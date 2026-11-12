@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-server/
+.env
+.env.*
+!.env.example
+*Key.txt
+*key.txt
+.research/
+.local/
+data/
+coverage/
+playwright-report/
+test-results/
+*.log
+.impeccable/review/

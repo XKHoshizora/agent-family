@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-server/
+.git/
+.env*
+*Key.txt
+*key.txt
+.research/
+.local/
+.impeccable/
+data/
+docs/
+test-results/
+playwright-report/
+*.log
+*.zip

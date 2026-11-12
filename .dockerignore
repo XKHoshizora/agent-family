@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-server
+.git
+.env*
+*Key.txt
+*key.txt
+.research
+.local
+.impeccable
+data
+docs
+tests
+test-results
+playwright-report
+*.log
+*.zip

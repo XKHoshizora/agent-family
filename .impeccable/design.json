@@ -1,0 +1,556 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T19:48:43.965355+00:00",
+  "title": "Design System: Agent Family",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "displayName": "Accent",
+        "role": "primary",
+        "tonalRamp": [
+          "oklch(15% 0.0652 170.72)",
+          "oklch(26% 0.0652 170.72)",
+          "oklch(38% 0.0652 170.72)",
+          "oklch(49% 0.0652 170.72)",
+          "oklch(61% 0.0652 170.72)",
+          "oklch(72% 0.0652 170.72)",
+          "oklch(84% 0.0652 170.72)",
+          "oklch(95% 0.0652 170.72)"
+        ]
+      },
+      "accent-hover": {
+        "displayName": "Accent Hover",
+        "role": "primary",
+        "tonalRamp": [
+          "oklch(15% 0.0595 167.23)",
+          "oklch(26% 0.0595 167.23)",
+          "oklch(38% 0.0595 167.23)",
+          "oklch(49% 0.0595 167.23)",
+          "oklch(61% 0.0595 167.23)",
+          "oklch(72% 0.0595 167.23)",
+          "oklch(84% 0.0595 167.23)",
+          "oklch(95% 0.0595 167.23)"
+        ]
+      },
+      "tint": {
+        "displayName": "Tint",
+        "role": "primary",
+        "tonalRamp": [
+          "oklch(15% 0.0109 149.86)",
+          "oklch(26% 0.0109 149.86)",
+          "oklch(38% 0.0109 149.86)",
+          "oklch(49% 0.0109 149.86)",
+          "oklch(61% 0.0109 149.86)",
+          "oklch(72% 0.0109 149.86)",
+          "oklch(84% 0.0109 149.86)",
+          "oklch(95% 0.0109 149.86)"
+        ]
+      },
+      "canvas": {
+        "displayName": "Canvas",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0000 0.00)",
+          "oklch(26% 0.0000 0.00)",
+          "oklch(38% 0.0000 0.00)",
+          "oklch(49% 0.0000 0.00)",
+          "oklch(61% 0.0000 0.00)",
+          "oklch(72% 0.0000 0.00)",
+          "oklch(84% 0.0000 0.00)",
+          "oklch(95% 0.0000 0.00)"
+        ]
+      },
+      "surface": {
+        "displayName": "Surface",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0054 117.92)",
+          "oklch(26% 0.0054 117.92)",
+          "oklch(38% 0.0054 117.92)",
+          "oklch(49% 0.0054 117.92)",
+          "oklch(61% 0.0054 117.92)",
+          "oklch(72% 0.0054 117.92)",
+          "oklch(84% 0.0054 117.92)",
+          "oklch(95% 0.0054 117.92)"
+        ]
+      },
+      "paper": {
+        "displayName": "Paper",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0041 121.56)",
+          "oklch(26% 0.0041 121.56)",
+          "oklch(38% 0.0041 121.56)",
+          "oklch(49% 0.0041 121.56)",
+          "oklch(61% 0.0041 121.56)",
+          "oklch(72% 0.0041 121.56)",
+          "oklch(84% 0.0041 121.56)",
+          "oklch(95% 0.0041 121.56)"
+        ]
+      },
+      "text": {
+        "displayName": "Text",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0285 166.56)",
+          "oklch(26% 0.0285 166.56)",
+          "oklch(38% 0.0285 166.56)",
+          "oklch(49% 0.0285 166.56)",
+          "oklch(61% 0.0285 166.56)",
+          "oklch(72% 0.0285 166.56)",
+          "oklch(84% 0.0285 166.56)",
+          "oklch(95% 0.0285 166.56)"
+        ]
+      },
+      "muted": {
+        "displayName": "Muted",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0258 155.37)",
+          "oklch(26% 0.0258 155.37)",
+          "oklch(38% 0.0258 155.37)",
+          "oklch(49% 0.0258 155.37)",
+          "oklch(61% 0.0258 155.37)",
+          "oklch(72% 0.0258 155.37)",
+          "oklch(84% 0.0258 155.37)",
+          "oklch(95% 0.0258 155.37)"
+        ]
+      },
+      "border": {
+        "displayName": "Border",
+        "role": "neutral",
+        "tonalRamp": [
+          "oklch(15% 0.0103 131.36)",
+          "oklch(26% 0.0103 131.36)",
+          "oklch(38% 0.0103 131.36)",
+          "oklch(49% 0.0103 131.36)",
+          "oklch(61% 0.0103 131.36)",
+          "oklch(72% 0.0103 131.36)",
+          "oklch(84% 0.0103 131.36)",
+          "oklch(95% 0.0103 131.36)"
+        ]
+      },
+      "error": {
+        "displayName": "Error",
+        "role": "semantic",
+        "tonalRamp": [
+          "oklch(15% 0.1360 28.51)",
+          "oklch(26% 0.1360 28.51)",
+          "oklch(38% 0.1360 28.51)",
+          "oklch(49% 0.1360 28.51)",
+          "oklch(61% 0.1360 28.51)",
+          "oklch(72% 0.1360 28.51)",
+          "oklch(84% 0.1360 28.51)",
+          "oklch(95% 0.1360 28.51)"
+        ]
+      },
+      "focus": {
+        "displayName": "Focus",
+        "role": "semantic",
+        "tonalRamp": [
+          "oklch(15% 0.0624 162.50)",
+          "oklch(26% 0.0624 162.50)",
+          "oklch(38% 0.0624 162.50)",
+          "oklch(49% 0.0624 162.50)",
+          "oklch(61% 0.0624 162.50)",
+          "oklch(72% 0.0624 162.50)",
+          "oklch(84% 0.0624 162.50)",
+          "oklch(95% 0.0624 162.50)"
+        ]
+      },
+      "selection": {
+        "displayName": "Selection",
+        "role": "semantic",
+        "tonalRamp": [
+          "oklch(15% 0.0256 145.36)",
+          "oklch(26% 0.0256 145.36)",
+          "oklch(38% 0.0256 145.36)",
+          "oklch(49% 0.0256 145.36)",
+          "oklch(61% 0.0256 145.36)",
+          "oklch(72% 0.0256 145.36)",
+          "oklch(84% 0.0256 145.36)",
+          "oklch(95% 0.0256 145.36)"
+        ]
+      },
+      "sage-bg": {
+        "displayName": "Sage Bg",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0187 145.42)",
+          "oklch(26% 0.0187 145.42)",
+          "oklch(38% 0.0187 145.42)",
+          "oklch(49% 0.0187 145.42)",
+          "oklch(61% 0.0187 145.42)",
+          "oklch(72% 0.0187 145.42)",
+          "oklch(84% 0.0187 145.42)",
+          "oklch(95% 0.0187 145.42)"
+        ]
+      },
+      "sage-text": {
+        "displayName": "Sage Text",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0584 154.76)",
+          "oklch(26% 0.0584 154.76)",
+          "oklch(38% 0.0584 154.76)",
+          "oklch(49% 0.0584 154.76)",
+          "oklch(61% 0.0584 154.76)",
+          "oklch(72% 0.0584 154.76)",
+          "oklch(84% 0.0584 154.76)",
+          "oklch(95% 0.0584 154.76)"
+        ]
+      },
+      "clay-bg": {
+        "displayName": "Clay Bg",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0186 57.21)",
+          "oklch(26% 0.0186 57.21)",
+          "oklch(38% 0.0186 57.21)",
+          "oklch(49% 0.0186 57.21)",
+          "oklch(61% 0.0186 57.21)",
+          "oklch(72% 0.0186 57.21)",
+          "oklch(84% 0.0186 57.21)",
+          "oklch(95% 0.0186 57.21)"
+        ]
+      },
+      "clay-text": {
+        "displayName": "Clay Text",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0885 44.65)",
+          "oklch(26% 0.0885 44.65)",
+          "oklch(38% 0.0885 44.65)",
+          "oklch(49% 0.0885 44.65)",
+          "oklch(61% 0.0885 44.65)",
+          "oklch(72% 0.0885 44.65)",
+          "oklch(84% 0.0885 44.65)",
+          "oklch(95% 0.0885 44.65)"
+        ]
+      },
+      "blue-bg": {
+        "displayName": "Blue Bg",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0128 244.26)",
+          "oklch(26% 0.0128 244.26)",
+          "oklch(38% 0.0128 244.26)",
+          "oklch(49% 0.0128 244.26)",
+          "oklch(61% 0.0128 244.26)",
+          "oklch(72% 0.0128 244.26)",
+          "oklch(84% 0.0128 244.26)",
+          "oklch(95% 0.0128 244.26)"
+        ]
+      },
+      "blue-text": {
+        "displayName": "Blue Text",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0554 248.93)",
+          "oklch(26% 0.0554 248.93)",
+          "oklch(38% 0.0554 248.93)",
+          "oklch(49% 0.0554 248.93)",
+          "oklch(61% 0.0554 248.93)",
+          "oklch(72% 0.0554 248.93)",
+          "oklch(84% 0.0554 248.93)",
+          "oklch(95% 0.0554 248.93)"
+        ]
+      },
+      "violet-bg": {
+        "displayName": "Violet Bg",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0205 311.08)",
+          "oklch(26% 0.0205 311.08)",
+          "oklch(38% 0.0205 311.08)",
+          "oklch(49% 0.0205 311.08)",
+          "oklch(61% 0.0205 311.08)",
+          "oklch(72% 0.0205 311.08)",
+          "oklch(84% 0.0205 311.08)",
+          "oklch(95% 0.0205 311.08)"
+        ]
+      },
+      "violet-text": {
+        "displayName": "Violet Text",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0865 309.18)",
+          "oklch(26% 0.0865 309.18)",
+          "oklch(38% 0.0865 309.18)",
+          "oklch(49% 0.0865 309.18)",
+          "oklch(61% 0.0865 309.18)",
+          "oklch(72% 0.0865 309.18)",
+          "oklch(84% 0.0865 309.18)",
+          "oklch(95% 0.0865 309.18)"
+        ]
+      },
+      "gold-bg": {
+        "displayName": "Gold Bg",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0312 92.95)",
+          "oklch(26% 0.0312 92.95)",
+          "oklch(38% 0.0312 92.95)",
+          "oklch(49% 0.0312 92.95)",
+          "oklch(61% 0.0312 92.95)",
+          "oklch(72% 0.0312 92.95)",
+          "oklch(84% 0.0312 92.95)",
+          "oklch(95% 0.0312 92.95)"
+        ]
+      },
+      "gold-text": {
+        "displayName": "Gold Text",
+        "role": "secondary",
+        "tonalRamp": [
+          "oklch(15% 0.0869 81.55)",
+          "oklch(26% 0.0869 81.55)",
+          "oklch(38% 0.0869 81.55)",
+          "oklch(49% 0.0869 81.55)",
+          "oklch(61% 0.0869 81.55)",
+          "oklch(72% 0.0869 81.55)",
+          "oklch(84% 0.0869 81.55)",
+          "oklch(95% 0.0869 81.55)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "桌面登录故事短句"
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "空对话邀请标题"
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "桌面群名"
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "基础界面文本"
+      },
+      "conversation": {
+        "displayName": "Conversation",
+        "purpose": "AI 回复正文"
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "标准按钮标签"
+      },
+      "metadata": {
+        "displayName": "Metadata",
+        "purpose": "模型与时间"
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "文件预览"
+      }
+    },
+    "shadows": [
+      {
+        "name": "modal",
+        "value": "0 24px 90px #162d2233",
+        "purpose": "无边框弹窗"
+      },
+      {
+        "name": "drawer-right",
+        "value": "-10px 0 40px #1d30251a",
+        "purpose": "右侧伙伴抽屉"
+      },
+      {
+        "name": "drawer-left",
+        "value": "10px 0 40px #1d30251a",
+        "purpose": "左侧群聊抽屉"
+      },
+      {
+        "name": "composer",
+        "value": "0 2px 9px #263d2105",
+        "purpose": "输入区静态轻阴影"
+      },
+      {
+        "name": "composer-focus",
+        "value": "0 0 0 3px #edf3e8",
+        "purpose": "输入区聚焦外环"
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "0.15s ease",
+        "purpose": "按钮背景/按下及输入边框状态；CSS 未另指定 easing 时为 ease。"
+      },
+      {
+        "name": "modal-enter",
+        "value": "0.18s ease-out",
+        "purpose": "从 translate(-50%, -48%) / opacity 0 到居中 / opacity 1。"
+      },
+      {
+        "name": "overlay-enter",
+        "value": "0.15s ease",
+        "purpose": "遮罩淡入。"
+      },
+      {
+        "name": "loading-spin",
+        "value": "1s linear infinite",
+        "purpose": "加载图标旋转。"
+      },
+      {
+        "name": "reduced-motion",
+        "value": "animation: none !important; transition: none !important; scroll-behavior: auto !important;",
+        "purpose": "prefers-reduced-motion: reduce 下覆盖全部元素及伪元素。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "members-drawer-max",
+        "value": "1180px"
+      },
+      {
+        "name": "mobile-max",
+        "value": "760px"
+      },
+      {
+        "name": "wide-desktop-min",
+        "value": "1600px"
+      }
+    ],
+    "focus": {
+      "outline": "3px solid #79a991",
+      "outlineOffset": "3px",
+      "composerBorder": "#8bab83"
+    },
+    "overlays": {
+      "modal": "#1d302540",
+      "drawer": "#20352540"
+    },
+    "implementationNotes": [
+      "色阶为展示面板合成的 8 步 OKLCH 明暗预览，不是生产 CSS token；前置颜色值为规范来源。",
+      "Agent Sans 未绑定字体文件；实际使用系统字体与中文回退。",
+      "compact 34px、手机建议 38px、聊天方式 35px 为实际目标尺寸例外；不得声称所有按钮已达到 40px。",
+      "表面预览不模拟应用业务状态或 Radix 焦点行为。"
+    ],
+    "provenance": {
+      "source": "src/styles.css final cascade and src/components.tsx, src/App.tsx, src/Auth.tsx, src/Project.tsx, src/Settings.tsx",
+      "directionRecord": "docs/design/2026-11-13-finish-review.md",
+      "shippingRasterAssets": [],
+      "developmentOnlyReference": "docs/design/concept.png",
+      "historicalProcessGap": "Seeded direction gate and QUALITY BAR card were not recorded before implementation; this documentation does not retroactively claim them."
+    }
+  },
+  "components": [
+    {
+      "name": "主要按钮",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "标准尺寸；compact 与登录变体见 DESIGN.md。",
+      "html": "<button class=\"ds-button-primary\">保存设置</button>",
+      "css": ".ds-button-primary{font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:13px;font-weight:550;line-height:1.65;display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:9px;padding:8px 15px;cursor:pointer;transition:background .15s,transform .15s;min-height:44px;background:var(--accent,#2e6554);color:#fff;border:1px solid var(--accent,#2e6554);}.ds-button-primary:hover{background:var(--accent-hover,#245342);}.ds-button-primary:active{transform:translateY(1px);}.ds-button-primary:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}.ds-button-primary:disabled{opacity:.45;cursor:not-allowed;}"
+    },
+    {
+      "name": "次要按钮",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "标准尺寸；compact 与登录变体见 DESIGN.md。",
+      "html": "<button class=\"ds-button-secondary\">保存设置</button>",
+      "css": ".ds-button-secondary{font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:13px;font-weight:550;line-height:1.65;display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:9px;padding:8px 15px;cursor:pointer;transition:background .15s,transform .15s;min-height:40px;background:#fff;color:var(--text,#24372f);border:1px solid #dce2d8;}.ds-button-secondary:hover{background:#f1f5ef;}.ds-button-secondary:active{transform:translateY(1px);}.ds-button-secondary:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}.ds-button-secondary:disabled{opacity:.45;cursor:not-allowed;}"
+    },
+    {
+      "name": "文字按钮",
+      "kind": "button",
+      "refersTo": "button-text",
+      "description": "轻量复制或返回动作。",
+      "html": "<button class=\"ds-text\">复制</button>",
+      "css": ".ds-text{font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:40px;background:none;border:0;color:var(--muted,#5c6c61);font-size:12px;padding:6px 8px;border-radius:6px;line-height:1.5;cursor:pointer}.ds-text:hover{color:var(--accent,#2e6554);background:var(--tint,#eaf1eb)}.ds-text:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}"
+    },
+    {
+      "name": "输入字段",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "保留可见标签与原生焦点。",
+      "html": "<label class=\"ds-field\">群聊名称<input class=\"ds-input\" value=\"我的 AI 群聊\" /></label>",
+      "css": ".ds-field{display:flex;flex-direction:column;gap:7px;font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:13px;color:var(--text,#24372f)}.ds-input{font:inherit;color:var(--text,#24372f);background:#fff;border:1px solid #dce2d9;border-radius:9px;padding:10px 12px;caret-color:var(--accent,#2e6554);transition:border-color .15s}.ds-input:hover{border-color:#bccabd}.ds-input:focus{border-color:var(--accent,#2e6554)}.ds-input:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}"
+    },
+    {
+      "name": "群聊导航",
+      "kind": "nav",
+      "description": "选中房间；示例文字仅为组件预览。",
+      "html": "<nav class=\"ds-nav\" aria-label=\"群聊\"><button class=\"ds-room\" aria-current=\"page\">我的 AI 群聊</button></nav>",
+      "css": ".ds-nav{background:var(--surface,#f6f7f3);padding:12px}.ds-room{font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;width:100%;text-align:left;min-height:44px;padding:11px 13px;border:0;border-radius:8px;font-size:14px;background:#e6eee2;color:#385d3e;font-weight:600;cursor:pointer}.ds-room:hover{background:#ecefe8}.ds-room:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}"
+    },
+    {
+      "name": "来源标签",
+      "kind": "chip",
+      "description": "仅在消息来源确为 LINE 时显示。",
+      "html": "<span class=\"ds-tag\">LINE</span>",
+      "css": ".ds-tag{display:inline-flex;background:#edf1ea;color:#687565;font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}"
+    },
+    {
+      "name": "模板卡片",
+      "kind": "card",
+      "description": "真实群聊创建流程中的可选模板。",
+      "html": "<button class=\"ds-template\" aria-pressed=\"true\"><strong>自由交流</strong><small>一起讨论一个问题</small></button>",
+      "css": ".ds-template{display:flex;flex-direction:column;align-items:flex-start;gap:5px;font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;padding:15px;border:1px solid #96af82;border-radius:10px;background:#f2f7ed;color:var(--text,#24372f);text-align:left;cursor:pointer}.ds-template strong{font-size:13px;font-weight:550}.ds-template small{font-size:12px;color:var(--muted,#5c6c61)}.ds-template:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}"
+    },
+    {
+      "name": "成员头像",
+      "kind": "custom",
+      "refersTo": "avatar-sage",
+      "description": "文字与颜色共同表达身份；非状态徽章。",
+      "html": "<span class=\"ds-avatar\" aria-hidden=\"true\">智</span>",
+      "css": ".ds-avatar{display:inline-flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:11px;background:#e3eee3;color:#365b43;font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;font-size:17px;font-weight:550}"
+    },
+    {
+      "name": "发送",
+      "kind": "button",
+      "refersTo": "send-button",
+      "description": "主要动作的固定方形目标。",
+      "html": "<button class=\"ds-send\" aria-label=\"发送\"><svg width=\"18\" height=\"18\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M12 19V5m-7 7 7-7 7 7\"/></svg></button>",
+      "css": ".ds-send{display:inline-flex;align-items:center;justify-content:center;width:44px;height:44px;min-height:44px;border:0;border-radius:9px;background:var(--accent,#2e6554);color:#fff;cursor:pointer}.ds-send:hover{background:var(--accent-hover,#245342)}.ds-send:focus-visible{outline:3px solid var(--focus,#79a991);outline-offset:3px;}.ds-send:disabled{background:#7d9a75;opacity:.65;cursor:not-allowed}"
+    },
+    {
+      "name": "弹窗表面",
+      "kind": "custom",
+      "refersTo": "modal",
+      "description": "预览仅呈现表面；实际应用使用 Radix Dialog 管理遮罩、焦点和关闭。",
+      "html": "<section class=\"ds-modal\" aria-label=\"项目审查\"><h2>项目审查</h2><p>查看提案，再决定是否保存。</p></section>",
+      "css": ".ds-modal{font-family:\"Agent Sans\", -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;width:520px;max-width:calc(100% - 54px);background:#fff;color:var(--text,#24372f);border:0;border-radius:18px;padding:25px 27px;box-shadow:0 24px 90px #162d2233}.ds-modal h2{font-size:20px;font-weight:600;line-height:1.4;color:#344a2d;margin:0 0 7px}.ds-modal p{font-size:13px;line-height:1.8;color:var(--muted,#5c6c61);margin:0}"
+    }
+  ],
+  "narrative": {
+    "northStar": "围坐一桌，各有所长",
+    "overview": "以一张安静的共同工作桌组织多个 AI 伙伴：白色对话中心、浅色侧栏和森林绿操作，让身份、内容与下一步动作清楚可见。中文优先，密度适中；亲切感来自姓名、字形头像与柔和材质，而不是虚构对话或连接状态。\n\n这是从当前实现提炼的 Operate 视觉系统。用户委托了设计判断；本次文档是实现后的刷新，不代表补做了历史上的 seeded direction gate、QUALITY BAR card 或用户视觉批准。流程缺口见 docs/design/2026-11-13-finish-review.md。生成图 docs/design/concept.png 仅为开发期方向参考；生产界面没有随附栅格图片，标志为内联 SVG，登录图形为 CSS。",
+    "keyCharacteristics": [
+      "白色主对话，浅绿辅助区域。",
+      "森林绿标示主要动作与选择，成员颜色只表达身份。",
+      "真实姓名、模型、连接与任务状态可见。",
+      "桌面三栏，手机以受控抽屉保留主对话空间。"
+    ],
+    "rules": [
+      {
+        "name": "The Identity Rule",
+        "body": "成员颜色表达身份，状态必须另有文字说明。",
+        "section": "colors"
+      },
+      {
+        "name": "The Quiet Layer Rule",
+        "body": "内容表面保持安静；浮层通过遮罩与阴影表达层级，不叠加装饰边框。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do 使用中文行动文案，并保留实际模型标识与状态。",
+      "Do 保持主对话的视觉优先级，用低饱和表面区分区域。",
+      "Do 为图标按钮保留可访问名称、清楚的焦点和可见状态。",
+      "Do 让项目提案、审查、保存和执行边界分别可辨。",
+      "Do 将新增界面从本文件 token 开始；核对响应式与 CSS 优先级后再声称目标尺寸已覆盖。"
+    ],
+    "donts": [
+      "Don't 用成员色暗示模型质量、在线状态或权限等级。",
+      "Don't 用概念图中的虚构群聊、计数或连接填充真实空状态。",
+      "Don't 为正文或登录标题添加无意义的眉题。",
+      "Don't 为浮层同时叠加装饰边框与重阴影。",
+      "Don't 把本次视觉修复通过当作真实 LINE、所有模型、后端安全或客户验收通过。"
+    ]
+  }
+}
