@@ -11,11 +11,15 @@ export const discussionSchema = z.object({
   maxCalls: z.number().int().min(1).max(100000),
   stopWhenQuiet: z.boolean(),
 });
-export const turnSchema = z.object({
-  action: z.enum(["handoff", "continue", "pass"]),
-  nextAgentId: z.string().max(100).optional(),
-  question: z.string().max(1000).optional(),
-});
+export const turnSchema = z
+  .object({
+    action: z.enum(["handoff", "continue", "pass", "clarify", "finish"]),
+    nextAgentId: z.string().max(100).optional(),
+    question: z.string().max(1000).optional(),
+  })
+  .refine((v) => v.action !== "clarify" || !!v.question?.trim(), {
+    message: "向用户澄清时必须提供明确问题。",
+  });
 export type TurnDecision = z.infer<typeof turnSchema>;
 export function discussionSettings(value?: unknown): DiscussionSettings {
   return discussionSchema.parse(value ?? DEFAULT_DISCUSSION);

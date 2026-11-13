@@ -3221,3 +3221,16 @@ select {
 .composer-bottom .stop-button + .send-button {
   margin-left: 8px;
 }
+.handoff-question,
+.long-answer {
+  margin: 10px 0;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+}
+.handoff-question summary,
+.long-answer summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 0;
+}

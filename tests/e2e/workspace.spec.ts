@@ -584,6 +584,100 @@ test.describe.serial("Web workspace end-to-end", () => {
     expect(data.notes[0].title).toBe("团队需求");
     await page.getByRole("button", { name: "关闭", exact: true }).click();
   });
+  test("discussion questions appear once, repeated replies fold, and the final plan stays readable", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const room = rooms.find((r: any) => r.name === "开发验收已完成");
+    const endpoint = `**/api/rooms/${room.id}`;
+    const base = {
+      roomId: room.id,
+      runId: "qa-quality",
+      role: "assistant",
+      author: "架构师",
+      agentId: room.agents[0].id,
+      model: "test-model",
+      status: "complete",
+      source: "web",
+      tokens: 0,
+      toolEvents: [],
+      createdAt: new Date().toISOString(),
+      round: 1,
+    };
+    const messages = [
+      {
+        ...base,
+        id: "quality-first",
+        content: "先核对成本，再决定额度。",
+        discussion: {
+          turn: 1,
+          phase: "discussion",
+          action: "handoff",
+          nextAgentId: room.agents[1].id,
+          question: "唯一的交棒问题：缓存是否重复计费？",
+        },
+      },
+      {
+        ...base,
+        id: "quality-repeat",
+        content: "相近意见正文",
+        discussion: {
+          turn: 2,
+          phase: "discussion",
+          similarTo: "quality-first",
+        },
+      },
+      {
+        ...base,
+        id: "quality-final",
+        content:
+          "## 最终方案\n\n用量先分类，按月扣额。\n\n## 分歧与未完成\n\nClaude 前次未完成，规则仍待核实。",
+        discussion: { turn: 3, phase: "summary" },
+      },
+    ];
+    await page.route(endpoint, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, runs: [], messages } });
+    });
+    try {
+      await page.reload();
+      const first = page.locator("#message-quality-first");
+      await first.locator(".handoff-question summary").click();
+      await expect(
+        first.getByText("唯一的交棒问题：缓存是否重复计费？", { exact: true }),
+      ).toHaveCount(1);
+      const repeated = page.locator("#message-quality-repeat");
+      await expect(
+        repeated.getByText("相近意见正文", { exact: true }),
+      ).not.toBeVisible();
+      await repeated.locator(".long-answer summary").click();
+      await expect(
+        repeated.getByText("相近意见正文", { exact: true }),
+      ).toBeVisible();
+      const final = page.locator("#message-quality-final");
+      await expect(final.locator(".round-label")).toHaveText("最终方案");
+      await expect(
+        final.getByRole("heading", { name: "分歧与未完成" }),
+      ).toBeVisible();
+      await expect(final.locator(".long-answer")).toHaveCount(0);
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      if (process.env.AF_QA_DIR)
+        await page.screenshot({
+          path: path.join(
+            process.env.AF_QA_DIR,
+            "discussion-quality-mobile.png",
+          ),
+        });
+    } finally {
+      await page.unroute(endpoint);
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.reload();
+    }
+  });
   test("user bubbles align right and returned reasoning stays collapsed on desktop and mobile", async () => {
     const list = await (await context.request.get("/api/rooms")).json();
     const room = list.find((r: any) => r.name === "开发验收已完成");

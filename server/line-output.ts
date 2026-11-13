@@ -9,6 +9,10 @@ export function lineMessages(
     const complete = answers
       .filter((m) => m.status === "complete" && m.content.trim())
       .slice(-4);
+    const closure = messages.findLast(
+      (m) => m.discussion?.phase === "fallback",
+    );
+    if (closure) complete.splice(0, Math.max(0, complete.length - 3));
     return [
       {
         type: "text",
@@ -19,9 +23,12 @@ export function lineMessages(
       },
       ...complete.map((m) => ({
         type: "text" as const,
-        text: `第 ${m.round || 1} 轮 · 第 ${m.discussion?.turn || 1} 次发言\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n（完整回答请到网页查看）" : ""}`,
+        text: `${m.discussion?.phase === "summary" ? "最终方案" : `第 ${m.round || 1} 轮 · 第 ${m.discussion?.turn || 1} 次发言`}\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n（完整回答请到网页查看）" : ""}`,
         sender: { name: m.author.slice(0, 20) },
       })),
+      ...(closure
+        ? [{ type: "text" as const, text: closure.content.slice(0, 4700) }]
+        : []),
     ];
   }
   const round = Math.max(1, ...answers.map((m) => m.round || 1));

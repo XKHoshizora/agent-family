@@ -13,7 +13,11 @@ export type DiscussionTurn = {
   turn: number;
   replyTo?: string;
   nextAgentId?: string;
-  action?: "handoff" | "continue" | "pass";
+  action?: "handoff" | "continue" | "pass" | "clarify" | "finish";
+  phase?: "discussion" | "summary" | "fallback";
+  similarTo?: string;
+  paused?: boolean;
+  failure?: { type: string; status?: number };
   question?: string;
 };
 export type Role = "owner" | "admin" | "member" | "viewer";

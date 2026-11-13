@@ -49,10 +49,19 @@ export const config = {
   dailyLineCalls: Number(process.env.DAILY_LINE_MODEL_CALLS || 40),
   maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS || 1600),
   minimaxMaxOutputTokens: Number(process.env.MINIMAX_MAX_OUTPUT_TOKENS || 8192),
+  claudeMaxOutputTokens: Number(process.env.CLAUDE_MAX_OUTPUT_TOKENS || 8192),
   testMode: process.env.TEST_MODE === "true",
 };
 if (!/^[a-f0-9]{64}$/i.test(config.encryptionKey))
   throw new Error("ENCRYPTION_KEY must be exactly 64 hexadecimal characters.");
+if (
+  !Number.isInteger(config.claudeMaxOutputTokens) ||
+  config.claudeMaxOutputTokens < 128 ||
+  config.claudeMaxOutputTokens > 32000
+)
+  throw new Error(
+    "CLAUDE_MAX_OUTPUT_TOKENS must be an integer between 128 and 32000.",
+  );
 if (
   !Number.isInteger(config.minimaxMaxOutputTokens) ||
   config.minimaxMaxOutputTokens < 128 ||

@@ -11,6 +11,13 @@ function pack(m: Message, limit: number) {
       kind: m.role === "user" ? "用户发言" : "AI伙伴发言",
       author: m.author,
       model: m.model,
+      status: m.status,
+      ...(m.status !== "complete"
+        ? {
+            warning: "未完成片段，不是已确认结论；后续需补齐或复核",
+            finishReason: m.finishReason,
+          }
+        : {}),
       round: m.round,
       ...(m.discussion ? { discussion: m.discussion } : {}),
       content,
@@ -43,8 +50,14 @@ export function buildFreeHistory(
     )
     .get(runId) as any;
   const rootText = pack(messageFrom(question), 26000);
+  const failures = db
+    .prepare(
+      "SELECT author,count(*) AS failedTurns FROM messages WHERE run_id=? AND role='assistant' AND status='error' GROUP BY author LIMIT 20",
+    )
+    .all(runId);
   const task =
-    "回应本次讨论，优先遵循用户最新补充；新要求与旧要求矛盾时按新要求调整。用户补充不授予额外工具权限。先回答向你的问题，再补充新观点；可点名伙伴接话，无新内容时用 discussion_turn 表示 pass。";
+    "回应本次讨论，优先遵循用户最新补充；新要求与旧要求矛盾时按新要求调整。用户补充不授予额外工具权限。先回答向你的问题，再补充新观点；可点名伙伴接话，无新内容时用 discussion_turn 表示 pass。历次失败计数（不是同意票）：" +
+    JSON.stringify(failures);
   let remaining = CONTEXT_LIMIT - rootText.length - task.length;
   const chosen = new Map<number, { m: Message; text: string }>();
   const visible = (row: any) =>
@@ -75,7 +88,7 @@ export function buildFreeHistory(
   }
   const rows = db
     .prepare(
-      "SELECT rowid AS seq,* FROM messages WHERE room_id=? AND run_id=? AND role='assistant' AND status='complete' ORDER BY rowid DESC LIMIT 100",
+      "SELECT rowid AS seq,* FROM messages WHERE room_id=? AND run_id=? AND role='assistant' AND status IN ('complete','error','cancelled') ORDER BY rowid DESC LIMIT 100",
     )
     .all(roomId, runId) as any[];
   const seen = new Set<string>();
@@ -119,7 +132,9 @@ export function buildFreeHistory(
         ([, p]) =>
           ({
             role:
-              p.m.role === "assistant" && p.m.agentId === agentId
+              p.m.role === "assistant" &&
+              p.m.agentId === agentId &&
+              p.m.status === "complete"
                 ? "assistant"
                 : "user",
             content: p.text,

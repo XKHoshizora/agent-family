@@ -93,6 +93,7 @@ import {
 import { buildFreeHistory, CONTEXT_LIMIT } from "../server/context";
 import { lineMessages } from "../server/line-output";
 import { reserveRunBudget, releaseRunBudget } from "../server/budget";
+import { similarContribution } from "../server/discussion-quality";
 const w = "free-test",
   u = "user";
 const makeRoom = (count = 3, tools = false) =>
@@ -192,7 +193,8 @@ it("a named first speaker can hand off to another model, whose input includes th
   const messages = getMessages(r.id).filter((m) => m.role === "assistant");
   expect(messages[1].discussion?.replyTo).toBe(messages[0].id);
   expect(messages[0].discussion?.nextAgentId).toBe("a2");
-  expect(messages[0].content).toContain("@伙伴2");
+  expect(messages[0].content).toBe("我建议先审查。");
+  expect(messages[0].discussion?.question).toBe("你能指出风险吗？");
   expect(state.calls[0].tools.map((t: any) => t.name)).toEqual([
     "discussion_turn",
   ]);
@@ -227,7 +229,8 @@ it("one member cannot stop the group; all members passing ends the discussion", 
     decision: { action: "pass" },
   }));
   const run = await finished(makeRoom(), { maxRounds: null });
-  expect(run.turns).toBe(3);
+  expect(run.turns).toBe(4);
+  expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
   expect(run.notice).toContain("所有伙伴");
 });
 it("quiet stopping can be disabled, but exact repetition still stops", async () => {
@@ -354,7 +357,7 @@ it("LINE renders a bounded recent conversation and explicit stop reason", async 
   expect(output).toHaveLength(5);
   expect(output[0].text).toContain("调用上限");
   expect(output[1].text).toContain("第 4 次发言");
-  expect(output[4].text).toContain("第 7 次发言");
+  expect(output[4].text).toContain("最终方案");
 });
 it("restart recovery releases unused free-discussion reservations and marks interruption", () => {
   const r = makeRoom(2),
@@ -402,7 +405,8 @@ it("all five quiet members get a chance before quiet stopping", async () => {
     decision: { action: "pass" },
   }));
   const run = await finished(makeRoom(5), { maxRounds: null });
-  expect(run.turns).toBe(5);
+  expect(run.turns).toBe(6);
+  expect(new Set(state.calls.slice(0, 5).map((c) => c.agent)).size).toBe(5);
   expect(run.notice).toContain("所有伙伴");
 });
 
@@ -573,4 +577,161 @@ it("MiniMax gets a separate bounded output budget", async () => {
   expect(state.calls[0].maxOutputTokens).toBeGreaterThan(
     config.maxOutputTokens,
   );
+});
+
+it("failed partial answers and their status reach the next speaker without exposing reasoning", async () => {
+  state.script = [
+    {
+      text: "成本需分成固定费与用量费，尚未完成",
+      reasoning: "PRIVATE_THOUGHT",
+      finish: "length",
+    },
+    { text: "上一位未完成，我补齐成本公式。" },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 3 });
+  const prompt = JSON.stringify(state.calls[1].prompt);
+  expect(prompt).toContain("固定费与用量费");
+  expect(prompt).toContain("未完成片段");
+  expect(prompt).toContain("error");
+  expect(prompt).not.toContain("PRIVATE_THOUGHT");
+  const answers = getMessages(run.roomId).filter((m) => m.role === "assistant");
+  expect(answers[1].discussion?.replyTo).toBe(answers[0].id);
+  expect(answers.at(-1)?.discussion?.phase).toBe("summary");
+  expect(run.status).toBe("partial");
+});
+it("a participant failing twice is bypassed even when others keep inviting it", async () => {
+  state.script = [
+    { fail: true },
+    { decision: { action: "handoff", nextAgentId: "a0" } },
+    { fail: true },
+    ...Array.from({ length: 8 }, () => ({
+      decision: { action: "handoff", nextAgentId: "a0" },
+    })),
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 9, maxRounds: null });
+  expect(state.calls.filter((c) => c.agent === "a0")).toHaveLength(2);
+  expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
+  expect(run.callsUsed).toBeLessThanOrEqual(9);
+});
+it("paraphrased handoff metadata does not append a second question", async () => {
+  state.script = [
+    {
+      text: "伙伴1，请核对额度计算。",
+      decision: {
+        action: "handoff",
+        nextAgentId: "a1",
+        question: "请进一步验证各额度池的计算方式。",
+      },
+    },
+  ];
+  const run = await finished(makeRoom(2), { maxCalls: 2 });
+  const answer = getMessages(run.roomId).find((m) => m.role === "assistant")!;
+  expect(answer.content).toBe("伙伴1，请核对额度计算。");
+  expect(answer.discussion?.question).toContain("各额度池");
+  expect(JSON.stringify(state.calls[1].prompt)).toContain("各额度池");
+});
+it("similarity catches reordered points but preserves numeric corrections and negation", () => {
+  const first =
+    "先明确输入输出和缓存计价，再按月计算额度过期的影响。把失败重试纳入实际成本，并且用低中高三档用量检查是否合算。";
+  const reordered =
+    "把失败重试纳入实际成本，并且用低中高三档用量检查是否合算。先明确输入输出和缓存计价，再按月计算额度过期的影响。";
+  expect(similarContribution(first, reordered)).toBe(true);
+  expect(similarContribution(first + "利用率60%", first + "利用率80%")).toBe(
+    false,
+  );
+  expect(similarContribution(first + "需要购买", first + "不需要购买")).toBe(
+    false,
+  );
+  expect(similarContribution(first + "费用3.5元", first + "费用35元")).toBe(
+    false,
+  );
+});
+it("repeated paraphrased contributions fold and close with a summary within the existing budget", async () => {
+  const a =
+    "先明确输入输出和缓存计价，再按月计算额度过期的影响。把失败重试纳入实际成本，并且用低中高三档用量检查是否合算。";
+  const b =
+    "把失败重试纳入实际成本，并且用低中高三档用量检查是否合算。先明确输入输出和缓存计价，再按月计算额度过期的影响。";
+  state.script = [
+    { text: a },
+    { text: b },
+    { text: a },
+    { text: "最终方案：按月模拟。待确认：计费顺序。" },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 12, maxRounds: null });
+  expect(run.callsUsed).toBe(4);
+  expect(run.notice).toContain("重复");
+  expect(
+    getMessages(run.roomId).filter((m) => m.discussion?.similarTo),
+  ).toHaveLength(2);
+  expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
+});
+it("summary uses the last allowed call, has no tools, and explicitly asks for unresolved issues", async () => {
+  const run = await finished(makeRoom(3, true), { maxRounds: 1, maxCalls: 3 });
+  expect(run.callsUsed).toBe(3);
+  expect(state.calls.at(-1).tools || []).toHaveLength(0);
+  const prompt = JSON.stringify(state.calls.at(-1).prompt);
+  expect(prompt).toContain("最后的整理阶段");
+  expect(prompt).toContain("分歧与未完成");
+  expect(prompt).toContain("不再点名");
+  expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
+});
+it("summary failure creates an honest free closure record with no extra retry", async () => {
+  state.script = [
+    { text: "一个有效建议。" },
+    { text: "未完的总结", finish: "length" },
+  ];
+  const run = await finished(makeRoom(2), { maxCalls: 2 });
+  expect(state.calls).toHaveLength(2);
+  const final = getMessages(run.roomId).at(-1)!;
+  expect(final.role).toBe("system");
+  expect(final.discussion?.phase).toBe("fallback");
+  expect(final.content).toContain("尚无完整最终方案");
+  expect(final.content).toContain("一个有效建议");
+  expect(
+    lineMessages(getMessages(run.roomId), run).some((m) =>
+      m.text.includes("尚无完整最终方案"),
+    ),
+  ).toBe(true);
+});
+it("critical ambiguity asks the user once and waits without burning more calls", async () => {
+  state.script = [
+    {
+      text: "你是要购买套餐，还是设计对外销售的套餐？",
+      decision: { action: "clarify", question: "请确认买方还是卖方。" },
+    },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 9 });
+  expect(state.calls).toHaveLength(1);
+  expect(run.notice).toContain("等待你确认");
+  expect(getMessages(run.roomId).at(-1)?.discussion?.action).toBe("clarify");
+  expect(usage(w).reserved).toBe(0);
+});
+it("stopping during final synthesis does not launch any further model request", async () => {
+  state.delay = 30;
+  const r = makeRoom(2),
+    rid = start(r, { maxCalls: 2 });
+  await until(() => state.calls.length === 2);
+  cancelRun(rid, r.id);
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(2);
+  expect(getRuns(r.id)[0].status).toBe("cancelled");
+  expect(getMessages(r.id).at(-1)?.discussion?.phase).toBe("fallback");
+  expect(usage(w).reserved).toBe(0);
+});
+it("Claude has a separate reasoning-inclusive budget instead of the generic 1600 limit", async () => {
+  const r = makeRoom(2);
+  r.agents[0].model = "claude-opus-5-5";
+  db.prepare("UPDATE rooms SET agents=? WHERE id=?").run(
+    JSON.stringify(r.agents),
+    r.id,
+  );
+  await finished(r, { maxCalls: 1 });
+  expect(state.calls[0].maxOutputTokens).toBe(config.claudeMaxOutputTokens);
+});
+
+it("after everyone speaks the healthy initial participant synthesizes the final plan", async () => {
+  const run = await finished(makeRoom(3), { maxRounds: 2, maxCalls: 6 });
+  expect(new Set(state.calls.slice(0, 3).map((c) => c.agent)).size).toBe(3);
+  expect(state.calls.at(-1).agent).toBe("a0");
+  expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
 });

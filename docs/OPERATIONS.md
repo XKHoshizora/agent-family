@@ -92,6 +92,13 @@ npm run reset-password:prod -- owner@agent.family
 
 新增 discussion_inputs 表及索引、runs.participants/line_scope、messages.finish_reason，均为幂等增量迁移。旧消息不补造 finishReason，旧任务不推算参与者和来源。运行中插话持久化后中止当前发言子请求；整场任务继续，已发送请求计入原额度。重启不自动续跑，待回应消息及状态保留。
 
-`MINIMAX_MAX_OUTPUT_TOKENS` 默认 8192，允许 128–32000；仅对名称含 MiniMax 的模型生效，其他模型继续使用 `MAX_OUTPUT_TOKENS`（默认 1600）。思考与正文共用输出预算，较小限制可能在正文前耗尽；依据 [MiniMax 官方兼容接口文档](https://platform.minimax.io/docs/api-reference/text-openai-api)。兼容接口使用 `max_completion_tokens` 并启用 `reasoning_split`，不关闭模型思考。较大上限可能增加单次费用；每日及每任务调用次数限制不变，不是 token 费用硬上限。
+`MINIMAX_MAX_OUTPUT_TOKENS` 默认 8192，允许 128–32000；仅对名称含 MiniMax 的模型生效，Claude 使用 `CLAUDE_MAX_OUTPUT_TOKENS`（默认 8192，允许 128–32000），其他模型继续使用 `MAX_OUTPUT_TOKENS`（默认 1600）。思考与正文共用输出预算，较小限制可能在正文前耗尽；依据 [MiniMax 官方兼容接口文档](https://platform.minimax.io/docs/api-reference/text-openai-api)。兼容接口使用 `max_completion_tokens` 并启用 `reasoning_split`，不关闭模型思考。较大上限可能增加单次费用；每日及每任务调用次数限制不变，不是 token 费用硬上限。
 
 新增响应完成原因可区分输出截断与仅思考无正文。历史异常没有记录完成原因，无法追溯判定每条的精确原因。失败不会自动重试，也不会自动重新生成旧空回答。更新前备份数据库和密钥；优先向前修复，不以旧镜像直接解释新增输入队列。
+
+
+## 讨论质量与最终整理升级
+
+本次不新增数据库列，复用消息 discussion JSON 保存 phase、similarTo、paused 及有限错误类型／HTTP 状态，不保存供应商原始错误体。新增 clarify／finish 控制动作，最终整理关闭全部工具。普通发言给最终整理留出一步；该保留是调度策略，其他任务竞争每日额度或用户调低上限后仍可能无法整理，此时写入不额外调用模型的结束记录。
+
+Claude 的思考可能消耗输出预算，即使不返回思考文本；参考 [Claude 官方思考说明](https://platform.claude.com/docs/en/build-with-claude/thinking)。本次同时缩小单次任务、传递失败状态、控制重复、优先可靠参与者整理，不通过关闭思考掩盖问题。无法保证外部服务永不失败或模型计算永远正确，最终方案保留未验证事项，不能把接口完整结束视为业务结果正确的充分证据。
