@@ -24,6 +24,46 @@ vi.mock("../server/providers", async () => {
           if (step.fail) throw new Error("provider failed");
           const text =
             step.text ?? `观点 ${state.calls.length} 来自 ${agent.name}`;
+          const reviewing = options.tools?.some(
+            (t: any) => t.name === "discussion_review",
+          );
+          const packets = options.prompt
+            .flatMap((m: any) =>
+              typeof m.content === "string"
+                ? [m.content]
+                : (m.content || [])
+                    .filter((p: any) => p.type === "text")
+                    .map((p: any) => p.text),
+            )
+            .flatMap((s: string) => {
+              try {
+                return [JSON.parse(s)];
+              } catch {
+                return [];
+              }
+            });
+          const source = packets.find(
+            (p: any) =>
+              p.discussion?.turn &&
+              p.status === "complete" &&
+              p.author !== agent.name,
+          );
+          const review =
+            reviewing && !step.noReview
+              ? step.review || {
+                  checked: source
+                    ? [
+                        {
+                          turn: source.discussion.turn,
+                          quote: source.content.slice(0, 50),
+                          check: "以测试条件重新核验。",
+                        },
+                      ]
+                    : [],
+                  findings: [],
+                  unresolved: ["需要实际运行验收。"],
+                }
+              : undefined;
           const parts: any[] = [
             { type: "stream-start", warnings: [] },
             ...(step.reasoning
@@ -36,7 +76,17 @@ vi.mock("../server/providers", async () => {
             { type: "text-start", id: "t" },
             { type: "text-delta", id: "t", delta: text },
             { type: "text-end", id: "t" },
-            ...(step.decision
+            ...(review
+              ? [
+                  {
+                    type: "tool-call",
+                    toolCallId: `review-${state.calls.length}`,
+                    toolName: "discussion_review",
+                    input: JSON.stringify(review),
+                  },
+                ]
+              : []),
+            ...(step.decision && !reviewing
               ? [
                   {
                     type: "tool-call",
@@ -185,9 +235,13 @@ it("a named first speaker can hand off to another model, whose input includes th
       },
     },
   ];
-  const rid = start(r, { maxCalls: 3 }, "@伙伴0 原始问题：如何提高质量？");
+  const rid = start(r, { maxCalls: 5 }, "@伙伴0 原始问题：如何提高质量？");
   await waitForRun(rid);
-  expect(state.calls.map((c) => c.agent)).toEqual(["a0", "a2", "a1"]);
+  expect(state.calls.slice(0, 3).map((c) => c.agent)).toEqual([
+    "a0",
+    "a2",
+    "a1",
+  ]);
   expect(JSON.stringify(state.calls[1].prompt)).toContain("你能指出风险吗");
   expect(JSON.stringify(state.calls[2].prompt)).toContain("原始问题");
   const messages = getMessages(r.id).filter((m) => m.role === "assistant");
@@ -198,7 +252,7 @@ it("a named first speaker can hand off to another model, whose input includes th
   expect(state.calls[0].tools.map((t: any) => t.name)).toEqual([
     "discussion_turn",
   ]);
-  expect(getRuns(r.id)[0].callsUsed).toBe(3);
+  expect(getRuns(r.id)[0].callsUsed).toBe(5);
   expect(usage(w).reserved).toBe(0);
 });
 it("five members get turns even when two repeatedly invite each other", async () => {
@@ -229,7 +283,7 @@ it("one member cannot stop the group; all members passing ends the discussion", 
     decision: { action: "pass" },
   }));
   const run = await finished(makeRoom(), { maxRounds: null });
-  expect(run.turns).toBe(4);
+  expect(run.turns).toBe(5);
   expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
   expect(run.notice).toContain("所有伙伴");
 });
@@ -242,7 +296,7 @@ it("quiet stopping can be disabled, but exact repetition still stops", async () 
     maxRounds: null,
     stopWhenQuiet: false,
   });
-  expect(run.turns).toBe(4);
+  expect(run.turns).toBe(5);
   expect(run.notice).toContain("重复");
 });
 it("three consecutive failed responses stop without an endless retry", async () => {
@@ -340,7 +394,7 @@ it("long free-discussion context keeps the root question and every member's late
     text: `意见${i}-` + "长内容".repeat(4000),
   }));
   const r = makeRoom(5);
-  const run = await finished(r, { maxRounds: 1 });
+  const run = await finished(r, { maxRounds: null, maxCalls: 7 });
   const history = buildFreeHistory(r.id, run.id, "a0");
   const all = JSON.stringify(history);
   expect(all).toContain("原始问题");
@@ -357,7 +411,7 @@ it("LINE renders a bounded recent conversation and explicit stop reason", async 
   expect(output).toHaveLength(5);
   expect(output[0].text).toContain("调用上限");
   expect(output[1].text).toContain("第 4 次发言");
-  expect(output[4].text).toContain("最终方案");
+  expect(output[4].text).toContain("讨论结论");
 });
 it("restart recovery releases unused free-discussion reservations and marks interruption", () => {
   const r = makeRoom(2),
@@ -405,7 +459,7 @@ it("all five quiet members get a chance before quiet stopping", async () => {
     decision: { action: "pass" },
   }));
   const run = await finished(makeRoom(5), { maxRounds: null });
-  expect(run.turns).toBe(6);
+  expect(run.turns).toBe(7);
   expect(new Set(state.calls.slice(0, 5).map((c) => c.agent)).size).toBe(5);
   expect(run.notice).toContain("所有伙伴");
 });
@@ -658,7 +712,7 @@ it("repeated paraphrased contributions fold and close with a summary within the 
     { text: "最终方案：按月模拟。待确认：计费顺序。" },
   ];
   const run = await finished(makeRoom(3), { maxCalls: 12, maxRounds: null });
-  expect(run.callsUsed).toBe(4);
+  expect(run.callsUsed).toBe(5);
   expect(run.notice).toContain("重复");
   expect(
     getMessages(run.roomId).filter((m) => m.discussion?.similarTo),
@@ -734,4 +788,158 @@ it("after everyone speaks the healthy initial participant synthesizes the final 
   expect(new Set(state.calls.slice(0, 3).map((c) => c.agent)).size).toBe(3);
   expect(state.calls.at(-1).agent).toBe("a0");
   expect(getMessages(run.roomId).at(-1)?.discussion?.phase).toBe("summary");
+});
+
+it("reserves peer review and synthesis inside six calls, carrying attributed corrections to a different final author", async () => {
+  state.script = [
+    { text: "单价是2元，三份成本6元。" },
+    { text: "我先检查限制。" },
+    { text: "还需要确认退款。" },
+    { text: "我的方案暂按前述报价。" },
+    {
+      review: {
+        checked: [],
+        findings: [
+          {
+            turn: 1,
+            quote: "单价是2元",
+            problem: "原始输入是1元，抄错数据。",
+            correction: "三份成本应为3×1=3元。",
+          },
+        ],
+        unresolved: ["退款承担方未定，不能上线收费。"],
+      },
+    },
+    { text: "采用纠正后的3元；只可执行模拟核算，退款规则待经营者确认。" },
+  ];
+  const run = await finished(makeRoom(3, true), { maxCalls: 6, maxRounds: 2 });
+  const messages = getMessages(run.roomId).filter(
+    (m) => m.role === "assistant",
+  );
+  expect(messages.map((m) => m.discussion?.phase)).toEqual([
+    "discussion",
+    "discussion",
+    "discussion",
+    "discussion",
+    "review",
+    "summary",
+  ]);
+  expect(messages[4].agentId).not.toBe(messages[3].agentId);
+  expect(messages[5].agentId).not.toBe(messages[4].agentId);
+  expect(messages[4].content).toContain("三份成本应为3×1=3元");
+  expect(JSON.stringify(state.calls[5].prompt)).toContain("退款承担方未定");
+  expect(state.calls[4].tools.map((t: any) => t.name)).toEqual([
+    "discussion_review",
+  ]);
+  expect(state.calls[4].toolChoice?.type).not.toBe("tool");
+  expect(state.calls[5].tools || []).toHaveLength(0);
+  expect(messages[5].discussion?.reviewState).toBe("complete");
+  expect(run.callsUsed).toBe(6);
+  expect(usage(w).reserved).toBe(0);
+});
+
+it.each(["invented", "reasoning", "future", "missing"])(
+  "invalid %s review cannot be presented as checked and does not create paid retries",
+  async (kind) => {
+    state.script = [
+      { text: "正式观点。", reasoning: "仅在思考中的数字" },
+      {
+        ...(kind === "missing"
+          ? { noReview: true }
+          : {
+              review: {
+                checked: [
+                  {
+                    turn: kind === "future" ? 3 : 1,
+                    quote:
+                      kind === "reasoning"
+                        ? "仅在思考中的数字"
+                        : kind === "future"
+                          ? "正式观点。"
+                          : "不存在的原文",
+                    check: "核算。",
+                  },
+                ],
+                findings: [],
+                unresolved: [],
+              },
+            }),
+      },
+      { text: "复核未完成，只交付待确认草案。" },
+    ];
+    const run = await finished(makeRoom(3), { maxCalls: 3 });
+    const messages = getMessages(run.roomId).filter(
+      (m) => m.role === "assistant",
+    );
+    expect(messages[1].status).toBe("error");
+    expect(messages[2].discussion?.reviewState).toBe("missing");
+    expect(run.status).toBe("partial");
+    expect(run.callsUsed).toBe(3);
+    expect(lineMessages(getMessages(run.roomId), run).at(-1)?.text).toContain(
+      "方案草案 · 待复核",
+    );
+  },
+);
+
+it("a two-call cap never silently expands for review", async () => {
+  const run = await finished(makeRoom(3), { maxCalls: 2 });
+  expect(run.callsUsed).toBe(2);
+  expect(getMessages(run.roomId).at(-1)?.discussion?.reviewState).toBe(
+    "missing",
+  );
+  expect(run.notice).toContain("未完成交叉复核");
+});
+
+it("a tool-only handoff must contain a real contribution rather than laundering a question into a completed answer", async () => {
+  state.script = [
+    {
+      text: "",
+      decision: {
+        action: "handoff",
+        nextAgentId: "a1",
+        question: "你替我回答？",
+      },
+    },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 2 });
+  expect(getMessages(run.roomId)[1].status).toBe("error");
+  expect(getMessages(run.roomId)[1].content).toContain("没有给出本次回答");
+  expect(JSON.stringify(state.calls[1].prompt)).toContain("error");
+  expect(run.status).toBe("partial");
+});
+
+it("a structured handoff contribution becomes the actual body once", async () => {
+  state.script = [
+    {
+      text: "",
+      decision: {
+        action: "handoff",
+        contribution: "重算24000÷1200=20分钟，不能全程停写。",
+        nextAgentId: "a1",
+        question: "如何追平日志？",
+      },
+    },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 2 });
+  expect(getMessages(run.roomId)[1].status).toBe("complete");
+  expect(getMessages(run.roomId)[1].content).toBe(
+    "重算24000÷1200=20分钟，不能全程停写。",
+  );
+  expect(getMessages(run.roomId)[1].content).not.toContain("如何追平");
+});
+
+it("user interjection during review invalidates that review and uses the new requirements within the same cap", async () => {
+  const r = makeRoom(3);
+  state.delay = 35;
+  const rid = start(r, { maxCalls: 7, maxRounds: null });
+  await until(() => state.calls.length === 6);
+  interject(r, rid, "新增要求：退款必须人工批准。");
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(7);
+  expect(JSON.stringify(state.calls[6].prompt)).toContain("退款必须人工批准");
+  expect(
+    getMessages(r.id)
+      .filter((m) => m.role === "assistant")
+      .at(-1)?.discussion?.reviewState,
+  ).toBe("missing");
 });

@@ -19,7 +19,15 @@ function pack(m: Message, limit: number) {
           }
         : {}),
       round: m.round,
-      ...(m.discussion ? { discussion: m.discussion } : {}),
+      ...(m.discussion
+        ? {
+            discussion: {
+              ...m.discussion,
+              review: undefined,
+              contribution: undefined,
+            },
+          }
+        : {}),
       content,
     });
   if (encode(m.content).length <= limit) return encode(m.content);
@@ -91,6 +99,18 @@ export function buildFreeHistory(
       "SELECT rowid AS seq,* FROM messages WHERE room_id=? AND run_id=? AND role='assistant' AND status IN ('complete','error','cancelled') ORDER BY rowid DESC LIMIT 100",
     )
     .all(roomId, runId) as any[];
+  // Keep the latest audit intact before older contributions consume the budget.
+  const auditRow = rows.find(
+    (row) => messageFrom(row).discussion?.phase === "review",
+  );
+  if (auditRow && remaining >= 1000) {
+    const m = messageFrom(auditRow),
+      text = pack(m, Math.min(10000, remaining));
+    if (text.length <= remaining) {
+      chosen.set(auditRow.seq, { m, text });
+      remaining -= text.length;
+    }
+  }
   const seen = new Set<string>();
   const perPartner = Math.min(
     3500,
@@ -99,7 +119,8 @@ export function buildFreeHistory(
     ),
   );
   for (const row of rows) {
-    if (seen.has(row.agent_id) || remaining < 500) continue;
+    if (chosen.has(row.seq) || seen.has(row.agent_id) || remaining < 500)
+      continue;
     const m = messageFrom(row);
     if (!m.content.trim()) continue;
     seen.add(row.agent_id);

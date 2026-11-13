@@ -14,13 +14,26 @@ export type DiscussionTurn = {
   replyTo?: string;
   nextAgentId?: string;
   action?: "handoff" | "continue" | "pass" | "clarify" | "finish";
-  phase?: "discussion" | "summary" | "fallback";
+  phase?: "discussion" | "review" | "summary" | "fallback";
+  review?: DiscussionReview;
+  reviewState?: "complete" | "missing";
   similarTo?: string;
   paused?: boolean;
   failure?: { type: string; status?: number };
   question?: string;
+  contribution?: string;
 };
 export type Role = "owner" | "admin" | "member" | "viewer";
+export type DiscussionReview = {
+  checked: { turn: number; quote: string; check: string }[];
+  findings: {
+    turn: number;
+    quote: string;
+    problem: string;
+    correction: string;
+  }[];
+  unresolved: string[];
+};
 export type Agent = {
   id: string;
   name: string;

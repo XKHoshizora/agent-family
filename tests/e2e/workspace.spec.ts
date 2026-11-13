@@ -630,7 +630,20 @@ test.describe.serial("Web workspace end-to-end", () => {
         id: "quality-final",
         content:
           "## 最终方案\n\n用量先分类，按月扣额。\n\n## 分歧与未完成\n\nClaude 前次未完成，规则仍待核实。",
-        discussion: { turn: 3, phase: "summary" },
+        discussion: { turn: 3, phase: "summary", reviewState: "complete" },
+      },
+      {
+        ...base,
+        id: "quality-review",
+        content:
+          "## 交叉复核\n\n修正发言 1：缓存不能重复扣费。\n\n## 尚未解决\n\n退款责任待确定。",
+        discussion: { turn: 4, phase: "review" },
+      },
+      {
+        ...base,
+        id: "quality-draft",
+        content: "复核未完成，只保留计算草案。",
+        discussion: { turn: 5, phase: "summary", reviewState: "missing" },
       },
     ];
     await page.route(endpoint, async (route) => {
@@ -654,11 +667,22 @@ test.describe.serial("Web workspace end-to-end", () => {
         repeated.getByText("相近意见正文", { exact: true }),
       ).toBeVisible();
       const final = page.locator("#message-quality-final");
-      await expect(final.locator(".round-label")).toHaveText("最终方案");
+      await expect(final.locator(".round-label")).toHaveText("讨论结论");
       await expect(
         final.getByRole("heading", { name: "分歧与未完成" }),
       ).toBeVisible();
       await expect(final.locator(".long-answer")).toHaveCount(0);
+      await expect(
+        final.getByText("· 已交叉复核，未解决事项见正文", { exact: true }),
+      ).toBeVisible();
+      const review = page.locator("#message-quality-review");
+      await expect(review.locator(".round-label")).toHaveText("交叉复核");
+      await expect(
+        review.getByRole("heading", { name: "尚未解决" }),
+      ).toBeVisible();
+      await expect(
+        page.locator("#message-quality-draft .round-label"),
+      ).toHaveText("方案草案 · 待复核");
       await page.setViewportSize({ width: 390, height: 844 });
       expect(
         await page.evaluate(

@@ -16,6 +16,7 @@ export const turnSchema = z
     action: z.enum(["handoff", "continue", "pass", "clarify", "finish"]),
     nextAgentId: z.string().max(100).optional(),
     question: z.string().max(1000).optional(),
+    contribution: z.string().max(4000).optional(),
   })
   .refine((v) => v.action !== "clarify" || !!v.question?.trim(), {
     message: "向用户澄清时必须提供明确问题。",

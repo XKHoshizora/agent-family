@@ -1045,7 +1045,7 @@ function Workspace({ me }: { me: Me }) {
                 )}
                 <p className="composer-budget">
                   {active?.mode === "free" && active.discussion
-                    ? `当前讨论已调用 ${active.callsUsed || 0}/${active.discussion.maxCalls} 次；在现有上限内预留最后一次整理，可随时调整或停止。`
+                    ? `当前讨论已调用 ${active.callsUsed || 0}/${active.discussion.maxCalls} 次；在现有上限内预留交叉复核与整理，可随时调整或停止。`
                     : mode === "free" && planned
                       ? `全部 ${planned.agents.length} 位伙伴参与，点名决定首位；每次发言按需预留，单次上限 ${discussion.maxCalls} 次调用。`
                       : planned
@@ -1318,10 +1318,16 @@ function MessageView({
           {m.discussion ? (
             <span className="round-label">
               {m.discussion.phase === "summary"
-                ? "最终方案"
-                : m.discussion.phase === "fallback"
-                  ? "结束记录"
-                  : `第 ${m.round} 轮 · 发言 ${m.discussion.turn}`}
+                ? m.discussion.reviewState === "missing"
+                  ? "方案草案 · 待复核"
+                  : m.discussion.reviewState === "complete"
+                    ? "讨论结论"
+                    : "最终方案"
+                : m.discussion.phase === "review"
+                  ? "交叉复核"
+                  : m.discussion.phase === "fallback"
+                    ? "结束记录"
+                    : `第 ${m.round} 轮 · 发言 ${m.discussion.turn}`}
             </span>
           ) : (
             showRound && <span className="round-label">回应伙伴</span>
@@ -1355,6 +1361,10 @@ function MessageView({
             )}
             {m.discussion.action === "pass" && <span> · 暂无补充</span>}
             {m.discussion.paused && <span> · 多次未完成，暂时让出</span>}
+            {m.discussion.phase === "summary" &&
+              m.discussion.reviewState === "complete" && (
+                <span> · 已交叉复核，未解决事项见正文</span>
+              )}
             {m.discussion.action === "clarify" && (
               <span> · 等待你确认方向</span>
             )}
@@ -1411,6 +1421,7 @@ function MessageView({
           m.discussion &&
           m.status !== "streaming" &&
           m.discussion?.phase !== "summary" &&
+          m.discussion?.phase !== "review" &&
           m.discussion?.phase !== "fallback" &&
           (m.discussion?.similarTo || m.content.length > 1400) ? (
             <details className="long-answer">

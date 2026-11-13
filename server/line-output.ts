@@ -23,7 +23,7 @@ export function lineMessages(
       },
       ...complete.map((m) => ({
         type: "text" as const,
-        text: `${m.discussion?.phase === "summary" ? "最终方案" : `第 ${m.round || 1} 轮 · 第 ${m.discussion?.turn || 1} 次发言`}\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n（完整回答请到网页查看）" : ""}`,
+        text: `${m.discussion?.phase === "summary" ? (m.discussion.reviewState === "missing" ? "方案草案 · 待复核" : "讨论结论 · 未解决事项见正文") : m.discussion?.phase === "review" ? "交叉复核" : `第 ${m.round || 1} 轮 · 第 ${m.discussion?.turn || 1} 次发言`}\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n（完整回答请到网页查看）" : ""}`,
         sender: { name: m.author.slice(0, 20) },
       })),
       ...(closure

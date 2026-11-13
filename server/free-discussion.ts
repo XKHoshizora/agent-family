@@ -24,7 +24,8 @@ export type FreeTurnInput = {
   replyTo?: string;
   participants: Agent[];
   steps: number;
-  phase?: "discussion" | "summary";
+  phase?: "discussion" | "review" | "summary";
+  reviewState?: "complete" | "missing";
 };
 type Answer = (
   agent: Agent,
@@ -59,7 +60,10 @@ export async function executeFreeDiscussion(
   let reason = "讨论已结束。",
     closing = "",
     summarized = false,
-    clarified = false;
+    clarified = false,
+    reviewAttempted = false,
+    reviewComplete = false;
+  let reviewer: string | undefined;
   try {
     while (!signal.aborted) {
       const run = db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as any;
@@ -126,6 +130,9 @@ export async function executeFreeDiscussion(
         repeats = 0;
         failures = 0;
         closing = "";
+        reviewAttempted = false;
+        reviewComplete = false;
+        reviewer = undefined;
         for (const m of newInputs)
           for (const id of m.targets) agentFailures.delete(id);
       }
@@ -167,19 +174,47 @@ export async function executeFreeDiscussion(
         reason = "空间或 LINE 剩余额度不足，讨论已停止；已有回答已保留。";
         break;
       }
-      const summary = !!closing || remainingTurns === 1 || available === 1;
+      const review =
+        !reviewAttempted &&
+        turns > 0 &&
+        eligible.length > 1 &&
+        remainingTurns >= 2 &&
+        available >= 2 &&
+        (!!closing || remainingTurns === 2 || available === 2);
+      const summary =
+        !review && (!!closing || remainingTurns === 1 || available === 1);
+      if (review && !directed) {
+        const previous = [...lastSpoke].sort((a, b) => b[1] - a[1])[0]?.[0];
+        const peers = eligible.filter((a) => a.id !== previous);
+        next =
+          peers.find(
+            (a) =>
+              successfulAgents.has(a.id) && !(agentFailures.get(a.id) || 0),
+          ) || nextSpeaker(peers, lastSpoke, turns);
+      }
       if (summary && !directed && lastSpoke.size === agents.length)
         next =
           eligible.find(
             (a) =>
-              successfulAgents.has(a.id) && !(agentFailures.get(a.id) || 0),
+              a.id !== reviewer &&
+              successfulAgents.has(a.id) &&
+              !(agentFailures.get(a.id) || 0),
           ) || next;
-      const steps = summary
-        ? 1
-        : Math.min(
-            next.tools && (!scope || scope.shareTools) ? 3 : 1,
-            available - 1,
-          );
+      if (summary && !directed && next.id === reviewer)
+        next =
+          eligible.find((a) => a.id !== reviewer && !lastSpoke.has(a.id)) ||
+          eligible.find((a) => a.id !== reviewer) ||
+          next;
+      const steps =
+        summary || review
+          ? 1
+          : Math.min(
+              next.tools && (!scope || scope.shareTools) ? 3 : 1,
+              Math.max(
+                1,
+                available - (eligible.length > 1 && !reviewAttempted ? 2 : 1),
+              ),
+            );
       try {
         reserveRunBudget(
           runId,
@@ -214,7 +249,12 @@ export async function executeFreeDiscussion(
             replyTo,
             participants: agents,
             steps,
-            phase: summary ? "summary" : "discussion",
+            phase: summary ? "summary" : review ? "review" : "discussion",
+            ...(summary
+              ? ({
+                  reviewState: reviewComplete ? "complete" : "missing",
+                } as const)
+              : {}),
           },
           turnControl.signal,
         );
@@ -235,8 +275,16 @@ export async function executeFreeDiscussion(
         successfulAgents.add(next.id);
         if (summary) {
           summarized = true;
-          reason = `${summaryReason} 已整理最终方案；其中待确认事项仍需核实。`;
+          reason = `${summaryReason} 已整理讨论结论；${reviewComplete ? "已完成交叉复核，仍需检查未解决事项。" : "未完成交叉复核，结论仅供继续验证。"}`;
           break;
+        }
+        if (review) {
+          reviewAttempted = true;
+          reviewComplete = !!m.discussion?.review;
+          reviewer = next.id;
+          replyTo = m.id;
+          closing = `${closing || (remainingTurns === 2 ? "已达到设置的讨论轮数。" : "已达到本次调用上限或今日剩余额度。")} 交叉复核后整理结论。`;
+          continue;
         }
         const decision = result!.decision;
         if (decision?.action === "clarify") {
@@ -304,6 +352,12 @@ export async function executeFreeDiscussion(
         if (summary) {
           reason = `${summaryReason} 最终整理未完成。`;
           break;
+        }
+        if (review) {
+          reviewAttempted = true;
+          reviewComplete = false;
+          reviewer = next.id;
+          closing = "交叉复核未完成，整理已有依据与缺口。";
         }
         if (
           failures >= 3 &&
