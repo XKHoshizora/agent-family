@@ -16,7 +16,12 @@ import {
 import { toast } from "sonner";
 import { api, post, patch, copy } from "./api";
 import { Modal, Field, ErrorBox, Spinner, CopyButton } from "./components";
-import type { UserSession, Room } from "../shared/types";
+import {
+  MODE_LABELS,
+  type Mode,
+  type UserSession,
+  type Room,
+} from "../shared/types";
 type SettingsTab = "general" | "models" | "members" | "line" | "security";
 export function Settings({
   open,
@@ -162,6 +167,11 @@ export function Settings({
                   </strong>
                 </div>
               </div>
+              <p className="hint">
+                进行中任务已预留 {data?.usage.reserved || 0}{" "}
+                次；未使用部分会在结束后释放。额度按任务开始的 UTC
+                日期归属，失败请求仍计入已用次数。
+              </p>
               <p className="hint">
                 按 UTC
                 日期重置。讨论模式每位伙伴最多回答两轮；工具追问可能增加模型请求。服务商账单以其实际计费为准。
@@ -798,15 +808,24 @@ export function LineDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [shareContext, setShareContext] = useState(false);
+  const [policy, setPolicy] = useState<{
+    mode: Mode;
+    shareTools: boolean;
+  } | null>(null);
+  const selectedPolicy = policy || {
+    mode: state.data?.mode || "parallel",
+    shareTools: !!state.data?.shareTools,
+  };
   async function action(url: string, method = "POST", body: unknown = {}) {
     setBusy(true);
     setError("");
     try {
       await api(url, {
         method,
-        body: method === "POST" ? JSON.stringify(body) : undefined,
+        body: method !== "DELETE" ? JSON.stringify(body) : undefined,
       });
       await client.invalidateQueries();
+      setPolicy(null);
     } catch (e: any) {
       setError(e.message);
     } finally {
@@ -824,6 +843,53 @@ export function LineDialog({
       <div className="line-dialog-icon">
         <Link2 size={28} />
       </div>
+      <Field
+        label="LINE 默认聊天方式"
+        hint="独立于网页发送框；未点名的单人模式由第一位启用伙伴回答。"
+      >
+        <select
+          value={selectedPolicy.mode}
+          onChange={(e) =>
+            setPolicy({ ...selectedPolicy, mode: e.target.value as Mode })
+          }
+        >
+          {(Object.keys(MODE_LABELS) as Mode[]).map((mode) => (
+            <option key={mode} value={mode}>
+              {MODE_LABELS[mode]}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <label className="check-field">
+        <input
+          type="checkbox"
+          checked={selectedPolicy.shareTools}
+          onChange={(e) =>
+            setPolicy({ ...selectedPolicy, shareTools: e.target.checked })
+          }
+        />
+        <span>
+          允许 LINE 群成员通过工具使用本群全部笔记和项目（包含绑定前资料）
+        </span>
+      </label>
+      <p className="hint">
+        默认只读取本次绑定后的 LINE 对话，不读取网页发言。更改资料共享开关会清空
+        LINE 可用上下文、停止旧任务的后续访问；网页记录保留。
+      </p>
+      {state.data?.resources && (
+        <p className="hint">
+          网页现有 {state.data.resources.messages} 条消息、
+          {state.data.resources.notes} 份笔记、{state.data.resources.files}{" "}
+          个项目文件。建议为 LINE 新建专用群。
+        </p>
+      )}
+      {state.data?.usage && (
+        <p className="hint">
+          LINE 今日已用 {state.data.usage.lineCalls} 次，预留{" "}
+          {state.data.usage.lineReserved} 次，上限 {state.data.usage.lineLimit}{" "}
+          次；同时受空间总额度约束，不含 LINE 消息费用。
+        </p>
+      )}
       {state.data?.linked ? (
         <>
           <h3 className="center">这个群已经连接 LINE</h3>
@@ -832,9 +898,18 @@ export function LineDialog({
             即可邀请伙伴回答。点名时使用 <code>/af @小文 你的问题</code>。
           </p>
           <div className="info-box">
-            LINE
-            群成员可通过伙伴的回答了解本群上下文，以及已开放的笔记与项目。历史不会自动逐条推送，但会用于回答。请只在这里保存适合与该群共享的内容。
+            LINE 对话会保存到网页。只有明确开启资料共享后，笔记和项目才可进入
+            LINE 回答；该权限面向整个 LINE 群，而非某一位成员。
           </div>
+          <button
+            className="button primary full"
+            disabled={busy || !policy}
+            onClick={() =>
+              action(`/api/rooms/${room.id}/line`, "PATCH", selectedPolicy)
+            }
+          >
+            保存 LINE 设置
+          </button>
           <button
             className="button danger full"
             disabled={busy}
@@ -881,7 +956,10 @@ export function LineDialog({
                   checked={shareContext}
                   onChange={(e) => setShareContext(e.target.checked)}
                 />
-                <span>我确认本群历史、笔记和项目可与目标 LINE 群共享</span>
+                <span>
+                  我已告知群成员：LINE
+                  对话会保存到网页，并按上方选择的范围使用资料
+                </span>
               </label>
               <button
                 className="button primary full"
@@ -889,6 +967,7 @@ export function LineDialog({
                 onClick={() =>
                   action(`/api/rooms/${room.id}/line/confirm`, "POST", {
                     shareContext: true,
+                    ...selectedPolicy,
                   })
                 }
               >
@@ -898,8 +977,7 @@ export function LineDialog({
           ) : null}
           <div className="info-box">
             确认后，LINE 群成员使用 /af
-            发送的内容将进入本群历史，并发送给模型服务。伙伴会使用本群历史、已开放笔记和项目来回答
-            LINE 群成员。请先告知群成员，并只连接适合共享的群聊。
+            发送的内容将保存在网页并发送给模型服务。默认不读取绑定前对话、网页消息、笔记和项目；请先告知群成员。
           </div>
           <button className="text-button full" onClick={onSettings}>
             打开 LINE 服务设置

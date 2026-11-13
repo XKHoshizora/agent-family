@@ -1,9 +1,12 @@
 import { validateSignature, messagingApi } from "@line/bot-sdk";
-import { db, getRoom, getMessages, audit } from "./db";
+import { db, getRoom, getMessages, getRuns, audit } from "./db";
 import { decrypt, encrypt, id, now } from "./config";
 import { startRun, waitForRun, notify } from "./orchestrator";
 import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
+import { lineScopeFor, assertLineScope } from "./line-access";
+import { lineMessages } from "./line-output";
+import { MODE_LABELS, type Mode } from "../shared/types";
 export function publicChannel(workspaceId: string) {
   const channel = db
     .prepare("SELECT * FROM line_channels WHERE workspace_id=?")
@@ -101,6 +104,7 @@ export function confirmChallenge(
   workspaceId: string,
   roomId: string,
   userId: string,
+  options: { mode?: Mode; shareTools?: boolean } = {},
 ) {
   return db.transaction(() => {
     const challenge = db
@@ -117,17 +121,48 @@ export function confirmChallenge(
       throw new Error("这个 LINE 群已经连接了另一个群聊，请先解除原连接。");
     if (db.prepare("SELECT 1 FROM line_bindings WHERE room_id=?").get(roomId))
       throw new Error("当前群聊已经连接 LINE。");
-    db.prepare("INSERT INTO line_bindings VALUES(?,?,?,?)").run(
+    db.prepare(
+      "INSERT INTO line_bindings(group_id,channel_id,room_id,created_at,mode,share_tools,context_after,scope_id) VALUES(?,?,?,?,?,?,(SELECT COALESCE(MAX(rowid),0) FROM messages),?)",
+    ).run(
       challenge.group_id,
       challenge.channel_id,
       roomId,
       now(),
+      options.mode || "parallel",
+      options.shareTools ? 1 : 0,
+      id(),
     );
     db.prepare("UPDATE line_challenges SET confirmed=1 WHERE code=?").run(
       challenge.code,
     );
     notify(roomId);
     return { linked: true };
+  })();
+}
+export function updateBinding(roomId: string, mode: Mode, shareTools: boolean) {
+  return db.transaction(() => {
+    const b = db
+      .prepare("SELECT * FROM line_bindings WHERE room_id=?")
+      .get(roomId) as any;
+    if (!b) throw new Error("请先连接 LINE 群。");
+    const changed = !!b.share_tools !== shareTools;
+    db.prepare(
+      "UPDATE line_bindings SET mode=?,share_tools=?,scope_id=?,context_after=? WHERE room_id=?",
+    ).run(
+      mode,
+      shareTools ? 1 : 0,
+      changed ? id() : b.scope_id,
+      changed
+        ? (
+            db
+              .prepare("SELECT COALESCE(MAX(rowid),0) AS n FROM messages")
+              .get() as any
+          ).n
+        : b.context_after,
+      roomId,
+    );
+    notify(roomId);
+    return { ok: true, contextReset: changed };
   })();
 }
 export async function registerLineWebhook(app: FastifyInstance) {
@@ -219,7 +254,19 @@ export async function registerLineWebhook(app: FastifyInstance) {
             .run(
               eventId,
               c.id,
-              encrypt(JSON.stringify(event)),
+              encrypt(
+                JSON.stringify({
+                  ...event,
+                  afScope:
+                    (
+                      db
+                        .prepare(
+                          "SELECT scope_id FROM line_bindings WHERE group_id=? AND channel_id=?",
+                        )
+                        .get(event.source.groupId, c.id) as any
+                    )?.scope_id || null,
+                }),
+              ),
               "queued",
               now(),
             );
@@ -306,7 +353,7 @@ async function processEvent(eventId: string) {
         ).run(groupId, groupName, code);
         notify(challenge.room_id);
         await replyText(
-          "已收到绑定请求。请回到 Agent Family 网页确认连接。确认后，本群的 /af 指令和 AI 回复会保存在对应网页群聊中。",
+          "已收到绑定请求，请回到网页确认。连接后 /af 指令及回答会保存在网页；默认仅使用本次绑定后的 LINE 对话，不读取网页历史。若创建者明确开放笔记和项目，其中资料可能出现在本群回答中。",
         );
       }
     } else {
@@ -320,6 +367,8 @@ async function processEvent(eventId: string) {
           "这个群还没有连接 Agent Family。请在网页的「连接 LINE」中获取绑定码。",
         );
       } else {
+        if (event.afScope !== binding.scope_id)
+          throw new Error("连接范围已变更，旧指令不再执行");
         const room = getRoom(binding.room_id);
         if (!room || room.archived) {
           await replyText("对应的网页群聊已归档，请联系群聊创建者。");
@@ -327,24 +376,26 @@ async function processEvent(eventId: string) {
           const content = text.replace(/^\/(?:af|家族)\s*/i, "").trim();
           if (!content) {
             await replyText(
-              "用法：/af 你的问题\n点名：/af @小文 帮我润色这段文字\n网页和 LINE 共享此群聊记录。请勿发送密码、密钥等敏感内容。",
+              `用法：/af 你的问题\n点名：/af @小文 帮我润色这段文字\n当前模式：${MODE_LABELS[binding.mode as Mode]}\n默认仅使用本次绑定后的 LINE 对话；资料工具${binding.share_tools ? "已开放，本群全部笔记和项目可能进入回答" : "未开放"}。请勿发送密码或密钥。`,
             );
           } else {
             const actor =
               "line:" +
               crypto
                 .createHash("sha256")
-                .update(event.source.userId || groupId)
+                .update(groupId + ":" + (event.source.userId || groupId))
                 .digest("hex")
                 .slice(0, 12);
             let runId: string;
+            const scope = lineScopeFor(groupId, c.id, room.id);
             try {
               runId = startRun({
                 room,
                 actor,
-                author: "LINE 成员",
+                author: `LINE 成员 ${actor.slice(-6)}`,
                 content,
                 source: "line",
+                lineScope: scope,
               });
             } catch (e: any) {
               await replyText(e.message);
@@ -375,26 +426,15 @@ async function processEvent(eventId: string) {
               usedReply = true;
               await completed;
             }
-            const current = db
-              .prepare(
-                "SELECT 1 FROM line_bindings b JOIN line_channels l ON b.channel_id=l.id WHERE b.group_id=? AND b.room_id=? AND l.enabled=1",
-              )
-              .get(groupId, room.id);
-            if (current) {
+            assertLineScope(scope, room.id);
+            {
               const messages = getMessages(room.id).filter(
-                (m) => m.runId === runId && m.role === "assistant",
+                (m) => m.runId === runId,
               );
-              const outputs: messagingApi.TextMessage[] = messages
-                .slice(-5)
-                .map((m) => ({
-                  type: "text",
-                  text:
-                    (m.content || "本次回答未完成。").slice(0, 4800) +
-                    (m.content.length > 4800
-                      ? "\n\n（完整回答请到网页查看）"
-                      : ""),
-                  sender: { name: m.author.slice(0, 20) },
-                }));
+              const outputs = lineMessages(
+                messages,
+                getRuns(room.id).find((r) => r.id === runId),
+              );
               if (outputs.length) {
                 const outboxId = id();
                 db.prepare(

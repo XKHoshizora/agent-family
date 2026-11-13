@@ -73,3 +73,11 @@ npm run reset-password:prod -- owner@agent.family
 ## 验证命令
 
 `npm run build`、`npm test`、`npm run test:e2e`。浏览器测试在 Windows 用已安装 Chrome；Linux CI 安装 Chromium。单元/契约与浏览器自动测试不需要真实 API key。真实服务测试单独记录，不放进每次 CI。
+
+## 2026-11-13 额度与 LINE 安全边界升级
+
+`DAILY_LINE_MODEL_CALLS` 默认 40，每空间独立限制 LINE 步骤，同时受 `DAILY_MODEL_CALLS` 约束。空间原有调用计数保留；LINE 独立计数从本次升级开始记录。预留按最大可用步骤计，未用释放；跨 UTC 午夜的任务仍归属开始日。
+
+启动执行幂等的增量迁移：消息增加轮次、任务增加说明、用量增加预留／LINE 计数，并建立任务预留表。既有 LINE 绑定改为各自回答、资料工具关闭，历史边界重置为升级时最新消息；网页历史不删除。
+
+更新前先备份。旧版本含按列位置插入的 SQL，不能仅回滚应用镜像后继续使用升级后的数据库；若需退回旧代码，必须停写并按恢复流程恢复对应升级前备份，会失去备份后的新写入。优先修复后向前发布。

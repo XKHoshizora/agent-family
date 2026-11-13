@@ -41,6 +41,7 @@ import {
   verifyChannel,
   createChallenge,
   confirmChallenge,
+  updateBinding,
   resumeQueuedLineEvents,
 } from "./line";
 import { DEFAULT_AGENTS, type Role, type Room } from "../shared/types";
@@ -884,10 +885,35 @@ export async function createApp() {
   app.get("/api/rooms/:id/line", async (req) => {
     const { room, user, role } = await roomAccess(req);
     editRoomAllowed(room, user.id, role);
+    const binding = db
+      .prepare(
+        "SELECT mode,share_tools,created_at FROM line_bindings WHERE room_id=?",
+      )
+      .get(room.id) as any;
     return {
-      linked: !!db
-        .prepare("SELECT 1 FROM line_bindings WHERE room_id=?")
-        .get(room.id),
+      linked: !!binding,
+      mode: binding?.mode || "parallel",
+      shareTools: !!binding?.share_tools,
+      usage: usage(room.workspaceId),
+      resources: {
+        messages: (
+          db
+            .prepare("SELECT COUNT(*) AS n FROM messages WHERE room_id=?")
+            .get(room.id) as any
+        ).n,
+        notes: (
+          db
+            .prepare("SELECT COUNT(*) AS n FROM notes WHERE room_id=?")
+            .get(room.id) as any
+        ).n,
+        files: (
+          db
+            .prepare(
+              "SELECT COUNT(*) AS n FROM project_files WHERE room_id=? AND content IS NOT NULL",
+            )
+            .get(room.id) as any
+        ).n,
+      },
       challenge:
         db
           .prepare(
@@ -904,8 +930,14 @@ export async function createApp() {
   app.post("/api/rooms/:id/line/confirm", async (req) => {
     const { room, user, role } = await roomAccess(req, true);
     editRoomAllowed(room, user.id, role);
-    z.object({ shareContext: z.literal(true) }).parse(req.body);
-    const result = confirmChallenge(room.workspaceId, room.id, user.id);
+    const data = z
+      .object({
+        shareContext: z.literal(true),
+        mode: modeSchema.default("parallel"),
+        shareTools: z.boolean().default(false),
+      })
+      .parse(req.body);
+    const result = confirmChallenge(room.workspaceId, room.id, user.id, data);
     audit(room.workspaceId, user.id, "line.bind", room.id);
     return result;
   });
@@ -917,6 +949,16 @@ export async function createApp() {
     audit(room.workspaceId, user.id, "line.unbind", room.id);
     notify(room.id);
     return { ok: true };
+  });
+  app.patch("/api/rooms/:id/line", async (req) => {
+    const { room, user, role } = await roomAccess(req, true);
+    editRoomAllowed(room, user.id, role);
+    const data = z
+      .object({ mode: modeSchema, shareTools: z.boolean() })
+      .parse(req.body);
+    const result = updateBinding(room.id, data.mode, data.shareTools);
+    audit(room.workspaceId, user.id, "line.policy", room.id);
+    return result;
   });
   await registerLineWebhook(app);
   if (fs.existsSync(path.join(root, "dist", "index.html"))) {

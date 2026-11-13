@@ -50,6 +50,35 @@ if (
   )
 )
   db.exec("ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''");
+// Additive migrations preserve existing messages and counters.
+for (const [table, column, definition] of [
+  ["messages", "round", "INTEGER NOT NULL DEFAULT 1"],
+  ["runs", "notice", "TEXT NOT NULL DEFAULT ''"],
+  ["usage_daily", "reserved", "INTEGER NOT NULL DEFAULT 0"],
+  ["usage_daily", "line_calls", "INTEGER NOT NULL DEFAULT 0"],
+  ["usage_daily", "line_reserved", "INTEGER NOT NULL DEFAULT 0"],
+  ["line_bindings", "mode", "TEXT NOT NULL DEFAULT 'parallel'"],
+  ["line_bindings", "share_tools", "INTEGER NOT NULL DEFAULT 0"],
+  ["line_bindings", "context_after", "INTEGER NOT NULL DEFAULT 0"],
+  ["line_bindings", "scope_id", "TEXT NOT NULL DEFAULT ''"],
+]) {
+  if (
+    !(db.pragma(`table_info(${table})`) as any[]).some((c) => c.name === column)
+  )
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+db.exec(
+  "CREATE TABLE IF NOT EXISTS run_budgets(run_id TEXT PRIMARY KEY REFERENCES runs(id),workspace_id TEXT NOT NULL,day TEXT NOT NULL,source TEXT NOT NULL,remaining INTEGER NOT NULL)",
+);
+db.transaction(() => {
+  for (const b of db
+    .prepare("SELECT group_id FROM line_bindings WHERE scope_id=''")
+    .all() as any[]) {
+    db.prepare(
+      "UPDATE line_bindings SET scope_id=?,context_after=(SELECT COALESCE(MAX(rowid),0) FROM messages),share_tools=0 WHERE group_id=?",
+    ).run(id(), b.group_id);
+  }
+})();
 export function audit(
   workspaceId: string,
   actor: string,
@@ -127,6 +156,7 @@ export function messageFrom(row: any): Message {
     model: row.model,
     content: parts.content,
     reasoning: [row.reasoning, parts.reasoning].filter(Boolean).join("\n\n"),
+    round: row.round || 1,
     status: row.status,
     source: row.source,
     createdAt: row.created_at,
@@ -154,7 +184,7 @@ export function addMessage(
     toolEvents: [],
   };
   db.prepare(
-    "INSERT INTO messages(id,room_id,run_id,role,agent_id,author,model,content,status,source,created_at,tokens,tool_events,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    "INSERT INTO messages(id,room_id,run_id,role,agent_id,author,model,content,status,source,created_at,tokens,tool_events,reasoning,round) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
   ).run(
     msg.id,
     msg.roomId,
@@ -170,6 +200,7 @@ export function addMessage(
     0,
     "[]",
     message.reasoning || "",
+    message.round || 1,
   );
   db.prepare("UPDATE rooms SET updated_at=? WHERE id=?").run(now(), msg.roomId);
   return msg;
@@ -183,6 +214,7 @@ export function runFrom(row: any): Run {
     createdAt: row.created_at,
     finishedAt: row.finished_at,
     error: row.error,
+    notice: row.notice || "",
   };
 }
 export function getRuns(roomId: string) {

@@ -46,6 +46,7 @@ export const config = {
     localKey.BASE_URL ||
     "https://api.canalapi.com/v1",
   dailyCalls: Number(process.env.DAILY_MODEL_CALLS || 300),
+  dailyLineCalls: Number(process.env.DAILY_LINE_MODEL_CALLS || 40),
   maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS || 1600),
   testMode: process.env.TEST_MODE === "true",
 };
@@ -68,6 +69,14 @@ if (
 )
   throw new Error(
     "MAX_OUTPUT_TOKENS must be an integer between 128 and 32000.",
+  );
+if (
+  !Number.isInteger(config.dailyLineCalls) ||
+  config.dailyLineCalls < 1 ||
+  config.dailyLineCalls > 100000
+)
+  throw new Error(
+    "DAILY_LINE_MODEL_CALLS must be an integer between 1 and 100000.",
   );
 export const allowedOrigins = new Set([
   config.origin,

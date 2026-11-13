@@ -149,6 +149,12 @@ test.describe.serial("Web workspace end-to-end", () => {
     await expect(
       page.getByRole("heading", { name: "连接 LINE 群聊" }),
     ).toBeVisible();
+    await expect(
+      page.getByLabel("LINE 默认聊天方式", { exact: true }),
+    ).toHaveValue("parallel");
+    await expect(
+      page.getByRole("checkbox", { name: /允许 LINE 群成员/ }),
+    ).not.toBeChecked();
     await page.getByRole("button", { name: "生成绑定码" }).click();
     await expect(page.getByRole("alert")).toContainText("请先验证并启用 LINE");
     await page.getByRole("button", { name: "打开 LINE 服务设置" }).click();
@@ -157,6 +163,116 @@ test.describe.serial("Web workspace end-to-end", () => {
       page.getByLabel("Channel secret", { exact: true }),
     ).toHaveValue("");
     await page.getByRole("button", { name: "关闭", exact: true }).click();
+  });
+  test("single-mode mentions synchronize the target and show reserved call estimates", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const r = rooms.find((r: any) => r.name === "开发测试群");
+    const coder = r.agents.find((a: any) => a.name === "编码伙伴");
+    const received: any[] = [];
+    const endpoint = `**/api/rooms/${r.id}/messages`;
+    await page.route(endpoint, async (route) => {
+      received.push(route.request().postDataJSON());
+      await route.fulfill({ status: 202, json: { runId: "ui-routing-test" } });
+    });
+    try {
+      await page
+        .getByLabel("本轮聊天方式", { exact: true })
+        .selectOption("single");
+      await page
+        .getByLabel("选择回答的伙伴", { exact: true })
+        .selectOption(r.agents[0].id);
+      await page
+        .getByLabel("消息", { exact: true })
+        .fill("@编码伙伴 请看看这个方案");
+      await expect(
+        page.getByLabel("选择回答的伙伴", { exact: true }),
+      ).toHaveValue(coder.id);
+      await expect(page.locator(".composer-budget")).toContainText(
+        "预留最多 3 次",
+      );
+      await page.getByRole("button", { name: "发送消息", exact: true }).click();
+      await expect.poll(() => received.length).toBe(1);
+      expect(received[0].targets).toEqual([coder.id]);
+      await page
+        .getByLabel("消息", { exact: true })
+        .fill("@架构师 @编码伙伴 一起看看");
+      await page.getByRole("button", { name: "发送消息", exact: true }).click();
+      await expect(page.getByRole("alert")).toContainText("只能点名一位");
+      expect(received).toHaveLength(1);
+      await page
+        .getByLabel("本轮聊天方式", { exact: true })
+        .selectOption("discuss");
+      await expect(page.locator(".composer-budget")).toContainText(
+        "预留最多 12 次",
+      );
+    } finally {
+      await page.unroute(endpoint);
+      await page.getByLabel("消息", { exact: true }).fill("");
+      await page
+        .getByLabel("本轮聊天方式", { exact: true })
+        .selectOption("parallel");
+      await page.reload();
+    }
+  });
+  test("LINE policy controls default to private history and submit explicit sharing choices", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const r = rooms.find((r: any) => r.name === "开发测试群");
+    const endpoint = `**/api/rooms/${r.id}/line`;
+    let policy = { mode: "parallel", shareTools: false };
+    const updates: any[] = [];
+    await page.route(endpoint, async (route) => {
+      if (route.request().method() === "PATCH") {
+        policy = route.request().postDataJSON();
+        updates.push(policy);
+        await route.fulfill({ json: { ok: true } });
+      } else
+        await route.fulfill({
+          json: {
+            linked: true,
+            ...policy,
+            challenge: null,
+            resources: { messages: 8, notes: 2, files: 1 },
+            usage: { lineCalls: 3, lineReserved: 2, lineLimit: 40 },
+          },
+        });
+    });
+    try {
+      await page.getByRole("button", { name: "连接群聊", exact: true }).click();
+      await expect(
+        page.getByLabel("LINE 默认聊天方式", { exact: true }),
+      ).toHaveValue("parallel");
+      await expect(
+        page.getByRole("checkbox", { name: /允许 LINE 群成员/ }),
+      ).not.toBeChecked();
+      await expect(
+        page.getByText(/默认只读取本次绑定后的 LINE 对话/),
+      ).toBeVisible();
+      await page
+        .getByLabel("LINE 默认聊天方式", { exact: true })
+        .selectOption("discuss");
+      await page.getByRole("checkbox", { name: /允许 LINE 群成员/ }).check();
+      await page
+        .getByRole("button", { name: "保存 LINE 设置", exact: true })
+        .click();
+      await expect.poll(() => updates.length).toBe(1);
+      expect(updates[0]).toEqual({ mode: "discuss", shareTools: true });
+      await expect(
+        page.getByRole("button", { name: "保存 LINE 设置", exact: true }),
+      ).toBeDisabled();
+      await page.getByRole("checkbox", { name: /允许 LINE 群成员/ }).uncheck();
+      await page
+        .getByRole("button", { name: "保存 LINE 设置", exact: true })
+        .click();
+      await expect.poll(() => updates.length).toBe(2);
+      expect(updates[1].shareTools).toBe(false);
+      if (process.env.AF_QA_DIR)
+        await page.screenshot({
+          path: path.join(process.env.AF_QA_DIR, "review-hardening-line.png"),
+        });
+      await page.getByRole("button", { name: "关闭", exact: true }).click();
+    } finally {
+      await page.unroute(endpoint);
+    }
   });
   test("invites and workspace name changes update real settings", async () => {
     await page.getByRole("button", { name: "设置", exact: true }).click();

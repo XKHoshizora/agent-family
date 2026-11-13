@@ -1219,6 +1219,12 @@ small {
   display: block;
   margin-top: 6px;
 }
+.composer-budget {
+  margin: 4px 10px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #5c6c61;
+}
 .markdown {
   font-size: 14px;
   line-height: 1.9;

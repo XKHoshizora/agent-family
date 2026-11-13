@@ -63,6 +63,7 @@ export type Message = {
   content: string;
   status: "complete" | "streaming" | "error" | "cancelled";
   reasoning?: string;
+  round?: number;
   source: "web" | "line";
   createdAt: string;
   tokens: number;
@@ -77,6 +78,7 @@ export type Run = {
   createdAt: string;
   finishedAt: string | null;
   error: string | null;
+  notice?: string;
 };
 export type Note = {
   id: string;

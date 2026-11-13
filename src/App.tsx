@@ -46,6 +46,7 @@ import {
 import { Auth } from "./Auth";
 import { Settings, LineDialog } from "./Settings";
 import { Project } from "./Project";
+import { planExecution, mentionedAgents } from "../shared/execution";
 import {
   MODE_LABELS,
   COLORS,
@@ -203,6 +204,23 @@ function Workspace({ me }: { me: Me }) {
   const messages = detail.data?.messages || [];
   const lastRun = detail.data?.runs[0];
   const enabledAgents = room?.agents.filter((a) => a.enabled) || [];
+  let planned: ReturnType<typeof planExecution> | undefined;
+  let planningError = "";
+  try {
+    planned = planExecution(
+      enabledAgents,
+      message + (attachment?.content || ""),
+      mode,
+      mode === "single" ? [target || enabledAgents[0]?.id] : undefined,
+    );
+  } catch (e: any) {
+    planningError = e.message;
+  }
+  const directMentions = mentionedAgents(enabledAgents, message);
+  useEffect(() => {
+    if (mode === "single" && directMentions.length === 1)
+      setTarget(directMentions[0].id);
+  }, [mode, message, roomId]);
   useEffect(() => {
     setMode(room?.mode || "parallel");
     setTarget("");
@@ -282,7 +300,11 @@ function Workspace({ me }: { me: Me }) {
       setSendError("请先启用至少一位伙伴。");
       return;
     }
-    if (enabledAgents.some((a) => !a.model) && mode !== "single") {
+    if (planningError || !planned) {
+      setSendError(planningError);
+      return;
+    }
+    if (planned.agents.some((a) => !a.model)) {
       setSendError("请先给每位启用的伙伴选择模型。");
       return;
     }
@@ -292,7 +314,7 @@ function Workspace({ me }: { me: Me }) {
         content,
         mode,
         ...(mode === "single"
-          ? { targets: [target || enabledAgents[0]?.id] }
+          ? { targets: planned.agents.map((a) => a.id) }
           : {}),
       });
       setMessage("");
@@ -821,6 +843,9 @@ function Workspace({ me }: { me: Me }) {
                       伙伴们正在思考<span>可以随时停止</span>
                     </div>
                   )}
+                  {lastRun?.notice && (
+                    <div className="run-notice">{lastRun.notice}</div>
+                  )}
                   {lastRun &&
                     ["partial", "failed", "interrupted"].includes(
                       lastRun.status,
@@ -901,6 +926,11 @@ function Workspace({ me }: { me: Me }) {
                       : "输入 @名字 可以点名"}
                   </span>
                 </div>
+                <p className="composer-budget">
+                  {planned
+                    ? `本次 ${planned.minimum === planned.maximum ? planned.minimum : `${planned.minimum}–${planned.maximum}`} 次模型调用，预留最多 ${planned.maximum} 次；未使用部分会释放。${planned.notice}`
+                    : planningError}
+                </p>
                 <textarea
                   ref={input}
                   aria-label="消息"
