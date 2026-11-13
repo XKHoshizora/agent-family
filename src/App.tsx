@@ -1141,9 +1141,24 @@ function MessageView({
             ))}
           </div>
         )}
+        {!user && m.reasoning && (
+          <details className="reasoning-panel">
+            <summary>
+              思考内容<span>模型提供</span>
+            </summary>
+            <div
+              className="reasoning-content"
+              tabIndex={0}
+              role="region"
+              aria-label={`${m.author}的思考内容`}
+            >
+              <Markdown text={m.reasoning} />
+            </div>
+          </details>
+        )}
         {m.content ? (
           <Markdown text={m.content} />
-        ) : (
+        ) : m.status === "streaming" ? (
           <div
             className="thinking"
             role="status"
@@ -1153,7 +1168,9 @@ function MessageView({
             <span />
             <span />
           </div>
-        )}
+        ) : m.status === "complete" ? (
+          <p className="message-state">本次未返回正式回答。</p>
+        ) : null}
         {m.status === "streaming" && m.content && (
           <span className="stream-caret" aria-label="正在生成" />
         )}

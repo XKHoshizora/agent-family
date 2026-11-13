@@ -1147,6 +1147,45 @@ small {
   border-radius: 0 12px 12px 12px;
   padding: 9px 15px 7px;
 }
+.user-message {
+  flex-direction: row-reverse;
+}
+.user-message .message-main {
+  flex: 0 1 auto;
+  min-width: min(160px, 100%);
+  max-width: calc(85% - 42px);
+  border-radius: 12px 0 12px 12px;
+}
+.reasoning-panel {
+  margin: 0 0 12px;
+  border: 1px solid #e3e8df;
+  border-radius: 10px;
+  color: #5c6c61;
+  background: #f8faf6;
+}
+.reasoning-panel summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  min-height: 42px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.reasoning-panel summary span {
+  margin-left: 10px;
+  font-size: 10px;
+  font-weight: 400;
+}
+.reasoning-content {
+  max-height: 280px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 12px 12px;
+}
+.reasoning-content .markdown {
+  color: #5c6c61;
+  font-size: 13px;
+  line-height: 1.7;
+}
 .user-message .message-meta {
   margin-bottom: 4px;
 }

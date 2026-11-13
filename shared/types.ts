@@ -62,6 +62,7 @@ export type Message = {
   model: string | null;
   content: string;
   status: "complete" | "streaming" | "error" | "cancelled";
+  reasoning?: string;
   source: "web" | "line";
   createdAt: string;
   tokens: number;

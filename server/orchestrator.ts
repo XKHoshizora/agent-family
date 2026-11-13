@@ -19,6 +19,7 @@ import {
   proposalSchema,
 } from "./projects";
 import type { Agent, Mode, Room, ToolEvent } from "../shared/types";
+import { splitReasoning } from "../shared/reasoning";
 export const changes = new EventEmitter();
 changes.setMaxListeners(300);
 const controllers = new Map<string, AbortController>();
@@ -284,14 +285,26 @@ async function answer(
     source: "web",
   });
   let content = "",
+    nativeReasoning = "",
     tokens = 0;
   const events: ToolEvent[] = [];
   let lastSave = 0,
     notesCreated = 0;
   const flush = (status: string) => {
+    const parts = splitReasoning(content, status === "streaming");
+    const reasoning = [nativeReasoning.trim(), parts.reasoning]
+      .filter(Boolean)
+      .join("\n\n");
     db.prepare(
-      "UPDATE messages SET content=?,status=?,tokens=?,tool_events=? WHERE id=?",
-    ).run(content, status, tokens, JSON.stringify(events), msg.id);
+      "UPDATE messages SET content=?,reasoning=?,status=?,tokens=?,tool_events=? WHERE id=?",
+    ).run(
+      parts.content,
+      reasoning,
+      status,
+      tokens,
+      JSON.stringify(events),
+      msg.id,
+    );
     notify(room.id);
   };
   let usageDay: string | undefined;
@@ -486,6 +499,12 @@ async function answer(
       if (part.type === "text-delta") {
         content += part.text;
         if (content.length > 50000) throw new Error("回答过长，已停止。");
+      } else if (part.type === "reasoning-start") {
+        if (nativeReasoning.trim()) nativeReasoning += "\n\n";
+      } else if (part.type === "reasoning-delta") {
+        nativeReasoning += part.text;
+        if (nativeReasoning.length > 50000)
+          throw new Error("思考内容过长，已停止。");
       } else if (part.type === "tool-call") {
         events.push({
           name: part.toolName,
@@ -522,7 +541,8 @@ async function answer(
       db.prepare(
         "UPDATE usage_daily SET tokens=tokens+? WHERE workspace_id=? AND day=?",
       ).run(tokens, room.workspaceId, usageDay);
-    if (!content.trim() && !events.length) throw new Error("empty response");
+    if (!content.trim() && !nativeReasoning.trim() && !events.length)
+      throw new Error("empty response");
     if (!content.trim() && events.length)
       content = events.some(
         (e) => e.name === "propose_project_changes" && e.result === "已完成",
@@ -546,7 +566,9 @@ async function answer(
             : error?.name === "TimeoutError"
               ? "等待模型回应超时，请稍后重试。"
               : "这位伙伴暂时没有完成回答，请稍后重试或切换模型。";
-    content = content ? `${content}\n\n> ${label}` : label;
+    const partial = splitReasoning(content, true);
+    if (partial.reasoning) nativeReasoning += `\n\n${partial.reasoning}`;
+    content = partial.content ? `${partial.content}\n\n> ${label}` : label;
     flush(cancelled ? "cancelled" : "error");
     if (!cancelled) throw new Error(label);
   }

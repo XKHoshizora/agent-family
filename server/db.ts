@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import path from "node:path";
 import { dataDir, id, now } from "./config";
 import type { Room, Message, Agent, Run, Note } from "../shared/types";
+import { splitReasoning } from "../shared/reasoning";
 export const db = new Database(path.join(dataDir, "agent-family.sqlite"));
 db.pragma("journal_mode = WAL");
 db.pragma("foreign_keys = ON");
@@ -43,6 +44,12 @@ if (
   db.exec(
     "ALTER TABLE line_challenges ADD COLUMN group_name TEXT NOT NULL DEFAULT ''",
   );
+if (
+  !(db.pragma("table_info(messages)") as any[]).some(
+    (c) => c.name === "reasoning",
+  )
+)
+  db.exec("ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''");
 export function audit(
   workspaceId: string,
   actor: string,
@@ -106,6 +113,10 @@ export function createRoom(
   return getRoom(roomId)!;
 }
 export function messageFrom(row: any): Message {
+  const parts =
+    row.role === "assistant"
+      ? splitReasoning(row.content, row.status === "streaming")
+      : { content: row.content, reasoning: "" };
   return {
     id: row.id,
     roomId: row.room_id,
@@ -114,7 +125,8 @@ export function messageFrom(row: any): Message {
     agentId: row.agent_id,
     author: row.author,
     model: row.model,
-    content: row.content,
+    content: parts.content,
+    reasoning: [row.reasoning, parts.reasoning].filter(Boolean).join("\n\n"),
     status: row.status,
     source: row.source,
     createdAt: row.created_at,
@@ -141,7 +153,9 @@ export function addMessage(
     tokens: 0,
     toolEvents: [],
   };
-  db.prepare("INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)").run(
+  db.prepare(
+    "INSERT INTO messages(id,room_id,run_id,role,agent_id,author,model,content,status,source,created_at,tokens,tool_events,reasoning) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  ).run(
     msg.id,
     msg.roomId,
     msg.runId,
@@ -155,6 +169,7 @@ export function addMessage(
     msg.createdAt,
     0,
     "[]",
+    message.reasoning || "",
   );
   db.prepare("UPDATE rooms SET updated_at=? WHERE id=?").run(now(), msg.roomId);
   return msg;

@@ -84,11 +84,22 @@ vi.mock("../server/providers", async (importOriginal) => {
                   },
                 ]
               : [
+                  ...(agent.model === "mock-reasoning"
+                    ? [
+                        { type: "reasoning-start", id: "r1" },
+                        {
+                          type: "reasoning-delta",
+                          id: "r1",
+                          delta: "NATIVE_PRIVATE_REASONING",
+                        },
+                        { type: "reasoning-end", id: "r1" },
+                      ]
+                    : []),
                   { type: "text-start", id: "text-1" },
                   {
                     type: "text-delta",
                     id: "text-1",
-                    delta: `${agent.name}的独立回答。`,
+                    delta: `${agent.model === "mock-tagged" ? "<think>TAGGED_PRIVATE_REASONING</think>" : ""}${agent.name}的独立回答。`,
                   },
                   { type: "text-end", id: "text-1" },
                 ]),
@@ -163,6 +174,7 @@ import {
   getRuns,
   saveNote,
   getNotes,
+  addMessage,
 } from "../server/db";
 import { auth } from "../server/auth";
 import { encrypt, decrypt, id, now, config } from "../server/config";
@@ -302,6 +314,8 @@ beforeAll(async () => {
     apiKey: "not-a-real-secret",
     models: [
       "mock-text",
+      "mock-reasoning",
+      "mock-tagged",
       "mock-fail",
       "mock-slow",
       "mock-tool",
@@ -604,6 +618,57 @@ describe("providers and protected storage", () => {
   });
 });
 describe("bounded multi-agent execution", () => {
+  it.each(["mock-reasoning", "mock-tagged"])(
+    "stores %s separately and passes only answers into discussion context",
+    async (model) => {
+      const r = room([testAgent(model), testAgent("mock-text", "b", "小文")]);
+      const result = await run(r, "discuss");
+      expect(result.run.status).toBe("completed");
+      const answer = result.messages.find((m) => m.agentId === "a")!;
+      expect(answer.reasoning).toContain("PRIVATE_REASONING");
+      expect(answer.content).toBe("小智的独立回答。");
+      expect(JSON.stringify(state.calls[2].prompt)).not.toContain(
+        "PRIVATE_REASONING",
+      );
+      expect(JSON.stringify(state.calls[2].prompt)).toContain("小智的独立回答");
+      const stored = db
+        .prepare("SELECT content,reasoning FROM messages WHERE id=?")
+        .get(answer.id) as any;
+      expect(stored.content).toBe(answer.content);
+      expect(stored.reasoning).toBe(answer.reasoning);
+    },
+  );
+  it("reads legacy tagged answers without rewriting them or parsing human messages", async () => {
+    const r = room();
+    const base = {
+      roomId: r.id,
+      runId: null,
+      agentId: null,
+      author: "Legacy",
+      model: null,
+      status: "complete" as const,
+      source: "web" as const,
+    };
+    const text = "<think>LEGACY_THOUGHT</think>历史正式回答";
+    addMessage({ ...base, role: "assistant", content: text });
+    addMessage({ ...base, role: "user", content: text });
+    const messages = getMessages(r.id);
+    expect(messages[0].content).toBe("历史正式回答");
+    expect(messages[0].reasoning).toBe("LEGACY_THOUGHT");
+    expect(messages[1].content).toBe(text);
+    const exported = await request(
+      "GET",
+      `/api/rooms/${r.id}/export?format=json`,
+    );
+    expect(exported.json().messages[0].reasoning).toBe("LEGACY_THOUGHT");
+    expect(
+      (
+        db
+          .prepare("SELECT content FROM messages WHERE id=?")
+          .get(messages[0].id) as any
+      ).content,
+    ).toBe(text);
+  });
   it("routes exact Chinese mentions and punctuation", () => {
     const r = room([
       testAgent("mock-text", "a", "小智"),

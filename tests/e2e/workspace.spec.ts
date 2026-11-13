@@ -1,5 +1,6 @@
 import { test, expect, type Page, type BrowserContext } from "@playwright/test";
 import fs from "node:fs";
+import path from "node:path";
 import { unzipSync, strFromU8 } from "fflate";
 test.describe.serial("Web workspace end-to-end", () => {
   let page: Page, context: BrowserContext;
@@ -186,6 +187,167 @@ test.describe.serial("Web workspace end-to-end", () => {
     expect(data.room.name).toBe("开发验收已完成");
     expect(data.notes[0].title).toBe("团队需求");
     await page.getByRole("button", { name: "关闭", exact: true }).click();
+  });
+  test("user bubbles align right and returned reasoning stays collapsed on desktop and mobile", async () => {
+    const list = await (await context.request.get("/api/rooms")).json();
+    const room = list.find((r: any) => r.name === "开发验收已完成");
+    const endpoint = `**/api/rooms/${room.id}`;
+    const sample = {
+      roomId: room.id,
+      runId: "qa-run",
+      agentId: null,
+      model: null,
+      status: "complete",
+      source: "web",
+      tokens: 0,
+      toolEvents: [],
+      createdAt: "2026-11-13T01:17:00Z",
+    };
+    const messages = [
+      {
+        ...sample,
+        id: "qa-user",
+        role: "user",
+        author: "浏览器测试员",
+        content: "Ciallo～今天一起聊聊吧。",
+      },
+      {
+        ...sample,
+        id: "qa-plain",
+        role: "assistant",
+        author: "GPT",
+        agentId: "qa-gpt",
+        model: "test-gpt",
+        content: "你好！今天想聊点什么？",
+      },
+      {
+        ...sample,
+        id: "qa-reasoning",
+        role: "assistant",
+        author: "MiniMax",
+        agentId: "qa-mini",
+        model: "test-minimax",
+        reasoning: "MODEL_RETURNED_THOUGHT\n\n先理解问候，再用简洁的中文回应。",
+        content:
+          "你好～很高兴见到你。我们可以聊创意、写作，或一起完善你的计划。",
+      },
+      {
+        ...sample,
+        id: "qa-cancelled",
+        role: "assistant",
+        author: "Claude",
+        agentId: "qa-claude",
+        model: "test-claude",
+        status: "cancelled",
+        reasoning: "已返回的部分思考",
+        content: "",
+      },
+    ];
+    await page.route(endpoint, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, messages } });
+    });
+    try {
+      await page.reload();
+      await expect(page).toHaveTitle(/Agent Family/);
+      const user = page.locator(".user-message");
+      const reasoning = page
+        .locator(".agent-message")
+        .filter({ hasText: "MiniMax" });
+      await expect(user).toContainText("Ciallo");
+      await expect(reasoning.locator(".reasoning-panel")).not.toHaveAttribute(
+        "open",
+      );
+      await expect(
+        reasoning.getByText("MODEL_RETURNED_THOUGHT", { exact: true }),
+      ).not.toBeVisible();
+      await expect(
+        reasoning.locator(":scope > .message-main > .markdown"),
+      ).toContainText("你好～");
+      await expect(
+        page
+          .locator(".agent-message")
+          .filter({ hasText: "GPT" })
+          .locator(".reasoning-panel"),
+      ).toHaveCount(0);
+      await expect(
+        page
+          .locator(".agent-message")
+          .filter({ hasText: "Claude" })
+          .locator(".thinking"),
+      ).toHaveCount(0);
+      const checkAlignment = async () => {
+        const avatar = await user.locator(".avatar").boundingBox();
+        const bubble = await user.locator(".message-main").boundingBox();
+        expect(avatar!.x).toBeGreaterThan(bubble!.x + bubble!.width);
+        const agentAvatar = await reasoning.locator(".avatar").boundingBox();
+        const agentBubble = await reasoning
+          .locator(".message-main")
+          .boundingBox();
+        expect(agentAvatar!.x).toBeLessThan(agentBubble!.x);
+        expect(
+          await page.evaluate(
+            () => document.documentElement.scrollWidth > innerWidth,
+          ),
+        ).toBe(false);
+      };
+      await checkAlignment();
+      const capture = async (name: string) => {
+        if (process.env.AF_QA_DIR) {
+          fs.mkdirSync(process.env.AF_QA_DIR, { recursive: true });
+          await page.screenshot({
+            path: path.join(process.env.AF_QA_DIR, name),
+          });
+        }
+      };
+      await capture("message-reading-desktop.png");
+      const toggle = reasoning.locator("summary");
+      await toggle.focus();
+      await page.keyboard.press("Enter");
+      await expect(reasoning.locator(".reasoning-panel")).toHaveAttribute(
+        "open",
+        "",
+      );
+      await expect(
+        reasoning.getByText("MODEL_RETURNED_THOUGHT", { exact: true }),
+      ).toBeVisible();
+      await capture("message-reading-expanded.png");
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+      await reasoning
+        .getByRole("button", { name: "复制", exact: true })
+        .click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        messages[2].content,
+      );
+      await reasoning.getByRole("button", { name: "存为笔记" }).click();
+      await expect(page.getByLabel("内容", { exact: true })).toHaveValue(
+        messages[2].content,
+      );
+      await page.getByRole("button", { name: "关闭", exact: true }).click();
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.reload();
+      await expect(reasoning.locator(".reasoning-panel")).not.toHaveAttribute(
+        "open",
+      );
+      await checkAlignment();
+      await page.locator(".message-scroller").evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await capture("message-reading-mobile.png");
+      await toggle.click();
+      await expect(
+        reasoning.getByText("MODEL_RETURNED_THOUGHT", { exact: true }),
+      ).toBeVisible();
+      await toggle.click();
+      await expect(
+        reasoning.getByText("MODEL_RETURNED_THOUGHT", { exact: true }),
+      ).not.toBeVisible();
+      expect(errors).toEqual([]);
+    } finally {
+      await page.unroute(endpoint);
+      await page.reload();
+    }
   });
   test("mobile drawers, focus and composer remain usable without overflow", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
