@@ -21,4 +21,11 @@
 - 真实测试不重放既有私聊。此前两次独立简单合成 MiniMax 请求也正常，但没有复现历史失败；旧消息未存 finishReason，不能断言每条历史故障的具体原因。修复针对原有 1600 共用输出限制及完成状态遗漏，MiniMax 独立预算改为 8192，并分别接收思考和正文。
 - 本机与线上更新前备份已保存。线上发布前只读检查：无运行中任务，6 个可访问群、34 条当前接口返回的消息，LINE 未配置。真实 LINE 群收发尚未验证，自动测试使用签名事件及模拟传输。
 
-证据（本机受控，不入版本库）：`.local/interjection-minimax-real-check.json`、`.local/interjection-preflight.json`，QA 目录中 `discussion-interjection-mobile.png`。发布结果随后补录。
+证据（本机受控，不入版本库）：`.local/interjection-minimax-real-check.json`、`.local/interjection-preflight.json`，QA 目录中 `discussion-interjection-mobile.png`。
+
+## 在线发布结果
+
+- 发布源版本 `ec4e77f6f36357b6d63c52ef5d2589537d6794dc`；Railway 部署 `e851c361-935d-4f84-8307-8e48afcf64ba` 为 SUCCESS。此次是本地固定版本上传，非 GitHub CI 自动发布。
+- 2026-11-13 21:06 JST 公网检查通过：health、已有会话与前端资源均 200；6 个既有可访问群、34 条消息保留；新版资源 `index-CxGP_6t5.js`、`index-D1rWCQMe.css` 命中；讨论设置正常、手机无横向溢出、浏览器运行错误 0。LINE 仍未配置，未宣称真实群收发通过。
+- 在线新建私有合成测试群「插话与 MiniMax · 合成话题验收」，run `488f4e5e-a1fd-4737-ac9b-db28ccc4f536`，限定 2 次调用。GPT 让出后 MiniMax-M3 正式回应预算 100 元且不买书架的新要求；返回 1217 字符的独立思考及非空正文，finishReason=tool-calls；补充已回应、同一 run 正常完成。新增测试群保留可供用户查看，不改写历史空回答。两次请求中被打断的 GPT 仍计入额度。
+- 线上验收证据 `.local/interjection-release.json`、`.local/interjection-minimax-cloud-check.json`；更新前备份 `/data/backups/before-interjections-minimax-20261113.zip` 保存在原卷，不能替代异地备份，本次未另做恢复演练。

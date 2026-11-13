@@ -2,6 +2,12 @@
 
 日期：2026-11-13，Asia/Tokyo。这里区分实现、自动测试、真实调用、部署和用户验收；完成一项不代表其他项自动完成。
 
+## 21:06 JST 增量发布
+
+自由讨论中随时补充／点名、当前发言让出、同一任务继续、幂等重试、LINE 逐条分享授权，以及 MiniMax 独立输出预算和完成状态修复已发布。最新自动验证为 **135 项核心测试、16 项浏览器测试，全部通过**，构建和类型检查通过。本机 GPT + MiniMax 4 次调用、线上 2 次合成调用均完成验收；MiniMax 在这三次发言中都有正式正文。线上原有群、消息及会话保留，真实 LINE 仍未接通。
+
+发布源 `ec4e77f`，部署 `e851c361-935d-4f84-8307-8e48afcf64ba` SUCCESS；详情与限制见 [插话与 MiniMax 验证记录](design/2026-11-13-discussion-interjections.md)。下文早期测试数量和部署 ID 为首次交付的历史记录。
+
 ## 可用入口与范围
 
 - 在线：[Agent Family](https://agent-family-web-production.up.railway.app)，邀请制，已初始化所有者；凭据另存本机 `.local/ACCESS-CLOUD.md`。
