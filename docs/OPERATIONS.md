@@ -87,3 +87,11 @@ npm run reset-password:prod -- owner@agent.family
 增量添加 runs.discussion/calls_used/turns、messages.discussion、line_bindings.discussion 及消息任务索引。旧任务的附加字段为空／零，不推算历史调用归属；原有 usage_daily 总用量保留。旧 LINE 默认模式、共享边界不变，只有用户选择 free 才使用新模式。不要回滚到无法识别 free 模式的旧代码而保留 free 群设置，优先向前修复或恢复对应备份。
 
 自由讨论每次发言按需预留 1–3 次调用，任务设置与计数持久化；控制循环仍在单进程内。重启标记中断并释放预留，不自动恢复。不限轮数仍受有限的任务调用上限及开始 UTC 日期的每日额度限制。
+
+## 讨论插话与 MiniMax 完成状态升级
+
+新增 discussion_inputs 表及索引、runs.participants/line_scope、messages.finish_reason，均为幂等增量迁移。旧消息不补造 finishReason，旧任务不推算参与者和来源。运行中插话持久化后中止当前发言子请求；整场任务继续，已发送请求计入原额度。重启不自动续跑，待回应消息及状态保留。
+
+`MINIMAX_MAX_OUTPUT_TOKENS` 默认 8192，允许 128–32000；仅对名称含 MiniMax 的模型生效，其他模型继续使用 `MAX_OUTPUT_TOKENS`（默认 1600）。思考与正文共用输出预算，较小限制可能在正文前耗尽；依据 [MiniMax 官方兼容接口文档](https://platform.minimax.io/docs/api-reference/text-openai-api)。兼容接口使用 `max_completion_tokens` 并启用 `reasoning_split`，不关闭模型思考。较大上限可能增加单次费用；每日及每任务调用次数限制不变，不是 token 费用硬上限。
+
+新增响应完成原因可区分输出截断与仅思考无正文。历史异常没有记录完成原因，无法追溯判定每条的精确原因。失败不会自动重试，也不会自动重新生成旧空回答。更新前备份数据库和密钥；优先向前修复，不以旧镜像直接解释新增输入队列。

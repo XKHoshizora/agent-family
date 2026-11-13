@@ -80,8 +80,15 @@ export type Message = {
   content: string;
   status: "complete" | "streaming" | "error" | "cancelled";
   reasoning?: string;
+  finishReason?: string;
   round?: number;
   discussion?: DiscussionTurn;
+  interjection?: {
+    targets: string[];
+    handled: string[];
+    answeredBy?: string;
+    sharedToLine: boolean;
+  };
   source: "web" | "line";
   createdAt: string;
   tokens: number;
@@ -100,6 +107,9 @@ export type Run = {
   discussion?: DiscussionSettings;
   callsUsed?: number;
   turns?: number;
+  participants?: string[];
+  source?: "web" | "line";
+  pendingInputs?: number;
 };
 export type Note = {
   id: string;

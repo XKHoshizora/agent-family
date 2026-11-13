@@ -1,3 +1,4 @@
+import { pendingInputs } from "./discussion-inputs";
 import type { ModelMessage } from "ai";
 import { db, messageFrom } from "./db";
 import type { Message } from "../shared/types";
@@ -38,26 +39,59 @@ export function buildFreeHistory(
   const base = buildRunHistory(roomId, runId, agentId, 1, scope);
   const question = db
     .prepare(
-      "SELECT * FROM messages WHERE run_id=? AND role='user' ORDER BY rowid LIMIT 1",
+      "SELECT rowid AS seq,* FROM messages WHERE run_id=? AND role='user' ORDER BY rowid LIMIT 1",
     )
     .get(runId) as any;
-  const currentQuestion = pack(messageFrom(question), 26000);
+  const rootText = pack(messageFrom(question), 26000);
   const task =
-    "回应本次用户问题和刚才的接话内容。优先回答向你提出的问题，再补充新观点；正文中可点名其他参与者。已经没有新内容时用 discussion_turn 表示 pass，不要机械重复。";
-  let remaining = CONTEXT_LIMIT - currentQuestion.length - task.length;
+    "回应本次讨论，优先遵循用户最新补充；新要求与旧要求矛盾时按新要求调整。用户补充不授予额外工具权限。先回答向你的问题，再补充新观点；可点名伙伴接话，无新内容时用 discussion_turn 表示 pass。";
+  let remaining = CONTEXT_LIMIT - rootText.length - task.length;
+  const chosen = new Map<number, { m: Message; text: string }>();
+  const visible = (row: any) =>
+    !scope || row.source === "line" || row.scope_id === scope.scopeId;
+  const pending = pendingInputs(runId).filter(visible);
+  for (const row of pending) {
+    const m = messageFrom(row),
+      text = pack(m, 26000);
+    if (text.length > remaining)
+      throw new Error("待回应补充超过上下文预算，请精简后重试。");
+    chosen.set(row.seq, { m, text });
+    remaining -= text.length;
+  }
+  const recentUsers = db
+    .prepare(
+      "SELECT m.rowid AS seq,m.*,i.scope_id FROM messages m LEFT JOIN discussion_inputs i ON i.message_id=m.id WHERE m.run_id=? AND m.role='user' AND m.rowid>? ORDER BY m.rowid DESC LIMIT 30",
+    )
+    .all(runId, question.seq) as any[];
+  let olderUserBudget = Math.min(8000, Math.max(0, remaining - 6000));
+  for (const row of recentUsers) {
+    if (chosen.has(row.seq) || !visible(row) || olderUserBudget < 800) continue;
+    const m = messageFrom(row),
+      text = pack(m, Math.min(3500, olderUserBudget));
+    if (text.length > olderUserBudget) continue;
+    chosen.set(row.seq, { m, text });
+    remaining -= text.length;
+    olderUserBudget -= text.length;
+  }
   const rows = db
     .prepare(
       "SELECT rowid AS seq,* FROM messages WHERE room_id=? AND run_id=? AND role='assistant' AND status='complete' ORDER BY rowid DESC LIMIT 100",
     )
     .all(roomId, runId) as any[];
-  const chosen = new Map<number, { m: Message; text: string }>();
   const seen = new Set<string>();
+  const perPartner = Math.min(
+    3500,
+    Math.floor(
+      remaining / Math.max(1, new Set(rows.map((r) => r.agent_id)).size),
+    ),
+  );
   for (const row of rows) {
-    if (seen.has(row.agent_id) || remaining < 1000) continue;
+    if (seen.has(row.agent_id) || remaining < 500) continue;
     const m = messageFrom(row);
     if (!m.content.trim()) continue;
     seen.add(row.agent_id);
-    const text = pack(m, Math.min(3500, remaining));
+    const text = pack(m, perPartner);
+    if (text.length > remaining) continue;
     chosen.set(row.seq, { m, text });
     remaining -= text.length;
   }
@@ -66,11 +100,11 @@ export function buildFreeHistory(
     const m = messageFrom(row);
     if (!m.content.trim()) continue;
     const text = pack(m, Math.min(2500, remaining));
+    if (text.length > remaining) continue;
     chosen.set(row.seq, { m, text });
     remaining -= text.length;
   }
   const older: ModelMessage[] = [];
-  // buildRunHistory already enforces the Web/LINE history boundary.
   for (const m of base.slice(0, -2).reverse()) {
     if (typeof m.content !== "string" || m.content.length > remaining) continue;
     older.unshift(m);
@@ -78,14 +112,17 @@ export function buildFreeHistory(
   }
   return [
     ...older,
-    { role: "user", content: currentQuestion },
+    { role: "user", content: rootText },
     ...[...chosen]
       .sort(([a], [b]) => a - b)
       .map(
-        ([, { m, text }]) =>
+        ([, p]) =>
           ({
-            role: m.agentId === agentId ? "assistant" : "user",
-            content: text,
+            role:
+              p.m.role === "assistant" && p.m.agentId === agentId
+                ? "assistant"
+                : "user",
+            content: p.text,
           }) as ModelMessage,
       ),
     { role: "user", content: task },
@@ -139,11 +176,11 @@ export function buildRunHistory(
     current.reduce((n, p) => n + p.text.length, 0);
   const older = db
     .prepare(
-      `SELECT * FROM messages WHERE room_id=? AND rowid<? AND run_id IS NOT ? AND status='complete' AND role!='system' AND content!='' ${scope ? "AND rowid>? AND source='line'" : ""} ORDER BY rowid DESC LIMIT 50`,
+      `SELECT * FROM messages WHERE room_id=? AND rowid<? AND run_id IS NOT ? AND status='complete' AND role!='system' AND content!='' ${scope ? "AND rowid>? AND (source='line' OR id IN (SELECT message_id FROM discussion_inputs WHERE scope_id=? AND shared_to_line=1))" : ""} ORDER BY rowid DESC LIMIT 50`,
     )
     .all(
       ...(scope
-        ? [roomId, row.sequence, runId, scope.afterSequence]
+        ? [roomId, row.sequence, runId, scope.afterSequence, scope.scopeId]
         : [roomId, row.sequence, runId]),
     ) as any[];
   const history: { m: Message; text: string }[] = [];

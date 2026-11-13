@@ -1,3 +1,7 @@
+import {
+  appendDiscussionInput,
+  pendingInputs,
+} from "../server/discussion-inputs";
 import { beforeAll, beforeEach, afterAll, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,6 +26,13 @@ vi.mock("../server/providers", async () => {
             step.text ?? `观点 ${state.calls.length} 来自 ${agent.name}`;
           const parts: any[] = [
             { type: "stream-start", warnings: [] },
+            ...(step.reasoning
+              ? [
+                  { type: "reasoning-start", id: "r" },
+                  { type: "reasoning-delta", id: "r", delta: step.reasoning },
+                  { type: "reasoning-end", id: "r" },
+                ]
+              : []),
             { type: "text-start", id: "t" },
             { type: "text-delta", id: "t", delta: text },
             { type: "text-end", id: "t" },
@@ -38,7 +49,7 @@ vi.mock("../server/providers", async () => {
             {
               type: "finish",
               finishReason: {
-                unified: step.decision ? "tool-calls" : "stop",
+                unified: step.finish || (step.decision ? "tool-calls" : "stop"),
                 raw: "stop",
               },
               usage: {
@@ -393,4 +404,173 @@ it("all five quiet members get a chance before quiet stopping", async () => {
   const run = await finished(makeRoom(5), { maxRounds: null });
   expect(run.turns).toBe(5);
   expect(run.notice).toContain("所有伙伴");
+});
+
+const interject = (
+  r: ReturnType<typeof makeRoom>,
+  rid: string,
+  content: string,
+  clientId = id(),
+) =>
+  appendDiscussionInput({
+    room: r,
+    runId: rid,
+    actor: u,
+    author: "用户",
+    content,
+    clientId,
+  });
+it("a user interjection cancels only the old utterance and prioritizes the named participant in the same run", async () => {
+  const r = makeRoom();
+  state.delay = 30;
+  const rid = start(r, { maxCalls: 4, maxRounds: null });
+  await until(() => state.calls.length === 1);
+  const input = interject(r, rid, "@伙伴2 补充要求：预算只能100元。");
+  await waitForRun(rid);
+  expect(getRuns(r.id)).toHaveLength(1);
+  expect(state.calls[1].agent).toBe("a2");
+  expect(JSON.stringify(state.calls[1].prompt)).toContain("预算只能100元");
+  expect(
+    getMessages(r.id).find((m) => m.id === input.messageId)?.interjection
+      ?.answeredBy,
+  ).toBeTruthy();
+  expect(getMessages(r.id).find((m) => m.role === "assistant")?.status).toBe(
+    "cancelled",
+  );
+  expect(
+    getMessages(r.id).find((m) => m.role === "assistant")?.content,
+  ).toContain("收到用户补充");
+  expect(getRuns(r.id)[0].status).toBe("completed");
+  expect(usage(w).reserved).toBe(0);
+});
+it("rapid interjections preserve all requirements, handle all named targets and deduplicate retries", async () => {
+  const r = makeRoom();
+  state.delay = 25;
+  const rid = start(r, { maxCalls: 5, maxRounds: null });
+  await until(() => state.calls.length === 1);
+  const key = id();
+  const first = interject(r, rid, "@伙伴1 要求一：保持简单。", key);
+  const same = interject(r, rid, "@伙伴1 要求一：保持简单。", key);
+  expect(same.messageId).toBe(first.messageId);
+  expect(same.duplicate).toBe(true);
+  interject(r, rid, "@伙伴2 要求二：不要使用网络。");
+  interject(r, rid, "要求三：总字数要少。");
+  await waitForRun(rid);
+  expect(state.calls[1].agent).toBe("a2");
+  expect(state.calls[2].agent).toBe("a1");
+  for (const text of ["要求一", "要求二", "要求三"])
+    expect(JSON.stringify(state.calls[1].prompt)).toContain(text);
+  expect(getMessages(r.id).filter((m) => m.interjection)).toHaveLength(3);
+  expect(
+    getMessages(r.id)
+      .filter((m) => m.interjection)
+      .every((m) => m.interjection?.answeredBy),
+  ).toBe(true);
+  expect(JSON.stringify(state.calls.at(-1).prompt)).toContain("不要使用网络");
+  expect(getRuns(r.id)[0].pendingInputs).toBe(0);
+});
+it("one interjection can ask two participants, and remains pending until both respond", async () => {
+  const r = makeRoom();
+  state.delay = 25;
+  const rid = start(r, { maxCalls: 4, maxRounds: null });
+  await until(() => state.calls.length === 1);
+  const input = interject(r, rid, "@伙伴1 @伙伴2 请各自给一个建议");
+  await until(() => state.calls.length === 3);
+  expect(pendingInputs(rid)[0]?.handled).toEqual(["a1"]);
+  await waitForRun(rid);
+  expect(
+    getMessages(r.id).find((m) => m.id === input.messageId)?.interjection
+      ?.handled,
+  ).toEqual(["a1", "a2"]);
+});
+it("exhausted limits keep an interjection explicitly pending without restarting or refunding spent calls", async () => {
+  const r = makeRoom(2);
+  state.delay = 30;
+  const rid = start(r, { maxCalls: 1, maxRounds: null });
+  await until(() => state.calls.length === 1);
+  interject(r, rid, "@伙伴1 新要求");
+  await waitForRun(rid);
+  const run = getRuns(r.id)[0];
+  expect(run.callsUsed).toBe(1);
+  expect(run.pendingInputs).toBe(1);
+  expect(run.notice).toContain("尚未被回应");
+  expect(getRuns(r.id)).toHaveLength(1);
+});
+it("completed or non-free runs reject new interjections without adding messages", async () => {
+  const r = makeRoom(2),
+    run = await finished(r, { maxCalls: 1 });
+  const before = getMessages(r.id).length;
+  expect(() => interject(r, run.id, "late input")).toThrow("已经结束");
+  expect(getMessages(r.id)).toHaveLength(before);
+});
+it("pending input size guard rejects excess before writing and keeps context bounded", async () => {
+  const r = makeRoom(5);
+  state.delay = 40;
+  const rid = start(r, { maxCalls: 2, maxRounds: null });
+  await until(() => state.calls.length === 1);
+  interject(r, rid, "补充甲" + "甲".repeat(7000));
+  interject(r, rid, "补充乙" + "乙".repeat(7000));
+  expect(() => interject(r, rid, "丙".repeat(3000))).toThrow("过长");
+  const history = buildFreeHistory(r.id, rid, "a0");
+  expect(JSON.stringify(history)).toContain("补充甲");
+  expect(JSON.stringify(history)).toContain("补充乙");
+  expect(
+    history.reduce((n, m) => n + String(m.content).length, 0),
+  ).toBeLessThanOrEqual(CONTEXT_LIMIT);
+  cancelRun(rid, r.id);
+  await waitForRun(rid);
+});
+it("read-only members cannot interrupt a live utterance", async () => {
+  const r = makeRoom(2);
+  state.delay = 30;
+  const rid = start(r, { maxCalls: 2 });
+  await until(() => state.calls.length === 1);
+  db.prepare("INSERT OR REPLACE INTO memberships VALUES(?,?,'viewer')").run(
+    w,
+    "reader",
+  );
+  expect(() =>
+    appendDiscussionInput({
+      room: r,
+      runId: rid,
+      actor: "reader",
+      author: "Reader",
+      content: "new",
+      clientId: id(),
+    }),
+  ).toThrow("无权");
+  await waitForRun(rid);
+  expect(
+    getMessages(r.id)
+      .filter((m) => m.role === "assistant")
+      .every((m) => m.status === "complete"),
+  ).toBe(true);
+});
+it.each(["stop", "length"])(
+  "reasoning-only output ending with %s is not a completed answer",
+  async (finish) => {
+    state.script = [{ text: "", reasoning: "MODEL_REASONING_ONLY", finish }];
+    const run = await finished(makeRoom(2), { maxCalls: 1 });
+    const answer = getMessages(run.roomId).find((m) => m.role === "assistant")!;
+    expect(answer.status).toBe("error");
+    expect(answer.reasoning).toContain("MODEL_REASONING_ONLY");
+    expect(answer.finishReason).toBe(finish);
+    expect(answer.content).toContain(
+      finish === "length" ? "输出上限" : "没有生成正式回答",
+    );
+    expect(run.status).toBe("failed");
+  },
+);
+it("MiniMax gets a separate bounded output budget", async () => {
+  const r = makeRoom(2);
+  r.agents[0].model = "MiniMax-M3";
+  db.prepare("UPDATE rooms SET agents=? WHERE id=?").run(
+    JSON.stringify(r.agents),
+    r.id,
+  );
+  await finished(r, { maxCalls: 1 });
+  expect(state.calls[0].maxOutputTokens).toBe(config.minimaxMaxOutputTokens);
+  expect(state.calls[0].maxOutputTokens).toBeGreaterThan(
+    config.maxOutputTokens,
+  );
 });

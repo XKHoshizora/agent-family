@@ -185,6 +185,14 @@ function Workspace({ me }: { me: Me }) {
   const [editDiscussion, setEditDiscussion] = useState(false);
   const [target, setTarget] = useState("");
   const [message, setMessage] = useState("");
+  const [draftRun, setDraftRun] = useState<string | null>(null);
+  const [shareToLine, setShareToLine] = useState(false);
+  const submission = useRef<{
+    runId: string;
+    content: string;
+    share: boolean;
+    id: string;
+  } | null>(null);
   const [attachment, setAttachment] = useState<{
     name: string;
     content: string;
@@ -205,6 +213,7 @@ function Workspace({ me }: { me: Me }) {
   const active = detail.data?.runs.find((r) =>
     ["running", "queued"].includes(r.status),
   );
+  const canInterject = active?.mode === "free";
   const messages = detail.data?.messages || [];
   const lastRun = detail.data?.runs[0];
   const enabledAgents = room?.agents.filter((a) => a.enabled) || [];
@@ -230,12 +239,18 @@ function Workspace({ me }: { me: Me }) {
     setTarget("");
     setDiscussion(DEFAULT_DISCUSSION);
     setEditDiscussion(false);
+    setDraftRun(null);
+    setShareToLine(false);
+    submission.current = null;
     setMessage(sessionStorage.getItem(`af-draft-${roomId}`) || "");
     setAttachment(null);
     setSendError("");
     firstScroll.current = true;
     setNearBottom(true);
   }, [roomId]);
+  useEffect(() => {
+    if (!message.trim() && !attachment) setDraftRun(null);
+  }, [message, attachment]);
   useEffect(() => {
     if (roomId) sessionStorage.setItem(`af-draft-${roomId}`, message);
   }, [message, roomId]);
@@ -288,7 +303,7 @@ function Workspace({ me }: { me: Me }) {
       !room ||
       !canWrite ||
       sending ||
-      active ||
+      (active && !canInterject) ||
       (!message.trim() && !attachment)
     )
       return;
@@ -302,30 +317,64 @@ function Workspace({ me }: { me: Me }) {
       setSendError("内容加附件最多 12,000 字符，请适当精简。");
       return;
     }
-    if (!enabledAgents.length) {
+    const joinRunId = canInterject ? active.id : draftRun;
+    if (!joinRunId && !enabledAgents.length) {
       setSendError("请先启用至少一位伙伴。");
       return;
     }
-    if (planningError || !planned) {
+    if (!joinRunId && (planningError || !planned)) {
       setSendError(planningError);
       return;
     }
-    if (planned.agents.some((a) => !a.model)) {
+    if (!joinRunId && planned?.agents.some((a) => !a.model)) {
       setSendError("请先给每位启用的伙伴选择模型。");
       return;
     }
+    if (joinRunId && active?.source === "line" && !shareToLine) {
+      setSendError("请先勾选将这条补充分享给 LINE 群。");
+      return;
+    }
+    if (
+      joinRunId &&
+      (!submission.current ||
+        submission.current.runId !== joinRunId ||
+        submission.current.content !== content ||
+        submission.current.share !== shareToLine)
+    )
+      submission.current = {
+        runId: joinRunId,
+        content,
+        share: shareToLine,
+        id: crypto.randomUUID(),
+      };
+    const sentText = message,
+      sentAttachment = attachment;
     setSending(true);
     try {
-      await post(`/api/rooms/${room.id}/messages`, {
-        content,
-        mode,
-        ...(mode === "free" ? { discussion } : {}),
-        ...(mode === "single"
-          ? { targets: planned.agents.map((a) => a.id) }
-          : {}),
-      });
-      setMessage("");
-      setAttachment(null);
+      await post(
+        `/api/rooms/${room.id}/messages`,
+        joinRunId
+          ? {
+              content,
+              runId: joinRunId,
+              clientMessageId: submission.current!.id,
+              shareToLine,
+            }
+          : {
+              content,
+              mode,
+              ...(mode === "free" ? { discussion } : {}),
+              ...(mode === "single"
+                ? { targets: planned!.agents.map((a) => a.id) }
+                : {}),
+            },
+      );
+      setMessage((current) => (current === sentText ? "" : current));
+      setAttachment((current) => (current === sentAttachment ? null : current));
+      setShareToLine(false);
+      submission.current = null;
+      if (!joinRunId) setDraftRun(null);
+      if (joinRunId) toast("补充已加入当前讨论");
       setNearBottom(true);
       await client.invalidateQueries({ queryKey: ["room", room.id] });
       await client.invalidateQueries({ queryKey: ["rooms"] });
@@ -858,7 +907,10 @@ function Workspace({ me }: { me: Me }) {
                   {active && (
                     <div className="run-status">
                       <span className="breathing-dot" />
-                      伙伴们正在思考<span>可以随时停止</span>
+                      伙伴们正在思考
+                      <span>
+                        {canInterject ? "可以随时插话或停止" : "可以随时停止"}
+                      </span>
                     </div>
                   )}
                   {lastRun?.notice && (
@@ -946,7 +998,8 @@ function Workspace({ me }: { me: Me }) {
               >
                 <div className="composer-top">
                   <select
-                    value={mode}
+                    disabled={!!active}
+                    value={active?.mode || mode}
                     onChange={(e) => setMode(e.target.value as Mode)}
                     aria-label="本轮聊天方式"
                   >
@@ -994,19 +1047,60 @@ function Workspace({ me }: { me: Me }) {
                   {active?.mode === "free" && active.discussion
                     ? `当前讨论已调用 ${active.callsUsed || 0}/${active.discussion.maxCalls} 次；未用预留会释放，可随时调整或停止。`
                     : mode === "free" && planned
-                    ? `全部 ${planned.agents.length} 位伙伴参与，点名决定首位；每次发言按需预留，单次上限 ${discussion.maxCalls} 次调用。`
-                    : planned
-                      ? `本次 ${planned.minimum === planned.maximum ? planned.minimum : `${planned.minimum}–${planned.maximum}`} 次模型调用，预留最多 ${planned.maximum} 次；未使用部分会释放。${planned.notice}`
-                      : planningError}
+                      ? `全部 ${planned.agents.length} 位伙伴参与，点名决定首位；每次发言按需预留，单次上限 ${discussion.maxCalls} 次调用。`
+                      : planned
+                        ? `本次 ${planned.minimum === planned.maximum ? planned.minimum : `${planned.minimum}–${planned.maximum}`} 次模型调用，预留最多 ${planned.maximum} 次；未使用部分会释放。${planned.notice}`
+                        : planningError}
                 </p>
+                {canInterject && (
+                  <p className="interjection-hint">
+                    可直接补充要求或 @伙伴点名；当前发言会让出。
+                    {active.pendingInputs
+                      ? `还有 ${active.pendingInputs} 条补充等待回应。`
+                      : ""}
+                  </p>
+                )}
+                {canInterject && active.source === "line" && (
+                  <label className="check-field interjection-share">
+                    <input
+                      type="checkbox"
+                      checked={shareToLine}
+                      onChange={(e) => setShareToLine(e.target.checked)}
+                    />
+                    将这条补充分享给 LINE 群，可能进入群内回答
+                  </label>
+                )}
+                {!active && draftRun && message.trim() && (
+                  <p className="interjection-hint">
+                    原讨论已结束，补充草稿尚未发送。
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => {
+                        setDraftRun(null);
+                        submission.current = null;
+                      }}
+                    >
+                      改为新讨论草稿
+                    </button>
+                  </p>
+                )}
                 <textarea
                   ref={input}
                   aria-label="消息"
                   placeholder={
-                    canWrite ? "有什么想和大家聊的？" : "你当前只有查看权限"
+                    canWrite
+                      ? canInterject
+                        ? "补充要求，或 @伙伴点名接话…"
+                        : "有什么想和大家聊的？"
+                      : "你当前只有查看权限"
                   }
                   value={message}
-                  onChange={(e) => setMessage(e.target.value)}
+                  onChange={(e) => {
+                    setMessage(e.target.value);
+                    if (canInterject) setDraftRun(active.id);
+                    else if (!e.target.value.trim()) setDraftRun(null);
+                  }}
                   maxLength={12000}
                   rows={2}
                   disabled={!canWrite}
@@ -1047,7 +1141,7 @@ function Workspace({ me }: { me: Me }) {
                       ? `${message.length.toLocaleString()} / 12,000`
                       : "Shift + Enter 换行"}
                   </span>
-                  {active ? (
+                  {active && (
                     <button
                       type="button"
                       className="stop-button"
@@ -1056,10 +1150,13 @@ function Workspace({ me }: { me: Me }) {
                       <Square size={13} fill="currentColor" />
                       停止
                     </button>
-                  ) : (
+                  )}
+                  {(!active || canInterject) && (
                     <button
                       className="send-button"
-                      aria-label="发送消息"
+                      aria-label={
+                        canInterject || draftRun ? "发送补充" : "发送消息"
+                      }
                       disabled={
                         sending || !canWrite || (!message.trim() && !attachment)
                       }
@@ -1226,6 +1323,12 @@ function MessageView({
             showRound && <span className="round-label">回应伙伴</span>
           )}
           {m.source === "line" && <span className="tag">LINE</span>}
+          {m.interjection && (
+            <span className="tag interjection-state">
+              {m.interjection.answeredBy ? "补充 · 已回应" : "补充 · 待回应"}
+              {m.interjection.sharedToLine ? " · 已分享至 LINE" : ""}
+            </span>
+          )}
           <time dateTime={m.createdAt}>
             {new Date(m.createdAt).toLocaleTimeString("zh-CN", {
               hour: "2-digit",

@@ -48,10 +48,19 @@ export const config = {
   dailyCalls: Number(process.env.DAILY_MODEL_CALLS || 300),
   dailyLineCalls: Number(process.env.DAILY_LINE_MODEL_CALLS || 40),
   maxOutputTokens: Number(process.env.MAX_OUTPUT_TOKENS || 1600),
+  minimaxMaxOutputTokens: Number(process.env.MINIMAX_MAX_OUTPUT_TOKENS || 8192),
   testMode: process.env.TEST_MODE === "true",
 };
 if (!/^[a-f0-9]{64}$/i.test(config.encryptionKey))
   throw new Error("ENCRYPTION_KEY must be exactly 64 hexadecimal characters.");
+if (
+  !Number.isInteger(config.minimaxMaxOutputTokens) ||
+  config.minimaxMaxOutputTokens < 128 ||
+  config.minimaxMaxOutputTokens > 32000
+)
+  throw new Error(
+    "MINIMAX_MAX_OUTPUT_TOKENS must be an integer between 128 and 32000.",
+  );
 if (config.authSecret.length < 32)
   throw new Error("AUTH_SECRET must contain at least 32 characters.");
 if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535)

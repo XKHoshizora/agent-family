@@ -316,6 +316,166 @@ test.describe.serial("Web workspace end-to-end", () => {
       await page.reload();
     }
   });
+  test("users can interject without stopping, keep new typing, and retry against the same run", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const r = rooms.find((r: any) => r.name === "开发测试群");
+    const original = await (
+      await context.request.get(`/api/rooms/${r.id}`)
+    ).json();
+    const rid = "20000000-0000-4000-8000-000000000001";
+    const run = {
+      id: rid,
+      roomId: r.id,
+      status: "running",
+      mode: "free",
+      source: "web",
+      createdAt: new Date().toISOString(),
+      discussion: { maxRounds: 3, maxCalls: 30, stopWhenQuiet: true },
+      callsUsed: 1,
+      turns: 1,
+      pendingInputs: 0,
+    };
+    const messages: any[] = [];
+    const sent: any[] = [];
+    let failNext = false;
+    const endpoint = `**/api/rooms/${r.id}`,
+      sendEndpoint = `**/api/rooms/${r.id}/messages`;
+    await page.route(endpoint, (route) =>
+      route.fulfill({ json: { ...original, runs: [run], messages } }),
+    );
+    await page.route(sendEndpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      sent.push(body);
+      if (failNext) {
+        await route.fulfill({
+          status: 409,
+          json: { error: "这次讨论已经结束，补充未发送，草稿已保留。" },
+        });
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+      messages.push({
+        id: "ui-input",
+        roomId: r.id,
+        runId: rid,
+        role: "user",
+        agentId: null,
+        author: "浏览器测试员",
+        model: null,
+        content: body.content,
+        status: "complete",
+        source: "web",
+        createdAt: new Date().toISOString(),
+        tokens: 0,
+        toolEvents: [],
+        interjection: { targets: [], handled: [], sharedToLine: false },
+      });
+      run.pendingInputs = 1;
+      await route.fulfill({
+        status: 202,
+        json: { runId: rid, messageId: "ui-input" },
+      });
+    });
+    try {
+      await page.reload();
+      await expect(
+        page.getByRole("button", { name: "停止", exact: true }),
+      ).toBeVisible();
+      const input = page.getByLabel("消息", { exact: true });
+      await input.fill("@架构师 补充：预算100元");
+      await page.getByRole("button", { name: "发送补充", exact: true }).click();
+      await input.fill("第二条：保留这个尚未发送的新要求");
+      await expect(page.locator(".interjection-state")).toContainText("待回应");
+      await expect(input).toHaveValue("第二条：保留这个尚未发送的新要求");
+      expect(sent[0].runId).toBe(rid);
+      expect(sent[0].clientMessageId).toBeTruthy();
+      expect(sent[0].mode).toBeUndefined();
+      failNext = true;
+      await page.getByRole("button", { name: "发送补充", exact: true }).click();
+      await expect(page.getByRole("alert")).toContainText("草稿已保留");
+      await expect(input).toHaveValue("第二条：保留这个尚未发送的新要求");
+      await page.getByRole("button", { name: "发送补充", exact: true }).click();
+      await expect.poll(() => sent.length).toBe(3);
+      expect(sent[1].clientMessageId).toBe(sent[2].clientMessageId);
+      expect(sent.every((x) => x.runId === rid)).toBe(true);
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      await expect(
+        page.getByRole("button", { name: "停止", exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "发送补充", exact: true }),
+      ).toBeVisible();
+      if (process.env.AF_QA_DIR)
+        await page.screenshot({
+          path: path.join(
+            process.env.AF_QA_DIR,
+            "discussion-interjection-mobile.png",
+          ),
+        });
+    } finally {
+      await page.getByLabel("消息", { exact: true }).fill("");
+      await page.unroute(endpoint);
+      await page.unroute(sendEndpoint);
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      await page.reload();
+    }
+  });
+  test("Web input into a LINE run requires per-message sharing consent", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const r = rooms.find((r: any) => r.name === "开发测试群");
+    const original = await (
+      await context.request.get(`/api/rooms/${r.id}`)
+    ).json();
+    const endpoint = `**/api/rooms/${r.id}`,
+      sendEndpoint = `**/api/rooms/${r.id}/messages`;
+    const sent: any[] = [];
+    const run = {
+      id: "30000000-0000-4000-8000-000000000001",
+      roomId: r.id,
+      status: "running",
+      mode: "free",
+      source: "line",
+      createdAt: new Date().toISOString(),
+      discussion: { maxRounds: 3, maxCalls: 30, stopWhenQuiet: true },
+    };
+    await page.route(endpoint, (route) =>
+      route.fulfill({ json: { ...original, runs: [run] } }),
+    );
+    await page.route(sendEndpoint, async (route) => {
+      sent.push(route.request().postDataJSON());
+      await route.fulfill({
+        status: 202,
+        json: { runId: run.id, messageId: "shared" },
+      });
+    });
+    try {
+      await page.reload();
+      await page
+        .getByLabel("消息", { exact: true })
+        .fill("这条补充明确分享给群");
+      await page.getByRole("button", { name: "发送补充", exact: true }).click();
+      await expect(page.getByRole("alert")).toContainText("勾选");
+      expect(sent).toHaveLength(0);
+      await page
+        .getByRole("checkbox", { name: /将这条补充分享给 LINE 群/ })
+        .check();
+      await page.getByRole("button", { name: "发送补充", exact: true }).click();
+      await expect.poll(() => sent.length).toBe(1);
+      expect(sent[0].shareToLine).toBe(true);
+      await expect(
+        page.getByRole("checkbox", { name: /将这条补充分享给 LINE 群/ }),
+      ).not.toBeChecked();
+    } finally {
+      await page.unroute(endpoint);
+      await page.unroute(sendEndpoint);
+      await page.reload();
+    }
+  });
   test("LINE policy controls default to private history and submit explicit sharing choices", async () => {
     const rooms = await (await context.request.get("/api/rooms")).json();
     const r = rooms.find((r: any) => r.name === "开发测试群");

@@ -136,3 +136,61 @@ it.each([
   expect(requests[0].url).not.toContain("fake-native-contract-key");
   expect(result.totalUsage.totalTokens).toBe(7);
 });
+
+it("MiniMax compatible requests separate reasoning and preserve its completion budget", async () => {
+  let body: any;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (_input: any, init: any) => {
+      body = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          id: "mini",
+          object: "chat.completion",
+          created: 1,
+          model: "MiniMax-M3",
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: "正式回答",
+                reasoning_content: "model reasoning",
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }),
+  );
+  saveProvider("native-workspace", {
+    id: "mini-test",
+    kind: "compatible",
+    baseUrl: "https://api.canalapi.com/v1",
+    apiKey: "fake-key",
+    models: ["MiniMax-M3"],
+  });
+  const result = await generateText({
+    model: modelFor("native-workspace", {
+      id: "m",
+      name: "MiniMax",
+      provider: "mini-test",
+      model: "MiniMax-M3",
+      persona: "",
+      color: "sage",
+      tools: false,
+      enabled: true,
+    }),
+    prompt: "hello",
+    maxOutputTokens: 8192,
+    maxRetries: 0,
+  });
+  expect(body.max_completion_tokens).toBe(8192);
+  expect(body.max_tokens).toBeUndefined();
+  expect(body.reasoning_split).toBe(true);
+  expect(result.text).toBe("正式回答");
+  expect(result.reasoningText).toBe("model reasoning");
+});

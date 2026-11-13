@@ -1,3 +1,4 @@
+import { appendDiscussionInput } from "./discussion-inputs";
 import { discussionSettings, updateDiscussion } from "./discussion";
 import type { DiscussionSettings } from "../shared/types";
 import { validateSignature, messagingApi } from "@line/bot-sdk";
@@ -458,6 +459,26 @@ async function processEvent(eventId: string) {
             let runId: string;
             const scope = lineScopeFor(groupId, c.id, room.id);
             try {
+              const active = getRuns(room.id).find((r) =>
+                ["queued", "running"].includes(r.status),
+              );
+              if (active?.mode === "free") {
+                appendDiscussionInput({
+                  room,
+                  runId: active.id,
+                  actor,
+                  author: `LINE 成员 ${actor.slice(-6)}`,
+                  content,
+                  clientId: eventId,
+                  lineScope: scope,
+                });
+                notify(room.id);
+                await replyText(
+                  "补充已加入当前讨论，伙伴将优先回应；轮数和额度保持不变。",
+                );
+                finishEvent(eventId, "done");
+                return;
+              }
               runId = startRun({
                 room,
                 actor,

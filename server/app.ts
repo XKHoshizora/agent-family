@@ -1,3 +1,4 @@
+import { appendDiscussionInput } from "./discussion-inputs";
 import {
   discussionSchema,
   discussionSettings,
@@ -483,8 +484,26 @@ export async function createApp() {
           mode: modeSchema.optional(),
           targets: z.array(z.string()).max(5).optional(),
           discussion: discussionSchema.optional(),
+          runId: z.string().uuid().optional(),
+          clientMessageId: z.string().uuid().optional(),
+          shareToLine: z.boolean().optional(),
         })
         .parse(req.body);
+      if (data.runId) {
+        if (!data.clientMessageId)
+          fail(400, "补充消息需要有效标识，请刷新后重试。");
+        const result = appendDiscussionInput({
+          room,
+          runId: data.runId,
+          actor: user.id,
+          author: user.name,
+          content: data.content,
+          clientId: data.clientMessageId!,
+          shareToLine: data.shareToLine,
+        });
+        notify(room.id);
+        return reply.code(202).send(result);
+      }
       const runId = startRun({
         room,
         actor: user.id,

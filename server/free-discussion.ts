@@ -1,3 +1,9 @@
+import {
+  beginInputAwareTurn,
+  pendingInputs,
+  markInputsAnswered,
+  INPUT_INTERRUPT,
+} from "./discussion-inputs";
 import { db, getRoom, messageFrom } from "./db";
 import { now } from "./config";
 import { releaseRunBudget, reserveRunBudget } from "./budget";
@@ -24,6 +30,7 @@ type Answer = (
   history: ModelMessage[],
   round: number,
   turn: FreeTurnInput,
+  signal: AbortSignal,
 ) => Promise<{ messageId: string; decision?: TurnDecision } | undefined>;
 export async function executeFreeDiscussion(
   runId: string,
@@ -45,6 +52,7 @@ export async function executeFreeDiscussion(
     repeats = 0,
     turns = 0;
   let reason = "讨论已结束。";
+  let seenInput = 0;
   try {
     while (!signal.aborted) {
       const run = db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as any;
@@ -100,6 +108,28 @@ export async function executeFreeDiscussion(
           break;
         }
       }
+      const inputs = pendingInputs(runId);
+      const newest = inputs.at(-1)?.seq || 0;
+      if (newest > seenInput) {
+        seenInput = newest;
+        quiet.clear();
+        contributions.length = 0;
+        repeats = 0;
+        failures = 0;
+      }
+      const directed = [...inputs]
+        .reverse()
+        .find((m) => m.targets.some((t: string) => !m.handled.includes(t)));
+      if (directed)
+        next =
+          agents.find(
+            (a) =>
+              a.id ===
+              directed.targets.find(
+                (t: string) => !directed.handled.includes(t),
+              ),
+          ) || next;
+      if (inputs.length) replyTo = (directed || inputs.at(-1)).id;
       const steps = Math.min(
         next.tools && (!scope || scope.shareTools) ? 3 : 1,
         settings.maxCalls - run.calls_used,
@@ -124,12 +154,14 @@ export async function executeFreeDiscussion(
       const round = Math.floor((turns - 1) / agents.length) + 1;
       lastSpoke.set(next.id, turns);
       let requested: string | undefined;
+      const turnControl = beginInputAwareTurn(runId, signal);
       try {
         const result = await answer(
           next,
           buildFreeHistory(room.id, runId, next.id, scope),
           round,
           { turn: turns, replyTo, participants: agents, steps },
+          turnControl.signal,
         );
         const row =
           result &&
@@ -137,6 +169,11 @@ export async function executeFreeDiscussion(
         const m = row ? messageFrom(row) : undefined;
         if (!m || m.status !== "complete" || !m.content.trim())
           throw new Error("incomplete");
+        markInputsAnswered(
+          inputs.map((m) => m.id),
+          next.id,
+          m.id,
+        );
         failures = 0;
         const decision = result!.decision;
         if (decision?.action === "pass") quiet.add(next.id);
@@ -157,11 +194,16 @@ export async function executeFreeDiscussion(
           )[0]?.id;
         if (requested === next.id || !agents.some((a) => a.id === requested))
           requested = undefined;
-        if (settings.stopWhenQuiet && quiet.size === agents.length) {
+        if (
+          !pendingInputs(runId).length &&
+          settings.stopWhenQuiet &&
+          quiet.size === agents.length
+        ) {
           reason = "所有伙伴都表示暂无补充，讨论已结束。";
           break;
         }
         if (
+          !pendingInputs(runId).length &&
           repeats >= 3 &&
           (decision?.action !== "pass" || quiet.size === agents.length)
         ) {
@@ -170,17 +212,26 @@ export async function executeFreeDiscussion(
         }
       } catch {
         if (signal.aborted) break;
+        if (turnControl.signal.reason === INPUT_INTERRUPT) continue;
         failures++;
         totalFailures++;
         quiet.clear();
-        if (failures >= 3) {
+        if (
+          failures >= 3 &&
+          !pendingInputs(runId).some((m) => m.seq > seenInput)
+        ) {
           reason = "连续三次回答失败，讨论已停止；请检查模型服务。";
           break;
         }
+      } finally {
+        turnControl.close();
       }
       next = nextSpeaker(agents, lastSpoke, turns, requested);
     }
     if (signal.aborted) reason = "用户已停止自由讨论。";
+    const waiting = pendingInputs(runId).length;
+    if (waiting)
+      reason += ` 还有 ${waiting} 条补充尚未被回应，已保存在群聊中；轮数和额度未自动增加。`;
     db.prepare(
       "UPDATE runs SET status=?,finished_at=?,notice=?,error=? WHERE id=?",
     ).run(

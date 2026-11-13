@@ -1180,6 +1180,151 @@ describe("LINE signature, privacy, binding and idempotency", () => {
     cancelRun(webRun, r.id);
     await waitForRun(webRun);
   });
+  it("LINE additions interrupt the same free run and send only one final result", async () => {
+    const { r, groupId } = boundRoom(
+      [
+        testAgent("mock-slow", "li0", "甲"),
+        testAgent("mock-slow", "li1", "乙"),
+      ],
+      { mode: "free" },
+    );
+    updateBinding(r.id, "free", false, {
+      maxRounds: null,
+      maxCalls: 3,
+      stopWhenQuiet: true,
+    });
+    const before = state.lineReplies.length;
+    const e = event("/af 讨论方案", id(), groupId);
+    await webhook([e]);
+    await settled(() => state.calls.length === 1);
+    const rid = getRuns(r.id)[0].id;
+    const addition = event("/af @乙 补充：预算只有100元", id(), groupId);
+    await webhook([addition, addition]);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(addition.webhookEventId) as any
+        )?.status === "done",
+    );
+    await waitForRun(rid);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(e.webhookEventId) as any
+        )?.status === "done",
+    );
+    expect(getRuns(r.id)).toHaveLength(1);
+    expect(state.calls[1].agent).toBe("li1");
+    expect(JSON.stringify(state.calls[1].prompt)).toContain("预算只有100元");
+    expect(getMessages(r.id).filter((m) => m.interjection)).toHaveLength(1);
+    expect(
+      getMessages(r.id).find((m) => m.interjection)?.interjection?.answeredBy,
+    ).toBeTruthy();
+    const replies = state.lineReplies.slice(before);
+    expect(
+      replies.filter((r) => r.messages[0].text.includes("补充已加入")),
+    ).toHaveLength(1);
+    expect(
+      replies.filter((r) => r.messages[0].text.startsWith("[自由讨论]")),
+    ).toHaveLength(1);
+  });
+  it("Web-to-LINE interjections require explicit sharing and exclude other Web history", async () => {
+    const { r, groupId } = boundRoom(
+      [
+        testAgent("mock-slow", "wl0", "甲"),
+        testAgent("mock-slow", "wl1", "乙"),
+      ],
+      { mode: "free" },
+    );
+    updateBinding(r.id, "free", false, {
+      maxRounds: null,
+      maxCalls: 3,
+      stopWhenQuiet: true,
+    });
+    const e = event("/af 开始讨论", id(), groupId);
+    await webhook([e]);
+    await settled(() => state.calls.length === 1);
+    const rid = getRuns(r.id)[0].id;
+    addMessage({
+      roomId: r.id,
+      runId: rid,
+      role: "user",
+      agentId: null,
+      author: "Web",
+      model: null,
+      content: "UNSHARED_WEB_SECRET",
+      status: "complete",
+      source: "web",
+    });
+    const body = {
+      runId: rid,
+      clientMessageId: id(),
+      content: "@乙 EXPLICIT_SHARED_REQUIREMENT",
+    };
+    expect(
+      (await request("POST", `/api/rooms/${r.id}/messages`, body)).statusCode,
+    ).toBe(409);
+    expect(
+      (
+        await request("POST", `/api/rooms/${r.id}/messages`, {
+          ...body,
+          shareToLine: true,
+        })
+      ).statusCode,
+    ).toBe(202);
+    await waitForRun(rid);
+    expect(JSON.stringify(state.calls[1].prompt)).toContain(
+      "EXPLICIT_SHARED_REQUIREMENT",
+    );
+    expect(JSON.stringify(state.calls[1].prompt)).not.toContain(
+      "UNSHARED_WEB_SECRET",
+    );
+    expect(
+      getMessages(r.id).find((m) => m.interjection)?.interjection?.sharedToLine,
+    ).toBe(true);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(e.webhookEventId) as any
+        )?.status === "done",
+    );
+  });
+  it("LINE cannot insert into a Web-originated free discussion", async () => {
+    const { r, groupId } = boundRoom(
+      [
+        testAgent("mock-slow", "wx0", "甲"),
+        testAgent("mock-slow", "wx1", "乙"),
+      ],
+      { mode: "free" },
+    );
+    const rid = startRun({
+      room: r,
+      actor: ownerId,
+      author: "Owner",
+      content: "Web topic",
+      mode: "free",
+      discussion: { maxRounds: null, maxCalls: 2, stopWhenQuiet: true },
+    });
+    const e = event("/af 注入网页任务", id(), groupId);
+    await webhook([e]);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(e.webhookEventId) as any
+        )?.status === "done",
+    );
+    expect(getMessages(r.id).filter((m) => m.interjection)).toHaveLength(0);
+    cancelRun(rid, r.id);
+    await waitForRun(rid);
+  });
   it("free discussion respects the restricted LINE context and stops on revoked scope", async () => {
     const { r, groupId } = boundRoom(
       [
@@ -1675,4 +1820,65 @@ it("free discussion counts tool follow-ups against its own adjustable cap", asyn
   expect(state.calls).toHaveLength(3);
   expect(getRuns(r.id)[0].callsUsed).toBe(3);
   expect(usage(workspaceId).reserved).toBe(0);
+});
+
+it("Web interjection API validates permissions, run identity and retry keys", async () => {
+  const r = room([
+    testAgent("mock-slow", "hi0", "甲"),
+    testAgent("mock-slow", "hi1", "乙"),
+  ]);
+  db.prepare("UPDATE rooms SET visibility='team' WHERE id=?").run(r.id);
+  const rid = startRun({
+    room: getRoom(r.id)!,
+    actor: ownerId,
+    author: "Owner",
+    content: "开始",
+    mode: "free",
+    discussion: { maxRounds: null, maxCalls: 3, stopWhenQuiet: true },
+  });
+  const body = {
+    runId: rid,
+    clientMessageId: id(),
+    content: "@乙 HTTP_NEW_REQUIREMENT",
+  };
+  expect(
+    (await request("POST", `/api/rooms/${r.id}/messages`, body, viewerCookie))
+      .statusCode,
+  ).toBe(403);
+  expect(
+    (
+      await request("POST", `/api/rooms/${r.id}/messages`, {
+        ...body,
+        clientMessageId: undefined,
+      })
+    ).statusCode,
+  ).toBe(400);
+  const first = await request(
+    "POST",
+    `/api/rooms/${r.id}/messages`,
+    body,
+    memberCookie,
+  );
+  expect(first.statusCode).toBe(202);
+  const retry = await request(
+    "POST",
+    `/api/rooms/${r.id}/messages`,
+    body,
+    memberCookie,
+  );
+  expect(retry.json().messageId).toBe(first.json().messageId);
+  expect(retry.json().duplicate).toBe(true);
+  await waitForRun(rid);
+  expect(getRuns(r.id)).toHaveLength(1);
+  expect(getMessages(r.id).filter((m) => m.interjection)).toHaveLength(1);
+  expect(
+    (
+      await request(
+        "POST",
+        `/api/rooms/${r.id}/messages`,
+        { ...body, clientMessageId: id() },
+        memberCookie,
+      )
+    ).statusCode,
+  ).toBe(409);
 });

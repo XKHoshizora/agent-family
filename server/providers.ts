@@ -151,8 +151,22 @@ export function modelFor(workspaceId: string, agent: Agent) {
   const opts = {
     apiKey: decrypt(p.secret),
     baseURL: validateEndpoint(p.base_url),
-    fetch: ((input: any, init: any) =>
-      fetch(input, { ...init, redirect: "error" })) as typeof fetch,
+    fetch: ((input: any, init: any) => {
+      if (
+        /minimax/i.test(agent.model) &&
+        ["compatible", "openai"].includes(p.kind) &&
+        typeof init?.body === "string"
+      ) {
+        const body = JSON.parse(init.body);
+        body.reasoning_split = true;
+        if (body.max_tokens !== undefined) {
+          body.max_completion_tokens = body.max_tokens;
+          delete body.max_tokens;
+        }
+        init = { ...init, body: JSON.stringify(body) };
+      }
+      return fetch(input, { ...init, redirect: "error" });
+    }) as typeof fetch,
   };
   if (p.kind === "anthropic") return createAnthropic(opts)(agent.model);
   if (p.kind === "google") return createGoogle(opts)(agent.model);

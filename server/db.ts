@@ -57,7 +57,10 @@ for (const [table, column, definition] of [
   ["runs", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
   ["runs", "calls_used", "INTEGER NOT NULL DEFAULT 0"],
   ["runs", "turns", "INTEGER NOT NULL DEFAULT 0"],
+  ["runs", "participants", "TEXT NOT NULL DEFAULT '[]'"],
+  ["runs", "line_scope", "TEXT NOT NULL DEFAULT 'null'"],
   ["messages", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
+  ["messages", "finish_reason", "TEXT"],
   ["line_bindings", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
   ["usage_daily", "reserved", "INTEGER NOT NULL DEFAULT 0"],
   ["usage_daily", "line_calls", "INTEGER NOT NULL DEFAULT 0"],
@@ -76,6 +79,12 @@ db.exec(
   "CREATE TABLE IF NOT EXISTS run_budgets(run_id TEXT PRIMARY KEY REFERENCES runs(id),workspace_id TEXT NOT NULL,day TEXT NOT NULL,source TEXT NOT NULL,remaining INTEGER NOT NULL)",
 );
 db.exec("CREATE INDEX IF NOT EXISTS messages_run ON messages(run_id)");
+db.exec(`CREATE TABLE IF NOT EXISTS discussion_inputs(
+  message_id TEXT PRIMARY KEY REFERENCES messages(id),run_id TEXT NOT NULL REFERENCES runs(id),
+  actor TEXT NOT NULL,client_id TEXT NOT NULL,targets TEXT NOT NULL,handled TEXT NOT NULL DEFAULT '[]',
+  answered_by TEXT REFERENCES messages(id),scope_id TEXT,shared_to_line INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(run_id,actor,client_id));
+  CREATE INDEX IF NOT EXISTS discussion_inputs_run ON discussion_inputs(run_id);`);
 db.transaction(() => {
   for (const b of db
     .prepare("SELECT group_id FROM line_bindings WHERE scope_id=''")
@@ -148,6 +157,12 @@ export function createRoom(
   return getRoom(roomId)!;
 }
 export function messageFrom(row: any): Message {
+  const input =
+    row.role === "user"
+      ? (db
+          .prepare("SELECT * FROM discussion_inputs WHERE message_id=?")
+          .get(row.id) as any)
+      : undefined;
   const parts =
     row.role === "assistant"
       ? splitReasoning(row.content, row.status === "streaming")
@@ -162,8 +177,17 @@ export function messageFrom(row: any): Message {
     model: row.model,
     content: parts.content,
     reasoning: [row.reasoning, parts.reasoning].filter(Boolean).join("\n\n"),
+    finishReason: row.finish_reason || undefined,
     round: row.round || 1,
     discussion: JSON.parse(row.discussion || "null") || undefined,
+    interjection: input
+      ? {
+          targets: JSON.parse(input.targets),
+          handled: JSON.parse(input.handled),
+          answeredBy: input.answered_by || undefined,
+          sharedToLine: !!input.shared_to_line,
+        }
+      : undefined,
     status: row.status,
     source: row.source,
     createdAt: row.created_at,
@@ -225,6 +249,15 @@ export function runFrom(row: any): Run {
     discussion: JSON.parse(row.discussion || "null") || undefined,
     callsUsed: row.calls_used || 0,
     turns: row.turns || 0,
+    participants: JSON.parse(row.participants || "[]"),
+    source: row.line_scope && row.line_scope !== "null" ? "line" : "web",
+    pendingInputs: (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM discussion_inputs WHERE run_id=? AND answered_by IS NULL",
+        )
+        .get(row.id) as any
+    ).n,
   };
 }
 export function getRuns(roomId: string) {
