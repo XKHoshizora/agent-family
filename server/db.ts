@@ -54,6 +54,11 @@ if (
 for (const [table, column, definition] of [
   ["messages", "round", "INTEGER NOT NULL DEFAULT 1"],
   ["runs", "notice", "TEXT NOT NULL DEFAULT ''"],
+  ["runs", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
+  ["runs", "calls_used", "INTEGER NOT NULL DEFAULT 0"],
+  ["runs", "turns", "INTEGER NOT NULL DEFAULT 0"],
+  ["messages", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
+  ["line_bindings", "discussion", "TEXT NOT NULL DEFAULT 'null'"],
   ["usage_daily", "reserved", "INTEGER NOT NULL DEFAULT 0"],
   ["usage_daily", "line_calls", "INTEGER NOT NULL DEFAULT 0"],
   ["usage_daily", "line_reserved", "INTEGER NOT NULL DEFAULT 0"],
@@ -70,6 +75,7 @@ for (const [table, column, definition] of [
 db.exec(
   "CREATE TABLE IF NOT EXISTS run_budgets(run_id TEXT PRIMARY KEY REFERENCES runs(id),workspace_id TEXT NOT NULL,day TEXT NOT NULL,source TEXT NOT NULL,remaining INTEGER NOT NULL)",
 );
+db.exec("CREATE INDEX IF NOT EXISTS messages_run ON messages(run_id)");
 db.transaction(() => {
   for (const b of db
     .prepare("SELECT group_id FROM line_bindings WHERE scope_id=''")
@@ -157,6 +163,7 @@ export function messageFrom(row: any): Message {
     content: parts.content,
     reasoning: [row.reasoning, parts.reasoning].filter(Boolean).join("\n\n"),
     round: row.round || 1,
+    discussion: JSON.parse(row.discussion || "null") || undefined,
     status: row.status,
     source: row.source,
     createdAt: row.created_at,
@@ -215,6 +222,9 @@ export function runFrom(row: any): Run {
     finishedAt: row.finished_at,
     error: row.error,
     notice: row.notice || "",
+    discussion: JSON.parse(row.discussion || "null") || undefined,
+    callsUsed: row.calls_used || 0,
+    turns: row.turns || 0,
   };
 }
 export function getRuns(roomId: string) {

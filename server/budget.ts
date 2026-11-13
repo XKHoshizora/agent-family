@@ -26,9 +26,10 @@ export function reserveRunBudget(
   workspaceId: string,
   amount: number,
   source: "web" | "line",
+  day = now().slice(0, 10),
 ) {
   db.transaction(() => {
-    const u = usage(workspaceId);
+    const u = usage(workspaceId, day);
     if (
       !Number.isInteger(amount) ||
       amount < 1 ||
@@ -57,10 +58,17 @@ export function reserveRunBudget(
 }
 export function consumeRunBudget(runId: string) {
   return db.transaction(() => {
+    const run = db
+      .prepare("SELECT discussion,calls_used FROM runs WHERE id=?")
+      .get(runId) as any;
+    const settings = run && JSON.parse(run.discussion);
+    if (settings && run.calls_used >= settings.maxCalls)
+      throw new Error("本次调用上限已达到。");
     const b = db
       .prepare("SELECT * FROM run_budgets WHERE run_id=?")
       .get(runId) as any;
     if (!b || b.remaining < 1) throw new Error("本次预留额度已用尽。");
+    db.prepare("UPDATE runs SET calls_used=calls_used+1 WHERE id=?").run(runId);
     db.prepare(
       "UPDATE run_budgets SET remaining=remaining-1 WHERE run_id=?",
     ).run(runId);

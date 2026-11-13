@@ -1,5 +1,7 @@
 import { db } from "./db";
 import type { Mode } from "../shared/types";
+import { discussionSettings } from "./discussion";
+import type { DiscussionSettings } from "../shared/types";
 export type LineScope = {
   groupId: string;
   channelId: string;
@@ -7,6 +9,7 @@ export type LineScope = {
   afterSequence: number;
   shareTools: boolean;
   mode: Mode;
+  discussion?: DiscussionSettings;
 };
 export function lineScopeFor(
   groupId: string,
@@ -26,6 +29,7 @@ export function lineScopeFor(
     afterSequence: b.context_after,
     shareTools: !!b.share_tools,
     mode: b.mode,
+    discussion: discussionSettings(JSON.parse(b.discussion || "null")),
   };
 }
 export function assertLineScope(scope: LineScope, roomId: string) {

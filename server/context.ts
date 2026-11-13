@@ -11,6 +11,7 @@ function pack(m: Message, limit: number) {
       author: m.author,
       model: m.model,
       round: m.round,
+      ...(m.discussion ? { discussion: m.discussion } : {}),
       content,
     });
   if (encode(m.content).length <= limit) return encode(m.content);
@@ -26,6 +27,69 @@ function pack(m: Message, limit: number) {
     else high = mid - 1;
   }
   return encode(clip(low));
+}
+
+export function buildFreeHistory(
+  roomId: string,
+  runId: string,
+  agentId: string,
+  scope?: LineScope,
+): ModelMessage[] {
+  const base = buildRunHistory(roomId, runId, agentId, 1, scope);
+  const question = db
+    .prepare(
+      "SELECT * FROM messages WHERE run_id=? AND role='user' ORDER BY rowid LIMIT 1",
+    )
+    .get(runId) as any;
+  const currentQuestion = pack(messageFrom(question), 26000);
+  const task =
+    "回应本次用户问题和刚才的接话内容。优先回答向你提出的问题，再补充新观点；正文中可点名其他参与者。已经没有新内容时用 discussion_turn 表示 pass，不要机械重复。";
+  let remaining = CONTEXT_LIMIT - currentQuestion.length - task.length;
+  const rows = db
+    .prepare(
+      "SELECT rowid AS seq,* FROM messages WHERE room_id=? AND run_id=? AND role='assistant' AND status='complete' ORDER BY rowid DESC LIMIT 100",
+    )
+    .all(roomId, runId) as any[];
+  const chosen = new Map<number, { m: Message; text: string }>();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    if (seen.has(row.agent_id) || remaining < 1000) continue;
+    const m = messageFrom(row);
+    if (!m.content.trim()) continue;
+    seen.add(row.agent_id);
+    const text = pack(m, Math.min(3500, remaining));
+    chosen.set(row.seq, { m, text });
+    remaining -= text.length;
+  }
+  for (const row of rows.slice(0, 30)) {
+    if (chosen.has(row.seq) || remaining < 1000) continue;
+    const m = messageFrom(row);
+    if (!m.content.trim()) continue;
+    const text = pack(m, Math.min(2500, remaining));
+    chosen.set(row.seq, { m, text });
+    remaining -= text.length;
+  }
+  const older: ModelMessage[] = [];
+  // buildRunHistory already enforces the Web/LINE history boundary.
+  for (const m of base.slice(0, -2).reverse()) {
+    if (typeof m.content !== "string" || m.content.length > remaining) continue;
+    older.unshift(m);
+    remaining -= m.content.length;
+  }
+  return [
+    ...older,
+    { role: "user", content: currentQuestion },
+    ...[...chosen]
+      .sort(([a], [b]) => a - b)
+      .map(
+        ([, { m, text }]) =>
+          ({
+            role: m.agentId === agentId ? "assistant" : "user",
+            content: text,
+          }) as ModelMessage,
+      ),
+    { role: "user", content: task },
+  ];
 }
 export function buildRunHistory(
   roomId: string,

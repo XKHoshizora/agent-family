@@ -1,7 +1,9 @@
+import { discussionSettings, updateDiscussion } from "./discussion";
+import type { DiscussionSettings } from "../shared/types";
 import { validateSignature, messagingApi } from "@line/bot-sdk";
 import { db, getRoom, getMessages, getRuns, audit } from "./db";
 import { decrypt, encrypt, id, now } from "./config";
-import { startRun, waitForRun, notify } from "./orchestrator";
+import { startRun, waitForRun, notify, cancelRun } from "./orchestrator";
 import type { FastifyInstance } from "fastify";
 import crypto from "node:crypto";
 import { lineScopeFor, assertLineScope } from "./line-access";
@@ -104,7 +106,11 @@ export function confirmChallenge(
   workspaceId: string,
   roomId: string,
   userId: string,
-  options: { mode?: Mode; shareTools?: boolean } = {},
+  options: {
+    mode?: Mode;
+    shareTools?: boolean;
+    discussion?: DiscussionSettings;
+  } = {},
 ) {
   return db.transaction(() => {
     const challenge = db
@@ -132,6 +138,10 @@ export function confirmChallenge(
       options.shareTools ? 1 : 0,
       id(),
     );
+    db.prepare("UPDATE line_bindings SET discussion=? WHERE room_id=?").run(
+      JSON.stringify(discussionSettings(options.discussion)),
+      roomId,
+    );
     db.prepare("UPDATE line_challenges SET confirmed=1 WHERE code=?").run(
       challenge.code,
     );
@@ -139,7 +149,12 @@ export function confirmChallenge(
     return { linked: true };
   })();
 }
-export function updateBinding(roomId: string, mode: Mode, shareTools: boolean) {
+export function updateBinding(
+  roomId: string,
+  mode: Mode,
+  shareTools: boolean,
+  settings?: DiscussionSettings,
+) {
   return db.transaction(() => {
     const b = db
       .prepare("SELECT * FROM line_bindings WHERE room_id=?")
@@ -161,6 +176,11 @@ export function updateBinding(roomId: string, mode: Mode, shareTools: boolean) {
         : b.context_after,
       roomId,
     );
+    if (settings)
+      db.prepare("UPDATE line_bindings SET discussion=? WHERE room_id=?").run(
+        JSON.stringify(discussionSettings(settings)),
+        roomId,
+      );
     notify(roomId);
     return { ok: true, contextReset: changed };
   })();
@@ -374,9 +394,58 @@ async function processEvent(eventId: string) {
           await replyText("对应的网页群聊已归档，请联系群聊创建者。");
         } else {
           const content = text.replace(/^\/(?:af|家族)\s*/i, "").trim();
-          if (!content) {
+          const command = /^(停止|状态|轮数(?:\s+.*)?|额度(?:\s+.*)?)$/.exec(
+            content,
+          );
+          if (command) {
+            const active = getRuns(room.id).find(
+              (r) =>
+                ["queued", "running"].includes(r.status) &&
+                db
+                  .prepare(
+                    "SELECT 1 FROM messages WHERE run_id=? AND role='user' AND source='line' AND rowid>?",
+                  )
+                  .get(r.id, binding.context_after),
+            );
+            if (!active)
+              await replyText("这个 LINE 连接当前没有进行中的讨论。");
+            else if (content === "停止") {
+              cancelRun(active.id, room.id);
+              await replyText("已停止，已有回答保留在网页。");
+            } else if (content === "状态")
+              await replyText(
+                `当前模式：${MODE_LABELS[active.mode]}；已发言 ${active.turns || 0} 次，已调用 ${active.callsUsed || 0} 次。${active.discussion ? `轮数：${active.discussion.maxRounds ?? "无限制"}；调用上限：${active.discussion.maxCalls}。` : ""}`,
+              );
+            else if (!active.discussion)
+              await replyText("只有自由讨论支持运行中修改轮数和调用上限。");
+            else {
+              const [name, value] = content.split(/\s+/);
+              try {
+                const settings = updateDiscussion(active.id, room.id, {
+                  ...active.discussion,
+                  ...(name === "轮数"
+                    ? { maxRounds: value === "无限制" ? null : Number(value) }
+                    : { maxCalls: Number(value) }),
+                });
+                notify(room.id);
+                audit(
+                  room.workspaceId,
+                  "line:group",
+                  "discussion.update",
+                  active.id,
+                );
+                await replyText(
+                  `设置已更新：轮数 ${settings.maxRounds ?? "无限制"}，调用上限 ${settings.maxCalls}。下一次发言／调用前生效，已发送请求不追回。`,
+                );
+              } catch {
+                await replyText(
+                  "轮数请输入 1–10000 或 无限制；额度请输入 1–100000。例如 /af 轮数 5。",
+                );
+              }
+            }
+          } else if (!content) {
             await replyText(
-              `用法：/af 你的问题\n点名：/af @小文 帮我润色这段文字\n当前模式：${MODE_LABELS[binding.mode as Mode]}\n默认仅使用本次绑定后的 LINE 对话；资料工具${binding.share_tools ? "已开放，本群全部笔记和项目可能进入回答" : "未开放"}。请勿发送密码或密钥。`,
+              `用法：/af 你的问题\n点名：/af @小文 帮我润色这段文字\n控制：/af 停止、/af 状态、/af 轮数 5（或 无限制）、/af 额度 30\n当前模式：${MODE_LABELS[binding.mode as Mode]}\n默认仅使用本次绑定后的 LINE 对话；资料工具${binding.share_tools ? "已开放，本群全部笔记和项目可能进入回答" : "未开放"}。请勿发送密码或密钥。`,
             );
           } else {
             const actor =

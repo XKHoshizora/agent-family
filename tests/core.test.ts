@@ -270,7 +270,7 @@ function room(
 }
 async function run(
   r: Room,
-  mode: "parallel" | "single" | "discuss" = "parallel",
+  mode: "parallel" | "single" | "discuss" | "free" = "parallel",
   content = "你好",
 ) {
   const runId = startRun({
@@ -1045,7 +1045,7 @@ describe("LINE signature, privacy, binding and idempotency", () => {
   const boundRoom = (
     agents = [testAgent()],
     options: {
-      mode?: "parallel" | "discuss" | "single";
+      mode?: "parallel" | "discuss" | "single" | "free";
       shareTools?: boolean;
     } = {},
   ) => {
@@ -1105,6 +1105,121 @@ describe("LINE signature, privacy, binding and idempotency", () => {
       }
     },
   );
+  it("LINE free mode supports live limits and stop without controlling Web runs", async () => {
+    const { r, groupId } = boundRoom(
+      [
+        testAgent("mock-slow", "lf0", "甲"),
+        testAgent("mock-slow", "lf1", "乙"),
+      ],
+      { mode: "free" },
+    );
+    const settings = { maxRounds: null, maxCalls: 12, stopWhenQuiet: true };
+    const policy = await request("PATCH", `/api/rooms/${r.id}/line`, {
+      mode: "free",
+      shareTools: false,
+      discussion: settings,
+    });
+    expect(policy.statusCode).toBe(200);
+    expect(
+      (await request("GET", `/api/rooms/${r.id}/line`)).json().discussion,
+    ).toEqual(settings);
+    const e = event("/af 自由讨论", id(), groupId);
+    await webhook([e]);
+    await settled(() => getRuns(r.id).length > 0);
+    const rid = getRuns(r.id)[0].id;
+    for (const text of [
+      "/af 轮数 7",
+      "/af 轮数 无限制",
+      "/af 额度 9",
+      "/af 状态",
+    ]) {
+      const cmd = event(text, id(), groupId);
+      await webhook([cmd]);
+      await settled(
+        () =>
+          (
+            db
+              .prepare("SELECT status FROM line_events WHERE id=?")
+              .get(cmd.webhookEventId) as any
+          )?.status === "done",
+      );
+    }
+    expect(getRuns(r.id)[0].discussion).toEqual({ ...settings, maxCalls: 9 });
+    const stop = event("/af 停止", id(), groupId);
+    await webhook([stop]);
+    await waitForRun(rid);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(e.webhookEventId) as any
+        )?.status === "done",
+    );
+    expect(getRuns(r.id)[0].status).toBe("cancelled");
+    expect(usage(workspaceId).lineReserved).toBe(0);
+    const webRun = startRun({
+      room: r,
+      actor: ownerId,
+      author: "Owner",
+      content: "Web only",
+      mode: "free",
+      discussion: settings,
+    });
+    const other = event("/af 停止", id(), groupId);
+    await webhook([other]);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(other.webhookEventId) as any
+        )?.status === "done",
+    );
+    expect(getRuns(r.id).find((x) => x.id === webRun)?.status).toBe("running");
+    cancelRun(webRun, r.id);
+    await waitForRun(webRun);
+  });
+  it("free discussion respects the restricted LINE context and stops on revoked scope", async () => {
+    const { r, groupId } = boundRoom(
+      [
+        testAgent("mock-slow", "sf0", "甲"),
+        testAgent("mock-slow", "sf1", "乙"),
+      ],
+      { mode: "free" },
+    );
+    addMessage({
+      roomId: r.id,
+      runId: null,
+      role: "user",
+      agentId: null,
+      author: "Web",
+      model: null,
+      content: "WEB_FREE_SECRET",
+      status: "complete",
+      source: "web",
+    });
+    const e = event("/af 开始讨论", id(), groupId);
+    await webhook([e]);
+    await settled(() => state.calls.length > 0);
+    const rid = getRuns(r.id)[0].id;
+    updateBinding(r.id, "free", true);
+    await waitForRun(rid);
+    await settled(
+      () =>
+        (
+          db
+            .prepare("SELECT status FROM line_events WHERE id=?")
+            .get(e.webhookEventId) as any
+        )?.status === "error",
+    );
+    expect(state.calls).toHaveLength(1);
+    expect(JSON.stringify(state.calls[0].prompt)).not.toContain(
+      "WEB_FREE_SECRET",
+    );
+    expect(getRuns(r.id)[0].notice).toContain("权限");
+    expect(usage(workspaceId).reserved).toBe(0);
+  });
   it("blocks pre-binding and Web-derived history, gates tools, and invalidates access after scope changes", async () => {
     const r = room([{ ...testAgent("mock-note"), tools: true }], "shared"),
       groupId = id();
@@ -1481,4 +1596,83 @@ describe("review regressions: context, participation and reservations", () => {
       config.dailyLineCalls = old;
     }
   });
+});
+
+describe("free discussion live settings authorization", () => {
+  it("only room writers can update an active free discussion", async () => {
+    const r = room([
+      testAgent("mock-slow", "rw0", "甲"),
+      testAgent("mock-slow", "rw1", "乙"),
+    ]);
+    db.prepare("UPDATE rooms SET visibility='team' WHERE id=?").run(r.id);
+    const response = await request("POST", `/api/rooms/${r.id}/messages`, {
+      content: "讨论",
+      mode: "free",
+      discussion: { maxRounds: 3, maxCalls: 10, stopWhenQuiet: true },
+    });
+    expect(response.statusCode).toBe(202);
+    const rid = response.json().runId;
+    const body = {
+      runId: rid,
+      settings: { maxRounds: null, maxCalls: 20, stopWhenQuiet: false },
+    };
+    expect(
+      (
+        await request(
+          "PATCH",
+          `/api/rooms/${r.id}/discussion`,
+          body,
+          viewerCookie,
+        )
+      ).statusCode,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          "PATCH",
+          `/api/rooms/${r.id}/discussion`,
+          body,
+          outsiderCookie,
+        )
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (await request("PATCH", `/api/rooms/${r.id}/discussion`, body))
+        .statusCode,
+    ).toBe(200);
+    expect(
+      (
+        await request("PATCH", `/api/rooms/${r.id}/discussion`, {
+          ...body,
+          settings: { ...body.settings, maxCalls: 0 },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(getRuns(r.id)[0].discussion?.maxRounds).toBeNull();
+    cancelRun(rid, r.id);
+    await waitForRun(rid);
+    expect(
+      (await request("PATCH", `/api/rooms/${r.id}/discussion`, body))
+        .statusCode,
+    ).toBe(400);
+  });
+});
+
+it("free discussion counts tool follow-ups against its own adjustable cap", async () => {
+  const r = room([
+    { ...testAgent("mock-tool", "tf0", "甲"), tools: true },
+    { ...testAgent("mock-tool", "tf1", "乙"), tools: true },
+  ]);
+  const rid = startRun({
+    room: r,
+    actor: ownerId,
+    author: "Owner",
+    content: "讨论时间",
+    mode: "free",
+    discussion: { maxRounds: null, maxCalls: 3, stopWhenQuiet: true },
+  });
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(3);
+  expect(getRuns(r.id)[0].callsUsed).toBe(3);
+  expect(usage(workspaceId).reserved).toBe(0);
 });

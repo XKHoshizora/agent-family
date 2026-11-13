@@ -3160,3 +3160,48 @@ select {
     max-width: 100%;
   }
 }
+
+.discussion-numbers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.discussion-fields {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}
+.discussion-options {
+  margin: 8px 0;
+  max-height: 250px;
+  overflow: auto;
+}
+.discussion-options summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.discussion-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  padding: 8px 0;
+}
+.discussion-relation {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0;
+}
+.discussion-numbers input {
+  min-width: 0;
+  width: 100%;
+}
+.line-policy-fields {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}

@@ -1,3 +1,5 @@
+import { DiscussionFields } from "./Discussion";
+import { DEFAULT_DISCUSSION, type DiscussionSettings } from "../shared/types";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -811,10 +813,12 @@ export function LineDialog({
   const [policy, setPolicy] = useState<{
     mode: Mode;
     shareTools: boolean;
+    discussion: DiscussionSettings;
   } | null>(null);
   const selectedPolicy = policy || {
     mode: state.data?.mode || "parallel",
     shareTools: !!state.data?.shareTools,
+    discussion: state.data?.discussion || DEFAULT_DISCUSSION,
   };
   async function action(url: string, method = "POST", body: unknown = {}) {
     setBusy(true);
@@ -843,35 +847,51 @@ export function LineDialog({
       <div className="line-dialog-icon">
         <Link2 size={28} />
       </div>
-      <Field
-        label="LINE 默认聊天方式"
-        hint="独立于网页发送框；未点名的单人模式由第一位启用伙伴回答。"
-      >
-        <select
-          value={selectedPolicy.mode}
-          onChange={(e) =>
-            setPolicy({ ...selectedPolicy, mode: e.target.value as Mode })
-          }
+      <fieldset className="line-policy-fields" disabled={busy}>
+        <Field
+          label="LINE 默认聊天方式"
+          hint="独立于网页发送框；未点名的单人模式由第一位启用伙伴回答。"
         >
-          {(Object.keys(MODE_LABELS) as Mode[]).map((mode) => (
-            <option key={mode} value={mode}>
-              {MODE_LABELS[mode]}
-            </option>
-          ))}
-        </select>
-      </Field>
-      <label className="check-field">
-        <input
-          type="checkbox"
-          checked={selectedPolicy.shareTools}
-          onChange={(e) =>
-            setPolicy({ ...selectedPolicy, shareTools: e.target.checked })
-          }
-        />
-        <span>
-          允许 LINE 群成员通过工具使用本群全部笔记和项目（包含绑定前资料）
-        </span>
-      </label>
+          <select
+            value={selectedPolicy.mode}
+            onChange={(e) =>
+              setPolicy({ ...selectedPolicy, mode: e.target.value as Mode })
+            }
+          >
+            {(Object.keys(MODE_LABELS) as Mode[]).map((mode) => (
+              <option key={mode} value={mode}>
+                {MODE_LABELS[mode]}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {selectedPolicy.mode === "free" && (
+          <>
+            <DiscussionFields
+              value={selectedPolicy.discussion}
+              onChange={(discussion) =>
+                setPolicy({ ...selectedPolicy, discussion })
+              }
+            />
+            <p className="hint">
+              群内可用 /af 停止、/af 状态、/af 轮数 5（或 无限制）、/af 额度
+              30。修改默认设置只影响下一次讨论，当前讨论用上述指令或网页「调整讨论」。
+            </p>
+          </>
+        )}
+        <label className="check-field">
+          <input
+            type="checkbox"
+            checked={selectedPolicy.shareTools}
+            onChange={(e) =>
+              setPolicy({ ...selectedPolicy, shareTools: e.target.checked })
+            }
+          />
+          <span>
+            允许 LINE 群成员通过工具使用本群全部笔记和项目（包含绑定前资料）
+          </span>
+        </label>
+      </fieldset>
       <p className="hint">
         默认只读取本次绑定后的 LINE 对话，不读取网页发言。更改资料共享开关会清空
         LINE 可用上下文、停止旧任务的后续访问；网页记录保留。

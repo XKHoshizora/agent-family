@@ -1,3 +1,5 @@
+import { DiscussionFields, DiscussionEditor } from "./Discussion";
+import { DEFAULT_DISCUSSION } from "../shared/types";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -179,6 +181,8 @@ function Workspace({ me }: { me: Me }) {
   const [notesOpen, setNotesOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
   const [mode, setMode] = useState<Mode>("parallel");
+  const [discussion, setDiscussion] = useState(DEFAULT_DISCUSSION);
+  const [editDiscussion, setEditDiscussion] = useState(false);
   const [target, setTarget] = useState("");
   const [message, setMessage] = useState("");
   const [attachment, setAttachment] = useState<{
@@ -224,6 +228,8 @@ function Workspace({ me }: { me: Me }) {
   useEffect(() => {
     setMode(room?.mode || "parallel");
     setTarget("");
+    setDiscussion(DEFAULT_DISCUSSION);
+    setEditDiscussion(false);
     setMessage(sessionStorage.getItem(`af-draft-${roomId}`) || "");
     setAttachment(null);
     setSendError("");
@@ -313,6 +319,7 @@ function Workspace({ me }: { me: Me }) {
       await post(`/api/rooms/${room.id}/messages`, {
         content,
         mode,
+        ...(mode === "free" ? { discussion } : {}),
         ...(mode === "single"
           ? { targets: planned.agents.map((a) => a.id) }
           : {}),
@@ -574,9 +581,11 @@ function Workspace({ me }: { me: Me }) {
       <p className="mode-explanation">
         {mode === "parallel"
           ? "先独立回答，再比较不同观点。"
-          : mode === "discuss"
-            ? "先各自思考，再互相回应一轮。最多两轮，随时可以停止。"
-            : "选择一位伙伴，或在输入框里 @ 点名。"}
+          : mode === "free"
+            ? "伙伴可以点名、提问和接话；逐个发言，随时调整轮数和额度。"
+            : mode === "discuss"
+              ? "先各自思考，再互相回应一轮。最多两轮，随时可以停止。"
+              : "选择一位伙伴，或在输入框里 @ 点名。"}
       </p>
       <div className="panel-divider" />
       <div className="line-panel">
@@ -811,6 +820,15 @@ function Workspace({ me }: { me: Me }) {
                           ? () => setProjectOpen(true)
                           : undefined
                       }
+                      replyAuthor={
+                        messages.find((p) => p.id === m.discussion?.replyTo)
+                          ?.author
+                      }
+                      nextAuthor={
+                        room.agents.find(
+                          (a) => a.id === m.discussion?.nextAgentId,
+                        )?.name
+                      }
                       agent={room.agents.find((a) => a.id === m.agentId)}
                       showRound={
                         m.role === "assistant" &&
@@ -891,6 +909,37 @@ function Workspace({ me }: { me: Me }) {
                   </button>
                 </div>
               )}
+              {active?.mode === "free" && active.discussion && (
+                <div className="discussion-progress" role="status">
+                  <span>
+                    自由讨论 · 已发言 {active.turns || 0} 次 · 调用{" "}
+                    {active.callsUsed || 0}/{active.discussion.maxCalls} 次 ·{" "}
+                    {active.discussion.maxRounds === null
+                      ? "不限轮数"
+                      : `最多 ${active.discussion.maxRounds} 轮`}
+                  </span>
+                  {canWrite && (
+                    <button
+                      className="button ghost"
+                      onClick={() => setEditDiscussion(true)}
+                    >
+                      调整讨论
+                    </button>
+                  )}
+                </div>
+              )}
+              {editDiscussion && active?.discussion && (
+                <DiscussionEditor
+                  run={active}
+                  roomId={room.id}
+                  onClose={() => setEditDiscussion(false)}
+                  onSaved={() => {
+                    void client.invalidateQueries({
+                      queryKey: ["room", room.id],
+                    });
+                  }}
+                />
+              )}
               <form
                 className={`composer ${active ? "busy" : ""}`}
                 onSubmit={send}
@@ -926,10 +975,29 @@ function Workspace({ me }: { me: Me }) {
                       : "输入 @名字 可以点名"}
                   </span>
                 </div>
+                {mode === "free" && !active && (
+                  <details className="discussion-options">
+                    <summary>
+                      讨论设置 ·{" "}
+                      {discussion.maxRounds === null
+                        ? "不限轮数"
+                        : `${discussion.maxRounds} 轮`}{" "}
+                      · 最多 {discussion.maxCalls} 次调用
+                    </summary>
+                    <DiscussionFields
+                      value={discussion}
+                      onChange={setDiscussion}
+                    />
+                  </details>
+                )}
                 <p className="composer-budget">
-                  {planned
-                    ? `本次 ${planned.minimum === planned.maximum ? planned.minimum : `${planned.minimum}–${planned.maximum}`} 次模型调用，预留最多 ${planned.maximum} 次；未使用部分会释放。${planned.notice}`
-                    : planningError}
+                  {active?.mode === "free" && active.discussion
+                    ? `当前讨论已调用 ${active.callsUsed || 0}/${active.discussion.maxCalls} 次；未用预留会释放，可随时调整或停止。`
+                    : mode === "free" && planned
+                    ? `全部 ${planned.agents.length} 位伙伴参与，点名决定首位；每次发言按需预留，单次上限 ${discussion.maxCalls} 次调用。`
+                    : planned
+                      ? `本次 ${planned.minimum === planned.maximum ? planned.minimum : `${planned.minimum}–${planned.maximum}`} 次模型调用，预留最多 ${planned.maximum} 次；未使用部分会释放。${planned.notice}`
+                      : planningError}
                 </p>
                 <textarea
                   ref={input}
@@ -1120,7 +1188,11 @@ function MessageView({
   showRound,
   onSave,
   onProject,
+  replyAuthor,
+  nextAuthor,
 }: {
+  replyAuthor?: string;
+  nextAuthor?: string;
   message: Message;
   agent?: Agent;
   showRound: boolean;
@@ -1130,6 +1202,7 @@ function MessageView({
   const user = m.role === "user";
   return (
     <article
+      id={`message-${m.id}`}
       className={`message ${user ? "user-message" : "agent-message"} ${m.status === "error" ? "message-error" : ""}`}
     >
       <Avatar
@@ -1145,7 +1218,13 @@ function MessageView({
               {m.model}
             </span>
           )}
-          {showRound && <span className="round-label">回应伙伴</span>}
+          {m.discussion ? (
+            <span className="round-label">
+              第 {m.round} 轮 · 发言 {m.discussion.turn}
+            </span>
+          ) : (
+            showRound && <span className="round-label">回应伙伴</span>
+          )}
           {m.source === "line" && <span className="tag">LINE</span>}
           <time dateTime={m.createdAt}>
             {new Date(m.createdAt).toLocaleTimeString("zh-CN", {
@@ -1154,6 +1233,17 @@ function MessageView({
             })}
           </time>
         </div>
+        {m.discussion && (
+          <div className="discussion-relation">
+            {replyAuthor && (
+              <a href={`#message-${m.discussion.replyTo}`}>
+                接着 {replyAuthor} 的发言
+              </a>
+            )}
+            {nextAuthor && <span> → 邀请 {nextAuthor} 接话</span>}
+            {m.discussion.action === "pass" && <span> · 暂无补充</span>}
+          </div>
+        )}
         {m.toolEvents.length > 0 && (
           <div className="tool-events">
             {m.toolEvents.map((t, i) => (

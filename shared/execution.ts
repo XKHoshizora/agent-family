@@ -23,6 +23,23 @@ export function planExecution(
   if (targets?.some((t) => !enabled.some((a) => a.id === t)))
     throw new Error("所选伙伴不在当前群聊中。");
   const mentions = mentionedAgents(enabled, content);
+  if (mode === "free") {
+    const participants = targets?.length
+      ? enabled.filter((a) => targets.includes(a.id))
+      : enabled;
+    if (participants.length < 2)
+      throw new Error("自由讨论需要至少两位启用的伙伴。");
+    const first =
+      mentions.find((a) => participants.some((p) => p.id === a.id)) ||
+      participants[0];
+    return {
+      agents: [first, ...participants.filter((a) => a.id !== first.id)],
+      mode,
+      notice: "",
+      minimum: 1,
+      maximum: first.tools && allowTools ? 3 : 1,
+    };
+  }
   let selected = mentions.length
     ? mentions
     : targets?.length

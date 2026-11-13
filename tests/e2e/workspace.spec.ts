@@ -214,6 +214,108 @@ test.describe.serial("Web workspace end-to-end", () => {
       await page.reload();
     }
   });
+  test("free discussion settings support unlimited rounds and editable live limits", async () => {
+    const rooms = await (await context.request.get("/api/rooms")).json();
+    const r = rooms.find((r: any) => r.name === "开发测试群");
+    const detail = await (
+      await context.request.get(`/api/rooms/${r.id}`)
+    ).json();
+    const endpoint = `**/api/rooms/${r.id}`;
+    const startEndpoint = `**/api/rooms/${r.id}/messages`;
+    const updateEndpoint = `**/api/rooms/${r.id}/discussion`;
+    const rid = "10000000-0000-4000-8000-000000000001";
+    let active: any;
+    const sent: any[] = [];
+    const updates: any[] = [];
+    await page.route(endpoint, (route) =>
+      route.fulfill({
+        json: { ...detail, runs: active ? [active] : detail.runs },
+      }),
+    );
+    await page.route(startEndpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      sent.push(body);
+      active = {
+        id: rid,
+        roomId: r.id,
+        status: "running",
+        mode: "free",
+        createdAt: new Date().toISOString(),
+        finishedAt: null,
+        error: null,
+        discussion: body.discussion,
+        callsUsed: 2,
+        turns: 2,
+      };
+      await route.fulfill({ status: 202, json: { runId: rid } });
+    });
+    await page.route(updateEndpoint, async (route) => {
+      const body = route.request().postDataJSON();
+      updates.push(body);
+      active.discussion = body.settings;
+      await route.fulfill({ json: { settings: body.settings } });
+    });
+    try {
+      await page
+        .getByLabel("本轮聊天方式", { exact: true })
+        .selectOption("free");
+      await page.locator(".discussion-options summary").click();
+      await page
+        .getByRole("checkbox", { name: "不限轮数", exact: true })
+        .check();
+      await page.getByLabel("本次模型调用上限", { exact: true }).fill("8");
+      await page
+        .getByLabel("消息", { exact: true })
+        .fill("@架构师 请和其他伙伴讨论");
+      await page.getByRole("button", { name: "发送消息", exact: true }).click();
+      await expect(page.locator(".discussion-progress")).toContainText(
+        "不限轮数",
+      );
+      expect(sent[0].mode).toBe("free");
+      expect(sent[0].discussion).toEqual({
+        maxRounds: null,
+        maxCalls: 8,
+        stopWhenQuiet: true,
+      });
+      await page.getByRole("button", { name: "调整讨论", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "调整自由讨论" });
+      await dialog
+        .getByRole("checkbox", { name: "不限轮数", exact: true })
+        .uncheck();
+      await dialog.getByLabel("最多讨论轮数", { exact: true }).fill("5");
+      await dialog.getByLabel("本次模型调用上限", { exact: true }).fill("12");
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      if (process.env.AF_QA_DIR)
+        await page.screenshot({
+          path: path.join(process.env.AF_QA_DIR, "free-discussion-mobile.png"),
+        });
+      await dialog.getByRole("button", { name: "应用到当前讨论" }).click();
+      await expect(page.locator(".discussion-progress")).toContainText(
+        "最多 5 轮",
+      );
+      await expect(page.locator(".composer-budget")).toContainText("2/12 次");
+      expect(updates[0]).toEqual({
+        runId: rid,
+        settings: { maxRounds: 5, maxCalls: 12, stopWhenQuiet: true },
+      });
+      await page.setViewportSize({ width: 1440, height: 1000 });
+      if (process.env.AF_QA_DIR)
+        await page.screenshot({
+          path: path.join(process.env.AF_QA_DIR, "free-discussion-desktop.png"),
+        });
+      expect(errors).toEqual([]);
+    } finally {
+      await page.unroute(endpoint);
+      await page.unroute(startEndpoint);
+      await page.unroute(updateEndpoint);
+      await page.reload();
+    }
+  });
   test("LINE policy controls default to private history and submit explicit sharing choices", async () => {
     const rooms = await (await context.request.get("/api/rooms")).json();
     const r = rooms.find((r: any) => r.name === "开发测试群");
@@ -255,7 +357,7 @@ test.describe.serial("Web workspace end-to-end", () => {
         .getByRole("button", { name: "保存 LINE 设置", exact: true })
         .click();
       await expect.poll(() => updates.length).toBe(1);
-      expect(updates[0]).toEqual({ mode: "discuss", shareTools: true });
+      expect(updates[0]).toMatchObject({ mode: "discuss", shareTools: true });
       await expect(
         page.getByRole("button", { name: "保存 LINE 设置", exact: true }),
       ).toBeDisabled();
@@ -265,6 +367,21 @@ test.describe.serial("Web workspace end-to-end", () => {
         .click();
       await expect.poll(() => updates.length).toBe(2);
       expect(updates[1].shareTools).toBe(false);
+      await page
+        .getByLabel("LINE 默认聊天方式", { exact: true })
+        .selectOption("free");
+      await page
+        .getByRole("checkbox", { name: "不限轮数", exact: true })
+        .check();
+      await page.getByLabel("本次模型调用上限", { exact: true }).fill("20");
+      await page
+        .getByRole("button", { name: "保存 LINE 设置", exact: true })
+        .click();
+      await expect.poll(() => updates.length).toBe(3);
+      expect(updates[2]).toMatchObject({
+        mode: "free",
+        discussion: { maxRounds: null, maxCalls: 20 },
+      });
       if (process.env.AF_QA_DIR)
         await page.screenshot({
           path: path.join(process.env.AF_QA_DIR, "review-hardening-line.png"),

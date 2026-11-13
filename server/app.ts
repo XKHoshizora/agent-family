@@ -1,3 +1,8 @@
+import {
+  discussionSchema,
+  discussionSettings,
+  updateDiscussion,
+} from "./discussion";
 import Fastify, { type FastifyRequest, type FastifyReply } from "fastify";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
@@ -79,7 +84,7 @@ const agentSchema = z.object({
   enabled: z.boolean(),
   tools: z.boolean(),
 });
-const modeSchema = z.enum(["parallel", "discuss", "single"]);
+const modeSchema = z.enum(["parallel", "discuss", "single", "free"]);
 const sha = (text: string) =>
   crypto.createHash("sha256").update(text).digest("hex");
 export async function sessionFor(req: FastifyRequest) {
@@ -477,6 +482,7 @@ export async function createApp() {
           content: z.string().trim().min(1).max(12000),
           mode: modeSchema.optional(),
           targets: z.array(z.string()).max(5).optional(),
+          discussion: discussionSchema.optional(),
         })
         .parse(req.body);
       const runId = startRun({
@@ -488,6 +494,16 @@ export async function createApp() {
       return reply.code(202).send({ runId });
     },
   );
+  app.patch("/api/rooms/:id/discussion", async (req) => {
+    const { room, user } = await roomAccess(req, true);
+    const data = z
+      .object({ runId: z.string().uuid(), settings: discussionSchema })
+      .parse(req.body);
+    const settings = updateDiscussion(data.runId, room.id, data.settings);
+    audit(room.workspaceId, user.id, "discussion.update", data.runId);
+    notify(room.id);
+    return { settings };
+  });
   app.post("/api/rooms/:id/cancel", async (req) => {
     const { room, user } = await roomAccess(req, true);
     const data = z.object({ runId: z.string().uuid() }).parse(req.body);
@@ -887,13 +903,16 @@ export async function createApp() {
     editRoomAllowed(room, user.id, role);
     const binding = db
       .prepare(
-        "SELECT mode,share_tools,created_at FROM line_bindings WHERE room_id=?",
+        "SELECT mode,share_tools,created_at,discussion FROM line_bindings WHERE room_id=?",
       )
       .get(room.id) as any;
     return {
       linked: !!binding,
       mode: binding?.mode || "parallel",
       shareTools: !!binding?.share_tools,
+      discussion: discussionSettings(
+        binding ? JSON.parse(binding.discussion) : undefined,
+      ),
       usage: usage(room.workspaceId),
       resources: {
         messages: (
@@ -935,6 +954,7 @@ export async function createApp() {
         shareContext: z.literal(true),
         mode: modeSchema.default("parallel"),
         shareTools: z.boolean().default(false),
+        discussion: discussionSchema.optional(),
       })
       .parse(req.body);
     const result = confirmChallenge(room.workspaceId, room.id, user.id, data);
@@ -954,9 +974,18 @@ export async function createApp() {
     const { room, user, role } = await roomAccess(req, true);
     editRoomAllowed(room, user.id, role);
     const data = z
-      .object({ mode: modeSchema, shareTools: z.boolean() })
+      .object({
+        mode: modeSchema,
+        shareTools: z.boolean(),
+        discussion: discussionSchema.optional(),
+      })
       .parse(req.body);
-    const result = updateBinding(room.id, data.mode, data.shareTools);
+    const result = updateBinding(
+      room.id,
+      data.mode,
+      data.shareTools,
+      data.discussion,
+    );
     audit(room.workspaceId, user.id, "line.policy", room.id);
     return result;
   });

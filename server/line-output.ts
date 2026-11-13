@@ -5,6 +5,25 @@ export function lineMessages(
   run?: Run,
 ): messagingApi.TextMessage[] {
   const answers = messages.filter((m) => m.role === "assistant");
+  if (run?.mode === "free") {
+    const complete = answers
+      .filter((m) => m.status === "complete" && m.content.trim())
+      .slice(-4);
+    return [
+      {
+        type: "text",
+        text: `[自由讨论]\n${run.notice || (run.status === "interrupted" ? "服务重启，讨论已中断。" : "讨论已停止。改善设置后可重新发起。")}\n已发言 ${run.turns || answers.length} 次，模型调用 ${run.callsUsed || 0} 次。以下为最近 ${complete.length} 条完整发言，完整过程请到网页查看。`.slice(
+          0,
+          4900,
+        ),
+      },
+      ...complete.map((m) => ({
+        type: "text" as const,
+        text: `第 ${m.round || 1} 轮 · 第 ${m.discussion?.turn || 1} 次发言\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n（完整回答请到网页查看）" : ""}`,
+        sender: { name: m.author.slice(0, 20) },
+      })),
+    ];
+  }
   const round = Math.max(1, ...answers.map((m) => m.round || 1));
   const complete = answers.filter(
     (m) =>
@@ -38,12 +57,10 @@ export function lineMessages(
           },
         ]
       : []),
-    ...complete
-      .slice(0, available)
-      .map((m) => ({
-        type: "text" as const,
-        text: `第 ${round} 轮\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n\n（完整回答请到网页查看）" : ""}`,
-        sender: { name: m.author.slice(0, 20) },
-      })),
+    ...complete.slice(0, available).map((m) => ({
+      type: "text" as const,
+      text: `第 ${round} 轮\n${m.content.slice(0, 4700)}${m.content.length > 4700 ? "\n\n（完整回答请到网页查看）" : ""}`,
+      sender: { name: m.author.slice(0, 20) },
+    })),
   ];
 }

@@ -1,4 +1,21 @@
-export type Mode = "parallel" | "discuss" | "single";
+export type Mode = "parallel" | "discuss" | "single" | "free";
+export type DiscussionSettings = {
+  maxRounds: number | null;
+  maxCalls: number;
+  stopWhenQuiet: boolean;
+};
+export const DEFAULT_DISCUSSION: DiscussionSettings = {
+  maxRounds: 3,
+  maxCalls: 30,
+  stopWhenQuiet: true,
+};
+export type DiscussionTurn = {
+  turn: number;
+  replyTo?: string;
+  nextAgentId?: string;
+  action?: "handoff" | "continue" | "pass";
+  question?: string;
+};
 export type Role = "owner" | "admin" | "member" | "viewer";
 export type Agent = {
   id: string;
@@ -64,6 +81,7 @@ export type Message = {
   status: "complete" | "streaming" | "error" | "cancelled";
   reasoning?: string;
   round?: number;
+  discussion?: DiscussionTurn;
   source: "web" | "line";
   createdAt: string;
   tokens: number;
@@ -79,6 +97,9 @@ export type Run = {
   finishedAt: string | null;
   error: string | null;
   notice?: string;
+  discussion?: DiscussionSettings;
+  callsUsed?: number;
+  turns?: number;
 };
 export type Note = {
   id: string;
@@ -100,6 +121,7 @@ export type UserSession = {
   workspace: { id: string; name: string; role: Role };
 };
 export const MODE_LABELS: Record<Mode, string> = {
+  free: "自由讨论",
   parallel: "大家分别说",
   discuss: "一起讨论",
   single: "一位伙伴回答",
