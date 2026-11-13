@@ -25,7 +25,12 @@ export type DiscussionTurn = {
 };
 export type Role = "owner" | "admin" | "member" | "viewer";
 export type DiscussionReview = {
-  checked: { turn: number; quote: string; check: string }[];
+  checked: {
+    turn: number;
+    quote: string;
+    check: string;
+    incomplete?: boolean;
+  }[];
   findings: {
     turn: number;
     quote: string;

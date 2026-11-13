@@ -928,6 +928,37 @@ it("a structured handoff contribution becomes the actual body once", async () =>
   expect(getMessages(run.roomId)[1].content).not.toContain("如何追平");
 });
 
+it("a review can verify a bounded quote from a failed partial answer without upgrading that message to complete", async () => {
+  state.script = [
+    { text: "基础成本43.2元；后续未完", finish: "length" },
+    {
+      review: {
+        checked: [
+          {
+            turn: 1,
+            quote: "基础成本43.2元",
+            check: "40.8+2.4=43.2，引用部分可核算。",
+          },
+        ],
+        findings: [],
+        unresolved: ["原回答其余部分未完成。"],
+      },
+    },
+    { text: "采用经复算的43.2元，原回答仍未完成。" },
+  ];
+  const run = await finished(makeRoom(3), { maxCalls: 3 });
+  const messages = getMessages(run.roomId).filter(
+    (m) => m.role === "assistant",
+  );
+  expect(messages[0].status).toBe("error");
+  expect(messages[1].status).toBe("complete");
+  expect(messages[1].discussion?.review?.checked[0].incomplete).toBe(true);
+  expect(messages[1].content).toContain("仅核对引用片段，原发言仍未完成");
+  expect(messages[2].discussion?.reviewState).toBe("complete");
+  expect(run.status).toBe("partial");
+  expect(run.callsUsed).toBe(3);
+});
+
 it("user interjection during review invalidates that review and uses the new requirements within the same cap", async () => {
   const r = makeRoom(3);
   state.delay = 35;
