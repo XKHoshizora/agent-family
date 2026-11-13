@@ -180,7 +180,7 @@ function Workspace({ me }: { me: Me }) {
   const [editRoom, setEditRoom] = useState(false);
   const [notesOpen, setNotesOpen] = useState(false);
   const [projectOpen, setProjectOpen] = useState(false);
-  const [mode, setMode] = useState<Mode>("parallel");
+  const [mode, setMode] = useState<Mode>("free");
   const [discussion, setDiscussion] = useState(DEFAULT_DISCUSSION);
   const [editDiscussion, setEditDiscussion] = useState(false);
   const [target, setTarget] = useState("");
@@ -235,7 +235,7 @@ function Workspace({ me }: { me: Me }) {
       setTarget(directMentions[0].id);
   }, [mode, message, roomId]);
   useEffect(() => {
-    setMode(room?.mode || "parallel");
+    setMode("free");
     setTarget("");
     setDiscussion(DEFAULT_DISCUSSION);
     setEditDiscussion(false);

@@ -533,7 +533,10 @@ test.describe.serial("Web workspace end-to-end", () => {
       await page
         .getByRole("checkbox", { name: "不限轮数", exact: true })
         .check();
-      await page.getByLabel("本次模型调用上限", { exact: true }).fill("20");
+      await page
+        .getByRole("dialog", { name: "连接 LINE 群聊" })
+        .getByLabel("本次模型调用上限", { exact: true })
+        .fill("20");
       await page
         .getByRole("button", { name: "保存 LINE 设置", exact: true })
         .click();
