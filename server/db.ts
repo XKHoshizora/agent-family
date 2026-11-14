@@ -204,6 +204,40 @@ export function getMessages(roomId: string, limit = 300) {
       .all(roomId, limit) as any[]
   ).map(messageFrom);
 }
+/** Bounded history pages; a cursor from another room never becomes a boundary. */
+export function getMessagePage(roomId: string, before?: string, limit = 300) {
+  let boundary: number | undefined;
+  if (before) {
+    const cursor = db
+      .prepare(
+        "SELECT rowid AS sequence FROM messages WHERE id=? AND room_id=?",
+      )
+      .get(before, roomId) as { sequence: number } | undefined;
+    if (!cursor)
+      throw Object.assign(new Error("历史位置不存在，请返回最新消息后重试。"), {
+        statusCode: 404,
+      });
+    boundary = cursor.sequence;
+  }
+  const size = Math.max(1, Math.min(300, Math.trunc(limit)));
+  const rows = (
+    boundary === undefined
+      ? db
+          .prepare(
+            "SELECT rowid AS sequence,* FROM messages WHERE room_id=? ORDER BY rowid DESC LIMIT ?",
+          )
+          .all(roomId, size + 1)
+      : db
+          .prepare(
+            "SELECT rowid AS sequence,* FROM messages WHERE room_id=? AND rowid<? ORDER BY rowid DESC LIMIT ?",
+          )
+          .all(roomId, boundary, size + 1)
+  ) as any[];
+  return {
+    messages: rows.slice(0, size).reverse().map(messageFrom),
+    hasMore: rows.length > size,
+  };
+}
 export function addMessage(
   message: Omit<Message, "id" | "createdAt" | "tokens" | "toolEvents">,
 ) {

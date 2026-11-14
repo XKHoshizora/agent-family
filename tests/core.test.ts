@@ -450,7 +450,7 @@ describe("authentication and authorization", () => {
   it("keeps private rooms, notes and exports private", async () => {
     saveNote(privateRoom.id, "Secret", "Private content", ownerId);
     for (const cookie of [memberCookie, outsiderCookie])
-      for (const suffix of ["", "/export", "/project"])
+      for (const suffix of ["", "/export", "/project", "/history"])
         expect(
           (
             await request(
@@ -483,6 +483,82 @@ describe("authentication and authorization", () => {
         )
       ).statusCode,
     ).toBe(403);
+  });
+  it("pages complete retained history beyond 300 messages without cross-room cursors or duplicates", async () => {
+    const r = room();
+    const expected: string[] = [];
+    db.transaction(() => {
+      for (let i = 0; i < 605; i++)
+        expected.push(
+          addMessage({
+            roomId: r.id,
+            runId: null,
+            role: "user",
+            agentId: null,
+            author: "Synthetic",
+            model: null,
+            content: `history-${i}`,
+            status: "complete",
+            source: "web",
+          }).id,
+        );
+    })();
+    const firstResponse = await request("GET", `/api/rooms/${r.id}`);
+    expect(firstResponse.statusCode).toBe(200);
+    const first = firstResponse.json();
+    expect(first.historyHasMore).toBe(true);
+    expect(first.messages.map((m: any) => m.id)).toEqual(expected.slice(305));
+    // A later message does not shift an older page's stable cursor.
+    addMessage({
+      roomId: r.id,
+      runId: null,
+      role: "user",
+      agentId: null,
+      author: "Synthetic",
+      model: null,
+      content: "new while reading",
+      status: "complete",
+      source: "web",
+    });
+    const second = (
+      await request(
+        "GET",
+        `/api/rooms/${r.id}/history?before=${first.messages[0].id}`,
+      )
+    ).json();
+    expect(second.hasMore).toBe(true);
+    expect(second.messages.map((m: any) => m.id)).toEqual(
+      expected.slice(5, 305),
+    );
+    const last = (
+      await request(
+        "GET",
+        `/api/rooms/${r.id}/history?before=${second.messages[0].id}`,
+      )
+    ).json();
+    expect(last.hasMore).toBe(false);
+    expect(last.messages.map((m: any) => m.id)).toEqual(expected.slice(0, 5));
+    expect(
+      (
+        await request(
+          "GET",
+          `/api/rooms/${teamRoom.id}/history?before=${expected[0]}`,
+        )
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (
+        await request(
+          "GET",
+          `/api/rooms/${r.id}/history`,
+          undefined,
+          memberCookie,
+        )
+      ).statusCode,
+    ).toBe(404);
+    expect(
+      (await request("GET", `/api/rooms/${r.id}/history?limit=301`)).statusCode,
+    ).toBe(400);
   });
   it("viewers cannot consume models, create rooms, save notes or cancel", async () => {
     for (const [url, body] of [

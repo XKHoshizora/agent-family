@@ -5,6 +5,7 @@ import {
   INPUT_INTERRUPT,
 } from "./discussion-inputs";
 import { db, getRoom, messageFrom } from "./db";
+import { assertFamilyRunAllowed, familyRoomAccess } from "./family-store";
 import { now } from "./config";
 import { releaseRunBudget, reserveRunBudget, usage } from "./budget";
 import { buildFreeHistory } from "./context";
@@ -67,6 +68,7 @@ export async function executeFreeDiscussion(
   let reviewer: string | undefined;
   try {
     while (!signal.aborted) {
+      assertFamilyRunAllowed(room.id, actor);
       const run = db.prepare("SELECT * FROM runs WHERE id=?").get(runId) as any;
       const settings = discussionSettings(JSON.parse(run.discussion));
       const remainingTurns =
@@ -115,7 +117,10 @@ export async function executeFreeDiscussion(
         if (
           !member ||
           member.role === "viewer" ||
-          (current.visibility === "private" && current.createdBy !== actor)
+          familyRoomAccess(room.id, actor) === false ||
+          (familyRoomAccess(room.id, actor) === null &&
+            current.visibility === "private" &&
+            current.createdBy !== actor)
         ) {
           reason = "访问权限已变更，讨论已停止。";
           break;

@@ -50,6 +50,7 @@ export type Agent = {
   tools: boolean;
 };
 export type Room = {
+  supervision?: import("./family").FamilyRoomPolicy;
   id: string;
   workspaceId: string;
   name: string;

@@ -1,4 +1,11 @@
 import { appendDiscussionInput } from "./discussion-inputs";
+import { registerMatrixRoutes } from "./matrix-account";
+import { registerFamilyRoutes } from "./family-routes";
+import {
+  familyRoomAccess,
+  familyRoomPolicy,
+  assertFamilyRunAllowed,
+} from "./family-store";
 import {
   discussionSchema,
   discussionSettings,
@@ -20,6 +27,7 @@ import {
   roomFrom,
   createRoom,
   getMessages,
+  getMessagePage,
   getRuns,
   getNotes,
   saveNote,
@@ -135,9 +143,13 @@ export async function roomAccess(req: FastifyRequest, write = false) {
   const member = db
     .prepare("SELECT role FROM memberships WHERE workspace_id=? AND user_id=?")
     .get(room!.workspaceId, session.user.id) as any;
+  const familyAccess = familyRoomAccess(room!.id, session.user.id);
   if (
     !member ||
-    (room!.visibility === "private" && room!.createdBy !== session.user.id)
+    familyAccess === false ||
+    (familyAccess === null &&
+      room!.visibility === "private" &&
+      room!.createdBy !== session.user.id)
   )
     fail(404, "群聊不存在或你没有访问权限。");
   if (write) {
@@ -147,8 +159,30 @@ export async function roomAccess(req: FastifyRequest, write = false) {
   return { room: room!, user: session.user, role: member.role as Role };
 }
 function editRoomAllowed(room: Room, userId: string, role: Role) {
+  if (familyRoomPolicy(room.id))
+    fail(
+      409,
+      "这是主人监督群。请到 Agent 好友与监督群中操作；成员和权限不能直接修改。",
+    );
   if (room.createdBy !== userId && !["owner", "admin"].includes(role))
     fail(403, "只有群聊创建者或管理员可以修改伙伴和群聊设置。");
+}
+function publicRoom(room: Room, userId: string) {
+  const supervision = familyRoomPolicy(room.id, userId);
+  if (!supervision) return room;
+  return {
+    ...room,
+    supervision,
+    agents: room.agents.map((a) =>
+      supervision.redactPersonaAgentIds.includes(a.id)
+        ? { ...a, persona: "" }
+        : a,
+    ),
+  };
+}
+function ordinaryRoomOnly(room: Room) {
+  if (familyRoomPolicy(room.id))
+    fail(409, "主人监督群首版不开放资料、项目或外部转发。");
 }
 function ensureAgentsUnique(agents: z.infer<typeof agentSchema>[]) {
   if (
@@ -216,7 +250,17 @@ export async function createApp() {
           : error.message || "操作未完成。",
     });
   });
-  app.get("/api/health", async () => ({ ok: true, version: "0.1.0" }));
+  app.get("/api/health", async () => ({ ok: true, version: "0.2.0" }));
+  registerMatrixRoutes(app, context);
+  await registerFamilyRoutes(app, {
+    context,
+    cancelRun: (roomId) => {
+      for (const run of getRuns(roomId))
+        if (["queued", "running"].includes(run.status))
+          cancelRun(run.id, roomId);
+      notify(roomId);
+    },
+  });
   app.get("/api/setup/status", async () => ({
     required: !db.prepare("SELECT 1 FROM memberships LIMIT 1").get(),
   }));
@@ -325,10 +369,18 @@ export async function createApp() {
     return (
       db
         .prepare(
-          "SELECT * FROM rooms WHERE workspace_id=? AND archived=0 AND (visibility='team' OR created_by=?) ORDER BY updated_at DESC",
+          "SELECT * FROM rooms WHERE workspace_id=? AND archived=0 ORDER BY updated_at DESC",
         )
-        .all(c.workspaceId, c.user.id) as any[]
-    ).map(roomFrom);
+        .all(c.workspaceId) as any[]
+    )
+      .map(roomFrom)
+      .filter((room) => {
+        const access = familyRoomAccess(room.id, c.user.id);
+        return access === null
+          ? room.visibility === "team" || room.createdBy === c.user.id
+          : access;
+      })
+      .map((room) => publicRoom(room, c.user.id));
   });
   app.post("/api/rooms", async (req, reply) => {
     const c = await context(req);
@@ -346,7 +398,7 @@ export async function createApp() {
     const count = (
       db
         .prepare(
-          "SELECT count(*) AS n FROM rooms WHERE workspace_id=? AND archived=0",
+          "SELECT count(*) AS n FROM rooms WHERE workspace_id=? AND archived=0 AND id NOT IN (SELECT room_id FROM family_groups WHERE room_id IS NOT NULL)",
         )
         .get(c.workspaceId) as any
     ).n;
@@ -405,15 +457,27 @@ export async function createApp() {
     return reply.code(201).send(getRoom(room.id));
   });
   app.get("/api/rooms/:id", async (req) => {
-    const { room } = await roomAccess(req);
+    const { room, user } = await roomAccess(req);
+    const history = getMessagePage(room.id);
     return {
-      room,
-      messages: getMessages(room.id),
+      room: publicRoom(room, user.id),
+      messages: history.messages,
+      historyHasMore: history.hasMore,
       runs: getRuns(room.id),
       notes: getNotes(room.id),
       pendingChanges: listChanges(room.id).filter((c) => c.status === "pending")
         .length,
     };
+  });
+  app.get("/api/rooms/:id/history", async (req) => {
+    const { room } = await roomAccess(req);
+    const query = z
+      .object({
+        before: z.string().uuid().optional(),
+        limit: z.coerce.number().int().min(1).max(300).default(300),
+      })
+      .parse(req.query);
+    return getMessagePage(room.id, query.before, query.limit);
   });
   app.patch("/api/rooms/:id", async (req) => {
     const { room, user, role } = await roomAccess(req, true);
@@ -478,6 +542,7 @@ export async function createApp() {
     { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
     async (req, reply) => {
       const { room, user } = await roomAccess(req, true);
+      assertFamilyRunAllowed(room.id, user.id);
       const data = z
         .object({
           content: z.string().trim().min(1).max(12000),
@@ -515,6 +580,7 @@ export async function createApp() {
   );
   app.patch("/api/rooms/:id/discussion", async (req) => {
     const { room, user } = await roomAccess(req, true);
+    assertFamilyRunAllowed(room.id, user.id);
     const data = z
       .object({ runId: z.string().uuid(), settings: discussionSchema })
       .parse(req.body);
@@ -524,14 +590,19 @@ export async function createApp() {
     return { settings };
   });
   app.post("/api/rooms/:id/cancel", async (req) => {
-    const { room, user } = await roomAccess(req, true);
+    const { room, user, role } = await roomAccess(req);
+    // A necessary owner retains the emergency stop even after a role downgrade.
+    if (familyRoomAccess(room.id, user.id) !== true) {
+      canWrite(role);
+      if (room.archived) fail(409, "群聊已经归档。");
+    }
     const data = z.object({ runId: z.string().uuid() }).parse(req.body);
     cancelRun(data.runId, room.id);
     audit(room.workspaceId, user.id, "run.cancel", data.runId);
     return { ok: true };
   });
   app.get("/api/rooms/:id/events", async (req, reply) => {
-    const { room } = await roomAccess(req);
+    const { room, user } = await roomAccess(req);
     reply.hijack();
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -542,6 +613,10 @@ export async function createApp() {
     reply.raw.write("event: ready\ndata: {}\n\n");
     let closed = false;
     const onChange = (roomId: string) => {
+      if (roomId === room.id && familyRoomAccess(room.id, user.id) === false) {
+        reply.raw.end();
+        return;
+      }
       if (roomId === room.id && !closed)
         reply.raw.write("event: change\ndata: {}\n\n");
     };
@@ -564,7 +639,7 @@ export async function createApp() {
     reply.raw.on("close", cleanup);
   });
   app.get("/api/rooms/:id/export", async (req, reply) => {
-    const { room } = await roomAccess(req);
+    const { room, user } = await roomAccess(req);
     const messages = getMessages(room.id, 10000);
     const format = (req.query as any).format;
     if (format === "json") {
@@ -572,7 +647,11 @@ export async function createApp() {
         "Content-Disposition",
         `attachment; filename="agent-family-${room.id}.json"`,
       );
-      return { room, messages, notes: getNotes(room.id) };
+      return {
+        room: publicRoom(room, user.id),
+        messages,
+        notes: getNotes(room.id),
+      };
     }
     reply
       .type("text/markdown; charset=utf-8")
@@ -592,6 +671,7 @@ export async function createApp() {
   });
   app.post("/api/rooms/:id/notes", async (req, reply) => {
     const { room, user } = await roomAccess(req, true);
+    ordinaryRoomOnly(room);
     const data = z
       .object({
         title: z.string().trim().min(1).max(100),
@@ -607,6 +687,7 @@ export async function createApp() {
   });
   app.delete("/api/rooms/:id/notes/:noteId", async (req) => {
     const { room, user } = await roomAccess(req, true);
+    ordinaryRoomOnly(room);
     db.prepare("DELETE FROM notes WHERE id=? AND room_id=?").run(
       (req.params as any).noteId,
       room.id,
@@ -621,6 +702,7 @@ export async function createApp() {
   });
   app.get("/api/rooms/:id/project", async (req) => {
     const { room } = await roomAccess(req);
+    ordinaryRoomOnly(room);
     return {
       mode: room.projectMode,
       files: listProjectFiles(room.id),
@@ -629,6 +711,7 @@ export async function createApp() {
   });
   app.post("/api/rooms/:id/project/changes", async (req, reply) => {
     const { room, user } = await roomAccess(req, true);
+    ordinaryRoomOnly(room);
     const data = proposalSchema
       .extend({
         branch: z
@@ -666,6 +749,7 @@ export async function createApp() {
   });
   app.get("/api/rooms/:id/project/export", async (req, reply) => {
     const { room } = await roomAccess(req);
+    ordinaryRoomOnly(room);
     const data = z
       .object({
         branch: z
@@ -712,6 +796,33 @@ export async function createApp() {
         models: z.array(z.string().min(1).max(180)).max(500),
       })
       .parse(req.body);
+    const previousProvider = db
+      .prepare(
+        "SELECT kind,base_url FROM providers WHERE workspace_id=? AND id=?",
+      )
+      .get(c.workspaceId, data.id) as
+      { kind: string; base_url: string } | undefined;
+    if (
+      !previousProvider ||
+      previousProvider.kind !== data.kind ||
+      previousProvider.base_url.replace(/\/$/, "") !==
+        data.baseUrl.replace(/\/$/, "")
+    ) {
+      const groups = db
+        .prepare(
+          "SELECT snapshot FROM family_groups WHERE workspace_id=? AND status IN ('proposed','active','paused')",
+        )
+        .all(c.workspaceId) as { snapshot: string }[];
+      if (
+        groups.some((g) =>
+          JSON.parse(g.snapshot).some((a: any) => a.provider === data.id),
+        )
+      )
+        fail(
+          409,
+          "此服务正在被主人审批群使用，不能直接更换接收消息的地址或协议。请用新标识添加服务，再提议新群。",
+        );
+    }
     saveProvider(c.workspaceId, data);
     audit(c.workspaceId, c.user.id, "provider.save", data.id);
     return { ok: true };
@@ -728,6 +839,7 @@ export async function createApp() {
       .all(c.workspaceId, c.user.id) as any[];
     for (const row of rooms) {
       const room = roomFrom(row);
+      if (familyRoomPolicy(room.id)) continue;
       if (room.agents.some((a) => !a.model)) {
         const agents = defaultAgentsWithModels(c.workspaceId, room.agents).map(
           (a, i) => (room.agents[i].model ? room.agents[i] : a),
@@ -873,7 +985,7 @@ export async function createApp() {
     admin(c.role);
     return db
       .prepare(
-        "SELECT a.id,a.action,a.target,a.created_at AS createdAt,COALESCE(u.name,a.actor) AS actor FROM audit a LEFT JOIN user u ON u.id=a.actor WHERE a.workspace_id=? ORDER BY a.created_at DESC LIMIT 100",
+        "SELECT a.id,a.action,a.target,a.created_at AS createdAt,COALESCE(u.name,a.actor) AS actor FROM audit a LEFT JOIN user u ON u.id=a.actor WHERE a.workspace_id=? AND a.action NOT LIKE 'family.%' ORDER BY a.created_at DESC LIMIT 100",
       )
       .all(c.workspaceId);
   });

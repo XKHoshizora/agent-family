@@ -920,4 +920,184 @@ test.describe.serial("Web workspace end-to-end", () => {
     ).toBeVisible();
     expect(errors).toEqual([]);
   });
+  test("independent Agents become friends and activate a supervised group", async () => {
+    test.setTimeout(100000);
+    // The preceding 17 fast scenarios share one real IP. Respect the production
+    // limiter before starting another complete workflow; do not disable it.
+    const rate = await context.request.get("/api/health");
+    const remaining = Number(rate.headers()["x-ratelimit-remaining"] ?? 240);
+    if (rate.status() === 429 || remaining < 150) {
+      const reset = Number(
+        rate.headers()["retry-after"] ??
+          rate.headers()["x-ratelimit-reset"] ??
+          60,
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, (Math.min(65, Math.max(1, reset)) + 1) * 1000),
+      );
+    }
+    await page.getByRole("button", { name: "Agent 好友与监督群" }).click();
+    for (const name of ["小研", "小审"]) {
+      await page
+        .getByRole("button", { name: "创建 Agent", exact: true })
+        .click();
+      const form = page.getByRole("dialog", {
+        name: "创建我的 Agent",
+        exact: true,
+      });
+      await form.getByLabel("名字", { exact: true }).fill(name);
+      await form.getByLabel("职责与个性").fill("仅用于合成验收的职责");
+      await form.getByRole("button", { name: "保存 Agent" }).click();
+      await expect(form).toBeHidden();
+    }
+    await page.getByRole("button", { name: "好友与屏蔽" }).click();
+    await page
+      .getByLabel("我的 Agent", { exact: true })
+      .selectOption({ label: "小研" });
+    const target = await page
+      .getByLabel("对方 Agent", { exact: true })
+      .locator("option")
+      .filter({ hasText: "小审" })
+      .getAttribute("value");
+    await page.getByLabel("对方 Agent", { exact: true }).selectOption(target!);
+    await page.getByRole("button", { name: "发送好友请求" }).click();
+    await page.getByRole("button", { name: "接受", exact: true }).click();
+    await expect(page.getByText("已成为好友", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "主人监督群", exact: true }).click();
+    await page.getByRole("button", { name: "提议新群" }).click();
+    const proposal = page.getByRole("dialog", { name: "提议一个主人监督群" });
+    await proposal.getByLabel("群名", { exact: true }).fill("首版监督验收群");
+    await proposal.locator("input[type=checkbox]").nth(0).check();
+    await proposal.locator("input[type=checkbox]").nth(1).check();
+    await proposal.getByRole("button", { name: "提交提议" }).click();
+    await expect(proposal).toBeHidden();
+    await expect(
+      page.getByText(/本站服务端.*模型服务处理本群明文消息/),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "同意以上范围并批准" }).click();
+    await page.getByRole("button", { name: "进入聊天", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "首版监督验收群" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("主人监督群 · 全部必要主人可查看完整记录"),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "添加文本附件" }),
+    ).toBeDisabled();
+    await expect(page.getByText("主人监督群，全部必要主人可见")).toBeVisible();
+  });
+  test("owners can navigate retained older history and return to a writable latest page", async () => {
+    const groups = await (
+      await context.request.get("/api/family/groups")
+    ).json();
+    const roomId = groups.groups.find(
+      (g: any) => g.name === "首版监督验收群",
+    ).roomId;
+    const endpoint = `**/api/rooms/${roomId}`;
+    const historyEndpoint = `**/api/rooms/${roomId}/history?*`;
+    const message = (id: string, content: string) => ({
+      id,
+      roomId,
+      runId: null,
+      role: "user",
+      agentId: null,
+      author: "验收",
+      model: null,
+      content,
+      status: "complete",
+      source: "web",
+      createdAt: "2026-11-15T00:00:00.000Z",
+      tokens: 0,
+      toolEvents: [],
+    });
+    await page.route(endpoint, async (route) => {
+      const response = await route.fetch();
+      const actual = await response.json();
+      await route.fulfill({
+        response,
+        json: {
+          ...actual,
+          historyHasMore: true,
+          messages: [
+            message("11111111-1111-4111-8111-111111111111", "较新的合成历史页"),
+          ],
+        },
+      });
+    });
+    await page.route(historyEndpoint, (route) =>
+      route.fulfill({
+        json: {
+          hasMore: false,
+          messages: [
+            message("22222222-2222-4222-8222-222222222222", "较早的合成历史页"),
+          ],
+        },
+      }),
+    );
+    try {
+      await page.reload();
+      await expect(
+        page.getByText("较新的合成历史页", { exact: true }),
+      ).toBeVisible();
+      await page.getByRole("button", { name: "查看更早一页" }).click();
+      await expect(
+        page.getByText("较早的合成历史页", { exact: true }),
+      ).toBeVisible();
+      await expect(
+        page.getByText("较新的合成历史页", { exact: true }),
+      ).toBeHidden();
+      await expect(page.getByLabel("消息", { exact: true })).toBeDisabled();
+      await page.getByRole("button", { name: "返回最新消息" }).click();
+      await expect(
+        page.getByText("较新的合成历史页", { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByLabel("消息", { exact: true })).toBeEditable();
+    } finally {
+      await page.unroute(endpoint);
+      await page.unroute(historyEndpoint);
+      await page.reload();
+    }
+  });
+  test("paused and archived supervision stays readable and cannot silently open another room", async () => {
+    await page.getByRole("button", { name: "查看审批与权限" }).click();
+    await page.getByRole("button", { name: "主人监督群", exact: true }).click();
+    await page
+      .locator(".family-group-row")
+      .filter({ hasText: "首版监督验收群" })
+      .click();
+    await page.getByRole("button", { name: "暂停协作" }).click();
+    await expect(
+      page.getByRole("button", { name: "同意恢复此版本" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "归档此群" }).click();
+    await expect(
+      page.getByRole("button", { name: "同意恢复此版本" }),
+    ).toBeHidden();
+    await page.getByRole("button", { name: "查看已有聊天" }).click();
+    await expect(
+      page.getByRole("heading", { name: "首版监督验收群" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("消息", { exact: true })).toBeDisabled();
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "首版监督验收群" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("消息", { exact: true })).toBeDisabled();
+  });
+  test("supervision controls fit mobile and explain the independent Matrix boundary", async () => {
+    await page.getByRole("button", { name: "查看审批与权限" }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "主人监督群", exact: true }).click();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth + 1,
+      ),
+    ).toBe(true);
+    await page.getByRole("button", { name: "开放聊天", exact: true }).click();
+    await expect(
+      page.getByText("本入口的消息不会自动交给 AI", { exact: false }),
+    ).toBeVisible();
+    expect(errors).toEqual([]);
+  });
 });

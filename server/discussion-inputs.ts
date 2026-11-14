@@ -1,4 +1,5 @@
 import { db, addMessage, audit, getRoom } from "./db";
+import { assertFamilyRunAllowed, familyRoomAccess } from "./family-store";
 import type { Room } from "../shared/types";
 import { mentionedAgents } from "../shared/execution";
 import { assertLineScope, type LineScope } from "./line-access";
@@ -72,6 +73,7 @@ export function appendDiscussionInput(input: {
   lineScope?: LineScope;
   shareToLine?: boolean;
 }) {
+  assertFamilyRunAllowed(input.room.id, input.actor);
   const result = db.transaction(() => {
     const room = getRoom(input.room.id);
     const run = db
@@ -95,7 +97,10 @@ export function appendDiscussionInput(input: {
       if (
         !member ||
         member.role === "viewer" ||
-        (room.visibility === "private" && room.createdBy !== input.actor)
+        familyRoomAccess(room.id, input.actor) === false ||
+        (familyRoomAccess(room.id, input.actor) === null &&
+          room.visibility === "private" &&
+          room.createdBy !== input.actor)
       )
         throw Object.assign(new Error("无权向这个群补充消息。"), {
           statusCode: 403,

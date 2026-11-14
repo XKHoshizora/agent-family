@@ -1,4 +1,9 @@
 import { INPUT_INTERRUPT } from "./discussion-inputs";
+import {
+  assertFamilyRunAllowed,
+  familyRoomAccess,
+  familyRoomPolicy,
+} from "./family-store";
 import { unwrapOwnAnswer } from "./answer-format";
 import {
   turnInstructions,
@@ -102,6 +107,9 @@ export function startRun(input: {
   discussion?: DiscussionSettings;
 }) {
   const { room, actor, author, content } = input;
+  assertFamilyRunAllowed(room.id, actor);
+  if (input.lineScope && familyRoomPolicy(room.id))
+    throw new Error("主人监督群不开放 LINE 转发。");
   const scope = input.lineScope;
   if ((input.source === "line" || actor.startsWith("line:")) && !scope)
     throw new Error("缺少有效的 LINE 连接身份。");
@@ -379,6 +387,7 @@ async function answer(
   let usageDay: string | undefined;
   const guard = () => {
     if (signal.aborted) throw new Error("任务已停止");
+    assertFamilyRunAllowed(room.id, actor);
     const current = getRoom(room.id);
     if (!current || current.archived) throw new Error("群聊已不可用");
     if (scope) {
@@ -392,7 +401,10 @@ async function answer(
       if (
         !member ||
         member.role === "viewer" ||
-        (current.visibility === "private" && current.createdBy !== actor)
+        familyRoomAccess(room.id, actor) === false ||
+        (familyRoomAccess(room.id, actor) === null &&
+          current.visibility === "private" &&
+          current.createdBy !== actor)
       )
         throw new Error("访问权限已变更");
     }
@@ -653,6 +665,7 @@ async function answer(
         onError: () => {},
       });
       for await (const part of result.stream) {
+        guard();
         if (part.type === "text-delta") {
           content += part.text;
           if (content.length > 50000) throw new Error("回答过长，已停止。");

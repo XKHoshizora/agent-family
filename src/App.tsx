@@ -48,6 +48,7 @@ import {
 import { Auth } from "./Auth";
 import { Settings, LineDialog } from "./Settings";
 import { Project } from "./Project";
+import { Family } from "./Family";
 import { planExecution, mentionedAgents } from "../shared/execution";
 import {
   MODE_LABELS,
@@ -64,6 +65,7 @@ import {
 type RoomDetail = {
   room: Room;
   messages: Message[];
+  historyHasMore?: boolean;
   runs: Run[];
   notes: Note[];
   pendingChanges: number;
@@ -154,9 +156,14 @@ function Workspace({ me }: { me: Me }) {
   const [selected, setSelected] = useState(
     localStorage.getItem(`af-room-${me.workspace.id}`) || "",
   );
-  const roomId = rooms.data?.some((r) => r.id === selected)
-    ? selected
-    : rooms.data?.[0]?.id;
+  const [familySelection, setFamilySelection] = useState(
+    localStorage.getItem(`af-family-room-${me.workspace.id}`) || "",
+  );
+  const roomId =
+    (!!familySelection && familySelection === selected) ||
+    rooms.data?.some((r) => r.id === selected)
+      ? selected
+      : rooms.data?.[0]?.id;
   const detail = useQuery({
     queryKey: ["room", roomId],
     queryFn: () => api<RoomDetail>(`/api/rooms/${roomId}`),
@@ -169,7 +176,17 @@ function Workspace({ me }: { me: Me }) {
         : false,
   });
   const room = detail.data?.room;
+  const [historyBefore, setHistoryBefore] = useState("");
+  const historyPage = useQuery({
+    queryKey: ["history", roomId, historyBefore],
+    queryFn: () =>
+      api<{ messages: Message[]; hasMore: boolean }>(
+        `/api/rooms/${roomId}/history?before=${historyBefore}`,
+      ),
+    enabled: !!roomId && !!historyBefore,
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [familyOpen, setFamilyOpen] = useState(false);
   const [membersOpen, setMembersOpen] = useState(false);
   const [newRoom, setNewRoom] = useState(false);
   const [settings, setSettings] = useState<
@@ -208,13 +225,18 @@ function Workspace({ me }: { me: Me }) {
   const canWrite = me.workspace.role !== "viewer";
   const canEdit =
     !!room &&
+    !room.supervision &&
     (room.createdBy === me.user.id ||
       ["owner", "admin"].includes(me.workspace.role));
   const active = detail.data?.runs.find((r) =>
     ["running", "queued"].includes(r.status),
   );
   const canInterject = active?.mode === "free";
-  const messages = detail.data?.messages || [];
+  const messages =
+    (historyBefore ? historyPage.data?.messages : detail.data?.messages) || [];
+  const hasOlderMessages = historyBefore
+    ? historyPage.data?.hasMore
+    : detail.data?.historyHasMore;
   const lastRun = detail.data?.runs[0];
   const enabledAgents = room?.agents.filter((a) => a.enabled) || [];
   let planned: ReturnType<typeof planExecution> | undefined;
@@ -292,13 +314,27 @@ function Workspace({ me }: { me: Me }) {
       input.current.style.height = `${Math.min(input.current.scrollHeight, 180)}px`;
     }
   }, [message]);
-  function selectRoom(id: string) {
+  function selectRoom(id: string, fromFamily = false) {
+    setHistoryBefore("");
+    setFamilySelection(fromFamily ? id : "");
+    if (fromFamily)
+      localStorage.setItem(`af-family-room-${me.workspace.id}`, id);
+    else localStorage.removeItem(`af-family-room-${me.workspace.id}`);
     setSelected(id);
     localStorage.setItem(`af-room-${me.workspace.id}`, id);
     setSidebarOpen(false);
   }
   async function send(e?: FormEvent) {
     e?.preventDefault();
+    if (historyBefore) return;
+    if (room?.supervision && !room.supervision.canRun) {
+      setSendError("监督群已暂停或归档。请在 Agent 好友与监督群中查看和审批。");
+      return;
+    }
+    if (room?.supervision && attachment) {
+      setSendError("主人监督群首版不开放附件，请移除附件后发送。");
+      return;
+    }
     if (
       !room ||
       !canWrite ||
@@ -477,6 +513,16 @@ function Workspace({ me }: { me: Me }) {
       <div className="sidebar-bottom">
         <button
           className="sidebar-action"
+          onClick={() => {
+            setFamilyOpen(true);
+            setSidebarOpen(false);
+          }}
+        >
+          <UsersRound size={18} />
+          <span>Agent 好友与监督群</span>
+        </button>
+        <button
+          className="sidebar-action"
           onClick={() =>
             room && canEdit ? setLineOpen(true) : setSettings("line")
           }
@@ -637,7 +683,7 @@ function Workspace({ me }: { me: Me }) {
               : "选择一位伙伴，或在输入框里 @ 点名。"}
       </p>
       <div className="panel-divider" />
-      <div className="line-panel">
+      <div className="line-panel" hidden={!!room.supervision}>
         <div className="line-panel-title">
           <Link2 size={18} />
           <h3>{room.lineLinked ? "已连接 LINE" : "把这个群带到 LINE"}</h3>
@@ -658,11 +704,13 @@ function Workspace({ me }: { me: Me }) {
       <div className="members-foot">
         <LockKeyhole size={13} />
         <span>
-          {room.lineLinked
-            ? "已共享给 LINE 群"
-            : room.visibility === "private"
-              ? "私人群聊，仅你可见"
-              : "团队群聊，空间成员可见"}
+          {room.supervision
+            ? "主人监督群，全部必要主人可见"
+            : room.lineLinked
+              ? "已共享给 LINE 群"
+              : room.visibility === "private"
+                ? "私人群聊，仅你可见"
+                : "团队群聊，空间成员可见"}
         </span>
       </div>
     </>
@@ -721,6 +769,8 @@ function Workspace({ me }: { me: Me }) {
                   title="群聊笔记"
                   aria-label="打开群聊笔记"
                   onClick={() => setNotesOpen(true)}
+                  disabled={!!room.supervision}
+                  hidden={!!room.supervision}
                 >
                   <BookOpen size={19} />
                   {detail.data?.notes.length ? (
@@ -748,6 +798,18 @@ function Workspace({ me }: { me: Me }) {
             )}
           </div>
         </header>
+        {room?.supervision && (
+          <div className="family-supervision-banner">
+            <p>
+              {room.supervision.canRun
+                ? "主人监督群 · 全部必要主人可查看完整记录"
+                : "监督群已暂停或归档 · 不会继续运行"}
+            </p>
+            <button className="text-button" onClick={() => setFamilyOpen(true)}>
+              查看审批与权限
+            </button>
+          </div>
+        )}
         {!connection && roomId && (
           <div className="connection-banner">
             正在重新连接。已发送的内容会保留，回答状态会自动刷新。
@@ -793,7 +855,36 @@ function Workspace({ me }: { me: Me }) {
                   );
               }}
             >
-              {messages.length === 0 ? (
+              {(historyBefore || hasOlderMessages) && (
+                <div className="conversation-start">
+                  {hasOlderMessages && messages.length > 0 && (
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() => setHistoryBefore(messages[0].id)}
+                    >
+                      查看更早一页
+                    </button>
+                  )}
+                  {historyBefore && (
+                    <button
+                      type="button"
+                      className="button small"
+                      onClick={() => setHistoryBefore("")}
+                    >
+                      返回最新消息
+                    </button>
+                  )}
+                  {historyBefore && (
+                    <span>正在查看历史记录；返回最新消息后可发言。</span>
+                  )}
+                </div>
+              )}
+              {historyBefore && historyPage.isPending ? (
+                <Spinner label="正在读取更早记录" />
+              ) : historyBefore && historyPage.error ? (
+                <ErrorBox error={historyPage.error.message} />
+              ) : messages.length === 0 ? (
                 <div className="empty-conversation">
                   <div className="welcome-avatars">
                     {room.agents
@@ -854,7 +945,9 @@ function Workspace({ me }: { me: Me }) {
                 <div className="messages">
                   <div className="conversation-start">
                     <span>
-                      对话开始于{" "}
+                      {historyBefore || hasOlderMessages
+                        ? "本页最早消息："
+                        : "对话开始于 "}
                       {new Date(messages[0].createdAt).toLocaleDateString(
                         "zh-CN",
                       )}
@@ -1103,7 +1196,11 @@ function Workspace({ me }: { me: Me }) {
                   }}
                   maxLength={12000}
                   rows={2}
-                  disabled={!canWrite}
+                  disabled={
+                    !canWrite ||
+                    !!historyBefore ||
+                    (!!room.supervision && !room.supervision.canRun)
+                  }
                   onKeyDown={(e) => {
                     if (
                       e.key === "Enter" &&
@@ -1131,7 +1228,9 @@ function Workspace({ me }: { me: Me }) {
                     className="icon-button attachment-button"
                     aria-label="添加文本附件"
                     title="添加文本或代码附件（最多 80 KB）"
-                    disabled={!canWrite}
+                    disabled={
+                      !canWrite || !!historyBefore || !!room.supervision
+                    }
                     onClick={() => fileInput.current?.click()}
                   >
                     <Paperclip size={19} />
@@ -1158,7 +1257,11 @@ function Workspace({ me }: { me: Me }) {
                         canInterject || draftRun ? "发送补充" : "发送消息"
                       }
                       disabled={
-                        sending || !canWrite || (!message.trim() && !attachment)
+                        sending ||
+                        !!historyBefore ||
+                        !canWrite ||
+                        (!!room.supervision && !room.supervision.canRun) ||
+                        (!message.trim() && !attachment)
                       }
                     >
                       {sending ? (
@@ -1206,6 +1309,19 @@ function Workspace({ me }: { me: Me }) {
           initialTab={settings}
         />
       )}{" "}
+      {familyOpen && (
+        <Family
+          workspaceId={me.workspace.id}
+          canWrite={canWrite}
+          models={models.data || []}
+          onClose={() => setFamilyOpen(false)}
+          onRoom={(id) => {
+            setFamilyOpen(false);
+            void client.invalidateQueries({ queryKey: ["rooms"] });
+            selectRoom(id, true);
+          }}
+        />
+      )}
       {room && lineOpen && (
         <LineDialog
           room={room}
@@ -1869,6 +1985,9 @@ function RoomSettings({
           导出 JSON
         </a>
       </div>
+      <p className="muted">
+        单次导出最多包含最近 10,000 条消息。更早记录可在聊天顶部按页查看。
+      </p>
       {canEdit && (
         <>
           <div className="section-divider" />

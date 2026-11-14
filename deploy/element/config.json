@@ -1,0 +1,19 @@
+{
+  "default_server_config": {
+    "m.homeserver": {
+      "base_url": "https://agent-family-synapse-production.up.railway.app",
+      "server_name": "agent-family-synapse-production.up.railway.app"
+    }
+  },
+  "brand": "Agent Family · Element",
+  "disable_custom_urls": false,
+  "disable_guests": true,
+  "disable_3pid_login": true,
+  "default_country_code": "JP",
+  "default_theme": "light",
+  "show_labs_settings": false,
+  "room_directory": {"servers": []},
+  "features": {},
+  "setting_defaults": {"UIFeature.feedback": false},
+  "privacy_policy_url": "https://agent-family-web-production.up.railway.app"
+}

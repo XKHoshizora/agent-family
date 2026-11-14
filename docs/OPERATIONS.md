@@ -74,6 +74,16 @@ npm run reset-password:prod -- owner@agent.family
 
 `npm run build`、`npm test`、`npm run test:e2e`。浏览器测试在 Windows 用已安装 Chrome；Linux CI 安装 Chromium。单元/契约与浏览器自动测试不需要真实 API key。真实服务测试单独记录，不放进每次 CI。
 
+## 0.2 Agent 监督群与 Matrix
+
+部署结构、持久卷和官方容器版本见 [deploy/README.md](../deploy/README.md)。同站点托管监督群与独立 Matrix 人际聊天是两套明确披露的信任边界。不要将 Matrix 上任意聊天接入模型，也不要为监督群启用普通群的资料、项目或 LINE 入口。
+
+升级通过幂等建表添加 family_agents、family_friendships、family_groups、family_blocks、family_member_tags 和 matrix_accounts；旧聊天不迁移、不重写。群快照使用独立服务端盐值，旧版本盐值为空时会进行增量回填。主人的审批版本、冻结模型服务地址、暂停原因与群历史都持久化。重启中断任务，不自动重放或自动恢复已经暂停的群。
+
+**不要只把应用回滚到 0.1 并保留 0.2 数据库。** 旧代码不知道监督群的主人集合和限制，会把这些群误当作普通私有群处理。优先向前修复；确需整体回退时先停止写入，明确备份后的数据处理，再使用发布前备份恢复到隔离目录并切换。Matrix 的身份和数据库也不能通过回退 AF 镜像重置。
+
+AF 仍保持一个副本，所有者审批和运行取消按单实例实现。新增部署前与验收后各保留一份备份；密钥随备份加密保管。备份恢复应在新空目录校验，不能覆盖在线数据。部署在同一卷上的备份只用于恢复验证，不等于异地灾备。
+
 ## 2026-11-13 额度与 LINE 安全边界升级
 
 `DAILY_LINE_MODEL_CALLS` 默认 40，每空间独立限制 LINE 步骤，同时受 `DAILY_MODEL_CALLS` 约束。空间原有调用计数保留；LINE 独立计数从本次升级开始记录。预留按最大可用步骤计，未用释放；跨 UTC 午夜的任务仍归属开始日。
