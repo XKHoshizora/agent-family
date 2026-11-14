@@ -764,21 +764,23 @@ function Workspace({ me }: { me: Me }) {
                     ) : null}
                   </button>
                 )}
-                <button
-                  className="icon-button"
-                  title="群聊笔记"
-                  aria-label="打开群聊笔记"
-                  onClick={() => setNotesOpen(true)}
-                  disabled={!!room.supervision}
-                  hidden={!!room.supervision}
-                >
-                  <BookOpen size={19} />
-                  {detail.data?.notes.length ? (
-                    <span className="count-dot">
-                      {detail.data.notes.length}
-                    </span>
-                  ) : null}
-                </button>
+                {!room.supervision && (
+                  <button
+                    className="icon-button"
+                    title="群聊笔记"
+                    aria-label="打开群聊笔记"
+                    onClick={() => setNotesOpen(true)}
+                    disabled={!!room.supervision}
+                    hidden={!!room.supervision}
+                  >
+                    <BookOpen size={19} />
+                    {detail.data?.notes.length ? (
+                      <span className="count-dot">
+                        {detail.data.notes.length}
+                      </span>
+                    ) : null}
+                  </button>
+                )}
                 <button
                   className="icon-button show-members"
                   aria-label="打开伙伴列表"
@@ -985,7 +987,7 @@ function Workspace({ me }: { me: Me }) {
                           )
                       }
                       onSave={
-                        canWrite
+                        canWrite && !room.supervision
                           ? () => {
                               setNotesOpen(true);
                               sessionStorage.setItem(
@@ -1322,7 +1324,7 @@ function Workspace({ me }: { me: Me }) {
           }}
         />
       )}
-      {room && lineOpen && (
+      {room && !room.supervision && lineOpen && (
         <LineDialog
           room={room}
           onClose={() => setLineOpen(false)}
@@ -1359,7 +1361,7 @@ function Workspace({ me }: { me: Me }) {
           }}
         />
       )}
-      {room && notesOpen && (
+      {room && !room.supervision && notesOpen && (
         <Notes
           room={room}
           notes={detail.data?.notes || []}
@@ -1367,7 +1369,7 @@ function Workspace({ me }: { me: Me }) {
           onClose={() => setNotesOpen(false)}
         />
       )}
-      {room && projectOpen && (
+      {room && room.projectMode !== "off" && projectOpen && (
         <Project
           room={room}
           canWrite={canWrite}

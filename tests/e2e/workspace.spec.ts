@@ -985,6 +985,9 @@ test.describe.serial("Web workspace end-to-end", () => {
     await expect(
       page.getByRole("button", { name: "添加文本附件" }),
     ).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "打开群聊笔记" }),
+    ).toBeHidden();
     await expect(page.getByText("主人监督群，全部必要主人可见")).toBeVisible();
   });
   test("owners can navigate retained older history and return to a writable latest page", async () => {
@@ -1040,6 +1043,9 @@ test.describe.serial("Web workspace end-to-end", () => {
       await expect(
         page.getByText("较新的合成历史页", { exact: true }),
       ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "存为笔记", exact: true }),
+      ).toHaveCount(0);
       await page.getByRole("button", { name: "查看更早一页" }).click();
       await expect(
         page.getByText("较早的合成历史页", { exact: true }),

@@ -55,7 +55,7 @@
 - **Audit**: every mutation writes `audit(workspace, actor, "family.*", targetId)`. System transitions use actor `system`. Private notes and reasons are never written to the audit table. `family.*` rows are **operator-only**: `GET /api/audit` excludes them, because an admin could otherwise infer who blocked or paused whom from adjacent rows.
 
 ## Routes (`shared/family.ts` holds exact types + Zod schemas)
-Every route except capabilities requires `deps.context(req)`, which returns a workspace member. Viewers are refused (403) except for the stop actions in the role table above. Request bodies are `.strict()`, so unknown keys such as `ownerUserId` return 400. Body limit is 16 KiB.
+Every route except capabilities requires `deps.context(req)`, which returns a workspace member. Viewers can read what they own or otherwise may view; mutations are refused (403) except for the stop actions in the role table above. Request bodies are `.strict()`, so unknown keys such as `ownerUserId` return 400. Body limit is 16 KiB.
 
 | Method & path | Body | Response |
 |---|---|---|
@@ -100,6 +100,7 @@ Every route except capabilities requires `deps.context(req)`, which returns a wo
 9. **Quota**: the ordinary 100-room count excludes rooms bound in `family_groups.room_id`.
 10. **Audit**: `GET /api/audit` excludes `action LIKE 'family.%'`.
 11. **UI**: use `FamilyGroupView.revision`/`snapshotHash` for approve/resume; show `availability.myReasons` and `availability.sharedReasons`; drive buttons from `can`; show `ownerTag` next to every `ownerName` and warn when `ownerNameDuplicate`; show `providerUrl` and `providerKind` in the approval disclosure; use `FAMILY_CAPABILITIES` for honest labelling.
+12. **Retained history**: room detail returns the newest 300 messages and `historyHasMore`. `GET /api/rooms/:id/history?before=<message UUID>&limit=300` reuses the same authoritative room ACL and returns `{messages,hasMore}`. Its cursor is resolved within that room and uses SQLite insertion order; a foreign/missing cursor is 404. Owners can continue to the beginning, including after archive. The UI disables composing on an older page. Single-file exports retain their explicit 10,000-message limit.
 
 ## Tests
 - `npm exec vitest run tests/family.test.ts` uses a temp `DATA_DIR`, no network, no credentials and no model calls. Provider fixtures go through the production `saveProvider` (endpoint allowlist and encryption) with a placeholder key; nothing bypasses the proposal or run guards. A stand-in `user` table mirrors Better Auth so current names are exercised. It covers:
