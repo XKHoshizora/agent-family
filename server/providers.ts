@@ -5,6 +5,7 @@ import { createGoogle } from "@ai-sdk/google";
 import { db } from "./db";
 import { config, encrypt, decrypt, now } from "./config";
 import type { ModelOption, Agent } from "../shared/types";
+import { supportsMiniMaxFinalization } from "../shared/model-policy";
 export type ProviderKind = "compatible" | "openai" | "anthropic" | "google";
 export function validateEndpoint(value: string) {
   const url = new URL(value);
@@ -142,12 +143,22 @@ export async function refreshModels(workspaceId: string, providerId: string) {
   ).run(JSON.stringify(models), now(), workspaceId, providerId);
   return models as string[];
 }
-export function modelFor(workspaceId: string, agent: Agent) {
+export function modelFor(
+  workspaceId: string,
+  agent: Agent,
+  options: { finalize?: boolean } = {},
+) {
   const p = db
     .prepare("SELECT * FROM providers WHERE workspace_id=? AND id=?")
     .get(workspaceId, agent.provider) as any;
   if (!p || !JSON.parse(p.models).includes(agent.model))
     throw new Error(`请先为${agent.name}选择可用模型。`);
+  if (
+    options.finalize &&
+    (!supportsMiniMaxFinalization(agent.model) ||
+      !["compatible", "openai"].includes(p.kind))
+  )
+    throw new Error("当前模型协议不支持限额后整理。");
   const opts = {
     apiKey: decrypt(p.secret),
     baseURL: validateEndpoint(p.base_url),
@@ -159,6 +170,7 @@ export function modelFor(workspaceId: string, agent: Agent) {
       ) {
         const body = JSON.parse(init.body);
         body.reasoning_split = true;
+        if (options.finalize) body.thinking = { type: "disabled" };
         if (body.max_tokens !== undefined) {
           body.max_completion_tokens = body.max_tokens;
           delete body.max_tokens;

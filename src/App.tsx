@@ -1388,15 +1388,21 @@ function MessageView({
           <div className="tool-events">
             {m.toolEvents.map((t, i) => (
               <span key={i}>
-                {t.result === "未完成" ? (
+                {t.result === "未完成" || t.result === "已停止" ? (
                   <X size={12} />
+                ) : t.result?.startsWith("进行中") ? (
+                  <RefreshCw size={12} />
                 ) : t.result ? (
                   <Check size={12} />
                 ) : (
                   <RefreshCw size={12} />
                 )}{" "}
                 {t.label}
-                {t.result === "未完成" ? " · 未完成" : ""}
+                {t.name === "minimax_finalize" && t.result
+                  ? ` · ${t.result}`
+                  : t.result === "未完成"
+                    ? " · 未完成"
+                    : ""}
               </span>
             ))}
           </div>

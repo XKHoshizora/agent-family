@@ -1,4 +1,5 @@
 import type { Agent, Mode } from "./types";
+import { turnCallAllowance } from "./model-policy";
 
 export function mentionedAgents(agents: Agent[], content: string) {
   return agents.filter(
@@ -37,7 +38,7 @@ export function planExecution(
       mode,
       notice: "",
       minimum: 1,
-      maximum: first.tools && allowTools ? 3 : 1,
+      maximum: turnCallAllowance(first.model, first.tools && allowTools),
     };
   }
   let selected = mentions.length
@@ -63,7 +64,9 @@ export function planExecution(
       mode !== effectiveMode ? "本次只选中一位伙伴，已改为单轮回答。" : "",
     minimum: selected.length * rounds,
     maximum:
-      selected.reduce((sum, a) => sum + (a.tools && allowTools ? 3 : 1), 0) *
-      rounds,
+      selected.reduce(
+        (sum, a) => sum + turnCallAllowance(a.model, a.tools && allowTools),
+        0,
+      ) * rounds,
   };
 }

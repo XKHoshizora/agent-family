@@ -15,11 +15,15 @@ const state = vi.hoisted(() => {
 vi.mock("../server/providers", async () => {
   const { MockLanguageModelV4 } = await import("ai/test");
   return {
-    modelFor: (_w: string, agent: any) =>
+    modelFor: (_w: string, agent: any, requestOptions: any = {}) =>
       new MockLanguageModelV4({
         doStream: async (options: any) => {
           const step = state.script.shift() || {};
-          state.calls.push({ agent: agent.id, ...options });
+          state.calls.push({
+            agent: agent.id,
+            finalize: !!requestOptions.finalize,
+            ...options,
+          });
           if (state.delay) await new Promise((r) => setTimeout(r, state.delay));
           if (step.fail) throw new Error("provider failed");
           const text =
@@ -76,6 +80,16 @@ vi.mock("../server/providers", async () => {
             { type: "text-start", id: "t" },
             { type: "text-delta", id: "t", delta: text },
             { type: "text-end", id: "t" },
+            ...(step.dataTool
+              ? [
+                  {
+                    type: "tool-call",
+                    toolCallId: `data-${state.calls.length}`,
+                    toolName: step.dataTool,
+                    input: "{}",
+                  },
+                ]
+              : []),
             ...(review
               ? [
                   {
@@ -144,6 +158,8 @@ import { buildFreeHistory, CONTEXT_LIMIT } from "../server/context";
 import { lineMessages } from "../server/line-output";
 import { reserveRunBudget, releaseRunBudget } from "../server/budget";
 import { similarContribution } from "../server/discussion-quality";
+import { turnCallAllowance } from "../shared/model-policy";
+import { unwrapOwnAnswer } from "../server/answer-format";
 const w = "free-test",
   u = "user";
 const makeRoom = (count = 3, tools = false) =>
@@ -194,9 +210,291 @@ const until = async (test: () => boolean) => {
   }
   throw new Error("wait timed out");
 };
+const minimaxRoom = (count = 3, tools = false, all = false) => {
+  const r = makeRoom(count, tools);
+  r.agents.forEach((a, i) => {
+    if (!i || all) a.model = "MiniMax-M3";
+  });
+  db.prepare("UPDATE rooms SET agents=? WHERE id=?").run(
+    JSON.stringify(r.agents),
+    r.id,
+  );
+  return r;
+};
+
+it("MiniMax repairs a length-limited draft once, accounts both calls and shares only its final answer", async () => {
+  state.script = [
+    {
+      text: "未完成旧片段",
+      reasoning: "PRIVATE_MINIMAX_DRAFT",
+      finish: "length",
+    },
+    {
+      text: "完整答案：24000÷1200=20分钟。",
+      decision: {
+        action: "handoff",
+        nextAgentId: "a1",
+        question: "请检查增量追赶时间。",
+      },
+    },
+  ];
+  const run = await finished(minimaxRoom(), { maxCalls: 7, maxRounds: 2 });
+  const messages = getMessages(run.roomId).filter(
+    (m) => m.role === "assistant",
+  );
+  expect(run.status).toBe("completed");
+  expect(run.callsUsed).toBe(7);
+  expect(messages).toHaveLength(6);
+  expect(state.calls.slice(0, 2).map((c) => [c.agent, c.finalize])).toEqual([
+    ["a0", false],
+    ["a0", true],
+  ]);
+  expect(messages[0].content).toBe("完整答案：24000÷1200=20分钟。");
+  expect(messages[0].reasoning).toContain("PRIVATE_MINIMAX_DRAFT");
+  expect(messages[0].tokens).toBe(40);
+  expect(
+    messages[0].toolEvents.find((e) => e.name === "minimax_finalize")?.result,
+  ).toContain("已完成");
+  expect(JSON.stringify(state.calls[1].prompt)).toContain(
+    "PRIVATE_MINIMAX_DRAFT",
+  );
+  expect(JSON.stringify(state.calls[2].prompt)).not.toContain(
+    "PRIVATE_MINIMAX_DRAFT",
+  );
+  expect(usage(w).calls).toBe(7);
+  expect(usage(w).tokens).toBe(140);
+  expect(usage(w).reserved).toBe(0);
+});
+
+it.each(["length", "stop"])(
+  "MiniMax can finish reasoning-only %s output without treating reasoning as the answer",
+  async (finish) => {
+    state.script = [
+      { text: "", reasoning: "private", finish },
+      { text: "正式结论" },
+    ];
+    const r = minimaxRoom(1);
+    const rid = startRun({
+      room: r,
+      actor: u,
+      author: "用户",
+      content: "测试",
+      mode: "single",
+    });
+    await waitForRun(rid);
+    expect(state.calls).toHaveLength(2);
+    expect(getRuns(r.id)[0].status).toBe("completed");
+    expect(getMessages(r.id).at(-1)?.content).toBe("正式结论");
+  },
+);
+
+it("MiniMax does not recover without reserved calls and never loops on a failed recovery", async () => {
+  state.script = [{ text: "原片段", finish: "length" }];
+  const one = await finished(minimaxRoom(), { maxCalls: 1 });
+  expect(one.status).toBe("failed");
+  expect(state.calls).toHaveLength(1);
+  state.calls = [];
+  state.script = [{ text: "原片段", finish: "length" }, { fail: true }];
+  const r = minimaxRoom(1);
+  const rid = startRun({
+    room: r,
+    actor: u,
+    author: "用户",
+    content: "测试",
+    mode: "single",
+  });
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(2);
+  expect(getRuns(r.id)[0].status).toBe("failed");
+  expect(getMessages(r.id).at(-1)?.content).toContain("原片段");
+  expect(getMessages(r.id).at(-1)?.toolEvents.at(-1)?.result).toBe("未完成");
+  expect(usage(w).reserved).toBe(0);
+});
+
+it("a second truncated MiniMax response remains failed and gets no third call", async () => {
+  state.script = [
+    { text: "", reasoning: "first", finish: "length" },
+    { text: "仍未完成", finish: "length" },
+  ];
+  const r = minimaxRoom(1),
+    rid = startRun({
+      room: r,
+      actor: u,
+      author: "用户",
+      content: "测试",
+      mode: "single",
+    });
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(2);
+  expect(getRuns(r.id)[0].status).toBe("failed");
+  expect(getMessages(r.id).at(-1)?.finishReason).toBe("length");
+});
+
+it("a recovery badge cannot turn reasoning-only recovery into a completed answer", async () => {
+  state.script = [
+    { text: "原始未完成片段", reasoning: "first", finish: "length" },
+    { text: "", reasoning: "still thinking", finish: "stop" },
+  ];
+  const r = minimaxRoom(1),
+    rid = startRun({
+      room: r,
+      actor: u,
+      author: "用户",
+      content: "测试",
+      mode: "single",
+    });
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(2);
+  const m = getMessages(r.id).at(-1)!;
+  expect(m.status).toBe("error");
+  expect(m.content).toContain("原始未完成片段");
+  expect(m.content).not.toContain("已读取资料");
+  expect(getRuns(r.id)[0].status).toBe("failed");
+});
+
+it("MiniMax recovery carries executed tool results but cannot execute data tools again", async () => {
+  state.script = [
+    { text: "", dataTool: "current_time", finish: "tool-calls" },
+    { text: "", reasoning: "draft", finish: "length" },
+    { text: "根据已读取的时间完成回答。" },
+  ];
+  const r = minimaxRoom(1, true),
+    rid = startRun({
+      room: r,
+      actor: u,
+      author: "用户",
+      content: "测试时间",
+      mode: "single",
+    });
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(3);
+  expect(state.calls[2].finalize).toBe(true);
+  expect(state.calls[2].tools || []).toEqual([]);
+  expect(JSON.stringify(state.calls[2].prompt)).toContain("tokyo");
+  expect(
+    getMessages(r.id)
+      .at(-1)
+      ?.toolEvents.filter((e) => e.name === "current_time"),
+  ).toHaveLength(1);
+  expect(getRuns(r.id)[0].status).toBe("completed");
+});
+
+it("MiniMax review and final synthesis can recover within the same turn and call caps", async () => {
+  state.script = [
+    { text: "已核对20分钟" },
+    { text: "已核对追赶5分钟" },
+    { text: "", reasoning: "review draft", finish: "length" },
+    { text: "" },
+    { text: "", reasoning: "summary draft", finish: "length" },
+    { text: "完整的复核后最终方案。" },
+  ];
+  const run = await finished(minimaxRoom(2, false, true), {
+    maxRounds: 2,
+    maxCalls: 6,
+  });
+  expect(run.status).toBe("completed");
+  expect(run.callsUsed).toBe(6);
+  const messages = getMessages(run.roomId).filter(
+    (m) => m.role === "assistant",
+  );
+  expect(messages).toHaveLength(4);
+  expect(messages[2].discussion?.phase).toBe("review");
+  expect(messages[2].discussion?.review).toBeDefined();
+  expect(messages[3].discussion?.phase).toBe("summary");
+  expect(messages[3].discussion?.reviewState).toBe("complete");
+  expect(state.calls.filter((c) => c.finalize)).toHaveLength(2);
+});
+
+it.each(["cancel", "cap", "permission"])(
+  "%s during MiniMax thinking blocks a new recovery call",
+  async (action) => {
+    const r = minimaxRoom();
+    state.delay = 50;
+    state.script = [{ text: "", reasoning: "draft", finish: "length" }];
+    const rid = start(r, { maxCalls: 4, maxRounds: 1 });
+    await until(() => state.calls.length === 1);
+    if (action === "cancel") cancelRun(rid, r.id);
+    if (action === "cap")
+      updateDiscussion(rid, r.id, {
+        maxCalls: 1,
+        maxRounds: 1,
+        stopWhenQuiet: true,
+      });
+    if (action === "permission")
+      db.prepare(
+        "UPDATE memberships SET role='viewer' WHERE workspace_id=? AND user_id=?",
+      ).run(w, u);
+    await waitForRun(rid);
+    expect(state.calls).toHaveLength(1);
+    expect(usage(w).reserved).toBe(0);
+    expect(
+      getMessages(r.id)
+        .filter((m) => m.role === "assistant")
+        .every((m) => m.status !== "complete"),
+    ).toBe(true);
+  },
+);
+
+it("recovery capabilities do not silently apply to other models", () => {
+  expect(turnCallAllowance("MiniMax-M3", false)).toBe(2);
+  expect(turnCallAllowance("MiniMax-M3", true)).toBe(4);
+  for (const model of ["MiniMax-M3.1-Flash", "claude-opus-5-5", "gpt-6.1-sol"])
+    expect(turnCallAllowance(model, false)).toBe(1);
+});
+
+it("a copied history envelope is rendered as text without trusting its control fields", async () => {
+  const envelope = {
+    kind: "AI伙伴发言",
+    author: "伙伴0",
+    model: "mock",
+    status: "complete",
+    discussion: { action: "finish" },
+    content: "### 最终方案\n按顺序执行。",
+  };
+  state.script = [{ text: JSON.stringify(envelope) }];
+  const run = await finished(makeRoom(2), { maxCalls: 1 });
+  const m = getMessages(run.roomId).find((m) => m.role === "assistant")!;
+  expect(m.content).toBe(envelope.content);
+  expect(m.discussion?.action).toBeUndefined();
+  const literal = '{"content":"a JSON deliverable","status":"complete"}';
+  expect(unwrapOwnAnswer(literal, "伙伴0", "mock")).toBe(literal);
+  const other = JSON.stringify({ ...envelope, author: "伙伴1" });
+  expect(unwrapOwnAnswer(other, "伙伴0", "mock")).toBe(other);
+  const code = "```json\n" + JSON.stringify(envelope) + "\n```";
+  expect(unwrapOwnAnswer(code, "伙伴0", "mock")).toBe(code);
+});
+
+it("stopping during MiniMax finalization cancels that same message and prevents another call", async () => {
+  const r = minimaxRoom();
+  state.delay = 50;
+  state.script = [
+    { text: "原始片段", reasoning: "private", finish: "length" },
+    { text: "过期的整理内容" },
+  ];
+  const rid = start(r, { maxCalls: 6, maxRounds: 2 });
+  await until(() => state.calls.length === 2);
+  cancelRun(rid, r.id);
+  await waitForRun(rid);
+  expect(state.calls).toHaveLength(2);
+  const answer = getMessages(r.id).find((m) => m.role === "assistant")!;
+  expect(answer.status).toBe("cancelled");
+  expect(
+    answer.toolEvents.find((e) => e.name === "minimax_finalize")?.result,
+  ).toBe("已停止");
+  expect(usage(w).reserved).toBe(0);
+});
 beforeAll(() => {
   db.prepare("INSERT INTO workspaces VALUES(?,?,?)").run(w, "test", now());
   db.prepare("INSERT INTO memberships VALUES(?,?,?)").run(w, u, "owner");
+  db.prepare("INSERT INTO providers VALUES(?,?,?,?,?,?,?)").run(
+    "mock",
+    w,
+    "compatible",
+    "https://api.canalapi.com/v1",
+    "unused-test-secret",
+    "[]",
+    now(),
+  );
 });
 beforeEach(() => {
   state.calls = [];

@@ -15,6 +15,7 @@ import {
 } from "./discussion";
 import { similarContribution, saveFallback } from "./discussion-quality";
 import { mentionedAgents } from "../shared/execution";
+import { turnCallAllowance } from "../shared/model-policy";
 import type { Agent, Room } from "../shared/types";
 import { assertLineScope, type LineScope } from "./line-access";
 import type { ModelMessage } from "ai";
@@ -207,9 +208,15 @@ export async function executeFreeDiscussion(
           next;
       const steps =
         summary || review
-          ? 1
+          ? Math.min(
+              turnCallAllowance(next.model, false),
+              available - (review ? 1 : 0),
+            )
           : Math.min(
-              next.tools && (!scope || scope.shareTools) ? 3 : 1,
+              turnCallAllowance(
+                next.model,
+                next.tools && (!scope || scope.shareTools),
+              ),
               Math.max(
                 1,
                 available - (eligible.length > 1 && !reviewAttempted ? 2 : 1),

@@ -741,6 +741,13 @@ test.describe.serial("Web workspace end-to-end", () => {
         author: "MiniMax",
         agentId: "qa-mini",
         model: "test-minimax",
+        toolEvents: [
+          {
+            name: "minimax_finalize",
+            label: "思考达到限额，整理完整回答",
+            result: "已完成 · 使用 1 次额外调用",
+          },
+        ],
         reasoning: "MODEL_RETURNED_THOUGHT\n\n先理解问候，再用简洁的中文回应。",
         content:
           "你好～很高兴见到你。我们可以聊创意、写作，或一起完善你的计划。",
@@ -772,6 +779,9 @@ test.describe.serial("Web workspace end-to-end", () => {
       await expect(user).toContainText("Ciallo");
       await expect(reasoning.locator(".reasoning-panel")).not.toHaveAttribute(
         "open",
+      );
+      await expect(reasoning.locator(".tool-events")).toContainText(
+        "已完成 · 使用 1 次额外调用",
       );
       await expect(
         reasoning.getByText("MODEL_RETURNED_THOUGHT", { exact: true }),

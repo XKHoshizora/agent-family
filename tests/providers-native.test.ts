@@ -191,6 +191,72 @@ it("MiniMax compatible requests separate reasoning and preserve its completion b
   expect(body.max_completion_tokens).toBe(8192);
   expect(body.max_tokens).toBeUndefined();
   expect(body.reasoning_split).toBe(true);
+  expect(body.thinking).toBeUndefined();
   expect(result.text).toBe("正式回答");
   expect(result.reasoningText).toBe("model reasoning");
 });
+
+it.each(["compatible", "openai"] as const)(
+  "%s MiniMax recovery uses the same model and only changes thinking for that request",
+  async (kind) => {
+    const bodies: any[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: any, init: any) => {
+        bodies.push(JSON.parse(init.body));
+        return new Response(
+          JSON.stringify({
+            id: "mini",
+            object: "chat.completion",
+            created: 1,
+            model: "MiniMax-M3",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: "完整结论" },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    saveProvider("native-workspace", {
+      id: "mini-finalize",
+      kind,
+      baseUrl: "https://api.canalapi.com/v1",
+      apiKey: "fake",
+      models: ["MiniMax-M3", "MiniMax-M3.1-Flash"],
+    });
+    const a: Agent = {
+      id: "m",
+      name: "MiniMax",
+      provider: "mini-finalize",
+      model: "MiniMax-M3",
+      persona: "",
+      color: "sage",
+      tools: false,
+      enabled: true,
+    };
+    for (const finalize of [true, false])
+      await generateText({
+        model: modelFor("native-workspace", a, { finalize }),
+        prompt: "hi",
+        maxOutputTokens: 4096,
+        maxRetries: 0,
+      });
+    expect(bodies[0].model).toBe("MiniMax-M3");
+    expect(bodies[0].thinking).toEqual({ type: "disabled" });
+    expect(bodies[0].max_completion_tokens).toBe(4096);
+    expect(bodies[1].thinking).toBeUndefined();
+    expect(() =>
+      modelFor(
+        "native-workspace",
+        { ...a, model: "MiniMax-M3.1-Flash" },
+        { finalize: true },
+      ),
+    ).toThrow("不支持");
+  },
+);
