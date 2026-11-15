@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { betterAuth } from "better-auth";
 import { fromNodeHeaders } from "better-auth/node";
@@ -21,8 +21,19 @@ const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
 // it hands out the caller's transaction client instead of a pooled one, and turns Better
 // Auth's own begin/commit/rollback into a savepoint so they nest inside the outer
 // transaction instead of ending it. Outside `runInTransaction` it is a plain pool.
+//
+// The caller's client goes back to the pool when its transaction ends, and may then be serving
+// someone else. So everything handed out inside `runInTransaction` stops working the moment its
+// callback settles (and a handed-out connection once it is released): a late query throws instead
+// of running on a client that is no longer ours.
 
-const outerTx = new AsyncLocalStorage<pg.PoolClient>();
+interface OuterTransaction {
+  client: pg.PoolClient;
+  /** False once the `runInTransaction` callback has settled. */
+  open: boolean;
+}
+
+const outerTx = new AsyncLocalStorage<OuterTransaction>();
 
 const SAVEPOINT = "better_auth_nested";
 
@@ -34,54 +45,110 @@ function nestedSql(text: string): string {
   return text;
 }
 
-function switchablePool(pool: pg.Pool) {
+/** Queries on the outer transaction's client while it is ours (and `usable()` holds); a rejection after. */
+function onOuter(outer: OuterTransaction, usable: () => boolean = () => true) {
+  return async (text: string, values?: unknown[]) => {
+    if (!outer.open) throw new Error("Better Auth used a registration transaction after it ended");
+    if (!usable()) throw new Error("Better Auth used a connection after releasing it");
+    return outer.client.query(nestedSql(text), values);
+  };
+}
+
+/** The pool Better Auth is given (exported for tests). */
+export function switchablePool(pool: pg.Pool) {
   return {
     async connect() {
-      const client = outerTx.getStore();
-      if (!client) return pool.connect();
+      const outer = outerTx.getStore();
+      if (!outer) return pool.connect();
+      let released = false;
       return {
-        query: (text: string, values?: unknown[]) => client.query(nestedSql(text), values),
-        release: () => {},
+        query: onOuter(outer, () => !released),
+        release: () => {
+          released = true;
+        },
       };
     },
     end: async () => {},
   };
 }
 
-/** Runs `fn` so that every Better Auth call inside it executes on `client`'s transaction. */
-export function runInTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
-  return outerTx.run(client, fn);
+/**
+ * Runs `fn` so that every Better Auth call inside it executes on `client`'s transaction. What Better
+ * Auth got hold of inside refuses to run once `fn` has settled.
+ */
+export async function runInTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
+  const outer: OuterTransaction = { client, open: true };
+  try {
+    return await outerTx.run(outer, fn);
+  } finally {
+    outer.open = false;
+  }
 }
 
 // --- session-ended notifications ------------------------------------------------------
 
-type SessionEndedListener = (principalId: string, sessionId: string) => void;
-const sessionEndedListeners = new Set<SessionEndedListener>();
+export type SessionEndedListener = (principalId: string, sessionId: string) => void | Promise<void>;
 
-/** Fires whenever a session is deleted: sign-out, password reset (once per session), expiry cleanup. */
-export function onSessionEnded(fn: SessionEndedListener): () => void {
-  sessionEndedListeners.add(fn);
-  return () => sessionEndedListeners.delete(fn);
+/** Per-app registry (on `Deps.sessions`) of "a session ended" listeners, in the style of `SocialEvents`. */
+export interface SessionEvents {
+  on(fn: SessionEndedListener): () => void;
+  /** Never throws; a listener that throws or rejects is logged. */
+  emit(principalId: string, sessionId: string, log: Pick<FastifyBaseLogger, "error">): void;
 }
 
-async function announceSessionEnded(db: Queryable, session: { id: string; userId: string }): Promise<void> {
-  const { rows } = await db.query<{ id: string }>("select id from principals where auth_user_id = $1", [session.userId]);
-  const principalId = rows[0]?.id;
-  if (!principalId) return;
-  for (const fn of sessionEndedListeners) {
-    try {
-      fn(principalId, session.id);
-    } catch {
-      // a faulty subscriber must not break sign-out or password reset
-    }
+export function createSessionEvents(): SessionEvents {
+  const listeners = new Set<SessionEndedListener>();
+  return {
+    on(fn) {
+      listeners.add(fn);
+      return () => void listeners.delete(fn);
+    },
+    emit(principalId, sessionId, log) {
+      for (const fn of [...listeners]) {
+        try {
+          Promise.resolve(fn(principalId, sessionId)).catch((err) => log.error({ err }, "session-ended listener failed"));
+        } catch (err) {
+          log.error({ err }, "session-ended listener failed");
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Subscribe to "a session was deleted" (sign-out, password reset — once per session —, expiry cleanup) of
+ * this app. Returns unsubscribe.
+ */
+export function onSessionEnded(app: FastifyInstance, fn: SessionEndedListener): () => void {
+  return app.deps.sessions.on(fn);
+}
+
+/** Never throws: a failure here must not turn a completed sign-out or password reset into an error. */
+async function announceSessionEnded(
+  db: Queryable,
+  sessions: SessionEvents,
+  log: Pick<FastifyBaseLogger, "error">,
+  session: { id: string; userId: string },
+): Promise<void> {
+  try {
+    const { rows } = await db.query<{ id: string }>("select id from principals where auth_user_id = $1", [session.userId]);
+    const principalId = rows[0]?.id;
+    if (principalId) sessions.emit(principalId, session.id, log);
+  } catch (err) {
+    // Its sockets are still closed by the heartbeat's session check (sync/hub.ts) within 30 s.
+    log.error({ err }, "could not announce an ended session");
   }
 }
 
 // --- the Better Auth instance -------------------------------------------------------------
 
-export function createAuth(config: Config, db: Db) {
-  // Mail caused by a registration commits with it; everything else writes straight to the pool.
-  const mailDb = (): Queryable => outerTx.getStore() ?? db;
+export function createAuth(config: Config, db: Db, sessions: SessionEvents, log: Pick<FastifyBaseLogger, "error">) {
+  // Mail caused by a registration commits with it (and cannot be written once that transaction is
+  // over); everything else writes straight to the pool.
+  const mailDb = (): Queryable => {
+    const outer = outerTx.getStore();
+    return outer ? ({ query: onOuter(outer) } as unknown as Queryable) : db;
+  };
   const isHttps = new URL(config.appOrigin).protocol === "https:";
 
   return betterAuth({
@@ -129,7 +196,7 @@ export function createAuth(config: Config, db: Db) {
     },
     databaseHooks: {
       session: {
-        delete: { after: async (session) => announceSessionEnded(db, session) },
+        delete: { after: async (session) => announceSessionEnded(db, sessions, log, session) },
       },
     },
   });
@@ -162,6 +229,25 @@ function accountAndIpLimiter(app: FastifyInstance, scale: number): Limiter {
     const results = [await perAccount(req), await perIp(req)];
     if (results.some((r) => "isExceeded" in r && r.isExceeded)) throw new AppError(429, "rate_limited");
   };
+}
+
+/**
+ * A Better Auth JSON body without any `token` field, at any depth. Sign-in returns the session token
+ * in its body; the HttpOnly cookie already carries the session, and a script must never see it.
+ */
+function withoutTokens(json: string): string {
+  const strip = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(strip);
+    if (v && typeof v === "object") {
+      return Object.fromEntries(Object.entries(v).filter(([k]) => k !== "token").map(([k, x]) => [k, strip(x)]));
+    }
+    return v;
+  };
+  try {
+    return JSON.stringify(strip(JSON.parse(json)));
+  } catch {
+    return json;
+  }
 }
 
 const STATUS_CODES: Record<number, string> = { 401: "unauthenticated", 403: "forbidden", 404: "not_found", 429: "rate_limited" };
@@ -261,10 +347,13 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
     }
     reply.status(response.status);
     response.headers.forEach((value, key) => {
-      if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
+      // The body may be rewritten below, so its length is Fastify's to state.
+      if (!["set-cookie", "content-length"].includes(key.toLowerCase())) reply.header(key, value);
     });
     for (const cookie of response.headers.getSetCookie()) reply.header("set-cookie", cookie);
-    return reply.send(response.body ? await response.text() : null);
+    if (!response.body) return reply.send(null);
+    const text = await response.text();
+    return reply.send(/json/i.test(response.headers.get("content-type") ?? "") ? withoutTokens(text) : text);
   };
   const onRequest = async (req: FastifyRequest) => {
     if (!exposed.has(endpointOf(req))) throw new AppError(404, "not_found");

@@ -8,7 +8,7 @@ import {
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
-import { createAuth, registerAuthRoutes, type Auth } from "./auth/auth.ts";
+import { createAuth, createSessionEvents, registerAuthRoutes, type Auth, type SessionEvents } from "./auth/auth.ts";
 import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, frameworkErrors, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
@@ -40,6 +40,8 @@ export interface Deps {
   conversations: ConversationEvents;
   /** Per-app registry of "a direct-chat read marker moved" listeners; fired after the update. */
   reads: ReadEvents;
+  /** Per-app registry of "a session was deleted" listeners (sign-out, password reset, expiry cleanup). */
+  sessions: SessionEvents;
   /** Uploads in progress per principal (at most 3 each). */
   uploads: UploadSlots;
   /** Searches in progress per principal (at most 2 each). */
@@ -103,6 +105,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     social: overrides.social ?? createSocialEvents(),
     conversations: overrides.conversations ?? createConversationEvents(),
     reads: overrides.reads ?? createReadEvents(),
+    sessions: overrides.sessions ?? createSessionEvents(),
     uploads: overrides.uploads ?? createUploadSlots(),
     searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES),
   };
@@ -148,7 +151,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   });
 
   app.decorate("deps", deps);
-  app.decorate("auth", createAuth(config, deps.db));
+  app.decorate("auth", createAuth(config, deps.db, deps.sessions, app.log));
   if (ownsDb) app.addHook("onClose", async () => deps.db.close());
 
   // The single source of throttling (Better Auth's own limiter is off): 10 per minute per IP and route.

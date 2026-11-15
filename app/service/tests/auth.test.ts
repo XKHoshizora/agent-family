@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { buildApp } from "../src/app.ts";
-import { onSessionEnded } from "../src/auth/auth.ts";
+import { onSessionEnded, runInTransaction, switchablePool } from "../src/auth/auth.ts";
 import { createInvite, hashInviteCode } from "../src/auth/invites.ts";
 import { api, cookieHeaderFrom, mailLink, signIn, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -247,7 +247,7 @@ describe("accounts", () => {
   test("onSessionEnded fires on sign-out, and on password reset once for every session of the user", async () => {
     const a = await signUp(app, "notify_me");
     const ended: Array<[string, string]> = [];
-    const off = onSessionEnded((principalId, sessionId) => ended.push([principalId, sessionId]));
+    const off = onSessionEnded(app, (principalId, sessionId) => void ended.push([principalId, sessionId]));
     try {
       await api(app, a, "POST", "/api/auth/sign-out", {});
       expect(ended).toHaveLength(1);
@@ -267,6 +267,113 @@ describe("accounts", () => {
       expect(new Set(ended.map(([, s]) => s)).size).toBe(2);
     } finally {
       off();
+    }
+  });
+
+  test("session-ended listeners belong to one app; one that throws or rejects is logged and sign-out still works", async () => {
+    const lines: string[] = [];
+    const other = await buildApp({ config: app.deps.config, db: app.deps.db }, { logStream: { write: (l) => void lines.push(l) } });
+    await other.ready();
+    try {
+      const a = await signUp(app, "per_app");
+      const heardHere: string[] = [];
+      const heardThere: string[] = [];
+      const offs = [
+        onSessionEnded(app, (_p, s) => void heardHere.push(s)),
+        onSessionEnded(other, () => {
+          throw new Error("listener threw");
+        }),
+        onSessionEnded(other, async () => {
+          throw new Error("listener rejected");
+        }),
+        onSessionEnded(other, (_p, s) => void heardThere.push(s)),
+      ];
+      try {
+        // Signed out through the other app: only its listeners hear of it, all of them despite the failures.
+        expect(await api(other, a, "POST", "/api/auth/sign-out", {})).toEqual({ status: 200, json: { success: true } });
+        expect(heardThere).toHaveLength(1);
+        expect(heardHere).toEqual([]);
+        await vi.waitFor(() => {
+          const failures = lines.map((l) => JSON.parse(l)).filter((e) => e.msg === "session-ended listener failed");
+          expect(failures.map((e) => e.err.message).sort()).toEqual(["listener rejected", "listener threw"]);
+        });
+        expect(await api(app, a, "GET", "/api/me")).toEqual({ status: 401, json: { error: "unauthenticated" } });
+      } finally {
+        for (const off of offs) off();
+      }
+    } finally {
+      await other.close();
+    }
+  });
+
+  test("what Better Auth holds of a registration transaction refuses to run once that transaction is over", async () => {
+    const pool = switchablePool(db.pool);
+    let kept: { query: (text: string) => Promise<unknown>; release: () => void } | undefined;
+    await db.tx((client) =>
+      runInTransaction(client, async () => {
+        kept = (await pool.connect()) as typeof kept;
+        await expect(kept!.query("select 1")).resolves.toBeTruthy();
+        // Better Auth's own transaction control becomes a savepoint inside ours.
+        await expect(kept!.query("begin")).resolves.toBeTruthy();
+        await expect(kept!.query("commit")).resolves.toBeTruthy();
+      }),
+    );
+    // The client is back in the pool (maybe serving someone else by now): no query may reach it.
+    await expect(kept!.query("select 1")).rejects.toThrow(/after it ended/);
+
+    await db.tx((client) =>
+      runInTransaction(client, async () => {
+        const released = await pool.connect();
+        released.release();
+        await expect(released.query("select 1")).rejects.toThrow(/after releasing it/);
+        const fresh = await pool.connect();
+        await expect(fresh.query("select 1")).resolves.toBeTruthy();
+      }),
+    );
+    // Outside a registration it is an ordinary pool.
+    const plain = await pool.connect();
+    try {
+      expect((await plain.query("select 1 as one")).rows).toEqual([{ one: 1 }]);
+    } finally {
+      plain.release();
+    }
+  });
+
+  test("no response of an auth endpoint carries a session token in its body; the cookie does", async () => {
+    const tokens = new Set<string>();
+    const bodies: Array<[string, string]> = [];
+    const collect = async () => {
+      for (const r of (await db.query<{ token: string }>(`select token from "session"`)).rows) tokens.add(r.token);
+    };
+    const keep = (label: string, res: { body: string }) => void bodies.push([label, res.body]);
+
+    // Registration and verification of a new account.
+    const code = await invite();
+    keep("register", await app.inject({ method: "POST", url: "/api/register", payload: { inviteCode: code, email: "tok@example.test", password: PASSWORD, displayName: "Tok", handle: "tok_en" } }));
+    keep("verify-email", await app.inject({ method: "GET", url: await mailLink(app, "tok@example.test", "verify_email") }));
+    // Sign-in, twice (two sessions), the second also with a remembered session.
+    const first = await signIn(app, "tok@example.test", PASSWORD);
+    keep("sign-in", first);
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).not.toHaveProperty("token");
+    expect(first.json().user.email).toBe("tok@example.test");
+    const cookie = cookieHeaderFrom(first.headers["set-cookie"]);
+    keep("sign-in remember", await app.inject({ method: "POST", url: "/api/auth/sign-in/email", payload: { email: "tok@example.test", password: PASSWORD, rememberMe: true } }));
+    await collect();
+    expect(tokens.size).toBe(2);
+    // The cookie carries the session (as the signed token).
+    expect([...tokens].some((t) => decodeURIComponent(cookie).includes(t))).toBe(true);
+    keep("me", await app.inject({ method: "GET", url: "/api/me", headers: { cookie } }));
+    keep("request-password-reset", await app.inject({ method: "POST", url: "/api/auth/request-password-reset", payload: { email: "tok@example.test" } }));
+    keep("reset-password", await app.inject({ method: "POST", url: "/api/auth/reset-password", payload: { newPassword: "another good password", token: await resetToken("tok@example.test") } }));
+    const again = await signIn(app, "tok@example.test", "another good password");
+    keep("sign-in after reset", again);
+    await collect();
+    keep("sign-out", await app.inject({ method: "POST", url: "/api/auth/sign-out", headers: { cookie: cookieHeaderFrom(again.headers["set-cookie"]) }, payload: {} }));
+
+    expect(tokens.size).toBe(3);
+    for (const [label, body] of bodies) {
+      for (const token of tokens) expect([label, body.includes(token)]).toEqual([label, false]);
     }
   });
 

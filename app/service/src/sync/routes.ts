@@ -115,7 +115,7 @@ export async function registerSync(app: FastifyInstance): Promise<void> {
   const tickets = createTicketStore();
   const hub = new Hub({ db, conversations, social, reads, log: app.log });
   hub.start();
-  const offSessionEnded = onSessionEnded((_principalId, sessionId) => {
+  const offSessionEnded = onSessionEnded(app, (_principalId, sessionId) => {
     tickets.revokeSession(sessionId);
     hub.endSession(sessionId);
   });

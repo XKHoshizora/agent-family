@@ -81,6 +81,9 @@ Better Auth (e-mail + password, verified e-mail required, 7-day sessions) mounte
 only these endpoints are exposed: `POST /sign-in/email`, `POST /sign-out`, `GET /verify-email`,
 `POST /request-password-reset`, `POST /reset-password`. Registration is `POST /api/register`
 (invite code unless `REGISTRATION_MODE=open`). `GET /api/me` returns the signed-in principal.
+Each of these declares its query and body; anything else is 400 before Better Auth sees it. A
+`callbackURL` / `redirectTo` must be a path on the site (not `//…`) or a URL on `APP_ORIGIN`. No response
+body carries the session token (sign-in's `token` field is removed): the `HttpOnly` cookie is the session.
 Mail goes to the `mail_outbox` table. CLI: `npx tsx src/cli.ts invite:create [--ttl-hours n]` / `inbox:list [--to <email>]`.
 Set `TRUST_PROXY=true` only behind a reverse proxy you control (IP rate limits then trust `X-Forwarded-For`).
 

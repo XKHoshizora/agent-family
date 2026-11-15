@@ -12,8 +12,10 @@ const TOTAL_MS = 2000;
 const CONNECTION_IDLE_MS = 800;
 
 const { blobs, probe, files: blobFiles, putStarted } = useProbeBlobs("af-att-deadline-");
+const logLines: string[] = [];
 const { app, db } = useApp({
   blobs,
+  logStream: { write: (line) => void logLines.push(line) },
   env: {
     UPLOAD_IDLE_TIMEOUT_MS: String(IDLE_MS),
     UPLOAD_TOTAL_TIMEOUT_MS: String(TOTAL_MS),
@@ -95,6 +97,44 @@ describe("upload deadlines", () => {
     expect(cut).toBe(true);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(TOTAL_MS - 50);
     await nothingLeft();
+  });
+
+  it("a client that stays connected and silent is cut off by the idle deadline alone, before the body's first part", async () => {
+    // Nothing else can end these: the client neither sends nor leaves (so the fail-fast check for a
+    // vanished client does not apply), and the server-wide connection timeout is twice the deadline.
+    const { a, dm } = await pair();
+    const { port } = await listen(app);
+    const heads = [
+      "", // the request head only
+      `--${BOUNDARY}\r\nContent-Disposition: form-data; na`, // stalled inside the first part's head
+    ];
+    for (const [i, partial] of heads.entries()) {
+      const linesBefore = logLines.length;
+      const socket = net.connect({ port, host: "127.0.0.1" });
+      socket.on("error", () => {});
+      const closed = new Promise<number>((resolve) => socket.once("close", () => resolve(performance.now())));
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      const head = [
+        `POST /api/conversations/${dm}/attachments HTTP/1.1`,
+        `Host: 127.0.0.1:${port}`,
+        `Cookie: ${a.cookie}`,
+        `Content-Type: ${MULTIPART}`,
+        "Content-Length: 1048576",
+      ].join("\r\n");
+      socket.write(`${head}\r\n\r\n${partial}`);
+      await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(1), { interval: 2 });
+      const handling = performance.now();
+      const cutAt = await closed;
+      expect(cutAt - handling).toBeGreaterThanOrEqual(IDLE_MS - 50);
+      expect(cutAt - handling).toBeLessThan(CONNECTION_IDLE_MS - 100);
+      // The handler settled through the deadline: slot back, key released, nothing written.
+      await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(0));
+      await nothingLeft();
+      const cut = logLines.slice(linesBefore).map((l) => JSON.parse(l)).filter((e) => e.msg === "upload cut off");
+      expect(cut.map((e) => e.why)).toEqual(["idle"]);
+    }
+    expect(probe.puts).toEqual([]);
+    expect((await api(app, a, "GET", "/api/me")).status).toBe(200);
   });
 
   it("a handler whose client vanished before the body was read settles and lets go of everything", async () => {
