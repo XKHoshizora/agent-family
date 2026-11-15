@@ -202,6 +202,39 @@ describe("paste and drop", () => {
     expect(uploads.calls.map((c) => c.file.name)).toEqual(["a.txt", "b.txt"]);
   });
 
+  it("dropped folders are skipped, with or without the browser saying what each item is", async () => {
+    await openApp();
+    await openChat("小安");
+    const chat = document.querySelector("section.chat");
+    const folder = fakeFile("相册", 0, "");
+    const real = fakeFile("a.txt", 5, "text/plain");
+    const entry = (isDirectory) => ({ kind: "file", webkitGetAsEntry: () => ({ isDirectory }) });
+    fireEvent.drop(chat, { dataTransfer: { types: ["Files"], files: [folder, real], items: [entry(true), entry(false)] } });
+    await flush();
+    expect(uploads.calls.map((c) => c.file.name)).toEqual(["a.txt"]);
+    fireEvent.drop(chat, { dataTransfer: { types: ["Files"], files: [fakeFile("文件夹", 0, ""), fakeFile("b.txt", 5, "text/plain")] } });
+    await flush();
+    expect(uploads.calls.map((c) => c.file.name)).toEqual(["a.txt", "b.txt"]);
+    expect(mine()).toHaveLength(2);
+  });
+
+  it("a chat that cannot send shows no drop outline while files are dragged over it", async () => {
+    const sync = () => syncOf([direct(D1, ANN, { lastSeq: 1, canSend: { ok: false, reason: "not_friends" } })], range(D1, 1, 1));
+    await openApp({ sync });
+    await openChat("小安");
+    const chat = document.querySelector("section.chat");
+    fireEvent.dragOver(chat, { dataTransfer: { types: ["Files"] } });
+    expect(chat.classList.contains("dropping")).toBe(false);
+  });
+
+  it("pasting an image together with text uploads the image and lets the text paste", async () => {
+    await openApp();
+    await openChat("小安");
+    const pasted = fireEvent.paste(screen.getByLabelText("消息内容"), { clipboardData: { files: [fakeFile("image.png", 5, "image/png")], getData: () => "网页上的文字" } });
+    expect(pasted).toBe(true); // not prevented
+    expect(uploads.calls.map((c) => c.file.name)).toEqual(["image.png"]);
+  });
+
   it("dropping something that is not a file does nothing", async () => {
     await openApp();
     await openChat("小安");

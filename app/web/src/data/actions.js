@@ -124,6 +124,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const waiting = [];
   let uploading = 0;
 
+  /** The job no longer uploads: its slot (if it held one) is free for the next waiting file. */
+  const releaseSlot = (job) => {
+    if (!job.counted) return;
+    job.counted = false;
+    uploading -= 1;
+    pump();
+  };
   const endJob = (clientTxn, job, result) => {
     if (jobs.get(clientTxn) === job) jobs.delete(clientTxn);
     if (job.counted) {
@@ -132,6 +139,16 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     }
     job.resolve(result);
     pump();
+  };
+  /** Stops the job of an entry (running or waiting), if there is one, and frees its slot. */
+  const dropJob = (clientTxn, error) => {
+    const job = jobs.get(clientTxn);
+    if (!job) return;
+    job.cancelled = true;
+    job.controller?.abort();
+    const at = waiting.indexOf(clientTxn);
+    if (at >= 0) waiting.splice(at, 1);
+    endJob(clientTxn, job, { ok: false, clientTxn, error: dropped(error) });
   };
 
   function pump() {
@@ -166,12 +183,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     try {
       attachment = await api.uploadAttachment(p.conversationId, files.get(clientTxn), { onProgress, signal: job.controller.signal });
     } catch (err) {
-      if (job.cancelled || jobs.get(clientTxn) !== job) return; // cancelUpload or stop() already settled it
+      if (job.cancelled || jobs.get(clientTxn) !== job) return releaseSlot(job); // cancelled, replaced or stopped
       const error = errorOf(err);
       endJob(clientTxn, job, failed(clientTxn, p.conversationId, job.token, error));
       return;
     }
-    if (job.cancelled || jobs.get(clientTxn) !== job) return;
+    if (job.cancelled || jobs.get(clientTxn) !== job) return releaseSlot(job);
     const why = staleness(job.token);
     if (why) {
       // The upload belongs to an earlier stay: it is not posted into this one (the entry, if kept, failed already).
@@ -180,17 +197,15 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     }
     setModel(setUploaded(getModel(), clientTxn, attachment));
     // Uploading is over (the next waiting file may start); the message send below is not limited.
-    if (job.counted) {
-      job.counted = false;
-      uploading -= 1;
-      pump();
-    }
+    releaseSlot(job);
     const result = await deliver(clientTxn);
     if (result.ok) files.delete(clientTxn);
     endJob(clientTxn, job, result);
   }
 
   function queueUpload(clientTxn, conversationId) {
+    // An earlier job of this entry (a stay that ended while it ran) must not outlive it: it would hold a slot or upload twice.
+    dropJob(clientTxn, "stale");
     return new Promise((resolve) => {
       jobs.set(clientTxn, { resolve, token: tokenFor(conversationId), controller: null, counted: false, cancelled: false });
       waiting.push(clientTxn);
@@ -208,7 +223,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (!file || !Number.isFinite(file.size)) return refused("invalid_request");
     if (file.size > MAX_FILE_BYTES) return refused("too_large");
     const clientTxn = uuid();
-    const caption = typeof text === "string" ? wellFormed(text.replaceAll(" ", "")).trim() : "";
+    const caption = typeof text === "string" ? wellFormed(text.replaceAll("\u0000", "")).trim() : "";
     // Forget files of entries that are gone (another account signed in, the conversation was left).
     for (const key of files.keys()) if (!getModel().pending[key]) files.delete(key);
     files.set(clientTxn, file);
@@ -223,14 +238,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   function cancelUpload(clientTxn) {
     const p = getModel().pending[clientTxn];
     if (!p || p.attachment || !p.file) return { ok: false, error: dropped("not_found") };
-    const job = jobs.get(clientTxn);
-    if (job) {
-      job.cancelled = true;
-      job.controller?.abort();
-      const at = waiting.indexOf(clientTxn);
-      if (at >= 0) waiting.splice(at, 1);
-      endJob(clientTxn, job, { ok: false, clientTxn, error: dropped("cancelled") });
-    }
+    dropJob(clientTxn, "cancelled");
     files.delete(clientTxn);
     setModel(discardPending(getModel(), clientTxn));
     return { ok: true };

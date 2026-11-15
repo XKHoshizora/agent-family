@@ -7,7 +7,7 @@ import { MessageItem } from "./Messages.jsx";
 import { Search, Menu, ChevronLeft, X } from "../icons.js";
 
 import { Composer } from "./Composer.jsx";
-import { useSendFiles } from "./useSendFiles.js";
+import { droppedFiles, useSendFiles } from "./useSendFiles.js";
 
 /** This close to the bottom the list counts as "at the newest message" and follows new ones. */
 const BOTTOM_SLACK_PX = 48;
@@ -168,7 +168,7 @@ export function ChatView({ conv }) {
     onDragOver: (e) => {
       if (!hasFiles(e)) return;
       e.preventDefault();
-      setDropping(true);
+      if (!block) setDropping(true); // a chat that cannot send does not invite the drop (it still answers it with the hold notice)
     },
     onDragLeave: (e) => {
       if (!e.currentTarget.contains(e.relatedTarget)) setDropping(false);
@@ -177,7 +177,7 @@ export function ChatView({ conv }) {
       if (!hasFiles(e)) return;
       e.preventDefault();
       setDropping(false);
-      sendFiles(e.dataTransfer.files);
+      sendFiles(droppedFiles(e.dataTransfer));
     },
   };
 

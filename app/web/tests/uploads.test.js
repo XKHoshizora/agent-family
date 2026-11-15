@@ -18,13 +18,14 @@ async function loaded({ sendMessage = vi.fn(() => new Promise(() => {})), transp
   const up = fakeUploads();
   const api = { uploadAttachment: up.uploadAttachment, sendMessage, markRead: vi.fn(), listMessages: vi.fn() };
   let n = 0;
-  const layer = createDataLayer({ transport, api, timers: fakeTimers(), now: () => 1_700_000_000_000, random: () => 0.5, uuid: () => `tx-${++n}` });
+  const timers = fakeTimers();
+  const layer = createDataLayer({ transport, api, timers, now: () => 1_700_000_000_000, random: () => 0.5, uuid: () => `tx-${++n}` });
   layers.push(layer);
   layer.start();
   await settle();
   const messages = (id) => toView(layer.getSnapshot().model, { now: 1_700_000_000_000 }).convs[id].messages;
   const last = (id) => messages(id).at(-1);
-  return { layer, api, up, transport, messages, last, actions: layer.actions };
+  return { layer, api, up, transport, timers, messages, last, actions: layer.actions };
 }
 
 describe("sendFile", () => {
@@ -179,6 +180,53 @@ describe("sendFile", () => {
     up.finish(0);
     await expect(queued).resolves.toMatchObject({ ok: false, error: { code: "stale" } });
     expect(up.calls.map((c) => c.file.name)).toEqual(["a", "b", "c"]);
+  });
+
+  /** While the socket is down I am removed from G1 and added again: the continuation starts a new stay, unsent entries fail as stale. */
+  async function reAdded({ transport, timers }) {
+    const joined = notice(G1, 60, "x", { event: "member_joined", actorId: ANN, principalId: ME_ID });
+    transport.socket.drop(1006);
+    transport.handlers.catchUp = () => ({ messages: [joined, wire(G1, 61, ANN)], gone: [], more: false });
+    transport.handlers.sync = () => syncOf([direct(D1, ANN, { lastSeq: 3 }), group(G1, { lastSeq: 61 })], [...range(D1, 1, 3), joined, wire(G1, 61, ANN)]);
+    timers.advance(timers.delays()[0]);
+    await settle();
+  }
+
+  it("retrying an entry whose stay ended while its upload ran aborts the old upload and frees its slot", async () => {
+    const env = await loaded();
+    const { actions, up, last } = env;
+    actions.sendFile(G1, fakeFile("alt"));
+    actions.sendFile(D1, fakeFile("b"));
+    actions.sendFile(D1, fakeFile("c"));
+    await reAdded(env);
+    expect(last(G1)).toMatchObject({ status: "failed", error: { code: "stale" } });
+    actions.retrySend("tx-1");
+    expect(up.calls[0].signal.aborted).toBe(true);
+    expect(up.calls.map((c) => c.file.name)).toEqual(["alt", "b", "c", "alt"]);
+    up.finish(0); // the old one ends late: no effect
+    await settle();
+    expect(up.calls).toHaveLength(4);
+    for (const i of [1, 2, 3]) up.finish(i);
+    await settle();
+    for (const name of ["x", "y", "z"]) actions.sendFile(D1, fakeFile(name));
+    expect(up.calls.map((c) => c.file.name).slice(4)).toEqual(["x", "y", "z"]); // no slot leaked
+  });
+
+  it("retrying an entry whose old upload still waits in the queue starts one upload, not two", async () => {
+    const env = await loaded();
+    const { actions, up } = env;
+    for (const name of ["a", "b", "c"]) actions.sendFile(D1, fakeFile(name));
+    const old = actions.sendFile(G1, fakeFile("waiting"));
+    await reAdded(env);
+    actions.retrySend("tx-4");
+    await expect(old).resolves.toMatchObject({ ok: false, error: { code: "stale" } });
+    up.finish(0);
+    await settle();
+    expect(up.calls.map((c) => c.file.name)).toEqual(["a", "b", "c", "waiting"]);
+    up.finish(1);
+    up.finish(2);
+    await settle();
+    expect(up.calls).toHaveLength(4);
   });
 
   it("stop() aborts uploads and settles them: failed, retryable after start", async () => {

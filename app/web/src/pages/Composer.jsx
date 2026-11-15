@@ -118,7 +118,8 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
   const paste = e => {
     const images = [...(e.clipboardData?.files ?? [])].filter(f => f.type.startsWith("image/"));
     if (images.length === 0) return;
-    e.preventDefault();
+    // Text on the clipboard as well (copied from a page or a document): it still pastes into the box.
+    if (!e.clipboardData.getData?.("text/plain")) e.preventDefault();
     sendFiles(images);
   };
   const limitNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : null;

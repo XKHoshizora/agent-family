@@ -4,6 +4,20 @@ import { MAX_FILE_BYTES } from "../data/actions.js";
 import { FILE_LIMIT_TEXT } from "../data/uploadErrors.js";
 
 /**
+ * The files of a drop, without folders (a dropped folder shows up as a File that cannot be read and would only
+ * fail). Browsers that say what each item is (`webkitGetAsEntry`) decide by that; otherwise an empty, untyped,
+ * zero-byte "file" is taken for a folder.
+ */
+export function droppedFiles(dataTransfer) {
+  const files = [...(dataTransfer?.files ?? [])];
+  const items = [...(dataTransfer?.items ?? [])].filter((item) => item.kind === "file");
+  if (items.length === files.length && items.every((item) => typeof item.webkitGetAsEntry === "function")) {
+    return files.filter((_file, i) => !items[i].webkitGetAsEntry()?.isDirectory);
+  }
+  return files.filter((file) => !(file.size === 0 && file.type === ""));
+}
+
+/**
  * `sendFiles(fileList)` for one conversation: the picker, paste and drop all come here. Each file becomes its own
  * message, in order. Where sending is not allowed (`block`, the hold) the hold notice is shown and nothing is
  * uploaded; a file over the size limit is refused here, before any request.
