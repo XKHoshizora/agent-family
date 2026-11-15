@@ -41,3 +41,16 @@ export function userText(min: number, max: number, { singleLine = false }: { sin
       return n >= min && n <= max;
     }, `must be ${min}-${max} characters`);
 }
+
+/** Format characters: bidi overrides and isolates, zero-width spaces and joiners, the BOM… (as in file names). */
+const FORMAT_CHARS = /\p{Cf}/gu;
+
+/**
+ * A person's display name, on registration and `PATCH /api/me` alike: format characters removed (they could
+ * reorder or hide what others see), then trimmed; 1–40 characters (code points); one line — no control
+ * characters, no line or paragraph separators; no lone surrogates.
+ */
+export const displayName = z
+  .string()
+  .transform((s) => s.replace(FORMAT_CHARS, ""))
+  .pipe(userText(1, 40, { singleLine: true }).refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line"));

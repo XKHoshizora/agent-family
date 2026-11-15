@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { uuidParam } from "../schemas.ts";
+import { displayName, uuidParam } from "../schemas.ts";
 import { isMissingBlob, newBlobKey } from "../attachments/blob.ts";
 import { discardBlob, holdBlob, releaseBlob } from "../attachments/pending.ts";
 import { sniff } from "../attachments/sniff.ts";
@@ -14,13 +14,6 @@ import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } fro
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
 const SNIFF_BYTES = 4100;
-
-const displayName = z
-  .string()
-  .trim()
-  .min(1)
-  .max(40)
-  .refine((s) => !/\p{Cc}/u.test(s), "no control characters");
 
 const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string() });
 

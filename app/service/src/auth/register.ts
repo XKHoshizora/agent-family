@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { APIError } from "better-auth/api";
 import { z } from "zod";
 import { AppError } from "../errors.ts";
+import { displayName } from "../schemas.ts";
 import { runInTransaction } from "./auth.ts";
 import { lockUsableInvite, markInviteUsed } from "./invites.ts";
 
@@ -15,7 +16,7 @@ export const registerBody = z.object({
   inviteCode: z.string().max(100).optional(),
   email: z.email().max(254),
   password: z.string().min(10).max(128),
-  displayName: z.string().trim().min(1).max(64),
+  displayName,
   handle: z.string().regex(/^[a-z0-9_]{3,24}$/),
 });
 

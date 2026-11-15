@@ -95,6 +95,48 @@ describe("display name", () => {
     expect((await api(app, alice, "PATCH", "/api/me", { displayName: "x".repeat(40) })).status).toBe(200);
     expect((await api(app, null, "PATCH", "/api/me", { displayName: "hi" })).status).toBe(401);
   });
+
+  /** One rule for registration and renaming: 1–40 characters, one line, format characters removed. */
+  const REFUSED = ["", "   ", "‮​", "x".repeat(41), "🙂".repeat(41), "bad\u0007name", "tab\tname", "line\nbreak", "para graph", "line sep", "\ud800"];
+  const CLEANED: Array<[string, string]> = [
+    ["‮evil‬ name", "evil name"],
+    ["zero​width⁠joiner﻿", "zerowidthjoiner"],
+    ["  ​ padded ​ ", "padded"],
+    ["🙂".repeat(40), "🙂".repeat(40)],
+    ["名前は四十文字まで", "名前は四十文字まで"],
+  ];
+
+  it("follows the one rule on PATCH /api/me", async () => {
+    const alice = await signUp(app, "alice");
+    for (const displayName of REFUSED) {
+      expect([displayName, await api(app, alice, "PATCH", "/api/me", { displayName })]).toEqual([displayName, { status: 400, json: { error: "invalid_request" } }]);
+    }
+    for (const [given, stored] of CLEANED) {
+      expect([given, (await api(app, alice, "PATCH", "/api/me", { displayName: given })).json.displayName]).toEqual([given, stored]);
+      expect((await api(app, alice, "GET", "/api/me")).json.displayName).toBe(stored);
+    }
+  });
+
+  it("follows the same rule on registration", async () => {
+    const { createInvite } = await import("../src/auth/invites.ts");
+    let n = 0;
+    const register = async (displayName: string) =>
+      api(app, null, "POST", "/api/register", {
+        inviteCode: await createInvite(app.deps.db, { ttlHours: 1 }),
+        email: `reg${++n}@example.test`,
+        password: "a good password",
+        displayName,
+        handle: `reg_${n}`,
+      });
+    for (const displayName of REFUSED) {
+      expect([displayName, await register(displayName)]).toEqual([displayName, { status: 400, json: { error: "invalid_request" } }]);
+    }
+    for (const [given, stored] of CLEANED) {
+      expect((await register(given)).status).toBe(201);
+      const { rows } = await app.deps.db.query("select display_name from principals where handle = $1", [`reg_${n}`]);
+      expect([given, rows[0].display_name]).toEqual([given, stored]);
+    }
+  });
 });
 
 describe("avatars", () => {
