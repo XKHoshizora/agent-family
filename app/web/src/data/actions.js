@@ -16,6 +16,22 @@ import {
   stayOf,
 } from "./model.js";
 
+/** Lone surrogates → U+FFFD (`String.prototype.toWellFormed`, by hand where a browser lacks it). */
+function wellFormed(text) {
+  if (typeof text.toWellFormed === "function") return text.toWellFormed();
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i);
+    const next = text.charCodeAt(i + 1);
+    if (unit >= 0xd800 && unit <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+      out += text[i] + text[i + 1];
+      i += 1;
+    } else if (unit >= 0xd800 && unit <= 0xdfff) out += "\uFFFD";
+    else out += text[i];
+  }
+  return out;
+}
+
 const errorOf = (err) => ({ code: err?.code ?? "unknown", reason: err?.reason ?? null, status: err?.status ?? 0 });
 const refused = (code, clientTxn = null) => Promise.resolve({ ok: false, clientTxn, error: { code, reason: null, status: 0 } });
 const dropped = (code) => ({ code, reason: null, status: 0 });
@@ -81,7 +97,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
    * without a request). Resolves {ok, clientTxn, duplicate?, error?}.
    */
   function sendText(conversationId, text, { replyToSeq = null } = {}) {
-    const body = typeof text === "string" ? text.replaceAll("\u0000", "").toWellFormed().trim() : "";
+    const body = typeof text === "string" ? wellFormed(text.replaceAll("\u0000", "")).trim() : "";
     if (!body) return refused("invalid_request");
     return send(conversationId, { text: body, replyToSeq });
   }

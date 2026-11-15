@@ -128,7 +128,19 @@ describe("sending (Review Focus 2)", () => {
   it("drops NUL characters and replaces lone surrogates before sending (the service refuses both)", async () => {
     const { actions, api } = await loaded();
     actions.sendText(D1, " a\u0000b\uD800c ");
-    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "ab�c" });
+    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "ab\uFFFDc" });
+  });
+
+  it("does the same in a browser without String.prototype.toWellFormed", async () => {
+    const own = Object.getOwnPropertyDescriptor(String.prototype, "toWellFormed");
+    Object.defineProperty(String.prototype, "toWellFormed", { value: undefined, configurable: true, writable: true });
+    try {
+      const { actions, api } = await loaded();
+      actions.sendText(D1, "x\uDC00y\uD83D\uDE00z\uD83D");
+      expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "x\uFFFDy\uD83D\uDE00z\uFFFD" });
+    } finally {
+      Object.defineProperty(String.prototype, "toWellFormed", own);
+    }
   });
 
   it("refuses empty text and unknown conversations without a request", async () => {

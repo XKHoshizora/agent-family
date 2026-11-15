@@ -20,6 +20,8 @@ const OLDER_RETRY_MS = 3000;
 const newestSeqOf = (messages) => messages.reduce((max, m) => (Number.isSafeInteger(m.seq) && m.seq > max ? m.seq : max), 0);
 /** The person can see this tab: it is visible and the window has focus. */
 const inView = () => document.visibilityState === "visible" && document.hasFocus();
+/** The element is laid out: not inside a `display: none` pane (the phone layout hides the chat while the list shows). */
+const onScreen = (element) => Boolean(element) && element.getClientRects().length > 0;
 const firstMessageNode = (list) => [...list.children].find((li) => li.dataset.msg);
 const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBoundingClientRect().top;
 
@@ -35,7 +37,8 @@ export function ChatView({ conv }) {
   const lastSeen = useRef(null);
   /** While an older page loads: the first message on screen and where it was, to keep it in place. */
   const anchor = useRef(null);
-  const older = useRef({ busy: null, failed: null });
+  /** The conversation whose older page is loading, and when loading failed per conversation. */
+  const older = useRef({ busy: null, failedAt: new Map() });
   const readFailed = useRef(null);
   const block = publishBlock(state, conv);
   const group = conv.type === "group";
@@ -50,11 +53,12 @@ export function ChatView({ conv }) {
     setQuery("");
   }, [conv.id]);
 
-  // A chat opens at its newest message.
+  // A chat opens at its newest message. Opening it is also the person asking again for history that failed.
   useLayoutEffect(() => {
     atBottom.current = true;
     anchor.current = null;
     readFailed.current = null;
+    older.current.failedAt.delete(conv.id);
     const list = listRef.current;
     if (list) list.scrollTop = list.scrollHeight;
   }, [conv.id]);
@@ -79,17 +83,25 @@ export function ChatView({ conv }) {
     }
   }, [conv.id, firstId, last?.id, messages.length]);
 
-  function loadOlder() {
+  /**
+   * Loads the page before the oldest held message. `byScroll`: the person scrolled to the top — after a failure
+   * that asks again once OLDER_RETRY_MS has passed. Otherwise (a history too short to scroll) a failure stops the
+   * automatic path for this conversation until the person scrolls or opens the chat again, so nothing repeats on
+   * its own while the service is unreachable.
+   */
+  function loadOlder({ byScroll }) {
     const list = listRef.current;
     const convId = conv.id;
-    const { busy, failed } = older.current;
+    const { busy, failedAt } = older.current;
     if (!list || q || !conv.hasOlder || busy === convId) return;
-    if (failed && failed.convId === convId && Date.now() - failed.at < OLDER_RETRY_MS) return;
+    if (failedAt.has(convId) && (!byScroll || Date.now() - failedAt.get(convId) < OLDER_RETRY_MS)) return;
     const first = firstMessageNode(list);
     anchor.current = first ? { convId, id: first.dataset.msg, top: topWithin(first, list) } : null;
-    older.current = { busy: convId, failed: null };
+    older.current.busy = convId;
     actions.loadOlder(convId).then((res) => {
-      if (older.current.busy === convId) older.current = { busy: null, failed: res.ok ? null : { convId, at: Date.now() } };
+      if (older.current.busy === convId) older.current.busy = null;
+      if (res.ok) older.current.failedAt.delete(convId);
+      else older.current.failedAt.set(convId, Date.now());
       // Nothing was added: nothing to keep in place.
       if ((!res.ok || res.loaded === 0) && anchor.current?.convId === convId) anchor.current = null;
       const quiet = ["stale", "stopped"].includes(res.error?.code) || [401, 404].includes(res.error?.status);
@@ -97,11 +109,12 @@ export function ChatView({ conv }) {
     });
   }
 
-  // History shorter than the list's height cannot be scrolled: ask for older messages straight away.
+  // History shorter than the list's height cannot be scrolled: ask for older messages straight away (once per
+  // page; not again on its own after a failure, see loadOlder).
   useEffect(() => {
     const list = listRef.current;
-    if (list && conv.hasOlder && list.clientHeight > 0 && list.scrollHeight <= list.clientHeight) loadOlder();
-  });
+    if (list && conv.hasOlder && list.clientHeight > 0 && list.scrollHeight <= list.clientHeight) loadOlder({ byScroll: false });
+  }, [conv.id, conv.hasOlder, conv.messages.length, q]);
 
   function onScroll() {
     const list = listRef.current;
@@ -111,7 +124,7 @@ export function ChatView({ conv }) {
       setAttention((n) => n + 1);
     }
     atBottom.current = bottom;
-    if (list.scrollTop <= TOP_SLACK_PX) loadOlder();
+    if (list.scrollTop <= TOP_SLACK_PX) loadOlder({ byScroll: true });
   }
 
   useEffect(() => {
@@ -128,21 +141,23 @@ export function ChatView({ conv }) {
   }, []);
 
   // Mark read up to the newest message once the chat has been in view for a moment: the tab is visible, the
-  // window focused, the list at the newest message (not while searching). A failed attempt is not repeated
-  // until something changes (a new message, or the person looks again).
+  // window focused, the chat laid out on screen (not behind the phone layout's list pane), the list at the newest
+  // message, no search filtering it. A failed attempt is not repeated until something changes (a new message,
+  // the person looks again, the chat pane is shown again).
+  const pane = state.nav.pane;
   useEffect(() => {
     if (conv.unread === 0 || newestSeq === 0 || q) return undefined;
     const key = `${conv.id}:${newestSeq}`;
     if (readFailed.current === key) return undefined;
     const timer = setTimeout(() => {
       // (A failure re-renders before it is recorded below, so this timer may predate it: check again.)
-      if (readFailed.current === key || !inView() || !atBottom.current) return;
+      if (readFailed.current === key || !inView() || !onScreen(listRef.current) || !atBottom.current) return;
       actions.markRead(conv.id, newestSeq).then((res) => {
         if (!res.ok) readFailed.current = key;
       });
     }, READ_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [conv.id, conv.unread, newestSeq, q, attention, actions]);
+  }, [conv.id, conv.unread, newestSeq, q, attention, pane, actions]);
 
   return (
     <section className="chat" aria-label={convTitle(state, conv)}>
@@ -180,6 +195,7 @@ export function ChatView({ conv }) {
         {messages.map((msg) => (
           <MessageItem key={msg.id} msg={msg} conv={conv} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}
+        <li aria-hidden="true" />
       </ol>
 
       <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} />

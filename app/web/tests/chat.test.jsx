@@ -2,7 +2,7 @@
 // The chat pages over the real data layer (fake transport and API): list, timeline, composer, details.
 import React from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { App } from "../src/App.jsx";
 import { createDataLayer } from "../src/data/store.jsx";
 import {
@@ -23,7 +23,6 @@ import {
   group,
   notice,
   range,
-  settle,
   syncOf,
   wire,
 } from "./fixtures.js";
@@ -49,24 +48,40 @@ function chatApi(over = {}) {
 }
 
 let visibility = "visible";
+/** Whether the chat's message list is laid out on screen (false: hidden by the mobile list pane's display:none). */
+let chatOnScreen = true;
 beforeAll(() => {
   Element.prototype.scrollIntoView = () => {};
   Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
 });
 beforeEach(() => {
+  // The page's timers (mark-read delay, draft save, toast) run on a fake clock; the data layer has its own fake timers.
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
   visibility = "visible";
+  chatOnScreen = true;
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.spyOn(Element.prototype, "getClientRects").mockImplementation(function rects() {
+    return chatOnScreen || !this.matches("ol.messages") ? [{ top: 0 }] : [];
+  });
   history.replaceState(null, "", "/");
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
+/** Lets pending promises and zero-delay timers run. */
 const flush = () =>
   act(async () => {
-    for (let i = 0; i < 6; i += 1) await settle();
+    for (let i = 0; i < 6; i += 1) await vi.advanceTimersByTimeAsync(0);
   });
+/** Moves the fake clock forward, running what falls due. */
+const elapse = (ms) =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+const toastText = () => document.querySelector(".toast")?.textContent ?? null;
 
 async function openApp({ sync = baseSync, social = emptySocial, api = {} } = {}) {
   const transport = fakeTransport({ sync, social });
@@ -87,6 +102,15 @@ const input = () => screen.getByLabelText("消息内容");
 const type = (value) => fireEvent.change(input(), { target: { value } });
 const press = (key, init = {}) => fireEvent.keyDown(input(), { key, ...init });
 const timeline = () => document.querySelector("ol.messages");
+/** Gives the message list a layout jsdom lacks: 3000 px of content in a 600 px box, scrolled to `scrollTop`. */
+function tallList(scrollTop, { scrollHeight = 3000, clientHeight = 600 } = {}) {
+  const list = timeline();
+  let top = scrollTop;
+  Object.defineProperty(list, "scrollTop", { configurable: true, get: () => top, set: (v) => (top = v) });
+  Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => scrollHeight });
+  Object.defineProperty(list, "clientHeight", { configurable: true, get: () => clientHeight });
+  return list;
+}
 const mainText = () => document.querySelector(".main-col").textContent;
 const push = (transport, event) => act(() => transport.socket.emit(event));
 
@@ -142,7 +166,10 @@ describe("reading", () => {
   it("opening a chat marks it read up to the newest seq once the tab is visible and focused", async () => {
     const { api } = await openApp();
     await openChat("小安");
-    await waitFor(() => expect(api.markRead).toHaveBeenCalledWith(D1, 3));
+    await elapse(400);
+    expect(api.markRead).not.toHaveBeenCalled();
+    await elapse(200);
+    expect(api.markRead).toHaveBeenCalledWith(D1, 3);
     expect(api.markRead).toHaveBeenCalledTimes(1);
     expect(screen.getByText("小安", { selector: ".row-name" }).closest("button").querySelector(".badge")).toBeNull();
   });
@@ -151,37 +178,76 @@ describe("reading", () => {
     visibility = "hidden";
     const { api } = await openApp();
     await openChat("小安");
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await elapse(2000);
     expect(api.markRead).not.toHaveBeenCalled();
 
     visibility = "visible";
     document.hasFocus.mockReturnValue(false);
     act(() => document.dispatchEvent(new Event("visibilitychange")));
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await elapse(2000);
     expect(api.markRead).not.toHaveBeenCalled();
 
     document.hasFocus.mockReturnValue(true);
     act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(api.markRead).toHaveBeenCalledWith(D1, 3));
+    await elapse(600);
+    expect(api.markRead).toHaveBeenCalledWith(D1, 3);
+  });
+
+  it("a chat hidden behind the list pane (phone layout) is not marked read; shown again, it is", async () => {
+    const { api, transport } = await openApp();
+    await openChat("小安");
+    await elapse(600);
+    expect(api.markRead).toHaveBeenCalledWith(D1, 3);
+    fireEvent.click(screen.getByRole("button", { name: "返回列表" }));
+    chatOnScreen = false; // the main column is display:none while the list pane shows
+    await push(transport, { type: "message", message: wire(D1, 4, ANN, "你看列表的时候发的") });
+    await elapse(2000);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("小安", { selector: ".row-name" }).closest("button").querySelector(".badge").textContent).toBe("1");
+
+    chatOnScreen = true;
+    await openChat("小安");
+    await elapse(600);
+    expect(api.markRead).toHaveBeenLastCalledWith(D1, 4);
   });
 
   it("a failed read is not retried in a loop: once more only when the person looks again", async () => {
     const { api } = await openApp({ api: { markRead: vi.fn(async () => Promise.reject(apiError(0, "network_error"))) } });
     await openChat("小安");
-    await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(1));
-    await new Promise((resolve) => setTimeout(resolve, 1300));
+    await elapse(600);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+    await elapse(10_000);
     expect(api.markRead).toHaveBeenCalledTimes(1);
     expect(screen.getByText("小安", { selector: ".row-name" }).closest("button").querySelector(".badge").textContent).toBe("2");
     act(() => window.dispatchEvent(new Event("focus")));
-    await waitFor(() => expect(api.markRead).toHaveBeenCalledTimes(2));
+    await elapse(600);
+    expect(api.markRead).toHaveBeenCalledTimes(2);
   });
 
   it("a message arriving in the open chat is marked read too", async () => {
     const { api, transport } = await openApp();
     await openChat("小安");
-    await waitFor(() => expect(api.markRead).toHaveBeenCalledWith(D1, 3));
+    await elapse(600);
+    expect(api.markRead).toHaveBeenCalledWith(D1, 3);
     await push(transport, { type: "message", message: wire(D1, 4, ANN, "还在吗") });
-    await waitFor(() => expect(api.markRead).toHaveBeenLastCalledWith(D1, 4));
+    await elapse(600);
+    expect(api.markRead).toHaveBeenLastCalledWith(D1, 4);
+  });
+
+  it("scrolled up: a new message is not marked read until the list is back at the newest message", async () => {
+    const { api, transport } = await openApp();
+    await openChat("小安");
+    await elapse(600);
+    const list = tallList(1000);
+    fireEvent.scroll(list);
+    await push(transport, { type: "message", message: wire(D1, 4, ANN, "还在吗") });
+    await elapse(2000);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+
+    list.scrollTop = 2400; // back at the bottom
+    fireEvent.scroll(list);
+    await elapse(600);
+    expect(api.markRead).toHaveBeenLastCalledWith(D1, 4);
   });
 
   it("已读 in a direct chat from the peer's marker; groups show no read state", async () => {
@@ -282,12 +348,8 @@ describe("older history", () => {
     const page = deferred();
     const { api } = await openApp({ api: { listMessages: vi.fn(() => page.promise) } });
     await openChat("周末小组");
-    const list = timeline();
     // a tall list scrolled to the top: m11 is 20 px below the list's top edge
-    let scrollTop = 0;
-    Object.defineProperty(list, "scrollTop", { configurable: true, get: () => scrollTop, set: (v) => (scrollTop = v) });
-    Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => 3000 });
-    Object.defineProperty(list, "clientHeight", { configurable: true, get: () => 600 });
+    const list = tallList(0);
     const tops = new Map([["m11", 20]]);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function rect() {
       const top = tops.get(this.dataset?.msg) ?? 0;
@@ -304,7 +366,7 @@ describe("older history", () => {
     await flush();
     expect(document.querySelectorAll("ol.messages > li[data-msg]")).toHaveLength(40);
     expect(list.querySelector("li[data-msg]").dataset.msg).toBe("m1");
-    expect(scrollTop).toBe(500);
+    expect(list.scrollTop).toBe(500);
 
     fireEvent.scroll(list);
     await flush();
@@ -317,6 +379,57 @@ describe("older history", () => {
     fireEvent.scroll(timeline());
     await flush();
     expect(api.listMessages).not.toHaveBeenCalled();
+  });
+
+  it("history shorter than the list loads older messages by itself; after a failure only the person asks again", async () => {
+    // The list box is taller than its content, so it cannot be scrolled (scrollTop stays 0).
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(function height() {
+      return this.matches("ol.messages") ? 600 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(function height() {
+      return this.matches("ol.messages") ? 300 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "scrollTop", "get").mockReturnValue(0);
+    const { api, transport } = await openApp({ api: { listMessages: vi.fn(async () => Promise.reject(apiError(503, "busy"))) } });
+    await openChat("周末小组");
+    expect(api.listMessages).toHaveBeenCalledTimes(1);
+    expect(toastText()).toBe("更早的消息加载失败，请稍后再试");
+    await elapse(10_000); // the toast clears (a re-render) and much more time passes
+    expect(api.listMessages).toHaveBeenCalledTimes(1);
+    expect(toastText()).toBeNull();
+    await push(transport, { type: "message", message: wire(G1, 41, BO, "新的一条") }); // the list changes
+    await elapse(10_000);
+    expect(api.listMessages).toHaveBeenCalledTimes(1);
+
+    // opening the chat again asks once more
+    await openChat("小安");
+    await openChat("周末小组");
+    expect(api.listMessages).toHaveBeenCalledTimes(2);
+    await elapse(10_000);
+    expect(api.listMessages).toHaveBeenCalledTimes(2);
+
+    // so does a scroll at the top (wheel or touch on a list that became scrollable), at most every 3 s
+    fireEvent.scroll(timeline());
+    await flush();
+    expect(api.listMessages).toHaveBeenCalledTimes(3);
+    expect(toastText()).toBe("更早的消息加载失败，请稍后再试");
+    fireEvent.scroll(timeline());
+    await flush();
+    expect(api.listMessages).toHaveBeenCalledTimes(3);
+  });
+
+  it("scrolled up: a message arriving does not move the list; at the bottom it follows", async () => {
+    const { transport } = await openApp();
+    await openChat("周末小组");
+    const list = tallList(1000);
+    fireEvent.scroll(list);
+    await push(transport, { type: "message", message: wire(G1, 41, BO, "新的一条") });
+    expect(list.scrollTop).toBe(1000);
+
+    list.scrollTop = 2400;
+    fireEvent.scroll(list);
+    await push(transport, { type: "message", message: wire(G1, 42, BO, "又一条") });
+    expect(list.scrollTop).toBe(3000);
   });
 });
 
@@ -336,11 +449,20 @@ describe("composer", () => {
     await flush();
     const mine = () => screen.getByText("你好", { selector: ".bubble" }).closest("li");
     expect(mine().querySelector(".receipt").textContent.trim()).toBe("发送中…");
-    await act(async () => {
-      answer.resolve({ message: wire(D1, 4, ME_ID, "你好"), duplicate: false });
-      await settle();
-    });
+    answer.resolve({ message: wire(D1, 4, ME_ID, "你好"), duplicate: false });
+    await flush();
     expect(mine().querySelector(".receipt").textContent.trim()).toBe("已发送");
+  });
+
+  it("Enter twice in a row sends once", async () => {
+    const { api } = await openApp();
+    await openChat("小安");
+    type("只发一次");
+    press("Enter");
+    press("Enter");
+    await flush();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getAllByText("只发一次", { selector: ".bubble" })).toHaveLength(1);
   });
 
   it("a failed send shows 发送失败，未发布 · 重试, and retry reuses the clientTxn", async () => {
@@ -451,5 +573,25 @@ describe("being removed while viewing (Review Focus 3)", () => {
     await flush();
     expect(api.markRead).not.toHaveBeenCalledWith(G1, expect.anything());
     expect(api.listMessages).not.toHaveBeenCalled();
+  });
+
+  it("the toast is shown exactly once", async () => {
+    const { transport } = await openApp();
+    await openChat("周末小组");
+    const shown = [];
+    const watch = new MutationObserver(() => {
+      const now = toastText();
+      if (now !== shown[shown.length - 1]) shown.push(now);
+    });
+    watch.observe(document.body, { childList: true, subtree: true, characterData: true });
+    await push(transport, { type: "gone", id: G1 });
+    await flush();
+    await elapse(5000); // the toast has cleared
+    await push(transport, { type: "gone", id: G1 });
+    await push(transport, { type: "message", message: wire(D1, 4, ANN, "别的会话还在动") });
+    await elapse(10_000);
+    watch.disconnect();
+    expect(shown.filter((text) => text === "你已不在该会话中")).toHaveLength(1);
+    expect(toastText()).toBeNull();
   });
 });
