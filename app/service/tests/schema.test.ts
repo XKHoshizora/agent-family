@@ -3,11 +3,20 @@ import { useApp } from "./helpers/harness.ts";
 
 const CHECK_VIOLATION = "23514";
 const UNIQUE_VIOLATION = "23505";
+const FOREIGN_KEY_VIOLATION = "23503";
 
 describe("schema guarantees enforced by the database", () => {
   const { db } = useApp();
 
+  async function authUser(id: string): Promise<void> {
+    await db.query(
+      `insert into "user" (id, name, email, "emailVerified") values ($1::text, $1::text, $1::text || '@example.test', true)`,
+      [id],
+    );
+  }
+
   async function human(handle: string): Promise<string> {
+    await authUser(`auth-${handle}`);
     const { rows } = await db.query<{ id: string }>(
       `insert into principals (kind, handle, display_name, auth_user_id)
        values ('human', $1::citext, $1::text, 'auth-' || $1::text) returning id`,
@@ -59,6 +68,56 @@ describe("schema guarantees enforced by the database", () => {
       [owner],
     );
     expect(rowCount).toBe(1);
+  });
+
+  test("a principal that owns itself is rejected", async () => {
+    await rejectedWith(
+      CHECK_VIOLATION,
+      `insert into principals (id, kind, handle, display_name, owner_id)
+       values ('00000000-0000-0000-0000-00000000000a', 'agent', 'self_bot', 'Self', '00000000-0000-0000-0000-00000000000a')`,
+    );
+  });
+
+  test("an agent owned by another agent is rejected", async () => {
+    const owner = await human("owner_three");
+    const { rows } = await db.query<{ id: string }>(
+      `insert into principals (kind, handle, display_name, owner_id) values ('agent', 'first_bot', 'First', $1) returning id`,
+      [owner],
+    );
+    await rejectedWith(
+      FOREIGN_KEY_VIOLATION,
+      `insert into principals (kind, handle, display_name, owner_id) values ('agent', 'second_bot', 'Second', $1)`,
+      [rows[0]!.id],
+    );
+  });
+
+  test("an agent carrying an auth user is rejected", async () => {
+    const owner = await human("owner_four");
+    await authUser("auth-agent-user");
+    await rejectedWith(
+      CHECK_VIOLATION,
+      `insert into principals (kind, handle, display_name, owner_id, auth_user_id)
+       values ('agent', 'authed_bot', 'Authed', $1, 'auth-agent-user')`,
+      [owner],
+    );
+  });
+
+  test("a human whose auth user does not exist is rejected", async () => {
+    await rejectedWith(
+      FOREIGN_KEY_VIOLATION,
+      `insert into principals (kind, handle, display_name, auth_user_id) values ('human', 'ghost_user', 'Ghost', 'no-such-auth-user')`,
+    );
+  });
+
+  test("a membership that leaves before it joined is rejected", async () => {
+    const p = await human("member_three");
+    const c = await conversation(p);
+    await rejectedWith(
+      CHECK_VIOLATION,
+      `insert into memberships (conversation_id, principal_id, role, joined_seq, left_seq)
+       values ($1, $2, 'speaker', 5, 4)`,
+      [c, p],
+    );
   });
 
   test("a second current membership for the same conversation and principal is rejected", async () => {

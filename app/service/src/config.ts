@@ -19,6 +19,11 @@ const envSchema = z.object({
   REGISTRATION_MODE: z.enum(["invite", "open"]).default("invite"),
   /** Only `outbox` exists in this plan; real delivery is added later. */
   MAIL_MODE: z.enum(["outbox"]).default("outbox"),
+  /** Honour X-Forwarded-For. Only enable behind a proxy you control: IP rate limits trust it. */
+  TRUST_PROXY: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((v) => v === "true"),
   /** Multiplier applied to every rate limit; tests raise it. */
   RATE_LIMIT_SCALE: z.coerce.number().positive().default(1),
 });
@@ -39,6 +44,7 @@ export interface Config {
   registrationMode: "invite" | "open";
   mailMode: "outbox";
   rateLimitScale: number;
+  trustProxy: boolean;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -75,5 +81,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     registrationMode: e.REGISTRATION_MODE,
     mailMode: e.MAIL_MODE,
     rateLimitScale: e.RATE_LIMIT_SCALE,
+    trustProxy: e.TRUST_PROXY,
   };
 }

@@ -33,6 +33,7 @@ export function registerErrorHandling(app: FastifyInstance): void {
     const status = (err as FastifyError).statusCode;
     if (typeof status === "number" && status >= 400 && status < 500) {
       // Framework-level client errors: malformed JSON, bad content type, oversized body...
+      if (status === 429) return reply.code(429).send({ error: "rate_limited" });
       if (status === 413) return reply.code(413).send({ error: "too_large" });
       if (status === 404) return reply.code(404).send({ error: "not_found" });
       return reply.code(status).send({ error: "invalid_request" });

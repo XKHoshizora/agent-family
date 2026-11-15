@@ -42,3 +42,12 @@ environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool 
 `vitest` global setup runs the migrations once on `TEST_DATABASE_URL`. `useApp()` in
 `tests/helpers/harness.ts` builds the app once per file and truncates every table except
 `pgmigrations` before each test. Test files run serially because they share one database.
+
+## Accounts (`src/auth/`, `src/session.ts`)
+
+Better Auth (e-mail + password, verified e-mail required, 7-day sessions) mounted at `/api/auth/*`;
+only these endpoints are exposed: `POST /sign-in/email`, `POST /sign-out`, `GET /verify-email`,
+`POST /request-password-reset`, `POST /reset-password`. Registration is `POST /api/register`
+(invite code unless `REGISTRATION_MODE=open`). `GET /api/me` returns the signed-in principal.
+Mail goes to the `mail_outbox` table. CLI: `npx tsx src/cli.ts invite:create [--ttl-hours n]` / `inbox:list [--to <email>]`.
+Set `TRUST_PROXY=true` only behind a reverse proxy you control (IP rate limits then trust `X-Forwarded-For`).

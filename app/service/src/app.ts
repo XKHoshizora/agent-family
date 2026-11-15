@@ -1,3 +1,4 @@
+import rateLimit from "@fastify/rate-limit";
 import Fastify, { type FastifyInstance } from "fastify";
 import {
   serializerCompiler,
@@ -7,7 +8,10 @@ import {
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
-import { registerErrorHandling } from "./errors.ts";
+import { createAuth, registerAuthRoutes, type Auth } from "./auth/auth.ts";
+import { registerRegistrationRoutes } from "./auth/register.ts";
+import { AppError, registerErrorHandling } from "./errors.ts";
+import { registerSessionRoutes } from "./session.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -18,6 +22,7 @@ export interface Deps {
 declare module "fastify" {
   interface FastifyInstance {
     deps: Deps;
+    auth: Auth;
   }
 }
 
@@ -28,14 +33,27 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
 
   const app = Fastify({
     logger: process.env.NODE_ENV === "test" || process.env.VITEST ? false : { level: "info" },
-    trustProxy: true,
+    trustProxy: config.trustProxy,
   });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   registerErrorHandling(app);
 
   app.decorate("deps", deps);
+  app.decorate("auth", createAuth(config, deps.db));
   if (ownsDb) app.addHook("onClose", async () => deps.db.close());
+
+  // The single source of throttling (Better Auth's own limiter is off): 10 per minute per IP and route.
+  await app.register(rateLimit, {
+    global: false,
+    keyGenerator: (req) => req.ip,
+    errorResponseBuilder: () => new AppError(429, "rate_limited"),
+  });
+  const perMinute = { max: Math.max(1, Math.round(10 * config.rateLimitScale)), timeWindow: "1 minute" };
+
+  registerRegistrationRoutes(app, perMinute);
+  registerAuthRoutes(app, { signIn: app.rateLimit(perMinute), resetRequest: app.rateLimit(perMinute) });
+  registerSessionRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 
