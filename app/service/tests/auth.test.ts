@@ -41,6 +41,7 @@ describe("accounts", () => {
 
     const early = await signIn(app, "new@example.test", PASSWORD);
     expect(early.statusCode).toBe(403);
+    expect(early.json()).toEqual({ error: "email_not_verified" });
     expect(early.headers["set-cookie"]).toBeUndefined();
 
     const verify = await app.inject({ method: "GET", url: await mailLink(app, "new@example.test", "verify_email") });
@@ -191,7 +192,7 @@ describe("accounts", () => {
       newPassword: "yet another password",
       token,
     });
-    expect(second.status).toBe(400);
+    expect(second).toEqual({ status: 400, json: { error: "invalid_token" } });
 
     expect((await api(app, a, "GET", "/api/me")).status).toBe(401);
     expect((await signIn(app, a.email, a.password)).statusCode).toBe(401);
@@ -241,34 +242,115 @@ describe("accounts", () => {
     }
   });
 
-  test("the 11th sign-in attempt within a minute from one address is 429 rate_limited; another address is unaffected", async () => {
+  test("a wrong password is 401 with only our error shape, never Better Auth's message", async () => {
+    const a = await signUp(app, "shape_check");
+    const res = await signIn(app, a.email, "definitely the wrong one");
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: "invalid_email_or_password" });
+    const bad = await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "short", token: "x" });
+    expect(bad.status).toBe(400);
+    expect(Object.keys(bad.json)).toEqual(["error"]);
+  });
+
+  test("an unverified account that signs in with the right password is refused but gets a fresh verification mail", async () => {
+    const code = await invite();
+    expect((await register({ inviteCode: code })).status).toBe(201);
+    const mails = () =>
+      count("select count(*) n from mail_outbox where recipient = 'new@example.test' and kind = 'verify_email'");
+    expect(await mails()).toBe(1);
+    const firstLink = await mailLink(app, "new@example.test", "verify_email");
+
+    // a wrong password reveals nothing and sends nothing
+    expect((await signIn(app, "new@example.test", "not the password")).statusCode).toBe(401);
+    expect(await mails()).toBe(1);
+
+    // the original mail is lost or expired: signing in again sends a new one
+    const refused = await signIn(app, "new@example.test", PASSWORD);
+    expect(refused.statusCode).toBe(403);
+    expect(await mails()).toBe(2);
+    const freshLink = await mailLink(app, "new@example.test", "verify_email");
+    expect(freshLink).not.toBe(firstLink);
+
+    expect((await app.inject({ method: "GET", url: freshLink })).statusCode).toBeLessThan(400);
+    expect((await signIn(app, "new@example.test", PASSWORD)).statusCode).toBe(200);
+  });
+
+  const attempt = (target: FastifyInstance, remoteAddress: string, email: string, path = "/api/auth/sign-in/email") =>
+    target.inject({
+      method: "POST",
+      url: path,
+      remoteAddress,
+      payload: path.includes("sign-in") ? { email, password: "whatever password" } : { email },
+    });
+
+  test("the 11th sign-in attempt for one account from one address is 429; other accounts and other addresses are unaffected", async () => {
     const strict = await appWith({ rateLimitScale: 1 });
     try {
-      const attempt = (remoteAddress: string, headers: Record<string, string> = {}) =>
-        strict.inject({
-          method: "POST",
-          url: "/api/auth/sign-in/email",
-          remoteAddress,
-          headers,
-          payload: { email: "nobody@example.test", password: "whatever password" },
-        });
-      for (let i = 0; i < 10; i++) expect((await attempt("10.0.0.1")).statusCode).toBe(401);
-      const blocked = await attempt("10.0.0.1");
+      const a = await signUp(strict, "limit_a");
+      const b = await signUp(strict, "limit_b");
+      for (let i = 0; i < 10; i++) expect((await attempt(strict, "10.0.0.1", a.email)).statusCode).toBe(401);
+      const blocked = await attempt(strict, "10.0.0.1", a.email);
       expect(blocked.statusCode).toBe(429);
       expect(blocked.json()).toEqual({ error: "rate_limited" });
-      // a client-supplied X-Forwarded-For must not let the same address dodge the limit
-      expect((await attempt("10.0.0.1", { "x-forwarded-for": "203.0.113.9" })).statusCode).toBe(429);
-      expect((await attempt("10.0.0.2")).statusCode).toBe(401);
+      // the e-mail is normalised, so case and spaces do not dodge the limit
+      expect((await attempt(strict, "10.0.0.1", ` ${a.email.toUpperCase()} `)).statusCode).toBe(429);
+      // a client-supplied X-Forwarded-For must not let the same address dodge it either
+      const spoofed = await strict.inject({
+        method: "POST",
+        url: "/api/auth/sign-in/email",
+        remoteAddress: "10.0.0.1",
+        headers: { "x-forwarded-for": "203.0.113.9" },
+        payload: { email: a.email, password: "whatever password" },
+      });
+      expect(spoofed.statusCode).toBe(429);
+      // account B from the same address still signs in; account A from another address too
+      const ok = await strict.inject({
+        method: "POST",
+        url: "/api/auth/sign-in/email",
+        remoteAddress: "10.0.0.1",
+        payload: { email: b.email, password: b.password },
+      });
+      expect(ok.statusCode).toBe(200);
+      expect((await attempt(strict, "10.0.0.2", a.email)).statusCode).toBe(401);
     } finally {
       await strict.close();
     }
   });
 
-  test("/api/register and the reset request are limited to 10 per minute per address too", async () => {
+  test("one address cycling through many e-mails hits the per-address cap of 60 per minute", async () => {
+    const strict = await appWith({ rateLimitScale: 1 });
+    try {
+      const reset = (ip: string, email: string) => attempt(strict, ip, email, "/api/auth/request-password-reset");
+      for (let i = 0; i < 60; i++) expect((await reset("10.0.1.1", `spray${i}@example.test`)).statusCode).toBe(200);
+      const blocked = await reset("10.0.1.1", "spray-fresh@example.test");
+      expect(blocked.statusCode).toBe(429);
+      expect(blocked.json()).toEqual({ error: "rate_limited" });
+      expect((await reset("10.0.1.2", "spray-fresh@example.test")).statusCode).toBe(200);
+    } finally {
+      await strict.close();
+    }
+  });
+
+  test("a missing or malformed e-mail in the body does not break rate limiting (falls back to the address)", async () => {
+    const strict = await appWith({ rateLimitScale: 1 });
+    try {
+      const send = (payload: unknown) =>
+        strict.inject({ method: "POST", url: "/api/auth/sign-in/email", remoteAddress: "10.0.2.1", payload: payload as object });
+      for (const payload of [{}, { email: 42 }, { email: ["a"] }, { email: null }, { password: "x" }]) {
+        expect((await send(payload)).statusCode).toBeLessThan(500);
+      }
+      for (let i = 0; i < 5; i++) await send({ email: 42 });
+      expect((await send({})).statusCode).toBe(429);
+    } finally {
+      await strict.close();
+    }
+  });
+
+  test("/api/register is limited to 10 per minute per address and the reset request to 10 per account", async () => {
     const strict = await appWith({ rateLimitScale: 1 });
     try {
       for (let i = 0; i < 10; i++) expect((await register({}, strict)).status).toBe(400);
-      expect((await register({}, strict)).status).toBe(429);
+      expect(await register({}, strict)).toEqual({ status: 429, json: { error: "rate_limited" } });
       const reset = () => api(strict, null, "POST", "/api/auth/request-password-reset", { email: "x@example.test" });
       for (let i = 0; i < 10; i++) expect((await reset()).status).toBe(200);
       expect((await reset()).status).toBe(429);

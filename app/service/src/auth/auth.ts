@@ -113,6 +113,8 @@ export function createAuth(config: Config, db: Db) {
       sendOnSignUp: true,
       autoSignInAfterVerification: false,
       expiresIn: 24 * 60 * 60,
+      // After a correct password only, so it reveals nothing about which accounts exist; this is the resend path.
+      sendOnSignIn: true,
       sendVerificationEmail: async ({ user, url }) => {
         await sendMail(mailDb(), "verify_email", user.email, "Verify your email", `Confirm your email address: ${url}`);
       },
@@ -129,18 +131,56 @@ export type Auth = ReturnType<typeof createAuth>;
 
 // --- HTTP mount (Better Auth's Fastify integration: forward the request to `auth.handler`) -----
 
-type RateLimitHook = (req: FastifyRequest, reply: FastifyReply) => Promise<unknown>;
+type Limiter = (req: FastifyRequest) => Promise<void>;
+
+/** Lower-cased, trimmed e-mail from a request body, or undefined when absent or not a string. */
+function bodyEmail(req: FastifyRequest): string | undefined {
+  const email = (req.body as { email?: unknown } | null | undefined)?.email;
+  if (typeof email !== "string") return undefined;
+  const normalised = email.trim().toLowerCase();
+  return normalised.length > 0 && normalised.length <= 254 ? normalised : undefined;
+}
+
+/**
+ * Two counters per request: 10/min per IP + e-mail (so hammering one account never locks out another),
+ * and a looser 60/min per IP (so one address cannot spray many accounts). Both times `scale`.
+ * A missing or malformed e-mail falls back to the IP-only key.
+ */
+function accountAndIpLimiter(app: FastifyInstance, scale: number): Limiter {
+  const per = (n: number) => ({ max: Math.max(1, Math.round(n * scale)), timeWindow: "1 minute" });
+  const perAccount = app.createRateLimit({ ...per(10), keyGenerator: (req: FastifyRequest) => `${req.ip}|${bodyEmail(req) ?? ""}` });
+  const perIp = app.createRateLimit({ ...per(60), keyGenerator: (req: FastifyRequest) => req.ip });
+  return async (req) => {
+    const results = [await perAccount(req), await perIp(req)];
+    if (results.some((r) => "isExceeded" in r && r.isExceeded)) throw new AppError(429, "rate_limited");
+  };
+}
+
+const STATUS_CODES: Record<number, string> = { 401: "unauthenticated", 403: "forbidden", 404: "not_found", 429: "rate_limited" };
+
+/** Better Auth's error code ("INVALID_EMAIL_OR_PASSWORD") as our snake_case; its message text is never forwarded. */
+function errorCodeOf(status: number, body: string): string {
+  try {
+    const code = (JSON.parse(body) as { code?: unknown }).code;
+    if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_]*$/.test(code)) return code.toLowerCase();
+  } catch {
+    // not JSON: fall through to the status
+  }
+  return STATUS_CODES[status] ?? "invalid_request";
+}
 
 /**
  * Only these Better Auth endpoints are reachable. Notably absent: `/sign-up/email`, which would
  * bypass invites and principal creation (registration goes through POST /api/register).
  */
-export function registerAuthRoutes(app: FastifyInstance, limits: { signIn: RateLimitHook; resetRequest: RateLimitHook }): void {
-  const exposed = new Map<string, RateLimitHook | null>([
-    ["POST /sign-in/email", limits.signIn],
+export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number): void {
+  const signIn = accountAndIpLimiter(app, rateLimitScale);
+  const resetRequest = accountAndIpLimiter(app, rateLimitScale);
+  const exposed = new Map<string, Limiter | null>([
+    ["POST /sign-in/email", signIn],
     ["POST /sign-out", null],
     ["GET /verify-email", null],
-    ["POST /request-password-reset", limits.resetRequest],
+    ["POST /request-password-reset", resetRequest],
     ["POST /reset-password", null],
   ]);
   const endpointOf = (req: FastifyRequest): string => {
@@ -156,6 +196,9 @@ export function registerAuthRoutes(app: FastifyInstance, limits: { signIn: RateL
       ...(req.body === undefined || req.body === null ? {} : { body: JSON.stringify(req.body) }),
     });
     const response = await app.auth.handler(request);
+    if (response.status >= 400) {
+      return reply.code(response.status).send({ error: errorCodeOf(response.status, await response.text()) });
+    }
     reply.status(response.status);
     response.headers.forEach((value, key) => {
       if (key.toLowerCase() !== "set-cookie") reply.header(key, value);
@@ -163,10 +206,12 @@ export function registerAuthRoutes(app: FastifyInstance, limits: { signIn: RateL
     for (const cookie of response.headers.getSetCookie()) reply.header("set-cookie", cookie);
     return reply.send(response.body ? await response.text() : null);
   };
-  const onRequest = async (req: FastifyRequest, reply: FastifyReply) => {
-    const endpoint = endpointOf(req);
-    if (!exposed.has(endpoint)) throw new AppError(404, "not_found");
-    await exposed.get(endpoint)?.(req, reply);
+  const onRequest = async (req: FastifyRequest) => {
+    if (!exposed.has(endpointOf(req))) throw new AppError(404, "not_found");
+  };
+  // After body parsing, because the limiter keys on the e-mail in the body.
+  const preHandler = async (req: FastifyRequest) => {
+    await exposed.get(endpointOf(req))?.(req);
   };
   // Better Auth validates its own payloads (4xx on bad input); these schemas only bound the shape.
   const schema = {
@@ -174,10 +219,10 @@ export function registerAuthRoutes(app: FastifyInstance, limits: { signIn: RateL
     querystring: z.object({}).catchall(z.union([z.string(), z.array(z.string())])),
   };
   const typed = app.withTypeProvider<ZodTypeProvider>();
-  typed.get(`${AUTH_BASE_PATH}/*`, { schema, onRequest }, handler);
+  typed.get(`${AUTH_BASE_PATH}/*`, { schema, onRequest, preHandler }, handler);
   typed.post(
     `${AUTH_BASE_PATH}/*`,
-    { schema: { ...schema, body: z.record(z.string(), z.unknown()).optional() }, onRequest },
+    { schema: { ...schema, body: z.record(z.string(), z.unknown()).optional() }, onRequest, preHandler },
     handler,
   );
 }

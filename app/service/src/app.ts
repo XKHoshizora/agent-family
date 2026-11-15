@@ -52,7 +52,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   const perMinute = { max: Math.max(1, Math.round(10 * config.rateLimitScale)), timeWindow: "1 minute" };
 
   registerRegistrationRoutes(app, perMinute);
-  registerAuthRoutes(app, { signIn: app.rateLimit(perMinute), resetRequest: app.rateLimit(perMinute) });
+  registerAuthRoutes(app, config.rateLimitScale);
   registerSessionRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
