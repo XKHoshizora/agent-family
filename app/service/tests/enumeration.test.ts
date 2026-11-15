@@ -92,6 +92,7 @@ describe("enumeration: an existing id that is not yours is answered like a rando
 
     const existing = { neverIn, left, removed, direct, closed, upperCase: neverIn.toUpperCase() };
     const routes: Array<[string, (id: string) => InjectOptions]> = [
+      ["one conversation", (id) => json("GET", `/api/conversations/${id}`)],
       ["rename", (id) => json("PATCH", `/api/conversations/${id}`, { title: "mine" })],
       ["members", (id) => json("GET", `/api/conversations/${id}/members`)],
       ["add member", (id) => json("POST", `/api/conversations/${id}/members`, { principalId: carol.id })],

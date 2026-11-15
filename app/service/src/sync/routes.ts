@@ -6,32 +6,35 @@ import { perPrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { requirePrincipal } from "../session.ts";
 import { Hub } from "./hub.ts";
-import { CATCHUP_MAX_POSITIONS, catchUp, syncView } from "./read.ts";
+import { notFound } from "../errors.ts";
+import { uuidParam } from "../schemas.ts";
+import { CATCHUP_MAX_POSITIONS, catchUp, syncConversation, syncView } from "./read.ts";
 import { createTicketStore, type TicketStore } from "./tickets.ts";
 import { registerWebSocketRoute } from "./ws.ts";
 
 const empty = z.object({});
 const role = z.enum(["speaker", "observer"]);
 
+/** One conversation as the caller sees it: an element of `/api/sync`'s `conversations`, and `GET /api/conversations/:id`. */
+const conversationEntry = z.object({
+  id: z.string(),
+  type: z.enum(["direct", "group"]),
+  title: z.string().nullable(),
+  creatorId: z.string().optional(),
+  myRole: role,
+  closed: z.boolean(),
+  peerId: z.string().optional(),
+  canSend: z.object({ ok: z.boolean(), reason: z.enum(["blocked", "not_friends", "closed"]).optional() }),
+  members: z.array(z.object({ id: z.string(), role, isCreator: z.boolean() })),
+  lastSeq: z.number(),
+  readSeq: z.number(),
+  unread: z.number(),
+  peerReadSeq: z.number().optional(),
+});
+
 const syncResponse = z.object({
   me: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), email: z.string() }),
-  conversations: z.array(
-    z.object({
-      id: z.string(),
-      type: z.enum(["direct", "group"]),
-      title: z.string().nullable(),
-      creatorId: z.string().optional(),
-      myRole: role,
-      closed: z.boolean(),
-      peerId: z.string().optional(),
-      canSend: z.object({ ok: z.boolean(), reason: z.enum(["blocked", "not_friends", "closed"]).optional() }),
-      members: z.array(z.object({ id: z.string(), role, isCreator: z.boolean() })),
-      lastSeq: z.number(),
-      readSeq: z.number(),
-      unread: z.number(),
-      peerReadSeq: z.number().optional(),
-    }),
-  ),
+  conversations: z.array(conversationEntry),
   principals: z.array(
     z.object({ id: z.string(), handle: z.string(), displayName: z.string(), kind: z.enum(["human", "agent"]) }),
   ),
@@ -62,6 +65,19 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
       await syncLimit(req, me.id);
       const view = await syncView(db, me.id);
       return { me: { id: me.id, handle: me.handle, displayName: me.displayName, email: me.email }, ...view };
+    },
+  );
+
+  // What a client fetches on a `conversation` push instead of a full sync. Not a current member: 404, like
+  // an id that does not exist.
+  api.get(
+    "/api/conversations/:id",
+    { schema: { params: z.object({ id: uuidParam }), querystring: empty, response: { 200: conversationEntry } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      const entry = await syncConversation(db, me.id, req.params.id);
+      if (!entry) throw notFound();
+      return entry;
     },
   );
 

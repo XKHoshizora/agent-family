@@ -82,56 +82,102 @@ function mentionedIn(m: WireMessage): string[] {
   return ids.filter((id): id is string => typeof id === "string" && UUID.test(id)).map((id) => id.toLowerCase());
 }
 
+/**
+ * The caller's entries for the conversations they are currently in (all of them, or only `onlyId`), in
+ * `/api/sync` order: what both `GET /api/sync` and `GET /api/conversations/:id` answer.
+ */
+async function conversationEntries(t: Tx, me: string, onlyId: string | null = null): Promise<SyncConversation[]> {
+  const conversations = await t.query<{
+    id: string;
+    type: "direct" | "group";
+    title: string | null;
+    creator_id: string;
+    seq: string;
+    closed: boolean;
+    role: Role;
+    read_seq: string;
+    peer_id: string | null;
+    peer_read_seq: string | null;
+    unread: string;
+  }>(
+    // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
+    // only the peer's read marker is read from their membership.
+    `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, me.role, me.read_seq,
+            pair.peer_id, peer.read_seq as peer_read_seq,
+            (select count(*) from messages m ${VISIBLE_JOIN}
+              where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
+       from memberships me
+       join conversations c on c.id = me.conversation_id
+       left join lateral (
+         select case when d.a_id = $1 then d.b_id else d.a_id end as peer_id
+           from direct_pairs d where d.conversation_id = c.id
+       ) pair on true
+       left join memberships peer
+         on peer.conversation_id = c.id and peer.principal_id = pair.peer_id and peer.left_seq is null
+      where me.principal_id = $1 and me.left_seq is null and ($2::uuid is null or me.conversation_id = $2::uuid)
+      order by c.created_at, c.id`,
+    [me, onlyId],
+  );
+  if (conversations.rows.length === 0) return [];
+
+  const members = await t.query<{ conversation_id: string; principal_id: string; role: Role; is_creator: boolean }>(
+    `select ms.conversation_id, ms.principal_id, ms.role, (c.type = 'group' and c.creator_id = ms.principal_id) as is_creator
+       from memberships me
+       join conversations c on c.id = me.conversation_id
+       join memberships ms on ms.conversation_id = me.conversation_id and ms.left_seq is null
+      where me.principal_id = $1 and me.left_seq is null and ($2::uuid is null or me.conversation_id = $2::uuid)
+      order by ms.joined_seq, ms.id`,
+    [me, onlyId],
+  );
+  const membersOf = new Map<string, SyncConversation["members"]>();
+  for (const r of members.rows) {
+    const list = membersOf.get(r.conversation_id) ?? [];
+    list.push({ id: r.principal_id, role: r.role, isCreator: r.is_creator });
+    membersOf.set(r.conversation_id, list);
+  }
+
+  const verdicts = await canDirectSendMany(
+    t,
+    me,
+    conversations.rows.flatMap((c) => (c.peer_id ? [c.peer_id] : [])),
+  );
+  /** A direct chat without a verdict (cannot happen) shows as refused, never as allowed. */
+  const directVerdict = (peerId: string | null): DirectRefusal | null => {
+    const verdict = peerId ? verdicts.get(peerId) : undefined;
+    return verdict === undefined ? "not_friends" : verdict;
+  };
+  return conversations.rows.map((c) => {
+    const verdict = c.type === "direct" ? directVerdict(c.peer_id) : null;
+    return {
+      id: c.id,
+      type: c.type,
+      title: c.title,
+      ...(c.type === "group" ? { creatorId: c.creator_id } : {}),
+      myRole: c.role,
+      closed: c.closed,
+      ...(c.type === "direct" && c.peer_id ? { peerId: c.peer_id } : {}),
+      canSend: c.closed ? { ok: false, reason: "closed" } : verdict ? { ok: false, reason: verdict } : { ok: true },
+      members: membersOf.get(c.id) ?? [],
+      lastSeq: Number(c.seq),
+      readSeq: Number(c.read_seq),
+      unread: Number(c.unread),
+      ...(c.type === "direct" && c.peer_read_seq !== null ? { peerReadSeq: Number(c.peer_read_seq) } : {}),
+    };
+  });
+}
+
+/**
+ * One conversation as the caller's `/api/sync` shows it, or null unless they are a current member (never,
+ * left, removed, unknown alike).
+ */
+export async function syncConversation(db: Db, me: string, conversationId: string): Promise<SyncConversation | null> {
+  return onSnapshot(db, async (t) => (await conversationEntries(t, me, conversationId))[0] ?? null);
+}
+
 /** Everything the web client loads at start: the caller's current conversations and what they may read of them. */
 export async function syncView(db: Db, me: string): Promise<SyncView> {
   return onSnapshot(db, async (t) => {
-    const conversations = await t.query<{
-      id: string;
-      type: "direct" | "group";
-      title: string | null;
-      creator_id: string;
-      seq: string;
-      closed: boolean;
-      role: Role;
-      read_seq: string;
-      peer_id: string | null;
-      peer_read_seq: string | null;
-      unread: string;
-    }>(
-      // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
-      // only the peer's read marker is read from their membership.
-      `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, me.role, me.read_seq,
-              pair.peer_id, peer.read_seq as peer_read_seq,
-              (select count(*) from messages m ${VISIBLE_JOIN}
-                where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
-         from memberships me
-         join conversations c on c.id = me.conversation_id
-         left join lateral (
-           select case when d.a_id = $1 then d.b_id else d.a_id end as peer_id
-             from direct_pairs d where d.conversation_id = c.id
-         ) pair on true
-         left join memberships peer
-           on peer.conversation_id = c.id and peer.principal_id = pair.peer_id and peer.left_seq is null
-        where me.principal_id = $1 and me.left_seq is null
-        order by c.created_at, c.id`,
-      [me],
-    );
-
-    const members = await t.query<{ conversation_id: string; principal_id: string; role: Role; is_creator: boolean }>(
-      `select ms.conversation_id, ms.principal_id, ms.role, (c.type = 'group' and c.creator_id = ms.principal_id) as is_creator
-         from memberships me
-         join conversations c on c.id = me.conversation_id
-         join memberships ms on ms.conversation_id = me.conversation_id and ms.left_seq is null
-        where me.principal_id = $1 and me.left_seq is null
-        order by ms.joined_seq, ms.id`,
-      [me],
-    );
-    const membersOf = new Map<string, SyncConversation["members"]>();
-    for (const r of members.rows) {
-      const list = membersOf.get(r.conversation_id) ?? [];
-      list.push({ id: r.principal_id, role: r.role, isCreator: r.is_creator });
-      membersOf.set(r.conversation_id, list);
-    }
+    const out = await conversationEntries(t, me);
 
     const recent = await t.query<MessageRow>(
       `select ${MESSAGE_COLUMNS}
@@ -150,37 +196,8 @@ export async function syncView(db: Db, me: string): Promise<SyncView> {
       list.push(m);
       recentOf.set(m.conversationId, list);
     }
-    const ordered = conversations.rows.flatMap((c) => (recentOf.get(c.id) ?? []).sort((x, y) => x.seq - y.seq));
+    const ordered = out.flatMap((c) => (recentOf.get(c.id) ?? []).sort((x, y) => x.seq - y.seq));
     const messages = await toWireFor(t, me, ordered);
-
-    const verdicts = await canDirectSendMany(
-      t,
-      me,
-      conversations.rows.flatMap((c) => (c.peer_id ? [c.peer_id] : [])),
-    );
-    /** A direct chat without a verdict (cannot happen) shows as refused, never as allowed. */
-    const directVerdict = (peerId: string | null): DirectRefusal | null => {
-      const verdict = peerId ? verdicts.get(peerId) : undefined;
-      return verdict === undefined ? "not_friends" : verdict;
-    };
-    const out: SyncConversation[] = conversations.rows.map((c) => {
-      const verdict = c.type === "direct" ? directVerdict(c.peer_id) : null;
-      return {
-        id: c.id,
-        type: c.type,
-        title: c.title,
-        ...(c.type === "group" ? { creatorId: c.creator_id } : {}),
-        myRole: c.role,
-        closed: c.closed,
-        ...(c.type === "direct" && c.peer_id ? { peerId: c.peer_id } : {}),
-        canSend: c.closed ? { ok: false, reason: "closed" } : verdict ? { ok: false, reason: verdict } : { ok: true },
-        members: membersOf.get(c.id) ?? [],
-        lastSeq: Number(c.seq),
-        readSeq: Number(c.read_seq),
-        unread: Number(c.unread),
-        ...(c.type === "direct" && c.peer_read_seq !== null ? { peerReadSeq: Number(c.peer_read_seq) } : {}),
-      };
-    });
 
     const mentioned = new Set<string>([me.toLowerCase()]);
     for (const c of out) for (const m of c.members) mentioned.add(m.id);

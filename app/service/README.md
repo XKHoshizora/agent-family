@@ -154,6 +154,11 @@ quote's sender, a system notice's participants) — including people who have si
 through messages you can see. After `/api/sync` your position for each conversation is its `lastSeq`.
 Older history: `GET /api/conversations/:id/messages?before=`. Limits: 60/min per principal.
 
+**One conversation.** `GET /api/conversations/:id` answers exactly the element of `/api/sync`'s
+`conversations` for that id (same fields, same values at that moment), or 404 `not_found` when you are not a
+current member — the same answer as for an id that does not exist. Fetch it on a `conversation` push instead
+of a full sync; a 404 there means you were removed meanwhile (a `gone` follows). Not rate limited.
+
 **Catch-up.** `POST /api/sync/catchup {"positions": {"<conversationId>": <last seq you have>, …}}`
 (at most 500 ids, values 0 … 2^53−1) → `{"messages": WireMessage[], "gone": string[], "more": boolean}`.
 For each id you are currently a member of: the visible messages after your position, ascending, each
@@ -183,7 +188,7 @@ Pushes (JSON text frames):
     "replyTo": { "seq": 40, "visible": true, "senderId": "…", "text": "…" } /* or { "seq": 7, "visible": false } */,
     "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
     "createdAt": "2026-11-16T01:02:03.000Z" } }
-{ "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: refetch /api/sync
+{ "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: GET /api/conversations/:id
 { "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: refetch /api/social
 { "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats only (either side)

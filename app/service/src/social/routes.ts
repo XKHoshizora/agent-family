@@ -57,6 +57,9 @@ export function registerSocialRoutes(app: FastifyInstance): void {
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const createLimit = perPrincipalLimit(app, 20);
+  // Each block or unblock that changes something appends a notice to the pair's direct chat, which the other
+  // side cannot stop: both together share one budget.
+  const blockLimit = perPrincipalLimit(app, 20);
 
   /** After commit: the pair's social change, its direct-chat notices, and that chat's change of state. */
   function announce(req: FastifyRequest, pair: string[], effects: DirectEffects): void {
@@ -180,6 +183,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
     { schema: { params: z.object({ principalId: uuidParam }), querystring: empty, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await blockLimit(req, me.id);
       const other = req.params.principalId;
       if (other === me.id) throw new AppError(400, "invalid_request");
       const result = await db.tx(async (t): Promise<Outcome<BlockResult>> => {
@@ -199,6 +203,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
     { schema: { params: z.object({ principalId: uuidParam }), querystring: empty, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await blockLimit(req, me.id);
       const other = req.params.principalId;
       const r = await db.tx((t) => unblockPrincipal(t, me.id, other));
       if (r.removed) announce(req, [me.id, other], r);

@@ -18,6 +18,8 @@ export function registerConversationRoutes(app: FastifyInstance): void {
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const createLimit = perPrincipalLimit(app, 10);
+  // Renaming, adding and removing (or leaving) each append a notice every member gets: one shared budget.
+  const changeLimit = perPrincipalLimit(app, 20);
 
   api.post(
     "/api/conversations",
@@ -55,6 +57,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
+      await changeLimit(req, me.id);
       const change = await db.tx((t) => renameGroup(t, req.params.id, me.id, req.body.title));
       conversations.publish(change, req.log);
       return { id: req.params.id, title: req.body.title };
@@ -103,6 +106,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     },
     async (req, reply) => {
       const me = await requirePrincipal(req);
+      await changeLimit(req, me.id);
       const change = await db.tx((t) => addMember(t, req.params.id, me.id, req.body.principalId));
       conversations.publish(change, req.log);
       return reply.code(201).send({ ok: true as const });
@@ -120,6 +124,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
+      await changeLimit(req, me.id);
       const change = await db.tx((t) => removeMember(t, req.params.id, me.id, req.params.principalId));
       conversations.publish(change, req.log);
       return { ok: true as const };

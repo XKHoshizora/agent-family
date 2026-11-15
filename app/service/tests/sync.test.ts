@@ -226,6 +226,60 @@ describe("GET /api/sync", () => {
   });
 });
 
+describe("GET /api/conversations/:id", () => {
+  const getOne = (who: Actor, conv: string) => api(app, who, "GET", `/api/conversations/${conv}`);
+  /** The caller's entry for `conv` in a full sync. */
+  const entry = async (who: Actor, conv: string) => (await sync(who)).json.conversations.find((x: any) => x.id === conv);
+
+  it("is the caller's /api/sync entry for that one conversation, direct or group, as it changes", async () => {
+    const [a, b, c, d] = await people("alice", "bob", "carol", "dave");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const g = await group(app, a, "team", [b, c]);
+    await say(a, dm, "hi");
+    await say(b, g, "hello team");
+    await markRead(b, dm, 1);
+
+    for (const who of [a, b]) {
+      for (const conv of [dm, g]) {
+        const res = await getOne(who, conv);
+        expect(res.status).toBe(200);
+        expect(res.json).toEqual(await entry(who, conv));
+      }
+    }
+    expect((await getOne(c, g)).json).toEqual(await entry(c, g));
+    expect((await getOne(a, g.toUpperCase())).json).toEqual(await entry(a, g));
+
+    // After a `conversation` push this is what a client fetches: it shows the change.
+    await befriend(app, a, d);
+    expect((await rename(a, g, "renamed")).status).toBe(200);
+    expect((await add(a, g, d)).status).toBe(201);
+    await api(app, a, "PUT", `/api/blocks/${b.id}`);
+    const team = (await getOne(c, g)).json;
+    expect(team).toMatchObject({ title: "renamed" });
+    expect(team.members.map((m: any) => m.id)).toContain(d.id);
+    expect(team).toEqual(await entry(c, g));
+    const blocked = (await getOne(b, dm)).json;
+    expect(blocked.canSend).toEqual({ ok: false, reason: "blocked" });
+    expect(blocked).toEqual(await entry(b, dm));
+    expect((await getOne(d, g)).json).toEqual(await entry(d, g));
+  });
+
+  it("is 404 not_found for a conversation you are not in now, like an id that does not exist", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const g = await group(app, a, "team", [b, c]);
+    const { conversationId: bc } = await befriend(app, b, c);
+    const NOT_FOUND = { status: 404, json: { error: "not_found" } };
+    expect(await getOne(a, bc)).toEqual(NOT_FOUND); // never in it
+    expect((await remove(c, g, c)).status).toBe(200);
+    expect(await getOne(c, g)).toEqual(NOT_FOUND); // left
+    expect((await remove(a, g, b)).status).toBe(200);
+    expect(await getOne(b, g)).toEqual(NOT_FOUND); // removed
+    expect(await getOne(a, RANDOM_ID)).toEqual(NOT_FOUND);
+    expect(await api(app, null, "GET", `/api/conversations/${g}`)).toEqual({ status: 401, json: { error: "unauthenticated" } });
+    expect((await getOne(a, "not-a-uuid")).status).toBe(400);
+  });
+});
+
 describe("POST /api/sync/catchup", () => {
   it("catchup returns exactly the missed messages in order, lists conversations I left, and never returns invisible ones even when I send positions for conversations I am not in", async () => {
     const [a, b, c, d] = await people("alice", "bob", "carol", "dave");
