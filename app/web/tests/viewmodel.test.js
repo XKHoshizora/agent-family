@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
 import { toView, formatAt } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
-import { convSubtitle, convTitle, lastPreview, publishBlock, visibilityNote, myBlock } from "../src/state/selectors.js";
+import { convSubtitle, convTitle, lastPreview, publishBlock, visibilityNote, myBlock, senderName } from "../src/state/selectors.js";
 import { ANN, BO, D1, G1, ME_ID, at, direct, emptySocial, group, notice, range, syncOf, wire } from "./fixtures.js";
 
 const NOW = new Date(2026, 10, 16, 12, 0).getTime();
@@ -94,12 +94,67 @@ describe("messages", () => {
       { now: NOW },
     );
     const [sys, text, file, image] = v.convs[G1].messages;
-    expect(sys).toMatchObject({ id: "m1", seq: 1, from: null, kind: "system", text: "Mei创建了群聊「周末小组」", system: { event: "group_created", actorId: ME, memberIds: [ANN, BO] } });
+    expect(sys).toMatchObject({ id: "m1", seq: 1, from: null, kind: "system", text: "你创建了群聊「周末小组」，并邀请小安、阿波加入", system: { event: "group_created", actorId: ME, memberIds: [ANN, BO] } });
     expect(text).toMatchObject({ id: "m2", from: ANN, kind: "text", text: "早上好", at: "09:02", status: "sent", replyTo: null, quote: null });
     expect(file).toMatchObject({ kind: "file", text: "报告.pdf", caption: "", attachment: { id: FILE, name: "报告.pdf", size: 1234, inline: false, url: `/api/attachments/${FILE}` } });
     expect(image).toMatchObject({ from: ME, kind: "image", text: "a.png", caption: "看这个", src: `/api/attachments/${IMG}`, replyTo: "m2" });
     expect(image.quote).toEqual({ seq: 2, visible: true, from: ANN, text: "早上好", kind: "text", attachmentName: null });
     expect(lastPreview(v, v.convs[G1])).toBe("你：[图片]");
+  });
+
+  it("system notices are rendered from their event with today's names (你 for me), else the service's sentence", () => {
+    const CAT = "00000000-0000-4000-8000-0000000000a7";
+    const ev = (seq, system, text = `服务端句子${seq}`) => notice(G1, seq, text, system);
+    const many = Array.from({ length: 11 }, (_, i) => (i === 0 ? ANN : BO));
+    const v = toView(
+      model({
+        conversations: [group(G1, { lastSeq: 15 })],
+        messages: [
+          ev(1, { event: "group_created", actorId: ANN, title: "周末小组", memberIds: [ME_ID, BO] }),
+          ev(2, { event: "member_joined", actorId: ANN, principalId: BO }),
+          ev(3, { event: "member_left", actorId: BO, principalId: BO, newCreatorId: null }),
+          ev(4, { event: "member_left", actorId: ME_ID, principalId: ME_ID, newCreatorId: ANN }),
+          ev(5, { event: "member_removed", actorId: ME_ID, principalId: BO }),
+          ev(6, { event: "group_renamed", actorId: ANN, title: "新名字" }),
+          ev(7, { event: "friendship_ended", actorId: ANN, principalId: ME_ID }),
+          ev(8, { event: "friendship_restored", actorId: ME_ID, principalId: ANN }),
+          ev(9, { event: "blocked", actorId: ANN, principalId: ME_ID }),
+          ev(10, { event: "blocked", actorId: ME_ID, principalId: ANN }),
+          ev(11, { event: "unblocked", actorId: ME_ID, principalId: ANN }),
+          ev(12, { event: "something_later", actorId: ANN }, "以后才有的通知"),
+          ev(13, { event: "member_joined", actorId: ANN, principalId: CAT }, "小安邀请小猫加入了群聊"),
+          ev(14, { event: "group_renamed", actorId: ANN }, "名字缺了"),
+          ev(15, { event: "group_created", actorId: ME_ID, title: "大群", memberIds: many }),
+        ],
+      }),
+      { now: NOW },
+    );
+    expect(v.convs[G1].messages.map((m) => m.text)).toEqual([
+      "小安创建了群聊「周末小组」，并邀请你、阿波加入",
+      "小安邀请阿波加入了群聊",
+      "阿波退出了群聊",
+      "你退出了群聊，小安成为新的创建者",
+      "你将阿波移出了群聊",
+      "小安将群名改为「新名字」",
+      "小安解除了与你的好友关系，双方不能再发送新消息，已有历史不受影响",
+      "你和小安重新成为好友，可以继续发送消息",
+      "小安拉黑了你，只能由对方解除。双方不能再发送新消息，已有历史不受影响",
+      "你拉黑了小安。双方不能再发送新消息，已有历史不受影响",
+      "你解除了对小安的拉黑",
+      // an event this client does not know, someone nobody named here, a malformed event: the service's sentence
+      "以后才有的通知",
+      "小安邀请小猫加入了群聊",
+      "名字缺了",
+      `你创建了群聊「大群」，并邀请${["小安", ...Array(9).fill("阿波")].join("、")}等11人加入`,
+    ]);
+  });
+
+  it("a sender nobody has named here is 已退出的成员 (in the timeline and the list preview)", () => {
+    const GONE = "00000000-0000-4000-8000-0000000000a9";
+    const v = toView(model({ conversations: [group(G1, { lastSeq: 2 })], messages: [wire(G1, 1, ANN, "在吗"), wire(G1, 2, GONE, "我先走了")] }), { now: NOW });
+    expect(senderName(v, v.convs[G1].messages[1].from)).toBe("已退出的成员");
+    expect(senderName(v, ANN)).toBe("小安");
+    expect(lastPreview(v, v.convs[G1])).toBe("已退出的成员：我先走了");
   });
 
   it("a quote the reader cannot see says so", () => {

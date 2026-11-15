@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { entity, nameOf, viewerOwners, isInterject } from "../state/selectors.js";
+import { entity, nameOf, senderName } from "../state/selectors.js";
 import { Avatar, Btn, IconBtn } from "../ui/primitives.jsx";
 import { Smile, AtSign, X } from "../icons.js";
 
@@ -11,9 +11,14 @@ const EMOJI = {
   "生活与出行": ["☀️","🌈","🌸","🌊","🌿","🍀","🐱","🐶","☕","🍵","🍰","🍜","🍱","🍕","🎂","🎁","📷","🎵","📚","💻","🚆","✈️","🏖️","🗺️"],
 };
 
+/** The service's limit for a message's text, in characters (code points) after trimming. */
+export const TEXT_LIMIT = 8000;
+/** Typing pauses this long before the draft is written to the data layer (and at once on leaving the chat). */
+const DRAFT_SAVE_MS = 300;
+
 export function Composer({ conv, block, replyTo, setReplyTo }) {
-  const { state, dispatch } = useStore();
-  const [text, setText] = useState("");
+  const { state, actions } = useStore();
+  const [text, setText] = useState(() => state.drafts?.[conv.id] ?? "");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [category, setCategory] = useState("表情");
   const [mention, setMention] = useState(null);
@@ -23,14 +28,33 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
   const rootRef = useRef(null);
   const selection = useRef({ start: 0, end: 0 });
   const drag = useRef(null);
+  const unsaved = useRef(null);
   const disabled = Boolean(block);
-  const people = [...new Set([...conv.members, ...viewerOwners(state, conv)])].filter(id => id !== ME);
+  const length = [...text.trim()].length;
+  const tooLong = length > TEXT_LIMIT;
+  // @ suggestions: the conversation's current members, nobody else.
+  const people = conv.members.filter(id => id !== ME);
   const matches = mention ? people.filter(id => `${nameOf(state,id)} ${entity(state,id)?.handle || ""}`.toLowerCase().includes(mention.query.toLowerCase())) : [];
   const selected = Math.min(active, Math.max(0, matches.length - 1));
   const maxHeight = () => Math.max(64, Math.min(360, Math.floor(window.innerHeight * 0.42)));
   const clampHeight = value => Math.max(56, Math.min(maxHeight(), value));
 
-  useEffect(() => { setText(""); setMention(null); setEmojiOpen(false); selection.current={start:0,end:0}; setReplyTo(null); }, [conv.id]);
+  // Drafts live in the data layer per conversation: written after a pause, and at once when the chat changes or closes.
+  const saveDraft = useCallback(() => {
+    const draft = unsaved.current;
+    if (!draft) return;
+    clearTimeout(draft.timer);
+    unsaved.current = null;
+    actions.setDraft(draft.convId, draft.text);
+  }, [actions]);
+  const edit = value => {
+    setText(value);
+    if (unsaved.current) clearTimeout(unsaved.current.timer);
+    unsaved.current = { convId: conv.id, text: value, timer: setTimeout(saveDraft, DRAFT_SAVE_MS) };
+  };
+  useEffect(() => saveDraft, [conv.id, saveDraft]);
+
+  useEffect(() => { setText(state.drafts?.[conv.id] ?? ""); setMention(null); setEmojiOpen(false); selection.current={start:0,end:0}; setReplyTo(null); }, [conv.id]);
   useEffect(() => { if (replyTo) inputRef.current?.focus(); }, [replyTo]);
   useEffect(() => { if(disabled) { setEmojiOpen(false); setMention(null); } }, [disabled]);
   useEffect(() => {
@@ -50,7 +74,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     if(disabled) return;
     const value = text.slice(0,range.start)+snippet+text.slice(range.end);
     const cursor = range.start+snippet.length;
-    setText(value); setMention(null); setEmojiOpen(false);
+    edit(value); setMention(null); setEmojiOpen(false);
     selection.current={start:cursor,end:cursor};
     requestAnimationFrame(()=>{ inputRef.current?.focus(); inputRef.current?.setSelectionRange(cursor,cursor); });
   };
@@ -61,14 +85,15 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     const prefix = range.start > 0 && !/\s/.test(text[range.start-1]) ? " @" : "@";
     const value=text.slice(0,range.start)+prefix+text.slice(range.end);
     const cursor=range.start+prefix.length;
-    setText(value); detect(value,cursor); setEmojiOpen(false);
+    edit(value); detect(value,cursor); setEmojiOpen(false);
     requestAnimationFrame(()=>{inputRef.current?.focus();inputRef.current?.setSelectionRange(cursor,cursor);});
   };
-  const send = (extra={}) => {
-    const body=extra.text ?? text.trim();
-    if(!body || disabled) return;
-    dispatch({type:"msg/send",convId:conv.id,text:body,replyTo:replyTo?.id,...extra});
-    if(!extra.kind) {setText("");selection.current={start:0,end:0};}
+  const send = () => {
+    const body=text.trim();
+    if(!body || disabled || tooLong) return;
+    actions.sendText(conv.id, body, { replyToSeq: replyTo?.seq ?? null });
+    edit(""); saveDraft();
+    selection.current={start:0,end:0};
     setReplyTo(null);setMention(null);setEmojiOpen(false);
   };
   const keyDown = e => {
@@ -84,8 +109,9 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     }
     if(e.key==="Enter" && !e.shiftKey) {e.preventDefault();send();}
   };
+  const limitNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : null;
   return <footer className="composer" ref={rootRef} onKeyDown={e=>{if(e.key==="Escape"){setEmojiOpen(false);setMention(null);}}}>
-    {replyTo && <div className="reply-chip"><span>回复 {nameOf(state,replyTo.from)}：{replyTo.kind==="image"?"[图片]":replyTo.text}</span><IconBtn label="取消回复" onClick={()=>setReplyTo(null)}><X size={14}/></IconBtn></div>}
+    {replyTo && <div className="reply-chip"><span>回复 {senderName(state,replyTo.from)}：{replyTo.kind==="image"?"[图片]":replyTo.text}</span><IconBtn label="取消回复" onClick={()=>setReplyTo(null)}><X size={14}/></IconBtn></div>}
     <div className="composer-tools">
       <div className="menu-anchor">
         <IconBtn label="表情" disabled={disabled} aria-expanded={emojiOpen} aria-controls="emoji-picker" onClick={()=>{setEmojiOpen(!emojiOpen);setMention(null);}}><Smile size={22}/></IconBtn>
@@ -95,7 +121,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
           <div className="emoji-grid">{EMOJI[category].map(emoji=><button key={emoji} type="button" aria-label={`插入表情 ${emoji}`} onClick={()=>replace(emoji)}>{emoji}</button>)}</div>
         </div>}
       </div>
-      {people.length>0 && <IconBtn label="@ 真人或 Agent" disabled={disabled} aria-expanded={Boolean(mention)} onClick={openMentions}><AtSign size={22}/></IconBtn>}
+      {people.length>0 && <IconBtn label="@ 会话成员" disabled={disabled} aria-expanded={Boolean(mention)} onClick={openMentions}><AtSign size={22}/></IconBtn>}
     </div>
     <div className="composer-row">
       <div className="composer-input">
@@ -106,21 +132,21 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
           onPointerCancel={()=>{drag.current=null;}}
           onDoubleClick={()=>setHeight(64)}
           onKeyDown={e=>{if(["ArrowUp","ArrowDown","Home","End"].includes(e.key)){e.preventDefault();setHeight(e.key==="Home"?56:e.key==="End"?maxHeight():clampHeight(height+(e.key==="ArrowUp"?20:-20)));}}} />
-        {mention && !disabled && <div className="mention-picker" id="mention-picker" role="listbox" aria-label="选择要提及的人或 Agent">
-          <div className="mention-heading">提及会话中的人或 Agent <small>↑↓ 选择 · Enter 确认</small></div>
+        {mention && !disabled && <div className="mention-picker" id="mention-picker" role="listbox" aria-label="选择要提及的成员">
+          <div className="mention-heading">提及会话中的成员 <small>↑↓ 选择 · Enter 确认</small></div>
           {!matches.length && <p className="mention-empty">没有匹配的成员</p>}
           {matches.map((id,i)=><button key={id} id={`mention-${id}`} role="option" aria-selected={i===selected} type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>chooseMention(id)}>
-            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>{state.agents[id]?`Agent · 主人：${nameOf(state,state.agents[id].ownerId)}${state.agents[id].paused?" · 已暂停":""}`:conv.members.includes(id)?"真人 · 会话成员":"真人 · 可见主人"}</small></span>
+            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>真人 · 会话成员</small></span>
           </button>)}
         </div>}
-        <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":isInterject(conv)?"以本人身份插话，所有可见主人都会看到":"发送消息，或 @ 真人 / Agent"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined}
-          onChange={e=>{setText(e.target.value);detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}
+        <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":"发送消息，或 @ 会话成员"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined}
+          onChange={e=>{edit(e.target.value);detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}
           onSelect={e=>{selection.current={start:e.target.selectionStart,end:e.target.selectionEnd};}}
           onClick={e=>detect(e.target.value,e.target.selectionStart,e.target.selectionEnd)} onKeyDown={keyDown}
           onKeyUp={e=>{if(!e.nativeEvent.isComposing && ["ArrowLeft","ArrowRight","Home","End"].includes(e.key))detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}/>
       </div>
-      <Btn variant="primary" className="send" disabled={disabled||!text.trim()} reason={block?.text} onClick={()=>send()}>发送</Btn>
+      <Btn variant="primary" className="send" disabled={disabled||!text.trim()||tooLong} reason={block?.text ?? limitNote} onClick={()=>send()}>发送</Btn>
     </div>
-    <p className="composer-hint">{disabled?block.text:"Enter 发送 · Shift+Enter 换行"}</p>
+    <p className="composer-hint">{disabled?block.text:limitNote?<span className="failed">{limitNote}</span>:"Enter 发送 · Shift+Enter 换行"}</p>
   </footer>;
 }

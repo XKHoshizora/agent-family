@@ -4,6 +4,8 @@ export const entity = (state, id) => state.people[id] || state.agents[id] || nul
 export const isAgent = (state, id) => Boolean(state.agents[id]);
 export const ownerOf = (state, id) => (state.agents[id] ? state.agents[id].ownerId : id);
 export const nameOf = (state, id) => entity(state, id)?.name || "未知";
+// A message's sender (or a quote's) whom nobody has named here: they left before this client saw them.
+export const senderName = (state, id) => entity(state, id)?.name || "已退出的成员";
 export const isMine = (state, id) => state.agents[id]?.ownerId === ME;
 export const uniq = (list) => [...new Set(list)];
 
@@ -145,7 +147,7 @@ export function lastPreview(state, conv) {
   if (last.kind === "file") body = "[文件]";
   const group = conv.type !== "human" && conv.type !== "agent";
   if (group && last.from === ME) return `你：${body}`;
-  if (group && last.from) return `${nameOf(state, last.from)}：${body}`;
+  if (group && last.from) return `${senderName(state, last.from)}：${body}`;
   return body;
 }
 

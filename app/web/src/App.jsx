@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef } from "react";
 import { StoreProvider, useStore } from "./data/store.jsx";
 import { unreadTotal } from "./state/selectors.js";
 import { ME } from "./data/identities.js";
@@ -52,8 +52,29 @@ function Rail() {
   );
 }
 
+/**
+ * The open conversation disappeared while loaded (I left or was removed: `gone`, or missing from a sync):
+ * close it, so nothing of it stays on screen, and say why once.
+ */
+function useCloseWhenRemoved(state, dispatch) {
+  const { convId, section } = state.nav;
+  const present = Boolean(convId && state.convs[convId]);
+  const shown = useRef(null);
+  useEffect(() => {
+    if (present) {
+      shown.current = convId;
+      return;
+    }
+    if (!convId || convId !== shown.current || !state.loaded) return;
+    shown.current = null;
+    dispatch({ type: "nav", patch: { convId: null, view: "chat", detailsOpen: false } });
+    if (section === "chat") dispatch({ type: "toast", text: "你已不在该会话中" });
+  }, [convId, present, section, state.loaded, dispatch]);
+}
+
 function Shell() {
-  const { state } = useStore();
+  const { state, dispatch } = useStore();
+  useCloseWhenRemoved(state, dispatch);
   const { nav } = state;
   const conv = state.convs[nav.convId];
   let list = null;

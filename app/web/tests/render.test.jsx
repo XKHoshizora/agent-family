@@ -7,6 +7,7 @@ import { ChatView } from "../src/pages/ChatView.jsx";
 
 const person = (id, name) => ({ id, kind: "person", name, handle: `@${id}`, cell: [0, 0] });
 const text = (id, from, body, extra = {}) => ({ id, from, kind: "text", text: body, at: "10:00", status: "read", ...extra });
+const quoting = (id, from, body) => ({ replyTo: id, quote: { seq: Number(id.slice(1)), visible: true, from, text: body, kind: "text", attachmentName: null } });
 
 function stateWithChats() {
   const s = emptyState(person("me", "你"));
@@ -21,18 +22,18 @@ function stateWithChats() {
     unread: 0,
     at: "10:02",
     cutoffs: {},
-    messages: [text("m1", "ann", "早上好"), text("m2", "me", "早", { replyTo: "m1" }), text("m3", "ann", "今天见面吗")],
+    messages: [text("m1", "ann", "早上好"), text("m2", "me", "早", quoting("m1", "ann", "早上好")), text("m3", "ann", "今天见面吗")],
   };
   s.convs.g1 = {
     id: "g1",
-    type: "mixed",
+    type: "group",
     title: "周末小组",
     members: ["me", "ann", "bo"],
     admin: "me",
     unread: 0,
     at: "10:05",
     cutoffs: {},
-    messages: [text("g1", "bo", "周六可以吗"), text("g2", "ann", "可以", { replyTo: "g1" }), text("g3", "me", "好的")],
+    messages: [text("m1", "bo", "周六可以吗"), text("m2", "ann", "可以", quoting("m1", "bo", "周六可以吗")), text("m3", "me", "好的")],
   };
   s.order = ["g1", "d1"];
   s.nav.convId = "d1";

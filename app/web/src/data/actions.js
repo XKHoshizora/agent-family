@@ -76,9 +76,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     return deliver(clientTxn);
   }
 
-  /** Sends text (trimmed; empty is refused without a request). Resolves {ok, clientTxn, duplicate?, error?}. */
+  /**
+   * Sends text (trimmed; NUL dropped and lone surrogates replaced, which the service refuses; empty is refused
+   * without a request). Resolves {ok, clientTxn, duplicate?, error?}.
+   */
   function sendText(conversationId, text, { replyToSeq = null } = {}) {
-    const body = typeof text === "string" ? text.trim() : "";
+    const body = typeof text === "string" ? text.replaceAll("\u0000", "").toWellFormed().trim() : "";
     if (!body) return refused("invalid_request");
     return send(conversationId, { text: body, replyToSeq });
   }
@@ -157,9 +160,14 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     return entry.promise;
   }
 
-  /** Composer text kept in the store (survives stop() for the same account). */
+  /**
+   * Composer text kept in the store (survives stop() for the same account). Not kept for a conversation I am
+   * no longer in (a composer saving on its way out after I was removed); while stopped every draft is kept.
+   */
   function saveDraft(conversationId, text) {
-    setModel(setDraft(getModel(), conversationId, typeof text === "string" ? text : ""));
+    const model = getModel();
+    if (model.synced && !model.conversations[conversationId]) return;
+    setModel(setDraft(model, conversationId, typeof text === "string" ? text : ""));
   }
 
   /** Runs a route; on success `after(result)`; a 401 signs out; errors reach the caller unchanged. */

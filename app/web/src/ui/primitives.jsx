@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef } from "react";
 import { X, Info, CircleAlert, CircleCheck, CirclePause, Bot } from "../icons.js";
 import { useStore } from "../data/store.jsx";
 import { entity, isAgent, nameOf, ownerOf, otherMember } from "../state/selectors.js";
-import { BRAND_CELL } from "../data/identities.js";
+import { BRAND_CELL, ME, MY_CELL, personCell } from "../data/identities.js";
 
 export const asset = (path) => `${import.meta.env.BASE_URL}${String(path).replace(/^\//, "")}`;
 const ATLAS = asset("assets/identities.png");
@@ -21,7 +21,8 @@ export function cellStyle(cell, size) {
 export function Avatar({ id, size = 44, online = false, className = "" }) {
   const { state } = useStore();
   const who = entity(state, id);
-  const cell = who?.cell || BRAND_CELL;
+  // Someone not named here (a member who left, or me before the first load) is a person, never the Agent mark.
+  const cell = who?.cell || (id === ME ? MY_CELL : id ? personCell(id) : BRAND_CELL);
   return (
     <span className={`avatar ${className}`} style={{ width: size, height: size }} role="img" aria-label={who?.name || "头像"}>
       {cell[0] === BRAND_CELL[0] && cell[1] === BRAND_CELL[1]

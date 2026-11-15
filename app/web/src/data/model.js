@@ -282,12 +282,26 @@ export function applySocial(state, social) {
   return { ...state, social };
 }
 
-/** Prepends an older page (`GET /api/conversations/:id/messages?before=`). */
+/**
+ * Adds the people a message read names: the `principals` of history, single-message and search answers (a map
+ * by id, the same public shape as in /api/sync; an array is accepted too). Absent or malformed: no change.
+ */
+export function applyPrincipals(state, principals) {
+  const list = Array.isArray(principals) ? principals : principals && typeof principals === "object" ? Object.values(principals) : [];
+  const valid = list.filter((p) => p && typeof p.id === "string" && typeof p.handle === "string" && typeof p.displayName === "string");
+  if (valid.length === 0) return state;
+  const next = { ...state.principals };
+  for (const p of valid) next[p.id] = p;
+  return { ...state, principals: next };
+}
+
+/** Prepends an older page (`GET /api/conversations/:id/messages?before=`) and the people it names. */
 export function applyOlder(state, conversationId, page) {
   const conv = state.conversations[conversationId];
   if (!conv) return state;
   const list = mergeBySeq(state.messages[conversationId] ?? [], page.messages ?? []);
-  return putConversation(state, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
+  const named = applyPrincipals(state, page.principals);
+  return putConversation(named, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
 }
 
 /** `{conversationId: position}` for the held ones among `ids`. */

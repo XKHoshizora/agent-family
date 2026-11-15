@@ -252,6 +252,20 @@ describe("other updates", () => {
     expect(s.conversations[D1].hasOlder).toBe(false);
   });
 
+  it("applyOlder adds the principals the page names (a map by id), so a sender who left is known", () => {
+    const GONE = "00000000-0000-4000-8000-0000000000a9";
+    let s = M.applySync(M.initial(), syncOf([group(G1, { lastSeq: 40 })], range(G1, 11, 40)));
+    const departed = { id: GONE, handle: "gone", displayName: "走了的人", kind: "human" };
+    s = M.applyOlder(s, G1, { messages: [wire(G1, 10, GONE)], nextBefore: 10, principals: { [GONE]: departed } });
+    expect(s.principals[GONE]).toEqual(departed);
+    expect(s.principals[ANN]).toMatchObject({ displayName: "小安" });
+    // absent or malformed: nothing changes
+    const before = s.principals;
+    expect(M.applyOlder(s, G1, { messages: [], nextBefore: null }).principals).toBe(before);
+    expect(M.applyPrincipals(s, { x: { id: 7 } }).principals).toBe(before);
+    expect(M.applyPrincipals(s, [departed]).principals[GONE]).toEqual(departed);
+  });
+
   it("applyConversation refreshes metadata but keeps position and unread", () => {
     let s = loaded();
     s = M.applyConversation(s, group(G1, { title: "新名字", lastSeq: 9, unread: 7, members: [{ id: ME_ID, role: "speaker", isCreator: false }, { id: ANN, role: "speaker", isCreator: true }], creatorId: ANN }));

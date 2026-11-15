@@ -125,6 +125,12 @@ describe("sending (Review Focus 2)", () => {
     expect(messages(D1).at(-1)).toMatchObject({ kind: "image", status: "sending", text: "a.png", caption: "图" });
   });
 
+  it("drops NUL characters and replaces lone surrogates before sending (the service refuses both)", async () => {
+    const { actions, api } = await loaded();
+    actions.sendText(D1, " a\u0000b\uD800c ");
+    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "ab�c" });
+  });
+
   it("refuses empty text and unknown conversations without a request", async () => {
     const { actions, api } = await loaded();
     await expect(actions.sendText(D1, "   ")).resolves.toMatchObject({ ok: false });
@@ -312,6 +318,18 @@ describe("lifecycle", () => {
     await settle();
     expect(layer.getSnapshot().model.conversations[D1]).toBeDefined();
     expect(toView(layer.getSnapshot().model, { now: 0 }).convs[D1].messages.at(-1)).toMatchObject({ status: "failed", clientTxn: "tx-1" });
+  });
+
+  it("setDraft keeps drafts of held conversations, and of any while stopped; never one I am no longer in", async () => {
+    const { layer, actions, transport } = await loaded();
+    actions.setDraft(G1, "群里写了一半");
+    transport.socket.emit({ type: "gone", id: G1 });
+    expect(layer.getSnapshot().model.drafts[G1]).toBeUndefined();
+    actions.setDraft(G1, "离开后才保存");
+    expect(layer.getSnapshot().model.drafts[G1]).toBeUndefined();
+    layer.stop();
+    actions.setDraft(D1, "退出登录时保存");
+    expect(layer.getSnapshot().model.drafts).toEqual({ [D1]: "退出登录时保存" });
   });
 
   it("a late answer to a request made before stop() is ignored", async () => {

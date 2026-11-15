@@ -1,31 +1,148 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { convTitle, convSubtitle, visibilityNote, publishBlock } from "../state/selectors.js";
-import { ConvAvatar, Btn, IconBtn } from "../ui/primitives.jsx";
+import { ME } from "../data/identities.js";
+import { convTitle, convSubtitle, publishBlock } from "../state/selectors.js";
+import { ConvAvatar, Btn, IconBtn, Notice } from "../ui/primitives.jsx";
 import { MessageItem } from "./Messages.jsx";
-import { Search, Menu, Eye, ChevronLeft, X } from "../icons.js";
+import { Search, Menu, ChevronLeft, X } from "../icons.js";
 
 import { Composer } from "./Composer.jsx";
 
+/** This close to the bottom the list counts as "at the newest message" and follows new ones. */
+const BOTTOM_SLACK_PX = 48;
+/** This close to the top, the page of older messages is loaded. */
+const TOP_SLACK_PX = 120;
+/** The newest message is marked read once the open chat has been in view this long. */
+export const READ_DELAY_MS = 500;
+/** After older history failed to load, scrolling asks again only after this long. */
+const OLDER_RETRY_MS = 3000;
+
+const newestSeqOf = (messages) => messages.reduce((max, m) => (Number.isSafeInteger(m.seq) && m.seq > max ? m.seq : max), 0);
+/** The person can see this tab: it is visible and the window has focus. */
+const inView = () => document.visibilityState === "visible" && document.hasFocus();
+const firstMessageNode = (list) => [...list.children].find((li) => li.dataset.msg);
+const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBoundingClientRect().top;
+
 export function ChatView({ conv }) {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, actions } = useStore();
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [replyTo, setReplyTo] = useState(null);
-  const endRef = useRef(null);
+  /** Bumped when the person may have started looking (tab shown, window focused, scrolled to the newest). */
+  const [attention, setAttention] = useState(0);
+  const listRef = useRef(null);
+  const atBottom = useRef(true);
+  const lastSeen = useRef(null);
+  /** While an older page loads: the first message on screen and where it was, to keep it in place. */
+  const anchor = useRef(null);
+  const older = useRef({ busy: null, failed: null });
+  const readFailed = useRef(null);
   const block = publishBlock(state, conv);
-  const note = visibilityNote(state, conv);
-  const group = conv.type === "group" || conv.type === "mixed" || conv.type === "agentGroup";
+  const group = conv.type === "group";
   const q = query.trim();
   const messages = q ? conv.messages.filter((x) => (x.text || "").toLowerCase().includes(q.toLowerCase())) : conv.messages;
+  const firstId = messages[0]?.id ?? null;
+  const last = messages[messages.length - 1] ?? null;
+  const newestSeq = newestSeqOf(conv.messages);
 
   useEffect(() => {
     setSearching(false);
     setQuery("");
   }, [conv.id]);
+
+  // A chat opens at its newest message.
+  useLayoutEffect(() => {
+    atBottom.current = true;
+    anchor.current = null;
+    readFailed.current = null;
+    const list = listRef.current;
+    if (list) list.scrollTop = list.scrollHeight;
+  }, [conv.id]);
+
+  // After the list changed: an older page keeps what was on screen where it was; otherwise a list that was at
+  // the newest message stays there, and so does one where I just sent something. Scrolled up: no jump.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const mineNew = last !== null && last.id !== lastSeen.current && last.from === ME && last.seq === null;
+    lastSeen.current = last?.id ?? null;
+    const held = anchor.current;
+    if (held && held.convId === conv.id && firstId !== held.id) {
+      anchor.current = null;
+      const node = [...list.children].find((li) => li.dataset.msg === held.id);
+      if (node) list.scrollTop += topWithin(node, list) - held.top;
+      return;
+    }
+    if (atBottom.current || mineNew) {
+      list.scrollTop = list.scrollHeight;
+      atBottom.current = true;
+    }
+  }, [conv.id, firstId, last?.id, messages.length]);
+
+  function loadOlder() {
+    const list = listRef.current;
+    const convId = conv.id;
+    const { busy, failed } = older.current;
+    if (!list || q || !conv.hasOlder || busy === convId) return;
+    if (failed && failed.convId === convId && Date.now() - failed.at < OLDER_RETRY_MS) return;
+    const first = firstMessageNode(list);
+    anchor.current = first ? { convId, id: first.dataset.msg, top: topWithin(first, list) } : null;
+    older.current = { busy: convId, failed: null };
+    actions.loadOlder(convId).then((res) => {
+      if (older.current.busy === convId) older.current = { busy: null, failed: res.ok ? null : { convId, at: Date.now() } };
+      // Nothing was added: nothing to keep in place.
+      if ((!res.ok || res.loaded === 0) && anchor.current?.convId === convId) anchor.current = null;
+      const quiet = ["stale", "stopped"].includes(res.error?.code) || [401, 404].includes(res.error?.status);
+      if (!res.ok && !quiet) dispatch({ type: "toast", text: "更早的消息加载失败，请稍后再试" });
+    });
+  }
+
+  // History shorter than the list's height cannot be scrolled: ask for older messages straight away.
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
-  }, [conv.id, conv.messages.length]);
+    const list = listRef.current;
+    if (list && conv.hasOlder && list.clientHeight > 0 && list.scrollHeight <= list.clientHeight) loadOlder();
+  });
+
+  function onScroll() {
+    const list = listRef.current;
+    const bottom = list.scrollHeight - list.scrollTop - list.clientHeight <= BOTTOM_SLACK_PX;
+    if (bottom && !atBottom.current) {
+      readFailed.current = null;
+      setAttention((n) => n + 1);
+    }
+    atBottom.current = bottom;
+    if (list.scrollTop <= TOP_SLACK_PX) loadOlder();
+  }
+
+  useEffect(() => {
+    const look = () => {
+      readFailed.current = null;
+      setAttention((n) => n + 1);
+    };
+    document.addEventListener("visibilitychange", look);
+    window.addEventListener("focus", look);
+    return () => {
+      document.removeEventListener("visibilitychange", look);
+      window.removeEventListener("focus", look);
+    };
+  }, []);
+
+  // Mark read up to the newest message once the chat has been in view for a moment: the tab is visible, the
+  // window focused, the list at the newest message (not while searching). A failed attempt is not repeated
+  // until something changes (a new message, or the person looks again).
+  useEffect(() => {
+    if (conv.unread === 0 || newestSeq === 0 || q) return undefined;
+    const key = `${conv.id}:${newestSeq}`;
+    if (readFailed.current === key) return undefined;
+    const timer = setTimeout(() => {
+      // (A failure re-renders before it is recorded below, so this timer may predate it: check again.)
+      if (readFailed.current === key || !inView() || !atBottom.current) return;
+      actions.markRead(conv.id, newestSeq).then((res) => {
+        if (!res.ok) readFailed.current = key;
+      });
+    }, READ_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [conv.id, conv.unread, newestSeq, q, attention, actions]);
 
   return (
     <section className="chat" aria-label={convTitle(state, conv)}>
@@ -53,17 +170,16 @@ export function ChatView({ conv }) {
           <IconBtn label="关闭会话搜索" onClick={()=>{setQuery("");setSearching(false);}}><X size={16}/></IconBtn>
         </div>
       )}
-      {note && (
-        <div className="vis-banner">
-          <Eye size={18} aria-hidden="true" /> {note}
-        </div>
+      {block && (
+        <Notice tone="pause">
+          <strong>{block.text}</strong>
+        </Notice>
       )}
-      <ol className="messages">
+      <ol className="messages" ref={listRef} onScroll={onScroll}>
         {q && messages.length === 0 && <li className="rows-empty" role="status">没有找到相关消息，请换个关键词</li>}
         {messages.map((msg) => (
           <MessageItem key={msg.id} msg={msg} conv={conv} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}
-        <li ref={endRef} aria-hidden="true" />
       </ol>
 
       <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} />

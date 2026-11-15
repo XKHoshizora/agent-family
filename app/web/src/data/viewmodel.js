@@ -1,19 +1,7 @@
 // Model → the state shape the prototype's pages and selectors read (people, agents, convs, order,
 // relations, blocks). The signed-in user appears as the alias id "me"; every other id is the real one.
 import { attachmentUrl, avatarUrl } from "../api/routes.js";
-import { ME } from "./identities.js";
-
-// Placeholder faces from the prototype's atlas until real avatars are shown (Task 9).
-const MY_CELL = [0, 0];
-const PERSON_CELLS = [
-  [1, 0],
-  [2, 0],
-];
-function cellFor(id) {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return PERSON_CELLS[h % PERSON_CELLS.length];
-}
+import { ME, MY_CELL, personCell } from "./identities.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -60,6 +48,69 @@ function systemView(system, alias) {
   return out;
 }
 
+/** How many invited members `group_created` names before "等N人" (as the service writes it). */
+const LISTED_NAMES = 10;
+const CANNOT_SEND_ANY_MORE = "双方不能再发送新消息，已有历史不受影响";
+
+/**
+ * A system notice's sentence, rendered from its event (`system`, ids aliased) with the names known now ("你"
+ * for me) in the service's wording. The service's own sentence (`fallback`, names of that moment) is shown for
+ * an event this client does not know, a malformed one, or when someone it names is not known here.
+ * @param {(id: string) => string | null} nameOf
+ */
+export function noticeText(system, fallback, nameOf) {
+  if (!system || typeof system.event !== "string") return fallback;
+  let missing = false;
+  const n = (id) => {
+    const name = typeof id === "string" ? nameOf(id) : null;
+    if (!name) missing = true;
+    return name ?? "";
+  };
+  const title = typeof system.title === "string" && system.title ? system.title : null;
+  let text;
+  switch (system.event) {
+    case "group_created": {
+      if (!title || !Array.isArray(system.memberIds)) return fallback;
+      const listed = system.memberIds.slice(0, LISTED_NAMES).map(n).join("、");
+      const more = system.memberIds.length > LISTED_NAMES ? `等${system.memberIds.length}人` : "";
+      text = `${n(system.actorId)}创建了群聊「${title}」，并邀请${listed}${more}加入`;
+      break;
+    }
+    case "member_joined":
+      text = `${n(system.actorId)}邀请${n(system.principalId)}加入了群聊`;
+      break;
+    case "member_left":
+      text = `${n(system.principalId)}退出了群聊${system.newCreatorId ? `，${n(system.newCreatorId)}成为新的创建者` : ""}`;
+      break;
+    case "member_removed":
+      text = `${n(system.actorId)}将${n(system.principalId)}移出了群聊`;
+      break;
+    case "group_renamed":
+      if (!title) return fallback;
+      text = `${n(system.actorId)}将群名改为「${title}」`;
+      break;
+    case "friendship_ended":
+      text = `${n(system.actorId)}解除了与${n(system.principalId)}的好友关系，${CANNOT_SEND_ANY_MORE}`;
+      break;
+    case "friendship_restored":
+      text = `${n(system.actorId)}和${n(system.principalId)}重新成为好友，可以继续发送消息`;
+      break;
+    case "blocked":
+      // "只能由对方解除" is said to the one who was blocked; the one who blocked can lift it themselves.
+      text =
+        system.actorId === ME
+          ? `${n(system.actorId)}拉黑了${n(system.principalId)}。${CANNOT_SEND_ANY_MORE}`
+          : `${n(system.actorId)}拉黑了${n(system.principalId)}，只能由对方解除。${CANNOT_SEND_ANY_MORE}`;
+      break;
+    case "unblocked":
+      text = `${n(system.actorId)}解除了对${n(system.principalId)}的拉黑`;
+      break;
+    default:
+      return fallback;
+  }
+  return missing ? fallback : text;
+}
+
 /** kind: "image" for a file the service marked inline, "file", "system", else "text". */
 function kindOf(kind, attachment) {
   if (kind === "system") return "system";
@@ -67,16 +118,20 @@ function kindOf(kind, attachment) {
   return "text";
 }
 
-function messageView(m, { alias, meId, direct, peerReadSeq, now }) {
+function messageView(m, { alias, meId, direct, peerReadSeq, now, nameOf }) {
   const attachment = m.kind === "file" ? attachmentView(m.attachment) : null;
   const kind = kindOf(m.kind, attachment);
+  const system = systemView(m.system, alias);
+  let text = m.text ?? "";
+  // As in the prototype, a file or image message's `text` is its file name; the caption is separate.
+  if (attachment) text = attachment.name;
+  else if (kind === "system") text = noticeText(system, text, nameOf);
   const view = {
     id: `m${m.seq}`,
     seq: m.seq,
     from: m.senderId === null || m.senderId === undefined ? null : alias(m.senderId),
     kind,
-    // As in the prototype, a file or image message's `text` is its file name; the caption is separate.
-    text: attachment ? attachment.name : m.text ?? "",
+    text,
     caption: attachment ? m.text ?? "" : null,
     at: formatAt(timeOf(m.createdAt), now),
     createdAt: m.createdAt,
@@ -84,7 +139,7 @@ function messageView(m, { alias, meId, direct, peerReadSeq, now }) {
     replyTo: m.replyTo ? `m${m.replyTo.seq}` : null,
     quote: quoteView(m.replyTo, alias),
     attachment,
-    system: systemView(m.system, alias),
+    system,
   };
   if (kind === "image") view.src = attachment.url;
   return view;
@@ -159,7 +214,7 @@ function personView(p) {
     name: p.displayName,
     handle: `@${p.handle}`,
     displayName: p.displayName,
-    cell: cellFor(p.id),
+    cell: personCell(p.id),
     avatar: avatarUrl(p.id),
   };
 }
@@ -191,6 +246,7 @@ export function toView(model, { now = Date.now() } = {}) {
       avatar: avatarUrl(meId),
     };
   }
+  const nameOf = (id) => people[id]?.name ?? null;
 
   const pendingByConv = new Map();
   for (const p of Object.values(model.pending).sort((a, b) => a.at - b.at)) {
@@ -208,7 +264,7 @@ export function toView(model, { now = Date.now() } = {}) {
     if (direct) members = [ME, conv.peerId ?? members.find((id) => id !== ME)].filter(Boolean);
     else if (!members.includes(ME)) members.unshift(ME);
 
-    const messages = held.map((m) => messageView(m, { alias, meId, direct, peerReadSeq: conv.peerReadSeq, now }));
+    const messages = held.map((m) => messageView(m, { alias, meId, direct, peerReadSeq: conv.peerReadSeq, now, nameOf }));
     const claimed = new Set();
     let lastPendingAt = null;
     for (const p of pendingByConv.get(conv.id) ?? []) {

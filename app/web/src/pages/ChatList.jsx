@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { convTitle, lastPreview, TYPE_LABEL, otherMember, isAgent } from "../state/selectors.js";
-import { ConvAvatar, Tag, IconBtn } from "../ui/primitives.jsx";
-import { Plus, Search, UserPlus, Bot } from "../icons.js";
+import { convTitle, entity, lastPreview, TYPE_LABEL, otherMember } from "../state/selectors.js";
+import { ConvAvatar, IconBtn } from "../ui/primitives.jsx";
+import { Plus, Search, UserPlus } from "../icons.js";
 
 const FILTERS = [
   ["all", "全部"],
@@ -51,13 +51,11 @@ export function Pills({ options, value, onChange, label }) {
   );
 }
 
-function convTag(state, conv) {
-  if (conv.type === "mixed") return <Tag tone="solid">混合群</Tag>;
-  if (conv.type === "agentGroup") return <Tag tone="solid">Agent 群</Tag>;
-  if (conv.type === "pair") return <Tag>一对一</Tag>;
-  if (conv.type === "observed") return <Tag>Agent 私聊</Tag>;
-  if (conv.type === "agent" && isAgent(state, otherMember(conv))) return <Tag>Agent</Tag>;
-  return null;
+/** Local filter: the conversation's name, a direct chat's account name (@handle), the last message, or 私聊/群聊. */
+function matches(state, conv, q) {
+  if (!q) return true;
+  const handle = conv.type === "human" ? entity(state, otherMember(conv))?.handle ?? "" : "";
+  return [convTitle(state, conv), handle, lastPreview(state, conv), TYPE_LABEL[conv.type] ?? ""].some((text) => text.toLowerCase().includes(q));
 }
 
 export function ChatList() {
@@ -79,8 +77,8 @@ export function ChatList() {
   const rows = state.order
     .map((id) => state.convs[id])
     .filter(Boolean)
-    .filter((c) => (filter === "unread" ? c.unread > 0 : filter === "group" ? c.type === "group" || c.type === "mixed" || c.type === "agentGroup" : true))
-    .filter((c) => !q || convTitle(state, c).toLowerCase().includes(q) || lastPreview(state, c).toLowerCase().includes(q) || TYPE_LABEL[c.type].includes(q));
+    .filter((c) => (filter === "unread" ? c.unread > 0 : filter === "group" ? c.type === "group" : true))
+    .filter((c) => matches(state, c, q));
 
   return (
     <>
@@ -94,17 +92,14 @@ export function ChatList() {
             {menu && (
               <div className="menu" aria-label="新建选项">
                 <button type="button" onClick={() => (setMenu(false), dispatch({ type: "nav", patch: { section: "contacts", pane: "list" } }))}>
-                  <UserPlus size={16} aria-hidden="true" /> 添加好友或 Agent
-                </button>
-                <button type="button" onClick={() => (setMenu(false), dispatch({ type: "nav", patch: { section: "agents", agentView: "create", pane: "main" } }))}>
-                  <Bot size={16} aria-hidden="true" /> 创建我的 Agent
+                  <UserPlus size={16} aria-hidden="true" /> 添加好友
                 </button>
               </div>
             )}
           </div>
         }
       />
-      <SearchBox value={query} onChange={setQuery} placeholder="搜索联系人、Agent、群聊" />
+      <SearchBox value={query} onChange={setQuery} placeholder="搜索联系人、群聊" />
       <Pills options={FILTERS} value={filter} onChange={setFilter} label="会话筛选" />
       <ul className="rows">
         {rows.map((c) => (
@@ -119,7 +114,6 @@ export function ChatList() {
               <span className="row-body">
                 <span className="row-top">
                   <span className="row-name">{convTitle(state, c)}</span>
-                  {convTag(state, c)}
                   <time>{c.at}</time>
                 </span>
                 <span className="row-sub">
