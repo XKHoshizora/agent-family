@@ -45,6 +45,8 @@ pool (and of the CLI's): a statement running longer, lock waits included, is can
 answered 503 `busy`. Only statements count, not the time between them, so a long upload or a sweep deleting
 blobs is not cut off; migrations run on their own connection and are not subject to it.
 `SEARCH_STATEMENT_TIMEOUT_MS` (default 3 s) is the same for each search (see Search).
+`DB_ACQUIRE_TIMEOUT_MS` (default 10 s): the pool has 10 connections; a request that cannot get one within
+this long (or whose new connection takes longer to open) is answered 503 `busy`.
 
 ## Errors
 
@@ -52,7 +54,8 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with string deta
 Shared codes: `not_found` (404), `forbidden` (403), `invalid_request` (400; 414 for an over-long path
 parameter, 415 for an unsupported content type), `unauthenticated` (401), `rate_limited` (429),
 `cannot_send` (403, with `reason`), `too_large` (413), and `busy` (503: a database statement ran past its
-timeout — a search's own or the pool's; nothing was changed, try again later). Feature codes
+timeout — a search's own or the pool's —, no database connection was free in time, or too many searches
+are running site-wide; nothing was changed, try again later). Feature codes
 (`handle_taken`, `already_member`, `request_not_pending`, …) are given with their routes. `internal` (500)
 is always a bug.
 
@@ -280,7 +283,8 @@ You only get messages you could read anyway (the same visibility rule), quotes r
 
 **Limits** per principal: 30 searches a minute over both routes, and at most 2 in progress at once (one
 more is 429 `rate_limited`; a search keeps its place until its database work ends, even if the client has
-gone, because the work goes on). Each search runs in a read-only transaction whose statements are cancelled
+gone, because the work goes on). Site-wide at most 4 searches run at once: one more is 503 `busy` (unless
+its caller is at their own 2, which stays 429). Each search runs in a read-only transaction whose statements are cancelled
 after `SEARCH_STATEMENT_TIMEOUT_MS` (3 s): 503 `{"error":"busy"}`. A very short or very common term over a
 long history can hit this; a longer term usually does not.
 

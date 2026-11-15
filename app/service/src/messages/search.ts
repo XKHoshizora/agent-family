@@ -5,6 +5,11 @@ import { toWireFor } from "./read.ts";
 
 /** Searches one principal may have running at once, both routes together; one more is 429 `rate_limited`. */
 export const MAX_CONCURRENT_SEARCHES = 2;
+/**
+ * Searches everyone together may have running at once (each holds one of the pool's 10 connections for up to
+ * the search timeout); one more is 503 `busy`, unless its caller is at their own cap (then 429).
+ */
+export const MAX_SEARCHES_IN_FLIGHT = 4;
 
 /**
  * Runs one search in a read-only transaction of its own whose statements Postgres cancels after

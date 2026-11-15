@@ -1,47 +1,55 @@
 import { AppError } from "./errors.ts";
 
 /**
- * Work in progress per principal, in this process (the service runs as a single instance), with a cap:
- * uploads (3 at once) and searches (2 at once) each have one on `Deps`.
+ * Work in progress per principal, in this process (the service runs as a single instance), with a cap per
+ * principal and optionally one for everyone together: uploads (3 at once each) and searches (2 at once each,
+ * 4 in all) each have one on `Deps`.
  */
 export interface Slots {
-  /** Takes a slot for `principalId`; false when it already has the maximum in progress. */
-  tryTake(principalId: string): boolean;
+  /**
+   * Takes a slot for `principalId`: "taken", or which cap stood in the way — the principal's own
+   * ("principal_full", checked first) or everyone's together ("total_full").
+   */
+  take(principalId: string): "taken" | "principal_full" | "total_full";
   release(principalId: string): void;
   /** In progress for one principal, or for everyone. For tests and diagnostics. */
   inProgress(principalId?: string): number;
 }
 
-export function createSlots(max: number): Slots {
+export function createSlots(max: number, totalMax: number = Infinity): Slots {
   const counts = new Map<string, number>();
+  let total = 0;
   return {
-    tryTake(principalId) {
+    take(principalId) {
       const n = counts.get(principalId) ?? 0;
-      if (n >= max) return false;
+      if (n >= max) return "principal_full";
+      if (total >= totalMax) return "total_full";
       counts.set(principalId, n + 1);
-      return true;
+      total++;
+      return "taken";
     },
     release(principalId) {
-      const n = (counts.get(principalId) ?? 0) - 1;
-      if (n > 0) counts.set(principalId, n);
+      const n = counts.get(principalId) ?? 0;
+      if (n === 0) return;
+      total--;
+      if (n > 1) counts.set(principalId, n - 1);
       else counts.delete(principalId);
     },
     inProgress(principalId) {
-      if (principalId !== undefined) return counts.get(principalId) ?? 0;
-      let total = 0;
-      for (const n of counts.values()) total += n;
-      return total;
+      return principalId === undefined ? total : (counts.get(principalId) ?? 0);
     },
   };
 }
 
 /**
- * Runs `work` holding one of `principalId`'s slots (429 `rate_limited` when none is free) and gives it
- * back exactly once, when `work` settles — whether it returns or throws. Nothing runs between taking the
- * slot and entering the `try`, so no path keeps it.
+ * Runs `work` holding one of `principalId`'s slots and gives it back exactly once, when `work` settles —
+ * whether it returns or throws. Nothing runs between taking the slot and entering the `try`, so no path
+ * keeps it. No slot: 429 `rate_limited` at the principal's own cap, 503 `busy` at everyone's.
  */
 export async function withSlot<T>(slots: Slots, principalId: string, work: () => Promise<T>): Promise<T> {
-  if (!slots.tryTake(principalId)) throw new AppError(429, "rate_limited");
+  const taken = slots.take(principalId);
+  if (taken === "principal_full") throw new AppError(429, "rate_limited");
+  if (taken === "total_full") throw new AppError(503, "busy");
   try {
     return await work();
   } finally {

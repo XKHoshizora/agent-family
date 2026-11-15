@@ -16,6 +16,22 @@ export type ErrorCode =
 /** Postgres `query_canceled`: what a statement past `statement_timeout` fails with. */
 const QUERY_CANCELED = "57014";
 
+/** What pg's pool fails with when no connection could be had within `connectionTimeoutMillis` (db.ts). */
+const NO_CONNECTION_IN_TIME = new Set([
+  "timeout exceeded when trying to connect", // every pooled connection stayed busy
+  "Connection terminated due to connection timeout", // a new connection took too long to open
+]);
+
+/**
+ * A database failure that means "busy, try again later", not "broken": a statement ran past its timeout
+ * (the pool's, or a search's own), or no pool connection was free in time. Answered 503 `busy`; nothing was
+ * changed (the transaction it was in, if any, rolled back).
+ */
+export function isBusy(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (err as { code?: unknown }).code === QUERY_CANCELED || NO_CONNECTION_IN_TIME.has(err.message);
+}
+
 export class AppError extends Error {
   constructor(
     readonly status: number,
@@ -53,9 +69,8 @@ export function registerErrorHandling(app: FastifyInstance): void {
     if (hasZodFastifySchemaValidationErrors(err)) {
       return reply.code(400).send({ error: "invalid_request" });
     }
-    if ((err as { code?: unknown }).code === QUERY_CANCELED) {
-      // A statement ran past its timeout (the pool's, or a search's own): the database is busy, not broken.
-      req.log.warn({ err }, "statement timed out");
+    if (isBusy(err)) {
+      req.log.warn({ err }, "database busy");
       return reply.code(503).send({ error: "busy" });
     }
     const status = (err as FastifyError).statusCode;

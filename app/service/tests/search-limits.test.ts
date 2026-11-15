@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { MAX_CONCURRENT_SEARCHES } from "../src/messages/search.ts";
+import { MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT } from "../src/messages/search.ts";
 import { api, befriend, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 import { listen } from "./helpers/ws.ts";
@@ -48,6 +48,27 @@ describe("search in-flight cap", () => {
     for (const r of await Promise.all([first, second, others])) expect([200, 503]).toContain(r!.status);
     expect(app.deps.searches.inProgress()).toBe(0);
     expect((await api(app, a, "GET", "/api/search?q=find")).status).toBe(200);
+  });
+
+  it(`allows ${MAX_SEARCHES_IN_FLIGHT} searches in flight across everyone; one more is 503 busy, even from someone with free slots`, async () => {
+    const { a, b } = await pair();
+    const c = await signUp(app, "carol");
+    const release = await blockMessages();
+    let running;
+    try {
+      running = [a, a, b, b].map((who) => api(app, who, "GET", "/api/search?q=find"));
+      await vi.waitFor(() => expect(app.deps.searches.inProgress()).toBe(MAX_SEARCHES_IN_FLIGHT));
+      expect(app.deps.searches.inProgress(c.id)).toBe(0);
+      expect(await api(app, c, "GET", "/api/search?q=find")).toEqual({ status: 503, json: { error: "busy" } });
+      // Someone at their own cap still hears that it is theirs.
+      expect(await api(app, a, "GET", "/api/search?q=find")).toEqual({ status: 429, json: { error: "rate_limited" } });
+      expect(app.deps.searches.inProgress()).toBe(MAX_SEARCHES_IN_FLIGHT);
+    } finally {
+      await release();
+    }
+    for (const r of await Promise.all(running!)) expect([200, 503]).toContain(r.status);
+    expect(app.deps.searches.inProgress()).toBe(0);
+    expect((await api(app, c, "GET", "/api/search?q=find")).status).toBe(200);
   });
 
   it("a search whose client went away keeps its slot until its work ends, then gives it back", async () => {

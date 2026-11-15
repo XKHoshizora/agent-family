@@ -22,7 +22,7 @@ import { createConversationEvents, type ConversationEvents } from "./conversatio
 import { registerConversationRoutes } from "./conversations/routes.ts";
 import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
-import { MAX_CONCURRENT_SEARCHES } from "./messages/search.ts";
+import { MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT } from "./messages/search.ts";
 import { clientIp } from "./limits.ts";
 import { appOriginCheck } from "./origin.ts";
 import { createSlots, type Slots } from "./slots.ts";
@@ -45,7 +45,7 @@ export interface Deps {
   sessions: SessionEvents;
   /** Uploads in progress per principal (at most 3 each). */
   uploads: UploadSlots;
-  /** Searches in progress per principal (at most 2 each). */
+  /** Searches in progress per principal (at most 2 each, 4 for everyone together). */
   searches: Slots;
 }
 
@@ -101,14 +101,16 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const ownsDb = overrides.db === undefined;
   const deps: Deps = {
     config,
-    db: overrides.db ?? createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs }),
+    db:
+      overrides.db ??
+      createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs }),
     blobs: overrides.blobs ?? createBlobStore(config),
     social: overrides.social ?? createSocialEvents(),
     conversations: overrides.conversations ?? createConversationEvents(),
     reads: overrides.reads ?? createReadEvents(),
     sessions: overrides.sessions ?? createSessionEvents(),
     uploads: overrides.uploads ?? createUploadSlots(),
-    searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES),
+    searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT),
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);

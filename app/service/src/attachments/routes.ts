@@ -234,7 +234,7 @@ function claimSlot(req: FastifyRequest, slots: UploadSlots) {
   return {
     take(principalId: string): void {
       if (gone || socket?.destroyed || req.raw.destroyed) throw invalid(); // nobody is left to answer
-      if (!slots.tryTake(principalId)) throw new AppError(429, "rate_limited");
+      if (slots.take(principalId) !== "taken") throw new AppError(429, "rate_limited");
       holder = principalId;
     },
     done(): void {
