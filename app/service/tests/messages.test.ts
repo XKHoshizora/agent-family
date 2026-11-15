@@ -93,7 +93,8 @@ describe("sending and reading", () => {
       { text: "hi", clientTxn: "has space" },
       { text: "hi", clientTxn: "é" },
       { text: "hi", clientTxn: 12 },
-      { text: "hi", clientTxn: nextTxn(), attachmentId: RANDOM_ID },
+      { text: "hi", clientTxn: nextTxn(), attachmentId: RANDOM_ID }, // no such upload
+      { text: "hi", clientTxn: nextTxn(), attachmentId: "not-a-uuid" },
       { text: "hi", clientTxn: nextTxn(), replyToSeq: 0 },
       { text: "hi", clientTxn: nextTxn(), replyToSeq: -1 },
       { text: "hi", clientTxn: nextTxn(), replyToSeq: 1.5 },

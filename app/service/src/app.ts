@@ -13,6 +13,7 @@ import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
+import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
@@ -27,7 +28,7 @@ import { registerSync } from "./sync/routes.ts";
 export interface Deps {
   config: Config;
   db: Db;
-  /** Where avatars (and later attachments) live; tests inject a temp-dir store. */
+  /** Where avatars and attachments live; tests inject a temp-dir store. */
   blobs: BlobStore;
   /** Per-app registry of "friendships/blocks changed" listeners; fired after commit. */
   social: SocialEvents;
@@ -88,6 +89,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   registerSocialRoutes(app);
   registerConversationRoutes(app);
   registerMessageRoutes(app);
+  registerAttachmentRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 

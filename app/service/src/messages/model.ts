@@ -19,12 +19,28 @@ export type PairEvent = {
   principalId: string;
 };
 
+/** A file message's attachment as stored in its body and shown on the wire (`attachments` row, frozen at send). */
+export interface AttachmentRef {
+  id: string;
+  /** The sanitised display name; search matches it via `messages.body->'attachment'->>'name'`. */
+  name: string;
+  size: number;
+  /** The server's sniffing verdict: safe to show in the browser (PNG, JPEG, WebP, GIF). */
+  inline: boolean;
+}
+
 /**
- * `messages.body`. Text messages carry `text` (and `replyToSeq` when quoting); system notices carry a
- * `SystemEvent` plus the rendered `text`. Later kinds (files, task cards...) add fields, so readers must
- * not assume more than this.
+ * `messages.body`. Text messages carry `text` (and `replyToSeq` when quoting); file messages carry
+ * `attachment` and an optional caption in `text`; system notices carry a `SystemEvent` plus the rendered
+ * `text`. Later kinds (task cards...) add fields, so readers must not assume more than this.
  */
-export type MessageBody = { text?: string; replyToSeq?: number; event?: string; [field: string]: unknown };
+export type MessageBody = {
+  text?: string;
+  replyToSeq?: number;
+  attachment?: AttachmentRef;
+  event?: string;
+  [field: string]: unknown;
+};
 
 export interface StoredMessage {
   /** `messages.id`, a bigint, as a string. Never exposed on the wire. */

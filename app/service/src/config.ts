@@ -26,6 +26,8 @@ const envSchema = z.object({
     .transform((v) => v === "true"),
   /** Multiplier applied to every rate limit; tests raise it. */
   RATE_LIMIT_SCALE: z.coerce.number().positive().default(1),
+  /** Total attachment bytes one principal may store (sent or not). */
+  ATTACHMENT_QUOTA_BYTES: z.coerce.number().int().positive().default(2 * 1024 ** 3),
 });
 
 export interface Config {
@@ -45,6 +47,7 @@ export interface Config {
   mailMode: "outbox";
   rateLimitScale: number;
   trustProxy: boolean;
+  attachmentQuotaBytes: number;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -82,5 +85,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     mailMode: e.MAIL_MODE,
     rateLimitScale: e.RATE_LIMIT_SCALE,
     trustProxy: e.TRUST_PROXY,
+    attachmentQuotaBytes: e.ATTACHMENT_QUOTA_BYTES,
   };
 }

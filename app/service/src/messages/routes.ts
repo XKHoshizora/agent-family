@@ -14,12 +14,13 @@ const sendResult = z.object({ message: wireMessageSchema, duplicate: z.boolean()
 
 const sendBody = z
   .object({
-    text: userText(1, 8000).optional(),
+    // A caption may be empty; a text message may not (the refinement below).
+    text: userText(0, 8000).optional(),
     attachmentId: uuidParam.optional(),
     replyToSeq: positiveInt.optional(),
     clientTxn: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
   })
-  .refine((b) => b.text !== undefined || b.attachmentId !== undefined, "text or attachmentId is required");
+  .refine((b) => b.attachmentId !== undefined || (b.text !== undefined && b.text.length > 0), "text or attachmentId is required");
 
 export function registerMessageRoutes(app: FastifyInstance): void {
   const { db, config, conversations, reads } = app.deps;

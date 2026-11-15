@@ -32,7 +32,8 @@ npm run build     # type-check only (tsc --noEmit)
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
-`MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1).
+`MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
+`ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB).
 
 `buildApp(deps?: Partial<Deps>)` takes `{ config, db }`; anything omitted is built from the
 environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool on `TEST_DATABASE_URL`.
@@ -122,7 +123,8 @@ Pushes (JSON text frames):
 ```jsonc
 { "type": "message", "message": {          // WireMessage, rendered for you
     "conversationId": "…", "seq": 43, "senderId": "…" /* null for system notices */,
-    "kind": "text" | "file" | "system", "text": "…",
+    "kind": "text" | "file" | "system", "text": "…",            // a file message's caption ("" when none)
+    "attachment": { "id": "…", "name": "报告.pdf", "size": 1234, "inline": false },   // file messages only
     "replyTo": { "seq": 40, "visible": true, "senderId": "…", "text": "…" } /* or { "seq": 7, "visible": false } */,
     "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
     "createdAt": "2026-11-16T01:02:03.000Z" } }
@@ -154,3 +156,32 @@ the position of every conversation you hold; append, advance, drop the `gone` on
 `more`. 3. `GET /api/sync` to refresh metadata, members, read markers and principals and to find
 conversations you were added to — `conversation`, `social` and `read` events sent while you were
 offline are not replayed. 4. Apply the buffered pushes by the rule above.
+
+## Attachments (`src/attachments/`)
+
+**Upload.** `POST /api/conversations/:id/attachments`, `multipart/form-data` with exactly one part: a file
+named `file` (any other part or field, or none, is 400). → 201 `{"id", "name", "size", "inline"}`. Only a
+current member who may send there can upload; the refusals are exactly a send's (404 `not_found`, 403
+`cannot_send` with `reason`), checked before the body is read and again, under the send locks, after it
+was stored — an upload that finishes after you were unfriended or removed is refused and deleted. The
+server decides the type from the first bytes (the declared `Content-Type` and file name are ignored):
+`inline: true` only for PNG, JPEG, WebP and GIF. The name is for display only (NFC; path, control,
+bidi and zero-width characters removed; at most 120 characters; `file` when empty). Limits per
+principal: 50 MB per file (413 `too_large`, enforced while streaming), 60 uploads per hour (429
+`rate_limited`), 2 GiB stored in total, sent or not (413 `{"error": "too_large", "reason": "quota"}`).
+
+**Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
+makes a `file` message (caption 0–8000 characters). The attachment must be your own upload in this
+conversation that no message carries yet (400 otherwise); each upload can be sent once.
+
+**Download.** `GET /api/attachments/:id` serves the bytes iff a message carrying the attachment is
+visible to you now (the same rule as for reading the message); everything else — unknown, never sent
+(also for the uploader), sent before you joined, after you left — is the same 404. Headers: the
+server's `Content-Type` (markup such as HTML or SVG is always `application/octet-stream`),
+`Content-Disposition: inline` only for `inline` attachments, else `attachment`, with an ASCII
+`filename` and the exact name as `filename*=UTF-8''…`; `X-Content-Type-Options: nosniff`,
+`Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: private, no-store`. No ranges.
+
+**Unsent uploads** are deleted by `npx tsx src/cli.ts attachments:sweep [--older-than <minutes>]`
+(default 60; run it from cron). Send an upload within that time. A blob that cannot be deleted keeps its
+row and is retried on the next sweep.

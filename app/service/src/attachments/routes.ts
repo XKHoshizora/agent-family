@@ -1,0 +1,252 @@
+import multipart, { type Multipart, type MultipartFile } from "@fastify/multipart";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { Readable } from "node:stream";
+import { z } from "zod";
+import { canSend } from "../conversations/store.ts";
+import { AppError, notFound } from "../errors.ts";
+import { uuidParam } from "../schemas.ts";
+import { requirePrincipal } from "../session.ts";
+import { isMissingBlob, newBlobKey, type BlobStore } from "./blob.ts";
+import { sniff, type Sniffed } from "./sniff.ts";
+import { findDownloadable, insertAttachment, quotaExceeded, usedBytes } from "./store.ts";
+
+/** Largest file one upload may carry (inclusive). */
+export const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
+/** Uploads per principal per hour, times `RATE_LIMIT_SCALE`. */
+export const UPLOADS_PER_HOUR = 60;
+export const FILE_NAME_MAX_CHARS = 120;
+/** The one multipart part an upload consists of. */
+export const FILE_FIELD = "file";
+
+/** Enough for every format `sniff` recognises. */
+const SNIFF_BYTES = 4100;
+const OPAQUE = "application/octet-stream";
+
+const DOWNLOAD_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "content-security-policy": "sandbox; default-src 'none'",
+  "cache-control": "private, no-store",
+} as const;
+
+// --- names ------------------------------------------------------------------------------------
+
+/** Control, format (bidi overrides, zero-width...), lone surrogate and line/paragraph separator characters. */
+const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/gu;
+
+/**
+ * A client-supplied file name made fit for display (it is never used as a path): unsafe characters
+ * removed, NFC, only the last path segment, trimmed, at most 120 characters; "file" when nothing is left.
+ */
+export function sanitizeFileName(raw: string | undefined): string {
+  const clean = (raw ?? "").replace(UNSAFE_CHARS, "").normalize("NFC");
+  const last = clean.slice(Math.max(clean.lastIndexOf("/"), clean.lastIndexOf("\\")) + 1).trim();
+  const capped = Array.from(last).slice(0, FILE_NAME_MAX_CHARS).join("").trimEnd();
+  return capped === "" || capped === "." || capped === ".." ? "file" : capped;
+}
+
+/**
+ * `inline` or `attachment` with the name twice: a printable-ASCII fallback (anything else, quotes,
+ * backslashes and percent signs become `_`) and the exact name as RFC 5987 `filename*=UTF-8''…`.
+ * Nothing in the name can end the header or the parameter.
+ */
+export function contentDisposition(name: string, inline: boolean): string {
+  const fallback = name.replace(/[^\x20-\x7e]|["\\%]/gu, "_");
+  const encoded = encodeURIComponent(name.replace(/\p{Cs}/gu, "\uFFFD")).replace(
+    /['()*]/g,
+    (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+// --- receiving an upload ----------------------------------------------------------------------
+
+/** Markup and script stay opaque even when recognised (an SVG with an XML prolog sniffs as application/xml). */
+const MARKUP = /^text\/|xml|html|svg|script/i;
+
+/** What the server serves the bytes as, decided from their first bytes only. */
+async function decideType(head: Buffer): Promise<Sniffed> {
+  const found = await sniff(head);
+  if (found.inline) return found;
+  return { mime: MARKUP.test(found.mime) ? OPAQUE : found.mime, inline: false };
+}
+
+class TooLarge extends Error {}
+/** The request body ended early or was malformed while the file streamed. */
+class BrokenUpload extends Error {}
+
+/**
+ * Passes the file through unchanged, counting it and keeping its first bytes for sniffing. Stops (and
+ * so tears down the source) the moment it passes the cap — nothing waits for the rest of the body.
+ */
+function metered(file: MultipartFile["file"]): { stream: Readable; size: () => number; head: () => Buffer } {
+  let size = 0;
+  let head = Buffer.alloc(0);
+  async function* pass() {
+    try {
+      for await (const chunk of file as AsyncIterable<Buffer>) {
+        size += chunk.length;
+        if (size > ATTACHMENT_MAX_BYTES) throw new TooLarge();
+        if (head.length < SNIFF_BYTES) head = Buffer.concat([head, chunk.subarray(0, SNIFF_BYTES - head.length)]);
+        yield chunk;
+      }
+    } catch (err) {
+      throw err instanceof TooLarge ? err : new BrokenUpload("upload stream failed", { cause: err });
+    }
+  }
+  return { stream: Readable.from(pass()), size: () => size, head: () => head };
+}
+
+const invalid = () => new AppError(400, "invalid_request");
+
+/** The next multipart part, or null at the end. Any parser error — malformed body, a part beyond the one allowed — is 400. */
+async function nextPart(parts: AsyncIterableIterator<Multipart>): Promise<Multipart | null> {
+  try {
+    const r = await parts.next();
+    return r.done ? null : r.value;
+  } catch {
+    throw invalid();
+  }
+}
+
+/**
+ * Streams the upload's single file part into the blob store under `key`, enforcing the cap while it
+ * streams. 400 for any other shape (a field, a second part, no part, another part name, a broken body),
+ * 413 `too_large` past the cap. The caller deletes the blob if this throws.
+ */
+async function receiveFile(req: FastifyRequest, blobs: BlobStore, key: string): Promise<{ name: string; size: number; head: Buffer }> {
+  const parts = req.parts();
+  const part = await nextPart(parts);
+  if (part?.type !== "file" || part.fieldname !== FILE_FIELD) throw invalid();
+  const meter = metered(part.file);
+  try {
+    await blobs.put(key, meter.stream);
+  } catch (err) {
+    if (err instanceof TooLarge) throw new AppError(413, "too_large");
+    if (err instanceof BrokenUpload) throw invalid();
+    throw err;
+  }
+  if (part.file.truncated) throw new AppError(413, "too_large"); // the parser's own cap, a backstop
+  if (await nextPart(parts)) throw invalid();
+  return { name: sanitizeFileName(part.filename), size: meter.size(), head: meter.head() };
+}
+
+/** After a refusal in mid-body: detach the parser and let the rest drain unread, so the answer goes out now. */
+function stopReading(req: FastifyRequest): void {
+  req.raw.unpipe();
+  req.raw.resume();
+}
+
+// --- routes -----------------------------------------------------------------------------------
+
+const attachmentView = z.object({ id: z.string(), name: z.string(), size: z.number(), inline: z.boolean() });
+
+export function registerAttachmentRoutes(app: FastifyInstance): void {
+  const { db, config, blobs } = app.deps;
+
+  const uploaders = new WeakMap<FastifyRequest, string>();
+  const uploadLimit = app.createRateLimit({
+    max: Math.max(1, Math.round(UPLOADS_PER_HOUR * config.rateLimitScale)),
+    timeWindow: "1 hour",
+    keyGenerator: (req: FastifyRequest) => uploaders.get(req) ?? req.ip,
+  });
+
+  const discard = async (req: FastifyRequest, key: string) => {
+    try {
+      await blobs.delete(key);
+    } catch (err) {
+      req.log.error({ err, key }, "could not delete the blob of a refused upload");
+    }
+  };
+
+  // Multipart parsing exists only in this scope. Its parser reads nothing: the handler streams the body.
+  void app.register(async (scope) => {
+    await scope.register(multipart, {
+      // The cap itself is enforced while streaming (`metered`); the parser's limits shape the request.
+      limits: { fileSize: ATTACHMENT_MAX_BYTES + 1, files: 1, fields: 0, parts: 1, headerPairs: 20 },
+    });
+
+    scope.withTypeProvider<ZodTypeProvider>().post(
+      "/api/conversations/:id/attachments",
+      {
+        // Only multipart/form-data gets here (`preValidation`), and its parser reads nothing, so there is no
+        // parsed body (Fastify validates an absent body as null). The body's shape — exactly one file part
+        // named "file" — is checked as it streams, with 400 before anything is kept.
+        schema: {
+          params: z.object({ id: uuidParam }),
+          querystring: z.object({}),
+          body: z.null(),
+          response: { 201: attachmentView },
+        },
+        preValidation: async (req) => {
+          if (!req.isMultipart()) throw invalid();
+        },
+      },
+      async (req, reply) => {
+        const me = await requirePrincipal(req);
+        uploaders.set(req, me.id);
+        const limited = await uploadLimit(req);
+        if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+
+        // Refuse what is obviously refused before reading a byte of the body: the answers a send gets.
+        const conversationId = req.params.id;
+        const verdict = await canSend(db, conversationId, me.id);
+        if (!verdict) throw notFound();
+        if (!verdict.ok) throw new AppError(403, "cannot_send", { reason: verdict.reason });
+        if ((await usedBytes(db, me.id)) >= config.attachmentQuotaBytes) throw quotaExceeded();
+
+        const key = newBlobKey("att");
+        let file: { name: string; size: number; head: Buffer };
+        try {
+          file = await receiveFile(req, blobs, key);
+        } catch (err) {
+          stopReading(req);
+          await discard(req, key);
+          throw err;
+        }
+
+        try {
+          const { mime, inline } = await decideType(file.head);
+          // The right to send may have gone while the bytes streamed: re-checked under the send locks.
+          const stored = await db.tx((t) =>
+            insertAttachment(
+              t,
+              { conversationId, uploaderId: me.id, blobKey: key, name: file.name, size: file.size, mime, inline },
+              config.attachmentQuotaBytes,
+            ),
+          );
+          return reply.code(201).send(stored);
+        } catch (err) {
+          await discard(req, key);
+          throw err;
+        }
+      },
+    );
+  });
+
+  app.withTypeProvider<ZodTypeProvider>().get(
+    "/api/attachments/:id",
+    { schema: { params: z.object({ id: uuidParam }), querystring: z.object({}) } },
+    async (req, reply) => {
+      const me = await requirePrincipal(req);
+      const found = await findDownloadable(db, me.id, req.params.id);
+      if (!found) throw notFound();
+      let body: Readable;
+      try {
+        body = await blobs.get(found.blobKey);
+      } catch (err) {
+        if (!isMissingBlob(err)) throw err;
+        req.log.error({ attachmentId: req.params.id }, "the blob of a sent attachment is missing");
+        throw notFound();
+      }
+      return reply
+        .headers({
+          ...DOWNLOAD_HEADERS,
+          "content-type": found.mime,
+          "content-length": String(found.size),
+          "content-disposition": contentDisposition(found.name, found.inline),
+        })
+        .send(body);
+    },
+  );
+}

@@ -30,6 +30,10 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMes
     text: wireText(msg),
     createdAt: msg.createdAt.toISOString(),
   };
+  const attachment = msg.body.attachment;
+  if (msg.kind === "file" && attachment) {
+    wire.attachment = { id: attachment.id, name: attachment.name, size: attachment.size, inline: attachment.inline };
+  }
   const replyToSeq = msg.body.replyToSeq;
   if (typeof replyToSeq === "number") {
     const q = visibleQuote;

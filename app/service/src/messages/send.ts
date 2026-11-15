@@ -1,12 +1,13 @@
+import { claimAttachment, linkAttachment } from "../attachments/store.ts";
 import { assertCanSend, lockForWrite, VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "./model.ts";
 
 export interface SendInput {
-  /** Already trimmed and validated (1–8000 characters). */
+  /** Already trimmed and validated: 0–8000 characters, and not empty unless `attachmentId` is given. */
   text?: string;
-  /** Not accepted yet: the attachments task enables it. */
+  /** The sender's own unsent upload in this conversation; makes a `file` message with `text` as caption. */
   attachmentId?: string;
   replyToSeq?: number;
   /** The client's retry key: one message per (conversation, sender, clientTxn). */
@@ -17,10 +18,12 @@ const invalid = () => new AppError(400, "invalid_request");
 
 /**
  * Sends as `senderId` (always the session principal). Lock order: pair lock (direct), conversation row;
- * then, all in this transaction: membership, idempotency, permission, quote visibility, seq assignment.
+ * then, all in this transaction: membership, idempotency, permission, quote visibility, the attachment
+ * (claimed with its row lock), seq assignment, and linking the attachment to the new message.
  *
  * A repeated `clientTxn` returns the stored message with `duplicate: true` and writes nothing — even if
- * sending is no longer allowed — provided the sender can still read it; otherwise 409 `client_txn_reused`.
+ * sending is no longer allowed or its attachment is linked by now — provided the sender can still read
+ * it; otherwise 409 `client_txn_reused`.
  */
 export async function sendMessage(
   t: Tx,
@@ -40,7 +43,7 @@ export async function sendMessage(
     return { message: toStored(prior.rows[0]), duplicate: true };
   }
 
-  if (input.attachmentId !== undefined || input.text === undefined) throw invalid();
+  if (input.attachmentId === undefined && !input.text) throw invalid();
   await assertCanSend(t, lock);
 
   if (input.replyToSeq !== undefined) {
@@ -52,8 +55,17 @@ export async function sendMessage(
     if (quoted.rowCount === 0) throw invalid();
   }
 
-  const body: MessageBody = { text: input.text };
+  const body: MessageBody = {};
+  if (input.text) body.text = input.text;
   if (input.replyToSeq !== undefined) body.replyToSeq = input.replyToSeq;
-  const message = await insertMessage(t, conversationId, senderId, "text", body, input.clientTxn);
+  if (input.attachmentId !== undefined) {
+    // Unknown, someone else's, another conversation's and already sent all look the same.
+    const attachment = await claimAttachment(t, input.attachmentId, conversationId, senderId);
+    if (!attachment) throw invalid();
+    body.attachment = attachment;
+  }
+
+  const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn);
+  if (body.attachment && !(await linkAttachment(t, body.attachment.id, message.id))) throw invalid();
   return { message, duplicate: false };
 }

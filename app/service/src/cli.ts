@@ -1,11 +1,15 @@
 import { config as loadDotenv } from "dotenv";
+import { createBlobStore } from "./attachments/blob.ts";
+import { sweepOrphans } from "./attachments/store.ts";
 import { createInvite } from "./auth/invites.ts";
+import { loadConfig } from "./config.ts";
 import { createDb } from "./db.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
 
-const USAGE = "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>]";
+const USAGE =
+  "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | attachments:sweep [--older-than <minutes>]";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -46,6 +50,21 @@ if (command === "migrate") {
     for (const m of rows) {
       console.log(`#${m.id} ${m.created_at.toISOString()} to=${m.recipient} kind=${m.kind}\n  ${m.subject}\n  ${m.body}\n`);
     }
+  } finally {
+    await db.close();
+  }
+} else if (command === "attachments:sweep") {
+  // Uploads never sent in a message. Run it periodically (cron); it is safe to run at any time.
+  const raw = flag(args, "--older-than") ?? "60";
+  if (!/^\d+$/.test(raw)) throw new Error("--older-than must be a whole number of minutes");
+  const olderThan = Number(raw);
+  const config = loadConfig(); // the blob store settings, as the server uses them
+  const db = createDb(config.databaseUrl);
+  try {
+    const swept = await sweepOrphans({ db, blobs: createBlobStore(config) }, olderThan, {
+      error: ({ err, attachmentId }, msg) => console.error(`${msg} (attachment ${attachmentId}): ${String(err)}`),
+    });
+    console.log(`swept ${swept} unsent attachment(s) older than ${olderThan} minutes`);
   } finally {
     await db.close();
   }

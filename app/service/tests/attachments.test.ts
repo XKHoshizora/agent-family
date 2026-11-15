@@ -1,0 +1,707 @@
+import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { pipeline, Transform } from "node:stream";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fsBlobStore, type BlobStore } from "../src/attachments/blob.ts";
+import { ATTACHMENT_MAX_BYTES, contentDisposition, sanitizeFileName } from "../src/attachments/routes.ts";
+import { sweepOrphans } from "../src/attachments/store.ts";
+import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
+import { testDatabaseUrl } from "./helpers/env.ts";
+import { useApp } from "./helpers/harness.ts";
+import { BOUNDARY, CLOSING, MULTIPART, multipart, openRequest, partHead, type Part } from "./helpers/multipart.ts";
+import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
+
+// --- a blob store on a temp dir that records how it is used -----------------------------------
+
+const blobDir = mkdtempSync(path.join(tmpdir(), "af-att-"));
+afterAll(() => rmSync(blobDir, { recursive: true, force: true }));
+
+interface PutRecord {
+  key: string;
+  /** Got a stream (not a Buffer). */
+  streamed: boolean;
+  chunks: number;
+  largestChunk: number;
+  bytes: number;
+}
+const probe = {
+  puts: [] as PutRecord[],
+  /** Called when the server starts writing a blob, i.e. it is reading an upload's file part. */
+  onPut: undefined as ((key: string) => void) | undefined,
+  failDelete: new Set<string>(),
+};
+const disk = fsBlobStore(blobDir);
+const blobs: BlobStore = {
+  put(key, body) {
+    const rec: PutRecord = { key, streamed: !Buffer.isBuffer(body), chunks: 0, largestChunk: 0, bytes: 0 };
+    probe.puts.push(rec);
+    probe.onPut?.(key);
+    if (Buffer.isBuffer(body)) return disk.put(key, body);
+    const spy = new Transform({
+      transform(chunk: Buffer, _enc, done) {
+        rec.chunks++;
+        rec.largestChunk = Math.max(rec.largestChunk, chunk.length);
+        rec.bytes += chunk.length;
+        done(null, chunk);
+      },
+    });
+    pipeline(body, spy, () => {});
+    return disk.put(key, spy);
+  },
+  get: (key) => disk.get(key),
+  async delete(key) {
+    if (probe.failDelete.has(key)) throw Object.assign(new Error("simulated blob store outage"), { code: "EIO" });
+    await disk.delete(key);
+  },
+};
+const blobFiles = () => readdirSync(blobDir);
+const putStarted = () => new Promise<void>((resolve) => (probe.onPut = () => resolve()));
+
+const { app, db } = useApp({ blobs });
+afterEach(closeAllSockets);
+beforeEach(() => {
+  for (const f of readdirSync(blobDir)) rmSync(path.join(blobDir, f), { force: true });
+  probe.puts = [];
+  probe.onPut = undefined;
+  probe.failDelete.clear();
+});
+
+// --- fixtures and helpers ---------------------------------------------------------------------
+
+const MB = 1024 * 1024;
+const NOT_FOUND_BODY = '{"error":"not_found"}';
+const INVALID = { error: "invalid_request" };
+const RANDOM_ID = "00000000-0000-4000-8000-000000000000";
+
+const PNG = Buffer.concat([
+  Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
+  Buffer.from("00000001000000010806000000", "hex"),
+  Buffer.from("1f15c4890000000d49444154789c6360000002000001e221bc330000000049454e44ae426082", "hex"),
+]);
+const HTML = Buffer.from("<!doctype html><html><body><script>alert(document.cookie)</script></body></html>");
+const SVG = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><circle r="5"/></svg>');
+const SVG_WITH_PROLOG = Buffer.from(
+  '<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><circle r="5"/></svg>',
+);
+/** Bytes no sniffer recognises. */
+const opaque = (n: number) => Buffer.concat([Buffer.from("plain bytes\n"), randomBytes(n)]);
+
+async function people<const N extends string[]>(...names: N): Promise<{ [K in keyof N]: Actor }> {
+  const out: Actor[] = [];
+  for (const n of names) out.push(await signUp(app, n));
+  return out as { [K in keyof N]: Actor };
+}
+const count = async (sql: string, params: unknown[] = []) => Number((await db.query<{ n: string }>(sql, params)).rows[0]!.n);
+
+async function uploadParts(who: Actor | null, conv: string, parts: Part[], contentType = MULTIPART) {
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/conversations/${conv}/attachments`,
+    headers: { ...(who ? { cookie: who.cookie } : {}), "content-type": contentType },
+    payload: multipart(parts),
+  });
+  return { status: res.statusCode, body: res.body, json: res.body ? JSON.parse(res.body) : null };
+}
+const upload = (who: Actor | null, conv: string, data: Buffer, filename = "notes.bin", type = "application/octet-stream") =>
+  uploadParts(who, conv, [{ name: "file", filename, type, data }]);
+const download = (who: Actor | null, id: string) =>
+  app.inject({ method: "GET", url: `/api/attachments/${id}`, headers: who ? { cookie: who.cookie } : {} });
+
+let txn = 0;
+const post = (who: Actor, conv: string, body: unknown) => api(app, who, "POST", `/api/conversations/${conv}/messages`, body);
+const sendFile = (who: Actor, conv: string, attachmentId: string, extra: object = {}) =>
+  post(who, conv, { attachmentId, clientTxn: `f${++txn}`, ...extra });
+const say = (who: Actor, conv: string, text: string) => post(who, conv, { text, clientTxn: `t${++txn}` });
+const add = (who: Actor, conv: string, target: Actor) =>
+  api(app, who, "POST", `/api/conversations/${conv}/members`, { principalId: target.id });
+const remove = (who: Actor, conv: string, target: Actor) =>
+  api(app, who, "DELETE", `/api/conversations/${conv}/members/${target.id}`);
+const isMessage = (conv: string, seq?: number) => (e: Push) =>
+  e.type === "message" && e.message.conversationId === conv && (seq === undefined || e.message.seq === seq);
+const backdate = (id: string, minutes: number) =>
+  db.query("update attachments set created_at = now() - make_interval(mins => $2) where id = $1", [id, minutes]);
+
+// --- tests ------------------------------------------------------------------------------------
+
+describe("upload, send, download", () => {
+  it("member uploads, sends, another member downloads identical bytes", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const data = opaque(300_000);
+
+    const up = await upload(a, dm, data, "notes.bin");
+    expect(up.status).toBe(201);
+    expect(up.json).toEqual({ id: expect.stringMatching(/^[0-9a-f-]{36}$/), name: "notes.bin", size: data.length, inline: false });
+    const id: string = up.json.id;
+
+    const sent = await sendFile(a, dm, id, { text: "  see attached  " });
+    expect(sent.status).toBe(201);
+    expect(sent.json.message).toEqual({
+      conversationId: dm,
+      seq: 1,
+      senderId: a.id,
+      kind: "file",
+      text: "see attached",
+      attachment: { id, name: "notes.bin", size: data.length, inline: false },
+      createdAt: expect.any(String),
+    });
+    const history = await api(app, b, "GET", `/api/conversations/${dm}/messages`);
+    expect(history.json.messages).toEqual([sent.json.message]);
+
+    for (const who of [b, a]) {
+      const got = await download(who, id);
+      expect(got.statusCode).toBe(200);
+      expect(Buffer.compare(got.rawPayload, data)).toBe(0);
+    }
+    expect(probe.puts).toEqual([expect.objectContaining({ streamed: true, bytes: data.length })]);
+    const row = await db.query("select message_id, uploader_id, conversation_id, size from attachments where id = $1", [id]);
+    expect(row.rows).toEqual([{ message_id: "1", uploader_id: a.id, conversation_id: dm, size: String(data.length) }]);
+  });
+
+  it("download response headers are exactly the server's decision", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const data = opaque(1000);
+    const id = (await upload(a, dm, data, "notes.bin", "image/png")).json.id;
+    await sendFile(a, dm, id);
+
+    const got = await download(b, id);
+    expect(got.statusCode).toBe(200);
+    expect(got.headers).toMatchObject({
+      "content-type": "application/octet-stream",
+      "content-length": String(data.length),
+      "content-disposition": `attachment; filename="notes.bin"; filename*=UTF-8''notes.bin`,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox; default-src 'none'",
+      "cache-control": "private, no-store",
+    });
+  });
+
+  it("an HTML file is served as application/octet-stream with attachment disposition; a PNG is inline; an SVG never is", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const cases = [
+      { data: HTML, name: "page.html", declared: "text/html", type: "application/octet-stream", inline: false },
+      { data: HTML, name: "fake.png", declared: "image/png", type: "application/octet-stream", inline: false },
+      { data: SVG, name: "logo.svg", declared: "image/svg+xml", type: "application/octet-stream", inline: false },
+      { data: SVG_WITH_PROLOG, name: "prolog.svg", declared: "image/svg+xml", type: "application/octet-stream", inline: false },
+      { data: PNG, name: "photo.png", declared: "text/html", type: "image/png", inline: true },
+    ];
+    for (const c of cases) {
+      const up = await upload(a, dm, c.data, c.name, c.declared);
+      expect([c.name, up.status, up.json.inline]).toEqual([c.name, 201, c.inline]);
+      await sendFile(a, dm, up.json.id);
+      const got = await download(b, up.json.id);
+      expect([c.name, got.headers["content-type"]]).toEqual([c.name, c.type]);
+      const disposition = c.inline ? "inline" : "attachment";
+      expect(got.headers["content-disposition"]).toBe(`${disposition}; filename="${c.name}"; filename*=UTF-8''${c.name}`);
+      expect(got.headers["x-content-type-options"]).toBe("nosniff");
+      expect(got.headers["content-security-policy"]).toBe("sandbox; default-src 'none'");
+      expect(Buffer.compare(got.rawPayload, c.data)).toBe(0);
+    }
+  });
+
+  it("a Chinese file name survives the round trip in Content-Disposition", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const name = "季度报告（终稿）v2 ✓.pdf";
+    const up = await upload(a, dm, opaque(10), name);
+    expect(up.json.name).toBe(name);
+    const sent = await sendFile(a, dm, up.json.id);
+    expect(sent.json.message.attachment.name).toBe(name);
+
+    const header = String((await download(b, up.json.id)).headers["content-disposition"]);
+    expect(header).toMatch(/^attachment; filename="[\x20-\x7e]*"; filename\*=UTF-8''[A-Za-z0-9!#$&+\-.^_`|~%]+$/);
+    expect(decodeURIComponent(/filename\*=UTF-8''(.+)$/.exec(header)![1]!)).toBe(name);
+  });
+
+  it("file names are sanitised: path, control, bidi and format characters go; quotes cannot break the header", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    // Raw UTF-8, as a browser sends it; busboy decodes it.
+    const up = await upload(a, dm, opaque(10), "../secret/in\u0007vo\u0001ice\u202Egnp.exe\u200B.txt");
+    expect(up.json.name).toBe("invoicegnp.exe.txt");
+
+    // The RFC 2231 form lets a client put anything in the name: quotes, semicolons, separators, bidi overrides.
+    const tricky = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${dm}/attachments`,
+      headers: { cookie: a.cookie, "content-type": MULTIPART },
+      payload: Buffer.concat([
+        Buffer.from(
+          `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename*=UTF-8''..%2Fa%22b%3B%20c%E2%80%AE.txt\r\n\r\n`,
+        ),
+        opaque(10),
+        Buffer.from(CLOSING),
+      ]),
+    });
+    expect(tricky.statusCode).toBe(201);
+    const { id, name } = JSON.parse(tricky.body) as { id: string; name: string };
+    expect(name).toBe('a"b; c.txt');
+    await sendFile(a, dm, id);
+    const header = String((await download(b, id)).headers["content-disposition"]);
+    expect(header).toBe(`attachment; filename="a_b; c.txt"; filename*=UTF-8''a%22b%3B%20c.txt`);
+  });
+
+  it("sanitizeFileName: NFC, last path segment, no control/format/bidi characters, 120 characters, 'file' when empty", () => {
+    expect(sanitizeFileName("report.pdf")).toBe("report.pdf");
+    expect(sanitizeFileName("../../etc/passwd")).toBe("passwd");
+    expect(sanitizeFileName("C:\\Users\\me\\a b.txt")).toBe("a b.txt");
+    expect(sanitizeFileName("in\u0000vo\u0007ice\u202Etxt.exe")).toBe("invoicetxt.exe");
+    expect(sanitizeFileName("zero\u200Bwidth\uFEFF\u2066x\u2069.txt")).toBe("zerowidthx.txt");
+    expect(sanitizeFileName("line\r\nbreak\u2028.txt")).toBe("linebreak.txt");
+    expect(sanitizeFileName("lone\ud800.txt")).toBe("lone.txt");
+    expect(sanitizeFileName("cafe\u0301.txt")).toBe("caf\u00e9.txt");
+    expect(sanitizeFileName("e\u200B\u0301.txt")).toBe("\u00e9.txt"); // NFC after stripping
+    expect(sanitizeFileName("  spaced  .txt  ")).toBe("spaced  .txt");
+    expect(sanitizeFileName("报告.pdf")).toBe("报告.pdf");
+    expect(sanitizeFileName("x".repeat(200))).toBe("x".repeat(120));
+    expect(sanitizeFileName("😀".repeat(130))).toBe("😀".repeat(120)); // characters, not UTF-16 units
+    for (const empty of [undefined, "", "   ", "\u202E\u200B", ".", "..", "/", "a/", "dir\\"]) {
+      expect([empty, sanitizeFileName(empty)]).toEqual([empty, "file"]);
+    }
+  });
+
+  it("contentDisposition: ASCII fallback plus RFC 5987 UTF-8 name; no way to inject a header", () => {
+    const name = 'a"b\\c;d%e\r\nf 报告(1)*\'.pdf';
+    const header = contentDisposition(name, false);
+    expect(header).toBe(
+      "attachment; filename=\"a_b_c;d_e__f __(1)*'.pdf\"; filename*=UTF-8''a%22b%5Cc%3Bd%25e%0D%0Af%20%E6%8A%A5%E5%91%8A%281%29%2A%27.pdf",
+    );
+    expect(header).not.toMatch(/[\r\n]/);
+    expect(decodeURIComponent(/filename\*=UTF-8''(.+)$/.exec(header)![1]!)).toBe(name);
+    expect(contentDisposition("pic.png", true)).toBe(`inline; filename="pic.png"; filename*=UTF-8''pic.png`);
+  });
+});
+
+describe("who can download", () => {
+  it("outsider, late joiner (for a pre-join attachment), removed member and signed-out caller all get 404/401; the late joiner can fetch a post-join attachment", async () => {
+    const [a, b, c, d, o] = await people("alice", "bob", "carol", "dave", "oscar");
+    const g = await group(app, a, "team", [b, c]);
+    const pre = (await upload(a, g, opaque(100), "pre.bin")).json.id;
+    expect((await sendFile(a, g, pre)).status).toBe(201);
+    await befriend(app, a, d);
+    expect((await add(a, g, d)).status).toBe(201);
+    const postJoin = (await upload(b, g, opaque(100), "post.bin")).json.id;
+    expect((await sendFile(b, g, postJoin)).status).toBe(201);
+    expect((await remove(a, g, c)).status).toBe(200);
+
+    expect((await download(b, pre)).statusCode).toBe(200);
+    for (const [who, id] of [
+      [o, pre],
+      [o, postJoin],
+      [d, pre],
+      [c, pre],
+      [c, postJoin],
+    ] as const) {
+      const res = await download(who, id);
+      expect([who.handle, res.statusCode, res.body]).toEqual([who.handle, 404, NOT_FOUND_BODY]);
+    }
+    expect((await download(null, pre)).statusCode).toBe(401);
+    expect(JSON.parse((await download(null, pre)).body)).toEqual({ error: "unauthenticated" });
+    const late = await download(d, postJoin);
+    expect(late.statusCode).toBe(200);
+    expect(late.rawPayload.length).toBe(112);
+  });
+
+  it("every refusal is the same 404, byte for byte: unknown id, other conversation, unsent (even for the uploader), late joiner, removed member, non-member", async () => {
+    const [a, b, c, d, o] = await people("alice", "bob", "carol", "dave", "oscar");
+    const { conversationId: ab } = await befriend(app, a, b);
+    const g = await group(app, a, "team", [b, c]);
+    const sentPre = (await upload(a, g, opaque(10))).json.id;
+    await sendFile(a, g, sentPre);
+    const unsent = (await upload(a, g, opaque(10))).json.id;
+    const elsewhere = (await upload(a, ab, opaque(10))).json.id;
+    await sendFile(a, ab, elsewhere);
+    await befriend(app, a, d);
+    await add(a, g, d);
+    await remove(a, g, c);
+
+    const reference = await download(a, RANDOM_ID);
+    expect(reference.statusCode).toBe(404);
+    expect(reference.body).toBe(NOT_FOUND_BODY);
+    const cases: Array<[string, Actor, string]> = [
+      ["unknown id", o, RANDOM_ID],
+      ["unsent, uploader", a, unsent],
+      ["unsent, member", b, unsent],
+      ["unsent, upper-cased", a, unsent.toUpperCase()],
+      ["late joiner, pre-join", d, sentPre],
+      ["removed member", c, sentPre],
+      ["non-member", o, sentPre],
+      ["other conversation", d, elsewhere],
+      ["other conversation, upper-cased", c, elsewhere.toUpperCase()],
+    ];
+    for (const [label, who, id] of cases) {
+      const res = await download(who, id);
+      expect([label, res.statusCode, res.body]).toEqual([label, 404, NOT_FOUND_BODY]);
+      expect([label, res.headers["content-type"], res.headers["content-length"]]).toEqual([
+        label,
+        reference.headers["content-type"],
+        reference.headers["content-length"],
+      ]);
+    }
+    // Positive controls.
+    expect((await download(b, sentPre)).statusCode).toBe(200);
+    expect((await download(b, elsewhere.toUpperCase())).statusCode).toBe(200);
+    expect((await download(a, "not-a-uuid")).statusCode).toBe(400);
+  });
+
+  it("uploaded but never sent → nobody can fetch it, including the uploader; sweep deletes row and blob", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const orphan = (await upload(a, dm, opaque(50))).json.id;
+    const fresh = (await upload(a, dm, opaque(50))).json.id;
+    const sent = (await upload(a, dm, opaque(50))).json.id;
+    await sendFile(a, dm, sent);
+    expect(blobFiles()).toHaveLength(3);
+
+    for (const who of [a, b]) expect((await download(who, orphan)).body).toBe(NOT_FOUND_BODY);
+
+    expect(await sweepOrphans({ db, blobs }, 60)).toBe(0); // nothing is old enough yet
+    await backdate(orphan, 61);
+    await backdate(sent, 120);
+    expect(await sweepOrphans({ db, blobs }, 60)).toBe(1);
+    expect((await db.query("select id from attachments order by created_at")).rows.map((r) => r.id).sort()).toEqual(
+      [fresh, sent].sort(),
+    );
+    expect(blobFiles()).toHaveLength(2);
+    expect((await download(b, sent)).statusCode).toBe(200);
+    expect(await sweepOrphans({ db, blobs }, 60)).toBe(0);
+  });
+
+  it("sweep keeps a row whose blob could not be deleted and retries it next time", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const [x, y] = [(await upload(a, dm, opaque(5))).json.id, (await upload(a, dm, opaque(5))).json.id];
+    await backdate(x, 90);
+    await backdate(y, 90);
+    const key = (await db.query("select blob_key from attachments where id = $1", [x])).rows[0].blob_key;
+    probe.failDelete.add(key);
+
+    const errors: unknown[] = [];
+    const log = { error: (details: unknown) => void errors.push(details) };
+    expect(await sweepOrphans({ db, blobs }, 60, log)).toBe(1);
+    expect(errors).toEqual([expect.objectContaining({ attachmentId: x })]);
+    expect((await db.query("select id from attachments")).rows).toEqual([{ id: x }]);
+    expect(blobFiles()).toEqual([key]);
+
+    probe.failDelete.clear();
+    expect(await sweepOrphans({ db, blobs }, 60, log)).toBe(1);
+    expect(await count("select count(*) n from attachments")).toBe(0);
+    expect(blobFiles()).toEqual([]);
+  });
+
+  it("the attachments:sweep CLI removes unsent uploads older than --older-than minutes (default 60)", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const [old, recent] = [(await upload(a, dm, opaque(5))).json.id, (await upload(a, dm, opaque(5))).json.id];
+    await backdate(old, 61);
+    await backdate(recent, 30);
+
+    const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+    const cwd = fileURLToPath(new URL("..", import.meta.url));
+    const env = {
+      ...process.env,
+      DATABASE_URL: testDatabaseUrl(),
+      BLOB_DIR: blobDir,
+      APP_ORIGIN: "http://localhost:5173",
+      AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+      S3_ENDPOINT: "",
+      S3_REGION: "",
+      S3_BUCKET: "",
+      S3_ACCESS_KEY_ID: "",
+      S3_SECRET_ACCESS_KEY: "",
+    };
+    const run = (...args: string[]) => promisify(execFile)(process.execPath, [tsx, "src/cli.ts", "attachments:sweep", ...args], { cwd, env });
+
+    expect((await run()).stdout).toContain("swept 1");
+    expect((await db.query("select id from attachments")).rows).toEqual([{ id: recent }]);
+    expect(blobFiles()).toHaveLength(1);
+    expect((await run("--older-than", "20")).stdout).toContain("swept 1");
+    expect(await count("select count(*) n from attachments")).toBe(0);
+    expect(blobFiles()).toEqual([]);
+  }, 30_000);
+});
+
+describe("sending a file", () => {
+  it("attachment id from another conversation or another uploader cannot be sent; nor one already sent, nor an unknown one", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const { conversationId: ab } = await befriend(app, a, b);
+    const g = await group(app, a, "team", [b, c]);
+    const inAb = (await upload(a, ab, opaque(10))).json.id;
+    const byB = (await upload(b, g, opaque(10))).json.id;
+
+    for (const [who, conv, id] of [
+      [a, g, inAb], // another conversation
+      [a, g, byB], // another uploader
+      [c, g, byB],
+      [a, ab, RANDOM_ID],
+    ] as const) {
+      expect(await sendFile(who, conv, id)).toMatchObject({ status: 400, json: INVALID });
+    }
+    expect(await count("select count(*) n from messages where kind = 'file'")).toBe(0);
+
+    expect((await sendFile(a, ab, inAb)).status).toBe(201);
+    expect(await sendFile(a, ab, inAb)).toMatchObject({ status: 400, json: INVALID }); // already sent
+    expect(await sendFile(b, g, inAb)).toMatchObject({ status: 400, json: INVALID });
+    expect(await count("select count(*) n from messages where kind = 'file'")).toBe(1);
+  });
+
+  it("two concurrent sends of the same attachment produce exactly one message", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    for (let round = 0; round < 5; round++) {
+      const id = (await upload(a, dm, opaque(10))).json.id;
+      const results = await Promise.all([sendFile(a, dm, id), sendFile(a, dm, id), sendFile(a, dm, id)]);
+      expect(results.map((r) => r.status).sort()).toEqual([201, 400, 400]);
+      expect(await count("select count(*) n from messages where body->'attachment'->>'id' = $1", [id])).toBe(1);
+      const winner = results.find((r) => r.status === 201)!.json.message.seq;
+      expect(
+        await count(
+          "select m.seq n from attachments a join messages m on m.id = a.message_id where a.id = $1",
+          [id],
+        ),
+      ).toBe(winner);
+    }
+  });
+
+  it("a repeated clientTxn returns the stored file message and does not trip over the linked attachment", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const id = (await upload(a, dm, opaque(10))).json.id;
+    const first = await post(a, dm, { attachmentId: id, clientTxn: "file-once" });
+    expect(first.status).toBe(201);
+    const again = await post(a, dm, { attachmentId: id, clientTxn: "file-once" });
+    expect(again).toEqual({ status: 200, json: { duplicate: true, message: first.json.message } });
+    // Still a duplicate after the pair can no longer send.
+    await api(app, a, "DELETE", `/api/friends/${b.id}`);
+    expect(await post(a, dm, { attachmentId: id, clientTxn: "file-once" })).toMatchObject({ status: 200, json: { duplicate: true } });
+    expect(await count("select count(*) n from messages where kind = 'file'")).toBe(1);
+  });
+
+  it("the caption is optional (0–8000 characters after trimming); text alone still needs at least one", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i++) ids.push((await upload(a, dm, opaque(10), `f${i}.bin`)).json.id);
+    const [id0, id1, id2, id3] = ids as [string, string, string, string];
+
+    expect((await sendFile(a, dm, id0)).json.message).toMatchObject({ kind: "file", text: "", attachment: { id: id0 } });
+    expect((await sendFile(a, dm, id1, { text: "   " })).json.message).toMatchObject({ kind: "file", text: "" });
+    expect((await sendFile(a, dm, id2, { text: "x".repeat(8000) })).status).toBe(201);
+    expect(await sendFile(a, dm, id3, { text: "x".repeat(8001) })).toMatchObject({ status: 400, json: INVALID });
+    expect(await post(a, dm, { text: "   ", clientTxn: "empty" })).toMatchObject({ status: 400, json: INVALID });
+    expect(await post(a, dm, { clientTxn: "nothing" })).toMatchObject({ status: 400, json: INVALID });
+    // Search (next task) finds files by name through the message body.
+    expect(await count("select count(*) n from messages where body->'attachment'->>'name' = 'f2.bin'")).toBe(1);
+  });
+
+  it("upper-case ids behave identically", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const up = await upload(a, dm.toUpperCase(), PNG, "pic.png");
+    expect(up.status).toBe(201);
+    const sent = await sendFile(a, dm.toUpperCase(), up.json.id.toUpperCase());
+    expect(sent.status).toBe(201);
+    expect(sent.json.message.attachment.id).toBe(up.json.id);
+    const got = await download(b, up.json.id.toUpperCase());
+    expect(got.statusCode).toBe(200);
+    expect(got.headers["content-type"]).toBe("image/png");
+  });
+});
+
+describe("upload refusals", () => {
+  it("extra parts or fields, no file part, a misnamed part or a non-multipart body → 400, nothing stored", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const file: Part = { name: "file", filename: "a.bin", type: "application/octet-stream", data: opaque(10) };
+    const bad: Array<[string, Part[]]> = [
+      ["file + field", [file, { name: "caption", data: "hi" }]],
+      ["field + file", [{ name: "caption", data: "hi" }, file]],
+      ["two files", [file, { ...file, filename: "b.bin" }]],
+      ["field only", [{ name: "file", data: "not a file" }]],
+      ["no parts", []],
+      ["misnamed", [{ ...file, name: "upload" }]],
+    ];
+    for (const [label, parts] of bad) {
+      const res = await uploadParts(a, dm, parts);
+      expect([label, res.status, res.json]).toEqual([label, 400, INVALID]);
+    }
+    const raw = (payload: string | Buffer, contentType: string) =>
+      app.inject({
+        method: "POST",
+        url: `/api/conversations/${dm}/attachments`,
+        headers: { cookie: a.cookie, "content-type": contentType },
+        payload,
+      });
+    for (const [label, res] of [
+      ["json", await raw(JSON.stringify({ file: "x" }), "application/json")],
+      ["text", await raw("hello", "text/plain")],
+      ["no boundary", await raw(multipart([file]), "multipart/form-data")],
+      ["truncated", await raw(multipart([file]).subarray(0, 120), MULTIPART)],
+    ] as const) {
+      expect([label, res.statusCode, JSON.parse(res.body)]).toEqual([label, 400, INVALID]);
+    }
+    expect(await count("select count(*) n from attachments")).toBe(0);
+    expect(blobFiles()).toEqual([]);
+  });
+
+  it("refuses non-members, unknown conversations, chats that cannot send and signed-out callers before reading the body", async () => {
+    const [a, b, c, o] = await people("alice", "bob", "carol", "oscar");
+    const { conversationId: ab } = await befriend(app, a, b);
+    const { conversationId: ac } = await befriend(app, a, c);
+    await api(app, a, "DELETE", `/api/friends/${b.id}`);
+    await api(app, c, "PUT", `/api/blocks/${a.id}`);
+    const data = opaque(1000);
+
+    const sendRefusal = async (who: Actor, conv: string) => (await say(who, conv, "x")).json;
+    for (const [who, conv] of [
+      [o, ab],
+      [o, RANDOM_ID],
+      [a, RANDOM_ID],
+    ] as const) {
+      const res = await upload(who, conv, data);
+      expect([res.status, res.body]).toEqual([404, NOT_FOUND_BODY]);
+      expect(res.json).toEqual(await sendRefusal(who, conv)); // exactly what a send answers
+    }
+    expect(await upload(a, ab, data)).toMatchObject({ status: 403, json: { error: "cannot_send", reason: "not_friends" } });
+    expect((await upload(a, ab, data)).json).toEqual(await sendRefusal(a, ab));
+    expect(await upload(a, ac, data)).toMatchObject({ status: 403, json: { error: "cannot_send", reason: "blocked" } });
+    expect((await upload(null, ab, data)).status).toBe(401);
+    expect(probe.puts).toEqual([]); // no body was ever streamed to storage
+    expect(await count("select count(*) n from attachments")).toBe(0);
+
+    // Over a real connection: the refusal arrives while most of a large body is still unsent.
+    const open = await openRequest(app, { path: `/api/conversations/${ab}/attachments`, cookie: o.cookie });
+    await open.write(partHead({ name: "file", filename: "big.bin", type: "application/octet-stream" }));
+    await open.fill(256 * 1024);
+    expect(await open.response).toEqual({ status: 404, body: NOT_FOUND_BODY });
+    open.destroy();
+    expect(probe.puts).toEqual([]);
+  });
+
+  it("upload that completes after the uploader was unfriended (direct) or removed (group) is refused and leaves no blob", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const { conversationId: dm } = await befriend(app, a, b);
+
+    const race = async (conv: string, change: () => Promise<{ status: number }>) => {
+      const started = putStarted();
+      const open = await openRequest(app, { path: `/api/conversations/${conv}/attachments`, cookie: a.cookie });
+      await open.write(partHead({ name: "file", filename: "late.bin", type: "application/octet-stream" }));
+      await open.write(opaque(64 * 1024));
+      await started; // the pre-check passed and the server is storing the bytes
+      expect((await change()).status).toBe(200);
+      await open.write(randomBytes(64 * 1024));
+      await open.write(CLOSING);
+      await open.end();
+      return open.response;
+    };
+
+    expect(await race(dm, () => api(app, a, "DELETE", `/api/friends/${b.id}`))).toEqual({
+      status: 403,
+      body: JSON.stringify({ error: "cannot_send", reason: "not_friends" }),
+    });
+    expect(blobFiles()).toEqual([]);
+
+    const g = await group(app, c, "team", [a, b]);
+    expect(await race(g, () => remove(c, g, a))).toEqual({ status: 404, body: NOT_FOUND_BODY });
+    expect(blobFiles()).toEqual([]);
+
+    // Both uploads were stored in full before the final check refused them.
+    const stored = 12 + 2 * 64 * 1024;
+    expect(probe.puts.map((p) => p.bytes)).toEqual([stored, stored]);
+    expect(await count("select count(*) n from attachments")).toBe(0);
+  });
+
+  it("a client that disconnects in the middle of an upload leaves no blob and no row", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const started = putStarted();
+    const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+    await open.write(partHead({ name: "file", filename: "cut.bin", type: "application/octet-stream" }));
+    await open.fill(512 * 1024);
+    await started;
+    await vi.waitFor(() => expect(blobFiles()).toHaveLength(1)); // the partial file is on disk
+    open.destroy();
+    await vi.waitFor(() => expect(blobFiles()).toEqual([]), { timeout: 5000 });
+    expect(probe.puts).toHaveLength(1);
+    expect(await count("select count(*) n from attachments")).toBe(0);
+  });
+
+  it("51 MB is refused without buffering it in memory", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const total = 51 * MB;
+    const withheld = 512 * 1024;
+
+    const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+    await open.write(partHead({ name: "file", filename: "huge.bin", type: "application/octet-stream" }));
+    await open.fill(total - withheld);
+    // The answer comes while the last 512 KB are still held back: the server never needs (or holds) the whole body.
+    expect(await open.response).toEqual({ status: 413, body: '{"error":"too_large"}' });
+    await open.fill(withheld);
+    await open.write(CLOSING);
+    await open.end();
+
+    expect(probe.puts).toHaveLength(1);
+    const [put] = probe.puts;
+    expect(put!.streamed).toBe(true);
+    expect(put!.chunks).toBeGreaterThan(50);
+    expect(put!.largestChunk).toBeLessThanOrEqual(MB);
+    expect(put!.bytes).toBeLessThanOrEqual(ATTACHMENT_MAX_BYTES);
+    expect(put!.bytes).toBeGreaterThan(ATTACHMENT_MAX_BYTES - MB);
+    expect(blobFiles()).toEqual([]);
+    expect(await count("select count(*) n from attachments")).toBe(0);
+  }, 30_000);
+
+  it("exactly 50 MB is accepted", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+    await open.write(partHead({ name: "file", filename: "max.bin", type: "application/octet-stream" }));
+    await open.fill(ATTACHMENT_MAX_BYTES);
+    await open.write(CLOSING);
+    await open.end();
+    const res = await open.response;
+    expect(res.status).toBe(201);
+    expect(JSON.parse(res.body)).toMatchObject({ name: "max.bin", size: ATTACHMENT_MAX_BYTES, inline: false });
+    expect(blobFiles()).toHaveLength(1);
+  }, 30_000);
+});
+
+describe("realtime", () => {
+  it("file messages reach members' sockets with the attachment; a late joiner never receives a pre-join file", async () => {
+    const [a, b, c, d] = await people("alice", "bob", "carol", "dave");
+    await befriend(app, a, d);
+    const g = await group(app, a, "team", [b, c]);
+    const sb = await connect(app, b);
+    const sd = await connect(app, d);
+
+    const pre = (await upload(a, g, opaque(20), "pre.bin")).json;
+    const preMsg = (await sendFile(a, g, pre.id, { text: "before dave" })).json.message;
+    const forB = await sb.next(isMessage(g, preMsg.seq));
+    expect(forB.message).toEqual(preMsg);
+    expect(forB.message.attachment).toEqual({ id: pre.id, name: "pre.bin", size: 32, inline: false });
+
+    expect((await add(a, g, d)).status).toBe(201);
+    const postUp = (await upload(c, g, PNG, "after.png")).json;
+    const postMsg = (await sendFile(c, g, postUp.id)).json.message;
+    const forD = await sd.next(isMessage(g, postMsg.seq));
+    expect(forD.message.attachment).toEqual({ id: postUp.id, name: "after.png", size: PNG.length, inline: true });
+    expect((await sb.next(isMessage(g, postMsg.seq))).message.attachment.id).toBe(postUp.id);
+
+    // Nothing of the pre-join file reaches the late joiner: not pushed, not in sync, not downloadable.
+    const seen = JSON.stringify(sd.events);
+    expect(seen).not.toContain(pre.id);
+    expect(seen).not.toContain("pre.bin");
+    expect(JSON.stringify((await api(app, d, "GET", "/api/sync")).json)).not.toContain(pre.id);
+    expect((await download(d, pre.id)).body).toBe(NOT_FOUND_BODY);
+    expect((await download(d, postUp.id)).statusCode).toBe(200);
+  });
+});
