@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { AppError, notFound } from "../errors.ts";
+import { notFound } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import { positiveInt, positiveIntString, userText, uuidParam } from "../schemas.ts";
 import type { Tx } from "../db.ts";
 import { requirePrincipal } from "../session.ts";
@@ -40,12 +41,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
   const { db, config, conversations, reads, searches } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
-  const actors = new WeakMap<FastifyRequest, string>();
-  const sendLimit = app.createRateLimit({
-    max: Math.max(1, Math.round(120 * config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
-  });
+  const sendLimit = perPrincipalLimit(app, 120);
 
   api.post(
     "/api/conversations/:id/messages",
@@ -54,9 +50,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     },
     async (req, reply) => {
       const me = await requirePrincipal(req);
-      actors.set(req, me.id);
-      const limited = await sendLimit(req);
-      if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+      await sendLimit(req, me.id);
 
       // Rendered inside the transaction, under the locks that just proved the sender may read it.
       const { message, duplicate, wire } = await db.tx(async (t) => {
@@ -106,16 +100,10 @@ export function registerMessageRoutes(app: FastifyInstance): void {
   );
 
   // One budget for both search routes: they are the same expensive read.
-  const searchLimiter = app.createRateLimit({
-    max: Math.max(1, Math.round(30 * config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
-  });
+  const searchRate = perPrincipalLimit(app, 30);
   const searcher = async (req: FastifyRequest): Promise<string> => {
     const me = await requirePrincipal(req);
-    actors.set(req, me.id);
-    const limited = await searchLimiter(req);
-    if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+    await searchRate(req, me.id);
     return me.id;
   };
   /**

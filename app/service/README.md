@@ -33,6 +33,7 @@ npm run build     # type-check only (tsc --noEmit)
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
+`CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
 `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
 `UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
 15 min in all), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle, default 2 min),
@@ -85,7 +86,25 @@ Each of these declares its query and body; anything else is 400 before Better Au
 `callbackURL` / `redirectTo` must be a path on the site (not `//…`) or a URL on `APP_ORIGIN`. No response
 body carries the session token (sign-in's `token` field is removed): the `HttpOnly` cookie is the session.
 Mail goes to the `mail_outbox` table. CLI: `npx tsx src/cli.ts invite:create [--ttl-hours n]` / `inbox:list [--to <email>]`.
-Set `TRUST_PROXY=true` only behind a reverse proxy you control (IP rate limits then trust `X-Forwarded-For`).
+The address the IP-keyed limits count is set up as described under Deployment.
+
+## Deployment
+
+**Client address.** Registration and the sign-in / reset-request limiters count requests per client
+address (`clientIp` in `src/limits.ts`, which the request log shows as `remoteAddress` too). By default
+that is the address of the TCP connection and nothing a client sends is believed. Behind a proxy every
+request comes from the proxy, so tell the service where the real address is:
+
+- `CLIENT_IP_HEADER=<header name>` — a header the proxy sets to the client's address, replacing any value
+  the client sent. On Railway: `CLIENT_IP_HEADER=x-real-ip`. Used when it holds exactly one address;
+  absent, empty, several values or not an address → the connection's address.
+- `TRUST_PROXY=<addresses/CIDRs>` — alternatively, the proxies' own addresses (comma-separated, e.g.
+  `10.0.0.0/8,fd00::/8`): on connections from them the right-most `X-Forwarded-For` entry they did not
+  write is the client. Empty, `false` or `0` trust nothing. `TRUST_PROXY=true` and hop counts are refused
+  at start-up (`true` would believe the left-most entry, which the client writes; a hop count cannot tell
+  the proxy from a client that connects directly).
+
+Never set either unless the service is reachable only through that proxy.
 
 ## Sync and realtime (`src/sync/`)
 

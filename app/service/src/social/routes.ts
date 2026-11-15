@@ -4,6 +4,7 @@ import { z } from "zod";
 import { uuidParam } from "../schemas.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { findByHandle } from "../principals/store.ts";
 import { requirePrincipal } from "../session.ts";
@@ -52,15 +53,10 @@ interface DirectEffects {
 }
 
 export function registerSocialRoutes(app: FastifyInstance): void {
-  const { db, config, social, conversations } = app.deps;
+  const { db, social, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
-  const actors = new WeakMap<FastifyRequest, string>();
-  const createLimit = app.createRateLimit({
-    max: Math.max(1, Math.round(20 * config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
-  });
+  const createLimit = perPrincipalLimit(app, 20);
 
   /** After commit: the pair's social change, its direct-chat notices, and that chat's change of state. */
   function announce(req: FastifyRequest, pair: string[], effects: DirectEffects): void {
@@ -107,9 +103,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
     },
     async (req, reply) => {
       const me = await requirePrincipal(req);
-      actors.set(req, me.id);
-      const limited = await createLimit(req);
-      if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+      await createLimit(req, me.id);
 
       const target = await findByHandle(db, req.body.handle);
       if (!target) throw new AppError(404, "not_found");

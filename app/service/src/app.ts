@@ -23,6 +23,7 @@ import { registerConversationRoutes } from "./conversations/routes.ts";
 import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
 import { MAX_CONCURRENT_SEARCHES } from "./messages/search.ts";
+import { clientIp } from "./limits.ts";
 import { appOriginCheck } from "./origin.ts";
 import { createSlots, type Slots } from "./slots.ts";
 import type { Hub } from "./sync/hub.ts";
@@ -90,7 +91,7 @@ const logSerializers = {
     method: req.method,
     url: redactQuery(req.url),
     host: req.host,
-    remoteAddress: req.ip,
+    remoteAddress: clientIp(req),
     remotePort: req.socket?.remotePort,
   }),
 };
@@ -154,10 +155,11 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   app.decorate("auth", createAuth(config, deps.db, deps.sessions, app.log));
   if (ownsDb) app.addHook("onClose", async () => deps.db.close());
 
-  // The single source of throttling (Better Auth's own limiter is off): 10 per minute per IP and route.
+  // The single source of throttling (Better Auth's own limiter is off). Routes that declare
+  // `config.rateLimit` are counted per client address (`clientIp`); the rest use limits.ts / createRateLimit.
   await app.register(rateLimit, {
     global: false,
-    keyGenerator: (req) => req.ip,
+    keyGenerator: clientIp,
     errorResponseBuilder: () => new AppError(429, "rate_limited"),
   });
   const perMinute = { max: Math.max(1, Math.round(10 * config.rateLimitScale)), timeWindow: "1 minute" };

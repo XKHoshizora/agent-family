@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { Config } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { clientIp } from "../limits.ts";
 import { sendMail } from "./mailer.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
@@ -163,6 +164,8 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
     // One source of truth for throttling: @fastify/rate-limit in app.ts.
     rateLimit: { enabled: false },
     advanced: {
+      // Better Auth reads no client address (it would trust X-Forwarded-For) and stores none on sessions;
+      // the limiters in front of it key on `clientIp` (src/limits.ts).
       ipAddress: { disableIpTracking: true },
       // Stated, not inherited from a library default: no cross-site POST carries the session (CSRF is
       // also refused by the Origin check in app.ts), scripts cannot read it, and https deployments
@@ -217,14 +220,15 @@ function bodyEmail(req: FastifyRequest): string | undefined {
 }
 
 /**
- * Two counters per request: 10/min per IP + e-mail (so hammering one account never locks out another),
- * and a looser 60/min per IP (so one address cannot spray many accounts). Both times `scale`.
- * A missing or malformed e-mail falls back to the IP-only key.
+ * Two counters per request: 10/min per client address + e-mail (so hammering one account never locks out
+ * another), and a looser 60/min per address (so one address cannot spray many accounts). Both times `scale`.
+ * A missing or malformed e-mail falls back to the address-only key. The address is `clientIp`'s: Better Auth
+ * itself never sees one (`disableIpTracking`, its own limiter off).
  */
 function accountAndIpLimiter(app: FastifyInstance, scale: number): Limiter {
   const per = (n: number) => ({ max: Math.max(1, Math.round(n * scale)), timeWindow: "1 minute" });
-  const perAccount = app.createRateLimit({ ...per(10), keyGenerator: (req: FastifyRequest) => `${req.ip}|${bodyEmail(req) ?? ""}` });
-  const perIp = app.createRateLimit({ ...per(60), keyGenerator: (req: FastifyRequest) => req.ip });
+  const perAccount = app.createRateLimit({ ...per(10), keyGenerator: (req: FastifyRequest) => `${clientIp(req)}|${bodyEmail(req) ?? ""}` });
+  const perIp = app.createRateLimit({ ...per(60), keyGenerator: clientIp });
   return async (req) => {
     const results = [await perAccount(req), await perIp(req)];
     if (results.some((r) => "isExceeded" in r && r.isExceeded)) throw new AppError(429, "rate_limited");

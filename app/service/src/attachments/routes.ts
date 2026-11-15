@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { z } from "zod";
 import { canSend } from "../conversations/store.ts";
 import { AppError, notFound } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { isMissingBlob, newBlobKey, type BlobStore } from "./blob.ts";
@@ -256,12 +257,7 @@ const attachmentView = z.object({ id: z.string(), name: z.string(), size: z.numb
 export function registerAttachmentRoutes(app: FastifyInstance): void {
   const { db, config, blobs, uploads } = app.deps;
 
-  const uploaders = new WeakMap<FastifyRequest, string>();
-  const uploadLimit = app.createRateLimit({
-    max: Math.max(1, Math.round(UPLOADS_PER_HOUR * config.rateLimitScale)),
-    timeWindow: "1 hour",
-    keyGenerator: (req: FastifyRequest) => uploaders.get(req) ?? req.ip,
-  });
+  const uploadLimit = perPrincipalLimit(app, UPLOADS_PER_HOUR, "1 hour");
 
   const deadlines: UploadDeadlines = { idleMs: config.uploadIdleTimeoutMs, totalMs: config.uploadTotalTimeoutMs };
 
@@ -329,9 +325,7 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
         const slot = claimSlot(req, uploads); // before the first await
         try {
           const me = await requirePrincipal(req);
-          uploaders.set(req, me.id);
-          const limited = await uploadLimit(req);
-          if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+          await uploadLimit(req, me.id);
           slot.take(me.id);
           return await acceptUpload(req, reply, req.params.id, me.id);
         } finally {

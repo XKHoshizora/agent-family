@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { uuidParam } from "../schemas.ts";
@@ -6,6 +6,7 @@ import { isMissingBlob, newBlobKey } from "../attachments/blob.ts";
 import { discardBlob, holdBlob, releaseBlob } from "../attachments/pending.ts";
 import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
@@ -36,16 +37,11 @@ async function readAll(stream: AsyncIterable<Buffer>): Promise<Buffer> {
 }
 
 export function registerPrincipalRoutes(app: FastifyInstance): void {
-  const { db, config, blobs } = app.deps;
+  const { db, blobs } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   // Handle lookup is the only way to probe for handles, so it is throttled per principal.
-  const lookupActors = new WeakMap<FastifyRequest, string>();
-  const lookupLimit = app.createRateLimit({
-    max: Math.max(1, Math.round(30 * config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => lookupActors.get(req) ?? req.ip,
-  });
+  const lookupLimit = perPrincipalLimit(app, 30);
 
   api.patch(
     "/api/me",
@@ -81,9 +77,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
-      lookupActors.set(req, me.id);
-      const limited = await lookupLimit(req);
-      if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+      await lookupLimit(req, me.id);
       const found = await findByHandle(db, req.query.handle);
       if (!found) throw new AppError(404, "not_found");
       return found;

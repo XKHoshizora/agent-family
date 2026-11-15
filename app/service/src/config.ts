@@ -1,4 +1,38 @@
+import { isIP } from "node:net";
 import { z } from "zod";
+
+/** Which X-Forwarded-For hops Fastify trusts: none, or those that come from these addresses / ranges. */
+export type TrustProxy = false | string[];
+
+/** An address, or an address with a prefix length in range for its family (`10.0.0.0/8`, `fd00::/8`). */
+function isAddressOrRange(entry: string): boolean {
+  const [address = "", prefix, ...rest] = entry.split("/");
+  const family = isIP(address);
+  if (family === 0 || rest.length > 0) return false;
+  if (prefix === undefined) return true;
+  return /^(0|[1-9][0-9]{0,2})$/.test(prefix) && Number(prefix) <= (family === 4 ? 32 : 128);
+}
+
+/**
+ * `TRUST_PROXY`: unset, empty, `false` or `0` trust nothing; otherwise a comma-separated list of the proxies'
+ * addresses / CIDR ranges, so X-Forwarded-For is only read when the connection comes from one of them (Fastify
+ * then takes the right-most entry not from a listed proxy). Refused, with a message saying why: a bare `true`
+ * (Fastify would take the left-most X-Forwarded-For entry, which the client writes) and a hop count (it cannot
+ * tell the proxy from a client that connects directly; Fastify 5 ignores it and trusts nothing).
+ */
+function parseTrustProxy(raw: string | undefined): TrustProxy | string {
+  if (raw === undefined || raw === "false" || raw === "0") return false;
+  const instead =
+    "set CLIENT_IP_HEADER to the header your proxy sets (e.g. x-real-ip), or TRUST_PROXY to the proxies' addresses/CIDRs";
+  if (raw === "true") return `TRUST_PROXY=true would trust a client-supplied X-Forwarded-For and is not accepted; ${instead}`;
+  if (/^[0-9]+$/.test(raw)) return `TRUST_PROXY=${raw}: a hop count cannot tell the proxy from a direct client and is not accepted; ${instead}`;
+  const entries = raw.split(",").map((s) => s.trim());
+  const bad = entries.filter((e) => !isAddressOrRange(e));
+  if (bad.length > 0) {
+    return `TRUST_PROXY must be a comma-separated list of addresses/CIDRs (not ${JSON.stringify(bad.join(","))})`;
+  }
+  return entries;
+}
 
 const optionalString = z
   .string()
@@ -19,11 +53,23 @@ const envSchema = z.object({
   REGISTRATION_MODE: z.enum(["invite", "open"]).default("invite"),
   /** Only `outbox` exists in this plan; real delivery is added later. */
   MAIL_MODE: z.enum(["outbox"]).default("outbox"),
-  /** Honour X-Forwarded-For. Only enable behind a proxy you control: IP rate limits trust it. */
-  TRUST_PROXY: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((v) => v === "true"),
+  /** A header your proxy sets to the client's address, replacing any client value (Railway: `x-real-ip`). */
+  CLIENT_IP_HEADER: optionalString.pipe(
+    z
+      .string()
+      .regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/, "CLIENT_IP_HEADER must be a header name")
+      .transform((v) => v.toLowerCase())
+      .optional(),
+  ),
+  /** The proxies whose X-Forwarded-For is read: their addresses / CIDR ranges. Default: none. */
+  TRUST_PROXY: optionalString.transform((v, ctx) => {
+    const parsed = parseTrustProxy(v);
+    if (typeof parsed === "string") {
+      ctx.addIssue({ code: "custom", message: parsed });
+      return z.NEVER;
+    }
+    return parsed;
+  }),
   /** Multiplier applied to every rate limit; tests raise it. */
   RATE_LIMIT_SCALE: z.coerce.number().positive().default(1),
   /** Total attachment bytes one principal may store (sent or not). */
@@ -62,7 +108,10 @@ export interface Config {
   registrationMode: "invite" | "open";
   mailMode: "outbox";
   rateLimitScale: number;
-  trustProxy: boolean;
+  /** Lower-case header name holding the client's address (src/limits.ts `clientIp`); unset: not consulted. */
+  clientIpHeader: string | undefined;
+  /** Fastify's `trustProxy`: which X-Forwarded-For hops `req.ip` may look through. */
+  trustProxy: TrustProxy;
   attachmentQuotaBytes: number;
   /** Per-upload deadlines: no body bytes for `uploadIdleTimeoutMs`, or still receiving after `uploadTotalTimeoutMs`. */
   uploadIdleTimeoutMs: number;
@@ -119,6 +168,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     registrationMode: e.REGISTRATION_MODE,
     mailMode: e.MAIL_MODE,
     rateLimitScale: e.RATE_LIMIT_SCALE,
+    clientIpHeader: e.CLIENT_IP_HEADER,
     trustProxy: e.TRUST_PROXY,
     attachmentQuotaBytes: e.ATTACHMENT_QUOTA_BYTES,
     uploadIdleTimeoutMs: e.UPLOAD_IDLE_TIMEOUT_MS,

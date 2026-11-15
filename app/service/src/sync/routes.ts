@@ -1,8 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { onSessionEnded } from "../auth/auth.ts";
-import { AppError } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { requirePrincipal } from "../session.ts";
 import { Hub } from "./hub.ts";
@@ -46,21 +46,6 @@ const positions = z
   .transform((r) => new Map(Object.entries(r).map(([id, seq]) => [id.toLowerCase(), seq])));
 
 const catchUpResponse = z.object({ messages: z.array(wireMessageSchema), gone: z.array(z.string()), more: z.boolean() });
-
-/** A per-principal limiter of `perMinute × RATE_LIMIT_SCALE` requests; throws 429 `rate_limited`. */
-function perPrincipalLimit(app: FastifyInstance, perMinute: number): (req: FastifyRequest, principalId: string) => Promise<void> {
-  const actors = new WeakMap<FastifyRequest, string>();
-  const limit = app.createRateLimit({
-    max: Math.max(1, Math.round(perMinute * app.deps.config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
-  });
-  return async (req, principalId) => {
-    actors.set(req, principalId);
-    const result = await limit(req);
-    if ("isExceeded" in result && result.isExceeded) throw new AppError(429, "rate_limited");
-  };
-}
 
 function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
   const { db } = app.deps;

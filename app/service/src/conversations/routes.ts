@@ -1,7 +1,8 @@
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { AppError, notFound } from "../errors.ts";
+import { notFound } from "../errors.ts";
+import { perPrincipalLimit } from "../limits.ts";
 import { userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { addMember, createGroup, removeMember, renameGroup } from "./groups.ts";
@@ -13,15 +14,10 @@ const title = userText(1, 60, { singleLine: true });
 const idParams = z.object({ id: uuidParam });
 
 export function registerConversationRoutes(app: FastifyInstance): void {
-  const { db, config, conversations } = app.deps;
+  const { db, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
-  const actors = new WeakMap<FastifyRequest, string>();
-  const createLimit = app.createRateLimit({
-    max: Math.max(1, Math.round(10 * config.rateLimitScale)),
-    timeWindow: "1 minute",
-    keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
-  });
+  const createLimit = perPrincipalLimit(app, 10);
 
   api.post(
     "/api/conversations",
@@ -39,9 +35,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     },
     async (req, reply) => {
       const me = await requirePrincipal(req);
-      actors.set(req, me.id);
-      const limited = await createLimit(req);
-      if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+      await createLimit(req, me.id);
 
       const { conversationId, change } = await db.tx((t) => createGroup(t, me.id, req.body.title, req.body.memberIds));
       conversations.publish(change, req.log);
