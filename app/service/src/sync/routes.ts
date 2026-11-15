@@ -125,6 +125,8 @@ export async function registerSync(app: FastifyInstance): Promise<void> {
   });
   app.decorate("realtime", hub);
 
-  registerSyncRoutes(app, tickets);
+  // The WebSocket plugin first: it wraps (through an onRoute hook) only routes registered after it, and
+  // refusing an upgrade to any other route relies on that.
   await registerWebSocketRoute(app, hub, tickets);
+  registerSyncRoutes(app, tickets);
 }

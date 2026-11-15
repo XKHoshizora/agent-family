@@ -47,8 +47,12 @@ is refused with 403 `{"error":"forbidden"}` before anything else runs
 Requests without `Origin` (non-browser clients) pass. The session cookie is `HttpOnly`, `SameSite=Lax`, and
 `Secure` (with the `__Secure-` name prefix) when `APP_ORIGIN` is https.
 
-`buildApp(deps?: Partial<Deps>)` takes `{ config, db }`; anything omitted is built from the
-environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool on `TEST_DATABASE_URL`.
+`buildApp(deps?: Partial<Deps>, options?: { logStream })` takes `{ config, db }`; anything omitted is built
+from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool on `TEST_DATABASE_URL`.
+
+**Logs.** JSON lines at info level on stdout (none under test unless a test passes `logStream`). A request
+is logged as method, path, host and address: the query string is replaced by `?[redacted]` (it carries
+WebSocket tickets, e-mail verification tokens and search terms), and headers (cookies) are never logged.
 
 ## Tests
 
@@ -124,7 +128,8 @@ positions. Limits: 60/min per principal.
 **Socket.** `POST /api/ws-ticket` (session cookie; 30/min per principal) → `{"ticket": "…"}`, valid
 once, for 30 seconds, and only while the session that asked for it lasts. Open
 `wss://<host>/api/ws?ticket=<ticket>` from the app's origin (`APP_ORIGIN`; other or missing `Origin`
-→ 403). The session cookie alone never opens a socket (400 without a ticket, 401 with a bad one).
+→ 403). The session cookie alone never opens a socket (400 without a ticket, 401 with a bad one). An upgrade
+request to any other path is refused with 404 `{"error":"not_found"}` before that route's handler runs.
 Each principal has at most 5 sockets; a 6th closes the oldest. The server sends WebSocket pings every
 30 s and drops sockets that did not answer the previous one. You may send `{"type":"ping"}` (answered
 with `{"type":"pong"}`); every other inbound message is ignored. Binary frames, frames over 4 KB and

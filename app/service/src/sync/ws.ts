@@ -10,6 +10,9 @@ import type { TicketOwner, TicketStore } from "./tickets.ts";
 /** Inbound frames (messages) larger than this close the socket with 1009. */
 export const MAX_FRAME_BYTES = 4096;
 
+/** The one route that accepts a WebSocket upgrade. */
+export const WS_PATH = "/api/ws";
+
 const pingMessage = z.strictObject({ type: z.literal("ping") });
 
 /** The only inbound application message: `{"type":"ping"}` as a small text frame. */
@@ -38,12 +41,19 @@ export async function registerWebSocketRoute(app: FastifyInstance, hub: Hub, tic
     },
   });
 
+  // An upgrade request to any other route (or to no route) is refused with 404 before any handler runs.
+  // Otherwise the plugin would accept the handshake and close the socket at once, and a route registered
+  // before the plugin would even answer the upgrade request with its JSON over the raw socket.
+  app.addHook("onRequest", async (req) => {
+    if (req.ws && req.routeOptions.url !== WS_PATH) throw notFound();
+  });
+
   const fromApp = appOriginCheck(app.deps.config.appOrigin);
   const owners = new WeakMap<FastifyRequest, TicketOwner>();
 
   app.withTypeProvider<ZodTypeProvider>().route({
     method: "GET",
-    url: "/api/ws",
+    url: WS_PATH,
     websocket: true,
     schema: {
       params: z.object({}),

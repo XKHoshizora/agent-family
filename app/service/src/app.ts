@@ -1,5 +1,5 @@
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyInstance, type FastifySchema } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifySchema } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -63,7 +63,33 @@ declare module "fastify" {
 
 const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyInstance> {
+/** What is not a dependency of the routes: where the log goes. */
+export interface BuildOptions {
+  /** JSON log lines at info level go here (tests capture them). Default: stdout, and nothing under test. */
+  logStream?: { write(line: string): void };
+}
+
+/**
+ * A URL as it may be logged: without its query string, which carries WebSocket tickets, e-mail
+ * verification tokens and search terms. Only `?[redacted]` shows that there was one.
+ */
+export function redactQuery(url: string): string {
+  const q = url.indexOf("?");
+  return q < 0 ? url : `${url.slice(0, q)}?[redacted]`;
+}
+
+/** Fastify's default request serializer, minus the query string. */
+const logSerializers = {
+  req: (req: FastifyRequest) => ({
+    method: req.method,
+    url: redactQuery(req.url),
+    host: req.host,
+    remoteAddress: req.ip,
+    remotePort: req.socket?.remotePort,
+  }),
+};
+
+export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOptions = {}): Promise<FastifyInstance> {
   const config = overrides.config ?? loadConfig();
   const ownsDb = overrides.db === undefined;
   const deps: Deps = {
@@ -76,8 +102,13 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     uploads: overrides.uploads ?? createUploadSlots(),
   };
 
+  const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
   const app = Fastify({
-    logger: process.env.NODE_ENV === "test" || process.env.VITEST ? false : { level: "info" },
+    logger: options.logStream
+      ? { level: "info", stream: options.logStream, serializers: logSerializers }
+      : underTest
+        ? false
+        : { level: "info", serializers: logSerializers },
     trustProxy: config.trustProxy,
     // Server-wide limits (WebSockets are exempt: `ws` clears the socket timeout on upgrade, and an upgraded
     // connection is no longer a request). Uploads run under their own, tighter deadlines (attachments/routes.ts).

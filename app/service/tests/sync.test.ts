@@ -1,3 +1,4 @@
+import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, befriend, cookieHeaderFrom, group, mailLink, signIn, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -554,6 +555,49 @@ describe("websocket authentication", () => {
     for (const origin of ["http://evil.test", "http://localhost:5173.evil.test", "https://localhost:5173", null]) {
       expect([origin, await tryConnect(app, { ticket, origin })]).toEqual([origin, { status: 403 }]);
     }
+  });
+
+  it("an upgrade request to any other route is refused with 404 before that route's handler runs", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    await say(a, dm, "not for a socket");
+    const { port } = await listen(app);
+    /** A WebSocket handshake for `path`, with the session cookie and the app's Origin; the raw answer. */
+    const upgrade = (path: string) =>
+      new Promise<string>((resolve) => {
+        const socket = net.connect({ port, host: "127.0.0.1" });
+        let got = "";
+        socket.on("data", (c) => (got += c.toString("utf8")));
+        socket.on("error", () => {});
+        socket.on("close", () => resolve(got));
+        socket.setTimeout(3000, () => socket.destroy());
+        socket.write(
+          [
+            `GET ${path} HTTP/1.1`,
+            `Host: 127.0.0.1:${port}`,
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+            "Sec-WebSocket-Version: 13",
+            "Origin: http://localhost:5173",
+            `Cookie: ${a.cookie}`,
+            "",
+            "",
+          ].join("\r\n"),
+        );
+      });
+    // /api/sync was registered before the WebSocket plugin: it used to answer with the caller's sync data.
+    for (const path of ["/api/sync", "/api/me", "/api/health", `/api/conversations/${dm}/messages`, "/api/ws-ticket", "/api/nope"]) {
+      const answer = await upgrade(path);
+      expect([path, answer.split("\r\n")[0]]).toEqual([path, "HTTP/1.1 404 Not Found"]);
+      expect(answer.endsWith('{"error":"not_found"}')).toBe(true);
+      expect(answer).not.toContain("not for a socket");
+      expect(answer).not.toContain(a.handle);
+    }
+    // The WebSocket route itself still upgrades.
+    const socket = await connect(app, a);
+    socket.send(JSON.stringify({ type: "ping" }));
+    await socket.next((e) => e.type === "pong");
   });
 
   it("sign-out and password reset close that session's sockets", async () => {

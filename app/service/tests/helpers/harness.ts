@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, beforeEach } from "vitest";
-import { buildApp, type Deps } from "../../src/app.ts";
+import { buildApp, type BuildOptions, type Deps } from "../../src/app.ts";
 import { loadConfig } from "../../src/config.ts";
 import { createDb, type Db } from "../../src/db.ts";
 import { testDatabaseUrl } from "./env.ts";
@@ -24,9 +24,9 @@ async function truncateAll(db: Db): Promise<void> {
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } = {},
+  extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, ...overrides } = extra;
+  const { env, logStream, ...overrides } = extra;
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;
   const current = <T>(v: T | undefined): T => {
@@ -52,7 +52,7 @@ export function useApp(
       ...env,
     });
     database = createDb(config.databaseUrl);
-    instance = await buildApp({ config, db: database, ...overrides });
+    instance = await buildApp({ config, db: database, ...overrides }, logStream ? { logStream } : {});
     await instance.ready();
   });
 
