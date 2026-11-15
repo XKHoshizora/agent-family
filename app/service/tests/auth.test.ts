@@ -199,6 +199,34 @@ describe("accounts", () => {
     expect((await signIn(app, a.email, newPassword)).statusCode).toBe(200);
   });
 
+  test("inputs Better Auth answered with a 500 are refused with 400 first; the app's own links still work", async () => {
+    const a = await signUp(app, "bad_inputs");
+    const post = (path: string, body: object) => api(app, null, "POST", `/api/auth/${path}`, body);
+    const bad = { status: 400, json: { error: "invalid_request" } };
+    // NUL cannot be stored or compared by Postgres (it was a 500).
+    expect(await post("reset-password", { newPassword: "a new password 1", token: "a\u0000b" })).toEqual(bad);
+    expect(await post("request-password-reset", { email: `${a.email}\u0000` })).toEqual(bad);
+    // Redirect targets: a lone surrogate and a bare word were 500s; other hosts are never a target.
+    const redirects = ["\ud800", "abc", "https://evil.example.test/x", "//evil.example.test", "/\\evil.example.test", "javascript:alert(1)", "/a\nb"];
+    for (const redirectTo of redirects) {
+      expect([redirectTo, await post("request-password-reset", { email: a.email, redirectTo })]).toEqual([redirectTo, bad]);
+    }
+    for (const callbackURL of ["%ED%A0%80", ...redirects.slice(1).map(encodeURIComponent)]) {
+      const res = await api(app, null, "GET", `/api/auth/verify-email?token=abc&callbackURL=${callbackURL}`);
+      expect([callbackURL, res]).toEqual([callbackURL, bad]);
+    }
+    // A query the endpoint does not declare is not forwarded silently.
+    expect(await api(app, null, "POST", "/api/auth/sign-in/email?callbackURL=%2F", { email: a.email, password: a.password })).toEqual(bad);
+    expect(await api(app, null, "GET", "/api/auth/verify-email?token=abc&extra=1")).toEqual(bad);
+
+    // What the app itself uses still works: a path on the site, a URL on the app's origin.
+    expect((await post("request-password-reset", { email: a.email, redirectTo: "/reset" })).status).toBe(200);
+    expect((await post("request-password-reset", { email: a.email, redirectTo: "http://localhost:5173/reset" })).status).toBe(200);
+    const invalidToken = await app.inject({ method: "GET", url: "/api/auth/verify-email?token=abc&callbackURL=%2Fdone" });
+    expect(invalidToken.statusCode).toBe(302);
+    expect(invalidToken.headers.location).toBe("/done?error=INVALID_TOKEN");
+  });
+
   test("sign-out invalidates the session cookie", async () => {
     const a = await signUp(app, "signs_out");
     expect((await api(app, a, "GET", "/api/me")).status).toBe(200);

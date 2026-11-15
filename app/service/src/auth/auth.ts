@@ -177,6 +177,39 @@ function errorCodeOf(status: number, body: string): string {
   return STATUS_CODES[status] ?? "invalid_request";
 }
 
+/** Text Postgres can store and a URL can carry: no NUL, no lone surrogate. */
+const storableText = (max: number) =>
+  z
+    .string()
+    .max(max)
+    .refine((s) => !s.includes("\u0000") && !/\p{Cs}/u.test(s), "not storable");
+
+/**
+ * Where Better Auth may send the browser afterwards: a path on this site (not `//host` or `/\host`, which
+ * browsers read as another host) or a URL on the app's own origin. Better Auth would refuse other origins
+ * too, but answers some malformed values with a 500.
+ */
+function appRedirect(appOrigin: string) {
+  const own = new URL(appOrigin).origin;
+  return storableText(2048).refine((s) => {
+    if (/[\\\p{Cc}]/u.test(s)) return false;
+    if (s.startsWith("/")) return !s.startsWith("//");
+    try {
+      return new URL(s).origin === own;
+    } catch {
+      return false;
+    }
+  }, "not a redirect on this site");
+}
+
+interface Endpoint {
+  limit: Limiter | null;
+  /** The query string, exactly (it is forwarded as sent, so nothing undeclared may be in it). */
+  query: z.ZodType;
+  /** The JSON body; what it parses to is what Better Auth receives (undeclared fields are dropped). */
+  body: z.ZodType;
+}
+
 /**
  * Only these Better Auth endpoints are reachable. Notably absent: `/sign-up/email`, which would
  * bypass invites and principal creation (registration goes through POST /api/register).
@@ -184,12 +217,31 @@ function errorCodeOf(status: number, body: string): string {
 export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number): void {
   const signIn = accountAndIpLimiter(app, rateLimitScale);
   const resetRequest = accountAndIpLimiter(app, rateLimitScale);
-  const exposed = new Map<string, Limiter | null>([
-    ["POST /sign-in/email", signIn],
-    ["POST /sign-out", null],
-    ["GET /verify-email", null],
-    ["POST /request-password-reset", resetRequest],
-    ["POST /reset-password", null],
+  const redirect = appRedirect(app.deps.config.appOrigin);
+  // Better Auth validates the values itself (e-mail format, password length, token); these schemas bound
+  // the shape and keep out what it would choke on. Passwords are only hashed, never stored, so any text goes.
+  const password = z.string().max(1024);
+  const noQuery = z.strictObject({});
+  const noBody = z.object({}).nullish();
+  const exposed = new Map<string, Endpoint>([
+    [
+      "POST /sign-in/email",
+      {
+        limit: signIn,
+        query: noQuery,
+        body: z.object({ email: storableText(254), password, callbackURL: redirect.optional(), rememberMe: z.boolean().optional() }),
+      },
+    ],
+    ["POST /sign-out", { limit: null, query: noQuery, body: noBody }],
+    [
+      "GET /verify-email",
+      { limit: null, query: z.strictObject({ token: storableText(4096), callbackURL: redirect.optional() }), body: noBody },
+    ],
+    [
+      "POST /request-password-reset",
+      { limit: resetRequest, query: noQuery, body: z.object({ email: storableText(254), redirectTo: redirect.optional() }) },
+    ],
+    ["POST /reset-password", { limit: null, query: noQuery, body: z.object({ newPassword: password, token: storableText(512) }) }],
   ]);
   const endpointOf = (req: FastifyRequest): string => {
     const path = (req.url.split("?")[0] ?? "").replace(/\/{2,}/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -217,11 +269,18 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
   const onRequest = async (req: FastifyRequest) => {
     if (!exposed.has(endpointOf(req))) throw new AppError(404, "not_found");
   };
-  // After body parsing, because the limiter keys on the e-mail in the body.
+  // After body parsing, because the limiter keys on the e-mail in the body. The limiter counts malformed
+  // requests too; then the endpoint's own schemas decide (400 before Better Auth sees anything).
   const preHandler = async (req: FastifyRequest) => {
-    await exposed.get(endpointOf(req))?.(req);
+    const endpoint = exposed.get(endpointOf(req));
+    if (!endpoint) throw new AppError(404, "not_found");
+    await endpoint.limit?.(req);
+    const query = endpoint.query.safeParse(req.query);
+    const body = endpoint.body.safeParse(req.body ?? undefined);
+    if (!query.success || !body.success) throw new AppError(400, "invalid_request");
+    req.body = body.data;
   };
-  // Better Auth validates its own payloads (4xx on bad input); these schemas only bound the shape.
+  // The mount's own schemas only bound the shape; each endpoint's schemas above are checked in preHandler.
   const schema = {
     params: z.object({ "*": z.string() }),
     querystring: z.object({}).catchall(z.union([z.string(), z.array(z.string())])),

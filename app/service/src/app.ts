@@ -1,5 +1,5 @@
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifySchema } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -10,7 +10,7 @@ import { loadConfig, type Config } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
 import { createAuth, registerAuthRoutes, type Auth } from "./auth/auth.ts";
 import { registerRegistrationRoutes } from "./auth/register.ts";
-import { AppError, registerErrorHandling } from "./errors.ts";
+import { AppError, frameworkErrors, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
@@ -42,12 +42,22 @@ export interface Deps {
   uploads: UploadSlots;
 }
 
+/** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
+export interface RouteEntry {
+  method: string;
+  url: string;
+  schema: FastifySchema | undefined;
+  websocket: boolean;
+}
+
 declare module "fastify" {
   interface FastifyInstance {
     deps: Deps;
     auth: Auth;
     /** The in-process socket registry and push delivery (src/sync/hub.ts). */
     realtime: Hub;
+    /** Every route the app serves, in registration order (diagnostics; the fuzz suite walks it). */
+    routeList: readonly RouteEntry[];
   }
 }
 
@@ -74,10 +84,20 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     connectionTimeout: config.httpConnectionTimeoutMs,
     requestTimeout: config.httpRequestTimeoutMs,
     keepAliveTimeout: config.httpKeepAliveTimeoutMs,
+    frameworkErrors,
   });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   registerErrorHandling(app);
+
+  // Before any route: an onRoute hook only sees routes registered after it.
+  const routeList: RouteEntry[] = [];
+  app.addHook("onRoute", (r) => {
+    for (const method of [r.method].flat()) {
+      routeList.push({ method, url: r.url, schema: r.schema, websocket: Boolean((r as { websocket?: boolean }).websocket) });
+    }
+  });
+  app.decorate("routeList", routeList);
 
   // Cross-site request forgery: a browser names the page that sent a request in `Origin`. Every
   // state-changing request from any other origin is refused before body parsing or any handler. It

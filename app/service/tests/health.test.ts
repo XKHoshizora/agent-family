@@ -16,4 +16,15 @@ describe("health", () => {
     expect(r.statusCode).toBeLessThan(500);
     expect((await app.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
   });
+
+  test("a path the router cannot decode, or an over-long id, is answered in the error shape", async () => {
+    // Fastify's router answered these itself with its own body ({"error":"Bad Request","code":"FST_ERR_…"}).
+    for (const url of ["/api/attachments/%ED%A0%80", "/api/conversations/%zz/messages", "/api/friend-requests/%"]) {
+      const r = await app.inject({ method: "GET", url });
+      expect([url, r.statusCode, r.json()]).toEqual([url, 400, { error: "invalid_request" }]);
+    }
+    const long = await app.inject({ method: "GET", url: `/api/attachments/${"x".repeat(500)}` });
+    expect([long.statusCode, long.json()]).toEqual([414, { error: "invalid_request" }]);
+    expect((await app.inject({ method: "GET", url: "/api/health" })).statusCode).toBe(200);
+  });
 });

@@ -220,25 +220,34 @@ function allot(backlogs: Array<{ id: string; missed: number }>, budget: number):
 export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string, number>): Promise<CatchUp> {
   if (positions.size === 0) return { messages: [], gone: [], more: false };
   const ids = [...positions.keys()];
-  const after = ids.map((id) => positions.get(id)!);
 
   return onSnapshot(db, async (t) => {
-    // Per id: whether the caller is a current member, and how many visible messages follow the
-    // position (counted up to one past the cap: enough to know whether more remain).
-    const backlog = await t.query<{ id: string; member: boolean; missed: string }>(
-      `select p.id, me.id is not null as member,
+    // First only which ids the caller is currently in (one index probe per id). Nothing more is looked
+    // at for the others, so an id you are not in costs the same whether it exists, is busy, or not.
+    const member = await t.query<{ id: string }>(
+      `select p.id from unnest($2::uuid[]) as p (id)
+         join memberships me on me.conversation_id = p.id and me.principal_id = $1 and me.left_seq is null`,
+      [me, ids],
+    );
+    const memberOf = new Set(member.rows.map((r) => r.id));
+    const gone = ids.filter((id) => !memberOf.has(id));
+    const memberIds = ids.filter((id) => memberOf.has(id));
+    if (memberIds.length === 0) return { messages: [], gone, more: false };
+
+    // Per conversation the caller is in: how many visible messages follow the position (counted up to
+    // one past the cap: enough to know whether more remain).
+    const backlog = await t.query<{ id: string; missed: string }>(
+      `select p.id,
               (select count(*) from (
                  select 1 from messages m ${VISIBLE_JOIN}
                   where m.conversation_id = p.id and m.seq > p.after
                   limit $4
               ) x) as missed
          from unnest($2::uuid[], $3::bigint[]) with ordinality as p (id, after, ord)
-         left join memberships me on me.conversation_id = p.id and me.principal_id = $1 and me.left_seq is null
         order by p.ord`,
-      [me, ids, after, CATCHUP_MAX_MESSAGES + 1],
+      [me, memberIds, memberIds.map((id) => positions.get(id)!), CATCHUP_MAX_MESSAGES + 1],
     );
-    const gone = backlog.rows.filter((r) => !r.member).map((r) => r.id);
-    const mine = backlog.rows.filter((r) => r.member).map((r) => ({ id: r.id, missed: Number(r.missed) }));
+    const mine = backlog.rows.map((r) => ({ id: r.id, missed: Number(r.missed) }));
     const take = allot(mine, CATCHUP_MAX_MESSAGES);
     const more = mine.some((b) => b.missed > take.get(b.id)!);
     const wanted = mine.filter((b) => take.get(b.id)! > 0);

@@ -24,7 +24,7 @@ async function truncateAll(db: Db): Promise<void> {
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs">> & { env?: Record<string, string> } = {},
+  extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } = {},
 ): { app: FastifyInstance; db: Db } {
   const { env, ...overrides } = extra;
   let instance: FastifyInstance | undefined;
