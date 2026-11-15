@@ -198,6 +198,30 @@ describe("read markers", () => {
     expect(s.conversations[D1]).toMatchObject({ readSeq: 3, unread: 0 });
   });
 
+  it("a read in flight shows at once; if it fails the marker goes back to what the service confirmed", () => {
+    let s = M.markReading(loaded(), D1, 3);
+    expect(s.conversations[D1]).toMatchObject({ readSeq: 3, unread: 0, readsInFlight: 1 });
+    s = M.markReadDone(s, D1, null);
+    expect(s.conversations[D1]).toMatchObject({ readSeq: 1, serverReadSeq: 1, unread: 2, readsInFlight: 0 });
+  });
+
+  it("a confirmed answer moves the service's marker; a later failure goes back only that far", () => {
+    let s = M.markReading(loaded(), D1, 2);
+    s = M.markReading(s, D1, 3);
+    s = M.markReadDone(s, D1, 2);
+    expect(s.conversations[D1]).toMatchObject({ readSeq: 3, serverReadSeq: 2, readsInFlight: 1 });
+    s = M.markReadDone(s, D1, null);
+    expect(s.conversations[D1]).toMatchObject({ readSeq: 2, serverReadSeq: 2, unread: 1, readsInFlight: 0 });
+  });
+
+  it("a sync keeps a local read marker only while its request is in flight", () => {
+    const server = syncOf([direct(D1, ANN, { lastSeq: 3, readSeq: 1, unread: 2 })], range(D1, 1, 3));
+    const reading = M.markReading(loaded(), D1, 3);
+    expect(M.applySync(reading, server).conversations[D1]).toMatchObject({ readSeq: 3, unread: 0, serverReadSeq: 1, readsInFlight: 1 });
+    const failed = M.markReadDone(reading, D1, null);
+    expect(M.applySync(failed, server).conversations[D1]).toMatchObject({ readSeq: 1, unread: 2 });
+  });
+
   it("setPeerRead is max(current, seq)", () => {
     let s = M.setPeerRead(loaded(), D1, 3);
     expect(s.conversations[D1].peerReadSeq).toBe(3);
@@ -229,6 +253,21 @@ describe("other updates", () => {
     expect(r).toMatchObject({ me: null, synced: false, conversations: {}, messages: {}, principals: {}, social: null, owner: ME_ID });
     expect(r.drafts).toEqual({ [D1]: "draft" });
     expect(r.pending.t1.status).toBe("failed");
+  });
+
+  it("every departure starts a new stay: gone, dropped by a sync, or a continuation that starts later", () => {
+    let s = loaded();
+    expect(M.stayOf(s, G1)).toBe(0);
+    s = M.applyGone(s, G1);
+    expect(M.stayOf(s, G1)).toBe(1);
+    expect(M.stayOf(M.applyGone(s, G1), G1)).toBe(1);
+    s = M.applySync(s, syncOf([direct(D1, ANN, { lastSeq: 3 })], range(D1, 1, 3)));
+    expect(M.stayOf(s, D1)).toBe(0);
+    s = M.applySync(s, syncOf([]));
+    expect(M.stayOf(s, D1)).toBe(1);
+    const jumped = M.applyCatchup(loaded(), { messages: [notice(G1, 9, "某人邀请Mei加入了群聊", { event: "member_joined", actorId: ANN, principalId: ME_ID })], gone: [], more: false });
+    expect(M.stayOf(jumped.state, G1)).toBe(1);
+    expect(M.stayOf(M.applyCatchup(loaded(), { messages: [wire(G1, 6, ANN)], gone: [], more: false }).state, G1)).toBe(0);
   });
 
   it("positionsOf lists the held positions of the given conversations", () => {

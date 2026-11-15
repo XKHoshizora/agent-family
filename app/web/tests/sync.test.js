@@ -153,14 +153,15 @@ describe("live pushes", () => {
     expect(t.log.slice(-2)).toEqual([["conversation", G1], "sync"]);
   });
 
-  it("404 on the conversation refetch drops it and confirms with a full sync; other errors fall back to a full sync", async () => {
+  it("404 on the conversation refetch drops it without a full sync; other errors fall back to a full sync", async () => {
     const t = fakeTransport({ sync: twoChats });
     const { box } = run(t);
     await settle();
     t.handlers.sync = () => syncOf([direct(D1, ANN, { lastSeq: 3 })], range(D1, 1, 3));
     t.socket.emit({ type: "conversation", id: G1 }); // default handler answers 404
     await settle();
-    expect(t.log.slice(-2)).toEqual([["conversation", G1], "sync"]);
+    expect(t.log.at(-1)).toEqual(["conversation", G1]);
+    expect(t.log.filter((x) => x === "sync")).toHaveLength(1);
     expect(box.model.conversations[G1]).toBeUndefined();
 
     t.handlers.conversation = () => {
@@ -241,6 +242,23 @@ describe("reconnect", () => {
     await settle();
     expect(t.log.filter((x) => x === "connect")).toHaveLength(1);
     expect(statuses.at(-1)).toBe("signedOut");
+  });
+
+  it("close 4002 (a newer socket replaced this one) waits 60 s plus jitter before reconnecting", async () => {
+    const t = fakeTransport({ sync: twoChats });
+    const { timers } = run(t, { random: () => 0.5 });
+    await settle();
+    t.socket.drop(4002);
+    expect(timers.delays()).toEqual([60_000 + 15_000]);
+    timers.advance(74_999);
+    await settle();
+    expect(t.log.filter((x) => x === "connect")).toHaveLength(1);
+    timers.advance(1);
+    await settle();
+    expect(t.log.filter((x) => x === "connect")).toHaveLength(2);
+    // other close codes keep the normal backoff
+    t.socket.drop(1006);
+    expect(timers.delays()).toEqual([backoffDelay(0, () => 0.5)]);
   });
 
   it("401 from any request (ticket, sync) is a sign-out, not a reconnect", async () => {

@@ -4,6 +4,10 @@
 // Per conversation, `position` is the last seq applied by the seq rule (sync, catch-up, pushes): every
 // visible message up to it is held. `messages[id]` is sorted by seq without duplicates; it may also hold
 // my own sent messages beyond the position (an HTTP answer that overtook the pushes before it).
+// `readSeq` is the read marker shown; `serverReadSeq` the one the service confirmed; `readsInFlight` the
+// read requests not answered yet (only while there are some may `readSeq` run ahead of the service).
+// `stays[id]` counts my departures from a conversation: an answer to a request made in an earlier stay
+// must not reach the current one.
 
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
@@ -26,8 +30,20 @@ export function initial() {
     drafts: {},
     /** The last /api/social answer. */
     social: null,
+    /** conversation id → how many times I left it (see `stayOf`). */
+    stays: {},
   };
 }
+
+/** Which of my stays in a conversation this is; changes whenever I leave it (or am found to have left). */
+export const stayOf = (state, conversationId) => state.stays[conversationId] ?? 0;
+
+const bumpStays = (stays, ids) => {
+  if (ids.length === 0) return stays;
+  const next = { ...stays };
+  for (const id of ids) next[id] = (next[id] ?? 0) + 1;
+  return next;
+};
 
 // ───────── helpers
 
@@ -133,17 +149,25 @@ export function applySync(state, sync) {
     else if (joins && held.length > 0 && held[0].seq < incoming[0].seq) hasOlder = prev.hasOlder;
     else hasOlder = list.length > 0 && list[0].seq > 1;
 
-    let readSeq = entry.readSeq;
-    let unread = entry.unread;
     const position = advance(list, joins || complete ? Math.max(prev?.position ?? 0, entry.lastSeq) : entry.lastSeq);
-    const conv = { ...metadata(entry), lastSeq: entry.lastSeq, readSeq, unread, peerReadSeq: entry.peerReadSeq ?? null, position, hasOlder, syncIndex: index };
-    if (prev && prev.readSeq > entry.readSeq) {
-      // A read marker of ours that the service has not confirmed yet (request in flight).
-      readSeq = prev.readSeq;
-      unread = unreadAfterReading(conv, list, meId, entry.readSeq, readSeq);
+    const readsInFlight = prev?.readsInFlight ?? 0;
+    const conv = {
+      ...metadata(entry),
+      lastSeq: entry.lastSeq,
+      readSeq: entry.readSeq,
+      serverReadSeq: entry.readSeq,
+      readsInFlight,
+      unread: entry.unread,
+      peerReadSeq: entry.peerReadSeq ?? null,
+      position,
+      hasOlder,
+      syncIndex: index,
+    };
+    if (readsInFlight > 0 && prev.readSeq > entry.readSeq) {
+      // My read request is not answered yet: keep showing its marker until it is (markReadDone).
+      conv.readSeq = prev.readSeq;
+      conv.unread = unreadAfterReading(conv, list, meId, entry.readSeq, prev.readSeq);
     }
-    conv.readSeq = readSeq;
-    conv.unread = unread;
     if (prev?.peerReadSeq != null && (conv.peerReadSeq === null || prev.peerReadSeq > conv.peerReadSeq)) conv.peerReadSeq = prev.peerReadSeq;
     conversations[entry.id] = conv;
     messages[entry.id] = list;
@@ -152,9 +176,10 @@ export function applySync(state, sync) {
   const principals = { ...state.principals };
   for (const p of sync.principals) principals[p.id] = p;
 
+  const dropped = Object.keys(state.conversations).filter((id) => !(id in conversations));
   const pending = sameOwner ? filterValues(state.pending, (p) => p.conversationId in conversations) : {};
   const drafts = sameOwner ? filterValues(state.drafts, (_text, id) => id in conversations) : {};
-  return { ...state, me: sync.me, owner: meId, synced: true, principals, conversations, messages, pending, drafts };
+  return { ...state, me: sync.me, owner: meId, synced: true, principals, conversations, messages, pending, drafts, stays: bumpStays(state.stays, dropped) };
 }
 
 /**
@@ -189,13 +214,14 @@ export function applyCatchup(state, response) {
     if (wire.seq > conv.position + 1) {
       const later = (next.messages[conv.id] ?? []).filter((m) => m.seq >= wire.seq);
       next = putConversation(next, { ...conv, position: wire.seq - 1, hasOlder: false }, later);
+      next = { ...next, stays: bumpStays(next.stays, [conv.id]) };
     }
     next = applyMessage(next, wire).state;
   }
   return { state: next };
 }
 
-/** "Not a member now": the conversation, its messages, unsent messages and draft go. Idempotent. */
+/** "Not a member now": the conversation, its messages, unsent messages and draft go; a new stay starts. Idempotent. */
 export function applyGone(state, conversationId) {
   if (!(conversationId in state.conversations)) return state;
   return {
@@ -204,6 +230,7 @@ export function applyGone(state, conversationId) {
     messages: without(state.messages, conversationId),
     pending: filterValues(state.pending, (p) => p.conversationId !== conversationId),
     drafts: without(state.drafts, conversationId),
+    stays: bumpStays(state.stays, [conversationId]),
   };
 }
 
@@ -223,6 +250,7 @@ export function applyConversation(state, entry) {
     createdAt: entry.createdAt ?? prev.createdAt,
     lastSeq: Math.max(prev.lastSeq, entry.lastSeq ?? 0),
     readSeq,
+    serverReadSeq: Math.max(prev.serverReadSeq, entry.readSeq ?? 0),
     unread: readSeq > prev.readSeq ? unreadAfterReading(prev, list, state.me?.id, prev.readSeq, readSeq) : prev.unread,
     peerReadSeq,
   });
@@ -290,12 +318,43 @@ export function setCanSend(state, conversationId, canSend) {
 
 // ───────── read markers and drafts
 
-/** My read marker: only forward; unread follows. */
+/** Moves the shown marker forward to `seq` (never back) and recomputes unread. */
+function showRead(state, conv, seq, fields = {}) {
+  const forward = seq > conv.readSeq;
+  const unread = forward ? unreadAfterReading(conv, state.messages[conv.id] ?? [], state.me?.id, conv.readSeq, seq) : conv.unread;
+  return putConversation(state, { ...conv, ...fields, readSeq: forward ? seq : conv.readSeq, unread });
+}
+
+/** My read marker as the service confirmed it (a `read` push or the answer to my request): only forward. */
 export function setRead(state, conversationId, seq) {
   const conv = state.conversations[conversationId];
-  if (!conv || seq <= conv.readSeq) return state;
-  const unread = unreadAfterReading(conv, state.messages[conversationId] ?? [], state.me?.id, conv.readSeq, seq);
-  return putConversation(state, { ...conv, readSeq: seq, unread });
+  if (!conv || (seq <= conv.readSeq && seq <= conv.serverReadSeq)) return state;
+  return showRead(state, conv, seq, { serverReadSeq: Math.max(conv.serverReadSeq, seq) });
+}
+
+/** A read request was sent: its marker shows at once, and stays while the request is unanswered. */
+export function markReading(state, conversationId, seq) {
+  const conv = state.conversations[conversationId];
+  if (!conv) return state;
+  return showRead(state, conv, seq, { readsInFlight: conv.readsInFlight + 1 });
+}
+
+/**
+ * A read request was answered: `confirmed` is the service's marker, or null when it failed. Once no
+ * request is left unanswered, the marker shown falls back to the confirmed one (unread comes back).
+ */
+export function markReadDone(state, conversationId, confirmed) {
+  const conv = state.conversations[conversationId];
+  if (!conv) return state;
+  const readsInFlight = Math.max(0, conv.readsInFlight - 1);
+  if (Number.isSafeInteger(confirmed)) {
+    return showRead(state, conv, confirmed, { readsInFlight, serverReadSeq: Math.max(conv.serverReadSeq, confirmed) });
+  }
+  if (readsInFlight > 0 || conv.readSeq <= conv.serverReadSeq) return putConversation(state, { ...conv, readsInFlight });
+  const list = state.messages[conversationId] ?? [];
+  const meId = state.me?.id;
+  const unreadAgain = list.filter((m) => m.seq > conv.serverReadSeq && m.seq <= conv.readSeq && countsAsUnread(m, meId)).length;
+  return putConversation(state, { ...conv, readsInFlight, readSeq: conv.serverReadSeq, unread: conv.unread + unreadAgain });
 }
 
 /** The other side's read marker in a direct chat: max(current, seq). */

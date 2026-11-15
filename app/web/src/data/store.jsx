@@ -94,7 +94,7 @@ export function createDataLayer({
     }
   }
 
-  const actions = createActions({
+  const { actions, reset: forgetRequests } = createActions({
     getModel,
     setModel,
     api,
@@ -126,6 +126,7 @@ export function createDataLayer({
     },
     stop() {
       epoch += 1;
+      forgetRequests();
       const running = engine;
       engine = null;
       running?.stop();

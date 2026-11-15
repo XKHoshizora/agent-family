@@ -27,6 +27,11 @@ export const STABLE_MS = 30_000;
 export const CATCHUP_MAX_POSITIONS = 500;
 /** Close code: the session ended. Sign in again; never reconnect. */
 export const CLOSE_SESSION_ENDED = 4001;
+/** Close code: a newer socket of mine (another tab) took this one's place; at most 5 are allowed. */
+export const CLOSE_REPLACED = 4002;
+/** After CLOSE_REPLACED wait this long (plus up to REPLACED_JITTER_MS) so tabs do not keep displacing each other. */
+export const REPLACED_DELAY_MS = 60_000;
+export const REPLACED_JITTER_MS = 30_000;
 
 const defaultTimers = {
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -192,8 +197,8 @@ export function start(
 
   /**
    * Refetches one held conversation (`GET /api/conversations/:id`: its /api/sync entry). 404: not a member
-   * now — drop it, and confirm with a full sync (as for any other error). A member nobody has named yet
-   * also needs the full sync (it lists principals).
+   * now — drop it (a `gone` follows). Any other error falls back to a full sync, and so does a member
+   * nobody has named yet (the full sync lists principals).
    */
   async function refreshConversation(my) {
     const [id] = need.convs;
@@ -206,7 +211,7 @@ export function start(
       if (my !== conn) return;
       if (isSignedOut(err)) throw err;
       if (err?.status === 404) setModel(applyGone(getModel(), id));
-      need.sync = true;
+      else need.sync = true;
       return;
     }
     if (my !== conn) return;
@@ -280,25 +285,29 @@ export function start(
   function onSocketClose(code) {
     socket = null;
     if (code === CLOSE_SESSION_ENDED) signedOut();
+    else if (code === CLOSE_REPLACED) fail(REPLACED_DELAY_MS + Math.round(random() * REPLACED_JITTER_MS));
     else fail();
   }
 
-  /** Gives up this connection and schedules the next one. */
-  function fail() {
+  /** Gives up this connection and schedules the next one (after `delay` ms, else the backoff). */
+  function fail(delay = null) {
     conn += 1;
     safeClose(socket);
     socket = null;
-    retry();
+    retry(delay);
   }
 
-  function retry() {
+  function retry(delay = null) {
     if (!alive) return;
     if (liveSince !== null && now() - liveSince >= STABLE_MS) attempt = 0;
     liveSince = null;
     setStatus("reconnecting");
-    const delay = backoffDelay(attempt, random);
-    attempt += 1;
-    retryTimer = timers.setTimeout(connect, delay);
+    let wait = delay;
+    if (wait === null) {
+      wait = backoffDelay(attempt, random);
+      attempt += 1;
+    }
+    retryTimer = timers.setTimeout(connect, wait);
   }
 
   function halt() {

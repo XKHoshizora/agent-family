@@ -13,6 +13,7 @@ import {
   fakeTimers,
   fakeTransport,
   group,
+  notice,
   range,
   settle,
   syncOf,
@@ -140,6 +141,60 @@ describe("reading and history", () => {
     expect(view().convs[D1]).toMatchObject({ unread: 0, readSeq: 3 });
     await actions.markRead(D1);
     expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed markRead goes back to the service's marker, stays there across a reconnect, and is sent again next time", async () => {
+    const api = fakeApi();
+    api.markRead.mockRejectedValueOnce(apiError(0, "network_error"));
+    const { actions, view, transport, timers } = await loaded({ api });
+    await expect(actions.markRead(D1)).resolves.toMatchObject({ ok: false });
+    expect(view().convs[D1]).toMatchObject({ readSeq: 1, unread: 2 });
+    transport.socket.drop(1006);
+    timers.advance(timers.delays()[0]);
+    await settle();
+    expect(transport.log.filter((x) => x === "sync")).toHaveLength(2);
+    expect(view().convs[D1]).toMatchObject({ readSeq: 1, unread: 2 });
+    await actions.markRead(D1);
+    expect(api.markRead).toHaveBeenCalledTimes(2);
+    expect(api.markRead).toHaveBeenLastCalledWith(D1, 3);
+    expect(view().convs[D1]).toMatchObject({ readSeq: 3, unread: 0 });
+  });
+
+  it("an older page or a send answered after I was removed and added again is not shown in the new stay", async () => {
+    const api = fakeApi();
+    const page = deferred();
+    const sent = deferred();
+    api.listMessages.mockReturnValueOnce(page.promise);
+    api.sendMessage.mockReturnValueOnce(sent.promise);
+    const { actions, transport, messages } = await loaded({ api });
+    const older = actions.loadOlder(G1);
+    const sending = actions.sendText(G1, "上一次的");
+    transport.socket.emit({ type: "gone", id: G1 });
+    transport.handlers.sync = () =>
+      syncOf(
+        [direct(D1, ANN, { lastSeq: 3 }), group(G1, { lastSeq: 52 })],
+        [...range(D1, 1, 3), notice(G1, 50, "小安邀请Mei加入了群聊", { event: "member_joined", actorId: ANN, principalId: ME_ID }), ...range(G1, 51, 52)],
+      );
+    transport.socket.emit({ type: "conversation", id: G1 });
+    await settle();
+    expect(messages(G1).map((m) => m.seq)).toEqual([50, 51, 52]);
+    page.resolve({ messages: range(G1, 1, 10), nextBefore: null });
+    sent.resolve({ message: wire(G1, 41, ME_ID, "上一次的"), duplicate: false });
+    await expect(older).resolves.toMatchObject({ ok: false, error: { code: "stale" } });
+    await expect(sending).resolves.toMatchObject({ ok: false, error: { code: "stale" } });
+    expect(messages(G1).map((m) => m.seq)).toEqual([50, 51, 52]);
+  });
+
+  it("stop() forgets an older-history request in flight: after start() it is asked again", async () => {
+    const api = fakeApi();
+    api.listMessages.mockReturnValue(new Promise(() => {}));
+    const { layer, actions } = await loaded({ api });
+    actions.loadOlder(G1);
+    layer.stop();
+    layer.start();
+    await settle();
+    actions.loadOlder(G1);
+    expect(api.listMessages).toHaveBeenCalledTimes(2);
   });
 
   it("loadOlder pages backwards from the oldest held message, once at a time, and stops at the start", async () => {
