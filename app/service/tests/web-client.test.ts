@@ -8,7 +8,7 @@ import { api, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
-const INDEX = '<!doctype html><html><body><div id="root"></div><script type="module" src="/assets/index-abc123.js"></script></body></html>';
+const INDEX = '<!doctype html><html><body><div id="root"></div><script type="module" src="/assets/index-Ab12_xYz.js"></script></body></html>';
 const SECRET = "SECRET-OUTSIDE-THE-WEB-DIST";
 
 // <tmp>/outside.json sits beside the served directory: traversal would reach it.
@@ -19,16 +19,19 @@ mkdirSync(path.join(dist, "empty-dir"));
 writeFileSync(path.join(dist, "index.html"), INDEX);
 writeFileSync(path.join(dist, "favicon.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>");
 writeFileSync(path.join(dist, ".env"), SECRET);
-writeFileSync(path.join(dist, "assets", "index-abc123.js"), "console.log('hi');");
-writeFileSync(path.join(dist, "assets", "index-abc123.css"), "body{margin:0}");
+writeFileSync(path.join(dist, "assets", "index-Ab12_xYz.js"), "console.log('hi');");
+writeFileSync(path.join(dist, "assets", "index-Ab12_xYz.css"), "body{margin:0}");
+writeFileSync(path.join(dist, "assets", "agent-family-mark-v2.png"), "png");
+writeFileSync(path.join(dist, "assets", "brand-v2-notes.md"), "notes");
 writeFileSync(path.join(outer, "outside.json"), SECRET);
 afterAll(() => rmSync(outer, { recursive: true, force: true }));
 
-const CSP =
-  "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+const csp = (socket: string) =>
+  `default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ${socket}; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`;
+const CSP = csp("ws://localhost:5173");
 
-function expectSecurityHeaders(h: Record<string, unknown>, hsts = false) {
-  expect(h["content-security-policy"]).toBe(CSP);
+function expectSecurityHeaders(h: Record<string, unknown>, hsts = false, policy = CSP) {
+  expect(h["content-security-policy"]).toBe(policy);
   expect(h["x-content-type-options"]).toBe("nosniff");
   expect(h["referrer-policy"]).toBe("same-origin");
   expect(h["x-frame-options"]).toBe("DENY");
@@ -53,8 +56,8 @@ describe("web client served from WEB_DIST", () => {
 
   test("hashed files under /assets/ are cached for a year, immutable", async () => {
     for (const [url, type] of [
-      ["/assets/index-abc123.js", /javascript/],
-      ["/assets/index-abc123.css", /css/],
+      ["/assets/index-Ab12_xYz.js", /javascript/],
+      ["/assets/index-Ab12_xYz.css", /css/],
     ] as const) {
       const r = await get(url);
       expect([url, r.statusCode]).toEqual([url, 200]);
@@ -65,7 +68,7 @@ describe("web client served from WEB_DIST", () => {
   });
 
   test("/, /index.html and the fallback are index.html with no-cache and the security headers", async () => {
-    for (const url of ["/", "/index.html", "/signin", "/some/deep/path", "/chat/12?x=1", "/reset-password?token=abc", "/no-such.file"]) {
+    for (const url of ["/", "/index.html", "/signin", "/some/deep/path", "/chat/12?x=1", "/reset-password?token=abc"]) {
       const r = await get(url);
       expect([url, r.statusCode, r.body]).toEqual([url, 200, INDEX]);
       expect(r.headers["content-type"]).toMatch(/^text\/html/);
@@ -74,8 +77,32 @@ describe("web client served from WEB_DIST", () => {
     }
   });
 
+  test("only content-hashed files are immutable; other files under /assets/ revalidate", async () => {
+    for (const url of ["/assets/agent-family-mark-v2.png", "/assets/brand-v2-notes.md"]) {
+      const r = await get(url);
+      expect([url, r.statusCode, r.headers["cache-control"]]).toEqual([url, 200, "no-cache"]);
+    }
+  });
+
+  test("a missing file is a plain JSON 404 (no-store), never the page: under /assets/ or with an extension", async () => {
+    for (const url of ["/assets/index-OLDHASH1.js", "/assets/x/y.js", "/assets/", "/assets", "/no-such.file", "/a/b/missing.css", "/sw.js", "/favicon.ico"]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const r = await get(url, method);
+        expect([url, method, r.statusCode, r.headers["cache-control"], r.headers["content-type"]]).toEqual([
+          url,
+          method,
+          404,
+          "no-store",
+          "application/json; charset=utf-8",
+        ]);
+        if (method === "GET") expect(r.json()).toEqual({ error: "not_found" });
+        expect(r.headers["content-security-policy"]).toBeUndefined();
+      }
+    }
+  });
+
   test("HEAD answers like GET without a body", async () => {
-    for (const url of ["/", "/signin", "/favicon.svg", "/assets/index-abc123.js"]) {
+    for (const url of ["/", "/signin", "/favicon.svg", "/assets/index-Ab12_xYz.js"]) {
       const g = await get(url);
       const h = await get(url, "HEAD");
       expect([url, h.statusCode, h.body]).toEqual([url, 200, ""]);
@@ -171,9 +198,9 @@ describe("web client served from WEB_DIST", () => {
 
 describe("HSTS follows APP_ORIGIN", () => {
   const { app } = useApp({ env: { WEB_DIST: dist, APP_ORIGIN: "https://family.example.test" } });
-  test("https adds Strict-Transport-Security to static responses", async () => {
+  test("https adds Strict-Transport-Security, and the CSP names the wss origin", async () => {
     const r = await app.inject({ method: "GET", url: "/signin" });
-    expectSecurityHeaders(r.headers, true);
+    expectSecurityHeaders(r.headers, true, csp("wss://family.example.test"));
   });
 });
 

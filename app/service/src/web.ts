@@ -24,12 +24,23 @@ const CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-/** Vite writes its content-hashed files here; they never change under the same name. */
-const HASHED_DIR = "assets";
+/** Vite writes its bundles, and copies everything from `public/assets/`, into this directory. */
+const ASSETS_DIR = "assets";
+/**
+ * What Vite 8 adds to a bundle's name: `-` and 8 base64url characters (`index-CdhHuwFq.js`). A hand-named
+ * file can look the same (`brand-v2-notes.md`), so the 8 characters must also contain a capital letter,
+ * which real names do not; the ~1.5% of hashes without one are merely revalidated (safe, never wrong).
+ */
+const CONTENT_HASH = /-(?=[a-z0-9_-]{0,7}[A-Z])[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$/;
+/** A last path segment with an extension: a request for a file, never for a client page. */
+const HAS_EXTENSION = /\.[^./]+$/;
 
 function pageHeaders(appOrigin: string): Record<string, string> {
+  const origin = new URL(appOrigin);
+  // `'self'` should cover the same-host WebSocket (CSP level 3) but older Safari does not match it: name it.
+  const socket = `${origin.protocol === "https:" ? "wss:" : "ws:"}//${origin.host}`;
   return {
-    "content-security-policy": CSP,
+    "content-security-policy": CSP.replace("connect-src 'self'", `connect-src 'self' ${socket}`),
     "x-content-type-options": "nosniff",
     "referrer-policy": "same-origin",
     "x-frame-options": "DENY",
@@ -55,7 +66,7 @@ function segmentsOf(wildcard: string): string[] | null {
 
 /**
  * Serves the built web client (`WEB_DIST`) from the same origin as the API: files from the directory, and
- * `index.html` for any other GET/HEAD outside `/api/` so the client's own router can take the path. Nothing
+ * `index.html` for any other extensionless GET/HEAD outside `/api/` and `/assets/` so the client's own router can take the path. Nothing
  * under `/api/` ever falls back: an unknown API route stays a JSON 404. The route is one wildcard, not a
  * route per file, and is kept out of `app.routeList`, which lists the API (README and fuzz suites walk it).
  */
@@ -76,7 +87,8 @@ export async function registerWebClient(app: FastifyInstance): Promise<void> {
   await app.register(fastifyStatic, { root, serve: false, dotfiles: "ignore", cacheControl: false, index: false });
 
   const sendPage = (reply: FastifyReply, file: string) => {
-    const hashed = file.startsWith(`${HASHED_DIR}/`);
+    // Only a name that carries a content hash can never change; unhashed files (index.html, copies of public/) revalidate.
+    const hashed = file.startsWith(`${ASSETS_DIR}/`) && CONTENT_HASH.test(file);
     void reply.headers({ ...headers, "cache-control": hashed ? "public, max-age=31536000, immutable" : "no-cache" });
     return reply.sendFile(file);
   };
@@ -93,6 +105,13 @@ export async function registerWebClient(app: FastifyInstance): Promise<void> {
       if (segments !== null && segments.length > 0) {
         const info = await stat(path.join(root, ...segments)).catch(() => null);
         if (info?.isFile()) return sendPage(reply, segments.join("/"));
+      }
+      // A missing file is a 404, not a page: a stale tab's import() of an old chunk must fail plainly, and no
+      // proxy may keep 200 HTML under a .js URL. Only extensionless paths are client routes.
+      const last = wildcard.split("/").filter((x) => x !== "").at(-1) ?? "";
+      const firstSegment = wildcard.split("/").find((x) => x !== "" && x !== ".");
+      if (firstSegment === ASSETS_DIR || HAS_EXTENSION.test(last)) {
+        return reply.code(404).header("cache-control", "no-store").send({ error: "not_found" });
       }
       return sendPage(reply, "index.html");
     },

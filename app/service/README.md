@@ -88,19 +88,24 @@ the JSON 404. Set to the directory of the built web client (`app/web/dist`: `ind
 fails naming `WEB_DIST` if the directory has no `index.html`), the service serves it from the same origin
 (`src/web.ts`, `@fastify/static`):
 
-- A `GET`/`HEAD` for a file in the directory returns it; any other `GET`/`HEAD` whose path does not start
-  with `/api/` returns `index.html` (200), so the client's router can take `/signin`, `/some/deep/path`, ….
-  Paths under `/api/` never fall back: an unknown one is `404 {"error":"not_found"}`. Other methods outside
-  `/api/` are that JSON 404 too. No directory listings, no dotfiles (`/.env`), nothing outside the directory
-  (`..` in any encoding): such paths match no file and get `index.html`.
-- `Cache-Control`: `public, max-age=31536000, immutable` for `/assets/*` (Vite's hashed files),
-  `no-cache` for `index.html` and every other file.
+- A `GET`/`HEAD` for a file in the directory returns it; any other extensionless `GET`/`HEAD` outside
+  `/api/` and `/assets/` returns `index.html` (200), so the client's router can take `/signin`,
+  `/some/deep/path`, …. A path that matches no file and is under `/assets/` or whose last segment has an
+  extension (`/assets/old-chunk.js`, `/sw.js`) is `404 {"error":"not_found"}` with `Cache-Control: no-store`,
+  never the page (a stale tab's `import()` of a removed chunk must fail plainly, and no proxy may keep HTML
+  under a `.js` URL). Paths under `/api/` never fall back either. Other methods outside `/api/` are that JSON
+  404 too. No directory listings, no dotfiles (`/.env`), nothing outside the directory (`..` in any
+  encoding): such paths match no file (404 if they have an extension, else `index.html`).
+- `Cache-Control`: `public, max-age=31536000, immutable` only for files under `/assets/` whose name carries
+  Vite's content hash (`index-CdhHuwFq.js`: `-` and 8 base64url characters including a capital letter);
+  `no-cache` for `index.html` and every other file, including the unhashed copies of `public/assets/`.
 - Every file and page response carries `Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:;
   style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self';
   form-action 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`,
   `X-Frame-Options: DENY`, `Permissions-Policy: camera=(), microphone=(), geolocation=()` and, when
-  `APP_ORIGIN` is `https`, `Strict-Transport-Security: max-age=15552000`. `connect-src 'self'` also covers
-  the same-origin WebSocket (`wss:`) in browsers that implement CSP level 3.
+  `APP_ORIGIN` is `https`, `Strict-Transport-Security: max-age=15552000`. `connect-src` additionally names
+  the WebSocket origin derived from `APP_ORIGIN` (`wss://host` for https, `ws://host` for http), because older
+  Safari does not match a same-host WebSocket with `'self'`; the CSP string above shows it without that.
 - Independent of `WEB_DIST`: every API response carries `X-Content-Type-Options: nosniff`, and API JSON
   `Cache-Control: no-store` unless the route sets its own (attachments `private, no-store`, avatars
   `private, max-age=60`).

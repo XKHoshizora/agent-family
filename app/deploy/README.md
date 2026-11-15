@@ -55,7 +55,7 @@ message naming the variable. Values in the right column are for the acceptance e
 | `TRUST_PROXY` | Alternative to the above: the proxies' addresses/CIDRs whose `X-Forwarded-For` is read. Never `true` or a number (refused). | unset |
 | `REGISTRATION_MODE` | `invite` (an invite code is required) or `open`. | `invite` |
 | `MAIL_MODE` | `outbox` is the only mode: mail is written to the `mail_outbox` table and read with `inbox:list`; nothing is sent. | `outbox` |
-| `BLOB_DIR` | Where avatars and attachments live when `S3_*` is not set. Image default `/data/blobs` (mount a volume there or it is lost with the container). | unused if S3 is set |
+| `BLOB_DIR` | Where avatars and attachments live when `S3_*` is not set. Image default `/data/blobs` (mount a volume there or it is lost with the container; the container runs as the unprivileged `node` user, uid 1000, so a bind-mounted host directory must be writable by uid 1000, e.g. `chown 1000:1000 <dir>`). | unused if S3 is set |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | S3-compatible object storage; all five or none. | all five (container disks are not durable) |
 | `RATE_LIMIT_SCALE` | Multiplier on every rate limit. | `1` |
 | `ATTACHMENT_QUOTA_BYTES` | Attachment bytes one user may store. | `2147483648` (default) |
