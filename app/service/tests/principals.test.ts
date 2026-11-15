@@ -98,13 +98,26 @@ describe("display name", () => {
   });
 
   /** One rule for registration and renaming: 1–40 characters, one line, format characters removed. */
-  const REFUSED = ["", "   ", "‮​", "x".repeat(41), "🙂".repeat(41), "bad\u0007name", "tab\tname", "line\nbreak", "para graph", "line sep", "\ud800"];
+  const REFUSED = ["", "   ", "‮​", "x".repeat(41), "🙂".repeat(41), "bad\u0007name", "tab\tname", "line\nbreak", "para graph", "line sep", "\ud800",
+    // Nothing left but joiners (or tag characters) once the rest is stripped.
+    "\u200d", "\u200c\u200d", " \u200d ", "\u200b\u200d\u2060", "\u{e0067}\u{e007f}"];
   const CLEANED: Array<[string, string]> = [
     ["‮evil‬ name", "evil name"],
     ["zero​width⁠joiner﻿", "zerowidthjoiner"],
     ["  ​ padded ​ ", "padded"],
     ["🙂".repeat(40), "🙂".repeat(40)],
     ["名前は四十文字まで", "名前は四十文字まで"],
+    // Joiners and tag characters carry meaning and stay: emoji ZWJ sequences, flags, Persian/Indic text.
+    ["\u{1F469}\u200d\u{1F4BB}", "\u{1F469}\u200d\u{1F4BB}"],
+    ["\u{1F468}\u200d\u{1F469}\u200d\u{1F467}", "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}"],
+    ["\u{1F3F3}\ufe0f\u200d\u{1F308}", "\u{1F3F3}\ufe0f\u200d\u{1F308}"],
+    ["\u{1F3F4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}", "\u{1F3F4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"],
+    ["\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645", "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"],
+    ["\u0915\u094d\u200d\u0937", "\u0915\u094d\u200d\u0937"],
+    // Everything else format-like still goes: bidi controls, ZWSP, word joiner, BOM, soft hyphen, ALM.
+    ["a\u202ebc\u202c", "abc"],
+    ["a\u202a\u202b\u202d\u2066\u2067\u2068\u2069\u200e\u200f\u061cb", "ab"],
+    ["a\u200b\u2060\ufeff\u00adb\u200d", "ab\u200d"],
   ];
 
   it("follows the one rule on PATCH /api/me", async () => {

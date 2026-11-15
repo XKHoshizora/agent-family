@@ -42,15 +42,27 @@ export function userText(min: number, max: number, { singleLine = false }: { sin
     }, `must be ${min}-${max} characters`);
 }
 
-/** Format characters: bidi overrides and isolates, zero-width spaces and joiners, the BOM… (as in file names). */
-const FORMAT_CHARS = /\p{Cf}/gu;
+/**
+ * Format characters (`\p{Cf}`: bidi overrides and isolates, zero-width spaces, the BOM, the soft hyphen…)
+ * except the ones that carry meaning: the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences
+ * such as 👩‍💻, Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: subdivision flags).
+ */
+const STRIPPED_FORMAT_CHARS = /(?![\u200C\u200D\u{E0020}-\u{E007F}])\p{Cf}/gu;
+
+/** Something visible: anything but joiners and tag characters, which only modify what is next to them. */
+const HAS_BASE_CHARACTER = /[^\u200C\u200D\u{E0020}-\u{E007F}]/u;
 
 /**
- * A person's display name, on registration and `PATCH /api/me` alike: format characters removed (they could
- * reorder or hide what others see), then trimmed; 1–40 characters (code points); one line — no control
- * characters, no line or paragraph separators; no lone surrogates.
+ * A person's display name, on registration and `PATCH /api/me` alike: format characters removed except
+ * U+200C, U+200D and the tag characters (the rest could reorder or hide what others see), then
+ * trimmed; 1–40 characters (code points), not made of joiners alone; one line — no control characters, no
+ * line or paragraph separators; no lone surrogates.
  */
 export const displayName = z
   .string()
-  .transform((s) => s.replace(FORMAT_CHARS, ""))
-  .pipe(userText(1, 40, { singleLine: true }).refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line"));
+  .transform((s) => s.replace(STRIPPED_FORMAT_CHARS, ""))
+  .pipe(
+    userText(1, 40, { singleLine: true })
+      .refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line")
+      .refine((s) => HAS_BASE_CHARACTER.test(s), "nothing but joiners"),
+  );

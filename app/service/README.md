@@ -231,7 +231,7 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
 
 - Body: `inviteCode` (string, at most 100; required when `REGISTRATION_MODE=invite`, ignored when `open`),
   `email` (an e-mail address, at most 254), `password` (10–128 characters), `displayName` (see
-  `PATCH /api/me`: 1–40 characters after removing format characters and trimming, one line), `handle`
+  `PATCH /api/me`: 1–40 characters after removing format characters (not joiners) and trimming, one line), `handle`
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
 - 201 `{"ok": true}`. Also for an e-mail that already has an account: then nothing is written, no invite is
   used and no mail is sent (the answer does not reveal which e-mails exist).
@@ -305,9 +305,13 @@ accepted but not used: the mail links to the web app).
 
 *Session: required.* Changes your display name (only yours: no route takes a target id).
 
-- Body: `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates, zero-width spaces and
-  joiners, BOM) are removed, then it is trimmed; the result must be 1–40 characters, one line (no control
-  characters, no line or paragraph separators) and contain no lone surrogates. The same rule applies on
+- Body: `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+  U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
+  are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
+  Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
+  Then it is trimmed; the result must be 1–40 characters, one line (no control characters, no line or
+  paragraph separators), contain no lone surrogates, and be more than joiners and tag characters alone (a
+  name that is empty or only joiners after stripping is 400 `invalid_request`). The same rule applies on
   registration.
 - 200 `{"id", "handle", "displayName"}` with the name as stored. Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
