@@ -22,4 +22,13 @@ describe("sync and ticket rate limits", () => {
     expect(await catchup(a)).toEqual({ status: 429, json: { error: "rate_limited" } });
     expect((await api(app, b, "GET", "/api/sync")).status).toBe(200);
   });
+
+  it("allows 120 single-conversation reads per minute per principal, on a budget of their own", async () => {
+    const [a, b] = [await signUp(app, "erin"), await signUp(app, "frank")];
+    const unknown = "/api/conversations/00000000-0000-4000-8000-000000000000";
+    for (let i = 1; i <= 120; i++) expect((await api(app, a, "GET", unknown)).status).toBe(404);
+    expect(await api(app, a, "GET", unknown)).toEqual({ status: 429, json: { error: "rate_limited" } });
+    expect((await api(app, a, "GET", "/api/sync")).status).toBe(200); // /api/sync counts separately
+    expect((await api(app, b, "GET", unknown)).status).toBe(404);
+  });
 });

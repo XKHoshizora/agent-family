@@ -56,6 +56,7 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
   const api = app.withTypeProvider<ZodTypeProvider>();
   const ticketLimit = perPrincipalLimit(app, 30);
   const syncLimit = perPrincipalLimit(app, 60);
+  const conversationLimit = perPrincipalLimit(app, 120);
   const catchUpLimit = perPrincipalLimit(app, 60);
 
   api.get(
@@ -76,6 +77,7 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
     { schema: { params: z.object({ id: uuidParam }), querystring: empty, response: { 200: conversationEntry } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await conversationLimit(req, me.id);
       const entry = await syncConversation(db, me.id, req.params.id);
       if (!entry) throw notFound();
       return entry;

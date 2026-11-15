@@ -194,6 +194,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
 | `POST /api/conversations/:id/attachments` | 60 per hour; at most 3 in progress | principal |
 | `GET /api/sync` | 60 | principal |
+| `GET /api/conversations/:id` | 120 | principal |
 | `POST /api/sync/catchup` | 60 | principal |
 | `POST /api/ws-ticket` | 30 | principal |
 | WebSockets | at most 5 open; a 6th closes the oldest (code 4002) | principal |
@@ -453,7 +454,7 @@ Visibility under Sync and realtime.
 
 *Session: required.* → 200: exactly the element of `GET /api/sync`'s `conversations` for this id, as it is
 now (shape under Wire shapes). 404 `not_found` unless you are a current member — the same answer as for an
-id that does not exist. Fetch it on a `conversation` push instead of a full sync.
+id that does not exist. Fetch it on a `conversation` push instead of a full sync. Limit: 120 per minute.
 
 #### `PATCH /api/conversations/:id`
 
