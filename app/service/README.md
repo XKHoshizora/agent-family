@@ -92,7 +92,8 @@ request comes from the proxy, so tell the service where the real address is:
 
 - `CLIENT_IP_HEADER=<header name>` — a header the proxy sets to the client's address, replacing any value
   the client sent. On Railway: `CLIENT_IP_HEADER=x-real-ip`. Used when it holds exactly one address;
-  absent, empty, several values or not an address → the connection's address.
+  absent, empty, several values or not an address → the connection's address, and the first such request
+  writes one warning to the log naming the header (once per process), so a proxy that does not set it shows.
 - `TRUST_PROXY=<addresses/CIDRs>` — alternatively, the proxies' own addresses (comma-separated, e.g.
   `10.0.0.0/8,fd00::/8`): on connections from them the right-most `X-Forwarded-For` entry they did not
   write is the client. Empty, `false` or `0` trust nothing. `TRUST_PROXY=true` and hop counts are refused

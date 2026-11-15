@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.ts";
 import { loadConfig, type Config } from "../src/config.ts";
+import { resetClientIpWarning } from "../src/limits.ts";
 import { signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 
@@ -49,6 +50,56 @@ describe("client address configuration", () => {
     expect(loadConfig({ ...BASE, CLIENT_IP_HEADER: "" }).clientIpHeader).toBeUndefined();
     for (const bad of ["x real ip", "x-real-ip:", "ü", "x-real-ip\n"]) {
       expect(() => loadConfig({ ...BASE, CLIENT_IP_HEADER: bad }), bad).toThrow(/CLIENT_IP_HEADER/);
+    }
+  });
+});
+
+describe("a configured CLIENT_IP_HEADER the proxy does not deliver", () => {
+  it("is warned about once per process, naming the header, however many requests lack it", async () => {
+    const lines: string[] = [];
+    const warnings = () => lines.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((e) => e.level === 40);
+    const built = await buildApp(
+      { config: { ...app.deps.config, rateLimitScale: 1, clientIpHeader: "x-real-ip" }, db: app.deps.db },
+      { logStream: { write: (line: string) => void lines.push(line) } },
+    );
+    await built.ready();
+    try {
+      resetClientIpWarning();
+      await register(built, "10.0.0.1", { "x-real-ip": "203.0.113.1" });
+      expect(warnings()).toEqual([]); // a valid value: nothing to say
+
+      for (const headers of [{}, { "x-real-ip": "" }, { "x-real-ip": "nonsense" }, {}]) await register(built, "10.0.0.2", headers);
+      expect(warnings()).toHaveLength(1);
+      expect(warnings()[0]!.msg).toContain("x-real-ip");
+      expect(lines.join("")).not.toContain("nonsense");
+
+      // Not per app instance either: a second app in this process stays quiet.
+      const second = await buildApp(
+        { config: { ...app.deps.config, rateLimitScale: 1, clientIpHeader: "x-real-ip" }, db: app.deps.db },
+        { logStream: { write: (line: string) => void lines.push(line) } },
+      );
+      await second.ready();
+      try {
+        await register(second, "10.0.0.3");
+      } finally {
+        await second.close();
+      }
+      expect(warnings()).toHaveLength(1);
+    } finally {
+      await built.close();
+    }
+  });
+
+  it("without CLIENT_IP_HEADER there is nothing to warn about", async () => {
+    const lines: string[] = [];
+    const built = await buildApp({ config: { ...app.deps.config, rateLimitScale: 1 }, db: app.deps.db }, { logStream: { write: (line: string) => void lines.push(line) } });
+    await built.ready();
+    try {
+      resetClientIpWarning();
+      await register(built, "10.0.0.1");
+      expect(lines.filter((l) => (JSON.parse(l) as { level: number }).level === 40)).toEqual([]);
+    } finally {
+      await built.close();
     }
   });
 });

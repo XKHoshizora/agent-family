@@ -11,6 +11,10 @@ import { AppError } from "./errors.ts";
  * `req.ip`: the socket's address, or, when the connection comes from a proxy listed in `TRUST_PROXY`, the
  * right-most X-Forwarded-For entry no listed proxy wrote. A header nobody configured is never read, so a
  * client cannot choose its own key.
+ *
+ * A configured header that arrives without a usable value is a sign of a misconfigured proxy (every client
+ * would then share the proxy's socket address and one budget): that is logged as a warning, once per
+ * process, naming the header.
  */
 export function clientIp(req: FastifyRequest): string {
   const header = req.server.deps.config.clientIpHeader;
@@ -20,8 +24,22 @@ export function clientIp(req: FastifyRequest): string {
       const address = value.trim();
       if (isIP(address) !== 0) return address.toLowerCase();
     }
+    if (!warnedAboutHeader) {
+      warnedAboutHeader = true;
+      req.log.warn(
+        `CLIENT_IP_HEADER is set to "${header}" but a request arrived without a valid client address in it; ` +
+          "falling back to the socket address. Check that the proxy sets this header (this warning appears once).",
+      );
+    }
   }
   return req.ip;
+}
+
+let warnedAboutHeader = false;
+
+/** For tests: lets the once-per-process warning of `clientIp` be seen again. */
+export function resetClientIpWarning(): void {
+  warnedAboutHeader = false;
 }
 
 /** Counts one request of `principalId`; throws 429 `rate_limited` when it is over the budget. */
