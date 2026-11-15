@@ -104,6 +104,15 @@ describe("accounts", () => {
     expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
   });
 
+  test("without a usable invite a taken handle is not revealed: invalid_invite either way", async () => {
+    await signUp(app, "taken_two");
+    for (const inviteCode of [undefined, "does-not-exist-00000"]) {
+      for (const handle of ["taken_two", "free_handle"]) {
+        expect(await register({ inviteCode, email: "probe@example.test", handle })).toEqual({ status: 400, json: { error: "invalid_invite" } });
+      }
+    }
+  });
+
   test("a 9 character password is refused", async () => {
     const res = await register({ inviteCode: await invite(), password: "123456789" });
     expect(res).toEqual({ status: 400, json: { error: "invalid_request" } });

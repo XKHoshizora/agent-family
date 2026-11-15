@@ -42,12 +42,13 @@ export function registerRegistrationRoutes(app: FastifyInstance, rateLimit: { ma
         // One transaction: invite lock, Better Auth's user/account/verification rows (joined to this
         // transaction, see auth.ts), the principal and the invite consumption all commit together.
         await db.tx(async (client) => {
-          const taken = await client.query("select 1 from principals where handle = $1", [handle]);
-          if (taken.rowCount) throw new AppError(409, "handle_taken");
-
+          // The invite first: without one, nothing (not even whether a handle is taken) is revealed.
           if (needsInvite) {
             if (!inviteCode || !(await lockUsableInvite(client, inviteCode))) throw new AppError(400, "invalid_invite");
           }
+
+          const taken = await client.query("select 1 from principals where handle = $1", [handle]);
+          if (taken.rowCount) throw new AppError(409, "handle_taken");
 
           const created = await runInTransaction(client, () =>
             app.auth.api.signUpEmail({
