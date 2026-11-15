@@ -55,6 +55,8 @@ export interface RouteEntry {
   url: string;
   schema: FastifySchema | undefined;
   websocket: boolean;
+  /** A HEAD Fastify derived from the GET of the same URL (same handler, no body sent). */
+  derived: boolean;
 }
 
 declare module "fastify" {
@@ -134,9 +136,12 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
 
   // Before any route: an onRoute hook only sees routes registered after it.
   const routeList: RouteEntry[] = [];
+  const getHandlers = new Map<string, unknown>();
   app.addHook("onRoute", (r) => {
     for (const method of [r.method].flat()) {
-      routeList.push({ method, url: r.url, schema: r.schema, websocket: Boolean((r as { websocket?: boolean }).websocket) });
+      if (method === "GET") getHandlers.set(r.url, r.handler);
+      const derived = method === "HEAD" && getHandlers.get(r.url) === r.handler;
+      routeList.push({ method, url: r.url, schema: r.schema, websocket: Boolean((r as { websocket?: boolean }).websocket), derived });
     }
   });
   app.decorate("routeList", routeList);

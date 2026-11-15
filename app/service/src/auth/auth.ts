@@ -358,6 +358,19 @@ function appRedirect(appOrigin: string) {
   }, "not a redirect on this site");
 }
 
+/**
+ * The Better Auth endpoints reachable under `/api/auth` (method and path below it); every other path there is
+ * 404 `not_found`. Notably absent: `/sign-up/email`, which would bypass invites and principal creation.
+ */
+export const AUTH_ENDPOINTS = [
+  "POST /sign-in/email",
+  "POST /sign-out",
+  "GET /verify-email",
+  "POST /request-password-reset",
+  "POST /reset-password",
+] as const;
+type AuthEndpoint = (typeof AUTH_ENDPOINTS)[number];
+
 interface Endpoint {
   limit: Limiter | null;
   /** The query string, exactly (it is forwarded as sent, so nothing undeclared may be in it). */
@@ -366,10 +379,7 @@ interface Endpoint {
   body: z.ZodType;
 }
 
-/**
- * Only these Better Auth endpoints are reachable. Notably absent: `/sign-up/email`, which would
- * bypass invites and principal creation (registration goes through POST /api/register).
- */
+/** Mounts Better Auth at `/api/auth/*` for `AUTH_ENDPOINTS` only (registration is POST /api/register). */
 export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number): void {
   const signIn = accountAndIpLimiter(app, rateLimitScale);
   const resetRequest = accountAndIpLimiter(app, rateLimitScale);
@@ -379,26 +389,26 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
   const password = z.string().max(1024);
   const noQuery = z.strictObject({});
   const noBody = z.object({}).nullish();
-  const exposed = new Map<string, Endpoint>([
-    [
-      "POST /sign-in/email",
-      {
-        limit: signIn,
-        query: noQuery,
-        body: z.object({ email: storableText(254), password, callbackURL: redirect.optional(), rememberMe: z.boolean().optional() }),
-      },
-    ],
-    ["POST /sign-out", { limit: null, query: noQuery, body: noBody }],
-    [
-      "GET /verify-email",
-      { limit: null, query: z.strictObject({ token: storableText(4096), callbackURL: redirect.optional() }), body: noBody },
-    ],
-    [
-      "POST /request-password-reset",
-      { limit: resetRequest, query: noQuery, body: z.object({ email: storableText(254), redirectTo: redirect.optional() }) },
-    ],
-    ["POST /reset-password", { limit: null, query: noQuery, body: z.object({ newPassword: password, token: storableText(512) }) }],
-  ]);
+  const endpoints: Record<AuthEndpoint, Endpoint> = {
+    "POST /sign-in/email": {
+      limit: signIn,
+      query: noQuery,
+      body: z.object({ email: storableText(254), password, callbackURL: redirect.optional(), rememberMe: z.boolean().optional() }),
+    },
+    "POST /sign-out": { limit: null, query: noQuery, body: noBody },
+    "GET /verify-email": {
+      limit: null,
+      query: z.strictObject({ token: storableText(4096), callbackURL: redirect.optional() }),
+      body: noBody,
+    },
+    "POST /request-password-reset": {
+      limit: resetRequest,
+      query: noQuery,
+      body: z.object({ email: storableText(254), redirectTo: redirect.optional() }),
+    },
+    "POST /reset-password": { limit: null, query: noQuery, body: z.object({ newPassword: password, token: storableText(512) }) },
+  };
+  const exposed = new Map<string, Endpoint>(Object.entries(endpoints));
   const endpointOf = (req: FastifyRequest): string => {
     const path = (req.url.split("?")[0] ?? "").replace(/\/{2,}/g, "/").replace(/\/+$/, "").toLowerCase();
     return `${req.method} ${path.startsWith(AUTH_BASE_PATH) ? path.slice(AUTH_BASE_PATH.length) : path}`;
