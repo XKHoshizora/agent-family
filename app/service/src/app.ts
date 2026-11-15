@@ -28,6 +28,7 @@ import { appOriginCheck } from "./origin.ts";
 import { createSlots, type Slots } from "./slots.ts";
 import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
+import { registerWebClient } from "./web.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -138,6 +139,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const routeList: RouteEntry[] = [];
   const getHandlers = new Map<string, unknown>();
   app.addHook("onRoute", (r) => {
+    // The web client's wildcard (src/web.ts) is not an API route: the README and the fuzz suite walk this list.
+    if (r.config?.webClient) return;
     for (const method of [r.method].flat()) {
       if (method === "GET") getHandlers.set(r.url, r.handler);
       const derived = method === "HEAD" && getHandlers.get(r.url) === r.handler;
@@ -145,6 +148,16 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     }
   });
   app.decorate("routeList", routeList);
+
+  // Every response: no content sniffing. API JSON is also never cached (a route that sets its own
+  // Cache-Control, like attachments and avatars, keeps it). The web client's files set theirs in src/web.ts.
+  app.addHook("onSend", async (req, reply, payload) => {
+    void reply.header("x-content-type-options", "nosniff");
+    const isApi = req.routeOptions.url?.startsWith("/api/") === true;
+    const isJson = String(reply.getHeader("content-type") ?? "").startsWith("application/json");
+    if ((isApi || isJson) && reply.getHeader("cache-control") === undefined) void reply.header("cache-control", "no-store");
+    return payload;
+  });
 
   // Cross-site request forgery: a browser names the page that sent a request in `Origin`. Every
   // state-changing request from any other origin is refused before body parsing or any handler. It
@@ -199,6 +212,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
       return { ok: true as const };
     },
   );
+
+  // Last: the wildcard must never get ahead of an API route (a more specific route always wins, but be explicit).
+  await registerWebClient(app);
 
   return app;
 }

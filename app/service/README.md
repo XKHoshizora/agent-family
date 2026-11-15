@@ -57,6 +57,7 @@ and every run-time import of `src/` a production dependency.
 ## Configuration (`src/config.ts`)
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
+`WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
 `CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
@@ -81,6 +82,31 @@ from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) an
 ## Deployment
 
 **Build and start.** See Commands: `npm run build`, `npm run migrate:prod`, `npm start`.
+
+**Web client (`WEB_DIST`).** Unset (the default) the service serves only the API, and every other path is
+the JSON 404. Set to the directory of the built web client (`app/web/dist`: `index.html` and `assets/`; start-up
+fails naming `WEB_DIST` if the directory has no `index.html`), the service serves it from the same origin
+(`src/web.ts`, `@fastify/static`):
+
+- A `GET`/`HEAD` for a file in the directory returns it; any other `GET`/`HEAD` whose path does not start
+  with `/api/` returns `index.html` (200), so the client's router can take `/signin`, `/some/deep/path`, ….
+  Paths under `/api/` never fall back: an unknown one is `404 {"error":"not_found"}`. Other methods outside
+  `/api/` are that JSON 404 too. No directory listings, no dotfiles (`/.env`), nothing outside the directory
+  (`..` in any encoding): such paths match no file and get `index.html`.
+- `Cache-Control`: `public, max-age=31536000, immutable` for `/assets/*` (Vite's hashed files),
+  `no-cache` for `index.html` and every other file.
+- Every file and page response carries `Content-Security-Policy: default-src 'self'; img-src 'self' data: blob:;
+  style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self';
+  form-action 'self'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: same-origin`,
+  `X-Frame-Options: DENY`, `Permissions-Policy: camera=(), microphone=(), geolocation=()` and, when
+  `APP_ORIGIN` is `https`, `Strict-Transport-Security: max-age=15552000`. `connect-src 'self'` also covers
+  the same-origin WebSocket (`wss:`) in browsers that implement CSP level 3.
+- Independent of `WEB_DIST`: every API response carries `X-Content-Type-Options: nosniff`, and API JSON
+  `Cache-Control: no-store` unless the route sets its own (attachments `private, no-store`, avatars
+  `private, max-age=60`).
+- The file route is a single wildcard registered after the API and left out of the route reference above
+  (and of `app.routeList`, which lists API routes only); the Origin check, rate limits and the WebSocket
+  upgrade are unaffected.
 
 **One instance.** Run exactly one instance of the service (one replica, no cluster mode); see Sync and
 realtime for why and what scaling out would take.

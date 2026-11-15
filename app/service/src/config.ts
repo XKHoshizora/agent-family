@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import path from "node:path";
 import { z } from "zod";
 
 /** Which X-Forwarded-For hops Fastify trusts: none, or those that come from these addresses / ranges. */
@@ -44,6 +45,8 @@ const envSchema = z.object({
   APP_ORIGIN: z.url(),
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
+  /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
+  WEB_DIST: optionalString,
   PORT: z.coerce.number().int().min(0).max(65535).default(3000),
   S3_ENDPOINT: optionalString,
   S3_REGION: optionalString,
@@ -99,6 +102,8 @@ export interface Config {
   appOrigin: string;
   authSecret: string;
   blobDir: string;
+  /** Absolute path of the built web client to serve, or undefined to serve none. */
+  webDist: string | undefined;
   port: number;
   s3?: {
     endpoint: string;
@@ -157,6 +162,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     appOrigin: e.APP_ORIGIN,
     authSecret: e.AUTH_SECRET,
     blobDir: e.BLOB_DIR,
+    webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,
     ...(anyS3
       ? {
