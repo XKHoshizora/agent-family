@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { onMembershipChanged, onMessages } from "../src/conversations/events.ts";
 import { canDirectSend } from "../src/social/blocks.ts";
 import { onSocialChanged } from "../src/social/routes.ts";
 import { api, befriend, signUp, type Actor } from "./helpers/actors.ts";
@@ -178,6 +179,43 @@ describe("blocks", () => {
     expect((await decide(b, sentByBlocker, "accept")).status).toBe(409);
     expect((await social(a)).json).toMatchObject({ incoming: [], outgoing: [] });
     expect((await social(b)).json.incoming).toEqual([]);
+  });
+
+  it("blocking records a lapsed pending request as expired, not withdrawn or rejected", async () => {
+    const [a, b, c] = [await signUp(app, "alice"), await signUp(app, "bob"), await signUp(app, "carol")];
+    const lapsedSent = (await send(a, b)).json.id;
+    const lapsedReceived = (await send(c, a)).json.id;
+    await db.query("update friend_requests set created_at = now() - interval '25 hours', expires_at = now() - interval '1 hour'");
+    expect((await api(app, a, "PUT", `/api/blocks/${b.id}`)).status).toBe(200);
+    expect((await api(app, a, "PUT", `/api/blocks/${c.id}`)).status).toBe(200);
+    // Stored, not only read: the lapsed requests were never withdrawn or rejected by anyone.
+    const stored = await db.query<{ id: string; status: string }>("select id, status from friend_requests order by id");
+    expect(Object.fromEntries(stored.rows.map((r) => [r.id, r.status]))).toEqual({ [lapsedSent]: "expired", [lapsedReceived]: "expired" });
+  });
+
+  it("blocking someone already blocked changes nothing and announces nothing", async () => {
+    const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
+    const { conversationId: dm } = await befriend(app, a, b);
+    const social: string[][] = [];
+    const notices: number[] = [];
+    const changed: string[] = [];
+    const offs = [
+      onSocialChanged(app, (ids) => void social.push(ids)),
+      onMessages(app, (ms) => void notices.push(...ms.map((m) => m.seq))),
+      onMembershipChanged(app, (id) => void changed.push(id)),
+    ];
+    try {
+      expect((await api(app, a, "PUT", `/api/blocks/${b.id}`)).status).toBe(200);
+      await vi.waitFor(() => expect(social).toHaveLength(1));
+      expect(notices).toHaveLength(1);
+      expect(changed).toEqual([dm]);
+      for (let i = 0; i < 3; i++) expect(await api(app, a, "PUT", `/api/blocks/${b.id.toUpperCase()}`)).toEqual({ status: 200, json: { ok: true } });
+      await new Promise((r) => setTimeout(r, 50));
+      expect([social.length, notices.length, changed.length]).toEqual([1, 1, 1]);
+      expect(await count("select count(*) n from messages where conversation_id = $1 and kind = 'system' and body->>'event' = 'blocked'", [dm])).toBe(1);
+    } finally {
+      for (const off of offs) off();
+    }
   });
 
   it("blocking leaves the friendship and conversation intact, and unblocking restores sending", async () => {

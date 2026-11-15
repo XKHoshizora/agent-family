@@ -20,7 +20,7 @@ const syncResponse = z.object({
       id: z.string(),
       type: z.enum(["direct", "group"]),
       title: z.string().nullable(),
-      creatorId: z.string(),
+      creatorId: z.string().optional(),
       myRole: role,
       closed: z.boolean(),
       peerId: z.string().optional(),

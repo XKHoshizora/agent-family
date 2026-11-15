@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { onMembershipChanged, onMessages } from "../src/conversations/events.ts";
-import { canSend, listMembers } from "../src/conversations/store.ts";
+import { canSend, listMembers, visibleJoin } from "../src/conversations/store.ts";
 import type { StoredMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -315,6 +315,17 @@ describe("access", () => {
     expect((await rename(a, G, "upper")).json).toEqual({ id: g, title: "upper" });
     expect((await remove(b, G, b.id.toUpperCase())).status).toBe(200);
     expect(await memberIds(a, g)).toEqual([a.id, c.id].sort());
+  });
+});
+
+describe("the visibility join", () => {
+  it("accepts only the two reader expressions it is spliced with (enforced by tsc, which checks this file)", () => {
+    expect(visibleJoin("$1")).toContain("vis.principal_id = $1 ");
+    expect(visibleJoin("r.reader_id")).toContain("vis.principal_id = r.reader_id ");
+    // @ts-expect-error any other SQL text does not compile
+    visibleJoin("$2");
+    // @ts-expect-error nor does a string computed at run time
+    visibleJoin(String("r.reader_id"));
   });
 });
 

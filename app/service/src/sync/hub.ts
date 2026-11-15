@@ -79,7 +79,8 @@ export interface HubDeps {
  * - messages: rendered per reader with `toWireForReaders`, which shows a message (and its quote) only to
  *   readers who can see it now;
  * - membership changes: `conversation` to the affected principals who are current members now, `gone`
- *   to those who are not — so after `gone` nothing more of that conversation reaches them;
+ *   to those who are not (more than once, when a change announced before they left is delivered after
+ *   it) — so after `gone` nothing more of that conversation reaches them until they are added again;
  * - read markers: only in direct chats, to its current members.
  */
 export class Hub {

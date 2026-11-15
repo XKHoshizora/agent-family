@@ -17,10 +17,11 @@ export interface SyncConversation {
   id: string;
   type: "direct" | "group";
   title: string | null;
-  creatorId: string;
+  /** Groups only: a direct chat has no creator role (and `isCreator` is false for both of its members). */
+  creatorId?: string;
   myRole: Role;
   closed: boolean;
-  /** Direct chats only: the other party. */
+  /** Direct chats only: the other party, from the pair the conversation belongs to (as the send path). */
   peerId?: string;
   canSend: { ok: true } | { ok: false; reason: "blocked" | "not_friends" | "closed" };
   members: Array<{ id: string; role: Role; isCreator: boolean }>;
@@ -97,14 +98,20 @@ export async function syncView(db: Db, me: string): Promise<SyncView> {
       peer_read_seq: string | null;
       unread: string;
     }>(
+      // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
+      // only the peer's read marker is read from their membership.
       `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, me.role, me.read_seq,
-              peer.principal_id as peer_id, peer.read_seq as peer_read_seq,
+              pair.peer_id, peer.read_seq as peer_read_seq,
               (select count(*) from messages m ${VISIBLE_JOIN}
                 where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
          from memberships me
          join conversations c on c.id = me.conversation_id
+         left join lateral (
+           select case when d.a_id = $1 then d.b_id else d.a_id end as peer_id
+             from direct_pairs d where d.conversation_id = c.id
+         ) pair on true
          left join memberships peer
-           on c.type = 'direct' and peer.conversation_id = c.id and peer.principal_id <> $1 and peer.left_seq is null
+           on peer.conversation_id = c.id and peer.principal_id = pair.peer_id and peer.left_seq is null
         where me.principal_id = $1 and me.left_seq is null
         order by c.created_at, c.id`,
       [me],
@@ -162,7 +169,7 @@ export async function syncView(db: Db, me: string): Promise<SyncView> {
         id: c.id,
         type: c.type,
         title: c.title,
-        creatorId: c.creator_id,
+        ...(c.type === "group" ? { creatorId: c.creator_id } : {}),
         myRole: c.role,
         closed: c.closed,
         ...(c.type === "direct" && c.peer_id ? { peerId: c.peer_id } : {}),

@@ -114,11 +114,12 @@ counter: a message is identified by `conversationId` + `seq` (gapless per conver
 {
   "me": { "id": "…", "handle": "alice", "displayName": "Alice", "email": "alice@example.test" },
   "conversations": [{
-    "id": "…", "type": "direct" | "group", "title": "team" /* null in direct chats */, "creatorId": "…",
+    "id": "…", "type": "direct" | "group", "title": "team" /* null in direct chats */,
+    "creatorId": "…",                                // groups only: a direct chat has no creator role
     "myRole": "speaker" | "observer", "closed": false,
-    "peerId": "…",                                   // direct chats only
+    "peerId": "…",                                   // direct chats only: the other person of the pair
     "canSend": { "ok": true } | { "ok": false, "reason": "blocked" | "not_friends" | "closed" },
-    "members": [{ "id": "…", "role": "speaker", "isCreator": true }],   // current members, join order
+    "members": [{ "id": "…", "role": "speaker", "isCreator": true }],   // current members, join order; isCreator only in groups
     "lastSeq": 42,       // the conversation's newest seq (counts messages from before you joined too)
     "readSeq": 40,       // your read marker
     "unread": 2,         // visible messages from others, not system notices, after readSeq
@@ -164,7 +165,7 @@ Pushes (JSON text frames):
     "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
     "createdAt": "2026-11-16T01:02:03.000Z" } }
 { "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: refetch /api/sync
-{ "type": "gone", "id": "…" }           // you left or were removed: drop the conversation; nothing more of it follows
+{ "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: refetch /api/social
 { "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats only (either side)
 { "type": "pong" }
@@ -185,6 +186,12 @@ join notice. Apply a `message` like this: `seq ≤ position` → duplicate, igno
 position. Gaps are rare (a backlog of more than 200 messages at once, a delivery step that failed, an
 announcement race right after a server start) but always repairable this way. A `message` for a
 conversation you do not know means you were just added: call `/api/sync`.
+
+**Leaving and coming back.** `gone` says "not a member now", decided when it is delivered, so it can
+arrive more than once for one departure (a change announced just before you left is delivered after it);
+ignore a `gone` for a conversation you no longer hold. After `gone` nothing of that conversation reaches
+you — unless you are added again: then it reappears with a `conversation` event (refetch `/api/sync`; your
+new stay starts at the join notice, nothing from before it or from your earlier stay is shown).
 
 **Reconnect.** 1. Get a ticket and open the socket; buffer pushes. 2. `POST /api/sync/catchup` with
 the position of every conversation you hold; append, advance, drop the `gone` ones; repeat while
@@ -269,3 +276,34 @@ may fold differently; `tests/search.test.ts` pins the behaviour above so that a 
 a search takes depends slightly on how often the term occurs in messages you cannot read. That says nothing
 about any particular conversation or person, but a patient client could estimate how common a term is
 across the site. Accepted for now; the limits above bound how much can be learnt.
+
+## Robustness suites
+
+- `tests/fuzz.test.ts` walks `app.routeList` (filled by an `onRoute` hook, so a route added later is fuzzed
+  without touching the test) and sends every route malformed path ids, query values, bodies and content
+  types, signed in and signed out; plus the Better Auth mount, malformed multipart, the avatar routes and
+  WebSocket handshakes. Every answer must be < 500, every 4xx a `{"error": "<snake_case>"}` JSON body, and
+  `/api/health` must answer afterwards.
+- `tests/concurrency.test.ts` races real HTTP requests on the 10-connection pool (sends against an unfriend,
+  a block and a removal; 20 adds of one person; two senders; accept against withdraw; a block against a
+  group add; the last two members leaving; read markers; uploads at the quota; a request against a block)
+  for several rounds and checks each stated invariant against the database.
+- `tests/enumeration.test.ts`: on every route taking a conversation id, a seq, an attachment, request or
+  principal id, an id that exists but is not yours gets byte for byte the answer a random id gets; the two
+  intended differences (any existing principal can be blocked and has an avatar) are asserted. Catch-up
+  and downloads also take about as long for both (medians within a factor of 2).
+
+### The prototype's defects (`spikes/base-gate/README.md`, candidate C) and what now covers them
+
+| # | Defect in the prototype | Covered by |
+|---|---|---|
+| 1 | One request with a malformed URL ends the process, no sign-in needed | `tests/fuzz.test.ts` (every route: undecodable, over-long, `..`, encoded-slash and non-UUID path ids, signed in and out; health checked after); `tests/health.test.ts` "malformed URL does not crash", "a path the router cannot decode, or an over-long id, is answered in the error shape" |
+| 2 | Any signed-in user ends the process with a malformed WebSocket frame | `tests/sync.test.ts` "an unmasked or oversized frame closes the socket and the server keeps serving"; `tests/fuzz.test.ts` WebSocket handshakes (bad tickets, keys, versions, origins) |
+| 3 | An owner who leaves a conversation leaves their Agent in it | batch 3 (needs Agents) |
+| 4 | An upload completes although the conversation was frozen while it streamed | the batch 1 counterpart — losing the right to send mid-upload — `tests/attachments.test.ts` "upload that completes after the uploader was unfriended (direct) or removed (group) is refused and leaves no blob"; freezing itself is batch 3 |
+| 5 | Leaving during a freeze still writes a system notice | batch 3 (manual freeze; in batch 1 only direct chats can become unable to send, and they cannot be left) |
+| 6 | A retry id reused in another conversation silently drops the second message | `tests/messages.test.ts` "same clientTxn twice in one conversation stores one message; the same clientTxn in a second conversation stores a new message there" |
+| 7 | Sign-in time tells whether an account exists; no rate limit | `tests/auth.test.ts` "a wrong password takes about as long for an existing as for a non-existing e-mail", "the 11th sign-in attempt for one account from one address is 429 …", "one address cycling through many e-mails …", "password reset answers identically …" |
+| 8 | The sync cursor is a site-wide counter (anyone sees site-wide activity); a late joiner sees how many messages came before them | site-wide: no global id or counter anywhere — `tests/sync.test.ts` "initial sync contains only my conversations …", `tests/search.test.ts` "the cursor does not reveal how many messages exist site-wide", `tests/enumeration.test.ts`. Per conversation, seqs are gapless and count messages from before you joined (`lastSeq`, the join notice's seq): kept by design, see the client contract |
+| 9 | Approvals never expire; an old approval still works after removal | batch 1 has no join approvals (members add their friends directly; expansion approval is batch 3). Friend requests expire after 24 h — `tests/social.test.ts` "a request older than 24h cannot be accepted and reads as expired"; a removed member loses access at once — `tests/messages.test.ts` "removed member gets 404 on every read and write …", `tests/enumeration.test.ts`, `tests/concurrency.test.ts` "… racing removal of the sender from a group" |
+| 10 | Several malformed parameters cause 500s | `tests/fuzz.test.ts` (the 500s it found are fixed and pinned in `tests/auth.test.ts` "inputs Better Auth answered with a 500 are refused with 400 first …" and `tests/health.test.ts`) |

@@ -109,7 +109,6 @@ describe("GET /api/sync", () => {
       id: ad,
       type: "direct",
       title: null,
-      creatorId: d.id,
       myRole: "speaker",
       closed: false,
       peerId: a.id,
@@ -167,6 +166,32 @@ describe("GET /api/sync", () => {
     const sd = (await sync(d)).json;
     expect(sd.principals.map((p: any) => p.id).sort()).toEqual([a.id, b.id, d.id].sort());
     expect(JSON.stringify(sd)).not.toContain(c.id);
+  });
+
+  it("a direct chat's peer and canSend come from its pair, as for a send, and it has no creator; a group's creator is consistent", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const g = await group(app, a, "team", [b, c]);
+    const view = async () => (await sync(a)).json.conversations as any[];
+
+    const direct = (await view()).find((x) => x.id === dm);
+    expect(direct).not.toHaveProperty("creatorId");
+    expect(direct.peerId).toBe(b.id);
+    expect(direct.members.map((m: any) => m.isCreator)).toEqual([false, false]);
+    const team = (await view()).find((x) => x.id === g);
+    expect(team.creatorId).toBe(a.id);
+    expect(team.members.filter((m: any) => m.isCreator).map((m: any) => m.id)).toEqual([a.id]);
+
+    // The peer's membership row is not what decides: with it ended (direct chats are never left, so only a
+    // broken row could do this) sync still names the peer and agrees with the send path.
+    await db.query("update memberships set left_seq = 0 where conversation_id = $1 and principal_id = $2", [dm, b.id]);
+    const after = (await view()).find((x) => x.id === dm);
+    expect(after).toMatchObject({ peerId: b.id, canSend: { ok: true } });
+    expect(after).not.toHaveProperty("peerReadSeq");
+    expect((await say(a, dm, "still allowed")).status).toBe(201);
+    await api(app, a, "PUT", `/api/blocks/${b.id}`);
+    expect((await view()).find((x) => x.id === dm).canSend).toEqual({ ok: false, reason: "blocked" });
+    expect(await say(a, dm, "refused")).toMatchObject({ status: 403, json: { error: "cannot_send", reason: "blocked" } });
   });
 
   it("counts unread visible messages from others, shows the peer's read position and canSend in direct chats", async () => {

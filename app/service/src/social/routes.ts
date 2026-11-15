@@ -7,7 +7,7 @@ import { AppError } from "../errors.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { findByHandle } from "../principals/store.ts";
 import { requirePrincipal } from "../session.ts";
-import { blockPrincipal, unblockPrincipal, type BlockResult } from "./blocks.ts";
+import { blockChanged, blockPrincipal, unblockPrincipal, type BlockResult } from "./blocks.ts";
 import type { SocialListener } from "./events.ts";
 import {
   decideRequest,
@@ -188,15 +188,14 @@ export function registerSocialRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       const other = req.params.principalId;
       if (other === me.id) throw new AppError(400, "invalid_request");
-      await run<BlockResult>(
-        req,
-        async (t): Promise<Outcome<BlockResult>> => {
-          const exists = await t.query("select 1 from principals where id = $1", [other]);
-          if (exists.rowCount === 0) return { ok: false, code: "not_found" };
-          return { ok: true, ...(await blockPrincipal(t, me.id, other)) };
-        },
-        () => [me.id, other],
-      );
+      const result = await db.tx(async (t): Promise<Outcome<BlockResult>> => {
+        const exists = await t.query("select 1 from principals where id = $1", [other]);
+        if (exists.rowCount === 0) return { ok: false, code: "not_found" };
+        return { ok: true, ...(await blockPrincipal(t, me.id, other)) };
+      });
+      if (!result.ok) throw new AppError(STATUS[result.code], result.code);
+      // Blocking again is idempotent: the same 200, and no event when nothing changed.
+      if (blockChanged(result)) announce(req, [me.id, other], result);
       return { ok: true as const };
     },
   );

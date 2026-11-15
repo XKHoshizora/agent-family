@@ -11,10 +11,13 @@ import { appendSystem } from "./system.ts";
  * before it (`joined_seq < seq`). Nothing else grants read access: not an earlier stay, not having sent
  * the message, not quoting it.
  *
- * `reader` is the SQL expression holding the reader's principal id — a parameter or a column such as
- * `r.reader_id` for many readers at once. It is spliced into SQL: only ever pass a literal written in code.
+ * `reader` is the SQL expression holding the reader's principal id: the parameter `$1`, or the column
+ * `r.reader_id` for many readers at once. It is spliced into SQL, so its type admits exactly these two
+ * literals; anything else does not compile.
  */
-export function visibleJoin(reader: string): string {
+export type VisibleReader = "$1" | "r.reader_id";
+
+export function visibleJoin(reader: VisibleReader): string {
   return `join memberships vis on vis.conversation_id = m.conversation_id and vis.principal_id = ${reader} and vis.left_seq is null and vis.joined_seq < m.seq`;
 }
 
@@ -168,7 +171,9 @@ async function permission(q: Queryable, type: "direct" | "group", principalId: s
 /**
  * Whether `principalId` may send in the conversation right now: direct chats follow the pair's
  * friendship and blocks, groups let every current member send. Null when not a current member of an
- * open conversation. Advisory outside a transaction (sync uses it to show state); sends re-check under locks.
+ * open conversation. Advisory outside a transaction: the upload route's pre-check uses it, and sends and
+ * uploads re-check under the locks. `GET /api/sync` gives the same verdict for all its direct chats at
+ * once (canDirectSendMany); every one of these takes the other party from `direct_pairs`.
  */
 export async function canSend(q: Queryable, conversationId: string, principalId: string): Promise<CanSend | null> {
   const { rows } = await q.query<{ type: "direct" | "group"; a_id: string | null; b_id: string | null }>(

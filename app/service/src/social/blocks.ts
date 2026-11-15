@@ -9,24 +9,36 @@ export { areFriends, blockBetween, canDirectSend } from "./relations.ts";
 export interface BlockResult {
   /** False when the block already existed. */
   created: boolean;
-  /** Pending requests this block cancelled (withdrawn if the blocker sent it, rejected if received). */
+  /** Live pending requests this block cancelled (withdrawn if the blocker sent it, rejected if received). */
   cancelledRequestIds: string[];
   /** The "blocked" notice in the pair's direct conversation, when the block is new and they have one. */
   notices: StoredMessage[];
 }
 
-/** Blocking is one-directional, leaves any friendship alone, and cancels pending requests between the pair. */
+const SAME_PAIR =
+  "least(from_id, to_id) = least($1::uuid, $2::uuid) and greatest(from_id, to_id) = greatest($1::uuid, $2::uuid)";
+
+/**
+ * Blocking is one-directional, leaves any friendship alone, and cancels live pending requests between the
+ * pair. A pending request already past its deadline is recorded as what it already reads as: expired.
+ * Nothing changes (and nothing is to be announced) when the block existed already: `created` is false and
+ * no request is cancelled, since none can be sent while it exists.
+ */
 export async function blockPrincipal(t: Tx, blocker: string, blocked: string): Promise<BlockResult> {
   await lockPair(t, blocker, blocked);
   const ins = await t.query(
     "insert into blocks (blocker_id, blocked_id) values ($1, $2) on conflict do nothing",
     [blocker, blocked],
   );
+  await t.query(
+    `update friend_requests set status = 'expired', resolved_at = now()
+      where status = 'pending' and expires_at < now() and ${SAME_PAIR}`,
+    [blocker, blocked],
+  );
   const cancelled = await t.query<{ id: string }>(
     `update friend_requests
         set status = case when from_id = $1 then 'withdrawn' else 'rejected' end, resolved_at = now()
-      where status = 'pending'
-        and least(from_id, to_id) = least($1::uuid, $2::uuid) and greatest(from_id, to_id) = greatest($1::uuid, $2::uuid)
+      where status = 'pending' and ${SAME_PAIR}
       returning id`,
     [blocker, blocked],
   );
@@ -34,6 +46,9 @@ export async function blockPrincipal(t: Tx, blocker: string, blocked: string): P
   const notice = created ? await appendDirectNotice(t, { event: "blocked", actorId: blocker, principalId: blocked }) : null;
   return { created, cancelledRequestIds: cancelled.rows.map((r) => r.id), notices: notice ? [notice] : [] };
 }
+
+/** Whether a block call changed anything others should hear about. */
+export const blockChanged = (r: BlockResult): boolean => r.created || r.cancelledRequestIds.length > 0;
 
 /** Restores nothing but the ability to interact. Returns whether a block was removed, and its notice. */
 export async function unblockPrincipal(
