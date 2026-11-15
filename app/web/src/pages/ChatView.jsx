@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { convTitle, convSubtitle, visibilityNote, publishBlock } from "../state/selectors.js";
-import { ConvAvatar, IconBtn } from "../ui/primitives.jsx";
+import { ConvAvatar, Btn, IconBtn } from "../ui/primitives.jsx";
 import { MessageItem } from "./Messages.jsx";
 import { Search, Menu, Eye, ChevronLeft, X } from "../icons.js";
 

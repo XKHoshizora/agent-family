@@ -142,7 +142,6 @@ export function Modal({ title, onClose, children, footer, wide }) {
       node.removeEventListener("keydown", onKey);
       if (previous instanceof HTMLElement) previous.focus();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return (
     <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
