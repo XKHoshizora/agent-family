@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
 import { toView, formatAt, expiryText } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
-import { convSubtitle, convTitle, lastPreview, publishBlock, visibilityNote, myBlock, senderName } from "../src/state/selectors.js";
+import { convSubtitle, convTitle, lastPreview, publishBlock, senderName } from "../src/state/selectors.js";
 import { ANN, BO, D1, G1, ME_ID, at, direct, emptySocial, group, notice, range, syncOf, wire } from "./fixtures.js";
 
 const NOW = new Date(2026, 10, 16, 12, 0).getTime();
@@ -47,7 +47,6 @@ describe("conversations", () => {
     expect(c).toMatchObject({ type: "group", title: "周末小组", admin: ANN });
     expect(c.members).toEqual([ANN, ME, BO]);
     expect(convSubtitle(v, c)).toBe("3 位真人");
-    expect(visibilityNote(v, c)).toBeNull();
   });
 
   it("orders by last activity; empty conversations by createdAt when present, else the service's order", () => {
@@ -211,7 +210,6 @@ describe("social: relations, blocks and the hold", () => {
       { by: ME, target: BO },
       { by: ANN, target: ME },
     ]);
-    expect(myBlock(v, BO)).toBeTruthy();
   });
 
   it("outgoing requests are pending from me", () => {

@@ -441,7 +441,7 @@ describe("blocks", () => {
     expect(within(side()).getByRole("button", { name: "拉黑此用户" })).toBeTruthy();
   });
 
-  it("a person I blocked who is not a friend is reached from Settings and unblocked with the same dialog", async () => {
+  it("a person I blocked who is not a friend is listed under Settings › 拉黑 and unblocked with the same dialog", async () => {
     const unblockPrincipal = vi.fn(async () => {
       env.social = emptySocial();
       return { ok: true };
@@ -449,12 +449,13 @@ describe("blocks", () => {
     const { env } = await openApp({ sync: baseSync, social: { ...emptySocial(), blocked: [PEOPLE[DORA]] }, api: { unblockPrincipal } });
     fireEvent.click(within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: /^设置/ }));
     await flush();
-    await click(button("查看"));
-    expect(mainText()).toContain("你已拉黑朵拉");
+    await click(screen.getByText("拉黑", { selector: ".list-col .row-name" }));
+    expect(mainText()).toContain("朵拉");
     await click(button("解除拉黑"));
     await click(dialogButton("解除我的拉黑"));
     expect(unblockPrincipal).toHaveBeenCalledWith(DORA);
-    expect(mainText()).not.toContain("你已拉黑朵拉");
+    expect(mainText()).not.toContain("朵拉");
+    expect(mainText()).toContain("你没有拉黑任何人。");
   });
 });
 

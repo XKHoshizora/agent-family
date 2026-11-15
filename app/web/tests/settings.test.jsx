@@ -1,0 +1,383 @@
+// @vitest-environment jsdom
+// Settings (profile, avatar, blocked people), avatars on screen, the Agent empty state, the lazy application shell.
+import React from "react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { ANN, BO, D1, G1, ME, ME_ID, apiError, deferred, direct, emptySocial, fakeFile, group, syncOf, wire } from "./fixtures.js";
+import { DORA, NOW, PEOPLE, button, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, toastText } from "./harness.jsx";
+
+beforeEach(() => {
+  installBrowser();
+  let n = 0;
+  URL.createObjectURL = vi.fn(() => `blob:preview-${++n}`);
+  URL.revokeObjectURL = vi.fn();
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+const baseSync = () => syncOf([direct(D1, ANN, { lastSeq: 1, readSeq: 1 })], [wire(D1, 1, ANN, "早")]);
+const rail = (name) => within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name });
+const goSettings = async () => {
+  fireEvent.click(rail(/^设置/));
+  await flush();
+};
+const settingsRow = (name) => screen.getByText(name, { selector: ".list-col .row-name" });
+const dialogButton = (name) => within(dialog()).getByRole("button", { name });
+const nameBox = () => screen.getByLabelText("昵称");
+const fileBox = () => screen.getByLabelText("选择头像图片");
+const choose = async (file) => {
+  fireEvent.change(fileBox(), { target: { files: [file] } });
+  await flush();
+};
+const source = (file) => readFileSync(path.join(import.meta.dirname, "..", file), "utf8");
+const png = (size = 1000) => fakeFile("me.png", size, "image/png");
+
+describe("settings list", () => {
+  it("offers the profile, blocked people and contacts; no Agent, device or demo entries", async () => {
+    await openApp({ sync: baseSync });
+    await goSettings();
+    expect([...document.querySelectorAll(".list-col .row-name")].map((x) => x.textContent)).toEqual(["我的资料", "拉黑", "通讯录与申请"]);
+    const text = (document.querySelector(".list-col").textContent + mainText()).replaceAll("Agent Family", "");
+    for (const word of ["Agent", "设备", "演示", "重置", "示例数据"]) expect(text).not.toContain(word);
+    expect(document.querySelector(".list-col .settings-me").textContent).toContain("Mei");
+  });
+
+  it("通讯录与申请 goes to the contacts", async () => {
+    await openApp({ sync: baseSync });
+    await goSettings();
+    await click(settingsRow("通讯录与申请"));
+    expect(document.querySelector(".list-col h1").textContent).toBe("通讯录");
+  });
+});
+
+describe("profile page", () => {
+  it("shows the account name and the e-mail as text, not as fields", async () => {
+    await openApp({ sync: baseSync });
+    await goSettings();
+    const kv = document.querySelector(".kv");
+    expect(kv.textContent).toContain("@me_one");
+    expect(kv.textContent).toContain("me@example.test");
+    expect(inMain().queryByDisplayValue("me@example.test")).toBeNull();
+    expect(inMain().queryByDisplayValue("@me_one")).toBeNull();
+    expect(nameBox().value).toBe("Mei");
+  });
+
+  it("keeps the sign-out button", async () => {
+    await openApp({ sync: baseSync });
+    await goSettings();
+    expect(inMain().getByRole("button", { name: "退出登录" })).toBeTruthy();
+  });
+});
+
+describe("display name", () => {
+  const saveName = async (value) => {
+    fireEvent.change(nameBox(), { target: { value } });
+    await click(button("保存"));
+  };
+
+  it("is saved trimmed, then shows everywhere", async () => {
+    const updateMe = vi.fn(async (displayName) => ({ id: ME_ID, handle: "me_one", displayName }));
+    await openApp({ sync: baseSync, api: { updateMe } });
+    await goSettings();
+    expect(button("保存").disabled).toBe(true);
+    await saveName("  新昵称 ");
+    expect(updateMe).toHaveBeenCalledWith("新昵称");
+    expect(toastText()).toBe("昵称已更新");
+    expect(document.querySelector(".profile-head h2").textContent).toContain("新昵称");
+    expect(document.querySelector(".settings-me").textContent).toContain("新昵称");
+    expect(button("保存").disabled).toBe(true);
+  });
+
+  it("is checked before any request: empty, only spaces, a line break, over 40 characters", async () => {
+    const updateMe = vi.fn(async (displayName) => ({ displayName }));
+    await openApp({ sync: baseSync, api: { updateMe } });
+    await goSettings();
+    await saveName("   ");
+    expect(screen.getByText("请输入昵称")).toBeTruthy();
+    await saveName("名".repeat(41));
+    expect(screen.getByText("昵称最多 40 个字")).toBeTruthy();
+    expect(updateMe).not.toHaveBeenCalled();
+    await saveName("😀".repeat(40));
+    expect(updateMe).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a pending state and says why a refusal happened", async () => {
+    const pending = deferred();
+    const updateMe = vi.fn(() => pending.promise);
+    await openApp({ sync: baseSync, api: { updateMe } });
+    await goSettings();
+    await saveName("新昵称");
+    expect(button("保存中…").disabled).toBe(true);
+    await act(async () => pending.reject(apiError(400, "invalid_request")));
+    await flush();
+    expect(toastText()).toBe("昵称需要 1–40 个字，且只能一行。");
+    expect(nameBox().value).toBe("新昵称");
+    expect(document.querySelector(".profile-head h2").textContent).toContain("Mei");
+    updateMe.mockImplementation(async () => {
+      throw apiError(429, "rate_limited");
+    });
+    await click(button("保存"));
+    expect(toastText()).toBe("操作太频繁了，请稍等一分钟再试。");
+  });
+});
+
+describe("avatar", () => {
+  it("refuses a file that is not PNG, JPEG or WebP, or is over 2 MB, without a preview or a request", async () => {
+    const uploadAvatar = vi.fn(async () => ({ ok: true }));
+    await openApp({ sync: baseSync, api: { uploadAvatar } });
+    await goSettings();
+    await choose(fakeFile("a.gif", 100, "image/gif"));
+    expect(screen.getByText("头像需要是 PNG、JPEG 或 WebP 格式的图片。")).toBeTruthy();
+    await choose(fakeFile("a.svg", 100, "image/svg+xml"));
+    expect(screen.getByText("头像需要是 PNG、JPEG 或 WebP 格式的图片。")).toBeTruthy();
+    await choose(fakeFile("big.png", 2 * 1024 * 1024 + 1, "image/png"));
+    expect(screen.getByText("头像不能超过 2 MB。")).toBeTruthy();
+    expect(URL.createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "保存头像" })).toBeNull();
+    expect(uploadAvatar).not.toHaveBeenCalled();
+  });
+
+  it("accepts PNG, JPEG and WebP up to exactly 2 MB, and a file whose type is unknown but whose name says so", async () => {
+    await openApp({ sync: baseSync, api: { uploadAvatar: vi.fn() } });
+    await goSettings();
+    for (const file of [png(2 * 1024 * 1024), fakeFile("a.jpg", 10, "image/jpeg"), fakeFile("a.webp", 10, "image/webp"), fakeFile("a.JPEG", 10, "")]) {
+      await choose(file);
+      expect(screen.getByRole("button", { name: "保存头像" })).toBeTruthy();
+    }
+  });
+
+  it("previews the picked image, uploads it on 保存头像, revokes the preview and gives my avatar a new version", async () => {
+    const uploadAvatar = vi.fn(async () => ({ ok: true }));
+    await openApp({ sync: baseSync, api: { uploadAvatar } });
+    await goSettings();
+    const mine = () => [...document.querySelectorAll(".rail-me img, .settings-me img, .profile-head img")].map((i) => i.getAttribute("src"));
+    expect(mine().every((src) => src === `/api/principals/${ME_ID}/avatar`)).toBe(true);
+    const file = png();
+    await choose(file);
+    expect(document.querySelector('img[alt="新头像预览"]').getAttribute("src")).toBe("blob:preview-1");
+    expect(uploadAvatar).not.toHaveBeenCalled();
+    await click(button("保存头像"));
+    expect(uploadAvatar).toHaveBeenCalledWith(file);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
+    expect(document.querySelector('img[alt="新头像预览"]')).toBeNull();
+    expect(toastText()).toBe("头像已更新");
+    const versioned = `/api/principals/${ME_ID}/avatar?v=${NOW}`;
+    expect(mine().length).toBeGreaterThanOrEqual(3);
+    expect(mine().every((src) => src === versioned)).toBe(true);
+  });
+
+  it("a person's avatar elsewhere does not change", async () => {
+    await openApp({ sync: baseSync, api: { uploadAvatar: vi.fn(async () => ({ ok: true })) } });
+    await goSettings();
+    await choose(png());
+    await click(button("保存头像"));
+    await click(rail(/^消息/));
+    const src = document.querySelector(".list-col .row img").getAttribute("src");
+    expect(src).toBe(`/api/principals/${ANN}/avatar`);
+  });
+
+  it("revokes the preview when it is dropped, replaced, or the page goes away", async () => {
+    await openApp({ sync: baseSync, api: { uploadAvatar: vi.fn() } });
+    await goSettings();
+    await choose(png());
+    await click(button("取消"));
+    expect(URL.revokeObjectURL).toHaveBeenLastCalledWith("blob:preview-1");
+    await choose(png());
+    await choose(png());
+    expect(URL.revokeObjectURL).toHaveBeenLastCalledWith("blob:preview-2");
+    await click(settingsRow("拉黑"));
+    expect(URL.revokeObjectURL).toHaveBeenLastCalledWith("blob:preview-3");
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);
+  });
+
+  it("a refusal says why, keeps the preview and does not change the avatar", async () => {
+    const uploadAvatar = vi.fn(async () => {
+      throw apiError(413, "too_large");
+    });
+    await openApp({ sync: baseSync, api: { uploadAvatar } });
+    await goSettings();
+    await choose(png());
+    await click(button("保存头像"));
+    expect(toastText()).toBe("头像不能超过 2 MB。");
+    expect(document.querySelector('img[alt="新头像预览"]')).toBeTruthy();
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    uploadAvatar.mockImplementation(async () => {
+      throw apiError(400, "invalid_request");
+    });
+    await click(button("保存头像"));
+    expect(toastText()).toBe("头像需要是 PNG、JPEG 或 WebP 格式的图片。");
+    expect(document.querySelector(".rail-me img").getAttribute("src")).toBe(`/api/principals/${ME_ID}/avatar`);
+  });
+
+  it("shows a pending state while uploading", async () => {
+    const pending = deferred();
+    await openApp({ sync: baseSync, api: { uploadAvatar: vi.fn(() => pending.promise) } });
+    await goSettings();
+    await choose(png());
+    await click(button("保存头像"));
+    expect(button("保存中…").disabled).toBe(true);
+    expect(button("取消").disabled).toBe(true);
+    await act(async () => pending.resolve({ ok: true }));
+    await flush();
+    expect(screen.queryByRole("button", { name: "保存中…" })).toBeNull();
+  });
+});
+
+describe("avatars on screen", () => {
+  const sync = () =>
+    syncOf(
+      [direct(D1, ANN, { lastSeq: 2, readSeq: 2 }), group(G1, { lastSeq: 2, readSeq: 2 })],
+      [wire(D1, 1, ANN, "早"), wire(D1, 2, ME_ID, "早啊"), wire(G1, 1, BO, "大家好"), wire(G1, 2, ANN, "你好")],
+    );
+
+  it("every person is a picture from the service, lazy, over an initial", async () => {
+    await openApp({ sync });
+    const rowImg = document.querySelector(".list-col .row img");
+    expect(rowImg.getAttribute("loading")).toBe("lazy");
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    const urls = [...document.querySelectorAll(".main-col .msg img")].map((i) => i.getAttribute("src"));
+    expect(urls).toEqual([`/api/principals/${ANN}/avatar`, `/api/principals/${ME_ID}/avatar`]);
+    expect(document.querySelector(".msg .avatar-fallback").textContent.startsWith("小")).toBe(true);
+    expect(document.querySelector(".msg.mine .avatar-fallback").textContent.startsWith("M")).toBe(true);
+  });
+
+  it("an image that fails to load leaves the initial", async () => {
+    await openApp({ sync });
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    const avatar = document.querySelector(".main-col .msg .avatar");
+    fireEvent.error(avatar.querySelector("img"));
+    expect(avatar.querySelector("img")).toBeNull();
+    expect(avatar.textContent).toBe("小");
+  });
+
+  it("a group keeps the prototype's composite of member avatars", async () => {
+    await openApp({ sync });
+    const composite = document.querySelector(".group-avatar");
+    expect(composite.classList.contains("n3")).toBe(true);
+    expect(composite.querySelectorAll("img")).toHaveLength(3);
+  });
+
+  it("a member nobody names here still has an avatar (the service makes one)", async () => {
+    const ghost = "00000000-0000-4000-8000-0000000000b9";
+    await openApp({ sync: () => syncOf([group(G1, { lastSeq: 1, readSeq: 1 })], [wire(G1, 1, ghost, "我走了")]) });
+    await click(screen.getByText("周末小组", { selector: ".list-col .row-name" }));
+    expect(document.querySelector(".main-col .msg img").getAttribute("src")).toBe(`/api/principals/${ghost}/avatar`);
+  });
+
+  it("the prototype's avatar atlas is not used for people", () => {
+    expect(source("src/ui/primitives.jsx")).not.toContain("identities.png");
+    expect(source("src/data/identities.js")).not.toContain("CELL");
+  });
+});
+
+describe("blocked people", () => {
+  const social = () => ({ ...emptySocial(), blocked: [PEOPLE[DORA], PEOPLE[ANN]], blockedBy: [PEOPLE[BO]] });
+
+  it("lists the people I blocked (not those who blocked me), each with 解除拉黑", async () => {
+    await openApp({ sync: baseSync, social: social() });
+    await goSettings();
+    await click(settingsRow("拉黑"));
+    const names = [...inMain().getAllByRole("listitem")].map((li) => li.querySelector("strong").textContent);
+    expect(names.sort()).toEqual(["小安", "朵拉"].sort());
+    expect(inMain().getAllByRole("button", { name: "解除拉黑" })).toHaveLength(2);
+    expect(mainText()).not.toContain("阿波");
+  });
+
+  it("asks first; cancel changes nothing; confirming lifts only that block", async () => {
+    let current = social();
+    const unblockPrincipal = vi.fn(async (id) => {
+      current = { ...current, blocked: current.blocked.filter((p) => p.id !== id) };
+      return { ok: true };
+    });
+    const app = await openApp({ sync: baseSync, social: social(), api: { unblockPrincipal } });
+    app.env.social = current;
+    await goSettings();
+    await click(settingsRow("拉黑"));
+    const row = inMain().getByText("朵拉", { selector: "strong" }).closest("li");
+    await click(within(row).getByRole("button", { name: "解除拉黑" }));
+    expect(dialog().textContent).toContain("解除对朵拉的拉黑");
+    await click(dialogButton("取消"));
+    expect(unblockPrincipal).not.toHaveBeenCalled();
+    await click(within(row).getByRole("button", { name: "解除拉黑" }));
+    app.env.social = { ...emptySocial(), blocked: [PEOPLE[ANN]] };
+    await click(dialogButton("解除我的拉黑"));
+    expect(unblockPrincipal).toHaveBeenCalledWith(DORA);
+    expect(dialog()).toBeNull();
+    expect([...inMain().getAllByRole("listitem")].map((li) => li.querySelector("strong").textContent)).toEqual(["小安"]);
+  });
+
+  it("says so when nobody is blocked", async () => {
+    await openApp({ sync: baseSync });
+    await goSettings();
+    await click(settingsRow("拉黑"));
+    expect(mainText()).toContain("你没有拉黑任何人。");
+  });
+});
+
+describe("the Agent entry", () => {
+  it("is an empty state in the list and in the main column", async () => {
+    await openApp({ sync: baseSync });
+    fireEvent.click(rail(/^Agent/));
+    await flush();
+    expect(document.querySelector(".list-col .rows-empty").textContent).toBe("尚未开放");
+    expect(document.querySelector(".main-col .empty-main").textContent).toBe("尚未开放");
+    expect(document.querySelectorAll(".list-col .row")).toHaveLength(0);
+  });
+});
+
+describe("empty states", () => {
+  it("a list without any conversation says how to start one", async () => {
+    await openApp({ sync: () => syncOf([]) });
+    expect(document.querySelector(".list-col .rows-empty").textContent).toBe("还没有会话，点右上角的“+”添加好友或发起群聊");
+  });
+});
+
+describe("carried fixes", () => {
+  it("the add-friend dialog opens with the account-name field focused", async () => {
+    await openApp({ sync: baseSync });
+    await goContacts();
+    await click(button("添加好友"));
+    expect(document.activeElement).toBe(within(dialog()).getByLabelText("对方的账号名"));
+  });
+
+  it("the add-member dialog opens with the search field focused", async () => {
+    const sync = () => syncOf([group(G1, { lastSeq: 1, readSeq: 1 })], [wire(G1, 1, ANN, "大家好")]);
+    await openApp({ sync, social: { ...emptySocial(), friends: [PEOPLE[ANN], PEOPLE[BO], PEOPLE[DORA]] } });
+    await click(screen.getByText("周末小组", { selector: ".list-col .row-name" }));
+    fireEvent.click(button("会话资料"));
+    await flush();
+    await click(within(document.querySelector(".side-col")).getByRole("button", { name: "打开群资料" }));
+    await click(button("添加成员"));
+    expect(document.activeElement).toBe(within(dialog()).getByLabelText("搜索好友"));
+  });
+
+  it("lifting my block says what has to be true for sending to work again", async () => {
+    const sync = () => syncOf([direct(D1, ANN, { lastSeq: 1, readSeq: 1, canSend: { ok: false, reason: "blocked" } })], [wire(D1, 1, ANN, "早")]);
+    await openApp({ sync, social: { ...emptySocial(), blocked: [PEOPLE[ANN]] } });
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    fireEvent.click(button("会话资料"));
+    await flush();
+    await click(within(document.querySelector(".side-col")).getByRole("button", { name: "解除我的拉黑" }));
+    expect(dialog().textContent).toContain("否则需要重新成为好友，或等对方解除拉黑。");
+    expect(dialog().textContent).not.toContain("仍需对方解除");
+  });
+});
+
+describe("the application chunk", () => {
+  it("is imported lazily: nothing in App.jsx loads the pages up front", () => {
+    const app = source("src/App.jsx");
+    expect(app).not.toMatch(/from "\.\/(AppShell|pages\/)/);
+    expect(app).toContain('import("./AppShell.jsx")');
+  });
+
+  it("index.html carries no inline script (the page runs under script-src 'self')", () => {
+    const html = source("index.html");
+    for (const tag of html.match(/<script[^>]*>/g) ?? []) expect(tag).toContain("src=");
+    expect(html).not.toMatch(/<script[^>]*>\s*[^<\s]/);
+  });
+});

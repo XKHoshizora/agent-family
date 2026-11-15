@@ -22,6 +22,8 @@ export function emptyState(me = null) {
       opening: null,
       /** A message to scroll to and highlight once it is shown: {convId, seq, n}. */
       focus: null,
+      /** The settings page shown: "profile" or "blocks". */
+      settingsPage: "profile",
       agentId: null,
       agentView: "detail",
       agentTab: "profile",

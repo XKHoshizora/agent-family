@@ -418,7 +418,7 @@ describe("leaving", () => {
     await openApp({ sync, social: social() });
     await openProfile();
     await leaveFlow();
-    expect(dialog().textContent).toContain("群主将自动转交给最早加入的成员");
+    expect(dialog().textContent).toContain("退出后，最早加入的成员会成为新的创建者。");
     expect(dialog().textContent).not.toContain("小安会成为");
   });
 

@@ -28,4 +28,5 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
   Nothing talks to the service until `start()`.
 - `src/auth/` - account screens (`screens.jsx`), the session gate (`AuthRoot.jsx`: one `GET /api/me` at start, runs the data layer while
   signed in, stops it on sign-out / 401 / close 4001), the path router (`router.js`), field rules, error-code texts.
+- `src/App.jsx` - the sign-in gate and the lazy application (`src/AppShell.jsx`: rail, lists, chat; its own chunk, so the account screens never download it).
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.

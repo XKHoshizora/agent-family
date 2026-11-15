@@ -33,7 +33,7 @@ export function BlockModal({ target, onClose }) {
       {blocked ? (
         <>
           <p>只解除你自己的拉黑。</p>
-          <Notice tone="info">如果你们仍是好友，并且对方没有拉黑你，私聊就可以继续发送；否则仍需对方解除。</Notice>
+          <Notice tone="info">如果你们仍是好友，并且对方没有拉黑你，私聊就可以继续发送；否则需要重新成为好友，或等对方解除拉黑。</Notice>
         </>
       ) : (
         <>

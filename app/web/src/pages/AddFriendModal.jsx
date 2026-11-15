@@ -48,10 +48,10 @@ export function AddFriendModal({ onClose }) {
 
   const reason = found ? whyNot(state, found) : "";
   return (
-    <Modal title="添加好友" onClose={onClose} footer={<Btn data-autofocus onClick={onClose}>完成</Btn>}>
+    <Modal title="添加好友" onClose={onClose} footer={<Btn onClick={onClose}>完成</Btn>}>
       <form onSubmit={search}>
         <Field label="对方的账号名" error={error} hint="输入完整的账号名（不是昵称），例如 ann_li。">
-          <input value={text} onChange={(e) => setText(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck="false" />
+          <input value={text} onChange={(e) => setText(e.target.value)} autoComplete="off" autoCapitalize="none" spellCheck="false" data-autofocus />
         </Field>
         <Btn type="submit" variant="primary" disabled={busy !== null || !text.trim()}>
           {busy === "lookup" ? "查找中…" : "查找"}

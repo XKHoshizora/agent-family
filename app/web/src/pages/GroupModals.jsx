@@ -16,7 +16,7 @@ export const MIN_GROUP_FRIENDS = 2;
 function SearchField({ value, onChange }) {
   return (
     <Field label="搜索好友">
-      <input type="search" value={value} onChange={(e) => onChange(e.target.value)} placeholder="名字或账号" autoComplete="off" />
+      <input type="search" value={value} onChange={(e) => onChange(e.target.value)} placeholder="名字或账号" autoComplete="off" data-autofocus />
     </Field>
   );
 }
@@ -116,7 +116,7 @@ export function AddMemberModal({ conv, onClose }) {
     }
   };
   return (
-    <Modal title="添加成员" onClose={onClose} footer={<Btn data-autofocus onClick={onClose}>完成</Btn>}>
+    <Modal title="添加成员" onClose={onClose} footer={<Btn onClick={onClose}>完成</Btn>}>
       <SearchField value={query} onChange={setQuery} />
       {offered.length === 0 && <p className="muted">没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。</p>}
       {offered.length > 0 && shown.length === 0 && <p className="muted">没有找到匹配的好友。</p>}
@@ -204,7 +204,7 @@ export function LeaveModal({ conv, onLeave, onClose }) {
       {creator && successor !== null && (
         <Notice tone="info">
           你是这个群的创建者。
-          {successor ? `退出后，最早加入的成员${nameOf(state, successor)}会成为新的创建者。` : "群主将自动转交给最早加入的成员"}
+          {successor ? `退出后，最早加入的成员${nameOf(state, successor)}会成为新的创建者。` : "退出后，最早加入的成员会成为新的创建者。"}
         </Notice>
       )}
     </Modal>

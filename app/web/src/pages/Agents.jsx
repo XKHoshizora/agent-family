@@ -6,7 +6,9 @@ export function AgentsList() {
   return (
     <>
       <ListHeader title="Agent" />
-      <p className="list-note">尚未开放</p>
+      <ul className="rows">
+        <li className="rows-empty">尚未开放</li>
+      </ul>
     </>
   );
 }

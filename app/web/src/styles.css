@@ -432,6 +432,8 @@ mark { background: rgba(255, 214, 102, 0.65); color: inherit; border-radius: 3px
 .order-list li { display: flex; align-items: center; gap: 10px; padding: 5px 0; }
 .order-list li span { flex: 1; }
 
+.avatar-editor { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.avatar-editor > p { flex-basis: 100%; margin: 0; }
 .settings-me { display: flex; align-items: center; gap: 14px; padding: 4px 20px 14px; }
 
 /* ───────── side panels */
