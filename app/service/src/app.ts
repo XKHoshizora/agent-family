@@ -18,7 +18,10 @@ import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
 import { createConversationEvents, type ConversationEvents } from "./conversations/events.ts";
 import { registerConversationRoutes } from "./conversations/routes.ts";
+import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
+import type { Hub } from "./sync/hub.ts";
+import { registerSync } from "./sync/routes.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -30,12 +33,16 @@ export interface Deps {
   social: SocialEvents;
   /** Per-app registry of "messages stored" / "membership changed" listeners; fired after commit. */
   conversations: ConversationEvents;
+  /** Per-app registry of "a direct-chat read marker moved" listeners; fired after the update. */
+  reads: ReadEvents;
 }
 
 declare module "fastify" {
   interface FastifyInstance {
     deps: Deps;
     auth: Auth;
+    /** The in-process socket registry and push delivery (src/sync/hub.ts). */
+    realtime: Hub;
   }
 }
 
@@ -48,6 +55,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     blobs: overrides.blobs ?? createBlobStore(config),
     social: overrides.social ?? createSocialEvents(),
     conversations: overrides.conversations ?? createConversationEvents(),
+    reads: overrides.reads ?? createReadEvents(),
   };
 
   const app = Fastify({
@@ -70,6 +78,9 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   });
   const perMinute = { max: Math.max(1, Math.round(10 * config.rateLimitScale)), timeWindow: "1 minute" };
 
+  // First among the routes: it registers the WebSocket plugin, whose route wrapper must see every route
+  // (an upgrade request to any other route is then refused instead of answered over the raw socket).
+  await registerSync(app);
   registerRegistrationRoutes(app, perMinute);
   registerAuthRoutes(app, config.rateLimitScale);
   registerSessionRoutes(app);

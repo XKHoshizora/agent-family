@@ -1,3 +1,4 @@
+import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { VISIBLE_JOIN, visibleJoin } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
@@ -154,18 +155,73 @@ export async function getMessage(q: Queryable, readerId: string, conversationId:
   return wire ?? null;
 }
 
+export interface ReadResult {
+  readSeq: number;
+  /** The marker before this call; equal to `readSeq` when nothing moved. */
+  previous: number;
+  type: "direct" | "group";
+}
+
 /**
  * Moves the reader's read marker to `seq`, clamped to [current read_seq, conversations.seq]: never
  * backwards, never beyond the last message. It is only a number and proves nothing about visibility.
- * Null when not a current member.
+ * Null when not a current member. The row is locked first, so `previous` is exact under concurrency.
  */
-export async function markRead(q: Queryable, readerId: string, conversationId: string, seq: number): Promise<number | null> {
-  const { rows } = await q.query<{ read_seq: string }>(
-    `update memberships ms set read_seq = greatest(ms.read_seq, least($3::bigint, c.seq))
-       from conversations c
-      where c.id = ms.conversation_id and ms.conversation_id = $1 and ms.principal_id = $2 and ms.left_seq is null
-      returning ms.read_seq`,
+export async function markRead(q: Queryable, readerId: string, conversationId: string, seq: number): Promise<ReadResult | null> {
+  const { rows } = await q.query<{ read_seq: string; previous: string; type: "direct" | "group" }>(
+    `with prev as (
+       select ms.id, ms.read_seq from memberships ms
+        where ms.conversation_id = $1 and ms.principal_id = $2 and ms.left_seq is null
+        for update
+     )
+     update memberships ms set read_seq = greatest(prev.read_seq, least($3::bigint, c.seq))
+       from prev, conversations c
+      where ms.id = prev.id and c.id = ms.conversation_id
+      returning ms.read_seq, prev.read_seq as previous, c.type`,
     [conversationId, readerId, seq],
   );
-  return rows[0] ? Number(rows[0].read_seq) : null;
+  const r = rows[0];
+  return r ? { readSeq: Number(r.read_seq), previous: Number(r.previous), type: r.type } : null;
+}
+
+// --- read-marker events ---------------------------------------------------------------------
+
+/** A principal's read marker in a direct conversation moved forward to `seq`. */
+export interface ReadMarker {
+  conversationId: string;
+  principalId: string;
+  seq: number;
+}
+
+export type ReadListener = (marker: ReadMarker) => void | Promise<void>;
+
+/** Per-app registry (on `Deps`) of read-marker listeners, in the style of `ConversationEvents`. */
+export interface ReadEvents {
+  onRead(fn: ReadListener): () => void;
+  /** Call only after the marker was stored, for direct conversations only. Never throws; failures are logged. */
+  publish(marker: ReadMarker, log: Pick<FastifyBaseLogger, "error">): void;
+}
+
+export function createReadEvents(): ReadEvents {
+  const listeners = new Set<ReadListener>();
+  return {
+    onRead(fn) {
+      listeners.add(fn);
+      return () => void listeners.delete(fn);
+    },
+    publish(marker, log) {
+      for (const fn of [...listeners]) {
+        try {
+          Promise.resolve(fn({ ...marker })).catch((err) => log.error({ err }, "read listener failed"));
+        } catch (err) {
+          log.error({ err }, "read listener failed");
+        }
+      }
+    },
+  };
+}
+
+/** Subscribe to direct-chat read-marker moves. Returns unsubscribe. */
+export function onRead(app: FastifyInstance, fn: ReadListener): () => void {
+  return app.deps.reads.onRead(fn);
 }

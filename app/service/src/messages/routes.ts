@@ -22,7 +22,7 @@ const sendBody = z
   .refine((b) => b.text !== undefined || b.attachmentId !== undefined, "text or attachmentId is required");
 
 export function registerMessageRoutes(app: FastifyInstance): void {
-  const { db, config, conversations } = app.deps;
+  const { db, config, conversations, reads } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const actors = new WeakMap<FastifyRequest, string>();
@@ -102,9 +102,13 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
-      const readSeq = await markRead(db, me.id, req.params.id, req.body.seq);
-      if (readSeq === null) throw notFound();
-      return { readSeq };
+      const marked = await markRead(db, me.id, req.params.id, req.body.seq);
+      if (!marked) throw notFound();
+      // Only a direct chat shows the other side's read position, and only when it actually moved.
+      if (marked.type === "direct" && marked.readSeq > marked.previous) {
+        reads.publish({ conversationId: req.params.id, principalId: me.id, seq: marked.readSeq }, req.log);
+      }
+      return { readSeq: marked.readSeq };
     },
   );
 }

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { fromNodeHeaders } from "better-auth/node";
 import { z } from "zod";
+import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
 
 export interface Principal {
@@ -32,6 +33,19 @@ export async function requirePrincipal(req: FastifyRequest): Promise<Principal> 
     email: session.user.email,
     sessionId: session.session.id,
   };
+}
+
+/**
+ * Which of `sessionIds` still exist and have not expired. Sign-out and password reset delete the row
+ * (and announce it through `onSessionEnded`); expiry only shows here, so long-lived connections ask.
+ */
+export async function liveSessions(q: Queryable, sessionIds: string[]): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  const { rows } = await q.query<{ id: string }>(
+    `select id from "session" where id = any($1::text[]) and "expiresAt" > now()`,
+    [sessionIds],
+  );
+  return new Set(rows.map((r) => r.id));
 }
 
 export function registerSessionRoutes(app: FastifyInstance): void {
