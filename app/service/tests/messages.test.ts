@@ -69,7 +69,7 @@ describe("sending and reading", () => {
         [2, b.id, "hi alice"],
       ]);
     }
-    expect((await one(b, dm, 1)).json).toEqual({ message: s1.json.message });
+    expect((await one(b, dm, 1)).json).toMatchObject({ message: s1.json.message });
     expect(await one(b, dm, 3)).toMatchObject({ status: 404, json: NOT_FOUND });
   });
 
@@ -188,8 +188,8 @@ describe("visibility", () => {
     expect(h.json.messages[0].system).toMatchObject({ event: "member_joined", actorId: a.id, principalId: d.id });
     expect(h.json.nextBefore).toBeNull();
     expect(JSON.stringify(h.json)).not.toContain("before ");
-    expect((await history(d, g, "?before=5")).json).toEqual({ messages: [], nextBefore: null });
-    expect((await history(d, g, "?before=4&limit=100")).json).toEqual({ messages: [], nextBefore: null });
+    expect((await history(d, g, "?before=5")).json).toEqual({ messages: [], nextBefore: null, principals: {} });
+    expect((await history(d, g, "?before=4&limit=100")).json).toEqual({ messages: [], nextBefore: null, principals: {} });
     expect((await history(d, g, "?limit=1")).json.nextBefore).toBeNull(); // no hint that older messages exist
     for (const seq of [1, 2, 3, 4]) expect(await one(d, g, seq)).toMatchObject({ status: 404, json: NOT_FOUND });
     expect(await say(d, g, "re", { replyToSeq: 2 })).toMatchObject({ status: 400, json: INVALID });

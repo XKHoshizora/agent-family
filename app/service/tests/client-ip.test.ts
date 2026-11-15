@@ -68,7 +68,7 @@ describe("a configured CLIENT_IP_HEADER the proxy does not deliver", () => {
       await register(built, "10.0.0.1", { "x-real-ip": "203.0.113.1" });
       expect(warnings()).toEqual([]); // a valid value: nothing to say
 
-      for (const headers of [{}, { "x-real-ip": "" }, { "x-real-ip": "nonsense" }, {}]) await register(built, "10.0.0.2", headers);
+      for (const headers of [{}, { "x-real-ip": "" }, { "x-real-ip": "nonsense" }, {}] as Array<Record<string, string>>) await register(built, "10.0.0.2", headers);
       expect(warnings()).toHaveLength(1);
       expect(warnings()[0]!.msg).toContain("x-real-ip");
       expect(lines.join("")).not.toContain("nonsense");

@@ -2,6 +2,7 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { VISIBLE_JOIN, visibleJoin } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
+import { principalsOf, type SyncPrincipal } from "./principals.ts";
 
 export const QUOTE_MAX_CHARS = 200;
 
@@ -118,6 +119,8 @@ export interface MessagePage {
   messages: WireMessage[];
   /** Pass as `before` for the next older page; null when no older visible message exists. */
   nextBefore: number | null;
+  /** Everyone these messages name (senders, visible quotes, notices), by id. */
+  principals: Record<string, SyncPrincipal>;
 }
 
 /**
@@ -146,9 +149,11 @@ export async function listMessages(
   if (rows.length === 0) return null; // not a current member
   const found = rows.filter((r): r is MessageRow => r.id !== null);
   const page = found.slice(0, limit).reverse().map(toStored);
+  const messages = await toWireFor(q, readerId, page);
   return {
-    messages: await toWireFor(q, readerId, page),
+    messages,
     nextBefore: found.length > limit ? page[0]!.seq : null,
+    principals: await principalsOf(q, messages),
   };
 }
 

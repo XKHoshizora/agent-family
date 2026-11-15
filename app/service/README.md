@@ -529,14 +529,16 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 *Session: required.* History, a page at a time.
 
 - Query: `before` (optional positive integer: only seqs below it), `limit` (1–100, default 50).
-- 200 `{"messages": WireMessage[], "nextBefore": number | null}`: up to `limit` messages you can see, the
-  newest page first, each page ascending by seq; pass `nextBefore` as `before` for the next older page
-  (`null`: nothing older you can see).
+- 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}`: up to `limit` messages you
+  can see, the newest page first, each page ascending by seq; pass `nextBefore` as `before` for the next
+  older page (`null`: nothing older you can see). `principals` names everyone these messages name — senders
+  (also members who have since left), a visible quote's sender, the people in system notices — as
+  `/api/sync`'s `principals` entries, by id; nobody else (see Client contract, Principals of a read).
 - 404 `not_found` unless you are a current member.
 
 #### `GET /api/conversations/:id/messages/:seq`
 
-*Session: required.* → 200 `{"message": WireMessage}`; 404 `not_found` when you cannot see it (from before
+*Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
 you joined, not a member, no such seq — identical).
 
 #### `POST /api/conversations/:id/read`
@@ -556,14 +558,14 @@ The rules (matching, order, limits, timing) are under Search below.
 #### `GET /api/conversations/:id/search`
 
 *Session: required.* Query: `q` (1–100 characters, trimmed, one line), `before` (optional positive integer),
-`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null}`, newest first;
-404 `not_found` unless you are a current member; 429 / 503 `busy` as under Search.
+`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}`,
+newest first (`principals` as under message history); 404 `not_found` unless you are a current member; 429 / 503 `busy` as under Search.
 
 #### `GET /api/search`
 
 *Session: required.* Query: `q`, `limit` as above, `before` (optional: the `nextBefore` cursor of the previous
-page, opaque; anything else is 400). → 200 `{"messages": WireMessage[], "nextBefore": string | null}`: hits in
-every conversation you are currently in, newest first; 429 / 503 `busy` as under Search.
+page, opaque; anything else is 400). → 200 `{"messages": WireMessage[], "nextBefore": string | null,
+"principals": {…}}` (as above): hits in every conversation you are currently in, newest first; 429 / 503 `busy` as under Search.
 
 ### Attachments
 
@@ -727,6 +729,14 @@ quote's sender, a system notice's participants) — including people who have si
 through messages you can see. After `/api/sync` your position for each conversation is its `lastSeq`.
 Older history: `GET /api/conversations/:id/messages?before=`.
 
+**Principals of a read.** A message can be sent by someone your client never saw (a member who left before
+your first sync). So `GET /api/conversations/:id/messages`, `GET /api/conversations/:id/messages/:seq`
+and both search routes add `"principals": { "<id>": { "id", "handle", "displayName", "kind" } }`: the same
+entries as `/api/sync`'s `principals`, keyed by id, for everyone the returned messages name (sender, a
+visible quote's sender, a system notice's participants). It is computed from the messages as rendered for
+you, so a message you cannot see, or a quote shown as `{"visible": false}`, names nobody. An empty page has
+`{}`. Merge it into the principals you hold.
+
 **One conversation.** `GET /api/conversations/:id` answers exactly the element of `/api/sync`'s
 `conversations` for that id (same fields, same values at that moment), or 404 `not_found` when you are not a
 current member — the same answer as for an id that does not exist. Fetch it on a `conversation` push instead
@@ -825,10 +835,10 @@ rule: an upload interrupted by a crash can leave an incomplete multipart upload 
 
 ## Search (`src/messages/search.ts`)
 
-`GET /api/conversations/:id/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": number | null}`:
+`GET /api/conversations/:id/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": number | null, "principals": {…}}`:
 hits in one conversation you are currently in, newest first; pass `nextBefore` as `before` for the next
 page. Any conversation you are not in now is 404 `not_found`.
-`GET /api/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": string | null}`: hits in
+`GET /api/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": string | null, "principals": {…}}`: hits in
 every conversation you are currently in; `before` is the opaque cursor of the previous page (anything else
 is 400). Each hit carries `conversationId` and `seq`, the place to jump to.
 

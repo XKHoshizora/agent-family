@@ -347,7 +347,7 @@ describe("global search", () => {
     expect(texts(await global(d, "needle"))).toEqual(["needle never after"]);
     // Someone in none of the conversations gets an empty list, not an error.
     const [outsider] = await people("zed");
-    expect(await global(outsider, "needle")).toEqual({ status: 200, json: { messages: [], nextBefore: null } });
+    expect(await global(outsider, "needle")).toEqual({ status: 200, json: { messages: [], nextBefore: null, principals: {} } });
     // A term that only exists where I am not: empty list.
     expect(await global(c, "needle never")).toMatchObject({ status: 200, json: { messages: [], nextBefore: null } });
   });

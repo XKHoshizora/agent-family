@@ -8,6 +8,7 @@ import type { Tx } from "../db.ts";
 import { requirePrincipal } from "../session.ts";
 import { withSlot } from "../slots.ts";
 import { wireMessageSchema } from "./model.ts";
+import { principalMapSchema, principalsOf } from "./principals.ts";
 import { getMessage, listMessages, markRead, toWireFor } from "./read.ts";
 import { decodeSearchCursor, inSearchBudget, searchAll, searchConversation } from "./search.ts";
 import { sendMessage } from "./send.ts";
@@ -70,7 +71,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       schema: {
         params: idParams,
         querystring: z.object({ before: positiveIntString().optional(), limit: positiveIntString(100).optional() }),
-        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.number().nullable() }) },
+        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.number().nullable(), principals: principalMapSchema }) },
       },
     },
     async (req) => {
@@ -88,14 +89,14 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       schema: {
         params: z.object({ id: uuidParam, seq: positiveIntString() }),
         querystring: empty,
-        response: { 200: z.object({ message: wireMessageSchema }) },
+        response: { 200: z.object({ message: wireMessageSchema, principals: principalMapSchema }) },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       const message = await getMessage(db, me.id, req.params.id, req.params.seq);
       if (!message) throw notFound();
-      return { message };
+      return { message, principals: await principalsOf(db, [message]) };
     },
   );
 
@@ -120,7 +121,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       schema: {
         params: idParams,
         querystring: z.object({ q: searchTerm, before: positiveIntString().optional(), limit: searchLimit.optional() }),
-        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.number().nullable() }) },
+        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.number().nullable(), principals: principalMapSchema }) },
       },
     },
     async (req) => {
@@ -138,7 +139,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       schema: {
         params: empty,
         querystring: z.object({ q: searchTerm, before: searchCursor.optional(), limit: searchLimit.optional() }),
-        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.string().nullable() }) },
+        response: { 200: z.object({ messages: z.array(wireMessageSchema), nextBefore: z.string().nullable(), principals: principalMapSchema }) },
       },
     },
     async (req) => {

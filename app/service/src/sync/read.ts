@@ -1,6 +1,7 @@
 import { VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
+import { mentionedIn, readPrincipals, type SyncPrincipal } from "../messages/principals.ts";
 import { toWireFor } from "../messages/read.ts";
 import { canDirectSendMany, type DirectRefusal } from "../social/relations.ts";
 
@@ -36,12 +37,7 @@ export interface SyncConversation {
   peerReadSeq?: number;
 }
 
-export interface SyncPrincipal {
-  id: string;
-  handle: string;
-  displayName: string;
-  kind: "human" | "agent";
-}
+export type { SyncPrincipal };
 
 export interface SyncView {
   conversations: SyncConversation[];
@@ -69,19 +65,6 @@ function onSnapshot<T>(db: Db, fn: (t: Tx) => Promise<T>): Promise<T> {
     await t.query("set transaction isolation level repeatable read, read only");
     return fn(t);
   });
-}
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-/** Principal ids a rendered message names: its sender, a visible quote's sender, a notice's participants. */
-function mentionedIn(m: WireMessage): string[] {
-  const ids: unknown[] = [m.senderId];
-  if (m.replyTo?.visible) ids.push(m.replyTo.senderId);
-  if (m.system) {
-    const { actorId, principalId, newCreatorId, memberIds } = m.system as Record<string, unknown>;
-    ids.push(actorId, principalId, newCreatorId, ...(Array.isArray(memberIds) ? memberIds : []));
-  }
-  return ids.filter((id): id is string => typeof id === "string" && UUID.test(id)).map((id) => id.toLowerCase());
 }
 
 /**
@@ -206,14 +189,11 @@ export async function syncView(db: Db, me: string): Promise<SyncView> {
     const mentioned = new Set<string>([me.toLowerCase()]);
     for (const c of out) for (const m of c.members) mentioned.add(m.id);
     for (const m of messages) for (const id of mentionedIn(m)) mentioned.add(id);
-    const principals = await t.query<{ id: string; handle: string; display_name: string; kind: "human" | "agent" }>(
-      "select id, handle::text as handle, display_name, kind from principals where id = any($1::uuid[]) order by handle",
-      [[...mentioned]],
-    );
+    const principals = await readPrincipals(t, mentioned);
 
     return {
       conversations: out,
-      principals: principals.rows.map((p) => ({ id: p.id, handle: p.handle, displayName: p.display_name, kind: p.kind })),
+      principals,
       messages,
     };
   });

@@ -130,7 +130,7 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     // And none of them appears anywhere in /api/sync or a global search.
     const sync = (await api(app, eve, "GET", "/api/sync")).json;
     expect(JSON.stringify(sync)).not.toMatch(new RegExp([neverIn, left, removed, direct, closed].join("|")));
-    expect((await api(app, eve, "GET", "/api/search?q=secret")).json).toEqual({ messages: [], nextBefore: null });
+    expect((await api(app, eve, "GET", "/api/search?q=secret")).json).toEqual({ messages: [], nextBefore: null, principals: {} });
     // Nothing she sent got in anywhere (her own leave notices aside).
     const hers = await db.query("select count(*) n from messages where sender_id = $1 and kind <> 'system'", [eve.id]);
     expect(Number(hers.rows[0].n)).toBe(0);

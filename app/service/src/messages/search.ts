@@ -1,6 +1,7 @@
 import { VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Db, Queryable, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type WireMessage } from "./model.ts";
+import { principalsOf, type SyncPrincipal } from "./principals.ts";
 import { toWireFor } from "./read.ts";
 
 /** Searches one principal may have running at once, both routes together; one more is 429 `rate_limited`. */
@@ -46,6 +47,8 @@ export interface ConversationSearchPage {
   messages: WireMessage[];
   /** Pass as `before` for the next older page; null when no older hit exists. */
   nextBefore: number | null;
+  /** Everyone the hits name (authors, visible quotes), by id. */
+  principals: Record<string, SyncPrincipal>;
 }
 
 /**
@@ -76,9 +79,11 @@ export async function searchConversation(
   if (rows.length === 0) return null; // not a current member
   const found = rows.filter((r): r is MessageRow => r.id !== null);
   const page = found.slice(0, limit).map(toStored);
+  const messages = await toWireFor(q, readerId, page);
   return {
-    messages: await toWireFor(q, readerId, page),
+    messages,
     nextBefore: found.length > limit ? page[page.length - 1]!.seq : null,
+    principals: await principalsOf(q, messages),
   };
 }
 
@@ -121,6 +126,8 @@ export interface GlobalSearchPage {
   messages: WireMessage[];
   /** Opaque; pass as `before`. Null when no older hit exists. */
   nextBefore: string | null;
+  /** Everyone the hits name (authors, visible quotes), by id. */
+  principals: Record<string, SyncPrincipal>;
 }
 
 /**
@@ -143,11 +150,13 @@ export async function searchAll(
   );
   const pageRows = rows.slice(0, limit);
   const last = pageRows[pageRows.length - 1];
+  const messages = await toWireFor(q, readerId, pageRows.map(toStored));
   return {
-    messages: await toWireFor(q, readerId, pageRows.map(toStored)),
+    messages,
     nextBefore:
       rows.length > limit && last
         ? encodeSearchCursor({ createdAt: last.created_at_text, conversationId: last.conversation_id, seq: Number(last.seq) })
         : null,
+    principals: await principalsOf(q, messages),
   };
 }
