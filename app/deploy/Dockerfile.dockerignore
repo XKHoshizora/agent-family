@@ -1,0 +1,29 @@
+# BuildKit reads this next to the Dockerfile in preference to the root .dockerignore (which belongs to the
+# old app). The build context is the repository root; the last matching line wins.
+
+# Only what the image builds from comes in: the web client and the service.
+*
+!app/web
+!app/service
+
+# ...and of those, never:
+**/node_modules
+**/.env
+**/.env.*
+**/*.log
+**/.git
+**/.claude
+**/.superpowers
+app/web/dist
+app/service/dist
+app/service/data
+app/service/tests
+app/web/tests
+
+# Named so they stay out even if the whitelist above changes.
+spikes
+prototype-v2
+.git
+.claude
+.superpowers
+data
