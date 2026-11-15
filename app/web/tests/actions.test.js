@@ -185,6 +185,44 @@ describe("reading and history", () => {
     expect(messages(G1).map((m) => m.seq)).toEqual([50, 51, 52]);
   });
 
+  it("a read and a send in flight when a reconnect finds me in a later stay are settled: the marker follows the server, the message is failed and can be retried", async () => {
+    const api = fakeApi();
+    const read = deferred();
+    const sent = deferred();
+    api.markRead.mockReturnValueOnce(read.promise).mockRejectedValueOnce(apiError(0, "network_error"));
+    api.sendMessage.mockReturnValueOnce(sent.promise);
+    const transport = fakeTransport({ sync: () => syncOf([group(G1, { lastSeq: 40, readSeq: 30, unread: 10 })], range(G1, 11, 40)) });
+    const { actions, timers, layer, messages, view } = await loaded({ api, transport });
+    actions.markRead(G1);
+    actions.sendText(G1, "hi");
+    expect(view().convs[G1]).toMatchObject({ readSeq: 40, unread: 0 });
+
+    // removed and added again while the socket was down
+    transport.socket.drop(1006);
+    transport.handlers.catchUp = () => ({ messages: [notice(G1, 60, "小安邀请Mei加入了群聊", { event: "member_joined", actorId: ANN, principalId: ME_ID }), wire(G1, 61, ANN)], gone: [], more: false });
+    transport.handlers.sync = () => syncOf([group(G1, { lastSeq: 61, readSeq: 59, unread: 1 })], [notice(G1, 60, "小安邀请Mei加入了群聊", { event: "member_joined", actorId: ANN, principalId: ME_ID }), wire(G1, 61, ANN)]);
+    timers.advance(timers.delays()[0]);
+    await settle();
+    expect(view().convs[G1]).toMatchObject({ readSeq: 59, unread: 1 });
+    expect(messages(G1).at(-1)).toMatchObject({ id: "tx:tx-1", status: "failed", clientTxn: "tx-1" });
+
+    // the earlier stay's answers arrive late and change nothing
+    read.resolve({ readSeq: 40 });
+    sent.resolve({ message: wire(G1, 41, ME_ID, "hi"), duplicate: false });
+    await settle();
+    expect(layer.getSnapshot().model.conversations[G1].readsInFlight).toBe(0);
+    expect(messages(G1).map((m) => m.id)).toEqual(["m60", "m61", "tx:tx-1"]);
+
+    // a read in the new stay that fails still goes back to the service's marker
+    await actions.markRead(G1);
+    expect(api.markRead).toHaveBeenLastCalledWith(G1, 61);
+    expect(view().convs[G1]).toMatchObject({ readSeq: 59, unread: 1 });
+
+    api.sendMessage.mockResolvedValueOnce({ message: wire(G1, 62, ME_ID, "hi"), duplicate: false });
+    await expect(actions.retrySend("tx-1")).resolves.toMatchObject({ ok: true, clientTxn: "tx-1" });
+    expect(api.sendMessage).toHaveBeenLastCalledWith(G1, { clientTxn: "tx-1", text: "hi" });
+  });
+
   it("stop() forgets an older-history request in flight: after start() it is asked again", async () => {
     const api = fakeApi();
     api.listMessages.mockReturnValue(new Promise(() => {}));

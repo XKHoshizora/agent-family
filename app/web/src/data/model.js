@@ -45,6 +45,23 @@ const bumpStays = (stays, ids) => {
   return next;
 };
 
+/**
+ * A new stay in a conversation that is kept (re-added while away). Answers to requests of the earlier stay
+ * are dropped (see `stayOf`), so nothing may wait for them: read requests stop counting and the marker
+ * falls back to the confirmed one; unsent messages still sending become failed, keeping their clientTxn.
+ * (Where the conversation itself is dropped — gone, sync, 404 — its counters and unsent messages go with it.)
+ */
+function startNewStay(state, conversationId) {
+  let next = { ...state, stays: bumpStays(state.stays, [conversationId]) };
+  const conv = next.conversations[conversationId];
+  if (conv) next = putConversation(next, backToConfirmedRead({ ...conv, readsInFlight: 0 }, next.messages[conversationId] ?? [], next.me?.id));
+  const sending = Object.values(next.pending).filter((p) => p.conversationId === conversationId && p.status === "sending");
+  if (sending.length === 0) return next;
+  const pending = { ...next.pending };
+  for (const p of sending) pending[p.clientTxn] = { ...p, status: "failed", error: { code: "stale", reason: null } };
+  return { ...next, pending };
+}
+
 // ───────── helpers
 
 const without = (obj, key) => {
@@ -213,8 +230,7 @@ export function applyCatchup(state, response) {
     if (!conv || wire.seq <= conv.position) continue;
     if (wire.seq > conv.position + 1) {
       const later = (next.messages[conv.id] ?? []).filter((m) => m.seq >= wire.seq);
-      next = putConversation(next, { ...conv, position: wire.seq - 1, hasOlder: false }, later);
-      next = { ...next, stays: bumpStays(next.stays, [conv.id]) };
+      next = startNewStay(putConversation(next, { ...conv, position: wire.seq - 1, hasOlder: false }, later), conv.id);
     }
     next = applyMessage(next, wire).state;
   }
@@ -350,11 +366,15 @@ export function markReadDone(state, conversationId, confirmed) {
   if (Number.isSafeInteger(confirmed)) {
     return showRead(state, conv, confirmed, { readsInFlight, serverReadSeq: Math.max(conv.serverReadSeq, confirmed) });
   }
-  if (readsInFlight > 0 || conv.readSeq <= conv.serverReadSeq) return putConversation(state, { ...conv, readsInFlight });
-  const list = state.messages[conversationId] ?? [];
-  const meId = state.me?.id;
+  if (readsInFlight > 0) return putConversation(state, { ...conv, readsInFlight });
+  return putConversation(state, backToConfirmedRead({ ...conv, readsInFlight }, state.messages[conversationId] ?? [], state.me?.id));
+}
+
+/** The shown read marker falls back to the one the service confirmed; what it covered counts as unread again. */
+function backToConfirmedRead(conv, list, meId) {
+  if (conv.readSeq <= conv.serverReadSeq) return conv;
   const unreadAgain = list.filter((m) => m.seq > conv.serverReadSeq && m.seq <= conv.readSeq && countsAsUnread(m, meId)).length;
-  return putConversation(state, { ...conv, readsInFlight, readSeq: conv.serverReadSeq, unread: conv.unread + unreadAgain });
+  return { ...conv, readSeq: conv.serverReadSeq, unread: conv.unread + unreadAgain };
 }
 
 /** The other side's read marker in a direct chat: max(current, seq). */

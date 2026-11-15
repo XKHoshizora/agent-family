@@ -121,6 +121,21 @@ describe("applyCatchup and applyGone", () => {
     expect(r.state.conversations[G1]).toMatchObject({ position: 10, hasOlder: false });
   });
 
+  it("a continuation that starts in a later stay settles the earlier stay's reads and sends", () => {
+    let s = M.markReading(loaded(), D1, 3);
+    s = M.markSending(s, { clientTxn: "t1", conversationId: D1, text: "hi", at: 0 });
+    s = M.markSending(s, { clientTxn: "t2", conversationId: D1, text: "ho", at: 1 });
+    s = M.markFailed(s, "t2", { code: "network_error", reason: null });
+    s = M.markSending(s, { clientTxn: "t3", conversationId: G1, text: "elsewhere", at: 2 });
+    s = M.applyCatchup(s, { messages: [notice(D1, 9, "小安邀请Mei加入了群聊", { event: "member_joined", actorId: ANN, principalId: ME_ID }), wire(D1, 10, ANN)], gone: [], more: false }).state;
+    expect(s.conversations[D1]).toMatchObject({ readsInFlight: 0, readSeq: 1, serverReadSeq: 1, position: 10 });
+    expect(s.pending.t1).toMatchObject({ clientTxn: "t1", status: "failed", error: { code: "stale" } });
+    expect(s.pending.t2).toMatchObject({ status: "failed", error: { code: "network_error" } });
+    expect(s.pending.t3.status).toBe("sending");
+    const synced = M.applySync(s, syncOf([direct(D1, ANN, { lastSeq: 10, readSeq: 1, unread: 1 })], [wire(D1, 10, ANN)]));
+    expect(synced.conversations[D1]).toMatchObject({ readSeq: 1, unread: 1, readsInFlight: 0 });
+  });
+
   it("a window shorter than SYNC_WINDOW is all that is visible: it replaces what is held", () => {
     let s = loaded();
     s = M.applySync(s, syncOf([group(G1, { lastSeq: 12 })], range(G1, 11, 12)));
