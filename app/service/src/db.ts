@@ -2,6 +2,9 @@ import pg from "pg";
 
 export type Queryable = Pick<pg.Pool, "query">;
 
+/** A client inside `db.tx(...)`: everything on it runs in the caller's transaction. */
+export type Tx = pg.PoolClient;
+
 export interface Db extends Queryable {
   readonly pool: pg.Pool;
   /** Runs `fn` in one transaction; commits on return, rolls back on throw. */

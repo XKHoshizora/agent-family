@@ -85,3 +85,12 @@ export async function signUp(app: FastifyInstance, name: string): Promise<Actor>
   if (me.status !== 200) throw new Error(`signUp: /api/me failed ${me.status}`);
   return { id: me.json.id, handle, email, password, cookie };
 }
+
+/** `a` sends `b` a friend request and `b` accepts it; returns the direct conversation's id. */
+export async function befriend(app: FastifyInstance, a: Actor, b: Actor): Promise<{ conversationId: string }> {
+  const sent = await api<{ id: string }>(app, a, "POST", "/api/friend-requests", { handle: b.handle });
+  if (sent.status !== 201) throw new Error(`befriend: request failed ${sent.status} ${JSON.stringify(sent.json)}`);
+  const accepted = await api<{ conversationId: string }>(app, b, "POST", `/api/friend-requests/${sent.json.id}/accept`);
+  if (accepted.status !== 200) throw new Error(`befriend: accept failed ${accepted.status} ${JSON.stringify(accepted.json)}`);
+  return { conversationId: accepted.json.conversationId };
+}

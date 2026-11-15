@@ -14,6 +14,8 @@ import { AppError, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
+import { createSocialEvents, type SocialEvents } from "./social/events.ts";
+import { registerSocialRoutes } from "./social/routes.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -21,6 +23,8 @@ export interface Deps {
   db: Db;
   /** Where avatars (and later attachments) live; tests inject a temp-dir store. */
   blobs: BlobStore;
+  /** Per-app registry of "friendships/blocks changed" listeners; fired after commit. */
+  social: SocialEvents;
 }
 
 declare module "fastify" {
@@ -37,6 +41,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     config,
     db: overrides.db ?? createDb(config.databaseUrl),
     blobs: overrides.blobs ?? createBlobStore(config),
+    social: overrides.social ?? createSocialEvents(),
   };
 
   const app = Fastify({
@@ -63,6 +68,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   registerAuthRoutes(app, config.rateLimitScale);
   registerSessionRoutes(app);
   registerPrincipalRoutes(app);
+  registerSocialRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 
