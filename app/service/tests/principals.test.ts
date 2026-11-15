@@ -1,13 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { fsBlobStore, newBlobKey } from "../src/attachments/blob.ts";
+import { abandonedAfterMs, sweepPendingBlobs } from "../src/attachments/pending.ts";
 import { api, signUp } from "./helpers/actors.ts";
+import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 
-const blobDir = mkdtempSync(path.join(tmpdir(), "af-blobs-"));
-afterAll(() => rmSync(blobDir, { recursive: true, force: true }));
+// An fs store on a temp dir that can be made to fail deletes (tests/helpers/blobs.ts).
+const { dir: blobDir, blobs, probe, files: blobFiles } = useProbeBlobs("af-blobs-");
 
 const PNG = Buffer.concat([
   Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"),
@@ -17,7 +16,10 @@ const PNG = Buffer.concat([
 const JPEG = Buffer.from("ffd8ffe000104a46494600010100000100010000ffd9", "hex");
 const HTML = Buffer.from("<html><script>alert(1)</script></html>");
 
-const { app } = useApp({ blobs: fsBlobStore(blobDir) });
+const { app } = useApp({ blobs });
+const held = async () => (await app.deps.db.query<{ key: string }>("select key from pending_blobs")).rows.map((r) => r.key);
+const avatarKey = async (id: string) =>
+  (await app.deps.db.query("select avatar_key from principals where id = $1", [id])).rows[0].avatar_key as string | null;
 
 function put(cookie: string | null, body: Buffer, contentType = "image/png") {
   return app.inject({
@@ -189,6 +191,35 @@ describe("avatars", () => {
     const got = await app.inject({ method: "GET", url: `/api/principals/${alice.id}/avatar`, headers: { cookie: alice.cookie } });
     expect(got.statusCode).toBe(200);
     expect(got.headers["content-type"]).toMatch(/^image\/svg\+xml/);
+  });
+});
+
+describe("avatar blobs nothing references", () => {
+  it("nothing stays held after uploads and replacements; a replaced avatar whose delete failed is held until the sweep removes it", async () => {
+    const alice = await signUp(app, "alice");
+    expect((await put(alice.cookie, PNG)).statusCode).toBe(200);
+    const first = await avatarKey(alice.id);
+    expect(await held()).toEqual([]);
+
+    probe.failNextDeletes = 1; // the old avatar's delete fails
+    expect((await put(alice.cookie, JPEG)).statusCode).toBe(200);
+    const second = await avatarKey(alice.id);
+    expect(await held()).toEqual([first]);
+    expect(blobFiles().sort()).toEqual([first, second].sort());
+
+    const sweep = () => sweepPendingBlobs({ db: app.deps.db, blobs }, abandonedAfterMs(app.deps.config));
+    expect(await sweep()).toBe(0); // within the upload deadline
+    await app.deps.db.query("update pending_blobs set created_at = now() - interval '1 day'");
+    expect(await sweep()).toBe(1);
+    expect(blobFiles()).toEqual([second]);
+    expect(await held()).toEqual([]);
+    const got = await app.inject({ method: "GET", url: `/api/principals/${alice.id}/avatar`, headers: { cookie: alice.cookie } });
+    expect(got.headers["content-type"]).toBe("image/jpeg");
+
+    // A refused upload (not an image) never wrote a blob; nothing is held.
+    expect((await put(alice.cookie, HTML)).statusCode).toBe(400);
+    expect(await held()).toEqual([]);
+    expect(blobFiles()).toEqual([second]);
   });
 });
 

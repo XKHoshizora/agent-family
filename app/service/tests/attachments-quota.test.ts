@@ -61,8 +61,9 @@ describe("storage quota per uploader", () => {
     const { conversationId: dm } = await befriend(app, a, b);
     const g = await group(app, a, "team", [b, c]);
 
-    const results = await Promise.all([upload(a, dm, 1500), upload(a, g, 1500), upload(a, dm, 1500), upload(a, g, 1500)]);
-    expect(results.map((r) => r.status).sort()).toEqual([201, 201, 413, 413]);
+    // Three at once (the most one principal may run): two fit, the third would exceed 4096.
+    const results = await Promise.all([upload(a, dm, 1500), upload(a, g, 1500), upload(a, dm, 1500)]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 201, 413]);
     expect(results.filter((r) => r.status === 413).every((r) => r.json.reason === "quota")).toBe(true);
     expect(await stored(a)).toBe(3000);
     expect(readdirSync(blobDir)).toHaveLength(2);

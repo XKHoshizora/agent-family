@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { uuidParam } from "../schemas.ts";
 import { isMissingBlob, newBlobKey } from "../attachments/blob.ts";
+import { discardBlob, holdBlob, releaseBlob } from "../attachments/pending.ts";
 import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
 import { requirePrincipal } from "../session.ts";
@@ -138,16 +139,24 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         const { mime } = await sniff(body.subarray(0, SNIFF_BYTES));
         if (!AVATAR_MIMES.has(mime)) throw new AppError(400, "invalid_request");
 
+        // Every blob that may exist unreferenced is held (attachments/pending.ts): the new one until the
+        // swap commits, the replaced one from the swap until it is deleted. The sweep removes leftovers.
         const key = newBlobKey("avatar");
-        await blobs.put(key, body);
+        await holdBlob(db, key);
         let previous: string | null;
         try {
-          previous = await db.tx((client) => swapAvatarKey(client, me.id, key));
+          await blobs.put(key, body);
+          previous = await db.tx(async (t) => {
+            const old = await swapAvatarKey(t, me.id, key);
+            await releaseBlob(t, key);
+            if (old) await holdBlob(t, old);
+            return old;
+          });
         } catch (err) {
-          await blobs.delete(key).catch(() => {});
+          await discardBlob({ db, blobs }, key, req.log);
           throw err;
         }
-        if (previous) await blobs.delete(previous).catch(() => {});
+        if (previous) await discardBlob({ db, blobs }, previous, req.log);
         return { ok: true as const };
       },
     );

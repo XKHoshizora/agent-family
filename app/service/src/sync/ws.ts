@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { AppError, notFound } from "../errors.ts";
+import { appOriginCheck } from "../origin.ts";
 import { CLOSE_CODES, type Hub } from "./hub.ts";
 import type { TicketOwner, TicketStore } from "./tickets.ts";
 
@@ -37,7 +38,7 @@ export async function registerWebSocketRoute(app: FastifyInstance, hub: Hub, tic
     },
   });
 
-  const appOrigin = new URL(app.deps.config.appOrigin).origin;
+  const fromApp = appOriginCheck(app.deps.config.appOrigin);
   const owners = new WeakMap<FastifyRequest, TicketOwner>();
 
   app.withTypeProvider<ZodTypeProvider>().route({
@@ -52,7 +53,7 @@ export async function registerWebSocketRoute(app: FastifyInstance, hub: Hub, tic
       // A plain GET is not an upgrade and must not spend the ticket.
       if (!req.ws) throw notFound();
       // Browsers always send Origin on a WebSocket handshake; anything else is cross-site or not a browser.
-      if (req.headers.origin !== appOrigin) throw new AppError(403, "forbidden");
+      if (!fromApp(req.headers.origin)) throw new AppError(403, "forbidden");
       const owner = tickets.redeem(req.query.ticket);
       if (!owner) throw new AppError(401, "unauthenticated");
       owners.set(req, owner);

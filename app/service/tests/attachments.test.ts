@@ -1,75 +1,29 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { pipeline, Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fsBlobStore, type BlobStore } from "../src/attachments/blob.ts";
-import { ATTACHMENT_MAX_BYTES, contentDisposition, sanitizeFileName } from "../src/attachments/routes.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { newBlobKey } from "../src/attachments/blob.ts";
+import { abandonedAfterMs, holdBlob, sweepPendingBlobs } from "../src/attachments/pending.ts";
+import { ATTACHMENT_MAX_BYTES, contentDisposition, MAX_CONCURRENT_UPLOADS, sanitizeFileName } from "../src/attachments/routes.ts";
 import { sweepOrphans } from "../src/attachments/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
+import { useProbeBlobs } from "./helpers/blobs.ts";
 import { testDatabaseUrl } from "./helpers/env.ts";
 import { useApp } from "./helpers/harness.ts";
-import { BOUNDARY, CLOSING, MULTIPART, multipart, openRequest, partHead, type Part } from "./helpers/multipart.ts";
+import { BOUNDARY, CLOSING, MULTIPART, multipart, destroyOpenRequests, openRequest, partHead, type Part } from "./helpers/multipart.ts";
 import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
-// --- a blob store on a temp dir that records how it is used -----------------------------------
-
-const blobDir = mkdtempSync(path.join(tmpdir(), "af-att-"));
-afterAll(() => rmSync(blobDir, { recursive: true, force: true }));
-
-interface PutRecord {
-  key: string;
-  /** Got a stream (not a Buffer). */
-  streamed: boolean;
-  chunks: number;
-  largestChunk: number;
-  bytes: number;
-}
-const probe = {
-  puts: [] as PutRecord[],
-  /** Called when the server starts writing a blob, i.e. it is reading an upload's file part. */
-  onPut: undefined as ((key: string) => void) | undefined,
-  failDelete: new Set<string>(),
-};
-const disk = fsBlobStore(blobDir);
-const blobs: BlobStore = {
-  put(key, body) {
-    const rec: PutRecord = { key, streamed: !Buffer.isBuffer(body), chunks: 0, largestChunk: 0, bytes: 0 };
-    probe.puts.push(rec);
-    probe.onPut?.(key);
-    if (Buffer.isBuffer(body)) return disk.put(key, body);
-    const spy = new Transform({
-      transform(chunk: Buffer, _enc, done) {
-        rec.chunks++;
-        rec.largestChunk = Math.max(rec.largestChunk, chunk.length);
-        rec.bytes += chunk.length;
-        done(null, chunk);
-      },
-    });
-    pipeline(body, spy, () => {});
-    return disk.put(key, spy);
-  },
-  get: (key) => disk.get(key),
-  async delete(key) {
-    if (probe.failDelete.has(key)) throw Object.assign(new Error("simulated blob store outage"), { code: "EIO" });
-    await disk.delete(key);
-  },
-};
-const blobFiles = () => readdirSync(blobDir);
-const putStarted = () => new Promise<void>((resolve) => (probe.onPut = () => resolve()));
+// A blob store on a temp dir that records how it is used (tests/helpers/blobs.ts).
+const { dir: blobDir, blobs, probe, files: blobFiles, putStarted } = useProbeBlobs("af-att-");
 
 const { app, db } = useApp({ blobs });
-afterEach(closeAllSockets);
-beforeEach(() => {
-  for (const f of readdirSync(blobDir)) rmSync(path.join(blobDir, f), { force: true });
-  probe.puts = [];
-  probe.onPut = undefined;
-  probe.failDelete.clear();
+afterEach(async () => {
+  destroyOpenRequests();
+  await closeAllSockets();
 });
 
 // --- fixtures and helpers ---------------------------------------------------------------------
@@ -126,6 +80,12 @@ const isMessage = (conv: string, seq?: number) => (e: Push) =>
   e.type === "message" && e.message.conversationId === conv && (seq === undefined || e.message.seq === seq);
 const backdate = (id: string, minutes: number) =>
   db.query("update attachments set created_at = now() - make_interval(mins => $2) where id = $1", [id, minutes]);
+/** Keys of blobs held as possibly unreferenced (`pending_blobs`). */
+const held = async () => (await db.query<{ key: string }>("select key from pending_blobs order by key")).rows.map((r) => r.key);
+const backdateHeld = (key: string, ms: number) =>
+  db.query("update pending_blobs set created_at = now() - $2::double precision * interval '1 millisecond' where key = $1", [key, ms]);
+const sweepHeld = (log?: { error: (details: { err: unknown; key: string }, msg: string) => void }) =>
+  sweepPendingBlobs({ db, blobs }, abandonedAfterMs(app.deps.config), log);
 
 // --- tests ------------------------------------------------------------------------------------
 
@@ -397,12 +357,20 @@ describe("who can download", () => {
     expect(blobFiles()).toEqual([]);
   });
 
-  it("the attachments:sweep CLI removes unsent uploads older than --older-than minutes (default 60)", async () => {
+  it("the attachments:sweep CLI removes unsent uploads older than --older-than minutes (default 60) and abandoned blobs", async () => {
     const [a, b] = await people("alice", "bob");
     const { conversationId: dm } = await befriend(app, a, b);
     const [old, recent] = [(await upload(a, dm, opaque(5))).json.id, (await upload(a, dm, opaque(5))).json.id];
     await backdate(old, 61);
     await backdate(recent, 30);
+    // Blobs no row came to reference: one past the upload deadline (15 min + 1 min grace), one not yet.
+    const [lost, inFlight] = [newBlobKey("att"), newBlobKey("att")];
+    for (const key of [lost, inFlight]) {
+      await holdBlob(db, key);
+      await blobs.put(key, Buffer.from("orphan"));
+    }
+    await backdateHeld(lost, 17 * 60_000);
+    await backdateHeld(inFlight, 10 * 60_000);
 
     const tsx = createRequire(import.meta.url).resolve("tsx/cli");
     const cwd = fileURLToPath(new URL("..", import.meta.url));
@@ -420,13 +388,100 @@ describe("who can download", () => {
     };
     const run = (...args: string[]) => promisify(execFile)(process.execPath, [tsx, "src/cli.ts", "attachments:sweep", ...args], { cwd, env });
 
-    expect((await run()).stdout).toContain("swept 1");
+    expect((await run()).stdout).toContain("swept 1 unsent attachment(s) older than 60 minutes and 1 abandoned blob(s)");
     expect((await db.query("select id from attachments")).rows).toEqual([{ id: recent }]);
-    expect(blobFiles()).toHaveLength(1);
-    expect((await run("--older-than", "20")).stdout).toContain("swept 1");
+    expect(await held()).toEqual([inFlight]);
+    expect(blobFiles()).toHaveLength(2);
+    expect((await run("--older-than", "20")).stdout).toContain("swept 1 unsent attachment(s) older than 20 minutes and 0 abandoned blob(s)");
     expect(await count("select count(*) n from attachments")).toBe(0);
-    expect(blobFiles()).toEqual([]);
+    expect(blobFiles()).toEqual([inFlight]);
   }, 30_000);
+});
+
+describe("blobs nothing references (pending_blobs)", () => {
+  it("a successful upload leaves nothing held; a refused upload whose blob delete failed stays held until the sweep removes it", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const ok = await upload(a, dm, opaque(10));
+    expect(ok.status).toBe(201);
+    await sendFile(a, dm, ok.json.id);
+    expect(await held()).toEqual([]);
+
+    // Refused after its bytes were stored (an extra part), and the store fails the delete once.
+    probe.failNextDeletes = 1;
+    const errors: unknown[] = [];
+    const refused = await uploadParts(a, dm, [
+      { name: "file", filename: "x.bin", type: "application/octet-stream", data: opaque(10) },
+      { name: "extra", data: "x" },
+    ]);
+    expect(refused.status).toBe(400);
+    const key = probe.puts.at(-1)!.key;
+    expect(await held()).toEqual([key]);
+    expect(blobFiles()).toContain(key);
+
+    expect(await sweepHeld()).toBe(0); // still within the upload deadline
+    expect(blobFiles()).toContain(key);
+    await backdateHeld(key, abandonedAfterMs(app.deps.config) + 1000);
+    probe.failDelete.add(key);
+    expect(await sweepHeld({ error: (d) => void errors.push(d) })).toBe(0); // fails again: stays held
+    expect(errors).toEqual([expect.objectContaining({ key })]);
+    expect(await held()).toEqual([key]);
+    probe.failDelete.clear();
+    expect(await sweepHeld()).toBe(1);
+    expect(await held()).toEqual([]);
+    expect(blobFiles()).not.toContain(key);
+    expect((await download(b, ok.json.id)).statusCode).toBe(200);
+  });
+
+  it("a crash between writing a blob and its row, or in the middle of writing it, is cleaned up by the sweep", async () => {
+    // What the route does before the row, then nothing (the process died).
+    const [whole, partial] = [newBlobKey("att"), newBlobKey("att")];
+    await holdBlob(db, whole);
+    await blobs.put(whole, opaque(100));
+    await holdBlob(db, partial);
+    writeFileSync(path.join(blobDir, `${partial}.part`), "half a file"); // a write cut short
+    expect(blobFiles().sort()).toEqual([whole, `${partial}.part`].sort());
+
+    expect(await sweepHeld()).toBe(0);
+    for (const key of [whole, partial]) await backdateHeld(key, abandonedAfterMs(app.deps.config) + 1000);
+    expect(await sweepHeld()).toBe(2);
+    expect(blobFiles()).toEqual([]);
+    expect(await held()).toEqual([]);
+  });
+
+  it("the sweep never deletes the blob of an inserted attachment or of an upload still within its deadline", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+
+    // An upload in progress: held, partly on disk.
+    const started = putStarted();
+    const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+    await open.write(partHead({ name: "file", filename: "slow.bin", type: "application/octet-stream" }));
+    await open.fill(256 * 1024);
+    await started;
+    await vi.waitFor(() => expect(blobFiles()).toHaveLength(1));
+    expect(await held()).toHaveLength(1);
+    expect(await sweepHeld()).toBe(0);
+    expect(blobFiles()).toHaveLength(1);
+    await open.write(CLOSING);
+    await open.end();
+    const res = await open.response;
+    expect(res.status).toBe(201);
+    const id = JSON.parse(res.body).id as string;
+    expect(await held()).toEqual([]); // released in the insert's transaction
+
+    // Even a stray record for a referenced blob (a bug) never costs the blob.
+    const key = (await db.query("select blob_key from attachments where id = $1", [id])).rows[0].blob_key as string;
+    await holdBlob(db, key);
+    await backdateHeld(key, abandonedAfterMs(app.deps.config) + 1000);
+    const errors: unknown[] = [];
+    expect(await sweepHeld({ error: (d) => void errors.push(d) })).toBe(0);
+    expect(errors).toEqual([expect.objectContaining({ key })]);
+    expect(await held()).toEqual([]);
+    expect(blobFiles()).toEqual([key]);
+    await sendFile(a, dm, id);
+    expect((await download(b, id)).statusCode).toBe(200);
+  });
 });
 
 describe("sending a file", () => {
@@ -617,6 +672,31 @@ describe("upload refusals", () => {
     const stored = 12 + 2 * 64 * 1024;
     expect(probe.puts.map((p) => p.bytes)).toEqual([stored, stored]);
     expect(await count("select count(*) n from attachments")).toBe(0);
+    expect(await held()).toEqual([]);
+  });
+
+  it(`at most ${MAX_CONCURRENT_UPLOADS} uploads per principal at once: one more is 429; another principal is unaffected`, async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const running = [];
+    for (let i = 0; i < MAX_CONCURRENT_UPLOADS; i++) {
+      const started = putStarted();
+      const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+      await open.write(partHead({ name: "file", filename: `slow${i}.bin`, type: "application/octet-stream" }));
+      await open.fill(64 * 1024);
+      await started;
+      running.push(open);
+    }
+    expect(await upload(a, dm, opaque(10))).toMatchObject({ status: 429, json: { error: "rate_limited" } });
+    expect((await upload(b, dm, opaque(10))).status).toBe(201);
+
+    for (const open of running) {
+      await open.write(CLOSING);
+      await open.end();
+    }
+    expect((await Promise.all(running.map((o) => o.response))).map((r) => r.status)).toEqual([201, 201, 201]);
+    expect((await upload(a, dm, opaque(10))).status).toBe(201); // the slots were given back
+    expect(await held()).toEqual([]);
   });
 
   it("a client that disconnects in the middle of an upload leaves no blob and no row", async () => {
@@ -629,7 +709,10 @@ describe("upload refusals", () => {
     await started;
     await vi.waitFor(() => expect(blobFiles()).toHaveLength(1)); // the partial file is on disk
     open.destroy();
-    await vi.waitFor(() => expect(blobFiles()).toEqual([]), { timeout: 5000 });
+    await vi.waitFor(async () => {
+      expect(blobFiles()).toEqual([]);
+      expect(await held()).toEqual([]);
+    }, { timeout: 5000 });
     expect(probe.puts).toHaveLength(1);
     expect(await count("select count(*) n from attachments")).toBe(0);
   });
@@ -658,6 +741,7 @@ describe("upload refusals", () => {
     expect(put!.bytes).toBeGreaterThan(ATTACHMENT_MAX_BYTES - MB);
     expect(blobFiles()).toEqual([]);
     expect(await count("select count(*) n from attachments")).toBe(0);
+    expect(await held()).toEqual([]);
   }, 30_000);
 
   it("exactly 50 MB is accepted", async () => {

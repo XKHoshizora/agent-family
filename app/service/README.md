@@ -33,7 +33,18 @@ npm run build     # type-check only (tsc --noEmit)
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
-`ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB).
+`ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
+`UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
+15 min in all), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle, default 2 min),
+`HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min) and `HTTP_KEEP_ALIVE_TIMEOUT_MS`
+(default 72 s). The server-wide ones must be longer than the upload deadlines (checked at start-up), so
+uploads are governed by their own deadlines; WebSockets are not subject to them.
+
+**Cross-site requests.** A `POST`, `PUT`, `PATCH` or `DELETE` under `/api` whose `Origin` header is present
+and is not exactly `APP_ORIGIN` is refused with 403 `{"error":"forbidden"}` before anything else runs
+(`src/app.ts`; the WebSocket upgrade uses the same comparison and also refuses a missing `Origin`).
+Requests without `Origin` (non-browser clients) pass. The session cookie is `HttpOnly`, `SameSite=Lax`, and
+`Secure` (with the `__Secure-` name prefix) when `APP_ORIGIN` is https.
 
 `buildApp(deps?: Partial<Deps>)` takes `{ config, db }`; anything omitted is built from the
 environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool on `TEST_DATABASE_URL`.
@@ -167,8 +178,10 @@ was stored — an upload that finishes after you were unfriended or removed is r
 server decides the type from the first bytes (the declared `Content-Type` and file name are ignored):
 `inline: true` only for PNG, JPEG, WebP and GIF. The name is for display only (NFC; path, control,
 bidi and zero-width characters removed; at most 120 characters; `file` when empty). Limits per
-principal: 50 MB per file (413 `too_large`, enforced while streaming), 60 uploads per hour (429
-`rate_limited`), 2 GiB stored in total, sent or not (413 `{"error": "too_large", "reason": "quota"}`).
+principal: 50 MB per file (413 `too_large`, enforced while streaming), 60 uploads per hour and 3 at a time
+(429 `rate_limited`), 2 GiB stored in total, sent or not (413 `{"error": "too_large", "reason": "quota"}`).
+A client that sends no body bytes for 45 s, or is still sending after 15 minutes, is disconnected and
+its partial upload deleted.
 
 **Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
 makes a `file` message (caption 0–8000 characters). The attachment must be your own upload in this
@@ -185,3 +198,12 @@ server's `Content-Type` (markup such as HTML or SVG is always `application/octet
 **Unsent uploads** are deleted by `npx tsx src/cli.ts attachments:sweep [--older-than <minutes>]`
 (default 60; run it from cron). Send an upload within that time. A blob that cannot be deleted keeps its
 row and is retried on the next sweep.
+
+**Blobs nothing references.** Every blob key (attachment or avatar) is recorded in `pending_blobs`, and
+committed, before its bytes are written; the record is deleted in the transaction that makes a row
+reference the blob, or once the blob itself is deleted. A replaced avatar's key is recorded in the swap
+transaction. The same sweep deletes blobs still recorded after the upload deadline plus a minute (refused
+uploads whose delete failed, uploads cut off or interrupted by a crash, including a partial `.part` file,
+replaced avatars), blob first; a failed delete keeps the record for the next run, and a key some row
+references is never deleted. With S3, also give the bucket an `AbortIncompleteMultipartUpload` lifecycle
+rule: an upload interrupted by a crash can leave an incomplete multipart upload behind.

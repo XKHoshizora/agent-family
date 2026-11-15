@@ -1,5 +1,6 @@
 import { config as loadDotenv } from "dotenv";
 import { createBlobStore } from "./attachments/blob.ts";
+import { abandonedAfterMs, sweepPendingBlobs } from "./attachments/pending.ts";
 import { sweepOrphans } from "./attachments/store.ts";
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
@@ -61,10 +62,16 @@ if (command === "migrate") {
   const config = loadConfig(); // the blob store settings, as the server uses them
   const db = createDb(config.databaseUrl);
   try {
-    const swept = await sweepOrphans({ db, blobs: createBlobStore(config) }, olderThan, {
+    const deps = { db, blobs: createBlobStore(config) };
+    const swept = await sweepOrphans(deps, olderThan, {
       error: ({ err, attachmentId }, msg) => console.error(`${msg} (attachment ${attachmentId}): ${String(err)}`),
     });
-    console.log(`swept ${swept} unsent attachment(s) older than ${olderThan} minutes`);
+    // Also blobs no row came to reference: refused uploads whose delete failed, uploads cut off or
+    // interrupted by a crash, replaced avatars. Only once they are past the upload deadline.
+    const abandoned = await sweepPendingBlobs(deps, abandonedAfterMs(config), {
+      error: ({ err, key }, msg) => console.error(`${msg} (blob ${key}): ${String(err)}`),
+    });
+    console.log(`swept ${swept} unsent attachment(s) older than ${olderThan} minutes and ${abandoned} abandoned blob(s)`);
   } finally {
     await db.close();
   }

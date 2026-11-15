@@ -21,6 +21,7 @@ import { createConversationEvents, type ConversationEvents } from "./conversatio
 import { registerConversationRoutes } from "./conversations/routes.ts";
 import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
+import { appOriginCheck } from "./origin.ts";
 import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
 
@@ -47,6 +48,8 @@ declare module "fastify" {
   }
 }
 
+const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyInstance> {
   const config = overrides.config ?? loadConfig();
   const ownsDb = overrides.db === undefined;
@@ -62,10 +65,27 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   const app = Fastify({
     logger: process.env.NODE_ENV === "test" || process.env.VITEST ? false : { level: "info" },
     trustProxy: config.trustProxy,
+    // Server-wide limits (WebSockets are exempt: `ws` clears the socket timeout on upgrade, and an upgraded
+    // connection is no longer a request). Uploads run under their own, tighter deadlines (attachments/routes.ts).
+    connectionTimeout: config.httpConnectionTimeoutMs,
+    requestTimeout: config.httpRequestTimeoutMs,
+    keepAliveTimeout: config.httpKeepAliveTimeoutMs,
   });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   registerErrorHandling(app);
+
+  // Cross-site request forgery: a browser names the page that sent a request in `Origin`. A state-changing
+  // API request from any other origin is refused before routing work, body parsing or any handler.
+  // Requests without `Origin` (non-browser clients, same-origin GETs) pass.
+  const fromApp = appOriginCheck(config.appOrigin);
+  app.addHook("onRequest", async (req) => {
+    if (!STATE_CHANGING.has(req.method)) return;
+    const path = req.url.split("?")[0] ?? "";
+    if (path !== "/api" && !path.startsWith("/api/")) return;
+    const origin = req.headers.origin;
+    if (origin !== undefined && !fromApp(origin)) throw new AppError(403, "forbidden");
+  });
 
   app.decorate("deps", deps);
   app.decorate("auth", createAuth(config, deps.db));

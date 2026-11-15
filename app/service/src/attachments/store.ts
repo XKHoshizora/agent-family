@@ -3,6 +3,7 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import type { AttachmentRef } from "../messages/model.ts";
 import type { BlobStore } from "./blob.ts";
+import { releaseBlob } from "./pending.ts";
 
 /**
  * Class of the per-uploader quota lock. Two-key advisory locks live in a key space of their own, so this
@@ -38,13 +39,15 @@ export async function usedBytes(q: Queryable, uploaderId: string): Promise<numbe
  * lock for a direct chat, then the conversation row) and re-checks, as a send would, that the uploader is
  * still a current member (404 `not_found`) who may send (403 `cannot_send` with the reason). Then, under
  * a per-uploader lock so concurrent uploads are counted one after another, the quota (413 `too_large`
- * `{reason: "quota"}`), and inserts the row. The caller deletes the blob if this throws.
+ * `{reason: "quota"}`), and inserts the row, releasing the blob's pending record in the same
+ * transaction (see pending.ts). The caller discards the blob if this throws.
  */
 export async function insertAttachment(t: Tx, a: NewAttachment, quotaBytes: number): Promise<AttachmentRef> {
   const lock = await lockForWrite(t, a.conversationId, a.uploaderId);
   await assertCanSend(t, lock);
   await t.query("select pg_advisory_xact_lock($1::int, hashtext($2::text))", [QUOTA_LOCK_CLASS, a.uploaderId]);
   if ((await usedBytes(t, a.uploaderId)) + a.size > quotaBytes) throw quotaExceeded();
+  await releaseBlob(t, a.blobKey);
   const { rows } = await t.query<{ id: string }>(
     `insert into attachments (conversation_id, uploader_id, blob_key, name, size, mime, inline)
      values ($1, $2, $3, $4, $5, $6, $7) returning id`,

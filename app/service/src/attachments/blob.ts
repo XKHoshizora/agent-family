@@ -12,7 +12,10 @@ export interface BlobStore {
   put(key: string, body: Readable | Buffer): Promise<{ size: number }>;
   /** Rejects with an error whose `code` is `ENOENT` (fs) or `NoSuchKey` (S3) when the key is absent. */
   get(key: string): Promise<Readable>;
-  /** Deleting a missing key is not an error. */
+  /**
+   * Deletes the blob and anything a `put` of it left behind (a partial file after a crash). Deleting a
+   * missing key is not an error.
+   */
   delete(key: string): Promise<void>;
 }
 
@@ -44,7 +47,8 @@ export function fsBlobStore(dir: string): BlobStore {
     async put(key, body) {
       const target = file(key);
       await mkdir(root, { recursive: true });
-      const tmp = `${target}.${randomUUID()}.part`;
+      // Named after the key (keys are never reused), so `delete(key)` also finds what a crash left behind.
+      const tmp = `${target}.part`;
       const { stream, size } = counted(body);
       try {
         await pipeline(stream, createWriteStream(tmp, { flags: "wx" }));
@@ -66,6 +70,7 @@ export function fsBlobStore(dir: string): BlobStore {
     },
     async delete(key) {
       await rm(file(key), { force: true });
+      await rm(`${file(key)}.part`, { force: true });
     },
   };
 }
@@ -85,7 +90,10 @@ export function s3BlobStore(cfg: S3Config, client?: S3Client): BlobStore {
   return {
     async put(key, body) {
       const { stream, size } = counted(body);
-      await new Upload({ client: s3, params: { Bucket: cfg.bucket, Key: checkKey(key), Body: stream } }).done();
+      // One part in flight at a time: an upload holds at most one part buffer (5 MB) in memory. A crash
+      // can leave an incomplete multipart upload behind; the bucket's AbortIncompleteMultipartUpload
+      // lifecycle rule removes those.
+      await new Upload({ client: s3, params: { Bucket: cfg.bucket, Key: checkKey(key), Body: stream }, queueSize: 1 }).done();
       return { size: size() };
     },
     async get(key) {

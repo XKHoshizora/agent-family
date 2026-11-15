@@ -31,7 +31,7 @@ export async function updateDisplayName(db: Queryable, id: string, displayName: 
   await db.query("update principals set display_name = $2 where id = $1", [id, displayName]);
 }
 
-/** Locks the row, swaps the key, and returns the previous key (to delete after commit). */
+/** Locks the row, swaps the key, and returns the previous key (to hold in the same transaction and delete after commit). */
 export async function swapAvatarKey(db: Queryable, id: string, newKey: string): Promise<string | null> {
   const { rows } = await db.query<{ avatar_key: string | null }>(
     "select avatar_key from principals where id = $1 for update",

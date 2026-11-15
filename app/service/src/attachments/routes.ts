@@ -1,5 +1,5 @@
 import multipart, { type Multipart, type MultipartFile } from "@fastify/multipart";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { Readable } from "node:stream";
 import { z } from "zod";
@@ -9,12 +9,15 @@ import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { isMissingBlob, newBlobKey, type BlobStore } from "./blob.ts";
 import { sniff, type Sniffed } from "./sniff.ts";
+import { discardBlob, holdBlob } from "./pending.ts";
 import { findDownloadable, insertAttachment, quotaExceeded, usedBytes } from "./store.ts";
 
 /** Largest file one upload may carry (inclusive). */
 export const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 /** Uploads per principal per hour, times `RATE_LIMIT_SCALE`. */
 export const UPLOADS_PER_HOUR = 60;
+/** Uploads one principal may have in progress at once; one more is 429 `rate_limited`. */
+export const MAX_CONCURRENT_UPLOADS = 3;
 export const FILE_NAME_MAX_CHARS = 120;
 /** The one multipart part an upload consists of. */
 export const FILE_FIELD = "file";
@@ -109,26 +112,70 @@ async function nextPart(parts: AsyncIterableIterator<Multipart>): Promise<Multip
   }
 }
 
+export interface UploadDeadlines {
+  /** No body bytes for this long: cut off. */
+  idleMs: number;
+  /** Still receiving the body after this long: cut off. */
+  totalMs: number;
+}
+
+/**
+ * Cuts the connection of a client that stalls while sending the body: idle for `idleMs`, or still
+ * sending after `totalMs`. Destroying an unfinished request destroys its socket and ends the multipart
+ * stream with an error, so the receiving code fails and its cleanup runs. Disarms itself once the body
+ * is complete; returns the disarm function. Arm it only once the body is being consumed (a 'data'
+ * listener on a request nobody reads would set it flowing into the void).
+ */
+function armDeadlines(req: FastifyRequest, { idleMs, totalMs }: UploadDeadlines): () => void {
+  const cutOff = (why: string) => () => {
+    req.log.info({ why }, "upload cut off");
+    req.raw.destroy();
+  };
+  const idle = setTimeout(cutOff("idle"), idleMs);
+  const total = setTimeout(cutOff("too slow"), totalMs);
+  const onData = () => void idle.refresh();
+  const disarm = () => {
+    clearTimeout(idle);
+    clearTimeout(total);
+    req.raw.off("data", onData);
+    req.raw.off("end", disarm);
+  };
+  req.raw.on("data", onData);
+  req.raw.once("end", disarm);
+  return disarm;
+}
+
 /**
  * Streams the upload's single file part into the blob store under `key`, enforcing the cap while it
- * streams. 400 for any other shape (a field, a second part, no part, another part name, a broken body),
- * 413 `too_large` past the cap. The caller deletes the blob if this throws.
+ * streams and the deadlines while the body arrives. 400 for any other shape (a field, a second part,
+ * no part, another part name, a broken or cut-off body), 413 `too_large` past the cap. The caller
+ * discards the blob if this throws.
  */
-async function receiveFile(req: FastifyRequest, blobs: BlobStore, key: string): Promise<{ name: string; size: number; head: Buffer }> {
-  const parts = req.parts();
-  const part = await nextPart(parts);
-  if (part?.type !== "file" || part.fieldname !== FILE_FIELD) throw invalid();
-  const meter = metered(part.file);
+async function receiveFile(
+  req: FastifyRequest,
+  blobs: BlobStore,
+  key: string,
+  deadlines: UploadDeadlines,
+): Promise<{ name: string; size: number; head: Buffer }> {
+  const parts = req.parts(); // starts consuming the body
+  const disarm = armDeadlines(req, deadlines);
   try {
-    await blobs.put(key, meter.stream);
-  } catch (err) {
-    if (err instanceof TooLarge) throw new AppError(413, "too_large");
-    if (err instanceof BrokenUpload) throw invalid();
-    throw err;
+    const part = await nextPart(parts);
+    if (part?.type !== "file" || part.fieldname !== FILE_FIELD) throw invalid();
+    const meter = metered(part.file);
+    try {
+      await blobs.put(key, meter.stream);
+    } catch (err) {
+      if (err instanceof TooLarge) throw new AppError(413, "too_large");
+      if (err instanceof BrokenUpload) throw invalid();
+      throw err;
+    }
+    if (part.file.truncated) throw new AppError(413, "too_large"); // the parser's own cap, a backstop
+    if (await nextPart(parts)) throw invalid();
+    return { name: sanitizeFileName(part.filename), size: meter.size(), head: meter.head() };
+  } finally {
+    disarm();
   }
-  if (part.file.truncated) throw new AppError(413, "too_large"); // the parser's own cap, a backstop
-  if (await nextPart(parts)) throw invalid();
-  return { name: sanitizeFileName(part.filename), size: meter.size(), head: meter.head() };
 }
 
 /** After a refusal in mid-body: detach the parser and let the rest drain unread, so the answer goes out now. */
@@ -151,13 +198,46 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
     keyGenerator: (req: FastifyRequest) => uploaders.get(req) ?? req.ip,
   });
 
-  const discard = async (req: FastifyRequest, key: string) => {
+  const deadlines: UploadDeadlines = { idleMs: config.uploadIdleTimeoutMs, totalMs: config.uploadTotalTimeoutMs };
+  /** Uploads in progress per principal. */
+  const inProgress = new Map<string, number>();
+
+  /** After the cheap checks: hold a key, stream the file, then re-check and insert under the send locks. */
+  async function acceptUpload(req: FastifyRequest, reply: FastifyReply, conversationId: string, uploaderId: string) {
+    // Refuse what is obviously refused before reading a byte of the body: the answers a send gets.
+    const verdict = await canSend(db, conversationId, uploaderId);
+    if (!verdict) throw notFound();
+    if (!verdict.ok) throw new AppError(403, "cannot_send", { reason: verdict.reason });
+    if ((await usedBytes(db, uploaderId)) >= config.attachmentQuotaBytes) throw quotaExceeded();
+
+    // Recorded before the first byte is written, so no blob ever exists unaccounted for (pending.ts).
+    const key = newBlobKey("att");
+    await holdBlob(db, key);
+    let file: { name: string; size: number; head: Buffer };
     try {
-      await blobs.delete(key);
+      file = await receiveFile(req, blobs, key, deadlines);
     } catch (err) {
-      req.log.error({ err, key }, "could not delete the blob of a refused upload");
+      stopReading(req);
+      await discardBlob({ db, blobs }, key, req.log);
+      throw err;
     }
-  };
+
+    try {
+      const { mime, inline } = await decideType(file.head);
+      // The right to send may have gone while the bytes streamed: re-checked under the send locks.
+      const stored = await db.tx((t) =>
+        insertAttachment(
+          t,
+          { conversationId, uploaderId, blobKey: key, name: file.name, size: file.size, mime, inline },
+          config.attachmentQuotaBytes,
+        ),
+      );
+      return reply.code(201).send(stored);
+    } catch (err) {
+      await discardBlob({ db, blobs }, key, req.log);
+      throw err;
+    }
+  }
 
   // Multipart parsing exists only in this scope. Its parser reads nothing: the handler streams the body.
   void app.register(async (scope) => {
@@ -187,38 +267,15 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
         uploaders.set(req, me.id);
         const limited = await uploadLimit(req);
         if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
-
-        // Refuse what is obviously refused before reading a byte of the body: the answers a send gets.
-        const conversationId = req.params.id;
-        const verdict = await canSend(db, conversationId, me.id);
-        if (!verdict) throw notFound();
-        if (!verdict.ok) throw new AppError(403, "cannot_send", { reason: verdict.reason });
-        if ((await usedBytes(db, me.id)) >= config.attachmentQuotaBytes) throw quotaExceeded();
-
-        const key = newBlobKey("att");
-        let file: { name: string; size: number; head: Buffer };
+        const running = inProgress.get(me.id) ?? 0;
+        if (running >= MAX_CONCURRENT_UPLOADS) throw new AppError(429, "rate_limited");
+        inProgress.set(me.id, running + 1);
         try {
-          file = await receiveFile(req, blobs, key);
-        } catch (err) {
-          stopReading(req);
-          await discard(req, key);
-          throw err;
-        }
-
-        try {
-          const { mime, inline } = await decideType(file.head);
-          // The right to send may have gone while the bytes streamed: re-checked under the send locks.
-          const stored = await db.tx((t) =>
-            insertAttachment(
-              t,
-              { conversationId, uploaderId: me.id, blobKey: key, name: file.name, size: file.size, mime, inline },
-              config.attachmentQuotaBytes,
-            ),
-          );
-          return reply.code(201).send(stored);
-        } catch (err) {
-          await discard(req, key);
-          throw err;
+          return await acceptUpload(req, reply, req.params.id, me.id);
+        } finally {
+          const left = (inProgress.get(me.id) ?? 1) - 1;
+          if (left > 0) inProgress.set(me.id, left);
+          else inProgress.delete(me.id);
         }
       },
     );

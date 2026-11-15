@@ -47,6 +47,13 @@ export interface OpenRequest {
 
 const FILLER = Buffer.alloc(256 * 1024, 0x61);
 
+const openRequests = new Set<OpenRequest>();
+
+/** Drops every request `openRequest` opened that is still around (call from afterEach). */
+export function destroyOpenRequests(): void {
+  for (const r of [...openRequests]) r.destroy();
+}
+
 export async function openRequest(
   app: FastifyInstance,
   { path, cookie, contentType = MULTIPART }: { path: string; cookie: string; contentType?: string },
@@ -76,7 +83,7 @@ export async function openRequest(
 
   const write = (chunk: Buffer | string) =>
     new Promise<void>((resolve, reject) => req.write(chunk, (err) => (err ? reject(err) : resolve())));
-  return {
+  const open: OpenRequest = {
     response,
     write,
     async fill(n) {
@@ -92,8 +99,11 @@ export async function openRequest(
         });
       }),
     destroy() {
+      openRequests.delete(open);
       req.destroy();
       agent.destroy();
     },
   };
+  openRequests.add(open);
+  return open;
 }

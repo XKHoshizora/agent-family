@@ -82,6 +82,7 @@ async function announceSessionEnded(db: Queryable, session: { id: string; userId
 export function createAuth(config: Config, db: Db) {
   // Mail caused by a registration commits with it; everything else writes straight to the pool.
   const mailDb = (): Queryable => outerTx.getStore() ?? db;
+  const isHttps = new URL(config.appOrigin).protocol === "https:";
 
   return betterAuth({
     appName: "Agent Family",
@@ -94,7 +95,14 @@ export function createAuth(config: Config, db: Db) {
     logger: { level: "error" },
     // One source of truth for throttling: @fastify/rate-limit in app.ts.
     rateLimit: { enabled: false },
-    advanced: { ipAddress: { disableIpTracking: true } },
+    advanced: {
+      ipAddress: { disableIpTracking: true },
+      // Stated, not inherited from a library default: no cross-site POST carries the session (CSRF is
+      // also refused by the Origin check in app.ts), scripts cannot read it, and https deployments
+      // send it over TLS only (with the __Secure- name prefix).
+      useSecureCookies: isHttps,
+      defaultCookieAttributes: { sameSite: "lax", httpOnly: true, secure: isHttps },
+    },
     session: { expiresIn: SESSION_LIFETIME_SECONDS },
     emailAndPassword: {
       enabled: true,
