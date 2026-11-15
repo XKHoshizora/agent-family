@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { isAgent, isMine, nameOf, ownerOf, entity, relation, myBlock, isPrivateType } from "../state/selectors.js";
-import { Avatar, Tag, Btn, IconBtn, IdentityLine, Notice, Reason, KV, Field } from "../ui/primitives.jsx";
+import { Avatar, Tag, Btn, IconBtn, Notice, Reason, KV, Field } from "../ui/primitives.jsx";
 import { ListHeader, SearchBox, Pills } from "./ChatList.jsx";
 import { BlockModal, sharedConvs } from "./BlockModal.jsx";
 import { ChevronLeft, UserPlus } from "../icons.js";

@@ -11,14 +11,10 @@ import {
   nameOf,
   ownerOf,
   otherMember,
-  publishBlock,
-  canManage,
   myBlock,
-  myAgentsIn,
 } from "../state/selectors.js";
-import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, Notice, Reason, KV } from "../ui/primitives.jsx";
+import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, Reason, KV } from "../ui/primitives.jsx";
 import { BlockModal } from "./BlockModal.jsx";
-import { FreezeNotice } from "./Recovery.jsx";
 import { X } from "../icons.js";
 
 const NOT_GRANTED = {
@@ -34,10 +30,8 @@ export function DetailsPanel({ conv }) {
   const { state, dispatch } = useStore();
   const [blockTarget, setBlockTarget] = useState(null);
   const owners = viewerOwners(state, conv);
-  const block = publishBlock(state, conv);
   const other = otherMember(conv);
   const group = conv.type === "mixed" || conv.type === "agentGroup";
-  const mine = myAgentsIn(state, conv);
   const viewers = [...new Set([...humansIn(state, conv), ...owners])];
   const go = (patch) => dispatch({ type: "nav", patch: { pane: "main", ...patch } });
 
@@ -53,8 +47,6 @@ export function DetailsPanel({ conv }) {
           <strong>{convTitle(state, conv)}</strong>
           <Tag tone="solid">{TYPE_LABEL[conv.type]}</Tag>
         </div>
-
-        {block && <FreezeNotice conv={conv} compact />}
 
         <h3>发言成员</h3>
         <ul className="side-list">
@@ -111,12 +103,6 @@ export function DetailsPanel({ conv }) {
                   {myBlock(state, id) ? `解除对${nameOf(state, id)}的拉黑` : `拉黑${nameOf(state, id)}`}
                 </Btn>
               ))}
-          {mine.length > 0 && conv.type !== "agent" && (
-            <>
-              <Btn onClick={() => dispatch({ type: "conv/toggleMyPause", convId: conv.id })}>{conv.myPause ? "恢复本会话中我的 Agent" : "暂停本会话中我的 Agent"}</Btn>
-              <Reason>只停止本会话里你自己的 Agent 的新回复，不是全局停用，也不影响别人的 Agent。</Reason>
-            </>
-          )}
         </div>
       </div>
       {blockTarget && <BlockModal target={blockTarget} onClose={() => setBlockTarget(null)} />}

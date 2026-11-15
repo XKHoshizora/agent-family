@@ -2,9 +2,9 @@ import React from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { nameOf, entity } from "../state/selectors.js";
-import { Avatar, Btn, Tag, Reason } from "../ui/primitives.jsx";
+import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
-import { ChevronLeft, Laptop, Monitor } from "../icons.js";
+import { ChevronLeft } from "../icons.js";
 
 export function SettingsList() {
   const { state, dispatch } = useStore();
@@ -24,7 +24,7 @@ export function SettingsList() {
         <li className="rows-label">快捷入口</li>
         <li>
           <button type="button" className="row slim" onClick={() => dispatch({ type: "nav", patch: { pane: "main" } })}>
-            <span className="row-body"><span className="row-name">我的资料与设备</span><span className="row-preview">身份、设备归属与拉黑管理</span></span>
+            <span className="row-body"><span className="row-name">我的资料</span><span className="row-preview">身份与拉黑管理</span></span>
           </button>
         </li>
         <li>
@@ -60,23 +60,6 @@ export function SettingsMain() {
         </div>
       </header>
       <div className="page-body">
-        <h3>设备与归属</h3>
-        <ul className="device-rows static">
-          {Object.values(state.devices).map((d) => (
-            <li key={d.id}>
-              <div className="device-static">
-                {d.type === "virtual" ? <Monitor size={20} aria-hidden="true" /> : <Laptop size={20} aria-hidden="true" />}
-                <span className="member-body">
-                  <strong>{d.name}</strong>
-                  <small>属于{nameOf(state, d.owner)}{d.owner === ME ? "" : " · 你没有分配或管理权限"}</small>
-                </span>
-                <Tag tone={!d.online ? "warn" : d.busy ? "pending" : "ok"}>{!d.online ? "离线" : d.busy ? "使用中" : "空闲"}</Tag>
-              </div>
-            </li>
-          ))}
-        </ul>
-        <Reason>设备分配在「Agent → 能力与设备」中按 Agent 单独配置；跨主人不共享设备。</Reason>
-
         <h3>我的拉黑</h3>
         {mineBlocks.length === 0 ? (
           <p className="muted">你没有拉黑任何 Agent。</p>

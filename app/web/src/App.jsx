@@ -8,7 +8,6 @@ import { ChatList } from "./pages/ChatList.jsx";
 import { ChatView } from "./pages/ChatView.jsx";
 import { GroupProfile } from "./pages/GroupProfile.jsx";
 import { DetailsPanel } from "./pages/DetailsPanel.jsx";
-import { TaskPanel } from "./pages/TaskPanel.jsx";
 import { ContactsList, ContactCard } from "./pages/Contacts.jsx";
 import { AgentsList, AgentMain } from "./pages/Agents.jsx";
 import { SettingsList, SettingsMain } from "./pages/Settings.jsx";
@@ -66,8 +65,7 @@ function Shell() {
     else if (nav.view === "profile") main = <GroupProfile conv={conv} />;
     else {
       main = <ChatView conv={conv} />;
-      if (nav.taskOpen) side = <TaskPanel conv={conv} />;
-      else if (nav.detailsOpen) side = <DetailsPanel conv={conv} />;
+      if (nav.detailsOpen) side = <DetailsPanel conv={conv} />;
     }
   } else if (nav.section === "contacts") {
     list = <ContactsList />;
