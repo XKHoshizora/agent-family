@@ -144,7 +144,7 @@ headers (cookies) are never logged.
   answers exactly like one that does not exist (`tests/enumeration.test.ts`): 404 `{"error":"not_found"}`,
   byte for byte. Two intended exceptions: any existing principal has an avatar and can be blocked.
 - **HEAD.** Every `GET` route also answers `HEAD` with the same status and headers and no body (Fastify
-  runs the `GET` handler). `HEAD /api/attachments/:id` is its own route (below): it does not read the file.
+  runs the `GET` handler). `HEAD /api/attachments/:id` and `HEAD /api/principals/:id/avatar` are their own routes (below): they do not read the whole file.
 - **Order of checks.** Cross-site `Origin` (403) → shape of path, query and body (400) → session (401) →
   rate limit (429) → the route's own rules. Registration counts its rate limit before checking the shape,
   and so do the sign-in and reset-request limiters in front of Better Auth.
@@ -327,6 +327,11 @@ accepted but not used: the mail links to the web app).
 `image/webp`), or a generated `image/svg+xml` with their initial when they have none. Headers:
 `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=60`,
 `Content-Security-Policy: default-src 'none'; sandbox`. 404 `not_found` for an id that is no principal.
+
+#### `HEAD /api/principals/:id/avatar`
+
+*Session: required.* The same decision and headers as the `GET`, no body; only the first bytes of a stored image are
+read (to tell its type), never the whole file. `Content-Length` is only sent for the generated SVG.
 
 #### `GET /api/principals/lookup`
 

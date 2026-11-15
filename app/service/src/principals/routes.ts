@@ -1,4 +1,5 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { Readable } from "node:stream";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { displayName, uuidParam } from "../schemas.ts";
@@ -27,6 +28,22 @@ async function readAll(stream: AsyncIterable<Buffer>): Promise<Buffer> {
   const chunks: Buffer[] = [];
   for await (const c of stream) chunks.push(c);
   return Buffer.concat(chunks);
+}
+
+/** The first `max` bytes (fewer if the stream is shorter); the rest is never pulled and the stream is closed. */
+async function readPrefix(stream: Readable, max: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let n = 0;
+  try {
+    for await (const c of stream as AsyncIterable<Buffer>) {
+      chunks.push(c);
+      n += c.length;
+      if (n >= max) break;
+    }
+  } finally {
+    stream.destroy();
+  }
+  return Buffer.concat(chunks).subarray(0, max);
 }
 
 export function registerPrincipalRoutes(app: FastifyInstance): void {
@@ -81,27 +98,47 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
     },
   );
 
-  api.get(
-    "/api/principals/:id/avatar",
-    { schema: { params: z.object({ id: uuidParam }), querystring: z.object({}) } },
-    async (req, reply) => {
-      await requirePrincipal(req);
-      const subject = await findAvatarSubject(db, req.params.id);
-      if (!subject) throw new AppError(404, "not_found");
+  const avatarSchema = { params: z.object({ id: uuidParam }), querystring: z.object({}) };
 
-      reply.headers(AVATAR_HEADERS);
-      if (subject.avatarKey) {
-        try {
-          const bytes = await readAll(await blobs.get(subject.avatarKey));
-          const { mime, inline } = await sniff(bytes.subarray(0, SNIFF_BYTES));
-          if (inline) return reply.type(mime).send(bytes);
-        } catch (err) {
-          if (!isMissingBlob(err)) throw err;
-        }
+  /**
+   * What `GET`/`HEAD /api/principals/:id/avatar` answer with: the stored image (its type from the bytes,
+   * only when browsers may show it) or the generated SVG. `whole: false` reads no more than the sniffing
+   * prefix of a stored image, so a HEAD does not drain the blob.
+   */
+  async function avatarOf(
+    req: FastifyRequest<{ Params: { id: string } }>,
+    whole: boolean,
+  ): Promise<{ type: string; body: Buffer | string; complete: boolean }> {
+    await requirePrincipal(req);
+    const subject = await findAvatarSubject(db, req.params.id);
+    if (!subject) throw new AppError(404, "not_found");
+    if (subject.avatarKey) {
+      try {
+        const stream = await blobs.get(subject.avatarKey);
+        const bytes = whole ? await readAll(stream) : await readPrefix(stream, SNIFF_BYTES);
+        const { mime, inline } = await sniff(bytes.subarray(0, SNIFF_BYTES));
+        if (inline) return { type: mime, body: bytes, complete: whole };
+      } catch (err) {
+        if (!isMissingBlob(err)) throw err;
       }
-      return reply.type("image/svg+xml").send(defaultAvatarSvg(subject.displayName, subject.id));
-    },
-  );
+    }
+    return { type: "image/svg+xml", body: defaultAvatarSvg(subject.displayName, subject.id), complete: true };
+  }
+
+  // Declared before the GET, so Fastify does not derive a HEAD from it (that one would read the whole blob).
+  // The same decision and headers; of a stored image only the first bytes are read, so there is no
+  // `Content-Length` for it (the generated SVG has one).
+  app.withTypeProvider<ZodTypeProvider>().head("/api/principals/:id/avatar", { schema: avatarSchema }, async (req, reply) => {
+    const found = await avatarOf(req, false);
+    reply.headers(AVATAR_HEADERS).type(found.type);
+    if (found.complete) reply.header("content-length", String(Buffer.byteLength(found.body)));
+    return reply.send();
+  });
+
+  api.get("/api/principals/:id/avatar", { schema: avatarSchema }, async (req, reply) => {
+    const found = await avatarOf(req, true);
+    return reply.headers(AVATAR_HEADERS).type(found.type).send(found.body);
+  });
 
   // Raw image bodies live in their own encapsulated scope so the 2 MB cap and the pass-through parser
   // apply to this route only. Fastify enforces the cap while the body streams in.

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
 import { fsBlobStore, newBlobKey } from "../src/attachments/blob.ts";
 import { abandonedAfterMs, sweepPendingBlobs } from "../src/attachments/pending.ts";
 import { api, signUp } from "./helpers/actors.ts";
@@ -192,6 +193,55 @@ describe("avatars", () => {
     await expect(app.deps.blobs.get(first)).rejects.toMatchObject({ code: "ENOENT" });
     const again = await app.inject({ method: "GET", url: `/api/principals/${alice.id}/avatar`, headers: { cookie: bob.cookie } });
     expect(again.headers["content-type"]).toBe("image/jpeg");
+  });
+
+  it("HEAD answers like the GET without reading the stored image beyond its first bytes", async () => {
+    const alice = await signUp(app, "alice");
+    const bob = await signUp(app, "bobby");
+    const big = Buffer.concat([PNG, Buffer.alloc(1_500_000)]);
+    expect((await put(alice.cookie, big)).statusCode).toBe(200);
+
+    const pulled: number[] = []; // bytes pulled from each blob opened
+    const original = app.deps.blobs.get.bind(app.deps.blobs);
+    const spy = vi.spyOn(app.deps.blobs, "get").mockImplementation(async (key) => {
+      const source = await original(key);
+      const at = pulled.push(0) - 1;
+      return Readable.from(
+        (async function* () {
+          for await (const chunk of source as AsyncIterable<Buffer>) {
+            pulled[at]! += chunk.length;
+            yield chunk;
+          }
+        })(),
+      );
+    });
+    try {
+      const head = await app.inject({ method: "HEAD", url: `/api/principals/${alice.id}/avatar`, headers: { cookie: bob.cookie } });
+      const get = await app.inject({ method: "GET", url: `/api/principals/${alice.id}/avatar`, headers: { cookie: bob.cookie } });
+      expect(head.statusCode).toBe(200);
+      expect(head.body).toBe("");
+      expect(head.headers["content-type"]).toBe("image/png");
+      expect(head.headers["content-type"]).toBe(get.headers["content-type"]);
+      expect(head.headers["cache-control"]).toBe(get.headers["cache-control"]);
+      expect(head.headers["x-content-type-options"]).toBe("nosniff");
+      expect(get.rawPayload.length).toBe(big.length);
+      expect(pulled[1]).toBe(big.length);
+      expect(pulled).toHaveLength(2); // one blob opened per request
+      expect(pulled[0]).toBeLessThan(200_000);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // Generated avatar, unknown id, no session: the same decisions as the GET.
+    const generated = await app.inject({ method: "HEAD", url: `/api/principals/${bob.id}/avatar`, headers: { cookie: alice.cookie } });
+    const generatedGet = await app.inject({ method: "GET", url: `/api/principals/${bob.id}/avatar`, headers: { cookie: alice.cookie } });
+    expect(generated.statusCode).toBe(200);
+    expect(generated.headers["content-type"]).toMatch(/^image\/svg\+xml/);
+    expect(generated.headers["content-length"]).toBe(String(generatedGet.rawPayload.length));
+    const missing = "00000000-0000-4000-8000-000000000000";
+    expect((await app.inject({ method: "HEAD", url: `/api/principals/${missing}/avatar`, headers: { cookie: alice.cookie } })).statusCode).toBe(404);
+    expect((await app.inject({ method: "HEAD", url: `/api/principals/${alice.id}/avatar` })).statusCode).toBe(401);
+    expect((await app.inject({ method: "HEAD", url: "/api/principals/not-a-uuid/avatar", headers: { cookie: alice.cookie } })).statusCode).toBe(400);
   });
 
   it("refuses an HTML file named .png, and leaves the avatar untouched", async () => {
