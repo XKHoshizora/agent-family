@@ -49,7 +49,7 @@ if (command === "migrate") {
       [to ?? null],
     );
     for (const m of rows) {
-      console.log(`#${m.id} ${m.created_at.toISOString()} to=${m.recipient} kind=${m.kind}\n  ${m.subject}\n  ${m.body}\n`);
+      console.log(`#${m.id} ${m.created_at.toISOString()} to=${m.recipient} kind=${m.kind}\n  ${m.subject}\n${m.body.split("\n").map((line) => `  ${line}`).join("\n")}\n`);
     }
   } finally {
     await db.close();

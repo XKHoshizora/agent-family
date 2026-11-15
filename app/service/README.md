@@ -219,7 +219,10 @@ would bypass invites) is 404 `not_found`. Each declares its query and body; anyt
 response body carries the session token (sign-in's `token` field is removed): the cookie is the session.
 Better Auth's own error codes reach the client lower-cased (`INVALID_TOKEN` → `invalid_token`), never its
 message text; a failure inside it is 500 `internal`, a busy database 503 `busy`. Mail goes to the
-`mail_outbox` table (read it with `npm run inbox:list`).
+`mail_outbox` table (read it with `npm run inbox:list`). The mails are plain text in Simplified Chinese
+(`src/auth/mail-copy.ts`): subject, a short body, the link on its own line, how long it is valid (24 hours for
+verification, 1 hour for reset: the configured lifetimes) and a line asking to ignore the mail if it was not
+the reader's own doing.
 
 Sessions last 7 days from sign-in (the cookie's `Max-Age`; with `rememberMe: false` the cookie ends with the
 browser session and the session after a day). Sign-out and a password reset end sessions at once: their

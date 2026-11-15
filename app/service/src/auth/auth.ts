@@ -9,6 +9,7 @@ import type { Config } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
 import { AppError, isBusy } from "../errors.ts";
 import { clientIp } from "../limits.ts";
+import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS, resetPasswordMail, verifyEmailMail } from "./mail-copy.ts";
 import { sendMail } from "./mailer.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
@@ -247,20 +248,22 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
       minPasswordLength: 10,
       maxPasswordLength: 128,
       revokeSessionsOnPasswordReset: true,
-      resetPasswordTokenExpiresIn: 60 * 60,
+      resetPasswordTokenExpiresIn: RESET_PASSWORD_TTL_SECONDS,
       sendResetPassword: async ({ user, token }) => {
         const link = `${config.appOrigin}/reset-password?token=${encodeURIComponent(token)}`;
-        await sendMail(mailDb(), "reset_password", user.email, "Reset your password", `Reset your password: ${link}`);
+        const mail = resetPasswordMail(link);
+        await sendMail(mailDb(), "reset_password", user.email, mail.subject, mail.body);
       },
     },
     emailVerification: {
       sendOnSignUp: true,
       autoSignInAfterVerification: false,
-      expiresIn: 24 * 60 * 60,
+      expiresIn: VERIFY_EMAIL_TTL_SECONDS,
       // After a correct password only, so it reveals nothing about which accounts exist; this is the resend path.
       sendOnSignIn: true,
       sendVerificationEmail: async ({ user, url }) => {
-        await sendMail(mailDb(), "verify_email", user.email, "Verify your email", `Confirm your email address: ${url}`);
+        const mail = verifyEmailMail(url);
+        await sendMail(mailDb(), "verify_email", user.email, mail.subject, mail.body);
       },
     },
     databaseHooks: {
