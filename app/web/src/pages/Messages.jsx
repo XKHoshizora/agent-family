@@ -94,7 +94,7 @@ function Body({ msg }) {
   );
 }
 
-export function MessageItem({ msg, conv, onReply }) {
+export function MessageItem({ msg, conv, onReply, flash = false }) {
   const { state, dispatch, actions } = useStore();
   if (msg.kind === "system")
     return (
@@ -112,7 +112,7 @@ export function MessageItem({ msg, conv, onReply }) {
     else actions.retrySend(msg.clientTxn);
   };
   return (
-    <li className={`msg ${mine ? "mine" : "theirs"}`} data-msg={msg.id}>
+    <li className={`msg ${mine ? "mine" : "theirs"}${flash ? " flash" : ""}`} data-msg={msg.id}>
       <Avatar id={msg.from} size={40} />
       <div className="msg-main">
         <div className="msg-meta">

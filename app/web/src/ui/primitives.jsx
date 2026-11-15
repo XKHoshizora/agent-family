@@ -1,33 +1,32 @@
-import React, { useEffect, useId, useRef } from "react";
-import { X, Info, CircleAlert, CircleCheck, CirclePause, Bot } from "../icons.js";
+import React, { useEffect, useId, useRef, useState } from "react";
+import { X, Info, CircleAlert, CircleCheck, CirclePause } from "../icons.js";
 import { useStore } from "../data/store.jsx";
+import { avatarUrl } from "../api/routes.js";
 import { entity, isAgent, nameOf, ownerOf, otherMember } from "../state/selectors.js";
-import { BRAND_CELL, ME, MY_CELL, personCell } from "../data/identities.js";
+import { ME } from "../data/identities.js";
 
 export const asset = (path) => `${import.meta.env.BASE_URL}${String(path).replace(/^\//, "")}`;
-const ATLAS = asset("assets/identities.png");
 
-export function cellStyle(cell, size) {
-  const [col, row] = cell;
-  return {
-    width: size,
-    height: size,
-    backgroundImage: `url(${ATLAS})`,
-    backgroundSize: "300% 300%",
-    backgroundPosition: `${col * 50}% ${row * 50}%`,
-  };
+/** The picture of a person from the service; the initial on the colour shows while it loads and when it fails. */
+function AvatarImage({ src }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(true)} />;
 }
 
 export function Avatar({ id, size = 44, online = false, className = "" }) {
   const { state } = useStore();
   const who = entity(state, id);
-  // Someone not named here (a member who left, or me before the first load) is a person, never the Agent mark.
-  const cell = who?.cell || (id === ME ? MY_CELL : id ? personCell(id) : BRAND_CELL);
+  // Anyone has an avatar at the service (a generated one when none was uploaded), also a member who left;
+  // only "me" before the first load is not known yet.
+  const src = who?.avatar ?? (id && id !== ME ? avatarUrl(id) : null);
+  const initial = [...String(who?.displayName ?? who?.name ?? "")][0] ?? "";
   return (
     <span className={`avatar ${className}`} style={{ width: size, height: size }} role="img" aria-label={who?.name || "头像"}>
-      {cell[0] === BRAND_CELL[0] && cell[1] === BRAND_CELL[1]
-        ? <span className="avatar-img agent-default" style={{ width: size, height: size }}><Bot size={Math.round(size * 0.64)} aria-hidden="true" /></span>
-        : <span className="avatar-img" style={cellStyle(cell, size)} />}
+      <span className="avatar-img avatar-fallback" style={{ width: size, height: size, fontSize: Math.round(size * 0.42) }}>
+        {initial}
+        {src && <AvatarImage key={src} src={src} />}
+      </span>
       {online && <span className="avatar-dot" />}
     </span>
   );

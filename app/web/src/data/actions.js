@@ -5,7 +5,13 @@ import * as routes from "../api/routes.js";
 import { ME } from "./identities.js";
 import {
   applyGone,
+  applyMyName,
+  applyNewerInWindow,
   applyOlder,
+  applyOlderInWindow,
+  applyPrincipals,
+  bumpAvatar,
+  closeWindow,
   discardPending,
   markFailed,
   markReadDone,
@@ -13,6 +19,7 @@ import {
   markSending,
   markSent,
   markUploading,
+  openWindow,
   setCanSend,
   setDraft,
   setUploaded,
@@ -22,6 +29,13 @@ import {
 
 /** The service refuses a file over this (413 `too_large`); the client does not even try. */
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+/** Hits per page of either search (the service's default). */
+export const SEARCH_PAGE = 20;
+/** A hit is shown in a window of this many messages (at most), the hit being near its middle. */
+export const JUMP_WINDOW = 50;
+/** The window ends this far after the hit: `before = seq + JUMP_AFTER`. */
+export const JUMP_AFTER = 25;
+
 /** Uploads in flight at once across the app (the service allows 3 per person); the rest wait in order. */
 export const MAX_UPLOADS = 3;
 
@@ -98,8 +112,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     return { ok: false, clientTxn, error };
   }
 
+  /** What I send goes to the end of the conversation: a detached window is left first. */
+  const toNewest = (conversationId) => setModel(closeWindow(getModel(), conversationId));
+
   function send(conversationId, { text = "", replyToSeq = null, attachment = null }) {
     if (!getModel().conversations[conversationId]) return refused("not_found");
+    toNewest(conversationId);
     const clientTxn = uuid();
     setModel(markSending(getModel(), { clientTxn, conversationId, text, replyToSeq, attachment, at: now() }));
     return deliver(clientTxn);
@@ -227,6 +245,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     // Forget files of entries that are gone (another account signed in, the conversation was left).
     for (const key of files.keys()) if (!getModel().pending[key]) files.delete(key);
     files.set(clientTxn, file);
+    toNewest(conversationId);
     setModel(markUploading(getModel(), { clientTxn, conversationId, text: caption, replyToSeq, file: { name: file.name, size: file.size }, at: now() }));
     return queueUpload(clientTxn, conversationId);
   }
@@ -275,6 +294,8 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   async function markRead(conversationId, seq) {
     const conv = getModel().conversations[conversationId];
     if (!conv) return { ok: false, error: { code: "not_found", reason: null, status: 0 } };
+    // A detached window is not the newest messages: nothing there says the newest were seen.
+    if (getModel().windows[conversationId]) return { ok: true, readSeq: conv.readSeq };
     const target = seq ?? conv.position;
     if (!Number.isSafeInteger(target) || target < 1 || target <= conv.readSeq) return { ok: true, readSeq: conv.readSeq };
     const token = tokenFor(conversationId);
@@ -295,25 +316,28 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     }
   }
 
-  /** conversation id → {promise} of the older-history request in flight. */
+  /** `conversation id#window number` → {promise} of the older-history request in flight (window 0: the held messages). */
   const olderInFlight = new Map();
-  /** Loads the page before the oldest held message; one request per conversation at a time. */
+  /** Loads the page before the oldest message shown (the window's, when one is open); one request at a time per list. */
   function loadOlder(conversationId, { limit = 50 } = {}) {
-    const inFlight = olderInFlight.get(conversationId);
+    const win = getModel().windows[conversationId] ?? null;
+    const key = `${conversationId}#${win?.n ?? 0}`;
+    const inFlight = olderInFlight.get(key);
     if (inFlight) return inFlight.promise;
     const conv = getModel().conversations[conversationId];
-    if (!conv || !conv.hasOlder) return Promise.resolve({ ok: true, loaded: 0, hasOlder: false });
-    const held = getModel().messages[conversationId] ?? [];
+    if (!conv || !(win ? win.hasOlder : conv.hasOlder)) return Promise.resolve({ ok: true, loaded: 0, hasOlder: false });
+    const held = win ? win.messages : getModel().messages[conversationId] ?? [];
     const before = held.length > 0 ? held[0].seq : conv.position + 1;
     const token = tokenFor(conversationId);
     const entry = { promise: null };
-    olderInFlight.set(conversationId, entry);
+    olderInFlight.set(key, entry);
     entry.promise = (async () => {
       try {
         const page = await api.listMessages(conversationId, { before, limit });
         const why = staleness(token);
         if (why) return { ok: false, error: dropped(why) };
-        setModel(applyOlder(getModel(), conversationId, page));
+        if ((getModel().windows[conversationId]?.n ?? 0) !== (win?.n ?? 0)) return { ok: false, error: dropped("stale") };
+        setModel(win ? applyOlderInWindow(getModel(), conversationId, page, win.n) : applyOlder(getModel(), conversationId, page));
         return { ok: true, loaded: page.messages.length, hasOlder: page.nextBefore !== null };
       } catch (err) {
         const error = errorOf(err);
@@ -321,10 +345,112 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         if (!staleness(token) && error.status === 404) request({ conversation: conversationId });
         return { ok: false, error };
       } finally {
-        if (olderInFlight.get(conversationId) === entry) olderInFlight.delete(conversationId);
+        if (olderInFlight.get(key) === entry) olderInFlight.delete(key);
       }
     })();
     return entry.promise;
+  }
+
+  /** `conversation id#window number` → {promise} of the newer-messages request in flight. */
+  const newerInFlight = new Map();
+  /**
+   * Loads the messages after the newest one of the detached window. Once the window reaches the held messages it is
+   * absorbed (`attached: true`) and the conversation shows its newest messages again. No window: nothing to load.
+   */
+  function loadNewer(conversationId, { limit = 50 } = {}) {
+    const win = getModel().windows[conversationId] ?? null;
+    if (!win) return Promise.resolve({ ok: true, loaded: 0, attached: true });
+    const key = `${conversationId}#${win.n}`;
+    const inFlight = newerInFlight.get(key);
+    if (inFlight) return inFlight.promise;
+    const newest = win.messages.length > 0 ? win.messages[win.messages.length - 1].seq : win.focusSeq;
+    const token = tokenFor(conversationId);
+    const entry = { promise: null };
+    newerInFlight.set(key, entry);
+    entry.promise = (async () => {
+      try {
+        // The service pages backwards only: the page below `newest + 1 + limit` holds the messages after `newest`.
+        const page = await api.listMessages(conversationId, { before: newest + 1 + limit, limit });
+        const why = staleness(token);
+        if (why) return { ok: false, error: dropped(why) };
+        if (getModel().windows[conversationId]?.n !== win.n) return { ok: false, error: dropped("stale") };
+        const had = getModel().windows[conversationId].messages.length;
+        setModel(applyNewerInWindow(getModel(), conversationId, page, win.n));
+        const now = getModel().windows[conversationId];
+        return { ok: true, loaded: now ? now.messages.length - had : page.messages.length, attached: !now };
+      } catch (err) {
+        const error = errorOf(err);
+        if (token.epoch === epoch() && error.status === 401) signedOut();
+        if (!staleness(token) && error.status === 404) request({ conversation: conversationId });
+        return { ok: false, error };
+      } finally {
+        if (newerInFlight.get(key) === entry) newerInFlight.delete(key);
+      }
+    })();
+    return entry.promise;
+  }
+
+  /** Back to the newest messages: the detached window (if any) is dropped. */
+  function closeWindowOf(conversationId) {
+    setModel(closeWindow(getModel(), conversationId));
+  }
+
+  /** conversation id → number of the latest jump asked for: an answer of an earlier one is dropped. */
+  const jumps = new Map();
+  let windowCounter = 0;
+  /**
+   * Makes message `seq` of a conversation shown: it is already held (the detached window, if any, is dropped), or
+   * it is already in the open window, or the window around it is loaded (`before = seq + JUMP_AFTER`, `JUMP_WINDOW`
+   * messages) and replaces what is shown, detached from the newest messages. Resolves {ok: true} or {ok: false,
+   * error}: `not_found` when the message is no longer visible to me (the service says so, or the page lacks it).
+   */
+  async function jumpToMessage(conversationId, seq) {
+    const model = getModel();
+    if (!model.conversations[conversationId]) return { ok: false, error: dropped("not_found") };
+    if (!Number.isSafeInteger(seq) || seq < 1) return { ok: false, error: dropped("invalid_request") };
+    if ((model.messages[conversationId] ?? []).some((m) => m.seq === seq)) {
+      closeWindowOf(conversationId);
+      return { ok: true };
+    }
+    if (model.windows[conversationId]?.messages.some((m) => m.seq === seq)) return { ok: true };
+    const token = tokenFor(conversationId);
+    const n = ++windowCounter;
+    jumps.set(conversationId, n);
+    try {
+      const page = await api.listMessages(conversationId, { before: seq + JUMP_AFTER, limit: JUMP_WINDOW });
+      const why = staleness(token);
+      if (why) return { ok: false, error: dropped(why) };
+      if (jumps.get(conversationId) !== n) return { ok: false, error: dropped("superseded") };
+      if (!(page.messages ?? []).some((m) => m.seq === seq)) return { ok: false, error: { code: "not_found", reason: null, status: 404 } };
+      setModel(openWindow(getModel(), conversationId, page, { focusSeq: seq, n }));
+      return { ok: true };
+    } catch (err) {
+      const error = errorOf(err);
+      if (token.epoch === epoch() && error.status === 401) signedOut();
+      if (!staleness(token) && error.status === 404) request({ conversation: conversationId });
+      return { ok: false, error };
+    }
+  }
+
+  /**
+   * One search request: the people it names join the model (so hits show names and avatars); the hits themselves are
+   * not kept here (they may lie far from the loaded messages). Resolves {ok, hits, nextBefore} or {ok: false, error}.
+   */
+  async function runSearch(run, conversationId = null) {
+    const token = epoch();
+    try {
+      const page = await run();
+      if (token !== epoch()) return { ok: false, error: dropped("stopped") };
+      setModel(applyPrincipals(getModel(), page.principals));
+      return { ok: true, hits: page.messages ?? [], nextBefore: page.nextBefore ?? null };
+    } catch (err) {
+      const error = errorOf(err);
+      if (token === epoch()) {
+        if (error.status === 401) signedOut();
+        else if (error.status === 404 && conversationId) request({ conversation: conversationId });
+      }
+      return { ok: false, error };
+    }
   }
 
   /**
@@ -386,7 +512,21 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     retryFile: retrySend,
     markRead,
     loadOlder,
+    loadNewer,
+    jumpToMessage,
+    closeWindow: closeWindowOf,
+    /** `before`: the previous page's `nextBefore` (a seq here). */
+    searchConversation: (conversationId, { q, before } = {}) =>
+      runSearch(() => api.searchConversation(conversationId, { q, before, limit: SEARCH_PAGE }), conversationId),
+    /** `before`: the previous page's `nextBefore` (an opaque cursor). */
+    searchAll: ({ q, before } = {}) => runSearch(() => api.searchAll({ q, before, limit: SEARCH_PAGE })),
     setDraft: saveDraft,
+    // my profile
+    /** Resolves the name as stored; throws the route's error (a 401 signs out). */
+    updateDisplayName: (displayName) =>
+      call(() => api.updateMe(displayName), (res) => setModel(applyMyName(getModel(), res?.displayName ?? displayName))),
+    /** Uploads my new avatar; on success every URL of it gets a new version. */
+    uploadAvatar: (file) => call(() => api.uploadAvatar(file), () => setModel(bumpAvatar(getModel(), now()))),
     // social
     lookupPrincipal: (handle) => call(() => api.lookupPrincipal(handle)),
     sendFriendRequest: (handle) => call(() => api.sendFriendRequest(handle), () => request({ social: true }), staleSocial),
@@ -421,6 +561,8 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     actions,
     reset() {
       olderInFlight.clear();
+      newerInFlight.clear();
+      jumps.clear();
       // Uploads stop; their entries become failed (the model's reset) and can be retried from the files kept here.
       for (const [clientTxn, job] of jobs) {
         job.counted = false;

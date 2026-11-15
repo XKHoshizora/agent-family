@@ -1,9 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { convTitle, entity, lastPreview, TYPE_LABEL, otherMember } from "../state/selectors.js";
 import { ConvAvatar, IconBtn } from "../ui/primitives.jsx";
 import { Plus, Search, UserPlus, Users } from "../icons.js";
 import { NewGroupModal } from "./GroupModals.jsx";
+import { GlobalHitRow, SearchFooter } from "./SearchHits.jsx";
+import { useJumpTo } from "./useJumpTo.js";
+import { useMessageSearch } from "./useMessageSearch.js";
+import { searchHitView } from "../data/viewmodel.js";
 
 const FILTERS = [
   ["all", "全部"],
@@ -60,9 +64,13 @@ function matches(state, conv, q) {
 }
 
 export function ChatList() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, actions } = useStore();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  // Below the local matches: the messages that contain the text (searched at the service, in every conversation I am in).
+  const search = useMessageSearch(query, (term, before) => actions.searchAll({ q: term, before }), "all");
+  const hits = useMemo(() => search.hits.map((m) => searchHitView(m, { meId: state.account?.id ?? null, now: Date.now() })), [search.hits, state.account?.id]);
+  const jumpTo = useJumpTo();
   const [menu, setMenu] = useState(false);
   const [newGroup, setNewGroup] = useState(false);
   const menuRef = useRef(null);
@@ -129,7 +137,16 @@ export function ChatList() {
             </button>
           </li>
         ))}
-        {rows.length === 0 && <li className="rows-empty">没有符合条件的会话</li>}
+        {rows.length === 0 && <li className="rows-empty">{state.order.length === 0 && !q ? "还没有会话，点右上角的“+”添加好友或发起群聊" : "没有符合条件的会话"}</li>}
+        {q && (
+          <>
+            <li className="rows-label">聊天记录</li>
+            {hits.map((hit) => (
+              <GlobalHitRow key={hit.key} hit={hit} q={search.q} onPick={(h) => jumpTo(h.conversationId, h.seq)} />
+            ))}
+            <SearchFooter search={search} emptyText="没有找到相关聊天记录" />
+          </>
+        )}
       </ul>
       {newGroup && <NewGroupModal onClose={() => setNewGroup(false)} />}
     </>

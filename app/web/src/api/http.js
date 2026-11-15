@@ -63,6 +63,27 @@ export async function request(method, path, body) {
   throw apiErrorOf(res.status, data, path, epoch);
 }
 
+/**
+ * Sends raw bytes (a File or Blob) as the body, e.g. `PUT /api/me/avatar`. Same origin, cookie session; the answer
+ * is JSON as in `request`.
+ * @param {string} method
+ * @param {string} path absolute path starting with /api
+ * @param {Blob} body
+ * @param {string} contentType
+ */
+export async function requestBytes(method, path, body, contentType) {
+  const epoch = sessionEpoch;
+  let res;
+  try {
+    res = await fetch(path, { method, credentials: "same-origin", headers: { Accept: "application/json", "Content-Type": contentType }, body });
+  } catch {
+    throw new ApiError(0, "network_error");
+  }
+  const data = await readJson(res);
+  if (res.ok) return data;
+  throw apiErrorOf(res.status, data, path, epoch);
+}
+
 /** The ApiError for a non-2xx answer; a 401 on a non-auth path first reaches the registered handler. */
 function apiErrorOf(status, data, path, epoch) {
   const code = typeof data?.error === "string" ? data.error : "unknown";

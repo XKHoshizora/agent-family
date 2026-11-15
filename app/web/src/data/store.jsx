@@ -20,6 +20,8 @@ export function emptyState(me = null) {
       contactId: null,
       addFriend: false,
       opening: null,
+      /** A message to scroll to and highlight once it is shown: {convId, seq, n}. */
+      focus: null,
       agentId: null,
       agentView: "detail",
       agentTab: "profile",

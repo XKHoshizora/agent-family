@@ -20,7 +20,6 @@ describe("people and identities", () => {
     expect(v.people[ME]).toMatchObject({ id: ME, kind: "person", name: "你", handle: "@me_one", displayName: "Mei", principalId: ME_ID });
     expect(v.people[ME_ID]).toBeUndefined();
     expect(v.people[ANN]).toMatchObject({ id: ANN, kind: "person", name: "小安", handle: "@ann", avatar: `/api/principals/${ANN}/avatar` });
-    expect(v.people[ANN].cell).toHaveLength(2);
     expect(v.agents).toEqual({});
     expect(v.account).toMatchObject({ id: ME_ID, handle: "me_one", displayName: "Mei" });
     expect(v.loaded).toBe(true);

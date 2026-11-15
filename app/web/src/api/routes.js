@@ -1,6 +1,6 @@
 // One function per service endpoint (see app/service/README.md and the route files under app/service/src).
 // Paths are built here and nowhere else.
-import { request, upload } from "./http.js";
+import { request, requestBytes, upload } from "./http.js";
 
 const seg = (value) => encodeURIComponent(String(value));
 
@@ -84,5 +84,9 @@ export function uploadAttachment(conversationId, file, options) {
   return upload(attachmentUploadUrl(conversationId), form, options);
 }
 export const attachmentUrl = (attachmentId) => `/api/attachments/${seg(attachmentId)}`;
-export const avatarUrl = (principalId) => `/api/principals/${seg(principalId)}/avatar`;
+/** `version` (my own avatar after a change) only busts the browser's cache; the service ignores it. */
+export const avatarUrl = (principalId, version = 0) =>
+  `/api/principals/${seg(principalId)}/avatar${version ? `?v=${encodeURIComponent(String(version))}` : ""}`;
 export const myAvatarUploadUrl = () => "/api/me/avatar";
+/** Replaces my avatar with the image file (PNG, JPEG or WebP, at most 2 MiB; the service decides by the bytes). → {ok: true} */
+export const uploadAvatar = (file) => requestBytes("PUT", myAvatarUploadUrl(), file, file.type && file.type.startsWith("image/") ? file.type : "application/octet-stream");

@@ -8,6 +8,12 @@
 // read requests not answered yet (only while there are some may `readSeq` run ahead of the service).
 // `stays[id]` counts my departures from a conversation: an answer to a request made in an earlier stay
 // must not reach the current one.
+//
+// `windows[id]` is a detached window: the messages around a search hit that lies outside what is held. The held
+// list (`messages[id]`) keeps following the pushes untouched, so nothing arriving meanwhile is lost or misplaced;
+// the window is only what the screen shows while it exists, and it never moves the position or the read marker.
+// It is dropped when the person goes back to the newest messages, and absorbed into the held list as soon as it
+// reaches it (see `settleWindow`).
 
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
@@ -32,6 +38,10 @@ export function initial() {
     social: null,
     /** conversation id → how many times I left it (see `stayOf`). */
     stays: {},
+    /** conversation id → detached window {n, messages, hasOlder, focusSeq} (see the header). */
+    windows: {},
+    /** Cache-busting version of my avatar's URL: 0 until I change it. */
+    avatarVersion: 0,
   };
 }
 
@@ -52,7 +62,7 @@ const bumpStays = (stays, ids) => {
  * (Where the conversation itself is dropped — gone, sync, 404 — its counters and unsent messages go with it.)
  */
 function startNewStay(state, conversationId) {
-  let next = { ...state, stays: bumpStays(state.stays, [conversationId]) };
+  let next = { ...state, stays: bumpStays(state.stays, [conversationId]), windows: without(state.windows, conversationId) };
   const conv = next.conversations[conversationId];
   if (conv) next = putConversation(next, backToConfirmedRead({ ...conv, readsInFlight: 0 }, next.messages[conversationId] ?? [], next.me?.id));
   const sending = Object.values(next.pending).filter((p) => p.conversationId === conversationId && p.status === "sending");
@@ -204,7 +214,8 @@ export function applySync(state, sync) {
   const dropped = Object.keys(state.conversations).filter((id) => !(id in conversations));
   const pending = sameOwner ? filterValues(state.pending, (p) => p.conversationId in conversations) : {};
   const drafts = sameOwner ? filterValues(state.drafts, (_text, id) => id in conversations) : {};
-  return { ...state, me: sync.me, owner: meId, synced: true, principals, conversations, messages, pending, drafts, stays: bumpStays(state.stays, dropped) };
+  const detached = filterValues(state.windows, (_w, id) => id in conversations);
+  return { ...state, me: sync.me, owner: meId, synced: true, principals, conversations, messages, pending, drafts, windows: detached, stays: bumpStays(state.stays, dropped) };
 }
 
 /**
@@ -254,6 +265,7 @@ export function applyGone(state, conversationId) {
     messages: without(state.messages, conversationId),
     pending: filterValues(state.pending, (p) => p.conversationId !== conversationId),
     drafts: without(state.drafts, conversationId),
+    windows: without(state.windows, conversationId),
     stays: bumpStays(state.stays, [conversationId]),
   };
 }
@@ -310,6 +322,77 @@ export function applyOlder(state, conversationId, page) {
   const list = mergeBySeq(state.messages[conversationId] ?? [], page.messages ?? []);
   const named = applyPrincipals(state, page.principals);
   return putConversation(named, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
+}
+
+// ───────── the detached window around a search hit
+
+/** The window reaches the held messages (or, with none held, the position): nothing lies between them to load. */
+function touchesHeld(state, conv, list) {
+  if (list.length === 0) return false;
+  const newest = list[list.length - 1].seq;
+  const held = state.messages[conv.id] ?? [];
+  return held.length > 0 ? newest + 1 >= held[0].seq : newest >= conv.position;
+}
+
+/** The window joins the held list: its messages are merged in and it is gone; the older edge is the window's. */
+function attachWindow(state, conv, win) {
+  const held = state.messages[conv.id] ?? [];
+  const list = mergeBySeq(held, win.messages);
+  const position = advance(list, conv.position);
+  const reachesOlder = held.length === 0 || (win.messages[0] && win.messages[0].seq <= held[0].seq);
+  const next = putConversation(
+    state,
+    { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), hasOlder: reachesOlder ? win.hasOlder : conv.hasOlder },
+    list,
+  );
+  return { ...next, windows: without(next.windows, conv.id) };
+}
+
+/** Keeps the window apart while it does not reach the held messages; absorbs it when it does. */
+function settleWindow(state, conv, win) {
+  if (touchesHeld(state, conv, win.messages)) return attachWindow(state, conv, win);
+  return { ...state, windows: { ...state.windows, [conv.id]: win } };
+}
+
+/**
+ * Shows the window around `focusSeq` (a `GET .../messages?before=` page): the people it names are added. `n` numbers
+ * the window, so answers of an older one are told apart. A page that reaches the held messages joins them instead.
+ */
+export function openWindow(state, conversationId, page, { focusSeq, n }) {
+  const conv = state.conversations[conversationId];
+  if (!conv) return state;
+  const named = applyPrincipals(state, page.principals);
+  const messages = mergeBySeq([], page.messages ?? []);
+  return settleWindow(named, conv, { n, messages, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined, focusSeq });
+}
+
+/** An older page for window `n`: prepended to it. An answer for another window, or none, changes nothing. */
+export function applyOlderInWindow(state, conversationId, page, n) {
+  const win = state.windows[conversationId];
+  if (!win || win.n !== n) return state;
+  const named = applyPrincipals(state, page.principals);
+  const messages = mergeBySeq(win.messages, page.messages ?? []);
+  const hasOlder = page.nextBefore !== null && page.nextBefore !== undefined;
+  return { ...named, windows: { ...named.windows, [conversationId]: { ...win, messages, hasOlder } } };
+}
+
+/**
+ * A newer page for window `n` (the messages after its newest one). The window joins the held messages once it reaches
+ * them, or when the page holds nothing new (what lies between is then not visible to me).
+ */
+export function applyNewerInWindow(state, conversationId, page, n) {
+  const win = state.windows[conversationId];
+  const conv = state.conversations[conversationId];
+  if (!win || !conv || win.n !== n) return state;
+  const named = applyPrincipals(state, page.principals);
+  const messages = mergeBySeq(win.messages, page.messages ?? []);
+  const next = { ...win, messages };
+  return messages.length > win.messages.length ? settleWindow(named, conv, next) : attachWindow(named, conv, next);
+}
+
+/** Back to the newest messages: the window is dropped. */
+export function closeWindow(state, conversationId) {
+  return conversationId in state.windows ? { ...state, windows: without(state.windows, conversationId) } : state;
 }
 
 /** `{conversationId: position}` for the held ones among `ids`. */
@@ -454,4 +537,19 @@ export function resetKeepingDrafts(state) {
   const pending = {};
   for (const [k, p] of Object.entries(state.pending)) pending[k] = p.status === "sending" ? failedEntry(p, { code: "network_error" }) : p;
   return { ...initial(), owner: state.owner, drafts: state.drafts, pending };
+}
+
+// ───────── my profile
+
+/** `PATCH /api/me` answered: my name as stored, in `me` and in my principal entry (message senders read it). */
+export function applyMyName(state, displayName) {
+  if (!state.me) return state;
+  const me = { ...state.me, displayName };
+  const entry = state.principals[me.id];
+  return { ...state, me, principals: entry ? { ...state.principals, [me.id]: { ...entry, displayName } } : state.principals };
+}
+
+/** My avatar changed: every URL of it gets a new version, so the browser fetches it again. */
+export function bumpAvatar(state, version) {
+  return { ...state, avatarVersion: version > state.avatarVersion ? version : state.avatarVersion + 1 };
 }

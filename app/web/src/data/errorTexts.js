@@ -82,3 +82,24 @@ const pick = (table, action, error) => {
 export const friendErrorText = (action, error) => pick(FRIENDS, action, error);
 /** action: create | rename | add | remove | leave */
 export const groupErrorText = (action, error) => pick(GROUPS, action, error);
+
+const SEARCH = {
+  search: {
+    rate_limited: "搜索太频繁了，请稍等一会儿再试。",
+    not_found: "你已不在这个会话中。",
+  },
+};
+/** Why a message search did not answer: a quiet one-line note beside a retry button. */
+export const searchErrorText = (error) => pick(SEARCH, "search", error);
+
+const PROFILE = {
+  name: {
+    invalid_request: "昵称需要 1–40 个字，且只能一行。",
+  },
+  avatar: {
+    invalid_request: "头像需要是 PNG、JPEG 或 WebP 格式的图片。",
+    too_large: "头像不能超过 2 MB。",
+  },
+};
+/** action: name | avatar */
+export const profileErrorText = (action, error) => pick(PROFILE, action, error);

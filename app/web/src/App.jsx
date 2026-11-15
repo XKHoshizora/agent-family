@@ -101,10 +101,22 @@ function useOpenWhenPresent(state, dispatch) {
   }, [opening, dispatch]);
 }
 
+/** A detached search window belongs to the conversation that is open: once another one is, the window is dropped. */
+function useDropStrayWindows(state, actions) {
+  const stray = Object.values(state.convs)
+    .filter((c) => c.detached && c.id !== state.nav.convId)
+    .map((c) => c.id)
+    .join(",");
+  useEffect(() => {
+    for (const id of stray ? stray.split(",") : []) actions.closeWindow(id);
+  }, [stray, actions]);
+}
+
 function Shell() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, actions } = useStore();
   useCloseWhenRemoved(state, dispatch);
   useOpenWhenPresent(state, dispatch);
+  useDropStrayWindows(state, actions);
   const { nav } = state;
   const conv = state.convs[nav.convId];
   let list = null;

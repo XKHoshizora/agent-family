@@ -1,7 +1,7 @@
 // Model → the state shape the prototype's pages and selectors read (people, agents, convs, order,
 // relations, blocks). The signed-in user appears as the alias id "me"; every other id is the real one.
 import { attachmentUrl, avatarUrl } from "../api/routes.js";
-import { ME, MY_CELL, personCell } from "./identities.js";
+import { ME } from "./identities.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -230,7 +230,6 @@ function personView(p) {
     name: p.displayName,
     handle: `@${p.handle}`,
     displayName: p.displayName,
-    cell: personCell(p.id),
     avatar: avatarUrl(p.id),
   };
 }
@@ -258,8 +257,7 @@ export function toView(model, { now = Date.now() } = {}) {
       handle: `@${model.me.handle}`,
       displayName: model.me.displayName,
       principalId: meId,
-      cell: MY_CELL,
-      avatar: avatarUrl(meId),
+      avatar: avatarUrl(meId, model.avatarVersion),
     };
   }
   const nameOf = (id) => people[id]?.name ?? null;
@@ -280,7 +278,9 @@ export function toView(model, { now = Date.now() } = {}) {
     if (direct) members = [ME, conv.peerId ?? members.find((id) => id !== ME)].filter(Boolean);
     else if (!members.includes(ME)) members.unshift(ME);
 
-    const messages = held.map((m) => messageView(m, { alias, meId, direct, peerReadSeq: conv.peerReadSeq, now, nameOf }));
+    const viewOf = (m) => messageView(m, { alias, meId, direct, peerReadSeq: conv.peerReadSeq, now, nameOf });
+    const messages = held.map(viewOf);
+    const win = model.windows?.[conv.id] ?? null;
     const claimed = new Set();
     let lastPendingAt = null;
     for (const p of pendingByConv.get(conv.id) ?? []) {
@@ -316,6 +316,9 @@ export function toView(model, { now = Date.now() } = {}) {
       lastSeq: conv.lastSeq,
       peerReadSeq: conv.peerReadSeq,
       hasOlder: conv.hasOlder,
+      /** A detached window around a search hit, shown instead of `messages` (the newest ones) while it exists: {messages, hasOlder, focusSeq} or null. */
+      window: win ? { messages: win.messages.map(viewOf), hasOlder: win.hasOlder, focusSeq: win.focusSeq } : null,
+      detached: Boolean(win),
       at: formatAt(activity || null, now),
       lastActivity: activity,
       cutoffs: {},
@@ -336,6 +339,24 @@ export function toView(model, { now = Date.now() } = {}) {
   }
 
   return { people, agents: {}, convs, order, relations, blocks, drafts: model.drafts, account: model.me, loaded: model.synced };
+}
+
+/**
+ * One search hit (a WireMessage from either search) for the list: `from` is "me" for my own, the real id otherwise,
+ * `text` what the match is looked for in (a file message: its name, then its caption).
+ */
+export function searchHitView(m, { meId, now }) {
+  const attachment = m.kind === "file" ? m.attachment : null;
+  const text = attachment ? [attachment.name, m.text].filter(Boolean).join(" · ") : m.text ?? "";
+  return {
+    key: `${m.conversationId}:${m.seq}`,
+    conversationId: m.conversationId,
+    seq: m.seq,
+    from: m.senderId === null || m.senderId === undefined ? null : m.senderId === meId ? ME : m.senderId,
+    file: Boolean(attachment),
+    text,
+    at: formatAt(timeOf(m.createdAt), now),
+  };
 }
 
 const MINUTE_MS = 60 * 1000;

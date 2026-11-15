@@ -1,9 +1,13 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice } from "../ui/primitives.jsx";
 import { MessageItem } from "./Messages.jsx";
+import { ChatHitRow, SearchFooter } from "./SearchHits.jsx";
+import { useJumpTo } from "./useJumpTo.js";
+import { useMessageSearch } from "./useMessageSearch.js";
+import { searchHitView } from "../data/viewmodel.js";
 import { Search, Menu, ChevronLeft, X } from "../icons.js";
 
 import { Composer } from "./Composer.jsx";
@@ -15,8 +19,12 @@ const BOTTOM_SLACK_PX = 48;
 const TOP_SLACK_PX = 120;
 /** The newest message is marked read once the open chat has been in view this long. */
 export const READ_DELAY_MS = 500;
-/** After older history failed to load, scrolling asks again only after this long. */
+/** After older (or newer) history failed to load, scrolling asks again only after this long. */
 const OLDER_RETRY_MS = 3000;
+/** A message jumped to stays highlighted this long. */
+const FLASH_MS = 2000;
+/** Search answers that need no word: a newer one replaced them, or the session ended. */
+const hushed = (error) => ["stale", "stopped", "superseded"].includes(error?.code) || [401, 404].includes(error?.status);
 
 const newestSeqOf = (messages) => messages.reduce((max, m) => (Number.isSafeInteger(m.seq) && m.seq > max ? m.seq : max), 0);
 /** The person can see this tab: it is visible and the window has focus. */
@@ -40,15 +48,29 @@ export function ChatView({ conv }) {
   const anchor = useRef(null);
   /** The conversation whose older page is loading, and when loading failed per conversation. */
   const older = useRef({ busy: null, failedAt: new Map() });
+  /** Loading the messages after a detached window's newest one. */
+  const newer = useRef({ busy: false, failedAt: 0 });
   const readFailed = useRef(null);
+  /** The seq of the message just jumped to, highlighted for FLASH_MS. */
+  const [flash, setFlash] = useState(null);
   const [dropping, setDropping] = useState(false);
   const block = publishBlock(state, conv);
   const group = conv.type === "group";
   const q = query.trim();
-  const messages = q ? conv.messages.filter((x) => (x.text || "").toLowerCase().includes(q.toLowerCase())) : conv.messages;
+  // A detached window (around a search hit) is shown instead of the newest messages while it exists.
+  const detached = Boolean(conv.detached);
+  const messages = conv.window ? conv.window.messages : conv.messages;
+  const hasOlder = conv.window ? conv.window.hasOlder : conv.hasOlder;
   const firstId = messages[0]?.id ?? null;
   const last = messages[messages.length - 1] ?? null;
   const newestSeq = newestSeqOf(conv.messages);
+  const search = useMessageSearch(searching ? query : "", (term, before) => actions.searchConversation(conv.id, { q: term, before }), conv.id);
+  const showHits = searching && q !== "";
+  const hits = useMemo(() => search.hits.map((m) => searchHitView(m, { meId: state.account?.id ?? null, now: Date.now() })), [search.hits, state.account?.id]);
+  const jumpTo = useJumpTo();
+  const focus = state.nav.focus;
+  /** Where the list was scrolled to when the search results covered it. */
+  const savedScroll = useRef(0);
 
   useEffect(() => {
     setSearching(false);
@@ -79,11 +101,40 @@ export function ChatView({ conv }) {
       if (node) list.scrollTop += topWithin(node, list) - held.top;
       return;
     }
-    if (atBottom.current || mineNew) {
+    // (A detached window is read from where the hit is: it never follows to its end.)
+    if (!detached && (atBottom.current || mineNew)) {
       list.scrollTop = list.scrollHeight;
       atBottom.current = true;
     }
-  }, [conv.id, firstId, last?.id, messages.length]);
+  }, [conv.id, firstId, last?.id, messages.length, detached]);
+
+  // The results cover the list while there is a query: its scroll position is kept for when they go away.
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    if (showHits) savedScroll.current = list.scrollTop;
+    else if (savedScroll.current > 0) {
+      list.scrollTop = savedScroll.current;
+      savedScroll.current = 0;
+    }
+  }, [showHits]);
+
+  // A jump (nav.focus) scrolls to the message once it is shown, and highlights it for a moment.
+  useLayoutEffect(() => {
+    if (!focus || focus.convId !== conv.id) return;
+    const node = [...(listRef.current?.children ?? [])].find((li) => li.dataset.msg === `m${focus.seq}`);
+    if (!node) return;
+    dispatch({ type: "nav", patch: { focus: null } });
+    savedScroll.current = 0;
+    node.scrollIntoView({ block: "center" });
+    setFlash(focus.seq);
+  }, [focus, conv.id, messages, dispatch]);
+
+  useEffect(() => {
+    if (flash === null) return undefined;
+    const timer = window.setTimeout(() => setFlash(null), FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [flash]);
 
   /**
    * Loads the page before the oldest held message. `byScroll`: the person scrolled to the top — after a failure
@@ -95,7 +146,7 @@ export function ChatView({ conv }) {
     const list = listRef.current;
     const convId = conv.id;
     const { busy, failedAt } = older.current;
-    if (!list || q || !conv.hasOlder || busy === convId) return;
+    if (!list || q || !hasOlder || busy === convId) return;
     if (failedAt.has(convId) && (!byScroll || Date.now() - failedAt.get(convId) < OLDER_RETRY_MS)) return;
     const first = firstMessageNode(list);
     anchor.current = first ? { convId, id: first.dataset.msg, top: topWithin(first, list) } : null;
@@ -115,8 +166,36 @@ export function ChatView({ conv }) {
   // page; not again on its own after a failure, see loadOlder).
   useEffect(() => {
     const list = listRef.current;
-    if (list && conv.hasOlder && list.clientHeight > 0 && list.scrollHeight <= list.clientHeight) loadOlder({ byScroll: false });
-  }, [conv.id, conv.hasOlder, conv.messages.length, q]);
+    if (list && hasOlder && list.clientHeight > 0 && list.scrollHeight <= list.clientHeight) loadOlder({ byScroll: false });
+  }, [conv.id, hasOlder, messages.length, q]);
+
+  /**
+   * Loads the messages after a detached window's newest one (the window joins the newest ones when it reaches them).
+   * `byScroll`: the person scrolled to the end — after a failure that asks again once OLDER_RETRY_MS has passed.
+   */
+  function loadNewer({ byScroll }) {
+    const { busy, failedAt } = newer.current;
+    if (!detached || q || busy) return;
+    if (byScroll && failedAt && Date.now() - failedAt < OLDER_RETRY_MS) return;
+    newer.current.busy = true;
+    actions.loadNewer(conv.id).then((res) => {
+      newer.current.busy = false;
+      newer.current.failedAt = res.ok ? 0 : Date.now();
+      if (!res.ok && !hushed(res.error)) dispatch({ type: "toast", text: "更新的消息加载失败，请稍后再试" });
+    });
+  }
+
+  function backToNewest() {
+    atBottom.current = true;
+    actions.closeWindow(conv.id);
+    setAttention((n) => n + 1);
+  }
+
+  function pickHit(hit) {
+    setSearching(false);
+    setQuery("");
+    jumpTo(conv.id, hit.seq);
+  }
 
   function onScroll() {
     const list = listRef.current;
@@ -127,6 +206,7 @@ export function ChatView({ conv }) {
     }
     atBottom.current = bottom;
     if (list.scrollTop <= TOP_SLACK_PX) loadOlder({ byScroll: true });
+    if (bottom) loadNewer({ byScroll: true });
   }
 
   useEffect(() => {
@@ -148,7 +228,7 @@ export function ChatView({ conv }) {
   // the person looks again, the chat pane is shown again).
   const pane = state.nav.pane;
   useEffect(() => {
-    if (conv.unread === 0 || newestSeq === 0 || q) return undefined;
+    if (conv.unread === 0 || newestSeq === 0 || q || detached) return undefined;
     const key = `${conv.id}:${newestSeq}`;
     if (readFailed.current === key) return undefined;
     const timer = setTimeout(() => {
@@ -159,7 +239,7 @@ export function ChatView({ conv }) {
       });
     }, READ_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [conv.id, conv.unread, newestSeq, q, attention, pane, actions]);
+  }, [conv.id, conv.unread, newestSeq, q, detached, attention, pane, actions]);
 
   // Files dropped anywhere on the chat are sent like picked ones (nothing is uploaded where sending is held).
   const sendFiles = useSendFiles(conv, block);
@@ -202,8 +282,8 @@ export function ChatView({ conv }) {
       {searching && (
         <div className="chat-search">
           <Search size={16} aria-hidden="true" />
-          <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setQuery("");setSearching(false);}}} placeholder="在本会话中搜索" aria-label="在本会话中搜索" />
-          <span className="muted">{q ? `${messages.length} 条结果` : ""}</span>
+          <input autoFocus value={query} maxLength={100} onChange={(e) => setQuery(e.target.value)} onKeyDown={e=>{if(e.key==="Escape"){setQuery("");setSearching(false);}}} placeholder="在本会话中搜索" aria-label="在本会话中搜索" />
+          <span className="muted">{showHits && search.status === "ready" ? `${hits.length}${search.more ? "+" : ""} 条结果` : ""}</span>
           <IconBtn label="关闭会话搜索" onClick={()=>{setQuery("");setSearching(false);}}><X size={16}/></IconBtn>
         </div>
       )}
@@ -212,10 +292,31 @@ export function ChatView({ conv }) {
           <strong>{block.text}</strong>
         </Notice>
       )}
-      <ol className="messages" ref={listRef} onScroll={onScroll}>
-        {q && messages.length === 0 && <li className="rows-empty" role="status">没有找到相关消息，请换个关键词</li>}
+      {detached && (
+        <Notice
+          tone="info"
+          action={
+            <>
+              <Btn small onClick={() => loadNewer({ byScroll: false })}>查看更新的消息</Btn>
+              <Btn small variant="primary" onClick={backToNewest}>回到最新消息</Btn>
+            </>
+          }
+        >
+          <strong>正在查看较早的消息</strong>
+          {conv.unread > 0 ? `，有 ${conv.unread} 条新消息` : ""}
+        </Notice>
+      )}
+      {showHits && (
+        <ul className="rows search-hits" aria-label="搜索结果">
+          {hits.map((hit) => (
+            <ChatHitRow key={hit.key} hit={hit} q={search.q} onPick={pickHit} />
+          ))}
+          <SearchFooter search={search} emptyText="没有找到相关消息，请换个关键词" />
+        </ul>
+      )}
+      <ol className="messages" ref={listRef} onScroll={onScroll} hidden={showHits}>
         {messages.map((msg) => (
-          <MessageItem key={msg.id} msg={msg} conv={conv} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
+          <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}
         <li aria-hidden="true" />
       </ol>
