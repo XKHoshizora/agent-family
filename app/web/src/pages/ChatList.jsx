@@ -91,7 +91,7 @@ export function ChatList() {
             </IconBtn>
             {menu && (
               <div className="menu" aria-label="新建选项">
-                <button type="button" onClick={() => (setMenu(false), dispatch({ type: "nav", patch: { section: "contacts", pane: "list" } }))}>
+                <button type="button" onClick={() => (setMenu(false), dispatch({ type: "nav", patch: { section: "contacts", pane: "list", addFriend: true } }))}>
                   <UserPlus size={16} aria-hidden="true" /> 添加好友
                 </button>
               </div>

@@ -1,13 +1,18 @@
-import React from "react";
+import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { convTitle, TYPE_LABEL, nameOf, otherMember } from "../state/selectors.js";
-import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, KV } from "../ui/primitives.jsx";
+import { blockedMe, iBlocked } from "../state/social.js";
+import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, KV, Reason } from "../ui/primitives.jsx";
+import { BlockModal } from "./BlockModal.jsx";
 import { X } from "../icons.js";
 
 export function DetailsPanel({ conv }) {
   const { state, dispatch } = useStore();
   const other = otherMember(conv);
   const group = conv.type === "group";
+  const [blockOpen, setBlockOpen] = useState(false);
+  const blocked = !group && iBlocked(state, other);
+  const blockedByThem = !group && blockedMe(state, other);
   const go = (patch) => dispatch({ type: "nav", patch: { pane: "main", ...patch } });
 
   return (
@@ -38,8 +43,13 @@ export function DetailsPanel({ conv }) {
         <div className="stack-actions">
           {group && <Btn onClick={() => dispatch({ type: "nav", patch: { view: "profile", profileTab: "members", detailsOpen: false } })}>打开群资料</Btn>}
           {conv.type === "human" && <Btn onClick={() => go({ section: "contacts", contactId: other })}>查看联系人卡片</Btn>}
+          {conv.type === "human" && (
+            <Btn variant={blocked ? "ghost" : "danger"} onClick={() => setBlockOpen(true)}>{blocked ? "解除我的拉黑" : "拉黑此用户"}</Btn>
+          )}
+          {conv.type === "human" && blockedByThem && <Reason>对方拉黑了你，只能由对方解除。</Reason>}
         </div>
       </div>
+      {blockOpen && <BlockModal target={other} onClose={() => setBlockOpen(false)} />}
     </div>
   );
 }

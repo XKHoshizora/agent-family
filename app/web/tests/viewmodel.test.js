@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
-import { toView, formatAt } from "../src/data/viewmodel.js";
+import { toView, formatAt, expiryText } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
 import { convSubtitle, convTitle, lastPreview, publishBlock, visibilityNote, myBlock, senderName } from "../src/state/selectors.js";
 import { ANN, BO, D1, G1, ME_ID, at, direct, emptySocial, group, notice, range, syncOf, wire } from "./fixtures.js";
@@ -248,5 +248,23 @@ describe("social: relations, blocks and the hold", () => {
     let m = model({ conversations: [direct(D1, ANN)], social: { ...emptySocial(), friends: [pub(ANN, "ann", "小安")] } });
     m = M.setCanSend(m, D1, { ok: false, reason: "not_friends" });
     expect(toView(m, { now: NOW }).convs[D1].hold.kind).toBe("relation");
+  });
+});
+
+describe("expiryText", () => {
+  const iso = (ms) => new Date(ms).toISOString();
+  it("rounds up to hours above an hour, to minutes within it", () => {
+    expect(expiryText(iso(NOW + 24 * 3600_000), NOW)).toBe("24 小时内有效");
+    expect(expiryText(iso(NOW + 23 * 3600_000 + 60_000), NOW)).toBe("24 小时内有效");
+    expect(expiryText(iso(NOW + 3600_000 + 1), NOW)).toBe("2 小时内有效");
+    expect(expiryText(iso(NOW + 3600_000), NOW)).toBe("60 分钟内有效");
+    expect(expiryText(iso(NOW + 61_000), NOW)).toBe("2 分钟内有效");
+    expect(expiryText(iso(NOW + 1000), NOW)).toBe("1 分钟内有效");
+  });
+  it("says expired at and after the expiry, and nothing for a missing or unreadable time", () => {
+    expect(expiryText(iso(NOW), NOW)).toBe("已过期");
+    expect(expiryText(iso(NOW - 5000), NOW)).toBe("已过期");
+    expect(expiryText(undefined, NOW)).toBe("");
+    expect(expiryText("soon", NOW)).toBe("");
   });
 });

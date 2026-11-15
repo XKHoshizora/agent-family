@@ -1,22 +1,22 @@
 import React from "react";
 import { useStore } from "../data/store.jsx";
-import { ME } from "../data/identities.js";
-import { nameOf, ownerOf, convTitle, myBlock, isMine } from "../state/selectors.js";
+import { nameOf } from "../state/selectors.js";
+import { iBlocked } from "../state/social.js";
+import { friendErrorText } from "../data/errorTexts.js";
 import { Modal, Btn, Notice } from "../ui/primitives.jsx";
+import { useAction } from "./useAction.js";
 
-export function sharedConvs(state, target) {
-  return Object.values(state.convs).filter(
-    (c) => c.members.includes(target) && c.members.some((id) => id !== target && (id === ME || isMine(state, id))),
-  );
-}
-
+/** Confirm blocking `target` (a person), or lifting my block when I have one. */
 export function BlockModal({ target, onClose }) {
-  const { state, dispatch } = useStore();
-  const blocked = Boolean(myBlock(state, target));
+  const { state, actions } = useStore();
+  const { busy, run } = useAction();
+  const blocked = iBlocked(state, target);
   const name = nameOf(state, target);
-  const owner = nameOf(state, ownerOf(state, target));
-  const shared = sharedConvs(state, target);
-  const myAgents = Object.values(state.agents).filter((a) => a.ownerId === ME).map((a) => a.name);
+  const confirm = async () => {
+    const action = blocked ? "unblock" : "block";
+    const res = await run(action, () => (blocked ? actions.unblockPrincipal(target) : actions.blockPrincipal(target)), (e) => friendErrorText(action, e));
+    if (res.ok) onClose();
+  };
   return (
     <Modal
       title={blocked ? `解除对${name}的拉黑` : `拉黑${name}`}
@@ -24,38 +24,28 @@ export function BlockModal({ target, onClose }) {
       footer={
         <>
           <Btn data-autofocus onClick={onClose}>取消</Btn>
-          <Btn
-            variant={blocked ? "primary" : "danger"}
-            onClick={() => {
-              dispatch({ type: blocked ? "block/remove" : "block/add", target });
-              onClose();
-            }}
-          >
-            {blocked ? "解除我的拉黑" : "确认拉黑"}
+          <Btn variant={blocked ? "primary" : "danger"} disabled={busy !== null} onClick={confirm}>
+            {busy !== null ? "处理中…" : blocked ? "解除我的拉黑" : "确认拉黑"}
           </Btn>
         </>
       }
     >
       {blocked ? (
         <>
-          <p>只解除你自己的拉黑。其他人对相关 Agent 的拉黑不受影响，仍需由对方解除。</p>
-          <Notice tone="info">解除拉黑不会恢复好友、不授予工具，也不会自动恢复群讨论；受影响的会话需检查后手动恢复。</Notice>
+          <p>只解除你自己的拉黑。</p>
+          <Notice tone="info">如果你们仍是好友，并且对方没有拉黑你，私聊就可以继续发送；否则仍需对方解除。</Notice>
         </>
       ) : (
         <>
           <p>
-            范围：你本人及你的 Agent（{myAgents.join("、")}）与 <strong>{name}</strong> 之间的直接新互动。
+            你要拉黑 <strong>{name}</strong>：
           </p>
           <ul className="plain-list">
-            <li>不会拉黑其主人{owner}，也不会拉黑{owner}的其他 Agent。</li>
-            <li>{name}与其他人的不相干会话不受影响。</li>
-            <li>已合法取得的历史可能仍可查看。</li>
+            <li>你们之间的私聊不能再发送新消息，已有历史不受影响。</li>
+            <li>你们之间待处理的好友申请会被取消，也不能再互相申请。</li>
+            <li>好友关系不会自动解除。</li>
+            <li>你们的私聊里会留下一条拉黑的提示；你可以随时解除自己的拉黑。</li>
           </ul>
-          {shared.length > 0 && (
-            <Notice tone="pause">
-              以下共同会话的新增消息、附件与讨论将被冻结：{shared.map((c) => convTitle(state, c)).join("、")}。
-            </Notice>
-          )}
         </>
       )}
     </Modal>

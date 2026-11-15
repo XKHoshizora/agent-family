@@ -337,18 +337,31 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     setModel(setDraft(model, conversationId, typeof text === "string" ? text : ""));
   }
 
-  /** Runs a route; on success `after(result)`; a 401 signs out; errors reach the caller unchanged. */
-  async function call(run, after) {
+  /**
+   * Runs a route; on success `after(result)`, on failure `onFail(error)` (to refresh what the refusal shows is stale);
+   * a 401 signs out; errors reach the caller unchanged.
+   */
+  async function call(run, after, onFail) {
     const token = epoch();
     try {
       const res = await run();
       if (token === epoch()) after?.(res);
       return res;
     } catch (err) {
-      if (token === epoch() && err?.status === 401) signedOut();
+      if (token === epoch()) {
+        if (err?.status === 401) signedOut();
+        else onFail?.(err);
+      }
       throw err;
     }
   }
+  /** A refusal that says the other side or the request is not what the screen showed: fetch the real state. */
+  const staleSocial = (err) => {
+    if (err?.status === 404 || err?.status === 409 || err?.status === 403) request({ social: true });
+  };
+  const staleConversation = (conversationId) => (err) => {
+    if (err?.status === 404 || err?.status === 409 || err?.status === 403) request({ conversation: conversationId });
+  };
   const socialChanged = (principalId) => () => request({ social: true, conversation: principalId ? peerConversation(principalId) : null });
 
   function removeMember(conversationId, principalId) {
@@ -361,6 +374,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         if (!leaving) request({ conversation: conversationId });
         else if (!staleness(token)) setModel(applyGone(getModel(), conversationId));
       },
+      staleConversation(conversationId),
     );
   }
 
@@ -375,20 +389,31 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     setDraft: saveDraft,
     // social
     lookupPrincipal: (handle) => call(() => api.lookupPrincipal(handle)),
-    sendFriendRequest: (handle) => call(() => api.sendFriendRequest(handle), () => request({ social: true })),
+    sendFriendRequest: (handle) => call(() => api.sendFriendRequest(handle), () => request({ social: true }), staleSocial),
     acceptFriendRequest: (requestId) =>
-      call(() => api.acceptFriendRequest(requestId), (res) => request({ social: true, conversation: res?.conversationId ?? null })),
-    rejectFriendRequest: (requestId) => call(() => api.rejectFriendRequest(requestId), () => request({ social: true })),
-    withdrawFriendRequest: (requestId) => call(() => api.withdrawFriendRequest(requestId), () => request({ social: true })),
-    removeFriend: (principalId) => call(() => api.removeFriend(realId(principalId)), socialChanged(realId(principalId))),
-    blockPrincipal: (principalId) => call(() => api.blockPrincipal(realId(principalId)), socialChanged(realId(principalId))),
-    unblockPrincipal: (principalId) => call(() => api.unblockPrincipal(realId(principalId)), socialChanged(realId(principalId))),
+      call(
+        () => api.acceptFriendRequest(requestId),
+        (res) => request({ social: true, conversation: res?.conversationId ?? null }),
+        staleSocial,
+      ),
+    rejectFriendRequest: (requestId) => call(() => api.rejectFriendRequest(requestId), () => request({ social: true }), staleSocial),
+    withdrawFriendRequest: (requestId) => call(() => api.withdrawFriendRequest(requestId), () => request({ social: true }), staleSocial),
+    removeFriend: (principalId) => call(() => api.removeFriend(realId(principalId)), socialChanged(realId(principalId)), staleSocial),
+    blockPrincipal: (principalId) => call(() => api.blockPrincipal(realId(principalId)), socialChanged(realId(principalId)), staleSocial),
+    unblockPrincipal: (principalId) => call(() => api.unblockPrincipal(realId(principalId)), socialChanged(realId(principalId)), staleSocial),
+    /** Asks for a full refresh (a conversation the screen expects is not held yet). */
+    syncNow: () => request({ sync: true }),
     // groups
     createGroup: (title, memberIds) =>
       call(() => api.createGroup({ title, memberIds: memberIds.map(realId) }), () => request({ sync: true })),
-    renameGroup: (conversationId, title) => call(() => api.renameGroup(conversationId, title), () => request({ conversation: conversationId })),
+    renameGroup: (conversationId, title) =>
+      call(() => api.renameGroup(conversationId, title), () => request({ conversation: conversationId }), staleConversation(conversationId)),
     addMember: (conversationId, principalId) =>
-      call(() => api.addMember(conversationId, realId(principalId)), () => request({ conversation: conversationId })),
+      call(
+        () => api.addMember(conversationId, realId(principalId)),
+        () => request({ conversation: conversationId }),
+        staleConversation(conversationId),
+      ),
     removeMember,
     leaveGroup: (conversationId) => removeMember(conversationId, ME),
   };

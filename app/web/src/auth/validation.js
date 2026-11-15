@@ -45,6 +45,15 @@ export function handle(value) {
   return "";
 }
 
+/** A group's name as the service counts it: trimmed, one line, 1-60 code points. */
+export function groupTitle(value) {
+  const v = value.trim();
+  if (!v) return "请输入群名称";
+  if (/[\p{Cc}\u2028\u2029]/u.test(v)) return "群名称只能是一行";
+  if ([...v].length > 60) return "群名称最多 60 个字";
+  return "";
+}
+
 /** @returns {Record<string,string>} the failing fields only, in the order of `rules` */
 export function validate(values, rules) {
   const errors = {};

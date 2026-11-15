@@ -337,3 +337,19 @@ export function toView(model, { now = Date.now() } = {}) {
 
   return { people, agents: {}, convs, order, relations, blocks, drafts: model.drafts, account: model.me, loaded: model.synced };
 }
+
+const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
+
+/**
+ * How long a friend request stays valid, rounded up: "24 小时内有效", "35 分钟内有效", "已过期".
+ * `expiresAt` is the service's ISO time; empty when it is missing or unreadable.
+ */
+export function expiryText(expiresAt, now) {
+  const ms = timeOf(expiresAt);
+  if (ms === null) return "";
+  const left = ms - now;
+  if (left <= 0) return "已过期";
+  if (left <= HOUR_MS) return `${Math.max(1, Math.ceil(left / MINUTE_MS))} 分钟内有效`;
+  return `${Math.ceil(left / HOUR_MS)} 小时内有效`;
+}

@@ -302,6 +302,52 @@ describe("social and group wrappers", () => {
   });
 });
 
+describe("refusals that show the screen is stale refresh what it showed", () => {
+  const count = (transport, entry) => transport.log.filter((x) => JSON.stringify(x) === JSON.stringify(entry)).length;
+  const refused = (status, code) => vi.fn(async () => Promise.reject(apiError(status, code)));
+
+  it.each([
+    ["acceptFriendRequest", "request_not_pending", 409],
+    ["rejectFriendRequest", "not_found", 404],
+    ["withdrawFriendRequest", "request_expired", 409],
+    ["sendFriendRequest", "request_pending", 409],
+  ])("%s refused with %s refetches the social view", async (name, code, status) => {
+    const { actions, transport } = await loaded({ api: fakeApi({ [name]: refused(status, code) }) });
+    const before = count(transport, "social");
+    await expect(actions[name]("x")).rejects.toMatchObject({ code });
+    await settle();
+    expect(count(transport, "social")).toBe(before + 1);
+  });
+
+  it("a rate limit or a network failure refreshes nothing", async () => {
+    const { actions, transport } = await loaded({ api: fakeApi({ sendFriendRequest: refused(429, "rate_limited") }) });
+    const before = transport.log.length;
+    await expect(actions.sendFriendRequest("ann")).rejects.toMatchObject({ code: "rate_limited" });
+    await settle();
+    expect(transport.log.length).toBe(before);
+  });
+
+  it("a refused group change refetches that conversation", async () => {
+    const { actions, transport } = await loaded({
+      api: fakeApi({ addMember: refused(409, "already_member"), renameGroup: refused(403, "forbidden"), removeMember: refused(404, "not_found") }),
+    });
+    transport.handlers.conversation = (id) => group(id, { lastSeq: 40 });
+    await expect(actions.addMember(G1, ANN)).rejects.toMatchObject({ code: "already_member" });
+    await expect(actions.renameGroup(G1, "x")).rejects.toMatchObject({ code: "forbidden" });
+    await expect(actions.leaveGroup(G1)).rejects.toMatchObject({ code: "not_found" });
+    await settle();
+    expect(count(transport, ["conversation", G1])).toBeGreaterThanOrEqual(1);
+  });
+
+  it("syncNow asks for a full refresh", async () => {
+    const { actions, transport } = await loaded();
+    const before = count(transport, "sync");
+    actions.syncNow();
+    await settle();
+    expect(count(transport, "sync")).toBe(before + 1);
+  });
+});
+
 describe("lifecycle", () => {
   it("stop() keeps drafts and unsent messages, clears the rest; start() loads again", async () => {
     const api = fakeApi();

@@ -18,6 +18,8 @@ export function emptyState(me = null) {
       profileTab: "members",
       detailsOpen: false,
       contactId: null,
+      addFriend: false,
+      opening: null,
       agentId: null,
       agentView: "detail",
       agentTab: "profile",

@@ -72,9 +72,39 @@ function useCloseWhenRemoved(state, dispatch) {
   }, [convId, present, section, state.loaded, dispatch]);
 }
 
+/** How long a conversation I asked for (a new group, a friend's chat) may take to arrive before I stop waiting. */
+export const OPENING_WAIT_MS = 8000;
+
+/**
+ * `nav.opening` ({convId} or {peerId}) names a conversation the screen wants to show as soon as it is in state
+ * (created or accepted a moment ago). It opens it, or gives up after OPENING_WAIT_MS.
+ */
+function useOpenWhenPresent(state, dispatch) {
+  const { opening } = state.nav;
+  const target = opening
+    ? opening.convId
+      ? state.convs[opening.convId]
+      : Object.values(state.convs).find((c) => c.type === "human" && c.peerId === opening.peerId)
+    : null;
+  const targetId = target?.id ?? null;
+  useEffect(() => {
+    if (!opening || !targetId) return;
+    dispatch({ type: "nav/openConv", convId: targetId, patch: { opening: null } });
+  }, [opening, targetId, dispatch]);
+  useEffect(() => {
+    if (!opening) return undefined;
+    const handle = window.setTimeout(() => {
+      dispatch({ type: "nav", patch: { opening: null } });
+      dispatch({ type: "toast", text: "会话还没有同步下来，请稍后在消息列表里查看" });
+    }, OPENING_WAIT_MS);
+    return () => window.clearTimeout(handle);
+  }, [opening, dispatch]);
+}
+
 function Shell() {
   const { state, dispatch } = useStore();
   useCloseWhenRemoved(state, dispatch);
+  useOpenWhenPresent(state, dispatch);
   const { nav } = state;
   const conv = state.convs[nav.convId];
   let list = null;
