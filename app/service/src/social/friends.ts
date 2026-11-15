@@ -1,8 +1,9 @@
-import { ensureDirect } from "../conversations/store.ts";
+import { appendDirectNotice, ensureDirect } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
+import type { StoredMessage } from "../messages/model.ts";
 import type { PublicPrincipal } from "../principals/store.ts";
-import { areFriends, blockBetween } from "./blocks.ts";
 import { lockPair, orderedPair } from "./pair.ts";
+import { areFriends, blockBetween } from "./relations.ts";
 
 export const REQUEST_TTL_HOURS = 24;
 
@@ -81,14 +82,15 @@ export type Decision = "accept" | "reject" | "withdraw";
 /**
  * Resolves a pending request as `actor`. Only the recipient may accept/reject, only the sender may
  * withdraw; anyone else, or an unknown id, is `not_found`. `accept` also creates the friendship and
- * ensures the direct conversation, returning its id.
+ * ensures the direct conversation, returning its id; when the pair already had one (re-befriending),
+ * a "friendship restored" notice is appended to it.
  */
 export async function decideRequest(
   t: Tx,
   actor: string,
   requestId: string,
   decision: Decision,
-): Promise<Outcome<{ fromId: string; toId: string; conversationId: string | null }>> {
+): Promise<Outcome<{ fromId: string; toId: string; conversationId: string | null; notices: StoredMessage[] }>> {
   const peek = await t.query<{ from_id: string; to_id: string }>(
     "select from_id, to_id from friend_requests where id = $1",
     [requestId],
@@ -118,12 +120,16 @@ export async function decideRequest(
   await t.query("update friend_requests set status = $2, resolved_at = now() where id = $1", [requestId, status]);
 
   let conversationId: string | null = null;
+  const notices: StoredMessage[] = [];
   if (decision === "accept") {
     const [lo, hi] = orderedPair(req.from_id, req.to_id);
     await t.query("insert into friendships (a_id, b_id) values ($1, $2) on conflict do nothing", [lo, hi]);
+    // Only an existing conversation gets the notice; a new one starts empty.
+    const restored = await appendDirectNotice(t, { event: "friendship_restored", actorId: actor, principalId: req.from_id });
+    if (restored) notices.push(restored);
     conversationId = await ensureDirect(t, req.from_id, req.to_id, actor);
   }
-  return { ok: true, fromId: req.from_id, toId: req.to_id, conversationId };
+  return { ok: true, fromId: req.from_id, toId: req.to_id, conversationId, notices };
 }
 
 /** Participant-only view of one request; `null` for unknown ids and for everyone else. */
@@ -135,21 +141,21 @@ export async function readRequest(db: Queryable, actor: string, requestId: strin
   return rows[0] ? toRow(rows[0]) : null;
 }
 
-/** Removes the friendship; the direct conversation and its history stay. `not_found` if not friends. */
+/**
+ * Removes the friendship; the direct conversation and its history stay, and get a "friendship ended"
+ * notice. `not_found` if not friends.
+ */
 export async function unfriend(
   t: Tx,
   actor: string,
   other: string,
-): Promise<Outcome<{ conversationId: string | null }>> {
+): Promise<Outcome<{ conversationId: string | null; notices: StoredMessage[] }>> {
   await lockPair(t, actor, other);
   const [lo, hi] = orderedPair(actor, other);
   const del = await t.query("delete from friendships where a_id = $1 and b_id = $2", [lo, hi]);
   if ((del.rowCount ?? 0) === 0) return { ok: false, code: "not_found" };
-  const conv = await t.query<{ conversation_id: string }>(
-    "select conversation_id from direct_pairs where a_id = $1 and b_id = $2",
-    [lo, hi],
-  );
-  return { ok: true, conversationId: conv.rows[0]?.conversation_id ?? null };
+  const notice = await appendDirectNotice(t, { event: "friendship_ended", actorId: actor, principalId: other });
+  return { ok: true, conversationId: notice?.conversationId ?? null, notices: notice ? [notice] : [] };
 }
 
 export interface RequestEntry {

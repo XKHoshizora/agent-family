@@ -94,3 +94,16 @@ export async function befriend(app: FastifyInstance, a: Actor, b: Actor): Promis
   if (accepted.status !== 200) throw new Error(`befriend: accept failed ${accepted.status} ${JSON.stringify(accepted.json)}`);
   return { conversationId: accepted.json.conversationId };
 }
+
+/** `creator` makes a group with `members`, befriending any that are not yet friends; returns its id. */
+export async function group(app: FastifyInstance, creator: Actor, title: string, members: Actor[]): Promise<string> {
+  const social = await api<{ friends: { id: string }[] }>(app, creator, "GET", "/api/social");
+  const friends = new Set(social.json.friends.map((f) => f.id));
+  for (const m of members) if (!friends.has(m.id)) await befriend(app, creator, m);
+  const created = await api<{ id: string }>(app, creator, "POST", "/api/conversations", {
+    title,
+    memberIds: members.map((m) => m.id),
+  });
+  if (created.status !== 201) throw new Error(`group: create failed ${created.status} ${JSON.stringify(created.json)}`);
+  return created.json.id;
+}

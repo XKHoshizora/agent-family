@@ -16,17 +16,21 @@ export class AppError extends Error {
   constructor(
     readonly status: number,
     readonly code: ErrorCode,
+    /** Extra fields sent next to `error`, e.g. `{ reason: "blocked" }` for `cannot_send`. */
+    readonly details: Readonly<Record<string, string>> = {},
   ) {
     super(code);
     this.name = "AppError";
   }
 }
 
+export const notFound = (): AppError => new AppError(404, "not_found");
+
 export function registerErrorHandling(app: FastifyInstance): void {
   app.setNotFoundHandler((_req, reply) => reply.code(404).send({ error: "not_found" }));
 
   app.setErrorHandler((err: FastifyError | AppError, req, reply) => {
-    if (err instanceof AppError) return reply.code(err.status).send({ error: err.code });
+    if (err instanceof AppError) return reply.code(err.status).send({ error: err.code, ...err.details });
     if (hasZodFastifySchemaValidationErrors(err)) {
       return reply.code(400).send({ error: "invalid_request" });
     }

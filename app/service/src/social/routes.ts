@@ -4,6 +4,7 @@ import { z } from "zod";
 import { uuidParam } from "../schemas.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
+import type { StoredMessage } from "../messages/model.ts";
 import { findByHandle } from "../principals/store.ts";
 import { requirePrincipal } from "../session.ts";
 import { blockPrincipal, unblockPrincipal, type BlockResult } from "./blocks.ts";
@@ -42,8 +43,16 @@ const requestEntry = z.object({
 const ok = z.object({ ok: z.literal(true) });
 const empty = z.object({});
 
+/** What a social change did to the pair's direct conversation. */
+interface DirectEffects {
+  /** Notices appended to it (friendship ended/restored, block added/removed). */
+  notices?: StoredMessage[];
+  /** A direct conversation whose sendability or existence changed even without a notice (a first accept). */
+  conversationId?: string | null;
+}
+
 export function registerSocialRoutes(app: FastifyInstance): void {
-  const { db, config, social } = app.deps;
+  const { db, config, social, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const actors = new WeakMap<FastifyRequest, string>();
@@ -52,6 +61,18 @@ export function registerSocialRoutes(app: FastifyInstance): void {
     timeWindow: "1 minute",
     keyGenerator: (req: FastifyRequest) => actors.get(req) ?? req.ip,
   });
+
+  /** After commit: the pair's social change, its direct-chat notices, and that chat's change of state. */
+  function announce(req: FastifyRequest, pair: string[], effects: DirectEffects): void {
+    social.emit(pair, req.log);
+    const notices = effects.notices ?? [];
+    const changed = new Set(notices.map((n) => n.conversationId));
+    if (effects.conversationId) changed.add(effects.conversationId);
+    conversations.publish(
+      { messages: notices, conversations: [...changed].map((conversationId) => ({ conversationId, principalIds: pair })) },
+      req.log,
+    );
+  }
 
   /**
    * Runs a mutation in one transaction. A refusal commits whatever the mutation wrote (e.g. a lazily
@@ -64,7 +85,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
   ): Promise<T> {
     const result = await db.tx(fn);
     if (!result.ok) throw new AppError(STATUS[result.code], result.code);
-    social.emit(affected(result), req.log);
+    announce(req, affected(result), result as DirectEffects);
     return result;
   }
 
@@ -187,7 +208,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       const other = req.params.principalId;
       const r = await db.tx((t) => unblockPrincipal(t, me.id, other));
-      if (r.removed) social.emit([me.id, other], req.log);
+      if (r.removed) announce(req, [me.id, other], r);
       return { ok: true as const };
     },
   );

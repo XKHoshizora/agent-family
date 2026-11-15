@@ -16,6 +16,9 @@ import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
+import { createConversationEvents, type ConversationEvents } from "./conversations/events.ts";
+import { registerConversationRoutes } from "./conversations/routes.ts";
+import { registerMessageRoutes } from "./messages/routes.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -25,6 +28,8 @@ export interface Deps {
   blobs: BlobStore;
   /** Per-app registry of "friendships/blocks changed" listeners; fired after commit. */
   social: SocialEvents;
+  /** Per-app registry of "messages stored" / "membership changed" listeners; fired after commit. */
+  conversations: ConversationEvents;
 }
 
 declare module "fastify" {
@@ -42,6 +47,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     db: overrides.db ?? createDb(config.databaseUrl),
     blobs: overrides.blobs ?? createBlobStore(config),
     social: overrides.social ?? createSocialEvents(),
+    conversations: overrides.conversations ?? createConversationEvents(),
   };
 
   const app = Fastify({
@@ -69,6 +75,8 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   registerSessionRoutes(app);
   registerPrincipalRoutes(app);
   registerSocialRoutes(app);
+  registerConversationRoutes(app);
+  registerMessageRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 

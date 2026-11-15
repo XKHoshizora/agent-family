@@ -1,39 +1,18 @@
-import type { Queryable, Tx } from "../db.ts";
-import { lockPair, orderedPair } from "./pair.ts";
+import { appendDirectNotice } from "../conversations/store.ts";
+import type { Tx } from "../db.ts";
+import type { StoredMessage } from "../messages/model.ts";
+import { lockPair } from "./pair.ts";
 
-/** Any block between the two, either direction. If both block, `a`'s own block is reported. */
-export async function blockBetween(t: Queryable, a: string, b: string): Promise<null | { blocker: string }> {
-  const { rows } = await t.query<{ blocker_id: string }>(
-    `select blocker_id from blocks
-      where (blocker_id = $1 and blocked_id = $2) or (blocker_id = $2 and blocked_id = $1)
-      order by (blocker_id = $1) desc limit 1`,
-    [a, b],
-  );
-  return rows[0] ? { blocker: rows[0].blocker_id } : null;
-}
-
-export async function areFriends(t: Queryable, a: string, b: string): Promise<boolean> {
-  const [lo, hi] = orderedPair(a, b);
-  const { rowCount } = await t.query("select 1 from friendships where a_id = $1 and b_id = $2", [lo, hi]);
-  return (rowCount ?? 0) > 0;
-}
-
-/** Why a direct message between the two must be refused, or null. A block wins over missing friendship. */
-export async function canDirectSend(
-  t: Queryable,
-  a: string,
-  b: string,
-): Promise<null | "not_friends" | "blocked"> {
-  if (await blockBetween(t, a, b)) return "blocked";
-  if (!(await areFriends(t, a, b))) return "not_friends";
-  return null;
-}
+// The read-only pair questions live in relations.ts (a leaf module conversations can import).
+export { areFriends, blockBetween, canDirectSend } from "./relations.ts";
 
 export interface BlockResult {
   /** False when the block already existed. */
   created: boolean;
   /** Pending requests this block cancelled (withdrawn if the blocker sent it, rejected if received). */
   cancelledRequestIds: string[];
+  /** The "blocked" notice in the pair's direct conversation, when the block is new and they have one. */
+  notices: StoredMessage[];
 }
 
 /** Blocking is one-directional, leaves any friendship alone, and cancels pending requests between the pair. */
@@ -51,12 +30,20 @@ export async function blockPrincipal(t: Tx, blocker: string, blocked: string): P
       returning id`,
     [blocker, blocked],
   );
-  return { created: (ins.rowCount ?? 0) > 0, cancelledRequestIds: cancelled.rows.map((r) => r.id) };
+  const created = (ins.rowCount ?? 0) > 0;
+  const notice = created ? await appendDirectNotice(t, { event: "blocked", actorId: blocker, principalId: blocked }) : null;
+  return { created, cancelledRequestIds: cancelled.rows.map((r) => r.id), notices: notice ? [notice] : [] };
 }
 
-/** Restores nothing but the ability to interact. Returns whether a block was removed. */
-export async function unblockPrincipal(t: Tx, blocker: string, blocked: string): Promise<{ removed: boolean }> {
+/** Restores nothing but the ability to interact. Returns whether a block was removed, and its notice. */
+export async function unblockPrincipal(
+  t: Tx,
+  blocker: string,
+  blocked: string,
+): Promise<{ removed: boolean; notices: StoredMessage[] }> {
   await lockPair(t, blocker, blocked);
   const del = await t.query("delete from blocks where blocker_id = $1 and blocked_id = $2", [blocker, blocked]);
-  return { removed: (del.rowCount ?? 0) > 0 };
+  const removed = (del.rowCount ?? 0) > 0;
+  const notice = removed ? await appendDirectNotice(t, { event: "unblocked", actorId: blocker, principalId: blocked }) : null;
+  return { removed, notices: notice ? [notice] : [] };
 }

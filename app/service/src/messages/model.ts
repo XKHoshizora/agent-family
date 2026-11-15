@@ -1,0 +1,114 @@
+import { z } from "zod";
+import type { Tx } from "../db.ts";
+
+export type MessageKind = "text" | "file" | "system";
+
+/** Machine-readable system notices. `actorId` is whoever caused it; it is also stored as `sender_id`. */
+export type SystemEvent =
+  | { event: "group_created"; actorId: string; title: string; memberIds: string[] }
+  | { event: "member_joined"; actorId: string; principalId: string }
+  | { event: "member_left"; actorId: string; principalId: string; newCreatorId: string | null }
+  | { event: "member_removed"; actorId: string; principalId: string }
+  | { event: "group_renamed"; actorId: string; title: string }
+  | PairEvent;
+
+/** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */
+export type PairEvent = {
+  event: "friendship_ended" | "friendship_restored" | "blocked" | "unblocked";
+  actorId: string;
+  principalId: string;
+};
+
+/**
+ * `messages.body`. Text messages carry `text` (and `replyToSeq` when quoting); system notices carry a
+ * `SystemEvent` plus the rendered `text`. Later kinds (files, task cards...) add fields, so readers must
+ * not assume more than this.
+ */
+export type MessageBody = { text?: string; replyToSeq?: number; event?: string; [field: string]: unknown };
+
+export interface StoredMessage {
+  /** `messages.id`, a bigint, as a string. Never exposed on the wire. */
+  id: string;
+  conversationId: string;
+  seq: number;
+  /** The author; for system notices, the principal whose action produced it (shown as `null` on the wire). */
+  senderId: string;
+  kind: MessageKind;
+  body: MessageBody;
+  clientTxn: string | null;
+  createdAt: Date;
+}
+
+/** Columns of `messages m` in the shape `toStored` reads. */
+export const MESSAGE_COLUMNS = "m.id, m.conversation_id, m.seq, m.sender_id, m.kind, m.body, m.client_txn, m.created_at";
+
+export interface MessageRow {
+  id: string;
+  conversation_id: string;
+  seq: string;
+  sender_id: string;
+  kind: MessageKind;
+  body: MessageBody;
+  client_txn: string | null;
+  created_at: Date;
+}
+
+export function toStored(r: MessageRow): StoredMessage {
+  return {
+    id: r.id,
+    conversationId: r.conversation_id,
+    seq: Number(r.seq),
+    senderId: r.sender_id,
+    kind: r.kind,
+    body: r.body,
+    clientTxn: r.client_txn,
+    createdAt: r.created_at,
+  };
+}
+
+/**
+ * Appends a message with the next sequence number (`conversations.seq + 1`, gapless and unique). The
+ * caller must already hold the conversation row lock and have checked permission in the same transaction.
+ */
+export async function insertMessage(
+  t: Tx,
+  conversationId: string,
+  senderId: string,
+  kind: MessageKind,
+  body: MessageBody,
+  clientTxn: string | null,
+): Promise<StoredMessage> {
+  const { rows } = await t.query<MessageRow>(
+    `with next as (update conversations set seq = seq + 1 where id = $1 returning seq)
+     insert into messages as m (conversation_id, seq, sender_id, kind, body, client_txn)
+     select $1, next.seq, $2, $3, $4::jsonb, $5 from next
+     returning ${MESSAGE_COLUMNS}`,
+    [conversationId, senderId, kind, JSON.stringify(body), clientTxn],
+  );
+  if (!rows[0]) throw new Error(`insertMessage: conversation ${conversationId} does not exist`);
+  return toStored(rows[0]);
+}
+
+/** A message as one reader receives it. Build it with `toWireFor` (src/messages/read.ts). */
+export const wireMessageSchema = z.object({
+  conversationId: z.string(),
+  seq: z.number(),
+  /** `null` for system notices. */
+  senderId: z.string().nullable(),
+  kind: z.enum(["text", "file", "system"]),
+  /** Message text; for system notices the server-rendered sentence. */
+  text: z.string(),
+  attachment: z.object({ id: z.string(), name: z.string(), size: z.number(), inline: z.boolean() }).optional(),
+  /** Present when quoting. Text and sender only when this reader can see the quoted message. */
+  replyTo: z
+    .union([
+      z.object({ seq: z.number(), visible: z.literal(true), senderId: z.string().nullable(), text: z.string() }),
+      z.object({ seq: z.number(), visible: z.literal(false) }),
+    ])
+    .optional(),
+  /** For system notices: the `SystemEvent` (without `text`), so a client can re-render it. */
+  system: z.looseObject({ event: z.string() }).optional(),
+  createdAt: z.string(),
+});
+
+export type WireMessage = z.infer<typeof wireMessageSchema>;

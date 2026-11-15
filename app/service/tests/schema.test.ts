@@ -192,6 +192,21 @@ describe("schema guarantees enforced by the database", () => {
     await rejectedWith(UNIQUE_VIOLATION, insert, [c, p]);
   });
 
+  test("the same (conversation, sender, client_txn) is rejected; another conversation or sender may reuse it; a null client_txn may repeat", async () => {
+    const p = await human("txn_one");
+    const q = await human("txn_two");
+    const c1 = await conversation(p);
+    const c2 = await conversation(p);
+    const insert = `insert into messages (conversation_id, seq, sender_id, kind, body, client_txn)
+                    values ($1, $2, $3, 'text', '{"text":"hi"}', $4)`;
+    await db.query(insert, [c1, 1, p, "retry-1"]);
+    await rejectedWith(UNIQUE_VIOLATION, insert, [c1, 2, p, "retry-1"]);
+    expect((await db.query(insert, [c2, 1, p, "retry-1"])).rowCount).toBe(1); // another conversation
+    expect((await db.query(insert, [c1, 2, q, "retry-1"])).rowCount).toBe(1); // another sender
+    expect((await db.query(insert, [c1, 3, p, null])).rowCount).toBe(1);
+    expect((await db.query(insert, [c1, 4, p, null])).rowCount).toBe(1);
+  });
+
   test.each(["Upper", "has space", "ab", "x".repeat(25), "dash-ed"])("handle %j is rejected", async (handle) => {
     await rejectedWith(
       CHECK_VIOLATION,
