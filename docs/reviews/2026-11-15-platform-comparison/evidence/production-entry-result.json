@@ -1,0 +1,57 @@
+{
+  "time": "2026-11-15T05:17:11.070Z",
+  "checks": [
+    {
+      "test": "primary_entry_/",
+      "passed": true,
+      "status": 302,
+      "location": "https://agent-family-element-production.up.railway.app"
+    },
+    {
+      "test": "primary_entry_/chat",
+      "passed": true,
+      "status": 302,
+      "location": "https://agent-family-element-production.up.railway.app"
+    },
+    {
+      "test": "invitation_stays_same_origin",
+      "passed": true
+    },
+    {
+      "test": "af_health",
+      "passed": true,
+      "status": 200
+    },
+    {
+      "test": "element_version",
+      "passed": true,
+      "status": 200
+    },
+    {
+      "test": "synapse_health",
+      "passed": true,
+      "status": 200
+    },
+    {
+      "test": "official_element_configuration",
+      "passed": true
+    },
+    {
+      "test": "native_chat_shortcuts_and_honest_agent_scope",
+      "passed": true
+    },
+    {
+      "test": "primary_browser_opens_element",
+      "passed": true
+    },
+    {
+      "test": "workbench_remains_accessible",
+      "passed": true
+    },
+    {
+      "test": "entry_pages_no_runtime_errors",
+      "passed": true
+    }
+  ],
+  "errors": []
+}

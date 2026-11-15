@@ -1,0 +1,55 @@
+{
+  "capturedAt": "2026-11-15T05:18:05.020Z",
+  "sourceCommit": "de6c410c4ef45333c5c4efb6f883e2145ff4a571",
+  "services": [
+    {
+      "name": "agent-family-web",
+      "state": "online",
+      "deployments": [
+        {
+          "createdAt": "2026-11-15T05:15:28.360Z",
+          "id": "91e9bf7f-bc65-4516-8919-3f9a1f244bcf",
+          "status": "SUCCESS",
+          "statusUpdatedAt": "2026-11-15T05:16:35.497Z"
+        }
+      ]
+    },
+    {
+      "name": "agent-family-element",
+      "state": "online",
+      "deployments": [
+        {
+          "createdAt": "2026-11-15T05:15:19.179Z",
+          "id": "fd14be4c-36b7-4ded-a841-31bb86fc2729",
+          "status": "SUCCESS",
+          "statusUpdatedAt": "2026-11-15T05:15:59.799Z"
+        }
+      ]
+    },
+    {
+      "name": "agent-family-matrix-db",
+      "state": "online",
+      "deployments": [
+        {
+          "createdAt": "2026-11-14T22:01:29.153Z",
+          "id": "ab1ac50a-ce75-45ba-99cf-2bdd3598a0d8",
+          "status": "SUCCESS",
+          "statusUpdatedAt": "2026-11-14T22:01:44.293Z"
+        }
+      ]
+    },
+    {
+      "name": "agent-family-synapse",
+      "state": "online",
+      "deployments": [
+        {
+          "createdAt": "2026-11-14T21:41:18.394Z",
+          "id": "309d8d2c-50db-4b95-a645-929be914d2fc",
+          "status": "SUCCESS",
+          "statusUpdatedAt": "2026-11-14T21:42:00.736Z"
+        }
+      ]
+    }
+  ],
+  "pendingWork": []
+}
