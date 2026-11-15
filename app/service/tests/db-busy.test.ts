@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config.ts";
-import { api } from "./helpers/actors.ts";
+import { api, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 
 /** The pool has 10 connections; a request that cannot get one within DB_ACQUIRE_TIMEOUT_MS is 503 busy. */
@@ -37,5 +37,18 @@ describe("waiting for a database connection (DB_ACQUIRE_TIMEOUT_MS)", () => {
       release();
     }
     expect(await api(app, null, "GET", "/api/health")).toEqual({ status: 200, json: { ok: true } });
+  });
+
+  it("also where Better Auth meets it first — looking up the session, signing in — : 503 busy, not 401 or 500", async () => {
+    const a = await signUp(app, "alice");
+    const release = await drainPool();
+    try {
+      expect(await api(app, a, "GET", "/api/me")).toEqual(BUSY);
+      expect(await api(app, a, "GET", "/api/sync")).toEqual(BUSY);
+      expect(await api(app, null, "POST", "/api/auth/sign-in/email", { email: a.email, password: a.password })).toEqual(BUSY);
+    } finally {
+      release();
+    }
+    expect((await api(app, a, "GET", "/api/me")).status).toBe(200);
   });
 });

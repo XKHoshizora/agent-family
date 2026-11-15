@@ -7,7 +7,7 @@ import type pg from "pg";
 import { z } from "zod";
 import type { Config } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
-import { AppError } from "../errors.ts";
+import { AppError, isBusy } from "../errors.ts";
 import { clientIp } from "../limits.ts";
 import { sendMail } from "./mailer.ts";
 
@@ -46,12 +46,56 @@ function nestedSql(text: string): string {
   return text;
 }
 
+// --- what Better Auth's database work ran into ------------------------------------------------
+//
+// Better Auth turns some database failures into its own answers: a statement timeout while creating the
+// user becomes 422 FAILED_TO_CREATE_USER, one while reading a session a 500 without the cause. Whether
+// the database was merely busy (errors.ts `isBusy`: 503, try again) is only visible where its queries
+// run, in the pool below; each call into Better Auth that should know is run under a watch.
+
+interface Watch {
+  /** The first failure of Better Auth's database work during the call that means "busy". */
+  busy?: unknown;
+  /** The first error Better Auth's router answered with (`onAPIError`), for the log. */
+  failure?: unknown;
+}
+
+const watches = new AsyncLocalStorage<Watch>();
+
+function noteDatabaseError(err: unknown): void {
+  const watch = watches.getStore();
+  if (watch && watch.busy === undefined && isBusy(err)) watch.busy = err;
+}
+
+/** `query`, noting a busy failure for the watch it runs under. */
+async function watched<R>(query: () => Promise<R>): Promise<R> {
+  try {
+    return await query();
+  } catch (err) {
+    noteDatabaseError(err);
+    throw err;
+  }
+}
+
+/**
+ * Runs a direct call into Better Auth (`auth.api.*`). If it fails after any of its database work was busy,
+ * that database error is thrown instead of whatever Better Auth made of it, so the caller answers 503.
+ */
+export async function authCall<T>(fn: () => Promise<T>): Promise<T> {
+  const watch: Watch = {};
+  try {
+    return await watches.run(watch, fn);
+  } catch (err) {
+    throw watch.busy ?? err;
+  }
+}
+
 /** Queries on the outer transaction's client while it is ours (and `usable()` holds); a rejection after. */
 function onOuter(outer: OuterTransaction, usable: () => boolean = () => true) {
   return async (text: string, values?: unknown[]) => {
     if (!outer.open) throw new Error("Better Auth used a registration transaction after it ended");
     if (!usable()) throw new Error("Better Auth used a connection after releasing it");
-    return outer.client.query(nestedSql(text), values);
+    return watched(() => outer.client.query(nestedSql(text), values));
   };
 }
 
@@ -60,13 +104,20 @@ export function switchablePool(pool: pg.Pool) {
   return {
     async connect() {
       const outer = outerTx.getStore();
-      if (!outer) return pool.connect();
-      let released = false;
+      if (outer) {
+        let released = false;
+        return {
+          query: onOuter(outer, () => !released),
+          release: () => {
+            released = true;
+          },
+        };
+      }
+      const client = await watched(() => pool.connect());
       return {
-        query: onOuter(outer, () => !released),
-        release: () => {
-          released = true;
-        },
+        // What Kysely (Better Auth's query layer) uses of a pg client: query(text, values) and release().
+        query: (text: string, values?: unknown[]) => watched(() => client.query(text, values)),
+        release: (destroy?: boolean | Error) => client.release(destroy),
       };
     },
     end: async () => {},
@@ -75,12 +126,12 @@ export function switchablePool(pool: pg.Pool) {
 
 /**
  * Runs `fn` so that every Better Auth call inside it executes on `client`'s transaction. What Better
- * Auth got hold of inside refuses to run once `fn` has settled.
+ * Auth got hold of inside refuses to run once `fn` has settled. Watched like `authCall`.
  */
 export async function runInTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
   const outer: OuterTransaction = { client, open: true };
   try {
-    return await outerTx.run(outer, fn);
+    return await authCall(() => outerTx.run(outer, fn));
   } finally {
     outer.open = false;
   }
@@ -160,7 +211,22 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
     trustedOrigins: [config.appOrigin],
     database: switchablePool(db.pool),
     telemetry: { enabled: false },
-    logger: { level: "error" },
+    // Into the app's log (JSON lines on stdout; nothing under test) instead of the console.
+    logger: {
+      level: "error",
+      log: (_level, message, ...args) => log.error({ err: args.find((a) => a instanceof Error) }, `better-auth: ${message}`),
+    },
+    // What the mount answered with goes to the watch: a busy database becomes 503, anything else that made
+    // it answer 5xx is logged with the request (registerAuthRoutes). Better Auth then logs nothing itself.
+    onAPIError: {
+      onError: (err) => {
+        const watch = watches.getStore();
+        if (!watch) return;
+        watch.failure ??= err;
+        noteDatabaseError(err);
+        noteDatabaseError((err as { cause?: unknown } | null)?.cause);
+      },
+    },
     // One source of truth for throttling: @fastify/rate-limit in app.ts.
     rateLimit: { enabled: false },
     advanced: {
@@ -345,9 +411,16 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
       headers: fromNodeHeaders(req.headers),
       ...(req.body === undefined || req.body === null ? {} : { body: JSON.stringify(req.body) }),
     });
-    const response = await app.auth.handler(request);
+    const watch: Watch = {};
+    const response = await watches.run(watch, () => app.auth.handler(request));
     if (response.status >= 400) {
-      return reply.code(response.status).send({ error: errorCodeOf(response.status, await response.text()) });
+      const body = await response.text();
+      // To the error handler (errors.ts): a busy database is 503 `busy`, anything else a logged 500 `internal`.
+      if (watch.busy !== undefined) throw watch.busy;
+      if (response.status >= 500) {
+        throw new Error(`Better Auth answered ${response.status} ${body.slice(0, 200)}`, { cause: watch.failure });
+      }
+      return reply.code(response.status).send({ error: errorCodeOf(response.status, body) });
     }
     reply.status(response.status);
     response.headers.forEach((value, key) => {

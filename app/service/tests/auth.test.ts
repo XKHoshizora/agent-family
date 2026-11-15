@@ -377,6 +377,27 @@ describe("accounts", () => {
     }
   });
 
+  test("a failure inside Better Auth is a logged 500 internal, never its own code or a 4xx", async () => {
+    const lines: string[] = [];
+    const logged = await buildApp({ config: app.deps.config, db: app.deps.db }, { logStream: { write: (l) => void lines.push(l) } });
+    await logged.ready();
+    const a = await signUp(app, "fails_inside");
+    await db.query("create function test_fail_session() returns trigger language plpgsql as 'begin raise exception ''boom''; end'");
+    await db.query(`create trigger test_fail before insert on "session" for each row execute function test_fail_session()`);
+    try {
+      const res = await logged.inject({ method: "POST", url: "/api/auth/sign-in/email", payload: { email: a.email, password: a.password } });
+      expect([res.statusCode, res.json()]).toEqual([500, { error: "internal" }]);
+      const errors = lines.map((l) => JSON.parse(l)).filter((e) => e.level >= 50);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(JSON.stringify(errors)).toContain("boom");
+    } finally {
+      await db.query(`drop trigger test_fail on "session"`);
+      await db.query("drop function test_fail_session()");
+      await logged.close();
+    }
+    expect((await signIn(app, a.email, a.password)).statusCode).toBe(200);
+  });
+
   test("a wrong password is 401 with only our error shape, never Better Auth's message", async () => {
     const a = await signUp(app, "shape_check");
     const res = await signIn(app, a.email, "definitely the wrong one");

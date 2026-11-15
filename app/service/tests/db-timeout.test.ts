@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { abandonedAfterMs, holdBlob, sweepPendingBlobs } from "../src/attachments/pending.ts";
 import { sweepOrphans } from "../src/attachments/store.ts";
+import { createInvite } from "../src/auth/invites.ts";
 import { loadConfig } from "../src/config.ts";
 import { api, befriend, signUp } from "./helpers/actors.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
@@ -43,6 +44,53 @@ describe("the pool's statement timeout (DB_STATEMENT_TIMEOUT_MS)", () => {
       blocker.release();
     }
     expect((await api(app, a, "GET", "/api/me")).status).toBe(200);
+  });
+
+  /** Holds `lock table <table> in <mode> mode` until the returned function is called. */
+  async function lockTable(table: string, mode: string): Promise<() => Promise<void>> {
+    const blocker = await db.pool.connect();
+    await blocker.query("begin");
+    await blocker.query(`lock table ${table} in ${mode} mode`);
+    return async () => {
+      await blocker.query("rollback");
+      blocker.release();
+    };
+  }
+  const BUSY = { status: 503, json: { error: "busy" } };
+
+  it("Better Auth's statements too: looking up the session and signing in answer 503 busy", async () => {
+    const a = await signUp(app, "alice");
+    let unlock = await lockTable(`"session"`, "access exclusive");
+    try {
+      expect(await api(app, a, "GET", "/api/me")).toEqual(BUSY);
+    } finally {
+      await unlock();
+    }
+    unlock = await lockTable(`"user"`, "access exclusive");
+    try {
+      expect(await api(app, null, "POST", "/api/auth/sign-in/email", { email: a.email, password: a.password })).toEqual(BUSY);
+    } finally {
+      await unlock();
+    }
+    expect((await api(app, null, "POST", "/api/auth/sign-in/email", { email: a.email, password: a.password })).status).toBe(200);
+  });
+
+  it("a registration whose account insert times out is 503 busy (not a 4xx), writes nothing and keeps the invite", async () => {
+    const inviteCode = await createInvite(db, { ttlHours: 1 });
+    const body = { inviteCode, email: "late@example.test", password: "a good password", displayName: "Late", handle: "late_one" };
+    // Reads of "user" go on (the e-mail check); Better Auth's insert waits on the lock until it times out.
+    const unlock = await lockTable(`"user"`, "share");
+    try {
+      expect(await api(app, null, "POST", "/api/register", body)).toEqual(BUSY);
+    } finally {
+      await unlock();
+    }
+    const count = async (sql: string) => Number((await db.query<{ n: string }>(sql)).rows[0]!.n);
+    expect(await count(`select count(*) n from "user"`)).toBe(0);
+    expect(await count("select count(*) n from principals")).toBe(0);
+    expect(await count("select count(*) n from mail_outbox")).toBe(0);
+    expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
+    expect((await api(app, null, "POST", "/api/register", body)).status).toBe(201);
   });
 
   it("does not cut off an upload that takes longer: no statement spans the body", async () => {

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { fromNodeHeaders } from "better-auth/node";
 import { z } from "zod";
+import { authCall } from "./auth/auth.ts";
 import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
 
@@ -15,10 +16,11 @@ export interface Principal {
 
 /**
  * The only way a handler learns who is acting: the session cookie, resolved by Better Auth.
- * Throws 401 `unauthenticated` for no/expired/revoked sessions, unverified e-mail, or a user without a principal.
+ * Throws 401 `unauthenticated` for no/expired/revoked sessions, unverified e-mail, or a user without a principal;
+ * a busy database is 503 `busy` (authCall), as everywhere.
  */
 export async function requirePrincipal(req: FastifyRequest): Promise<Principal> {
-  const session = await req.server.auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+  const session = await authCall(() => req.server.auth.api.getSession({ headers: fromNodeHeaders(req.headers) }));
   if (!session || !session.user.emailVerified) throw new AppError(401, "unauthenticated");
   const { rows } = await req.server.deps.db.query<{ id: string; handle: string; display_name: string }>(
     "select id, handle, display_name from principals where auth_user_id = $1",
