@@ -37,15 +37,19 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMes
   const replyToSeq = msg.body.replyToSeq;
   if (typeof replyToSeq === "number") {
     const q = visibleQuote;
-    wire.replyTo =
-      q && q.conversationId === msg.conversationId && q.seq === replyToSeq
-        ? {
-            seq: replyToSeq,
-            visible: true,
-            senderId: q.kind === "system" ? null : q.senderId,
-            text: truncate(wireText(q), QUOTE_MAX_CHARS),
-          }
-        : { seq: replyToSeq, visible: false };
+    if (q && q.conversationId === msg.conversationId && q.seq === replyToSeq) {
+      const quote: Extract<NonNullable<WireMessage["replyTo"]>, { visible: true }> = {
+        seq: replyToSeq,
+        visible: true,
+        senderId: q.kind === "system" ? null : q.senderId,
+        text: truncate(wireText(q), QUOTE_MAX_CHARS),
+        kind: q.kind === "file" ? "file" : "text",
+      };
+      if (q.kind === "file" && q.body.attachment) quote.attachmentName = q.body.attachment.name;
+      wire.replyTo = quote;
+    } else {
+      wire.replyTo = { seq: replyToSeq, visible: false };
+    }
   }
   if (msg.kind === "system" && typeof msg.body.event === "string") {
     const { text: _text, ...event } = msg.body;

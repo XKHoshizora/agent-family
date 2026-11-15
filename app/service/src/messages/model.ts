@@ -118,7 +118,16 @@ export const wireMessageSchema = z.object({
   /** Present when quoting. Text and sender only when this reader can see the quoted message. */
   replyTo: z
     .union([
-      z.object({ seq: z.number(), visible: z.literal(true), senderId: z.string().nullable(), text: z.string() }),
+      z.object({
+        seq: z.number(),
+        visible: z.literal(true),
+        senderId: z.string().nullable(),
+        text: z.string(),
+        /** What was quoted: a file message may have no caption, so `text` alone cannot say. */
+        kind: z.enum(["text", "file"]),
+        /** For a quoted file message: its file name. */
+        attachmentName: z.string().optional(),
+      }),
       z.object({ seq: z.number(), visible: z.literal(false) }),
     ])
     .optional(),
