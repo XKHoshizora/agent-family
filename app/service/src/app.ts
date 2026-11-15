@@ -12,11 +12,15 @@ import { createAuth, registerAuthRoutes, type Auth } from "./auth/auth.ts";
 import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
+import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
+import { registerPrincipalRoutes } from "./principals/routes.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
   config: Config;
   db: Db;
+  /** Where avatars (and later attachments) live; tests inject a temp-dir store. */
+  blobs: BlobStore;
 }
 
 declare module "fastify" {
@@ -29,7 +33,11 @@ declare module "fastify" {
 export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyInstance> {
   const config = overrides.config ?? loadConfig();
   const ownsDb = overrides.db === undefined;
-  const deps: Deps = { config, db: overrides.db ?? createDb(config.databaseUrl) };
+  const deps: Deps = {
+    config,
+    db: overrides.db ?? createDb(config.databaseUrl),
+    blobs: overrides.blobs ?? createBlobStore(config),
+  };
 
   const app = Fastify({
     logger: process.env.NODE_ENV === "test" || process.env.VITEST ? false : { level: "info" },
@@ -54,6 +62,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   registerRegistrationRoutes(app, perMinute);
   registerAuthRoutes(app, config.rateLimitScale);
   registerSessionRoutes(app);
+  registerPrincipalRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, beforeEach } from "vitest";
-import { buildApp } from "../../src/app.ts";
+import { buildApp, type Deps } from "../../src/app.ts";
 import { loadConfig } from "../../src/config.ts";
 import { createDb, type Db } from "../../src/db.ts";
 import { testDatabaseUrl } from "./env.ts";
@@ -23,7 +23,7 @@ async function truncateAll(db: Db): Promise<void> {
  * raised) and truncates every table except the migrations table before each test.
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
-export function useApp(): { app: FastifyInstance; db: Db } {
+export function useApp(extra: Partial<Pick<Deps, "blobs">> = {}): { app: FastifyInstance; db: Db } {
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;
   const current = <T>(v: T | undefined): T => {
@@ -48,7 +48,7 @@ export function useApp(): { app: FastifyInstance; db: Db } {
       RATE_LIMIT_SCALE: "1000",
     });
     database = createDb(config.databaseUrl);
-    instance = await buildApp({ config, db: database });
+    instance = await buildApp({ config, db: database, ...extra });
     await instance.ready();
   });
 
