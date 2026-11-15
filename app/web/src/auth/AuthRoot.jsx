@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import * as routes from "../api/routes.js";
-import { setUnauthenticatedHandler } from "../api/http.js";
+import { bumpSessionEpoch, setUnauthenticatedHandler } from "../api/http.js";
 import { createDataLayer } from "../data/store.jsx";
 import { Forgot, Loading, LoadFailed, Register, ResetPassword, SignIn, Verify } from "./screens.jsx";
 import { captureResetToken, decide, navigate, parseRoute, useLocation } from "./router.js";
@@ -25,15 +25,24 @@ export function AuthRoot({ api = routes, createLayer = createDataLayer, children
   const accountId = useRef(null);
   const requested = useRef(false);
 
+  const signingOut = useRef(false);
+
   const end = useCallback((expired) => {
-    setSession((s) => (s.status === "out" ? s : { status: "out", expired: expired && s.status === "in" }));
+    // The service closes our socket with 4001 on a deliberate sign-out too; that is not an expiry.
+    const wasExpired = expired && !signingOut.current;
+    bumpSessionEpoch();
+    setSession((s) => (s.status === "out" ? s : { status: "out", expired: wasExpired && s.status === "in" }));
   }, []);
 
   const confirm = useCallback(
     (me) => {
       const another = accountId.current !== null && accountId.current !== me.id;
       accountId.current = me.id;
-      if (another) setBox((b) => ({ layer: createLayer(), id: b.id + 1 }));
+      if (another) {
+        const layer = createLayer();
+        setBox((b) => ({ layer, id: b.id + 1 }));
+      }
+      bumpSessionEpoch();
       setSession({ status: "in", expired: false });
     },
     [createLayer],
@@ -67,12 +76,17 @@ export function AuthRoot({ api = routes, createLayer = createDataLayer, children
   }, [running, box, end]);
 
   const signOut = useCallback(async () => {
+    signingOut.current = true;
     try {
       await api.signOut();
     } catch (error) {
-      if (error?.status !== 401) return { ok: false, error };
+      if (error?.status !== 401) {
+        signingOut.current = false;
+        return { ok: false, error };
+      }
     }
     end(false);
+    signingOut.current = false;
     return { ok: true };
   }, [api, end]);
   const sessionApi = useMemo(() => ({ signOut }), [signOut]);

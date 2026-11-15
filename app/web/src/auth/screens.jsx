@@ -4,10 +4,10 @@ import { fieldOf, messageFor, verifyMessage } from "./errors.js";
 import { clearResetToken, navigate, takeResetToken } from "./router.js";
 import * as rules from "./validation.js";
 
-function Link({ to, children }) {
+function Link({ to, children, primary = false }) {
   return (
     <a
-      className="btn btn-text btn-sm"
+      className={primary ? "btn btn-primary" : "btn btn-text btn-sm"}
       href={to}
       onClick={(e) => {
         if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
@@ -196,7 +196,7 @@ export function Verify({ error, signedIn }) {
   useEffect(() => {
     navigate("/verify", { replace: true }); // the address keeps no query
   }, []);
-  const next = signedIn ? <Link to="/">进入应用</Link> : <Link to="/signin">去登录</Link>;
+  const next = signedIn ? <Link to="/" primary={!code}>进入应用</Link> : <Link to="/signin" primary={!code}>去登录</Link>;
   return (
     <AuthCard title={code ? "邮箱没有验证成功" : "邮箱已验证"} footer={next}>
       {code ? <Notice tone="warn">{verifyMessage(code)}</Notice> : <Notice tone="ok">邮箱已验证，现在可以登录了。</Notice>}

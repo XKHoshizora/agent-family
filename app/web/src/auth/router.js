@@ -37,8 +37,10 @@ export function decide(route, status) {
     case "forgot":
       return signedIn ? { redirect: "/" } : { view: route.name };
     case "verify":
+      // Without an error a signed-in visitor has nothing to read here.
+      return signedIn && !route.error ? { redirect: "/" } : { view: "verify" };
     case "reset":
-      return { view: route.name };
+      return { view: "reset" };
     default:
       return signedIn ? { view: "app" } : { redirect: "/signin" };
   }

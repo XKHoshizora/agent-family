@@ -223,11 +223,21 @@ describe("register", () => {
 });
 
 describe("verification landing", () => {
-  it("/verify without an error is the success page and keeps the address clean", async () => {
+  it("/verify without an error is the success page with a sign-in button, and keeps the address clean", async () => {
     at("/verify");
     mount(outApi());
     await screen.findByText("邮箱已验证，现在可以登录了。");
     expect(place()).toBe("/verify");
+    fireEvent.click(screen.getByRole("link", { name: "去登录" }));
+    await screen.findByRole("button", { name: "登录" });
+    expect(place()).toBe("/signin");
+  });
+
+  it("/verify without an error, for a signed-in visitor, goes to the app", async () => {
+    at("/verify");
+    mount(fakeApi());
+    await screen.findByTestId("app");
+    expect(place()).toBe("/");
   });
 
   it("/?error=TOKEN_EXPIRED (where the service redirects a bad link) shows the failure and moves to /verify", async () => {
@@ -330,6 +340,51 @@ describe("session lifecycle", () => {
     expect(layers[0].stop).toHaveBeenCalledTimes(1);
     expect(place()).toBe("/signin");
     expect(screen.queryByText(EXPIRED_NOTICE)).toBeNull();
+  });
+
+  it("the 4001 close the service sends on sign-out, arriving before the answer, is not an expiry", async () => {
+    let answer;
+    const api = fakeApi({ signOut: vi.fn(() => new Promise((resolve) => (answer = resolve))) });
+    mount(api, () => <SignOutProbe />);
+    fireEvent.click(await screen.findByText("probe-sign-out"));
+    await waitFor(() => expect(api.signOut).toHaveBeenCalled());
+    act(() => layers[0].closeWith4001());
+    await act(async () => answer({ success: true }));
+    await screen.findByRole("button", { name: "登录" });
+    expect(screen.queryByText(EXPIRED_NOTICE)).toBeNull();
+    expect(layers[0].stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed sign-out clears the flag: a later 4001 is an expiry again", async () => {
+    const api = fakeApi({ signOut: vi.fn(async () => Promise.reject(new ApiError(0, "network_error"))) });
+    mount(api, () => <SignOutProbe />);
+    fireEvent.click(await screen.findByText("probe-sign-out"));
+    await waitFor(() => expect(api.signOut).toHaveBeenCalled());
+    await act(async () => {});
+    act(() => layers[0].closeWith4001());
+    await screen.findByText(EXPIRED_NOTICE);
+  });
+
+  it("a 401 answered after the session ended and a new one began does not end the new one", async () => {
+    const getMe = vi.fn().mockResolvedValueOnce(ANN);
+    mount(fakeApi({ getMe }));
+    await screen.findByTestId("app");
+    let release;
+    vi.stubGlobal("fetch", () => new Promise((resolve) => (release = () => resolve(new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 })))));
+    const stale = request("GET", "/api/sync").catch(() => {});
+    act(() => layers[0].closeWith4001());
+    await screen.findByRole("button", { name: "登录" });
+    getMe.mockResolvedValueOnce(ANN);
+    typeInto("邮箱", "ann@x.com");
+    typeInto("密码", "correct horse");
+    submit("登录");
+    await screen.findByTestId("app");
+    await act(async () => {
+      release();
+      await stale;
+    });
+    expect(screen.getByTestId("app")).toBeTruthy();
+    expect(layers[0].stop).toHaveBeenCalledTimes(1);
   });
 
   it("the sign-out button in Settings does the same", async () => {

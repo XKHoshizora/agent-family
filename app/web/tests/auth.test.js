@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { request, setUnauthenticatedHandler } from "../src/api/http.js";
+import { bumpSessionEpoch, request, setUnauthenticatedHandler } from "../src/api/http.js";
 import { FALLBACK_MESSAGE, VERIFY_FALLBACK, fieldOf, messageFor, verifyMessage } from "../src/auth/errors.js";
 import { captureResetToken, clearResetToken, decide, parseRoute, takeResetToken } from "../src/auth/router.js";
 import * as v from "../src/auth/validation.js";
@@ -40,6 +40,11 @@ describe("field rules", () => {
     expect(v.displayName("你".repeat(41))).toBe("昵称最多 40 个字");
     expect(v.displayName("你".repeat(40))).toBe("");
     expect(v.displayName("a\nb")).toBe("昵称只能是一行");
+    // code points, not UTF-16 units; invisible format characters do not count and do not make a name
+    expect(v.displayName("😀".repeat(40))).toBe("");
+    expect(v.displayName("😀".repeat(41))).toBe("昵称最多 40 个字");
+    expect(v.displayName("\u200b\u200d\ufeff")).toBe("请输入昵称");
+    expect(v.displayName(`${"a".repeat(40)}\u200b`)).toBe("");
     expect(v.displayName(" 小安 ")).toBe("");
   });
 
@@ -137,7 +142,8 @@ describe("router decisions", () => {
   it("signed in: the app shows, sign-in, register and forgot go to the app, verify and reset still show", () => {
     expect(decide(route("/"), "in")).toEqual({ view: "app" });
     for (const p of ["/signin", "/register", "/forgot"]) expect(decide(route(p), "in")).toEqual({ redirect: "/" });
-    expect(decide(route("/verify"), "in")).toEqual({ view: "verify" });
+    expect(decide(route("/verify"), "in")).toEqual({ redirect: "/" });
+    expect(decide(route("/verify", "?error=INVALID_TOKEN"), "in")).toEqual({ view: "verify" });
     expect(decide(route("/reset-password"), "in")).toEqual({ view: "reset" });
   });
 });
@@ -200,6 +206,19 @@ describe("401 handler", () => {
     await expect(request("POST", "/api/auth/sign-out")).rejects.toMatchObject({ status: 401 });
     await expect(request("POST", "/api/auth/reset-password", {})).rejects.toMatchObject({ status: 401 });
     expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("ignores a 401 for a request that started before the session changed (epoch bumped)", async () => {
+    let release;
+    fetchMock.mockImplementation(() => new Promise((resolve) => (release = () => resolve(new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 })))));
+    const pending = request("GET", "/api/sync").catch((e) => e);
+    bumpSessionEpoch();
+    release();
+    expect(await pending).toMatchObject({ status: 401 });
+    expect(handler).not.toHaveBeenCalled();
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ error: "unauthenticated" }), { status: 401 }));
+    await request("GET", "/api/sync").catch(() => {});
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it("is called for a 401 from any other request", async () => {

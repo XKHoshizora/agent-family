@@ -31,10 +31,11 @@ export function inviteCode(value) {
 }
 
 export function displayName(value) {
-  const v = value.trim();
+  // As the service counts it: one line, 1-40 code points once format characters are removed and the ends trimmed.
+  if (/[\r\n]/.test(value.trim())) return "昵称只能是一行";
+  const v = value.replace(/\p{Cf}/gu, "").trim();
   if (!v) return "请输入昵称";
-  if (v.length > 40) return "昵称最多 40 个字";
-  if (/[\r\n]/.test(v)) return "昵称只能是一行";
+  if ([...v].length > 40) return "昵称最多 40 个字";
   return "";
 }
 
