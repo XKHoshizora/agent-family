@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A single backend service that provides accounts, friends, blocks, direct and group conversations, messages, realtime sync, attachments and in-conversation search for humans, with every rule enforced server-side and proven by API-level tests.
+**Goal:** A single backend service that provides accounts, friends, blocks, direct and group conversations, messages, realtime sync, attachments and search (per conversation and global) for humans, with every rule enforced server-side and proven by API-level tests.
 
 **Architecture:** One Fastify process and one Postgres database are the only authority. Every write runs its permission check and its mutation in the same transaction. Browsers use HTTP for requests and one WebSocket for pushes; attachment bytes live in a private blob store behind an authorizing download route.
 
@@ -329,16 +329,17 @@ onMessages(fn: (msgs: StoredMessage[]) => void); onMembershipChanged(fn: (conver
   - `51 MB is refused without buffering it in memory`
 - [ ] **Steps 2–5:** fail → implement → pass → commit `feat(service): attachments with message-scoped access`.
 
-### Task 9: In-conversation search
+### Task 9: Search — in one conversation and across all of mine
 
 **Files:**
 - Create: `src/messages/search.ts`, `tests/search.test.ts`; Modify: `src/messages/routes.ts`, `migrations/004_search.sql` (`pg_trgm` index on `(body->>'text')`)
 
 **Interfaces:**
 - Produces: `GET /api/conversations/:id/search?q=&before=&limit=` → `{messages: WireMessage[], nextBefore: number | null}`; `q` 1–100 chars, substring match, case-insensitive, `%`/`_`/`\` treated literally; limit 1–50.
+- Produces: `GET /api/search?q=&before=&limit=` → `{messages: WireMessage[], nextBefore: string | null}` across every conversation the caller is currently in, newest first. Same `q` rules, same `VISIBLE_JOIN`; `before` is an opaque cursor (encode `created_at` + message id), never a raw global id. Both searches match message text and attachment file names only.
 
-- [ ] **Step 1: Tests:** `finds a Chinese fragment such as "镰仓站" inside a longer sentence`; `late joiner's search never returns pre-join messages even when the term only occurs there`; `outsider gets 404`; `q="%"` matches only messages containing a literal percent sign; `pagination with nextBefore walks back through all hits without repeats`.
-- [ ] **Steps 2–5:** fail → implement → pass → commit `feat(service): in-conversation search`.
+- [ ] **Step 1: Tests:** `finds a Chinese fragment such as "镰仓站" inside a longer sentence`; `late joiner's search never returns pre-join messages even when the term only occurs there`; `outsider gets 404`; `q="%"` matches only messages containing a literal percent sign; `pagination with nextBefore walks back through all hits without repeats`; `global search returns hits from several of my conversations with their conversationId and seq`; `global search never returns a pre-join message, a message from a conversation I left or was removed from, or anything from a conversation I was never in`; `after being re-added, global search returns only post-rejoin hits`; `the global cursor does not reveal how many messages exist site-wide (two users see unrelated cursors)`; `a file message is found by its file name`.
+- [ ] **Steps 2–5:** fail → implement → pass → commit `feat(service): in-conversation and global search`.
 
 ### Task 10: Robustness and concurrency suites
 
