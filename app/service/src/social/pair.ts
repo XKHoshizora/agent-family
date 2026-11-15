@@ -2,7 +2,9 @@ import type { Tx } from "../db.ts";
 
 /** Canonical (low, high) order of an unordered pair; matches uuid ordering in Postgres. */
 export function orderedPair(a: string, b: string): [string, string] {
-  return a < b ? [a, b] : [b, a];
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return x < y ? [x, y] : [y, x];
 }
 
 /** Serialises every social mutation on this pair until the transaction ends. */

@@ -111,6 +111,9 @@ export async function decideRequest(
     return { ok: false, code: "request_expired" };
   }
 
+  // A block created after the request was sent (block cancels pending ones, but be strict under the lock).
+  if (decision === "accept" && (await blockBetween(t, req.from_id, req.to_id))) return { ok: false, code: "blocked" };
+
   const status = decision === "accept" ? "accepted" : decision === "reject" ? "rejected" : "withdrawn";
   await t.query("update friend_requests set status = $2, resolved_at = now() where id = $1", [requestId, status]);
 

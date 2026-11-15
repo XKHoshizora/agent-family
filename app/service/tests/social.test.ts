@@ -192,6 +192,84 @@ describe("blocks", () => {
   });
 });
 
+describe("id canonicalisation", () => {
+  const upper = (s: string) => s.toUpperCase();
+  // Mixed case: alternate letters so neither pure form matches the stored lower-case id.
+  const mixed = (s: string) => [...s].map((ch, i) => (i % 2 ? ch.toUpperCase() : ch)).join("");
+
+  it("self-block via an upper-case own id is 400, never 5xx", async () => {
+    const a = await signUp(app, "alice");
+    for (const f of [upper, mixed]) {
+      expect(await api(app, a, "PUT", `/api/blocks/${f(a.id)}`)).toMatchObject({ status: 400, json: { error: "invalid_request" } });
+    }
+    expect(await count("select count(*) n from blocks")).toBe(0);
+  });
+
+  it("block, unblock and unfriend behave identically for upper and mixed-case ids", async () => {
+    const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
+    await befriend(app, a, b);
+    expect((await api(app, a, "PUT", `/api/blocks/${upper(b.id)}`)).status).toBe(200);
+    expect(await canDirectSend(db, a.id, b.id)).toBe("blocked");
+    expect((await social(b)).json.blockedBy.map((x: any) => x.id)).toEqual([a.id]);
+    expect((await api(app, a, "DELETE", `/api/blocks/${mixed(b.id)}`)).status).toBe(200);
+    expect(await count("select count(*) n from blocks")).toBe(0);
+    expect((await api(app, b, "DELETE", `/api/friends/${upper(a.id)}`)).status).toBe(200);
+    expect((await social(a)).json.friends).toEqual([]);
+    expect((await api(app, b, "DELETE", `/api/friends/${mixed(a.id)}`)).json).toEqual(NOT_FOUND);
+  });
+
+  it("accept, reject and withdraw work with upper-case request ids; listeners get lower-case principal ids", async () => {
+    const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
+    const seen: string[][] = [];
+    const off = onSocialChanged(app, (ids) => void seen.push(ids));
+    try {
+      const r1 = (await send(a, b)).json.id;
+      expect((await decide(b, upper(r1), "reject")).status).toBe(200);
+      const r2 = (await send(a, b)).json.id;
+      expect((await decide(a, mixed(r2), "withdraw")).status).toBe(200);
+      const r3 = (await send(a, b)).json.id;
+      expect((await decide(b, upper(r3), "accept")).status).toBe(200);
+      expect((await api(app, a, "GET", `/api/friend-requests/${upper(r3)}`)).json.status).toBe("accepted");
+      await api(app, a, "PUT", `/api/blocks/${upper(b.id)}`);
+    } finally {
+      off();
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    for (const ids of seen) for (const id of ids) expect(id).toBe(id.toLowerCase());
+  });
+
+  it("an upper-case block still serialises with a simultaneous accept", async () => {
+    // Invariant, whichever order wins: the block exists; no request is left pending; the request is
+    // accepted with a friendship iff accept returned 200, otherwise it was rejected with no friendship.
+    for (let i = 0; i < 8; i++) {
+      const [a, b] = [await signUp(app, `alice${i}`), await signUp(app, `bob${i}`)];
+      const id = (await send(a, b)).json.id;
+      const [acc, blk] = await Promise.all([decide(b, id, "accept"), api(app, b, "PUT", `/api/blocks/${upper(a.id)}`)]);
+      expect(blk.status).toBe(200);
+      const status = (await api(app, a, "GET", `/api/friend-requests/${id}`)).json.status;
+      const friends = await count("select count(*) n from friendships where a_id = least($1::uuid, $2::uuid)", [a.id, b.id]);
+      expect(await count("select count(*) n from blocks where blocker_id = $1 and blocked_id = $2", [b.id, a.id])).toBe(1);
+      if (acc.status === 200) expect([status, friends]).toEqual(["accepted", 1]);
+      else {
+        expect(acc.status).toBe(409);
+        expect([status, friends]).toEqual(["rejected", 0]);
+      }
+    }
+  });
+});
+
+describe("accept re-checks blocks", () => {
+  it("a block row present while a request is pending makes accept 403 blocked, with no friendship", async () => {
+    const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
+    const id = (await send(a, b)).json.id;
+    await db.query("insert into blocks (blocker_id, blocked_id) values ($1, $2)", [a.id, b.id]);
+    expect(await decide(b, id, "accept")).toMatchObject({ status: 403, json: { error: "blocked" } });
+    expect(await count("select count(*) n from friendships")).toBe(0);
+    expect(await count("select count(*) n from conversations")).toBe(0);
+  });
+});
+
 describe("privacy", () => {
   it("a third party can neither read nor act on a request, and never sees other people's rows", async () => {
     const [a, b, c] = [await signUp(app, "alice"), await signUp(app, "bob"), await signUp(app, "carol")];

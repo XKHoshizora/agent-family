@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { uuidParam } from "../schemas.ts";
 import { isMissingBlob, newBlobKey } from "../attachments/blob.ts";
 import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
@@ -90,7 +91,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
 
   api.get(
     "/api/principals/:id/avatar",
-    { schema: { params: z.object({ id: z.uuid() }), querystring: z.object({}) } },
+    { schema: { params: z.object({ id: uuidParam }), querystring: z.object({}) } },
     async (req, reply) => {
       await requirePrincipal(req);
       const subject = await findAvatarSubject(db, req.params.id);

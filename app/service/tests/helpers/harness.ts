@@ -23,7 +23,10 @@ async function truncateAll(db: Db): Promise<void> {
  * raised) and truncates every table except the migrations table before each test.
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
-export function useApp(extra: Partial<Pick<Deps, "blobs">> = {}): { app: FastifyInstance; db: Db } {
+export function useApp(
+  extra: Partial<Pick<Deps, "blobs">> & { env?: Record<string, string> } = {},
+): { app: FastifyInstance; db: Db } {
+  const { env, ...overrides } = extra;
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;
   const current = <T>(v: T | undefined): T => {
@@ -46,9 +49,10 @@ export function useApp(extra: Partial<Pick<Deps, "blobs">> = {}): { app: Fastify
       AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
       APP_ORIGIN: "http://localhost:5173",
       RATE_LIMIT_SCALE: "1000",
+      ...env,
     });
     database = createDb(config.databaseUrl);
-    instance = await buildApp({ config, db: database, ...extra });
+    instance = await buildApp({ config, db: database, ...overrides });
     await instance.ready();
   });
 

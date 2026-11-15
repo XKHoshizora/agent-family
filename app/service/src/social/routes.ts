@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { uuidParam } from "../schemas.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { findByHandle } from "../principals/store.ts";
@@ -101,7 +102,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
     "/api/friend-requests/:id",
     {
       schema: {
-        params: z.object({ id: z.uuid() }),
+        params: z.object({ id: uuidParam }),
         querystring: empty,
         response: {
           200: z.object({
@@ -135,7 +136,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
       `/api/friend-requests/:id/${decision}`,
       {
         schema: {
-          params: z.object({ id: z.uuid() }),
+          params: z.object({ id: uuidParam }),
           querystring: empty,
           response: { 200: z.object({ ok: z.literal(true), conversationId: z.string().nullable() }) },
         },
@@ -150,7 +151,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
 
   api.delete(
     "/api/friends/:principalId",
-    { schema: { params: z.object({ principalId: z.uuid() }), querystring: empty, response: { 200: ok } } },
+    { schema: { params: z.object({ principalId: uuidParam }), querystring: empty, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
       const other = req.params.principalId;
@@ -161,7 +162,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
 
   api.put(
     "/api/blocks/:principalId",
-    { schema: { params: z.object({ principalId: z.uuid() }), querystring: empty, response: { 200: ok } } },
+    { schema: { params: z.object({ principalId: uuidParam }), querystring: empty, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
       const other = req.params.principalId;
@@ -181,7 +182,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
 
   api.delete(
     "/api/blocks/:principalId",
-    { schema: { params: z.object({ principalId: z.uuid() }), querystring: empty, response: { 200: ok } } },
+    { schema: { params: z.object({ principalId: uuidParam }), querystring: empty, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
       const other = req.params.principalId;
