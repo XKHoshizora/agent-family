@@ -11,6 +11,7 @@ import { DetailsPanel } from "./pages/DetailsPanel.jsx";
 import { ContactsList, ContactCard } from "./pages/Contacts.jsx";
 import { AgentsList, AgentMain } from "./pages/Agents.jsx";
 import { SettingsList, SettingsMain } from "./pages/Settings.jsx";
+import { AuthRoot } from "./auth/AuthRoot.jsx";
 
 const NAV = [
   { id: "chat", label: "消息", icon: MessageCircle },
@@ -93,10 +94,14 @@ function Shell() {
   );
 }
 
-export function App() {
+export function App(props) {
   return (
-    <StoreProvider>
-      <Shell />
-    </StoreProvider>
+    <AuthRoot {...props}>
+      {(dataLayer, key) => (
+        <StoreProvider key={key} dataLayer={dataLayer}>
+          <Shell />
+        </StoreProvider>
+      )}
+    </AuthRoot>
   );
 }

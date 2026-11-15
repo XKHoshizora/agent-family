@@ -15,9 +15,13 @@ export class ApiError extends Error {
   }
 }
 
+const AUTH_PREFIX = "/api/auth/";
 let onUnauthenticated = null;
 
-/** Registers the function called once for every 401 response (Task 3 supplies it). Pass null to clear. */
+/**
+ * Registers the function called once for every 401 response. Pass null to clear. 401s from `/api/auth/*` never
+ * reach it: a wrong password or a spent reset token is not an ended session.
+ */
 export function setUnauthenticatedHandler(fn) {
   onUnauthenticated = typeof fn === "function" ? fn : null;
 }
@@ -58,7 +62,7 @@ export async function request(method, path, body) {
   const code = typeof data?.error === "string" ? data.error : "unknown";
   const reason = typeof data?.reason === "string" ? data.reason : null;
   const error = new ApiError(res.status, code, reason);
-  if (res.status === 401 && onUnauthenticated) {
+  if (res.status === 401 && onUnauthenticated && !path.startsWith(AUTH_PREFIX)) {
     try {
       onUnauthenticated(error);
     } catch {

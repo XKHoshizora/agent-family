@@ -1,0 +1,110 @@
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import * as routes from "../api/routes.js";
+import { setUnauthenticatedHandler } from "../api/http.js";
+import { createDataLayer } from "../data/store.jsx";
+import { Forgot, Loading, LoadFailed, Register, ResetPassword, SignIn, Verify } from "./screens.jsx";
+import { captureResetToken, decide, navigate, parseRoute, useLocation } from "./router.js";
+
+const SessionContext = createContext(null);
+
+/** `{ signOut() → Promise<{ok, error?}> }`, or null outside the sign-in gate (render tests). */
+export const useSession = () => useContext(SessionContext);
+
+/**
+ * Decides signed in or out (one `GET /api/me` at start), shows the account screens or, for a signed-in user,
+ * `children(dataLayer, key)`. While a session is confirmed the data layer runs; it is stopped when the session
+ * ends (sign-out, a 401 on a non-auth request, socket close 4001). Unsent drafts stay in the layer for this tab
+ * and the same account; another account gets a fresh layer.
+ */
+export function AuthRoot({ api = routes, createLayer = createDataLayer, children }) {
+  useState(captureResetToken); // first: the reset token leaves the address bar before any request is made
+  const location = useLocation();
+  const route = useMemo(() => parseRoute(location), [location]);
+  const [box, setBox] = useState(() => ({ layer: createLayer(), id: 0 }));
+  const [session, setSession] = useState({ status: "loading", expired: false });
+  const accountId = useRef(null);
+  const requested = useRef(false);
+
+  const end = useCallback((expired) => {
+    setSession((s) => (s.status === "out" ? s : { status: "out", expired: expired && s.status === "in" }));
+  }, []);
+
+  const confirm = useCallback(
+    (me) => {
+      const another = accountId.current !== null && accountId.current !== me.id;
+      accountId.current = me.id;
+      if (another) setBox((b) => ({ layer: createLayer(), id: b.id + 1 }));
+      setSession({ status: "in", expired: false });
+    },
+    [createLayer],
+  );
+
+  const loadMe = useCallback(() => {
+    api.getMe().then(confirm, (err) => (err?.status === 401 ? end(false) : setSession({ status: "failed", expired: false })));
+  }, [api, confirm, end]);
+
+  useEffect(() => {
+    if (requested.current) return;
+    requested.current = true;
+    loadMe();
+  }, [loadMe]);
+
+  useEffect(() => {
+    setUnauthenticatedHandler(() => end(true));
+    return () => setUnauthenticatedHandler(null);
+  }, [end]);
+
+  const running = session.status === "in";
+  useEffect(() => {
+    if (!running) return undefined;
+    const { layer } = box;
+    const off = layer.onSignedOut(() => end(true));
+    layer.start();
+    return () => {
+      off();
+      layer.stop();
+    };
+  }, [running, box, end]);
+
+  const signOut = useCallback(async () => {
+    try {
+      await api.signOut();
+    } catch (error) {
+      if (error?.status !== 401) return { ok: false, error };
+    }
+    end(false);
+    return { ok: true };
+  }, [api, end]);
+  const sessionApi = useMemo(() => ({ signOut }), [signOut]);
+
+  const decision = session.status === "failed" ? { view: "failed" } : decide(route, session.status);
+  useEffect(() => {
+    if (decision.redirect) navigate(decision.redirect, { replace: true });
+  }, [decision.redirect]);
+
+  switch (decision.view) {
+    case "app":
+      return <SessionContext.Provider value={sessionApi}>{children(box.layer, box.id)}</SessionContext.Provider>;
+    case "signin":
+      return <SignIn api={api} expired={session.expired} onSignedIn={confirm} />;
+    case "register":
+      return <Register api={api} />;
+    case "verify":
+      return <Verify error={route.error} signedIn={running} />;
+    case "forgot":
+      return <Forgot api={api} />;
+    case "reset":
+      return <ResetPassword api={api} />;
+    case "failed":
+      return (
+        <LoadFailed
+          onRetry={() => {
+            setSession({ status: "loading", expired: false });
+            loadMe();
+          }}
+        />
+      );
+    default:
+      return <Loading />;
+  }
+}

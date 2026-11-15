@@ -5,6 +5,7 @@ import { nameOf, entity } from "../state/selectors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
 import { ChevronLeft } from "../icons.js";
+import { useSession } from "../auth/AuthRoot.jsx";
 
 export function SettingsList() {
   const { state, dispatch } = useStore();
@@ -46,6 +47,11 @@ export function SettingsMain() {
   const { state, dispatch } = useStore();
   const self = entity(state, ME) || { name: "", handle: "" };
   const mineBlocks = state.blocks.filter((b) => b.by === ME);
+  const session = useSession();
+  const signOut = async () => {
+    const result = await session.signOut();
+    if (!result.ok) dispatch({ type: "toast", text: "退出登录失败，请检查网络后重试" });
+  };
   return (
     <section className="page" aria-label="设置">
       <button type="button" className="back only-mobile" onClick={() => dispatch({ type: "nav", patch: { pane: "list" } })}>
@@ -75,6 +81,14 @@ export function SettingsMain() {
               </li>
             ))}
           </ul>
+        )}
+        {session && (
+          <>
+            <h3>账户</h3>
+            <div>
+              <Btn variant="danger" onClick={signOut}>退出登录</Btn>
+            </div>
+          </>
         )}
       </div>
     </section>

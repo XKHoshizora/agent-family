@@ -26,4 +26,6 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
 - `src/data/viewmodel.js` - model → the prototype's state shape (signed-in user under the alias id `"me"`).
 - `src/data/store.jsx` - `createDataLayer()`, store provider and `useStore()` → `{state, dispatch, actions, start, stop, onSignedOut}`.
   Nothing talks to the service until `start()`.
+- `src/auth/` - account screens (`screens.jsx`), the session gate (`AuthRoot.jsx`: one `GET /api/me` at start, runs the data layer while
+  signed in, stops it on sign-out / 401 / close 4001), the path router (`router.js`), field rules, error-code texts.
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.
