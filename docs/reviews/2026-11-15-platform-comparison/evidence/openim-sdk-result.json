@@ -1,0 +1,51 @@
+{
+  "checks": [
+    {
+      "test": "aliceagent_sdk_login",
+      "passed": true
+    },
+    {
+      "test": "bobagent_sdk_login",
+      "passed": true
+    },
+    {
+      "test": "alice_sdk_login",
+      "passed": true
+    },
+    {
+      "test": "bob_sdk_login",
+      "passed": true
+    },
+    {
+      "test": "aliceagent_ordinary_user_sends_group_after_block",
+      "passed": true
+    },
+    {
+      "test": "bobagent_ordinary_user_sends_group_after_block",
+      "passed": true
+    },
+    {
+      "test": "alice_receives_both_agent_messages_live",
+      "passed": true
+    },
+    {
+      "test": "bob_receives_both_agent_messages_live",
+      "passed": true
+    },
+    {
+      "test": "personal_block_prevents_private_message",
+      "passed": true,
+      "detail": {
+        "errCode": 1302,
+        "errMsg": "BlockedByPeer"
+      }
+    },
+    {
+      "test": "owner_history_survives_reload",
+      "passed": true
+    }
+  ],
+  "notes": [
+    "Official SDK, real WebSocket transport, ordinary user tokens only; test harness is not a product frontend."
+  ]
+}

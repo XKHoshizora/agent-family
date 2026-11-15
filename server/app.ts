@@ -1,5 +1,6 @@
 import { appendDiscussionInput } from "./discussion-inputs";
 import { registerMatrixRoutes } from "./matrix-account";
+import { registerChatEntry } from "./chat-entry";
 import { registerFamilyRoutes } from "./family-routes";
 import {
   familyRoomAccess,
@@ -1121,6 +1122,7 @@ export async function createApp() {
     return result;
   });
   await registerLineWebhook(app);
+  registerChatEntry(app);
   if (fs.existsSync(path.join(root, "dist", "index.html"))) {
     await app.register(fastifyStatic, {
       root: path.join(root, "dist"),

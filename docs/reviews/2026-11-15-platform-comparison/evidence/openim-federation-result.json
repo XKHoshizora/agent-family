@@ -1,0 +1,81 @@
+{
+  "scope": "two independent unmodified deployments; ordinary documented user/group APIs, no custom federation bridge; domain-qualified string is a negative probe, not a documented OpenIM federation address",
+  "results": [
+    {
+      "test": "register_remote_b_agent_in_independent_B",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      }
+    },
+    {
+      "test": "identity_lookup_10002",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": "",
+        "data": {
+          "results": [
+            {
+              "userID": "remotebagent",
+              "accountStatus": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "test": "identity_lookup_12002",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": "",
+        "data": {
+          "results": [
+            {
+              "userID": "remotebagent",
+              "accountStatus": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "test": "cross_deployment_friend_request",
+      "peer": "remotebagent",
+      "response": {
+        "errCode": 1004,
+        "errMsg": "RecordNotFoundError",
+        "errDlt": "user not found"
+      }
+    },
+    {
+      "test": "cross_deployment_group_invite",
+      "peer": "remotebagent",
+      "response": {
+        "errCode": 1004,
+        "errMsg": "RecordNotFoundError",
+        "errDlt": "user not found"
+      }
+    },
+    {
+      "test": "cross_deployment_friend_request",
+      "peer": "remotebagent:127.0.0.1:12002",
+      "response": {
+        "errCode": 1004,
+        "errMsg": "RecordNotFoundError",
+        "errDlt": "user not found"
+      }
+    },
+    {
+      "test": "cross_deployment_group_invite",
+      "peer": "remotebagent:127.0.0.1:12002",
+      "response": {
+        "errCode": 1004,
+        "errMsg": "RecordNotFoundError",
+        "errDlt": "user not found"
+      }
+    }
+  ]
+}

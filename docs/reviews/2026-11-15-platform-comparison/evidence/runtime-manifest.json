@@ -1,0 +1,239 @@
+{
+  "capturedAt": "2026-11-15T05:07:41.578785+00:00",
+  "containers": [
+    {
+      "name": "afcompare-hula-server-1",
+      "image": "maven:3.9.11-eclipse-temurin-25",
+      "imageId": "sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c",
+      "repoDigests": [
+        "maven@sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-nacos-1",
+      "image": "nacos/nacos-server:v3.1.1",
+      "imageId": "sha256:13e74786507abbacebe080fae2fc9c05aa2591eb99c97a0a78ff0e72beb21b13",
+      "repoDigests": [
+        "nacos/nacos-server@sha256:13e74786507abbacebe080fae2fc9c05aa2591eb99c97a0a78ff0e72beb21b13"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-broker-1",
+      "image": "apache/rocketmq:5.3.1",
+      "imageId": "sha256:d2b231c1b9204129e4f4dd65ec1521c81b8d6826e5f1fe8daa521dab0db5bf16",
+      "repoDigests": [
+        "apache/rocketmq@sha256:d2b231c1b9204129e4f4dd65ec1521c81b8d6826e5f1fe8daa521dab0db5bf16"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-namesrv-1",
+      "image": "apache/rocketmq:5.3.1",
+      "imageId": "sha256:d2b231c1b9204129e4f4dd65ec1521c81b8d6826e5f1fe8daa521dab0db5bf16",
+      "repoDigests": [
+        "apache/rocketmq@sha256:d2b231c1b9204129e4f4dd65ec1521c81b8d6826e5f1fe8daa521dab0db5bf16"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-redis-1",
+      "image": "redis:7.0.0",
+      "imageId": "sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c",
+      "repoDigests": [
+        "redis@sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-mysql-1",
+      "image": "mysql:8.0.30",
+      "imageId": "sha256:3c1aab708f6e57fc4dccafe36baccc7219acfb4ec450f3fb6d370ea89409e906",
+      "repoDigests": [
+        "mysql@sha256:3c1aab708f6e57fc4dccafe36baccc7219acfb4ec450f3fb6d370ea89409e906"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-build-original-retry",
+      "image": "maven:3.9.11-eclipse-temurin-25",
+      "imageId": "sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c",
+      "repoDigests": [
+        "maven@sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c"
+      ],
+      "status": "exited"
+    },
+    {
+      "name": "afcompare-hula-build-fast",
+      "image": "maven:3.9.11-eclipse-temurin-25",
+      "imageId": "sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c",
+      "repoDigests": [
+        "maven@sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c"
+      ],
+      "status": "exited"
+    },
+    {
+      "name": "afcompare-openim-b-openim-server-1",
+      "image": "openim/openim-server:v3.8.3-patch.18",
+      "imageId": "sha256:71d5872be4e603c94a3a06d4279bac2b3b5aa66685e95403efac7489690773e1",
+      "repoDigests": [
+        "openim/openim-server@sha256:71d5872be4e603c94a3a06d4279bac2b3b5aa66685e95403efac7489690773e1"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-b-mongo-1",
+      "image": "mongo:7.0.28",
+      "imageId": "sha256:4510cf3d7050003e958745adb25d2deb3fb907430716162d9cc1a92eda2a6047",
+      "repoDigests": [
+        "mongo@sha256:4510cf3d7050003e958745adb25d2deb3fb907430716162d9cc1a92eda2a6047"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-b-redis-1",
+      "image": "redis:7.0.0",
+      "imageId": "sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c",
+      "repoDigests": [
+        "redis@sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-b-kafka-1",
+      "image": "bitnamilegacy/kafka:3.5.1",
+      "imageId": "sha256:c98ae8022239c956ed81c761262d018ce9a22bb2ef0214e2be670ee6b71741db",
+      "repoDigests": [
+        "bitnamilegacy/kafka@sha256:c98ae8022239c956ed81c761262d018ce9a22bb2ef0214e2be670ee6b71741db"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-b-etcd-1",
+      "image": "bitnamilegacy/etcd:3.5.21",
+      "imageId": "sha256:1b9977cf4cce7546873e0ee50e684c38a38a4e7a27d22086fbd2b8a1b44a69d0",
+      "repoDigests": [
+        "bitnamilegacy/etcd@sha256:1b9977cf4cce7546873e0ee50e684c38a38a4e7a27d22086fbd2b8a1b44a69d0"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-b-minio-1",
+      "image": "bitnamilegacy/minio:2024.1.13",
+      "imageId": "sha256:35d0a4404341601ae4dff4d8672699f7b49e2975fd0fae897c5f5af4638f816e",
+      "repoDigests": [
+        "bitnamilegacy/minio@sha256:35d0a4404341601ae4dff4d8672699f7b49e2975fd0fae897c5f5af4638f816e"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-matrix-element-1",
+      "image": "vectorim/element-web:v1.12.35",
+      "imageId": "sha256:406b48b80153818284a235fa3600b2a5b5b6b0aa0e4ef4896b36d8d3461352f3",
+      "repoDigests": [
+        "vectorim/element-web@sha256:406b48b80153818284a235fa3600b2a5b5b6b0aa0e4ef4896b36d8d3461352f3"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-matrix-matrix-a-1",
+      "image": "matrixdotorg/synapse:v1.165.0",
+      "imageId": "sha256:673b4223c81a7634fd07d832b939a58f97081cfdaae7cdd2d1664cdcf7611b62",
+      "repoDigests": [
+        "matrixdotorg/synapse@sha256:673b4223c81a7634fd07d832b939a58f97081cfdaae7cdd2d1664cdcf7611b62"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-matrix-matrix-b-1",
+      "image": "matrixdotorg/synapse:v1.165.0",
+      "imageId": "sha256:673b4223c81a7634fd07d832b939a58f97081cfdaae7cdd2d1664cdcf7611b62",
+      "repoDigests": [
+        "matrixdotorg/synapse@sha256:673b4223c81a7634fd07d832b939a58f97081cfdaae7cdd2d1664cdcf7611b62"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-hula-build",
+      "image": "maven:3.9.11-eclipse-temurin-25",
+      "imageId": "sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c",
+      "repoDigests": [
+        "maven@sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c"
+      ],
+      "status": "exited"
+    },
+    {
+      "name": "afcompare-openim-openim-chat-1",
+      "image": "openim/openim-chat:v1.8.4-patch.5",
+      "imageId": "sha256:43777257d4543ac3aa780f72b14a94c5df64c3b5c60fdf136f0ea48b65c2a4fa",
+      "repoDigests": [
+        "openim/openim-chat@sha256:43777257d4543ac3aa780f72b14a94c5df64c3b5c60fdf136f0ea48b65c2a4fa"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-openim-server-1",
+      "image": "openim/openim-server:v3.8.3-patch.18",
+      "imageId": "sha256:71d5872be4e603c94a3a06d4279bac2b3b5aa66685e95403efac7489690773e1",
+      "repoDigests": [
+        "openim/openim-server@sha256:71d5872be4e603c94a3a06d4279bac2b3b5aa66685e95403efac7489690773e1"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-openim-web-front-1",
+      "image": "openim/openim-web-front:release-v3.8.3",
+      "imageId": "sha256:b90c285886c6e9b2bb47c1ee44c94daecf56c3fe4d9cba683ac9d21142efa05d",
+      "repoDigests": [
+        "openim/openim-web-front@sha256:b90c285886c6e9b2bb47c1ee44c94daecf56c3fe4d9cba683ac9d21142efa05d"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-mongo-1",
+      "image": "mongo:7.0.28",
+      "imageId": "sha256:4510cf3d7050003e958745adb25d2deb3fb907430716162d9cc1a92eda2a6047",
+      "repoDigests": [
+        "mongo@sha256:4510cf3d7050003e958745adb25d2deb3fb907430716162d9cc1a92eda2a6047"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-redis-1",
+      "image": "redis:7.0.0",
+      "imageId": "sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c",
+      "repoDigests": [
+        "redis@sha256:1b90dbfe6943c72a7469c134cad3f02eb810f016049a0e19ad78be07040cdb0c"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-kafka-1",
+      "image": "bitnamilegacy/kafka:3.5.1",
+      "imageId": "sha256:c98ae8022239c956ed81c761262d018ce9a22bb2ef0214e2be670ee6b71741db",
+      "repoDigests": [
+        "bitnamilegacy/kafka@sha256:c98ae8022239c956ed81c761262d018ce9a22bb2ef0214e2be670ee6b71741db"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-minio-1",
+      "image": "bitnamilegacy/minio:2024.1.13",
+      "imageId": "sha256:35d0a4404341601ae4dff4d8672699f7b49e2975fd0fae897c5f5af4638f816e",
+      "repoDigests": [
+        "bitnamilegacy/minio@sha256:35d0a4404341601ae4dff4d8672699f7b49e2975fd0fae897c5f5af4638f816e"
+      ],
+      "status": "running"
+    },
+    {
+      "name": "afcompare-openim-etcd-1",
+      "image": "bitnamilegacy/etcd:3.5.21",
+      "imageId": "sha256:1b9977cf4cce7546873e0ee50e684c38a38a4e7a27d22086fbd2b8a1b44a69d0",
+      "repoDigests": [
+        "bitnamilegacy/etcd@sha256:1b9977cf4cce7546873e0ee50e684c38a38a4e7a27d22086fbd2b8a1b44a69d0"
+      ],
+      "status": "running"
+    }
+  ]
+}

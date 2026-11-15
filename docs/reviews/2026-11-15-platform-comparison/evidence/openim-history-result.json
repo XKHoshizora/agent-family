@@ -1,0 +1,30 @@
+{
+  "checks": [
+    {
+      "test": "new_member_invitation",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      }
+    },
+    {
+      "test": "default_configuration_exposes_prejoin_history_to_new_member",
+      "observed": true,
+      "messageCount": 3
+    },
+    {
+      "test": "quit_group",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      }
+    },
+    {
+      "test": "quit_user_history_retained",
+      "messageCount": 3
+    }
+  ],
+  "note": "Default configuration only. Source contains configurable global new-member history flag; per-room/owner-specific policy not runtime verified."
+}

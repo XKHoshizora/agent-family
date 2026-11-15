@@ -7,6 +7,20 @@ test.describe.serial("Web workspace end-to-end", () => {
   const errors: string[] = [];
   const email = "browser-owner@example.test",
     password = "Browser-test-password-123!";
+  async function waitForRequestBudget(required: number) {
+    const rate = await context.request.get("/api/health");
+    const remaining = Number(rate.headers()["x-ratelimit-remaining"] ?? 240);
+    if (rate.status() === 429 || remaining < required) {
+      const reset = Number(
+        rate.headers()["retry-after"] ??
+          rate.headers()["x-ratelimit-reset"] ??
+          60,
+      );
+      await new Promise((resolve) =>
+        setTimeout(resolve, (Math.min(65, Math.max(1, reset)) + 1) * 1000),
+      );
+    }
+  }
   test.beforeAll(async ({ browser }) => {
     context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
@@ -55,7 +69,7 @@ test.describe.serial("Web workspace end-to-end", () => {
       .click();
   });
   test("creates independent developer agents in a team room", async () => {
-    await page.getByRole("button", { name: "新建群聊" }).click();
+    await page.getByRole("button", { name: "新建工作台讨论" }).click();
     await page.getByLabel("群聊名称", { exact: true }).fill("开发测试群");
     await page.getByRole("button", { name: "协作开发" }).click();
     await page
@@ -908,10 +922,14 @@ test.describe.serial("Web workspace end-to-end", () => {
     await page.getByLabel("消息", { exact: true }).fill("");
   });
   test("logout and login retain the same workspace without runtime errors", async () => {
+    test.setTimeout(100000);
+    await waitForRequestBudget(50);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await page.getByRole("button", { name: "退出登录" }).click();
-    await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "登录实验工作台" }),
+    ).toBeVisible();
     await page.getByLabel("邮箱", { exact: true }).fill(email);
     await page.getByLabel("密码", { exact: true }).fill(password);
     await page.getByRole("button", { name: "登录", exact: true }).click();
@@ -924,18 +942,7 @@ test.describe.serial("Web workspace end-to-end", () => {
     test.setTimeout(100000);
     // The preceding 17 fast scenarios share one real IP. Respect the production
     // limiter before starting another complete workflow; do not disable it.
-    const rate = await context.request.get("/api/health");
-    const remaining = Number(rate.headers()["x-ratelimit-remaining"] ?? 240);
-    if (rate.status() === 429 || remaining < 150) {
-      const reset = Number(
-        rate.headers()["retry-after"] ??
-          rate.headers()["x-ratelimit-reset"] ??
-          60,
-      );
-      await new Promise((resolve) =>
-        setTimeout(resolve, (Math.min(65, Math.max(1, reset)) + 1) * 1000),
-      );
-    }
+    await waitForRequestBudget(150);
     await page.getByRole("button", { name: "Agent 好友与监督群" }).click();
     for (const name of ["小研", "小审"]) {
       await page

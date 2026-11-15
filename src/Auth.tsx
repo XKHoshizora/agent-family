@@ -98,14 +98,14 @@ export function Auth({
               ? "欢迎来到 Agent Family"
               : invite
                 ? "加入你的团队"
-                : "欢迎回来"}
+                : "登录实验工作台"}
           </h2>
           <p className="muted">
             {setup
               ? "创建第一个账户，开启你的专属 AI 群聊。"
               : invite
                 ? `你受邀加入「${info.data?.name || "工作空间"}」。`
-                : "登录后，继续和伙伴们一起思考。"}
+                : "管理模型与已有讨论。工作台账户与聊天账户暂时独立。"}
           </p>
           <ErrorBox error={error || info.error?.message} />
           {register && (

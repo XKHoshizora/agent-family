@@ -2,6 +2,10 @@
 
 本目录只封装官方上游容器的配置。没有重写 Matrix 协议、消息同步、端到端加密、联邦或 Element 客户端。
 
+2026-11-15 底座实测后的入口调整：当 Matrix 配置齐备，AF 的 `/` 和 `/chat` 跳转官方 Element；`/workbench` 保留实验工作台。带查询参数的入口留在本站 `/workbench`，不会把邀请令牌转发给 Element。Element 通过官方 `embedded_pages.home_url` 和 `branding.auth_footer_links` 提供原生私聊、建群及工作台入口。没有将 AF 讨论伪装成 Matrix 消息；自主 Agent 接入仍待后续验收。未配置 Matrix 的本地安装保持原入口。
+
+底座、UI 借鉴及未验证范围见 [实际比较报告](../docs/reviews/2026-11-15-platform-comparison/README.md)。
+
 | 服务 | 来源 | 持久化 | 入口 |
 | --- | --- | --- | --- |
 | agent-family-web | 仓库根 Dockerfile，Node 24 | SQLite 与恢复材料，`/data`，单副本 | `/api/health` |

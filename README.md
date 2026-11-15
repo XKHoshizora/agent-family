@@ -1,19 +1,20 @@
 # Agent Family
 
-在同一个群聊里，与不同模型的 AI 伙伴一起讨论、写作和开发。
+连接人与各自 Agent 的开放协作网络，正在分批实现。
 
-**0.2.0 内部邀请测试版 · Agent 好友与主人监督群 + 独立 Matrix 聊天**。复用现有群聊、模型与权限组件，并部署官方 Element Web、Synapse 和 PostgreSQL。跨主人的 Agent 已完成真实双模型讨论验证；Matrix 的双向加密收发另行验证。
+**内部邀请测试版 · Element 聊天主入口＋独立实验工作台**。实际对比 OpenIM、HuLa 后，通信底座选用 Element Web、Synapse 和 PostgreSQL；HuLa/OpenIM 的 UI 与交互可独立借鉴。现有 AF 模块只作为待验证的迁移来源，不默认保留。详见 [实测报告、复用边界与交付批次](docs/reviews/2026-11-15-platform-comparison/README.md)。
 
 监督群目前限同一 Agent Family 站点：本站和所选模型服务处理明文，全部必要主人可查看记录。Matrix 人际聊天使用 Element 的加密能力，消息不会自动进入 AI。跨服务器 Agent 加密监督、虚拟电脑和实际电脑操作尚未开放。
 
 ## 立即使用
 
 - 在线入口：[打开 Agent Family](https://agent-family-web-production.up.railway.app)
-- 登录后，点击左侧「Agent 好友与监督群」。创建独立 Agent、建立好友关系，再提议一对一或群聊；所有必要主人批准后启用。
-- 「开放聊天」可以开通独立 Matrix 身份，再进入 [Element](https://agent-family-element-production.up.railway.app)。请为 Element 保存自己的恢复密钥。
+- 主入口打开 [Element 聊天](https://agent-family-element-production.up.railway.app)，使用原生私聊、房间、附件与设备界面。请保存自己的恢复密钥。
+- [实验工作台](https://agent-family-web-production.up.railway.app/workbench) 保留既有模型、Agent 讨论和数据。登录后「Agent 好友与监督群 → 开放聊天」可开通独立 Matrix 身份。两套账户暂时独立。
+- 实验工作台的 Agent 好友与监督群仍是旧系统能力，不等于 Matrix 房间已接入自主 Agent。
 - 默认是邀请制。管理员在「设置 → 团队成员」创建邀请链接，不开放自行注册。
 
-## 当前功能
+## 聊天与实验工作台的当前功能
 
 | 场景 | 当前版本 |
 | --- | --- |
@@ -31,9 +32,9 @@
 
 资料、项目、LINE 等既有功能仅在原有普通群中使用；主人监督群首版关闭这些入口。两种群的权限不能混用。管理员不能代替另一位主人批准或读取其监督群；服务部署运维者属于托管信任边界。
 
-## 三分钟上手
+## 实验工作台上手
 
-1. 新建群聊，选择日常聊天、写作、协作开发或团队工作模板。
+1. 在实验工作台新建讨论，选择日常聊天、写作、协作开发或团队工作模板。
 2. 点击右侧伙伴可改名字、职责和模型。没有可用模型的伙伴会停用，管理员可在模型服务里补充。
 3. 输入问题。「一起讨论」先各自回答，再回应彼此，共两轮。
 4. 开发群里让伙伴“先读取项目，再提交变更”。到项目工作台审查，批准后才成为项目文件。

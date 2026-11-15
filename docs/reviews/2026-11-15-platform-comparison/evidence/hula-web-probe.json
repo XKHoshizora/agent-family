@@ -1,0 +1,13 @@
+{
+  "time": "2026-11-15T04:33:35.367Z",
+  "url": "http://127.0.0.1:46130/",
+  "title": "HuLa",
+  "body": "",
+  "errors": [
+    "Cannot read properties of undefined (reading 'os_type')",
+    "Cannot read properties of undefined (reading 'invoke')"
+  ],
+  "blockedExternalOrigins": [],
+  "nativeMock": false,
+  "backendConnected": false
+}

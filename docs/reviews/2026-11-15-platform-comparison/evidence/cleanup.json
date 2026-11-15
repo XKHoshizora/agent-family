@@ -1,0 +1,11 @@
+[
+  {
+    "id": "39bfc41a-2ee8-4dd7-94a0-eb95701e6816",
+    "status": "DESTROYED",
+    "region": "",
+    "environmentId": "bb10971d-40be-4f71-8e88-bfbeb40b293d",
+    "createdAt": "2026-11-15T04:26:09.314Z",
+    "idleTimeoutMinutes": null,
+    "domains": []
+  }
+]

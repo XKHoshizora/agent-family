@@ -1,0 +1,53 @@
+{
+  "checks": [
+    {
+      "test": "alice_decrypts_aliceagent",
+      "passed": true
+    },
+    {
+      "test": "bob_decrypts_aliceagent",
+      "passed": true
+    },
+    {
+      "test": "bobagent_decrypts_aliceagent",
+      "passed": true
+    },
+    {
+      "test": "alice_decrypts_bobagent",
+      "passed": true
+    },
+    {
+      "test": "bob_decrypts_bobagent",
+      "passed": true
+    },
+    {
+      "test": "aliceagent_decrypts_bobagent",
+      "passed": true
+    },
+    {
+      "test": "both_agent_wire_events_encrypted",
+      "passed": true
+    },
+    {
+      "test": "owner_decrypts_history_after_reload",
+      "passed": true
+    }
+  ],
+  "wire": [
+    {
+      "name": "aliceagent",
+      "path": "/_matrix/client/v3/rooms/!oJdC3yjfXoKpCcvOKZxgwTSPNblC4SD_UaviPdf5CSo/send/m.room.encrypted/m1794717853713.0",
+      "encrypted": true,
+      "plaintext": false
+    },
+    {
+      "name": "bobagent",
+      "path": "/_matrix/client/v3/rooms/!oJdC3yjfXoKpCcvOKZxgwTSPNblC4SD_UaviPdf5CSo/send/m.room.encrypted/m1794717856057.0",
+      "encrypted": true,
+      "plaintext": false
+    }
+  ],
+  "errors": [],
+  "roomUrl": "http://127.0.0.1:49080/#/room/!oJdC3yjfXoKpCcvOKZxgwTSPNblC4SD_UaviPdf5CSo",
+  "scope": "Official Element clients on two independent Synapse servers; controlled synthetic Agent identities, no autonomous model execution."
+}

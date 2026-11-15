@@ -1,0 +1,26 @@
+[
+  {
+    "repo": "open-im-server",
+    "commit": "a101d85ec16cc21bec60005169725adc1ae5649a"
+  },
+  {
+    "repo": "openim-docker",
+    "commit": "9b69872983a3a4984dc0b66848831ef69bf202cc"
+  },
+  {
+    "repo": "HuLa",
+    "commit": "16871546d8f42252ed8b475540b0f74f1ea44fd6"
+  },
+  {
+    "repo": "HuLa-Server",
+    "commit": "9125bb42ea16896055ec057e65124f3c684c361a"
+  },
+  {
+    "repo": "openim-chat",
+    "commit": "73e7b82a64fdc997a415f3a55f697e0c5800f1d1"
+  },
+  {
+    "repo": "openim-electron-demo",
+    "commit": "62d7ca7b12e91144b315f36c8ebd1d9e0457a352"
+  }
+]

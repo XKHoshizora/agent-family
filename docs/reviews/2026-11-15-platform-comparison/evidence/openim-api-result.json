@@ -1,0 +1,323 @@
+{
+  "time": 1794717137.3076503,
+  "scope": "real isolated server REST APIs; admin-send is not normal client send",
+  "results": [
+    {
+      "test": "admin_login",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "token",
+        "expireTimeSeconds"
+      ]
+    },
+    {
+      "test": "register_synthetic_users",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "agent_friend_request",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "agent_friend_accept",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "friend_list",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "friendsInfo",
+        "total"
+      ]
+    },
+    {
+      "test": "friend_contains_peer",
+      "passed": true
+    },
+    {
+      "test": "cross_owner_group_create",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "groupInfo"
+      ]
+    },
+    {
+      "test": "owner_reads_group_members",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "total",
+        "members"
+      ]
+    },
+    {
+      "test": "both_agents_and_both_owners_are_members",
+      "passed": true
+    },
+    {
+      "test": "send_using_agent_token",
+      "response": {
+        "errCode": 1002,
+        "errMsg": "NoPermissionError",
+        "errDlt": "only app manager can send message"
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "send_using_server_admin_token",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "serverMsgID",
+        "clientMsgID",
+        "sendTime",
+        "modify"
+      ]
+    },
+    {
+      "test": "alice_read_history",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "msgs"
+      ]
+    },
+    {
+      "test": "alice_read_content",
+      "data": {
+        "msgs": {
+          "sg_af-cross-owner": {
+            "Msgs": [
+              {
+                "sendID": "aliceagent",
+                "recvID": "af-cross-owner",
+                "groupID": "af-cross-owner",
+                "clientMsgID": "0476cddef04004a24f3d6ba01b695d35",
+                "serverMsgID": "cf2a0d008e63ffca070a50f105c8f54a",
+                "senderPlatformID": 0,
+                "senderNickname": "",
+                "senderFaceURL": "",
+                "sessionType": 3,
+                "msgFrom": 200,
+                "contentType": 1501,
+                "content": "eyJkZXRhaWwiOiJ7XCJncm91cFwiOntcImdyb3VwSURcIjpcImFmLWNyb3NzLW93bmVyXCIsXCJncm91cE5hbWVcIjpcIkNyb3NzIG93bmVyIGFnZW50cyAoc3ludGhldGljKVwiLFwibm90aWZpY2F0aW9uXCI6XCJcIixcImludHJvZHVjdGlvblwiOlwiXCIsXCJmYWNlVVJMXCI6XCJcIixcIm93bmVyVXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJjcmVhdGVUaW1lXCI6MTc5NDcxNzEzNDY4MixcIm1lbWJlckNvdW50XCI6NCxcImV4XCI6XCJcIixcInN0YXR1c1wiOjAsXCJjcmVhdG9yVXNlcklEXCI6XCJcIixcImdyb3VwVHlwZVwiOjIsXCJuZWVkVmVyaWZpY2F0aW9uXCI6MCxcImxvb2tNZW1iZXJJbmZvXCI6MCxcImFwcGx5TWVtYmVyRnJpZW5kXCI6MCxcIm5vdGlmaWNhdGlvblVwZGF0ZVRpbWVcIjowLFwibm90aWZpY2F0aW9uVXNlcklEXCI6XCJcIn0sXCJvcFVzZXJcIjp7XCJncm91cElEXCI6XCJhZi1jcm9zcy1vd25lclwiLFwidXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJyb2xlTGV2ZWxcIjoxMDAsXCJqb2luVGltZVwiOjE3OTQ3MTcxMzQ3MTAsXCJuaWNrbmFtZVwiOlwiQUYgdGVzdCBhbGljZWFnZW50XCIsXCJmYWNlVVJMXCI6XCJcIixcImFwcE1hbmdlckxldmVsXCI6MCxcImpvaW5Tb3VyY2VcIjoyLFwib3BlcmF0b3JVc2VySURcIjpcImFsaWNlYWdlbnRcIixcImV4XCI6XCJcIixcIm11dGVFbmRUaW1lXCI6MCxcImludml0ZXJVc2VySURcIjpcImFsaWNlYWdlbnRcIn0sXCJtZW1iZXJMaXN0XCI6W3tcImdyb3VwSURcIjpcImFmLWNyb3NzLW93bmVyXCIsXCJ1c2VySURcIjpcImFsaWNlYWdlbnRcIixcInJvbGVMZXZlbFwiOjEwMCxcImpvaW5UaW1lXCI6MTc5NDcxNzEzNDcxMCxcIm5pY2tuYW1lXCI6XCJBRiB0ZXN0IGFsaWNlYWdlbnRcIixcImZhY2VVUkxcIjpcIlwiLFwiYXBwTWFuZ2VyTGV2ZWxcIjowLFwiam9pblNvdXJjZVwiOjIsXCJvcGVyYXRvclVzZXJJRFwiOlwiYWxpY2VhZ2VudFwiLFwiZXhcIjpcIlwiLFwibXV0ZUVuZFRpbWVcIjowLFwiaW52aXRlclVzZXJJRFwiOlwiYWxpY2VhZ2VudFwifV0sXCJvcGVyYXRpb25UaW1lXCI6MTc5NDcxNzEzNDY4MixcImdyb3VwT3duZXJVc2VyXCI6e1wiZ3JvdXBJRFwiOlwiYWYtY3Jvc3Mtb3duZXJcIixcInVzZXJJRFwiOlwiYWxpY2VhZ2VudFwiLFwicm9sZUxldmVsXCI6MTAwLFwiam9pblRpbWVcIjoxNzk0NzE3MTM0NzEwLFwibmlja25hbWVcIjpcIlwiLFwiZmFjZVVSTFwiOlwiXCIsXCJhcHBNYW5nZXJMZXZlbFwiOjAsXCJqb2luU291cmNlXCI6MixcIm9wZXJhdG9yVXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJleFwiOlwiXCIsXCJtdXRlRW5kVGltZVwiOjAsXCJpbnZpdGVyVXNlcklEXCI6XCJhbGljZWFnZW50XCJ9LFwiZ3JvdXBNZW1iZXJWZXJzaW9uXCI6MSxcImdyb3VwTWVtYmVyVmVyc2lvbklEXCI6XCI2YWY5MzVjZTIxMDY2YzNkYTI2ZDgzNDNcIn0ifQ==",
+                "seq": 1,
+                "sendTime": 1794717134849,
+                "createTime": 1794717134804,
+                "status": 0,
+                "isRead": false,
+                "options": {
+                  "offlinePush": false,
+                  "unreadCount": true
+                },
+                "offlinePushInfo": {
+                  "title": "create group title",
+                  "desc": "create group desc",
+                  "ex": "create group ext",
+                  "iOSPushSound": "",
+                  "iOSBadgeCount": false,
+                  "signalInfo": ""
+                },
+                "atUserIDList": null,
+                "attachedInfo": "",
+                "ex": ""
+              },
+              {
+                "sendID": "aliceagent",
+                "recvID": "",
+                "groupID": "af-cross-owner",
+                "clientMsgID": "0c5d2817624bb5e6f374ffcd06622e20",
+                "serverMsgID": "5cb0b38e862e10b9acda43b9037e6146",
+                "senderPlatformID": 5,
+                "senderNickname": "Alice Agent",
+                "senderFaceURL": "",
+                "sessionType": 3,
+                "msgFrom": 200,
+                "contentType": 101,
+                "content": "eyJjb250ZW50IjoiQUYgbGl2ZSBwcm9iZSBncm91cCBtZXNzYWdlIn0=",
+                "seq": 2,
+                "sendTime": 1794717134905,
+                "createTime": 1794717134875,
+                "status": 0,
+                "isRead": false,
+                "offlinePushInfo": null,
+                "atUserIDList": null,
+                "attachedInfo": "",
+                "ex": ""
+              }
+            ],
+            "isEnd": true,
+            "endSeq": 0
+          }
+        }
+      }
+    },
+    {
+      "test": "bob_read_history",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "msgs"
+      ]
+    },
+    {
+      "test": "bob_read_content",
+      "data": {
+        "msgs": {
+          "sg_af-cross-owner": {
+            "Msgs": [
+              {
+                "sendID": "aliceagent",
+                "recvID": "af-cross-owner",
+                "groupID": "af-cross-owner",
+                "clientMsgID": "0476cddef04004a24f3d6ba01b695d35",
+                "serverMsgID": "cf2a0d008e63ffca070a50f105c8f54a",
+                "senderPlatformID": 0,
+                "senderNickname": "",
+                "senderFaceURL": "",
+                "sessionType": 3,
+                "msgFrom": 200,
+                "contentType": 1501,
+                "content": "eyJkZXRhaWwiOiJ7XCJncm91cFwiOntcImdyb3VwSURcIjpcImFmLWNyb3NzLW93bmVyXCIsXCJncm91cE5hbWVcIjpcIkNyb3NzIG93bmVyIGFnZW50cyAoc3ludGhldGljKVwiLFwibm90aWZpY2F0aW9uXCI6XCJcIixcImludHJvZHVjdGlvblwiOlwiXCIsXCJmYWNlVVJMXCI6XCJcIixcIm93bmVyVXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJjcmVhdGVUaW1lXCI6MTc5NDcxNzEzNDY4MixcIm1lbWJlckNvdW50XCI6NCxcImV4XCI6XCJcIixcInN0YXR1c1wiOjAsXCJjcmVhdG9yVXNlcklEXCI6XCJcIixcImdyb3VwVHlwZVwiOjIsXCJuZWVkVmVyaWZpY2F0aW9uXCI6MCxcImxvb2tNZW1iZXJJbmZvXCI6MCxcImFwcGx5TWVtYmVyRnJpZW5kXCI6MCxcIm5vdGlmaWNhdGlvblVwZGF0ZVRpbWVcIjowLFwibm90aWZpY2F0aW9uVXNlcklEXCI6XCJcIn0sXCJvcFVzZXJcIjp7XCJncm91cElEXCI6XCJhZi1jcm9zcy1vd25lclwiLFwidXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJyb2xlTGV2ZWxcIjoxMDAsXCJqb2luVGltZVwiOjE3OTQ3MTcxMzQ3MTAsXCJuaWNrbmFtZVwiOlwiQUYgdGVzdCBhbGljZWFnZW50XCIsXCJmYWNlVVJMXCI6XCJcIixcImFwcE1hbmdlckxldmVsXCI6MCxcImpvaW5Tb3VyY2VcIjoyLFwib3BlcmF0b3JVc2VySURcIjpcImFsaWNlYWdlbnRcIixcImV4XCI6XCJcIixcIm11dGVFbmRUaW1lXCI6MCxcImludml0ZXJVc2VySURcIjpcImFsaWNlYWdlbnRcIn0sXCJtZW1iZXJMaXN0XCI6W3tcImdyb3VwSURcIjpcImFmLWNyb3NzLW93bmVyXCIsXCJ1c2VySURcIjpcImFsaWNlYWdlbnRcIixcInJvbGVMZXZlbFwiOjEwMCxcImpvaW5UaW1lXCI6MTc5NDcxNzEzNDcxMCxcIm5pY2tuYW1lXCI6XCJBRiB0ZXN0IGFsaWNlYWdlbnRcIixcImZhY2VVUkxcIjpcIlwiLFwiYXBwTWFuZ2VyTGV2ZWxcIjowLFwiam9pblNvdXJjZVwiOjIsXCJvcGVyYXRvclVzZXJJRFwiOlwiYWxpY2VhZ2VudFwiLFwiZXhcIjpcIlwiLFwibXV0ZUVuZFRpbWVcIjowLFwiaW52aXRlclVzZXJJRFwiOlwiYWxpY2VhZ2VudFwifV0sXCJvcGVyYXRpb25UaW1lXCI6MTc5NDcxNzEzNDY4MixcImdyb3VwT3duZXJVc2VyXCI6e1wiZ3JvdXBJRFwiOlwiYWYtY3Jvc3Mtb3duZXJcIixcInVzZXJJRFwiOlwiYWxpY2VhZ2VudFwiLFwicm9sZUxldmVsXCI6MTAwLFwiam9pblRpbWVcIjoxNzk0NzE3MTM0NzEwLFwibmlja25hbWVcIjpcIlwiLFwiZmFjZVVSTFwiOlwiXCIsXCJhcHBNYW5nZXJMZXZlbFwiOjAsXCJqb2luU291cmNlXCI6MixcIm9wZXJhdG9yVXNlcklEXCI6XCJhbGljZWFnZW50XCIsXCJleFwiOlwiXCIsXCJtdXRlRW5kVGltZVwiOjAsXCJpbnZpdGVyVXNlcklEXCI6XCJhbGljZWFnZW50XCJ9LFwiZ3JvdXBNZW1iZXJWZXJzaW9uXCI6MSxcImdyb3VwTWVtYmVyVmVyc2lvbklEXCI6XCI2YWY5MzVjZTIxMDY2YzNkYTI2ZDgzNDNcIn0ifQ==",
+                "seq": 1,
+                "sendTime": 1794717134849,
+                "createTime": 1794717134804,
+                "status": 0,
+                "isRead": false,
+                "options": {
+                  "offlinePush": false,
+                  "unreadCount": true
+                },
+                "offlinePushInfo": {
+                  "title": "create group title",
+                  "desc": "create group desc",
+                  "ex": "create group ext",
+                  "iOSPushSound": "",
+                  "iOSBadgeCount": false,
+                  "signalInfo": ""
+                },
+                "atUserIDList": null,
+                "attachedInfo": "",
+                "ex": ""
+              },
+              {
+                "sendID": "aliceagent",
+                "recvID": "",
+                "groupID": "af-cross-owner",
+                "clientMsgID": "0c5d2817624bb5e6f374ffcd06622e20",
+                "serverMsgID": "5cb0b38e862e10b9acda43b9037e6146",
+                "senderPlatformID": 5,
+                "senderNickname": "Alice Agent",
+                "senderFaceURL": "",
+                "sessionType": 3,
+                "msgFrom": 200,
+                "contentType": 101,
+                "content": "eyJjb250ZW50IjoiQUYgbGl2ZSBwcm9iZSBncm91cCBtZXNzYWdlIn0=",
+                "seq": 2,
+                "sendTime": 1794717134905,
+                "createTime": 1794717134875,
+                "status": 0,
+                "isRead": false,
+                "offlinePushInfo": null,
+                "atUserIDList": null,
+                "attachedInfo": "",
+                "ex": ""
+              }
+            ],
+            "isEnd": true,
+            "endSeq": 0
+          }
+        }
+      }
+    },
+    {
+      "test": "outsider_read_history",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "outsider_read_content",
+      "data": {}
+    },
+    {
+      "test": "agent_block_peer",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": []
+    },
+    {
+      "test": "members_after_block",
+      "response": {
+        "errCode": 0,
+        "errMsg": "",
+        "errDlt": ""
+      },
+      "dataKeys": [
+        "total",
+        "members"
+      ]
+    },
+    {
+      "test": "block_does_not_remove_group_members",
+      "passed": true
+    },
+    {
+      "test": "matrix_endpoint_probe",
+      "path": "/.well-known/matrix/server",
+      "status": 404,
+      "note": "404 alone does not prove absence of another federation protocol"
+    },
+    {
+      "test": "matrix_endpoint_probe",
+      "path": "/_matrix/federation/v1/version",
+      "status": 404,
+      "note": "404 alone does not prove absence of another federation protocol"
+    }
+  ]
+}

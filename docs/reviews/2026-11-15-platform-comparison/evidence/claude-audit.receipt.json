@@ -1,0 +1,12 @@
+{
+  "requestedModel": "claude-opus-5-5",
+  "effort": "xhigh",
+  "started": "2026-11-15T04:23:44.037Z",
+  "finished": "2026-11-15T04:31:54.988Z",
+  "exitCode": 0,
+  "timedOut": false,
+  "modelVerified": true,
+  "isError": false,
+  "num_turns": 110,
+  "permission_denials": []
+}

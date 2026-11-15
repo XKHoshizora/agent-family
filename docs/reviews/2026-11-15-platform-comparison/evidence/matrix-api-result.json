@@ -1,0 +1,111 @@
+{
+  "checks": [
+    {
+      "test": "aliceagent_joins_cross_server_room",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "bob_joins_cross_server_room",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "bobagent_joins_cross_server_room",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "aliceagent_sends",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "bobagent_sends",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "alice_reads_agent_0",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "alice_reads_agent_1",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "bob_reads_agent_0",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "bob_reads_agent_1",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "outsider_cannot_read_room",
+      "passed": true,
+      "detail": {
+        "status": 403
+      }
+    },
+    {
+      "test": "attachment_upload",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "remote_owner_downloads_attachment",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "invite_new_member",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "new_member_joins",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "new_member_cannot_read_prejoin_event",
+      "passed": true,
+      "detail": {
+        "status": 404
+      }
+    },
+    {
+      "test": "remove_agent_membership",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "test": "removed_agent_cannot_send",
+      "passed": true,
+      "detail": {
+        "status": 403
+      }
+    },
+    {
+      "test": "removed_agent_cannot_read_new_event",
+      "passed": true,
+      "detail": {
+        "status": 404
+      }
+    },
+    {
+      "test": "encrypted_room_created_not_yet_crypto_verified",
+      "passed": true,
+      "detail": null
+    }
+  ],
+  "roomId": "!bpWeqQAi6L_fVrYi6L6amD3-xofFpKCd94lTdIheNvw",
+  "encryptedRoomId": "!oJdC3yjfXoKpCcvOKZxgwTSPNblC4SD_UaviPdf5CSo",
+  "federation": "two separate Synapse databases and signing keys; private test TLS with certificate verification disabled ONLY in this isolated test",
+  "cryptoVerified": false
+}

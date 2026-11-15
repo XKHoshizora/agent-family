@@ -145,6 +145,10 @@ export function App() {
 }
 function Workspace({ me }: { me: Me }) {
   const client = useQueryClient();
+  const matrixAccount = useQuery({
+    queryKey: ["matrix-account"],
+    queryFn: () => api<{ configured: boolean }>("/api/matrix/account"),
+  });
   const rooms = useQuery({
     queryKey: ["rooms", me.workspace.id],
     queryFn: () => api<Room[]>("/api/rooms"),
@@ -468,16 +472,23 @@ function Workspace({ me }: { me: Me }) {
           <X size={20} />
         </button>
       </div>
+      {matrixAccount.data?.configured && (
+        <a className="new-chat" href="/chat">
+          <MessageCircle size={19} />
+          打开聊天
+          <ArrowRight size={16} />
+        </a>
+      )}
       <button
         className="new-chat"
         onClick={() => setNewRoom(true)}
         disabled={!canWrite}
       >
         <Plus size={19} />
-        新建群聊
+        新建工作台讨论
       </button>
       <div className="sidebar-section-label">
-        我的群聊 <span>{rooms.data?.length || 0}</span>
+        工作台讨论 <span>{rooms.data?.length || 0}</span>
       </div>
       <nav className="room-list" aria-label="群聊列表">
         {rooms.isPending ? (

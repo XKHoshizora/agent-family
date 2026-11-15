@@ -1,0 +1,45 @@
+{
+  "build": {
+    "util": "SUCCESS",
+    "bootServer": "SUCCESS",
+    "jdk": "25",
+    "maven": "3.9.11",
+    "testsSkipped": true,
+    "upstreamDependenciesUnchanged": true
+  },
+  "readiness": {
+    "status": 200,
+    "body": {
+      "status": "UP"
+    }
+  },
+  "health": {
+    "status": 503,
+    "db": "UP",
+    "redis": "UP",
+    "mail": "DOWN: intentionally no outbound SMTP in isolated network"
+  },
+  "client": "plain Web blank; Tauri native runtime not supplied; native desktop not tested",
+  "completedScenarios": [
+    "source audit",
+    "backend compilation",
+    "database initialization",
+    "backend application startup",
+    "readiness HTTP 200",
+    "unauthenticated chat HTTP response"
+  ],
+  "notVerified": [
+    "authenticated friendship/group flow",
+    "cross-owner groups",
+    "owner visibility",
+    "E2EE",
+    "two-independent-server federation",
+    "native desktop end-to-end"
+  ],
+  "corrections": [
+    "Central-only mirror misses Tencent SDK; original Aliyun repository succeeds",
+    "disabling discovery causes missing NacosServiceManager; Nacos included on retry",
+    "initial DB initialization retried after readiness"
+  ],
+  "isolation": "internal Docker network; public sample integration secrets replaced in mounted config; no production data or secrets"
+}

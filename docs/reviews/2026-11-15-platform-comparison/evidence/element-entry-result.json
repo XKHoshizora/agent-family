@@ -1,0 +1,12 @@
+{
+  "checks": [
+    {
+      "test": "official_element_home_extension_and_workbench_link",
+      "passed": true
+    },
+    {
+      "test": "home_shortcut_opens_native_element_direct_chat_dialog",
+      "passed": true
+    }
+  ]
+}
