@@ -93,6 +93,7 @@ describe("GET /api/sync", () => {
       creatorId: a.id,
       myRole: "speaker",
       closed: false,
+      createdAt: expect.any(String),
       canSend: { ok: true },
       members: [
         { id: a.id, role: "speaker", isCreator: true },
@@ -111,6 +112,7 @@ describe("GET /api/sync", () => {
       title: null,
       myRole: "speaker",
       closed: false,
+      createdAt: expect.any(String),
       peerId: a.id,
       canSend: { ok: true },
       members: [
@@ -214,6 +216,23 @@ describe("GET /api/sync", () => {
     expect(await conv(b)).toMatchObject({ canSend: { ok: true } });
     expect((await api(app, a, "DELETE", `/api/friends/${b.id}`)).status).toBe(200);
     expect(await conv(b)).toMatchObject({ unread: 1, canSend: { ok: false, reason: "not_friends" } });
+  });
+
+  it("each conversation carries its createdAt, so one without any messages can be placed too", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const { conversationId: ab } = await befriend(app, a, b); // a new direct chat has no messages at all
+    const { conversationId: ac } = await befriend(app, a, c);
+    const g = await group(app, a, "team", [b, c]);
+    const created = new Map(
+      (await db.query<{ id: string; created_at: Date }>("select id, created_at from conversations")).rows.map((r) => [r.id, r.created_at.toISOString()]),
+    );
+    const s = (await sync(a)).json;
+    expect(s.messages.filter((m: any) => m.conversationId !== g)).toEqual([]);
+    expect(s.conversations.map((x: any) => [x.id, x.createdAt])).toEqual([
+      [ab, created.get(ab)],
+      [ac, created.get(ac)],
+      [g, created.get(g)],
+    ]);
   });
 
   it("returns the last 30 visible messages per conversation, ascending", async () => {

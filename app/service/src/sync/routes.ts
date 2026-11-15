@@ -23,6 +23,7 @@ const conversationEntry = z.object({
   creatorId: z.string().optional(),
   myRole: role,
   closed: z.boolean(),
+  createdAt: z.string(),
   peerId: z.string().optional(),
   canSend: z.object({ ok: z.boolean(), reason: z.enum(["blocked", "not_friends", "closed"]).optional() }),
   members: z.array(z.object({ id: z.string(), role, isCreator: z.boolean() })),

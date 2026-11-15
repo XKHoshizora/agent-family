@@ -21,6 +21,8 @@ export interface SyncConversation {
   creatorId?: string;
   myRole: Role;
   closed: boolean;
+  /** When the conversation was created (ISO 8601): `/api/sync`'s order, and a place for one without messages. */
+  createdAt: string;
   /** Direct chats only: the other party, from the pair the conversation belongs to (as the send path). */
   peerId?: string;
   canSend: { ok: true } | { ok: false; reason: "blocked" | "not_friends" | "closed" };
@@ -94,6 +96,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
     creator_id: string;
     seq: string;
     closed: boolean;
+    created_at: Date;
     role: Role;
     read_seq: string;
     peer_id: string | null;
@@ -102,7 +105,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
   }>(
     // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
     // only the peer's read marker is read from their membership.
-    `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, me.role, me.read_seq,
+    `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, c.created_at, me.role, me.read_seq,
             pair.peer_id, peer.read_seq as peer_read_seq,
             (select count(*) from messages m ${VISIBLE_JOIN}
               where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
@@ -155,6 +158,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
       ...(c.type === "group" ? { creatorId: c.creator_id } : {}),
       myRole: c.role,
       closed: c.closed,
+      createdAt: c.created_at.toISOString(),
       ...(c.type === "direct" && c.peer_id ? { peerId: c.peer_id } : {}),
       canSend: c.closed ? { ok: false, reason: "closed" } : verdict ? { ok: false, reason: verdict } : { ok: true },
       members: membersOf.get(c.id) ?? [],

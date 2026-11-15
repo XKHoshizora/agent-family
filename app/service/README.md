@@ -136,6 +136,7 @@ counter: a message is identified by `conversationId` + `seq` (gapless per conver
     "id": "…", "type": "direct" | "group", "title": "team" /* null in direct chats */,
     "creatorId": "…",                                // groups only: a direct chat has no creator role
     "myRole": "speaker" | "observer", "closed": false,
+    "createdAt": "2026-11-16T01:02:03.000Z",       // when the conversation was created; the list is in this order
     "peerId": "…",                                   // direct chats only: the other person of the pair
     "canSend": { "ok": true } | { "ok": false, "reason": "blocked" | "not_friends" | "closed" },
     "members": [{ "id": "…", "role": "speaker", "isCreator": true }],   // current members, join order; isCreator only in groups
