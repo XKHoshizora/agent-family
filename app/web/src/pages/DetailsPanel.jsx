@@ -31,7 +31,7 @@ export function DetailsPanel({ conv }) {
   const [blockTarget, setBlockTarget] = useState(null);
   const owners = viewerOwners(state, conv);
   const other = otherMember(conv);
-  const group = conv.type === "mixed" || conv.type === "agentGroup";
+  const group = conv.type === "group" || conv.type === "mixed" || conv.type === "agentGroup";
   const viewers = [...new Set([...humansIn(state, conv), ...owners])];
   const go = (patch) => dispatch({ type: "nav", patch: { pane: "main", ...patch } });
 

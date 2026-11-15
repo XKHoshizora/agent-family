@@ -79,7 +79,7 @@ export function ChatList() {
   const rows = state.order
     .map((id) => state.convs[id])
     .filter(Boolean)
-    .filter((c) => (filter === "unread" ? c.unread > 0 : filter === "group" ? c.type === "mixed" || c.type === "agentGroup" : true))
+    .filter((c) => (filter === "unread" ? c.unread > 0 : filter === "group" ? c.type === "group" || c.type === "mixed" || c.type === "agentGroup" : true))
     .filter((c) => !q || convTitle(state, c).toLowerCase().includes(q) || lastPreview(state, c).toLowerCase().includes(q) || TYPE_LABEL[c.type].includes(q));
 
   return (

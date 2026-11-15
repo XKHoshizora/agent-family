@@ -15,7 +15,7 @@ export function ChatView({ conv }) {
   const endRef = useRef(null);
   const block = publishBlock(state, conv);
   const note = visibilityNote(state, conv);
-  const group = conv.type === "mixed" || conv.type === "agentGroup";
+  const group = conv.type === "group" || conv.type === "mixed" || conv.type === "agentGroup";
   const q = query.trim();
   const messages = q ? conv.messages.filter((x) => (x.text || "").toLowerCase().includes(q.toLowerCase())) : conv.messages;
 

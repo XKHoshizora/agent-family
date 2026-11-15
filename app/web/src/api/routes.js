@@ -39,6 +39,8 @@ export const unblockPrincipal = (principalId) => request("DELETE", `/api/blocks/
 
 // ───────── conversations
 export const createGroup = ({ title, memberIds }) => request("POST", "/api/conversations", { title, memberIds });
+/** One conversation in the shape of a `/api/sync` entry (404 when you are not a member now). */
+export const getConversation = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}`);
 export const renameGroup = (conversationId, title) => request("PATCH", `/api/conversations/${seg(conversationId)}`, { title });
 export const listMembers = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/members`);
 export const addMember = (conversationId, principalId) => request("POST", `/api/conversations/${seg(conversationId)}/members`, { principalId });

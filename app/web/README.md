@@ -19,5 +19,11 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
 
 - `src/api/http.js` - `request`, `ApiError`, `setUnauthenticatedHandler`.
 - `src/api/routes.js` - one function per service endpoint, plus attachment/avatar URL builders and `socketUrl`.
-- `src/data/store.jsx` - store provider and `useStore()`; starts empty (`emptyState`).
+- `src/api/socket.js` - ticket → WebSocket, ping every 25 s, `onEvent` / `onClose(code)`.
+- `src/data/model.js` - the client's copy of the service's data as pure functions (seq rule, catch-up, optimistic sends).
+- `src/data/sync.js` - first load, push buffering, gap repair, reconnect with backoff (1 s → 30 s).
+- `src/data/actions.js` - async actions (send, retry, read, older history, social and group routes).
+- `src/data/viewmodel.js` - model → the prototype's state shape (signed-in user under the alias id `"me"`).
+- `src/data/store.jsx` - `createDataLayer()`, store provider and `useStore()` → `{state, dispatch, actions, start, stop, onSignedOut}`.
+  Nothing talks to the service until `start()`.
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.

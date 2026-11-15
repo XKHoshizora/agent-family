@@ -40,6 +40,7 @@ const table = [
   ["blockPrincipal", () => routes.blockPrincipal(ID), "PUT", `/api/blocks/${ID}`, undefined],
   ["unblockPrincipal", () => routes.unblockPrincipal(ID), "DELETE", `/api/blocks/${ID}`, undefined],
   ["createGroup", () => routes.createGroup({ title: "team", memberIds: [ID, ID2] }), "POST", "/api/conversations", { title: "team", memberIds: [ID, ID2] }],
+  ["getConversation", () => routes.getConversation(ID), "GET", `/api/conversations/${ID}`, undefined],
   ["renameGroup", () => routes.renameGroup(ID, "new"), "PATCH", `/api/conversations/${ID}`, { title: "new" }],
   ["listMembers", () => routes.listMembers(ID), "GET", `/api/conversations/${ID}/members`, undefined],
   ["addMember", () => routes.addMember(ID, ID2), "POST", `/api/conversations/${ID}/members`, { principalId: ID2 }],

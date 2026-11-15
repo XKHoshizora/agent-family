@@ -9,7 +9,7 @@ export const uniq = (list) => [...new Set(list)];
 
 // "observed": a private chat between one Agent and one human who is not its owner.
 // The Agent's owner may view and interject, but it is never an Agent-only discussion.
-export const TYPE_LABEL = { human: "私聊", agent: "私聊", pair: "一对一", observed: "Agent 私聊", mixed: "混合群", agentGroup: "Agent 群" };
+export const TYPE_LABEL = { human: "私聊", agent: "私聊", pair: "一对一", observed: "Agent 私聊", mixed: "混合群", agentGroup: "Agent 群", group: "群聊" };
 export const isPrivateType = (type) => ["human", "agent", "pair", "observed"].includes(type);
 // The viewer is an owner looking in, not a speaking member: messages are owner interjections.
 export const isInterject = (conv) => !conv.members.includes(ME);
@@ -44,6 +44,7 @@ export function audience(state, conv) {
 export function convSubtitle(state, conv) {
   const agents = agentsIn(state, conv).length;
   const humans = humansIn(state, conv).length;
+  if (conv.type === "group") return `${humans} 位真人`;
   if (conv.type === "mixed") return `${humans} 位真人 · ${agents} 个 Agent`;
   if (conv.type === "agentGroup") return `${agents} 个 Agent · ${viewerOwners(state, conv).length} 位主人`;
   if (conv.type === "pair") {
@@ -62,7 +63,7 @@ export function convSubtitle(state, conv) {
 }
 
 export function visibilityNote(state, conv) {
-  if (conv.type === "human") return null;
+  if (conv.type === "human" || conv.type === "group") return null;
   if (conv.type === "observed") {
     const agent = agentsIn(state, conv)[0];
     const human = humansIn(state, conv)[0];
@@ -117,6 +118,8 @@ const HOLD_TEXT = {
 
 // null when publishing is allowed, otherwise the user-facing reason.
 export function publishBlock(state, conv) {
+  // Conversations from the data layer carry the service's verdict (viewmodel.js `hold`, same shape).
+  if (conv.hold !== undefined) return conv.hold;
   const pending = checks(state, conv);
   if (pending.length === 0) return null;
   const kind = blocksFor(state, conv).length ? "block" : "relation";
