@@ -233,8 +233,9 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
 - 201 `{"ok": true}`. Also for an e-mail that already has an account: then nothing is written, no invite is
   used and no mail is sent (the answer does not reveal which e-mails exist).
-- Mail (`verify_email`): `<APP_ORIGIN>/api/auth/verify-email?token=…&callbackURL=<APP_ORIGIN>/` (the
-  callback URL-encoded), valid 24 h; opening it lands on `<APP_ORIGIN>/` (or `/?error=…`).
+- Mail (`verify_email`): `<APP_ORIGIN>/api/auth/verify-email?token=…&callbackURL=<APP_ORIGIN>/verify` (the
+  callback URL-encoded), valid 24 h; opening it lands on the client's `<APP_ORIGIN>/verify` (or
+  `/verify?error=CODE`).
   The e-mail must be verified before sign-in works.
 - Errors: 400 `invalid_invite` (missing, unknown, expired or used invite; checked first, so without a usable
   invite nothing else — not even whether the handle is taken — is revealed), 409 `handle_taken`,

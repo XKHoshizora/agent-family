@@ -53,7 +53,7 @@ export function registerRegistrationRoutes(app: FastifyInstance, rateLimit: { ma
 
           const created = await runInTransaction(client, () =>
             app.auth.api.signUpEmail({
-              body: { name: displayName, email, password, callbackURL: `${config.appOrigin}/` },
+              body: { name: displayName, email, password, callbackURL: `${config.appOrigin}/verify` },
             }),
           );
 

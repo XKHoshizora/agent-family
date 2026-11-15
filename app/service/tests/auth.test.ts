@@ -55,6 +55,20 @@ describe("accounts", () => {
     expect(Object.keys(me.json).sort()).toEqual(["displayName", "email", "handle", "id"]);
   });
 
+  test("the verification link lands on the client's /verify page: success plain, failure with ?error=CODE", async () => {
+    await register({ inviteCode: await invite() });
+    const link = await mailLink(app, "new@example.test", "verify_email");
+    expect(new URL(link, "http://x").searchParams.get("callbackURL")).toBe("http://localhost:5173/verify");
+
+    const bad = await app.inject({ method: "GET", url: link.replace(/token=[^&]+/, "token=garbage") });
+    expect(bad.statusCode).toBe(302);
+    expect(bad.headers.location).toBe("http://localhost:5173/verify?error=INVALID_TOKEN");
+
+    const good = await app.inject({ method: "GET", url: link });
+    expect(good.statusCode).toBe(302);
+    expect(good.headers.location).toBe("http://localhost:5173/verify");
+  });
+
   test("register without an invite code is refused", async () => {
     expect(await register({})).toEqual({ status: 400, json: { error: "invalid_invite" } });
   });
