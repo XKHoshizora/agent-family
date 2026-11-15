@@ -1,0 +1,16 @@
+import { config as loadDotenv } from "dotenv";
+import { buildApp } from "./app.ts";
+import { loadConfig } from "./config.ts";
+
+loadDotenv({ quiet: true });
+const config = loadConfig();
+const app = await buildApp({ config });
+
+const shutdown = async (): Promise<void> => {
+  await app.close();
+  process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+await app.listen({ port: config.port, host: "0.0.0.0" });
