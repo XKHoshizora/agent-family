@@ -43,10 +43,15 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       const limited = await sendLimit(req);
       if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
 
-      const { message, duplicate } = await db.tx((t) => sendMessage(t, req.params.id, me.id, req.body));
+      // Rendered inside the transaction, under the locks that just proved the sender may read it.
+      const { message, duplicate, wire } = await db.tx(async (t) => {
+        const sent = await sendMessage(t, req.params.id, me.id, req.body);
+        const [rendered] = await toWireFor(t, me.id, [sent.message]);
+        if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
+        return { ...sent, wire: rendered };
+      });
       if (!duplicate) conversations.publish({ messages: [message], conversations: [] }, req.log);
-      const [wire] = await toWireFor(db, me.id, [message]);
-      return reply.code(duplicate ? 200 : 201).send({ message: wire!, duplicate });
+      return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
     },
   );
 

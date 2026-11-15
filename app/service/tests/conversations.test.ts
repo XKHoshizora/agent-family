@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { onMembershipChanged, onMessages } from "../src/conversations/events.ts";
-import { canSend } from "../src/conversations/store.ts";
+import { canSend, listMembers } from "../src/conversations/store.ts";
 import type { StoredMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -319,6 +319,17 @@ describe("access", () => {
 });
 
 describe("canSend and change events", () => {
+  it("listMembers answers only a current member, from the same statement that checks membership", async () => {
+    const [a, b, c, o] = await people("alice", "bob", "carol", "oscar");
+    const g = await group(app, a, "g", [b, c]);
+    expect(await listMembers(db, o.id, g)).toBeNull();
+    expect(await listMembers(db, b.id, RANDOM_ID)).toBeNull();
+    expect((await listMembers(db, b.id, g))!.map((m) => m.id).sort()).toEqual([a.id, b.id, c.id].sort());
+    expect((await remove(a, g, b)).status).toBe(200);
+    expect(await listMembers(db, b.id, g)).toBeNull();
+    expect((await listMembers(db, c.id, g))!.map((m) => m.id).sort()).toEqual([a.id, c.id].sort());
+  });
+
   it("canSend reflects the pair's relationship in direct chats and membership in groups", async () => {
     const [a, b, c, o] = await people("alice", "bob", "carol", "oscar");
     const { conversationId: dm } = await befriend(app, a, b);

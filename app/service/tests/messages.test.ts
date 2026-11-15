@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { onMessages } from "../src/conversations/events.ts";
+import type { Queryable } from "../src/db.ts";
+import { MESSAGE_COLUMNS, toStored, type MessageRow } from "../src/messages/model.ts";
+import { toWireForReaders } from "../src/messages/read.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 
@@ -374,6 +377,68 @@ describe("idempotency", () => {
     expect(reused).toMatchObject({ status: 409, json: { error: "client_txn_reused" } });
     expect(JSON.stringify(reused.json)).not.toContain("first stay");
     expect(await count("select count(*) n from messages where client_txn = 'g-1'")).toBe(1);
+  });
+});
+
+describe("fan-out rendering", () => {
+  const stored = async (conv: string, seq: number) =>
+    toStored(
+      (await db.query<MessageRow>(`select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.seq = $2`, [conv, seq]))
+        .rows[0]!,
+    );
+
+  it("each reader gets only what they may see: the original member sees the quote, the late joiner gets visible=false, a non-member gets nothing", async () => {
+    const [a, b, c, d, o] = await people("alice", "bob", "carol", "dave", "oscar");
+    const g = await group(app, a, "g", [b, c]); // seq 1
+    await say(a, g, "secret before dave"); // seq 2
+    await befriend(app, a, d);
+    await add(a, g, d); // seq 3
+    await say(c, g, "quoting", { replyToSeq: 2 }); // seq 4
+    const [pre, quotingMsg] = [await stored(g, 2), await stored(g, 4)];
+
+    let queries = 0;
+    const counted: Queryable = {
+      query: ((...args: Parameters<Queryable["query"]>) => {
+        queries++;
+        return (db.query as (...a: unknown[]) => unknown)(...args);
+      }) as Queryable["query"],
+    };
+    const out = await toWireForReaders(counted, [b.id, d.id, o.id, a.id.toUpperCase()], [pre, quotingMsg]);
+    expect(queries).toBeLessThanOrEqual(2); // bounded, however many readers and messages
+
+    expect([...out.keys()].sort()).toEqual([a.id, b.id, d.id, o.id].sort());
+    expect(out.get(b.id)!.map((m) => m.seq)).toEqual([2, 4]);
+    expect(out.get(b.id)![1]!.replyTo).toEqual({ seq: 2, visible: true, senderId: a.id, text: "secret before dave" });
+    expect(out.get(a.id)!.map((m) => m.seq)).toEqual([2, 4]);
+    // The late joiner does not get the pre-join message, and the quote of it is hidden.
+    expect(out.get(d.id)!.map((m) => m.seq)).toEqual([4]);
+    expect(out.get(d.id)![0]!.replyTo).toEqual({ seq: 2, visible: false });
+    expect(JSON.stringify(out.get(d.id))).not.toContain("secret");
+    expect(out.get(o.id)).toEqual([]);
+    // Identical to what the routes return to each of them.
+    expect((await one(d, g, 4)).json.message).toEqual(out.get(d.id)![0]);
+    expect((await one(b, g, 4)).json.message).toEqual(out.get(b.id)![1]);
+  });
+
+  it("a removed member gets nothing; once re-added they get only new messages, with a quote from their first stay hidden", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const g = await group(app, a, "g", [b, c]); // seq 1
+    await say(a, g, "first stay"); // seq 2
+    await remove(a, g, b); // seq 3
+    await say(a, g, "while out", { replyToSeq: 2 }); // seq 4
+    const whileOut = await stored(g, 4);
+
+    let out = await toWireForReaders(db, [b.id, c.id], [whileOut]);
+    expect(out.get(b.id)).toEqual([]);
+    expect(out.get(c.id)![0]!.replyTo).toMatchObject({ seq: 2, visible: true, text: "first stay" });
+
+    await add(a, g, b); // seq 5
+    await say(a, g, "after", { replyToSeq: 2 }); // seq 6
+    out = await toWireForReaders(db, [b.id, c.id], [whileOut, await stored(g, 6)]);
+    expect(out.get(b.id)!.map((m) => m.seq)).toEqual([6]);
+    expect(out.get(b.id)![0]!.replyTo).toEqual({ seq: 2, visible: false });
+    expect(JSON.stringify(out.get(b.id))).not.toContain("first stay");
+    expect(out.get(c.id)!.map((m) => m.seq)).toEqual([4, 6]);
   });
 });
 

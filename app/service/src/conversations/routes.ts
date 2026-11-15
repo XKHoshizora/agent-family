@@ -5,7 +5,7 @@ import { AppError, notFound } from "../errors.ts";
 import { userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { addMember, createGroup, removeMember, renameGroup } from "./groups.ts";
-import { currentMembership, listMembers } from "./store.ts";
+import { listMembers } from "./store.ts";
 
 const empty = z.object({});
 const ok = z.object({ ok: z.literal(true) });
@@ -91,8 +91,9 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
-      if (!(await currentMembership(db, req.params.id, me.id))) throw notFound();
-      return { members: await listMembers(db, req.params.id) };
+      const members = await listMembers(db, me.id, req.params.id);
+      if (!members) throw notFound();
+      return { members };
     },
   );
 

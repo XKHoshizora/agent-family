@@ -6,15 +6,24 @@ import { canDirectSend } from "../social/relations.ts";
 import { appendSystem } from "./system.ts";
 
 /**
- * THE visibility rule, and the only place it is written down. Join it onto `messages m`; the query's `$1`
- * must be the reader's principal id. A message is visible iff the reader has a CURRENT membership
- * (`left_seq is null`) in its conversation that began before it (`joined_seq < seq`). Nothing else grants
- * read access: not an earlier stay, not having sent the message, not quoting it.
+ * THE visibility rule, and the only place it is written down. Join it onto `messages m`. A message is
+ * visible iff the reader has a CURRENT membership (`left_seq is null`) in its conversation that began
+ * before it (`joined_seq < seq`). Nothing else grants read access: not an earlier stay, not having sent
+ * the message, not quoting it.
+ *
+ * `reader` is the SQL expression holding the reader's principal id — a parameter or a column such as
+ * `r.reader_id` for many readers at once. It is spliced into SQL: only ever pass a literal written in code.
+ */
+export function visibleJoin(reader: string): string {
+  return `join memberships vis on vis.conversation_id = m.conversation_id and vis.principal_id = ${reader} and vis.left_seq is null and vis.joined_seq < m.seq`;
+}
+
+/**
+ * `visibleJoin` for one reader passed as `$1`:
  *
  *   select ... from messages m ${VISIBLE_JOIN} where m.conversation_id = $2 ...
  */
-export const VISIBLE_JOIN =
-  "join memberships vis on vis.conversation_id = m.conversation_id and vis.principal_id = $1 and vis.left_seq is null and vis.joined_seq < m.seq";
+export const VISIBLE_JOIN = visibleJoin("$1");
 
 export const MAX_GROUP_MEMBERS = 500;
 
@@ -239,7 +248,12 @@ export interface MemberView {
   isCreator: boolean;
 }
 
-export async function listMembers(q: Queryable, conversationId: string): Promise<MemberView[]> {
+/**
+ * The current members, as `readerId` may see them: null unless the reader is a current member. One
+ * statement, so the membership check and the list come from the same snapshot (a member removed
+ * concurrently never receives the list as it is after their removal).
+ */
+export async function listMembers(q: Queryable, readerId: string, conversationId: string): Promise<MemberView[] | null> {
   const { rows } = await q.query<{
     id: string;
     handle: string;
@@ -250,13 +264,16 @@ export async function listMembers(q: Queryable, conversationId: string): Promise
   }>(
     `select p.id, p.handle::text as handle, p.display_name, p.kind, ms.role,
             (c.type = 'group' and c.creator_id = p.id) as is_creator
-       from memberships ms
+       from memberships me
+       join conversations c on c.id = me.conversation_id
+       join memberships ms on ms.conversation_id = me.conversation_id and ms.left_seq is null
        join principals p on p.id = ms.principal_id
-       join conversations c on c.id = ms.conversation_id
-      where ms.conversation_id = $1 and ms.left_seq is null
+      where me.conversation_id = $1 and me.principal_id = $2 and me.left_seq is null
       order by ms.joined_seq, ms.id`,
-    [conversationId],
+    [conversationId, readerId],
   );
+  // A current member always sees at least themselves, so no rows means "not a member".
+  if (rows.length === 0) return null;
   return rows.map((r) => ({
     id: r.id,
     handle: r.handle,
