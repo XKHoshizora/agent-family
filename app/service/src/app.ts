@@ -22,7 +22,9 @@ import { createConversationEvents, type ConversationEvents } from "./conversatio
 import { registerConversationRoutes } from "./conversations/routes.ts";
 import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
+import { MAX_CONCURRENT_SEARCHES } from "./messages/search.ts";
 import { appOriginCheck } from "./origin.ts";
+import { createSlots, type Slots } from "./slots.ts";
 import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
 
@@ -40,6 +42,8 @@ export interface Deps {
   reads: ReadEvents;
   /** Uploads in progress per principal (at most 3 each). */
   uploads: UploadSlots;
+  /** Searches in progress per principal (at most 2 each). */
+  searches: Slots;
 }
 
 /** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
@@ -94,12 +98,13 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const ownsDb = overrides.db === undefined;
   const deps: Deps = {
     config,
-    db: overrides.db ?? createDb(config.databaseUrl),
+    db: overrides.db ?? createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs }),
     blobs: overrides.blobs ?? createBlobStore(config),
     social: overrides.social ?? createSocialEvents(),
     conversations: overrides.conversations ?? createConversationEvents(),
     reads: overrides.reads ?? createReadEvents(),
     uploads: overrides.uploads ?? createUploadSlots(),
+    searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES),
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);

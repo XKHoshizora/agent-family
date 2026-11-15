@@ -93,6 +93,28 @@ describe("search matching", () => {
     expect(texts(await global(b, "L"))).toEqual(["Hello World"]);
   });
 
+  // Case folding beyond ASCII is whatever the database's character classification does (here UTF8 with
+  // ctype C.UTF-8, see README "Search"). These pin today's behaviour, so a locale change is noticed.
+  it("folds case of non-ASCII Latin letters (É/é) but does not strip accents", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    await say(a, dm, "École de café");
+    for (const q of ["école", "ÉCOLE", "CAFÉ", "Café"]) expect([q, texts(await inConv(b, dm, q))]).toEqual([q, ["École de café"]]);
+    expect(texts(await global(b, "éCOLE"))).toEqual(["École de café"]);
+    for (const q of ["ecole", "cafe"]) expect([q, texts(await inConv(b, dm, q))]).toEqual([q, []]);
+  });
+
+  it("folds case among full-width Latin letters, but full-width and ASCII letters never match each other", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    await say(a, dm, "ＡＢＣ全角");
+    await say(a, dm, "abc half-width");
+    expect(texts(await inConv(b, dm, "ａｂｃ"))).toEqual(["ＡＢＣ全角"]);
+    expect(texts(await inConv(b, dm, "ＡＢＣ"))).toEqual(["ＡＢＣ全角"]);
+    expect(texts(await inConv(b, dm, "ABC"))).toEqual(["abc half-width"]);
+    expect(texts(await global(b, "ｂｃ"))).toEqual(["ＡＢＣ全角"]);
+  });
+
   it('treats "%", "_" and "\\" in q as literal characters', async () => {
     const [a, b] = await people("alice", "bob");
     const { conversationId: dm } = await befriend(app, a, b);

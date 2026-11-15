@@ -3,10 +3,12 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { AppError, notFound } from "../errors.ts";
 import { positiveInt, positiveIntString, userText, uuidParam } from "../schemas.ts";
+import type { Tx } from "../db.ts";
 import { requirePrincipal } from "../session.ts";
+import { withSlot } from "../slots.ts";
 import { wireMessageSchema } from "./model.ts";
 import { getMessage, listMessages, markRead, toWireFor } from "./read.ts";
-import { decodeSearchCursor, searchAll, searchConversation } from "./search.ts";
+import { decodeSearchCursor, inSearchBudget, searchAll, searchConversation } from "./search.ts";
 import { sendMessage } from "./send.ts";
 
 const empty = z.object({});
@@ -35,7 +37,7 @@ const searchCursor = z
   });
 
 export function registerMessageRoutes(app: FastifyInstance): void {
-  const { db, config, conversations, reads } = app.deps;
+  const { db, config, conversations, reads, searches } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const actors = new WeakMap<FastifyRequest, string>();
@@ -116,6 +118,13 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
     return me.id;
   };
+  /**
+   * One search under both bounds: a slot of the caller's (at most 2 in progress; the slot is held until
+   * the search's own transaction ends, even if the client has gone, because the work goes on) and the
+   * search statement timeout.
+   */
+  const search = <T>(me: string, run: (t: Tx) => Promise<T>): Promise<T> =>
+    withSlot(searches, me, () => inSearchBudget(db, config.searchStatementTimeoutMs, run));
 
   api.get(
     "/api/conversations/:id/search",
@@ -129,7 +138,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await searcher(req);
       const { q, before, limit = 20 } = req.query;
-      const page = await searchConversation(db, me, req.params.id, { q, before, limit });
+      const page = await search(me, (t) => searchConversation(t, me, req.params.id, { q, before, limit }));
       if (!page) throw notFound();
       return page;
     },
@@ -147,7 +156,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await searcher(req);
       const { q, before, limit = 20 } = req.query;
-      return searchAll(db, me, { q, before, limit });
+      return search(me, (t) => searchAll(t, me, { q, before, limit }));
     },
   );
 

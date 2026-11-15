@@ -60,7 +60,7 @@ if (command === "migrate") {
   if (!/^\d+$/.test(raw)) throw new Error("--older-than must be a whole number of minutes");
   const olderThan = Number(raw);
   const config = loadConfig(); // the blob store settings, as the server uses them
-  const db = createDb(config.databaseUrl);
+  const db = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs });
   try {
     const deps = { db, blobs: createBlobStore(config) };
     const swept = await sweepOrphans(deps, olderThan, {

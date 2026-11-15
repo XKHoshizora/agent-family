@@ -1,7 +1,23 @@
 import { VISIBLE_JOIN } from "../conversations/store.ts";
-import type { Queryable } from "../db.ts";
+import type { Db, Queryable, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type WireMessage } from "./model.ts";
 import { toWireFor } from "./read.ts";
+
+/** Searches one principal may have running at once, both routes together; one more is 429 `rate_limited`. */
+export const MAX_CONCURRENT_SEARCHES = 2;
+
+/**
+ * Runs one search in a read-only transaction of its own whose statements Postgres cancels after
+ * `timeoutMs` (`statement_timeout`, local to the transaction): a 1–2 character or CJK term can make the
+ * trigram index useless and scan a lot of history. The cancellation is answered 503 `busy` (errors.ts).
+ */
+export function inSearchBudget<T>(db: Db, timeoutMs: number, search: (t: Tx) => Promise<T>): Promise<T> {
+  return db.tx(async (t) => {
+    await t.query("set transaction read only");
+    await t.query("select set_config('statement_timeout', $1, true)", [String(timeoutMs)]);
+    return search(t);
+  });
+}
 
 /**
  * What is searched: the message text (captions included) and a file message's attachment name; system

@@ -31,8 +31,20 @@ export async function tx<T>(pool: pg.Pool, fn: (client: pg.PoolClient) => Promis
   }
 }
 
-export function createDb(databaseUrl: string): Db {
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 10 });
+/** Default `statement_timeout` of a pool (`DB_STATEMENT_TIMEOUT_MS`). */
+export const DEFAULT_STATEMENT_TIMEOUT_MS = 30_000;
+
+/**
+ * The app's pool. Every connection has `statement_timeout` set, so no statement (lock waits included)
+ * runs longer than `statementTimeoutMs`; a transaction may lower it for itself with `set_config(…, true)`.
+ * Time between statements does not count: an upload streaming its body, or a sweep deleting a blob
+ * inside its transaction, is not cut off by it. Migrations run on their own connection.
+ */
+export function createDb(
+  databaseUrl: string,
+  { statementTimeoutMs = DEFAULT_STATEMENT_TIMEOUT_MS }: { statementTimeoutMs?: number } = {},
+): Db {
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 10, statement_timeout: statementTimeoutMs });
   // An idle client error must not crash the process.
   pool.on("error", () => {});
   return {

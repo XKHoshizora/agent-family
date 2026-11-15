@@ -40,6 +40,10 @@ const envSchema = z.object({
   ),
   /** Server-wide: an idle kept-alive connection is closed after this long. */
   HTTP_KEEP_ALIVE_TIMEOUT_MS: z.coerce.number().int().positive().default(72_000),
+  /** Postgres cancels any statement on the app's pool that runs longer than this (503 busy). */
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  /** A search's statements are cancelled after this long (503 busy). */
+  SEARCH_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
 });
 
 export interface Config {
@@ -67,6 +71,10 @@ export interface Config {
   httpConnectionTimeoutMs: number;
   httpRequestTimeoutMs: number;
   httpKeepAliveTimeoutMs: number;
+  /** `statement_timeout` of every pool connection (migrations use their own connection). */
+  dbStatementTimeoutMs: number;
+  /** `statement_timeout` inside a search's transaction. */
+  searchStatementTimeoutMs: number;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -118,5 +126,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     httpConnectionTimeoutMs: e.HTTP_CONNECTION_TIMEOUT_MS,
     httpRequestTimeoutMs,
     httpKeepAliveTimeoutMs: e.HTTP_KEEP_ALIVE_TIMEOUT_MS,
+    dbStatementTimeoutMs: e.DB_STATEMENT_TIMEOUT_MS,
+    searchStatementTimeoutMs: e.SEARCH_STATEMENT_TIMEOUT_MS,
   };
 }

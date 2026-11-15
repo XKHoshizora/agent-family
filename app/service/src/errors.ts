@@ -1,7 +1,7 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { hasZodFastifySchemaValidationErrors } from "fastify-type-provider-zod";
 
-/** Shared snake_case error codes; routes may add feature-specific ones. */
+/** Shared snake_case error codes (README, "Errors"); routes may add feature-specific ones. */
 export type ErrorCode =
   | "not_found"
   | "forbidden"
@@ -10,7 +10,11 @@ export type ErrorCode =
   | "rate_limited"
   | "cannot_send"
   | "too_large"
+  | "busy"
   | (string & {});
+
+/** Postgres `query_canceled`: what a statement past `statement_timeout` fails with. */
+const QUERY_CANCELED = "57014";
 
 export class AppError extends Error {
   constructor(
@@ -48,6 +52,11 @@ export function registerErrorHandling(app: FastifyInstance): void {
     if (err instanceof AppError) return reply.code(err.status).send({ error: err.code, ...err.details });
     if (hasZodFastifySchemaValidationErrors(err)) {
       return reply.code(400).send({ error: "invalid_request" });
+    }
+    if ((err as { code?: unknown }).code === QUERY_CANCELED) {
+      // A statement ran past its timeout (the pool's, or a search's own): the database is busy, not broken.
+      req.log.warn({ err }, "statement timed out");
+      return reply.code(503).send({ error: "busy" });
     }
     const status = (err as FastifyError).statusCode;
     if (typeof status === "number" && status >= 400 && status < 500) {

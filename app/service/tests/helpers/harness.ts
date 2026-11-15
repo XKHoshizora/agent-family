@@ -51,7 +51,7 @@ export function useApp(
       RATE_LIMIT_SCALE: "1000",
       ...env,
     });
-    database = createDb(config.databaseUrl);
+    database = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs });
     instance = await buildApp({ config, db: database, ...overrides }, logStream ? { logStream } : {});
     await instance.ready();
   });

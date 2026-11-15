@@ -39,6 +39,21 @@ npm run build     # type-check only (tsc --noEmit)
 `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min) and `HTTP_KEEP_ALIVE_TIMEOUT_MS`
 (default 72 s). The server-wide ones must be longer than the upload deadlines (checked at start-up), so
 uploads are governed by their own deadlines; WebSockets are not subject to them.
+`DB_STATEMENT_TIMEOUT_MS` (default 30 s) is Postgres' `statement_timeout` on every connection of the app's
+pool (and of the CLI's): a statement running longer, lock waits included, is cancelled and the request
+answered 503 `busy`. Only statements count, not the time between them, so a long upload or a sweep deleting
+blobs is not cut off; migrations run on their own connection and are not subject to it.
+`SEARCH_STATEMENT_TIMEOUT_MS` (default 3 s) is the same for each search (see Search).
+
+## Errors
+
+Every error body is `{"error": "<snake_case_code>"}`, sometimes with string details next to it (`reason`).
+Shared codes: `not_found` (404), `forbidden` (403), `invalid_request` (400; 414 for an over-long path
+parameter, 415 for an unsupported content type), `unauthenticated` (401), `rate_limited` (429),
+`cannot_send` (403, with `reason`), `too_large` (413), and `busy` (503: a database statement ran past its
+timeout — a search's own or the pool's; nothing was changed, try again later). Feature codes
+(`handle_taken`, `already_member`, `request_not_pending`, …) are given with their routes. `internal` (500)
+is always a bug.
 
 **Cross-site requests.** Any `POST`, `PUT`, `PATCH` or `DELETE`, whatever its path, whose `Origin` header is
 present and is not exactly `APP_ORIGIN` (byte for byte: no other case, port, trailing slash, `null` or list)
@@ -213,3 +228,41 @@ uploads whose delete failed, uploads cut off or interrupted by a crash, includin
 replaced avatars), blob first; a failed delete keeps the record for the next run, and a key some row
 references is never deleted. With S3, also give the bucket an `AbortIncompleteMultipartUpload` lifecycle
 rule: an upload interrupted by a crash can leave an incomplete multipart upload behind.
+
+## Search (`src/messages/search.ts`)
+
+`GET /api/conversations/:id/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": number | null}`:
+hits in one conversation you are currently in, newest first; pass `nextBefore` as `before` for the next
+page. Any conversation you are not in now is 404 `not_found`.
+`GET /api/search?q=&before=&limit=` → `{"messages": WireMessage[], "nextBefore": string | null}`: hits in
+every conversation you are currently in; `before` is the opaque cursor of the previous page (anything else
+is 400). Each hit carries `conversationId` and `seq`, the place to jump to.
+
+`q` is 1–100 characters after trimming, one line, matched as a substring (`%`, `_` and `\` are ordinary
+characters) of a message's text (captions included) or a file message's name; system notices never match.
+You only get messages you could read anyway (the same visibility rule), quotes resolved for you. `limit`
+1–50, default 20.
+
+**Limits** per principal: 30 searches a minute over both routes, and at most 2 in progress at once (one
+more is 429 `rate_limited`; a search keeps its place until its database work ends, even if the client has
+gone, because the work goes on). Each search runs in a read-only transaction whose statements are cancelled
+after `SEARCH_STATEMENT_TIMEOUT_MS` (3 s): 503 `{"error":"busy"}`. A very short or very common term over a
+long history can hit this; a longer term usually does not.
+
+**Order of global search.** Hits are ordered by their message's timestamp (`created_at`: when its
+transaction began), newest first, ties by conversation id and then seq, both descending; the cursor resumes
+exactly after the last hit. On messages that do not change, paging never repeats or skips a hit. A message
+committed while you page can be missed when its timestamp falls behind your cursor (its transaction began
+before, but committed after, the page you already have): search again from the top to see it. Messages
+written at the same moment in one conversation may appear in another order than their seqs.
+
+**Case.** Matching ignores case as the database's character classification defines it. The databases here
+are UTF8 with collation and ctype `C.UTF-8`, under which letters with a simple case mapping fold (`É`/`é`,
+full-width `Ａ`/`ａ`), and nothing is normalised: accents are not stripped (`é` does not match `e`),
+full-width letters never match ASCII ones, `ß` does not match `SS`. A database created with another locale
+may fold differently; `tests/search.test.ts` pins the behaviour above so that a change is noticed.
+
+**Timing.** The match runs over a site-wide trigram index before the visibility rule narrows it, so how long
+a search takes depends slightly on how often the term occurs in messages you cannot read. That says nothing
+about any particular conversation or person, but a patient client could estimate how common a term is
+across the site. Accepted for now; the limits above bound how much can be learnt.
