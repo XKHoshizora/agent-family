@@ -1,6 +1,6 @@
 // One function per service endpoint (see app/service/README.md and the route files under app/service/src).
 // Paths are built here and nowhere else.
-import { request } from "./http.js";
+import { request, upload } from "./http.js";
 
 const seg = (value) => encodeURIComponent(String(value));
 
@@ -74,6 +74,15 @@ export const searchAll = ({ q, before, limit }) => request("GET", withQuery("/ap
 
 // ───────── attachment and avatar URLs (uploads and image/file bytes are not JSON, so no request() here)
 export const attachmentUploadUrl = (conversationId) => `/api/conversations/${seg(conversationId)}/attachments`;
+/**
+ * Uploads one file (multipart field `file`) → {id, name, size, inline}; send it with `sendMessage({attachmentId, …})`.
+ * options: {onProgress(fraction 0..1), signal}. Aborting rejects with ApiError code "aborted".
+ */
+export function uploadAttachment(conversationId, file, options) {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  return upload(attachmentUploadUrl(conversationId), form, options);
+}
 export const attachmentUrl = (attachmentId) => `/api/attachments/${seg(attachmentId)}`;
 export const avatarUrl = (principalId) => `/api/principals/${seg(principalId)}/avatar`;
 export const myAvatarUploadUrl = () => "/api/me/avatar";

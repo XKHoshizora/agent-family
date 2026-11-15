@@ -152,3 +152,86 @@ describe("401 handler", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("uploadAttachment (XMLHttpRequest)", () => {
+  let xhrs;
+  class FakeXhr {
+    constructor() {
+      this.upload = {};
+      this.headers = {};
+      this.aborted = false;
+      xhrs.push(this);
+    }
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+    }
+    setRequestHeader(name, value) {
+      this.headers[name] = value;
+    }
+    send(body) {
+      this.body = body;
+    }
+    abort() {
+      this.aborted = true;
+      this.onabort?.();
+    }
+    answer(status, body) {
+      this.status = status;
+      this.responseText = body === undefined ? "" : typeof body === "string" ? body : JSON.stringify(body);
+      this.onload();
+    }
+  }
+  beforeEach(() => {
+    xhrs = [];
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+  });
+  const pick = () => new File(["hello"], "报告.pdf", { type: "application/pdf" });
+
+  it("POSTs multipart with one part named file, no Content-Type, and reports progress", async () => {
+    const onProgress = vi.fn();
+    const sent = routes.uploadAttachment(ID, pick(), { onProgress });
+    const [xhr] = xhrs;
+    expect(xhr).toMatchObject({ method: "POST", url: `/api/conversations/${ID}/attachments` });
+    expect(xhr.headers).toEqual({ Accept: "application/json" });
+    expect(xhr.body).toBeInstanceOf(FormData);
+    expect([...xhr.body.keys()]).toEqual(["file"]);
+    expect(xhr.body.get("file").name).toBe("报告.pdf");
+    xhr.upload.onprogress({ lengthComputable: true, loaded: 1, total: 4 });
+    xhr.upload.onprogress({ lengthComputable: false, loaded: 2, total: 0 });
+    expect(onProgress.mock.calls).toEqual([[0.25]]);
+    xhr.answer(201, { id: ID2, name: "报告.pdf", size: 5, inline: false });
+    await expect(sent).resolves.toEqual({ id: ID2, name: "报告.pdf", size: 5, inline: false });
+  });
+
+  it("maps error bodies like request(), including reason", async () => {
+    const sent = routes.uploadAttachment(ID, pick());
+    xhrs[0].answer(413, { error: "too_large", reason: "quota" });
+    await expect(sent).rejects.toMatchObject({ status: 413, code: "too_large", reason: "quota" });
+    const plain = routes.uploadAttachment(ID, pick());
+    xhrs[1].answer(502, "<html>bad gateway</html>");
+    await expect(plain).rejects.toMatchObject({ status: 502, code: "unknown" });
+  });
+
+  it("a network failure is status 0 network_error; aborting is code aborted (also when already aborted)", async () => {
+    const failed = routes.uploadAttachment(ID, pick());
+    xhrs[0].onerror();
+    await expect(failed).rejects.toMatchObject({ status: 0, code: "network_error" });
+    const controller = new AbortController();
+    const sent = routes.uploadAttachment(ID, pick(), { signal: controller.signal });
+    controller.abort();
+    expect(xhrs[1].aborted).toBe(true);
+    await expect(sent).rejects.toMatchObject({ status: 0, code: "aborted" });
+    await expect(routes.uploadAttachment(ID, pick(), { signal: controller.signal })).rejects.toMatchObject({ code: "aborted" });
+    expect(xhrs).toHaveLength(2);
+  });
+
+  it("a 401 reaches the unauthenticated handler", async () => {
+    const handler = vi.fn();
+    setUnauthenticatedHandler(handler);
+    const sent = routes.uploadAttachment(ID, pick());
+    xhrs[0].answer(401, { error: "unauthenticated" });
+    await expect(sent).rejects.toMatchObject({ status: 401 });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});

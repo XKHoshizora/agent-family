@@ -6,15 +6,24 @@ import { ME } from "./identities.js";
 import {
   applyGone,
   applyOlder,
+  discardPending,
   markFailed,
   markReadDone,
   markReading,
   markSending,
   markSent,
+  markUploading,
   setCanSend,
   setDraft,
+  setUploaded,
+  setUploadProgress,
   stayOf,
 } from "./model.js";
+
+/** The service refuses a file over this (413 `too_large`); the client does not even try. */
+export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+/** Uploads in flight at once across the app (the service allows 3 per person); the rest wait in order. */
+export const MAX_UPLOADS = 3;
 
 /** Lone surrogates → U+FFFD (`String.prototype.toWellFormed`, by hand where a browser lacks it). */
 function wellFormed(text) {
@@ -73,16 +82,20 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       setModel(markSent(getModel(), clientTxn, res.message));
       return { ok: true, clientTxn, duplicate: Boolean(res.duplicate) };
     } catch (err) {
-      const error = errorOf(err);
-      if (token.epoch === epoch() && error.status === 401) signedOut();
-      if (staleness(token)) return { ok: false, clientTxn, error };
-      setModel(markFailed(getModel(), clientTxn, error));
-      if (error.code === "cannot_send") {
-        setModel(setCanSend(getModel(), p.conversationId, { ok: false, reason: error.reason ?? "not_friends" }));
-        request({ social: true, conversation: p.conversationId });
-      } else if (error.status === 404) request({ conversation: p.conversationId });
-      return { ok: false, clientTxn, error };
+      return failed(clientTxn, p.conversationId, token, errorOf(err));
     }
+  }
+
+  /** A send or an upload was refused or failed: the unsent entry fails (unless it is of an earlier stay). */
+  function failed(clientTxn, conversationId, token, error) {
+    if (token.epoch === epoch() && error.status === 401) signedOut();
+    if (staleness(token)) return { ok: false, clientTxn, error };
+    setModel(markFailed(getModel(), clientTxn, error));
+    if (error.code === "cannot_send") {
+      setModel(setCanSend(getModel(), conversationId, { ok: false, reason: error.reason ?? "not_friends" }));
+      request({ social: true, conversation: conversationId });
+    } else if (error.status === 404) request({ conversation: conversationId });
+    return { ok: false, clientTxn, error };
   }
 
   function send(conversationId, { text = "", replyToSeq = null, attachment = null }) {
@@ -102,19 +115,149 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     return send(conversationId, { text: body, replyToSeq });
   }
 
-  /** Sends an uploaded attachment ({id, name, size, inline}) with an optional caption. */
-  function sendFile(conversationId, attachment, { text = "", replyToSeq = null } = {}) {
-    if (!attachment?.id) return refused("invalid_request");
-    const { id, name, size, inline } = attachment;
-    return send(conversationId, { text: text.trim(), replyToSeq, attachment: { id, name, size, inline: Boolean(inline) } });
+  // ───────── file messages: upload (at most MAX_UPLOADS at once, the rest wait in order), then send
+
+  /** clientTxn → the File being sent; kept until the message is sent or discarded, so a failed upload can retry. */
+  const files = new Map();
+  /** clientTxn → {resolve, token, controller, counted, cancelled}: the upload job of an entry that is queued or uploading. */
+  const jobs = new Map();
+  const waiting = [];
+  let uploading = 0;
+
+  const endJob = (clientTxn, job, result) => {
+    if (jobs.get(clientTxn) === job) jobs.delete(clientTxn);
+    if (job.counted) {
+      job.counted = false;
+      uploading -= 1;
+    }
+    job.resolve(result);
+    pump();
+  };
+
+  function pump() {
+    while (uploading < MAX_UPLOADS && waiting.length > 0) {
+      const clientTxn = waiting.shift();
+      const job = jobs.get(clientTxn);
+      if (!job) continue;
+      const p = getModel().pending[clientTxn];
+      const why = staleness(job.token);
+      // Gone, or failed meanwhile (stop, or I left the conversation and came back): not uploaded.
+      if (!p || p.status !== "sending" || why) {
+        endJob(clientTxn, job, { ok: false, clientTxn, error: dropped(why ?? "stale") });
+        continue;
+      }
+      job.counted = true;
+      uploading += 1;
+      runUpload(clientTxn, job, p);
+    }
   }
 
-  /** Sends a failed message again with the same clientTxn. */
+  async function runUpload(clientTxn, job, p) {
+    job.controller = new AbortController();
+    setModel(setUploadProgress(getModel(), clientTxn));
+    let percent = 0;
+    const onProgress = (fraction) => {
+      const next = Math.floor(fraction * 100);
+      if (job.cancelled || next === percent || staleness(job.token)) return;
+      percent = next;
+      setModel(setUploadProgress(getModel(), clientTxn, next / 100));
+    };
+    let attachment;
+    try {
+      attachment = await api.uploadAttachment(p.conversationId, files.get(clientTxn), { onProgress, signal: job.controller.signal });
+    } catch (err) {
+      if (job.cancelled || jobs.get(clientTxn) !== job) return; // cancelUpload or stop() already settled it
+      const error = errorOf(err);
+      endJob(clientTxn, job, failed(clientTxn, p.conversationId, job.token, error));
+      return;
+    }
+    if (job.cancelled || jobs.get(clientTxn) !== job) return;
+    const why = staleness(job.token);
+    if (why) {
+      // The upload belongs to an earlier stay: it is not posted into this one (the entry, if kept, failed already).
+      endJob(clientTxn, job, { ok: false, clientTxn, error: dropped(why) });
+      return;
+    }
+    setModel(setUploaded(getModel(), clientTxn, attachment));
+    // Uploading is over (the next waiting file may start); the message send below is not limited.
+    if (job.counted) {
+      job.counted = false;
+      uploading -= 1;
+      pump();
+    }
+    const result = await deliver(clientTxn);
+    if (result.ok) files.delete(clientTxn);
+    endJob(clientTxn, job, result);
+  }
+
+  function queueUpload(clientTxn, conversationId) {
+    return new Promise((resolve) => {
+      jobs.set(clientTxn, { resolve, token: tokenFor(conversationId), controller: null, counted: false, cancelled: false });
+      waiting.push(clientTxn);
+      pump();
+    });
+  }
+
+  /**
+   * Sends a picked file as a message: shown as unsent at once (with progress), uploaded when one of the
+   * MAX_UPLOADS slots is free, then sent with the same clientTxn. A file over MAX_FILE_BYTES is refused without a
+   * request or an entry. `text` is an optional caption. Resolves {ok, clientTxn, error?} when it was sent or failed.
+   */
+  function sendFile(conversationId, file, { text = "", replyToSeq = null } = {}) {
+    if (!getModel().conversations[conversationId]) return refused("not_found");
+    if (!file || !Number.isFinite(file.size)) return refused("invalid_request");
+    if (file.size > MAX_FILE_BYTES) return refused("too_large");
+    const clientTxn = uuid();
+    const caption = typeof text === "string" ? wellFormed(text.replaceAll(" ", "")).trim() : "";
+    // Forget files of entries that are gone (another account signed in, the conversation was left).
+    for (const key of files.keys()) if (!getModel().pending[key]) files.delete(key);
+    files.set(clientTxn, file);
+    setModel(markUploading(getModel(), { clientTxn, conversationId, text: caption, replyToSeq, file: { name: file.name, size: file.size }, at: now() }));
+    return queueUpload(clientTxn, conversationId);
+  }
+
+  /**
+   * Stops an upload that is queued or running, or removes a failed one, and removes its message. Not possible
+   * once the file is uploaded (the message is being sent, or waits for a retry). Returns {ok} or {ok: false, error}.
+   */
+  function cancelUpload(clientTxn) {
+    const p = getModel().pending[clientTxn];
+    if (!p || p.attachment || !p.file) return { ok: false, error: dropped("not_found") };
+    const job = jobs.get(clientTxn);
+    if (job) {
+      job.cancelled = true;
+      job.controller?.abort();
+      const at = waiting.indexOf(clientTxn);
+      if (at >= 0) waiting.splice(at, 1);
+      endJob(clientTxn, job, { ok: false, clientTxn, error: dropped("cancelled") });
+    }
+    files.delete(clientTxn);
+    setModel(discardPending(getModel(), clientTxn));
+    return { ok: true };
+  }
+
+  /**
+   * Sends a failed message again with the same clientTxn. A file whose upload failed is uploaded again (queued like
+   * any other); one that was uploaded is only sent again, never uploaded twice.
+   */
   function retrySend(clientTxn) {
     const p = getModel().pending[clientTxn];
     if (!p || p.status !== "failed") return refused("not_found", clientTxn);
+    // (An upload of an earlier stay is not reused either: it is uploaded again into this one.)
+    if (p.file && (!p.attachment || p.error?.code === "stale")) {
+      if (!files.has(clientTxn)) return refused("not_found", clientTxn);
+      setModel(markUploading(getModel(), { clientTxn, conversationId: p.conversationId }));
+      return queueUpload(clientTxn, p.conversationId);
+    }
     setModel(markSending(getModel(), { clientTxn, conversationId: p.conversationId }));
-    return deliver(clientTxn);
+    return p.file ? deliverFile(clientTxn) : deliver(clientTxn);
+  }
+
+  /** Sending an uploaded file again: as `deliver`, and the file is let go once it is sent. */
+  async function deliverFile(clientTxn) {
+    const result = await deliver(clientTxn);
+    if (result.ok) files.delete(clientTxn);
+    return result;
   }
 
   /**
@@ -216,7 +359,9 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const actions = {
     sendText,
     sendFile,
+    cancelUpload,
     retrySend,
+    retryFile: retrySend,
     markRead,
     loadOlder,
     setDraft: saveDraft,
@@ -243,6 +388,15 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     actions,
     reset() {
       olderInFlight.clear();
+      // Uploads stop; their entries become failed (the model's reset) and can be retried from the files kept here.
+      for (const [clientTxn, job] of jobs) {
+        job.counted = false;
+        job.controller?.abort();
+        job.resolve({ ok: false, clientTxn, error: dropped("stopped") });
+      }
+      jobs.clear();
+      waiting.length = 0;
+      uploading = 0;
     },
   };
 }

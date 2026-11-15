@@ -33,13 +33,7 @@ export function setUnauthenticatedHandler(fn) {
 }
 
 async function readJson(res) {
-  const text = await res.text();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
+  return parseJson(await res.text());
 }
 
 /**
@@ -66,15 +60,63 @@ export async function request(method, path, body) {
   const data = await readJson(res);
   if (res.ok) return data;
 
+  throw apiErrorOf(res.status, data, path, epoch);
+}
+
+/** The ApiError for a non-2xx answer; a 401 on a non-auth path first reaches the registered handler. */
+function apiErrorOf(status, data, path, epoch) {
   const code = typeof data?.error === "string" ? data.error : "unknown";
   const reason = typeof data?.reason === "string" ? data.reason : null;
-  const error = new ApiError(res.status, code, reason);
-  if (res.status === 401 && onUnauthenticated && epoch === sessionEpoch && !path.startsWith(AUTH_PREFIX)) {
+  const error = new ApiError(status, code, reason);
+  if (status === 401 && onUnauthenticated && epoch === sessionEpoch && !path.startsWith(AUTH_PREFIX)) {
     try {
       onUnauthenticated(error);
     } catch {
       /* the handler must never replace the ApiError */
     }
   }
-  throw error;
+  return error;
+}
+
+function parseJson(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POSTs a FormData (a multipart upload) with progress. Same origin, so the session cookie goes along; no
+ * Content-Type is set (the browser adds the multipart boundary). Errors are ApiErrors as in `request`;
+ * aborting through `signal` rejects with `ApiError(0, "aborted")`.
+ * @param {string} path absolute path starting with /api
+ * @param {FormData} form
+ * @param {{onProgress?: (fraction: number) => void, signal?: AbortSignal}} [options]
+ * @returns the parsed JSON body
+ */
+export function upload(path, form, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new ApiError(0, "aborted"));
+      return;
+    }
+    const epoch = sessionEpoch;
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.setRequestHeader("Accept", "application/json");
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) onProgress?.(Math.min(1, event.loaded / event.total));
+    };
+    xhr.onload = () => {
+      const data = parseJson(xhr.responseText);
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(apiErrorOf(xhr.status, data, path, epoch));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network_error"));
+    xhr.onabort = () => reject(new ApiError(0, "aborted"));
+    signal?.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(form);
+  });
 }

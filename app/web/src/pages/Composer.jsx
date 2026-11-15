@@ -3,7 +3,8 @@ import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { entity, nameOf, senderName } from "../state/selectors.js";
 import { Avatar, Btn, IconBtn } from "../ui/primitives.jsx";
-import { Smile, AtSign, X } from "../icons.js";
+import { useSendFiles } from "./useSendFiles.js";
+import { Smile, Image, Paperclip, AtSign, X } from "../icons.js";
 
 const EMOJI = {
   "表情": ["😀","😄","😁","😊","🥰","😍","🤩","😎","🤔","🤗","😂","🤣","🥹","😅","😉","😋","😴","😭","😮","😱","😤","🥳","🫡","🤖"],
@@ -25,6 +26,8 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
   const [active, setActive] = useState(0);
   const [height, setHeight] = useState(64);
   const inputRef = useRef(null);
+  const imagePicker = useRef(null);
+  const filePicker = useRef(null);
   const rootRef = useRef(null);
   const selection = useRef({ start: 0, end: 0 });
   const drag = useRef(null);
@@ -109,6 +112,15 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     }
     if(e.key==="Enter" && !e.shiftKey) {e.preventDefault();send();}
   };
+  const sendFiles = useSendFiles(conv, block);
+  // The same file input can pick the same file again; the pick is handed over and forgotten.
+  const picked = e => { const list = [...e.target.files]; e.target.value = ""; sendFiles(list); };
+  const paste = e => {
+    const images = [...(e.clipboardData?.files ?? [])].filter(f => f.type.startsWith("image/"));
+    if (images.length === 0) return;
+    e.preventDefault();
+    sendFiles(images);
+  };
   const limitNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : null;
   return <footer className="composer" ref={rootRef} onKeyDown={e=>{if(e.key==="Escape"){setEmojiOpen(false);setMention(null);}}}>
     {replyTo && <div className="reply-chip"><span>回复 {senderName(state,replyTo.from)}：{replyTo.kind==="image"?"[图片]":replyTo.text}</span><IconBtn label="取消回复" onClick={()=>setReplyTo(null)}><X size={14}/></IconBtn></div>}
@@ -121,6 +133,10 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
           <div className="emoji-grid">{EMOJI[category].map(emoji=><button key={emoji} type="button" aria-label={`插入表情 ${emoji}`} onClick={()=>replace(emoji)}>{emoji}</button>)}</div>
         </div>}
       </div>
+      <IconBtn label="发送图片" disabled={disabled} onClick={()=>imagePicker.current?.click()}><Image size={22}/></IconBtn>
+      <IconBtn label="发送文件" disabled={disabled} onClick={()=>filePicker.current?.click()}><Paperclip size={22}/></IconBtn>
+      <input ref={imagePicker} type="file" accept="image/*" multiple hidden tabIndex={-1} aria-label="选择图片" onChange={picked}/>
+      <input ref={filePicker} type="file" multiple hidden tabIndex={-1} aria-label="选择文件" onChange={picked}/>
       {people.length>0 && <IconBtn label="@ 会话成员" disabled={disabled} aria-expanded={Boolean(mention)} onClick={openMentions}><AtSign size={22}/></IconBtn>}
     </div>
     <div className="composer-row">
@@ -142,7 +158,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
         <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":"发送消息，或 @ 会话成员"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined}
           onChange={e=>{edit(e.target.value);detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}
           onSelect={e=>{selection.current={start:e.target.selectionStart,end:e.target.selectionEnd};}}
-          onClick={e=>detect(e.target.value,e.target.selectionStart,e.target.selectionEnd)} onKeyDown={keyDown}
+          onClick={e=>detect(e.target.value,e.target.selectionStart,e.target.selectionEnd)} onKeyDown={keyDown} onPaste={paste}
           onKeyUp={e=>{if(!e.nativeEvent.isComposing && ["ArrowLeft","ArrowRight","Home","End"].includes(e.key))detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}/>
       </div>
       <Btn variant="primary" className="send" disabled={disabled||!text.trim()||tooLong} reason={block?.text ?? limitNote} onClick={()=>send()}>发送</Btn>

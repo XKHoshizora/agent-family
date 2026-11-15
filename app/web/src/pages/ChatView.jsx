@@ -7,6 +7,7 @@ import { MessageItem } from "./Messages.jsx";
 import { Search, Menu, ChevronLeft, X } from "../icons.js";
 
 import { Composer } from "./Composer.jsx";
+import { useSendFiles } from "./useSendFiles.js";
 
 /** This close to the bottom the list counts as "at the newest message" and follows new ones. */
 const BOTTOM_SLACK_PX = 48;
@@ -40,6 +41,7 @@ export function ChatView({ conv }) {
   /** The conversation whose older page is loading, and when loading failed per conversation. */
   const older = useRef({ busy: null, failedAt: new Map() });
   const readFailed = useRef(null);
+  const [dropping, setDropping] = useState(false);
   const block = publishBlock(state, conv);
   const group = conv.type === "group";
   const q = query.trim();
@@ -159,8 +161,28 @@ export function ChatView({ conv }) {
     return () => clearTimeout(timer);
   }, [conv.id, conv.unread, newestSeq, q, attention, pane, actions]);
 
+  // Files dropped anywhere on the chat are sent like picked ones (nothing is uploaded where sending is held).
+  const sendFiles = useSendFiles(conv, block);
+  const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+  const dropHandlers = {
+    onDragOver: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDropping(true);
+    },
+    onDragLeave: (e) => {
+      if (!e.currentTarget.contains(e.relatedTarget)) setDropping(false);
+    },
+    onDrop: (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      setDropping(false);
+      sendFiles(e.dataTransfer.files);
+    },
+  };
+
   return (
-    <section className="chat" aria-label={convTitle(state, conv)}>
+    <section className={`chat${dropping ? " dropping" : ""}`} aria-label={convTitle(state, conv)} {...dropHandlers}>
       <header className="chat-head">
         <IconBtn label="返回列表" className="only-mobile" onClick={() => dispatch({ type: "nav", patch: { pane: "list" } })}><ChevronLeft size={22} /></IconBtn>
         <ConvAvatar conv={conv} size={56} />

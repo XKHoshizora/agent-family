@@ -111,6 +111,20 @@ export function noticeText(system, fallback, nameOf) {
   return missing ? fallback : text;
 }
 
+/** A byte count for people: "932 B", "1.4 KB", "12 MB" (one decimal below 10, base 1024). */
+export function formatSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const text = unit === 0 || value >= 10 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, "");
+  return `${text} ${units[unit]}`;
+}
+
 /** kind: "image" for a file the service marked inline, "file", "system", else "text". */
 function kindOf(kind, attachment) {
   if (kind === "system") return "system";
@@ -146,14 +160,15 @@ function messageView(m, { alias, meId, direct, peerReadSeq, now, nameOf }) {
 }
 
 function pendingView(p, { held, alias, now }) {
-  const attachment = attachmentView(p.attachment);
-  const kind = kindOf("text", attachment);
+  // An unsent file is never shown as an image: the service serves its bytes only once a message carries it.
+  const file = p.attachment ?? p.file ?? null;
+  const attachment = file ? { id: p.attachment?.id ?? null, name: file.name, size: file.size, inline: false, url: null } : null;
   const quoted = p.replyToSeq !== null && p.replyToSeq !== undefined ? held.find((m) => m.seq === p.replyToSeq) : null;
-  const view = {
+  return {
     id: `tx:${p.clientTxn}`,
     seq: null,
     from: ME,
-    kind,
+    kind: attachment ? "file" : "text",
     text: attachment ? attachment.name : p.text,
     caption: attachment ? p.text : null,
     at: formatAt(p.at, now),
@@ -161,6 +176,8 @@ function pendingView(p, { held, alias, now }) {
     status: p.status,
     clientTxn: p.clientTxn,
     error: p.error,
+    /** While the file is queued or uploading: {phase: "queued" | "uploading", progress: 0..1}; else null. */
+    upload: p.upload ?? null,
     replyTo: p.replyToSeq !== null && p.replyToSeq !== undefined ? `m${p.replyToSeq}` : null,
     quote: quoted
       ? {
@@ -175,13 +192,12 @@ function pendingView(p, { held, alias, now }) {
     attachment,
     system: null,
   };
-  if (kind === "image") view.src = attachment.url;
-  return view;
 }
 
 /** The held server message an unsent one turned into, before the HTTP answer said so. */
 function sameContent(m, p) {
   if (p.attachment) return m.attachment?.id === p.attachment.id;
+  if (p.file) return false;
   return m.kind === "text" && m.text === p.text && (m.replyTo?.seq ?? null) === (p.replyToSeq ?? null);
 }
 

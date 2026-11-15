@@ -24,7 +24,7 @@ export function initial() {
     conversations: {},
     /** conversation id → WireMessage[] (plus `clientTxn` on my messages confirmed over HTTP). */
     messages: {},
-    /** clientTxn → unsent message: {clientTxn, conversationId, text, replyToSeq, attachment, at, afterSeq, status, error}. */
+    /** clientTxn → unsent message: {clientTxn, conversationId, text, replyToSeq, attachment, file, upload, at, afterSeq, status, error}. */
     pending: {},
     /** conversation id → composer text not sent yet. */
     drafts: {},
@@ -58,11 +58,19 @@ function startNewStay(state, conversationId) {
   const sending = Object.values(next.pending).filter((p) => p.conversationId === conversationId && p.status === "sending");
   if (sending.length === 0) return next;
   const pending = { ...next.pending };
-  for (const p of sending) pending[p.clientTxn] = { ...p, status: "failed", error: { code: "stale", reason: null } };
+  for (const p of sending) pending[p.clientTxn] = failedEntry(p, { code: "stale" });
   return { ...next, pending };
 }
 
 // ───────── helpers
+
+/** An unsent entry that failed: no longer sending or uploading; its attachment (if the upload finished) stays. */
+const failedEntry = (p, error) => ({
+  ...p,
+  status: "failed",
+  upload: null,
+  error: { code: error?.code ?? "unknown", reason: error?.reason ?? null },
+});
 
 const without = (obj, key) => {
   if (!(key in obj)) return obj;
@@ -336,8 +344,43 @@ export function markSent(state, clientTxn, wire) {
 export function markFailed(state, clientTxn, error) {
   const p = state.pending[clientTxn];
   if (!p) return state;
-  const failed = { ...p, status: "failed", error: { code: error?.code ?? "unknown", reason: error?.reason ?? null } };
-  return { ...state, pending: { ...state.pending, [clientTxn]: failed } };
+  return { ...state, pending: { ...state.pending, [clientTxn]: failedEntry(p, error) } };
+}
+
+/**
+ * A file picked for sending, not uploaded yet (or an upload being retried: the entry keeps its clientTxn, time and
+ * place). `file` is {name, size}; `upload` is {phase: "queued" | "uploading", progress: 0..1} while the upload lasts.
+ */
+export function markUploading(state, { clientTxn, conversationId, text = "", replyToSeq = null, file, at }) {
+  const conv = state.conversations[conversationId];
+  const old = state.pending[clientTxn];
+  const upload = { phase: "queued", progress: 0 };
+  const entry = old
+    ? { ...old, status: "sending", error: null, attachment: null, upload }
+    : { clientTxn, conversationId, text, replyToSeq, attachment: null, file, at, afterSeq: conv ? conv.position : 0, status: "sending", error: null, upload };
+  return { ...state, pending: { ...state.pending, [clientTxn]: entry } };
+}
+
+/** The upload started (progress omitted) or reached `progress` (0..1). */
+export function setUploadProgress(state, clientTxn, progress) {
+  const p = state.pending[clientTxn];
+  if (!p?.upload) return state;
+  const next = { phase: "uploading", progress: progress ?? p.upload.progress };
+  if (next.phase === p.upload.phase && next.progress === p.upload.progress) return state;
+  return { ...state, pending: { ...state.pending, [clientTxn]: { ...p, upload: next } } };
+}
+
+/** The upload finished: the entry now carries the attachment `{id, name, size, inline}` and is ready to be sent. */
+export function setUploaded(state, clientTxn, attachment) {
+  const p = state.pending[clientTxn];
+  if (!p) return state;
+  const { id, name, size, inline } = attachment;
+  return { ...state, pending: { ...state.pending, [clientTxn]: { ...p, attachment: { id, name, size, inline: Boolean(inline) }, upload: null } } };
+}
+
+/** Removes an unsent entry (a cancelled upload). */
+export function discardPending(state, clientTxn) {
+  return clientTxn in state.pending ? { ...state, pending: without(state.pending, clientTxn) } : state;
 }
 
 /** The service's verdict on sending here, e.g. from a `cannot_send` refusal. */
@@ -409,6 +452,6 @@ export function setDraft(state, conversationId, text) {
  */
 export function resetKeepingDrafts(state) {
   const pending = {};
-  for (const [k, p] of Object.entries(state.pending)) pending[k] = p.status === "sending" ? { ...p, status: "failed", error: { code: "network_error", reason: null } } : p;
+  for (const [k, p] of Object.entries(state.pending)) pending[k] = p.status === "sending" ? failedEntry(p, { code: "network_error" }) : p;
   return { ...initial(), owner: state.owner, drafts: state.drafts, pending };
 }

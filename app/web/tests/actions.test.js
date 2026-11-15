@@ -115,16 +115,6 @@ describe("sending (Review Focus 2)", () => {
     expect(transport.log.slice(-2)).toEqual([["conversation", D1], "social"]);
   });
 
-  it("files are sent with their attachment id and shown as file or image meanwhile", async () => {
-    const api = fakeApi();
-    api.sendMessage.mockReturnValue(new Promise(() => {}));
-    const { actions, messages } = await loaded({ api });
-    const attachment = { id: "00000000-0000-4000-8000-0000000000f1", name: "a.png", size: 9, inline: true };
-    actions.sendFile(D1, attachment, { text: "图" });
-    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", attachmentId: attachment.id, text: "图" });
-    expect(messages(D1).at(-1)).toMatchObject({ kind: "image", status: "sending", text: "a.png", caption: "图" });
-  });
-
   it("drops NUL characters and replaces lone surrogates before sending (the service refuses both)", async () => {
     const { actions, api } = await loaded();
     actions.sendText(D1, " a\u0000b\uD800c ");

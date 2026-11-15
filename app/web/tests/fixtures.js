@@ -1,4 +1,5 @@
 // Shared builders for the data-layer tests: service-shaped payloads, a fake transport, fake timers.
+import { vi } from "vitest";
 import { ApiError } from "../src/api/http.js";
 
 export const ME_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -211,4 +212,35 @@ export function fakeTransport(handlers = {}) {
     },
   };
   return t;
+}
+
+/** A File of `size` bytes without allocating them (a File's size is read-only, so the property is redefined). */
+export function fakeFile(name, size = 10, type = "application/octet-stream") {
+  const file = new File(["x"], name, { type });
+  Object.defineProperty(file, "size", { value: size });
+  return file;
+}
+
+export const ATT = (n, fields = {}) => ({ id: `00000000-0000-4000-8000-00000000f${String(n).padStart(3, "0")}`, name: `f${n}.bin`, size: 10, inline: false, ...fields });
+
+/**
+ * A controllable `uploadAttachment` for the data layer's api: every call is recorded in `calls` and stays open until
+ * the test calls `finish(i, attachment)`, `fail(i, error)` or `progress(i, fraction)`; aborting rejects like the real one.
+ */
+export function fakeUploads() {
+  const calls = [];
+  const uploadAttachment = vi.fn((conversationId, file, { onProgress, signal } = {}) => {
+    const d = deferred();
+    const call = { conversationId, file, onProgress, signal, ...d, settled: false };
+    signal?.addEventListener("abort", () => d.reject(new ApiError(0, "aborted")));
+    calls.push(call);
+    return d.promise;
+  });
+  return {
+    uploadAttachment,
+    calls,
+    progress: (i, fraction) => calls[i].onProgress?.(fraction),
+    finish: (i, attachment) => calls[i].resolve(attachment ?? ATT(i + 1, { name: calls[i].file.name, size: calls[i].file.size })),
+    fail: (i, error) => calls[i].reject(error),
+  };
 }
