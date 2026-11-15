@@ -145,6 +145,34 @@ describe("upload, send, download", () => {
     });
   });
 
+  it("HEAD answers with a download's status and headers without opening the blob; refusals are the same 404", async () => {
+    const [a, b, c] = await people("alice", "bob", "carol");
+    const { conversationId: dm } = await befriend(app, a, b);
+    const data = opaque(1000);
+    const id = (await upload(a, dm, data, "notes.bin")).json.id;
+    const unsent = (await upload(a, dm, opaque(10), "unsent.bin")).json.id;
+    await sendFile(a, dm, id);
+    const head = (who: Actor | null, attachmentId: string) =>
+      app.inject({ method: "HEAD", url: `/api/attachments/${attachmentId}`, headers: who ? { cookie: who.cookie } : {} });
+
+    probe.gets = [];
+    const res = await head(b, id);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe("");
+    const { date: _d, ...headers } = res.headers;
+    const { date: _g, connection: _c, ...getHeaders } = (await download(b, id)).headers;
+    expect({ ...headers, connection: undefined }).toEqual({ ...getHeaders, connection: undefined });
+    expect(headers["content-length"]).toBe(String(data.length));
+    expect(probe.gets).toHaveLength(1); // the GET's only
+
+    probe.gets = [];
+    for (const [who, attachmentId] of [[c, id], [b, unsent], [a, unsent], [b, RANDOM_ID]] as const) {
+      expect((await head(who, attachmentId)).statusCode).toBe(404);
+    }
+    expect((await head(null, id)).statusCode).toBe(401);
+    expect(probe.gets).toEqual([]);
+  });
+
   it("an HTML file is served as application/octet-stream with attachment disposition; a PNG is inline; an SVG never is", async () => {
     const [a, b] = await people("alice", "bob");
     const { conversationId: dm } = await befriend(app, a, b);

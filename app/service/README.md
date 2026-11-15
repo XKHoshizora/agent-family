@@ -253,6 +253,8 @@ server's `Content-Type` (markup such as HTML or SVG is always `application/octet
 `Content-Disposition: inline` only for `inline` attachments, else `attachment`, with an ASCII
 `filename` and the exact name as `filename*=UTF-8''…`; `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: private, no-store`. No ranges.
+`HEAD /api/attachments/:id` answers the same status and headers (`Content-Length` included) without a body,
+and without reading the file.
 
 **Unsent uploads** are deleted by `npx tsx src/cli.ts attachments:sweep [--older-than <minutes>]`
 (default 60; run it from cron). Send an upload within that time. A blob that cannot be deleted keeps its

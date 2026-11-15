@@ -13,7 +13,7 @@ import { isMissingBlob, newBlobKey, type BlobStore } from "./blob.ts";
 import { sniff, type Sniffed } from "./sniff.ts";
 import { discardBlob, holdBlob } from "./pending.ts";
 import type { UploadSlots } from "./slots.ts";
-import { findDownloadable, insertAttachment, quotaExceeded, usedBytes } from "./store.ts";
+import { findDownloadable, insertAttachment, quotaExceeded, usedBytes, type Downloadable } from "./store.ts";
 
 /** Largest file one upload may carry (inclusive). */
 export const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
@@ -335,29 +335,39 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
     );
   });
 
-  app.withTypeProvider<ZodTypeProvider>().get(
-    "/api/attachments/:id",
-    { schema: { params: z.object({ id: uuidParam }), querystring: z.object({}) } },
-    async (req, reply) => {
-      const me = await requirePrincipal(req);
-      const found = await findDownloadable(db, me.id, req.params.id);
-      if (!found) throw notFound();
-      let body: Readable;
-      try {
-        body = await blobs.get(found.blobKey);
-      } catch (err) {
-        if (!isMissingBlob(err)) throw err;
-        req.log.error({ attachmentId: req.params.id }, "the blob of a sent attachment is missing");
-        throw notFound();
-      }
-      return reply
-        .headers({
-          ...DOWNLOAD_HEADERS,
-          "content-type": found.mime,
-          "content-length": String(found.size),
-          "content-disposition": contentDisposition(found.name, found.inline),
-        })
-        .send(body);
-    },
-  );
+  const downloadSchema = { params: z.object({ id: uuidParam }), querystring: z.object({}) };
+
+  /** The attachment the caller may download now (the same 404 for everything else). */
+  async function downloadable(req: FastifyRequest<{ Params: { id: string } }>): Promise<Downloadable> {
+    const me = await requirePrincipal(req);
+    const found = await findDownloadable(db, me.id, req.params.id);
+    if (!found) throw notFound();
+    return found;
+  }
+  const downloadHeaders = (found: Downloadable) => ({
+    ...DOWNLOAD_HEADERS,
+    "content-type": found.mime,
+    "content-length": String(found.size),
+    "content-disposition": contentDisposition(found.name, found.inline),
+  });
+
+  // Declared before the GET, so Fastify does not derive a HEAD from it (that one would open and drain the
+  // whole blob). The same decision and headers; the blob is not touched.
+  app.withTypeProvider<ZodTypeProvider>().head("/api/attachments/:id", { schema: downloadSchema }, async (req, reply) => {
+    const found = await downloadable(req);
+    return reply.headers(downloadHeaders(found)).send();
+  });
+
+  app.withTypeProvider<ZodTypeProvider>().get("/api/attachments/:id", { schema: downloadSchema }, async (req, reply) => {
+    const found = await downloadable(req);
+    let body: Readable;
+    try {
+      body = await blobs.get(found.blobKey);
+    } catch (err) {
+      if (!isMissingBlob(err)) throw err;
+      req.log.error({ attachmentId: req.params.id }, "the blob of a sent attachment is missing");
+      throw notFound();
+    }
+    return reply.headers(downloadHeaders(found)).send(body);
+  });
 }
