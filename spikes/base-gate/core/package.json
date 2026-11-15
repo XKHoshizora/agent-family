@@ -1,0 +1,9 @@
+{
+  "name": "af-gate-core-spike",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.0",
+    "ws": "^8.18.0"
+  }
+}

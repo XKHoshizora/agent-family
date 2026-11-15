@@ -1,0 +1,248 @@
+{
+ "candidate": "C: self-built core (Node + Postgres via PGlite)",
+ "runId": "ec4869",
+ "at": "2026-11-15T14:23:17.500Z",
+ "results": [
+  {
+   "id": "1a",
+   "desc": "私聊双向收发",
+   "result": "PASS",
+   "evidence": {
+    "s1": 200,
+    "s2": 200
+   }
+  },
+  {
+   "id": "1b",
+   "desc": "建群并群内收发（纯真人群）",
+   "result": "PASS",
+   "evidence": {
+    "gs": 200
+   }
+  },
+  {
+   "id": "1c",
+   "desc": "成员上传附件并由另一成员取回，内容一致",
+   "result": "PASS",
+   "evidence": {
+    "up": 200,
+    "fe": 200,
+    "dl": 200,
+    "bytes": 2048
+   }
+  },
+  {
+   "id": "1d",
+   "desc": "重新登录（新令牌）后历史完整，初次同步含全部会话",
+   "result": "PASS",
+   "evidence": {
+    "relog": 200,
+    "h2": 200,
+    "sync": 200
+   }
+  },
+  {
+   "id": "1e",
+   "desc": "同一条消息重发（断线重试）不会产生第二条",
+   "result": "PASS",
+   "evidence": {
+    "seq1": 5,
+    "seq2": 5,
+    "count": 1
+   }
+  },
+  {
+   "id": "8c",
+   "desc": "只把 Agent 加进会话，两位主人被自动加为旁观成员；成员没有任何接口可改角色",
+   "result": "PASS",
+   "evidence": {
+    "members": [
+     "observer",
+     "speaker",
+     "observer",
+     "speaker"
+    ]
+   }
+  },
+  {
+   "id": "8a",
+   "desc": "两位主人各自的长连接实时收到两个 Agent 的消息",
+   "result": "PASS",
+   "evidence": {
+    "m1": 200,
+    "m2": 200,
+    "owner1": true,
+    "owner2": true
+   }
+  },
+  {
+   "id": "8b",
+   "desc": "主人以本人身份插话，Agent 侧可读到",
+   "result": "PASS",
+   "evidence": {
+    "inter": 200
+   }
+  },
+  {
+   "id": "4",
+   "desc": "无关人读不到也发不进（历史、单条、成员、搜索、同步、长连接推送、发送、上传、加入）",
+   "result": "PASS",
+   "evidence": {
+    "messages": "403 not_a_member",
+    "single": "404 not_found",
+    "members": "403 not_a_member",
+    "search": "403 not_a_member",
+    "send": "403 not_a_member",
+    "upload": "403 not_a_member",
+    "join": "403 not_approved",
+    "read": 200,
+    "leaked": []
+   }
+  },
+  {
+   "id": "7",
+   "desc": "未经批准的邀请、自行加入、自建会话、踢人、改角色、调用服务端接口全部被拒；批准后加入成功，批准只能用一次",
+   "result": "PASS",
+   "evidence": {
+    "memberInviteUnapproved": "403 not_approved",
+    "agentInviteUnapproved": "403 not_approved",
+    "selfJoinUnapproved": "403 not_approved",
+    "outsiderInvitesSomeone": "403 not_a_member",
+    "userCreatesOwnRoom": "404 no_such_route",
+    "kick": "404 no_such_route",
+    "setRole": "404 no_such_route",
+    "adminEndpointWithUserToken": "403 forbidden",
+    "inviteApproved": 200,
+    "approvalIsSingleUse": "403 not_approved"
+   }
+  },
+  {
+   "id": "2",
+   "desc": "后加入者通过历史、翻页、单条、搜索、初次同步、增量同步、引用旧消息都拿不到入群前的内容；入群后的可读",
+   "result": "PASS",
+   "evidence": {
+    "statuses": {
+     "messages": 200,
+     "beforeOldSeq": 200,
+     "single": "404 not_found",
+     "singleFirst": "404 not_found",
+     "search": 200,
+     "syncInitial": 200,
+     "syncSinceZeroish": 200,
+     "replyToOld": "400 bad_reply_target"
+    },
+    "leaked": {},
+    "seesNew": true,
+    "ownerSearchHits": 5,
+    "lateSearchHits": 0
+   }
+  },
+  {
+   "id": "3",
+   "desc": "附件只能经由“本人当前看得见的那条消息”取得：无关人、后加入者、无令牌都取不到旧附件；成员和入群后的附件正常",
+   "result": "PASS",
+   "evidence": {
+    "outsider": 404,
+    "noToken": 401,
+    "member": 200,
+    "memberBytesMatch": true,
+    "late": 404,
+    "lateNewAttachment": 200,
+    "lateNewBytesMatch": true,
+    "uploadedButNotSent": 404
+   }
+  },
+  {
+   "id": "2b",
+   "desc": "被移除后读不到也发不了；重新加入后只能看到重新加入之后的消息",
+   "result": "PASS",
+   "evidence": {
+    "whileGone": {
+     "history": "403 not_a_member",
+     "sync": 200,
+     "send": "403 not_a_member"
+    },
+    "seesAfterReturn": true,
+    "seesAwayPeriod": false,
+    "seesFirstStay": false
+   }
+  },
+  {
+   "id": "5a",
+   "desc": "冻结后主人、成员、Agent 的消息、附件上传、附件消息全部被拒；系统通知仍可发；客户端能得知冻结状态",
+   "result": "PASS",
+   "evidence": {
+    "observerOwner": "403 frozen",
+    "otherOwner": "403 frozen",
+    "member": "403 frozen",
+    "agent": "403 frozen",
+    "fileUpload": "403 frozen",
+    "fileMessage": "403 frozen",
+    "systemNotice": 200,
+    "leakedIn": [],
+    "frozenFlag": true
+   }
+  },
+  {
+   "id": "5b",
+   "desc": "成员改历史可见范围、加入规则、权限表、开启加密：这些概念和接口在自研核心里不存在，无可更改",
+   "result": "N/A",
+   "evidence": {
+    "routesProbed": {
+     "a": "404 no_such_route",
+     "b": "404 no_such_route"
+    }
+   }
+  },
+  {
+   "id": "5c",
+   "desc": "解冻后恢复发送",
+   "result": "PASS",
+   "evidence": {
+    "thaw": 200
+   }
+  },
+  {
+   "id": "5d",
+   "desc": "冻结与并发发送同时发生：被接受的条数与实际入库条数一致，冻结生效后的发送被拒",
+   "result": "PASS",
+   "evidence": {
+    "accepted": 40,
+    "rejected": 0,
+    "stored": 40,
+    "afterFreeze": 403
+   }
+  },
+  {
+   "id": "9",
+   "desc": "发送者只取自令牌：冒名字段无效；Agent 不能密码登录；别人的 Agent 凭据拿不到；主人可为自己的 Agent 签发接入凭据，持有者只能以该 Agent 身份、在它所在的会话里行动",
+   "result": "PASS",
+   "evidence": {
+    "spoofSenderField": 200,
+    "loginAsAgent": "403 bad_credentials",
+    "mintOthersAgentToken": "403 not_your_agent",
+    "agentMintsOwnToken": "403 not_your_agent",
+    "serviceTokenEndpointWithUserToken": "403 forbidden",
+    "spoofAttributedTo": "owner1 (the real caller)",
+    "ownerIssuesOwnAgentToken": 200,
+    "messageViaOwnerIssuedToken": "attributed to agent a1",
+    "agentReadsUnrelatedConversation": 403
+   }
+  },
+  {
+   "id": "6",
+   "desc": "规则服务故障时拒绝：不适用。自研核心没有独立的规则服务，规则判断和写入在同一个数据库事务里；数据库不可用时所有请求一起失败。并发一致性见 5d",
+   "result": "N/A",
+   "evidence": {}
+  },
+  {
+   "id": "x1",
+   "desc": "中文按片段搜索可命中，且只在本人可见范围内",
+   "result": "PASS",
+   "evidence": {
+    "hits": 1,
+    "outsider": 403
+   }
+  }
+ ]
+}

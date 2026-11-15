@@ -1,0 +1,251 @@
+{
+ "candidate": "A: Synapse + af_gate module + rule service + nginx entry",
+ "runId": "b9c6e9",
+ "at": "2026-11-15T13:25:22.805Z",
+ "server": {
+  "server": {
+   "name": "Synapse",
+   "version": "1.165.0"
+  }
+ },
+ "results": [
+  {
+   "id": "1a",
+   "desc": "私聊双向收发",
+   "result": "PASS",
+   "evidence": {
+    "s1": 200,
+    "s2": 200
+   }
+  },
+  {
+   "id": "1b",
+   "desc": "建群并群内收发（纯真人群）",
+   "result": "PASS",
+   "evidence": {
+    "send": 200
+   }
+  },
+  {
+   "id": "1c",
+   "desc": "成员上传附件并由另一成员取回，内容一致",
+   "result": "PASS",
+   "evidence": {
+    "upload": 200,
+    "send": 200,
+    "download": 200,
+    "bytes": 2048
+   }
+  },
+  {
+   "id": "1d",
+   "desc": "重新登录（新令牌、新设备）后历史完整",
+   "result": "PASS",
+   "evidence": {
+    "login": 200,
+    "history": 200
+   }
+  },
+  {
+   "id": "8a",
+   "desc": "两位主人各自的长连接实时收到两个 Agent 的消息",
+   "result": "PASS",
+   "evidence": {
+    "a1": 200,
+    "a2": 200,
+    "owner1": true,
+    "owner2": true
+   }
+  },
+  {
+   "id": "8b",
+   "desc": "主人以本人身份插话，Agent 侧可读到",
+   "result": "PASS",
+   "evidence": {
+    "send": 200
+   }
+  },
+  {
+   "id": "8c",
+   "desc": "旁观标记存于房间状态，成员可读但不能改",
+   "result": "PASS",
+   "evidence": {
+    "tamper": {
+     "status": 403,
+     "errcode": "M_FORBIDDEN",
+     "error": "This event is not allowed in this context"
+    },
+    "read": 200
+   }
+  },
+  {
+   "id": "4",
+   "desc": "无关人读不到也发不进（消息、状态、单条事件、上下文、成员、搜索、发送、加入）",
+   "result": "PASS",
+   "evidence": {
+    "messages": 403,
+    "state": 403,
+    "event": 404,
+    "context": 403,
+    "members": 403,
+    "send": 403,
+    "join": 403,
+    "search": 200
+   }
+  },
+  {
+   "id": "7",
+   "desc": "未经规则服务批准的邀请、自行加入、敲门、自建房间、踢人、封禁全部被拒；批准后邀请与加入成功",
+   "result": "PASS",
+   "evidence": {
+    "adminInviteUnapproved": 403,
+    "memberInviteUnapproved": 403,
+    "selfJoinUnapproved": 403,
+    "knock": 403,
+    "userCreatesOwnRoom": 403,
+    "adminInviteApproved": 200,
+    "invitedOnlyHistory": 403,
+    "joinApproved": 200,
+    "adminKick": 403,
+    "adminBan": 403
+   }
+  },
+  {
+   "id": "2",
+   "desc": "后加入者通过 13 种读取途径都拿不到入群前的消息，入群后的新消息可读",
+   "result": "PASS",
+   "evidence": {
+    "statuses": {
+     "messages": 200,
+     "messagesWithOwnerToken": 200,
+     "messagesFromOwnerEnd": 200,
+     "forwardFromStart": 200,
+     "sync": 200,
+     "syncFullState": 200,
+     "event": 404,
+     "context": 403,
+     "relations": 403,
+     "initialSync": 200,
+     "search": 200,
+     "timestampToEvent": 200,
+     "state": 200
+    },
+    "leaked": {},
+    "seesNew": true,
+    "ownerSeesOld": 5,
+    "lateSearchHits": 0,
+    "ownerSearchHits": 1
+   }
+  },
+  {
+   "id": "3-native",
+   "desc": "原生行为：只要有任意登录令牌并知道地址，就能直接下载（不校验房间成员）",
+   "result": "OBSERVED",
+   "evidence": {
+    "outsider": 200,
+    "late": 200,
+    "noToken": 401,
+    "legacyNoToken": 404
+   }
+  },
+  {
+   "id": "3",
+   "desc": "补法生效：入口封掉直接下载，附件改由规则服务按“调用者能否看到该消息”放行",
+   "result": "PASS",
+   "evidence": {
+    "nativeDirect_outsider": 200,
+    "nativeDirect_noToken": 401,
+    "nativeLegacy_noToken": 404,
+    "publicDirect_member": 403,
+    "publicDirect_outsider": 403,
+    "publicThumb_outsider": 403,
+    "gated_outsider": 403,
+    "gated_noToken": 401,
+    "gated_member": 200,
+    "gated_member_bytesMatch": true,
+    "nativeDirect_late": 200,
+    "publicDirect_late": 403,
+    "gated_late": 403,
+    "gated_late_newAttachment": 200,
+    "gated_late_newAttachment_bytesMatch": true
+   }
+  },
+  {
+   "id": "5a",
+   "desc": "冻结后群管理员、普通成员、新成员、Agent 的消息/表情/撤回/附件/改话题全部被服务器拒绝；系统通知仍可发",
+   "result": "PASS",
+   "evidence": {
+    "roomAdmin": 403,
+    "member": 403,
+    "lateMember": 403,
+    "agent": 403,
+    "reaction": 403,
+    "redaction": 403,
+    "fileMessage": 403,
+    "topic": 403,
+    "systemNotice": 200,
+    "leakedIn": []
+   }
+  },
+  {
+   "id": "5b",
+   "desc": "群管理员（权限 100）不能改历史可见、加入规则、权限表，也不能开启加密",
+   "result": "PASS",
+   "evidence": {
+    "powerLevels": 403,
+    "historyVisibility": 403,
+    "joinRules": 403,
+    "encryption": 403
+   }
+  },
+  {
+   "id": "5c",
+   "desc": "解冻后恢复发送",
+   "result": "PASS",
+   "evidence": {
+    "status": 200
+   }
+  },
+  {
+   "id": "9",
+   "desc": "服务端可代 Agent 发言；Agent 无密码、普通用户无法登录/注册/冒充 Agent，也碰不到管理接口",
+   "result": "PASS",
+   "evidence": {
+    "serviceSendsAsAgent": 200,
+    "sender": "@agent_a1_b9c6e9:af.test",
+    "passwordLogin": 403,
+    "publicRegisterInNamespace": 403,
+    "userTokenImpersonate": "200 sender=@owner1_b9c6e9:af.test",
+    "asLoginViaPublicWithoutToken": 401,
+    "adminApiViaPublic": 403
+   }
+  },
+  {
+   "id": "6",
+   "desc": "规则服务返回 500、超时无响应、进程不在：发消息、Agent 发言、邀请一律被拒；服务恢复后正常",
+   "result": "PASS",
+   "evidence": {
+    "http500": {
+     "send": 403,
+     "agent": 403,
+     "invite": 403,
+     "ms": 153
+    },
+    "hang": {
+     "send": 403,
+     "agent": 403,
+     "invite": 403,
+     "ms": 6126
+    },
+    "down": {
+     "send": 403,
+     "agent": 403,
+     "invite": 403,
+     "ms": 134
+    },
+    "leakedIntoRoom": false,
+    "recoveredSend": 200
+   }
+  }
+ ]
+}
