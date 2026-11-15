@@ -98,6 +98,7 @@ if (
   );
 export const allowedOrigins = new Set([
   config.origin,
+  ...(process.env.AF_LEGACY_ORIGIN ? [new URL(process.env.AF_LEGACY_ORIGIN).origin] : []),
   ...(process.env.NODE_ENV !== "production"
     ? [
         "http://localhost:5173",

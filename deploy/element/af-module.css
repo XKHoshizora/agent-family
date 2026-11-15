@@ -1,0 +1,254 @@
+.af-page {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  background: var(--cpd-color-bg-canvas-default, #f6f8f7);
+  color: var(--cpd-color-text-primary, #172b24);
+  padding: 32px 40px;
+  font-family: inherit;
+}
+.af-page * {
+  box-sizing: border-box;
+}
+.af-page-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.af-eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.15em;
+  color: #527663;
+  margin: 0 0 8px;
+}
+.af-page h1 {
+  font-size: 30px;
+  margin: 0;
+}
+.af-page h2 {
+  font-size: 18px;
+  margin: 0 0 15px;
+}
+.af-lead {
+  color: #63756c;
+  margin-bottom: 25px;
+}
+.af-page a {
+  color: #237750;
+}
+.af-toolbar,
+.af-actions,
+.af-search,
+.af-id {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.af-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  background: #217552;
+  color: white !important;
+  border: 1px solid #217552;
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  text-decoration: none;
+}
+.af-button:hover {
+  filter: brightness(0.94);
+}
+.af-button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.af-secondary {
+  background: transparent;
+  color: inherit !important;
+  border-color: #bdcec4;
+}
+.af-section {
+  padding: 24px 0;
+  border-bottom: 1px solid #dce5df;
+}
+.af-id {
+  background: #e9f1ec;
+  border-radius: 10px;
+  padding: 14px;
+}
+.af-page code {
+  font-family: monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  display: block;
+  color: inherit;
+}
+.af-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--cpd-color-bg-canvas-default, #fff);
+  padding: 18px;
+  margin-top: 12px;
+  border: 1px solid #d6e2da;
+  border-radius: 12px;
+}
+.af-card-body {
+  flex: 1;
+  min-width: 0;
+}
+.af-card-body strong {
+  display: block;
+  margin-bottom: 7px;
+}
+.af-card-body p {
+  font-size: 13px;
+  margin-bottom: 0;
+}
+.af-avatar {
+  width: 42px;
+  height: 42px;
+  flex-shrink: 0;
+  border-radius: 13px;
+  background: #d6e8dc;
+  color: #21583d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 650;
+  font-size: 18px;
+}
+.af-page input,
+.af-page textarea,
+.af-page select {
+  width: 100%;
+  border: 1px solid #bfcdc4;
+  background: var(--cpd-color-bg-canvas-default, #fff);
+  color: inherit;
+  border-radius: 8px;
+  padding: 10px;
+  font: inherit;
+  margin: 6px 0;
+}
+.af-search input {
+  flex: 1;
+  min-width: 220px;
+}
+.af-muted {
+  font-size: 13px;
+  color: #68786f;
+}
+.af-error {
+  padding: 13px 16px;
+  border-radius: 8px;
+  background: #fff1e8;
+  color: #843c22;
+  margin: 16px 0;
+}
+.af-agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+  margin: 24px 0;
+}
+.af-agent-card {
+  border: 1px solid #d4e1d8;
+  border-radius: 16px;
+  padding: 22px;
+  background: var(--cpd-color-bg-canvas-default, #fff);
+}
+.af-agent-card > p {
+  white-space: pre-wrap;
+  max-height: 90px;
+  overflow: auto;
+  line-height: 1.6;
+}
+.af-agent-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 18px;
+}
+.af-badge {
+  font-size: 12px;
+  background: #e7f0ea;
+  color: #2d6144;
+  padding: 5px 9px;
+  border-radius: 20px;
+}
+.af-agent-card .af-actions {
+  margin-top: 18px;
+}
+.af-editor {
+  max-width: 680px;
+  padding: 24px;
+  margin: 22px 0;
+  background: var(--cpd-color-bg-canvas-default, #fff);
+  border: 1px solid #bfd2c5;
+  border-radius: 14px;
+}
+.af-editor label {
+  display: block;
+  margin: 15px 0;
+  font-size: 14px;
+}
+.af-note {
+  border-left: 3px solid #9dbcaa;
+  background: #eaf1ed;
+  padding: 18px 22px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #3a5143;
+}
+.af-empty {
+  padding: 50px 24px;
+  border: 1px dashed #bccfc2;
+  border-radius: 16px;
+  margin: 25px 0;
+}
+.af-nav-icon {
+  font-size: 16px;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+}
+.af-login {
+  max-width: 460px;
+  padding: 32px;
+}
+.af-login details {
+  margin-top: 25px;
+}
+.af-login .af-button {
+  width: 100%;
+  margin-top: 16px;
+}
+.af-login p {
+  line-height: 1.7;
+}
+@media (max-width: 700px) {
+  .af-page {
+    padding: 22px 16px;
+  }
+  .af-card {
+    flex-wrap: wrap;
+  }
+  .af-card > .af-actions {
+    width: 100%;
+  }
+  .af-page-heading {
+    gap: 15px;
+  }
+  .af-page-heading h1 {
+    font-size: 25px;
+  }
+}

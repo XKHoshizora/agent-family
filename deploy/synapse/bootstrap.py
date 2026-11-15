@@ -39,6 +39,90 @@ config.update({
     'report_stats': False,
     'suppress_key_server_warning': True,
 })
+
+
+# --- Agent Family single sign-on (standard Synapse OIDC; disabled by default) ---
+# Identity mapping: OIDC `sub` = immutable AF user id; the Matrix localpart comes
+# ONLY from the AF-computed `af_localpart` claim (the same deterministic value AF
+# already used for shared-secret provisioning), so existing @af_...:server users
+# keep their ID, history and crypto. Email is never requested or used to match.
+AF_IDP_IDS = {'agent-family', 'oidc-agent-family'}
+
+
+def _https_url(name, value, path=None):
+    from urllib.parse import urlsplit
+    if not value:
+        raise RuntimeError(f'{name} is required when SYNAPSE_OIDC_ENABLED=true')
+    parts = urlsplit(value)
+    if parts.scheme != 'https' or not parts.hostname:
+        raise RuntimeError(f'{name} must be an https URL')
+    if parts.username or parts.password or parts.query or parts.fragment:
+        raise RuntimeError(f'{name} must not contain credentials, query or fragment')
+    if path is not None and parts.path.rstrip('/') != path:
+        raise RuntimeError(f'{name} must have path {path}')
+    return parts
+
+
+def agent_family_oidc_provider():
+    issuer = os.environ.get('SYNAPSE_OIDC_ISSUER', '')
+    _https_url('SYNAPSE_OIDC_ISSUER', issuer, '/api/auth')
+    issuer = issuer.rstrip('/')
+    client_id = os.environ.get('SYNAPSE_OIDC_CLIENT_ID', '')
+    client_secret = os.environ.get('SYNAPSE_OIDC_CLIENT_SECRET', '')
+    if not client_id or len(client_secret) < 32:
+        raise RuntimeError('SYNAPSE_OIDC_CLIENT_ID and a >=32 character SYNAPSE_OIDC_CLIENT_SECRET are required')
+    public = config['public_baseurl']
+    _https_url('SYNAPSE_PUBLIC_BASEURL', public)
+    callback = public.rstrip('/') + '/_synapse/client/oidc/callback'
+    expected = os.environ.get('SYNAPSE_OIDC_EXPECTED_REDIRECT_URI', '')
+    if expected and expected != callback:
+        # AF registers MATRIX_HOMESERVER_URL + /_synapse/client/oidc/callback; they must agree.
+        raise RuntimeError('SYNAPSE_OIDC_EXPECTED_REDIRECT_URI does not match public_baseurl callback')
+    return {
+        'idp_id': 'agent-family',
+        'idp_name': os.environ.get('SYNAPSE_OIDC_IDP_NAME', 'Agent Family'),
+        'issuer': issuer,
+        'discover': True,
+        'skip_verification': False,
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'client_auth_method': 'client_secret_basic',
+        'pkce_method': 'always',
+        'scopes': ['openid', 'profile'],
+        'user_profile_method': 'auto',
+        # Required to attach the OIDC subject to the EXISTING deterministic
+        # Matrix user; safe only because the localpart is never user-chosen.
+        'allow_existing_users': True,
+        # Fail closed: by default only users who already have their AF Matrix
+        # account may sign in; set true to let SSO create the deterministic user.
+        'enable_registration': os.environ.get('SYNAPSE_OIDC_ENABLE_REGISTRATION', 'false') == 'true',
+        'backchannel_logout_enabled': False,
+        'user_mapping_provider': {'config': {
+            'subject_claim': 'sub',
+            'localpart_template': '{{ user.af_localpart }}',
+            'display_name_template': '{{ user.name }}',
+            'confirm_localpart': False,
+        }},
+    }
+
+
+oidc_enabled = os.environ.get('SYNAPSE_OIDC_ENABLED', 'false')
+if oidc_enabled not in ('true', 'false'):
+    raise RuntimeError('SYNAPSE_OIDC_ENABLED must be true or false')
+providers = [p for p in (config.get('oidc_providers') or [])
+             if not (isinstance(p, dict) and p.get('idp_id') in AF_IDP_IDS)]
+if oidc_enabled == 'true':
+    providers.append(agent_family_oidc_provider())
+    whitelist = [u.strip() for u in os.environ.get('SYNAPSE_SSO_CLIENT_WHITELIST', '').split(',') if u.strip()]
+    for entry in whitelist:
+        _https_url('SYNAPSE_SSO_CLIENT_WHITELIST entry', entry)
+    if whitelist:
+        config['sso'] = {**(config.get('sso') or {}), 'client_whitelist': whitelist}
+if providers:
+    config['oidc_providers'] = providers
+else:
+    config.pop('oidc_providers', None)
+
 temp = data / 'homeserver.yaml.new'
 temp.write_text(yaml.safe_dump(config, sort_keys=False))
 temp.chmod(0o600)

@@ -2,6 +2,14 @@ import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { db } from "./db";
 import { config, allowedOrigins } from "./config";
+import {
+  ensureTrustedClient,
+  loadUnifiedAuthSettings,
+  sqliteMatrixLookup,
+  unifiedAuthPlugins,
+} from "./unified-auth";
+/** Null unless AF_UNIFIED_LOGIN=true; throws (fail closed) on invalid config. */
+export const unifiedAuth = loadUnifiedAuthSettings(process.env, config.origin);
 export const auth = betterAuth({
   database: db,
   baseURL: config.origin,
@@ -19,10 +27,14 @@ export const auth = betterAuth({
     ipAddress: { ipAddressHeaders: ["x-af-client-ip"] },
   },
   rateLimit: { enabled: true, window: 60, max: 30 },
+  plugins: unifiedAuth
+    ? unifiedAuthPlugins(unifiedAuth, sqliteMatrixLookup(db))
+    : [],
 });
 export async function migrateAuth() {
   const migration = await getMigrations(auth.options);
   await migration.runMigrations();
+  if (unifiedAuth) await ensureTrustedClient(auth, unifiedAuth);
 }
 export function requestHeaders(
   headers: Record<string, string | string[] | undefined>,

@@ -1,6 +1,9 @@
 import { appendDiscussionInput } from "./discussion-inputs";
 import { registerMatrixRoutes } from "./matrix-account";
 import { registerChatEntry } from "./chat-entry";
+import { registerSocialRoutes } from "./social-routes";
+import { stopChatAgents } from "./chat-agents";
+import { handleUnifiedAuthRequest, registerUnifiedAuthBodyParser, unifiedAuthRoute } from "./unified-auth";
 import { registerFamilyRoutes } from "./family-routes";
 import {
   familyRoomAccess,
@@ -20,7 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { z } from "zod";
-import { auth, migrateAuth, requestHeaders } from "./auth";
+import { auth, migrateAuth, requestHeaders, unifiedAuth } from "./auth";
 import { config, allowedOrigins, id, now, root } from "./config";
 import {
   db,
@@ -221,11 +224,13 @@ export async function createApp() {
     crossOriginEmbedderPolicy: false,
   });
   await app.register(rateLimit, { max: 240, timeWindow: "1 minute" });
+  if (unifiedAuth) registerUnifiedAuthBodyParser(app);
   app.addHook("onRequest", async (req, reply) => {
     if (req.url.startsWith("/api/")) reply.header("Cache-Control", "no-store");
     if (
       ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) &&
-      !req.url.startsWith("/api/line/webhook/")
+      !req.url.startsWith("/api/line/webhook/") &&
+      !(unifiedAuth && unifiedAuthRoute(req.method, req.url)?.kind === "client")
     ) {
       const origin = req.headers.origin;
       if (!origin || !allowedOrigins.has(origin))
@@ -253,6 +258,8 @@ export async function createApp() {
   });
   app.get("/api/health", async () => ({ ok: true, version: "0.2.0" }));
   registerMatrixRoutes(app, context);
+  if (unifiedAuth) registerSocialRoutes(app, context);
+  app.addHook('onClose', async()=>stopChatAgents());
   await registerFamilyRoutes(app, {
     context,
     cancelRun: (roomId) => {
@@ -321,6 +328,8 @@ export async function createApp() {
     method: ["GET", "POST"],
     url: "/api/auth/*",
     handler: async (req, reply) => {
+      if (unifiedAuth && unifiedAuthRoute(req.method,req.url))
+        return handleUnifiedAuthRequest(auth.handler,req,reply,unifiedAuth);
       const route = req.url.split("?")[0];
       const allowed = [
         "/api/auth/sign-in/email",

@@ -1,0 +1,33 @@
+# Preserve Element's upstream static/config layout; add only the same-origin AF API.
+server {
+    listen ${ELEMENT_WEB_PORT};
+    listen [::]:${ELEMENT_WEB_PORT};
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+    include /etc/nginx/af-security-headers.conf;
+    resolver 1.1.1.1 8.8.8.8 valid=30s ipv6=off;
+    location /api/ {
+        set $af_backend ${AF_BACKEND_URL};
+        proxy_pass $af_backend$request_uri;
+        proxy_ssl_server_name on;
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-AF-Client-IP "";
+        proxy_read_timeout 120s;
+        proxy_buffering off;
+        add_header Cache-Control "no-store" always;
+        include /etc/nginx/af-security-headers.conf;
+    }
+    location = /index.html { add_header Cache-Control "no-cache"; include /etc/nginx/af-security-headers.conf; }
+    location = /version { add_header Cache-Control "no-cache"; include /etc/nginx/af-security-headers.conf; }
+    location /i18n/ { add_header Cache-Control "no-cache"; include /etc/nginx/af-security-headers.conf; }
+    location /usercontent/ { add_header Cache-Control "no-cache"; include /etc/nginx/af-security-headers.conf; }
+    location /config { root /tmp/element-web-config; add_header Cache-Control "no-cache"; include /etc/nginx/af-security-headers.conf; }
+    location /modules { alias /modules; }
+    location ~ ^/af- { add_header Cache-Control "no-store"; include /etc/nginx/af-security-headers.conf; }
+    error_page 500 502 503 504 /50x.html;
+}
