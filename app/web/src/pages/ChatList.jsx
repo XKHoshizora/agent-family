@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { convTitle, entity, lastPreview, TYPE_LABEL, otherMember } from "../state/selectors.js";
 import { ConvAvatar, IconBtn } from "../ui/primitives.jsx";
-import { Plus, Search, UserPlus } from "../icons.js";
+import { Plus, Search, UserPlus, Users } from "../icons.js";
+import { NewGroupModal } from "./GroupModals.jsx";
 
 const FILTERS = [
   ["all", "全部"],
@@ -63,6 +64,7 @@ export function ChatList() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [menu, setMenu] = useState(false);
+  const [newGroup, setNewGroup] = useState(false);
   const menuRef = useRef(null);
   useEffect(() => {
     if (!menu) return;
@@ -91,6 +93,9 @@ export function ChatList() {
             </IconBtn>
             {menu && (
               <div className="menu" aria-label="新建选项">
+                <button type="button" onClick={() => (setMenu(false), setNewGroup(true))}>
+                  <Users size={16} aria-hidden="true" /> 发起群聊
+                </button>
                 <button type="button" onClick={() => (setMenu(false), dispatch({ type: "nav", patch: { section: "contacts", pane: "list", addFriend: true } }))}>
                   <UserPlus size={16} aria-hidden="true" /> 添加好友
                 </button>
@@ -126,6 +131,7 @@ export function ChatList() {
         ))}
         {rows.length === 0 && <li className="rows-empty">没有符合条件的会话</li>}
       </ul>
+      {newGroup && <NewGroupModal onClose={() => setNewGroup(false)} />}
     </>
   );
 }

@@ -1,106 +1,106 @@
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { groupErrorText } from "../data/errorTexts.js";
+import { groupTitle } from "../auth/validation.js";
 import { ME } from "../data/identities.js";
-import {
-  convTitle,
-  agentsIn,
-  humansIn,
-  viewerOwners,
-  nameOf,
-  ownerOf,
-  isAgent,
-  isMine,
-  publishBlock,
-  myBlock,
-  blocksFor,
-} from "../state/selectors.js";
-import { Avatar, ConvAvatar, Tag, Btn, Notice, Reason, IdentityLine, KV } from "../ui/primitives.jsx";
+import { convTitle, nameOf } from "../state/selectors.js";
+import { Avatar, ConvAvatar, Tag, Btn, Field, IdentityLine, KV, Reason, focusInvalid } from "../ui/primitives.jsx";
 import { Pills } from "./ChatList.jsx";
-import { BlockModal } from "./BlockModal.jsx";
-import { ChevronLeft, CirclePause } from "../icons.js";
+import { AddMemberModal, LeaveModal, RemoveMemberModal } from "./GroupModals.jsx";
+import { useAction } from "./useAction.js";
+import { ChevronLeft } from "../icons.js";
 
 function Members({ conv }) {
-  const { state, dispatch } = useStore();
-  const [blockTarget, setBlockTarget] = useState(null);
-  const admin = conv.admin === ME;
-  const owners = viewerOwners(state, conv);
+  const { state } = useStore();
+  const [dialog, setDialog] = useState(null); // {kind: "add"} | {kind: "remove", id}
+  const creator = conv.admin === ME;
   return (
     <>
-      <h3>发言成员</h3>
+      <h3>群成员</h3>
       <ul className="member-rows">
-        {conv.members.map((id) => {
-          const agent = isAgent(state, id);
-          const mine = isMine(state, id);
-          const blocked = agent && myBlock(state, id);
-          return (
-            <li key={id}>
-              <Avatar id={id} size={44} />
-              <div className="member-body">
-                <IdentityLine id={id} extra={conv.cutoffs[id] ? <Tag tone="muted">仅见 {conv.cutoffs[id]} 之后</Tag> : null} />
-                <p className="muted">
-                  {agent
-                    ? "由其主人管理"
-                    : id === conv.admin
-                      ? "群管理员"
-                      : "真人成员"}
-                </p>
-              </div>
-              <div className="member-actions">
-                {mine && <Btn small onClick={() => dispatch({ type: "group/remove", convId: conv.id, memberId: id })}>撤回我的 Agent</Btn>}
-                {agent && !mine && (
-                  <Btn small onClick={() => setBlockTarget(id)}>{blocked ? "解除拉黑" : "拉黑此 Agent"}</Btn>
-                )}
-                {!mine && id !== ME && (
-                  <Btn small disabled={!admin} reason="只有群管理员可以移除成员" onClick={() => dispatch({ type: "group/remove", convId: conv.id, memberId: id })}>
-                    移除
-                  </Btn>
-                )}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      <h3>可见主人</h3>
-      <ul className="member-rows">
-        {owners.map((id) => (
+        {conv.memberRoles.map(({ id, isCreator }) => (
           <li key={id}>
             <Avatar id={id} size={44} />
             <div className="member-body">
-              <IdentityLine id={id} />
-              <p className="muted">
-                因 {agentsIn(state, conv).filter((a) => ownerOf(state, a) === id).map((a) => nameOf(state, a)).join("、")} 参与而可查看相关消息与附件；不含其他私聊、电脑画面或文件。
-              </p>
+              <IdentityLine id={id} extra={isCreator ? <Tag tone="solid">创建者</Tag> : null} />
+              <p className="muted">{state.people[id]?.handle ?? ""}</p>
+            </div>
+            <div className="member-actions">
+              {creator && id !== ME && <Btn small onClick={() => setDialog({ kind: "remove", id })}>移除</Btn>}
             </div>
           </li>
         ))}
       </ul>
-      <Reason>旁观主人不计入发言成员数。撤回自己的 Agent 立即生效，不会被其他人否决；成员变化后本群会暂停并需重新检查。</Reason>
-      {blockTarget && <BlockModal target={blockTarget} onClose={() => setBlockTarget(null)} />}
+      <div className="stack-actions">
+        <Btn variant="primary" onClick={() => setDialog({ kind: "add" })}>添加成员</Btn>
+        <Reason>只能添加你的好友，和你有拉黑关系的人除外。群里最多 500 人。</Reason>
+      </div>
+      {dialog?.kind === "add" && <AddMemberModal conv={conv} onClose={() => setDialog(null)} />}
+      {dialog?.kind === "remove" && <RemoveMemberModal conv={conv} memberId={dialog.id} onClose={() => setDialog(null)} />}
     </>
   );
 }
 
+function Rename({ conv }) {
+  const { actions, dispatch } = useStore();
+  const { busy, run } = useAction();
+  const [title, setTitle] = useState(conv.title ?? "");
+  const [error, setError] = useState("");
+  const unchanged = title.trim() === (conv.title ?? "");
+  const save = async (event) => {
+    event.preventDefault();
+    if (busy !== null || unchanged) return;
+    const problem = groupTitle(title);
+    setError(problem);
+    if (problem) {
+      focusInvalid();
+      return;
+    }
+    const res = await run("rename", () => actions.renameGroup(conv.id, title.trim()), (e) => groupErrorText("rename", e));
+    if (res.ok) dispatch({ type: "toast", text: "群名称已修改" });
+  };
+  return (
+    <form className="apply-box" onSubmit={save} noValidate>
+      <Field label="群名称" hint="只有创建者可以修改，1–60 个字" error={error}>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} autoComplete="off" />
+      </Field>
+      <Btn type="submit" variant="primary" disabled={busy !== null || unchanged} reason={unchanged ? "名称没有变化" : undefined}>
+        {busy !== null ? "保存中…" : "保存"}
+      </Btn>
+    </form>
+  );
+}
+
 function GroupSettings({ conv }) {
-  const { state, dispatch } = useStore();
-  const block = publishBlock(state, conv);
-  const blocks = blocksFor(state, conv);
+  const { state, dispatch, actions } = useStore();
+  const { run } = useAction();
+  const [leaving, setLeaving] = useState(false);
+  const creator = conv.admin === ME;
+
+  // Navigate away first: the conversation leaves the state when the service answers, and by then nothing of it
+  // is on screen, so the "no longer in this conversation" notice (for removals) does not fire for my own action.
+  const leave = async () => {
+    const id = conv.id;
+    setLeaving(false);
+    dispatch({ type: "nav", patch: { convId: null, view: "chat", detailsOpen: false } });
+    const res = await run("leave", () => actions.leaveGroup(id), (e) => groupErrorText("leave", e));
+    if (res.ok) dispatch({ type: "toast", text: "已退出群聊" });
+    else dispatch({ type: "nav/openConv", convId: id, patch: { view: "profile", profileTab: "settings" } });
+  };
+
   return (
     <>
-      <h3>发布状态</h3>
-      {block ? <Notice tone="pending">{block.text}</Notice> : <Notice tone="ok">本群可正常发布新消息。</Notice>}
-      <KV
-        rows={[
-          ["群管理员", nameOf(state, conv.admin)],
-          ["拉黑冲突", blocks.length ? blocks.map((b) => `${b.by === ME ? "你" : nameOf(state, b.by)} → ${nameOf(state, b.target)}`).join("；") : "无"],
-        ]}
-      />
+      <h3>群设置</h3>
+      <KV rows={[["群创建者", nameOf(state, conv.admin)], ...(creator ? [] : [["群名称", convTitle(state, conv)]])]} />
+      {creator && <Rename conv={conv} />}
       <h3>我的操作</h3>
       <div className="stack-actions">
         <div>
-          <Btn variant="danger" onClick={() => dispatch({ type: "group/exit", convId: conv.id })}>退出本群</Btn>
-          <Reason>退出后你和你的 Agent 停止接收新内容；已取得的历史不承诺被远端抹除。</Reason>
+          <Btn variant="danger" onClick={() => setLeaving(true)}>退出本群</Btn>
+          <Reason>退出后你不会再收到这个群的消息，也看不到群里的历史消息。</Reason>
         </div>
       </div>
+      {leaving && <LeaveModal conv={conv} onLeave={leave} onClose={() => setLeaving(false)} />}
     </>
   );
 }
@@ -108,8 +108,6 @@ function GroupSettings({ conv }) {
 export function GroupProfile({ conv }) {
   const { state, dispatch } = useStore();
   const tab = state.nav.profileTab;
-  const agents = agentsIn(state, conv).length;
-  const humans = humansIn(state, conv).length;
   return (
     <section className="page profile" aria-label="群资料">
       <button type="button" className="back" onClick={() => dispatch({ type: "nav", patch: { view: "chat" } })}>
@@ -119,13 +117,8 @@ export function GroupProfile({ conv }) {
         <ConvAvatar conv={conv} size={84} />
         <div>
           <p className="eyebrow">群资料</p>
-          <h2>
-            {convTitle(state, conv)}
-            {publishBlock(state, conv) && <Tag tone="pending"><CirclePause size={13} aria-hidden="true" /> 已冻结</Tag>}
-          </h2>
-          <p className="muted">
-            当前：{humans > 0 ? `${humans} 位真人 · ` : ""}{agents} 个 Agent · {viewerOwners(state, conv).length} 位主人
-          </p>
+          <h2>{convTitle(state, conv)}</h2>
+          <p className="muted">共 {conv.memberRoles.length} 位成员</p>
         </div>
       </header>
       <Pills
