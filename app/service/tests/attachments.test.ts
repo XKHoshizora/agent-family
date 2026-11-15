@@ -2,20 +2,22 @@ import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { newBlobKey } from "../src/attachments/blob.ts";
 import { abandonedAfterMs, holdBlob, sweepPendingBlobs } from "../src/attachments/pending.ts";
-import { ATTACHMENT_MAX_BYTES, contentDisposition, MAX_CONCURRENT_UPLOADS, sanitizeFileName } from "../src/attachments/routes.ts";
+import { ATTACHMENT_MAX_BYTES, contentDisposition, sanitizeFileName } from "../src/attachments/routes.ts";
+import { MAX_CONCURRENT_UPLOADS } from "../src/attachments/slots.ts";
 import { sweepOrphans } from "../src/attachments/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { testDatabaseUrl } from "./helpers/env.ts";
 import { useApp } from "./helpers/harness.ts";
 import { BOUNDARY, CLOSING, MULTIPART, multipart, destroyOpenRequests, openRequest, partHead, type Part } from "./helpers/multipart.ts";
-import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
+import { closeAllSockets, connect, listen, type Push } from "./helpers/ws.ts";
 
 // A blob store on a temp dir that records how it is used (tests/helpers/blobs.ts).
 const { dir: blobDir, blobs, probe, files: blobFiles, putStarted } = useProbeBlobs("af-att-");
@@ -697,6 +699,67 @@ describe("upload refusals", () => {
     expect((await Promise.all(running.map((o) => o.response))).map((r) => r.status)).toEqual([201, 201, 201]);
     expect((await upload(a, dm, opaque(10))).status).toBe(201); // the slots were given back
     expect(await held()).toEqual([]);
+  });
+
+  /** Opens a raw connection and sends an upload's request head, its part head and a few bytes of file. */
+  async function rawUploadStart(who: Actor, conv: string): Promise<net.Socket> {
+    const { port } = await listen(app);
+    const socket = net.connect({ port, host: "127.0.0.1" });
+    socket.on("error", () => {});
+    await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+    const head = [
+      `POST /api/conversations/${conv}/attachments HTTP/1.1`,
+      `Host: 127.0.0.1:${port}`,
+      `Cookie: ${who.cookie}`,
+      `Content-Type: ${MULTIPART}`,
+      "Content-Length: 1048576",
+    ].join("\r\n");
+    await new Promise<void>((resolve) =>
+      socket.write(`${head}\r\n\r\n${partHead({ name: "file", filename: "gone.bin", type: "application/octet-stream" })}abc`, () =>
+        resolve(),
+      ),
+    );
+    return socket;
+  }
+
+  it("a client that disconnects during the pre-check gives its slot back at once; three times, then a fourth upload succeeds", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    for (let round = 1; round <= 3; round++) {
+      // Hold the server inside the pre-check: recording the blob key waits for this lock.
+      const blocker = await db.pool.connect();
+      try {
+        await blocker.query("begin");
+        await blocker.query("lock table pending_blobs in exclusive mode");
+        const socket = await rawUploadStart(a, dm);
+        await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(1)); // slot taken, handler waiting
+        socket.destroy();
+        // The slot comes back as soon as the connection closes, while the handler is still waiting.
+        await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(0));
+        await blocker.query("commit");
+      } finally {
+        blocker.release();
+      }
+      // The handler then finds its client gone instead of waiting for a body forever, and lets go of the key.
+      await vi.waitFor(async () => expect(await held()).toEqual([]));
+      expect([round, app.deps.uploads.inProgress()]).toEqual([round, 0]);
+    }
+    expect(blobFiles()).toEqual([]);
+    expect(await upload(a, dm, opaque(10))).toMatchObject({ status: 201 });
+    expect(app.deps.uploads.inProgress()).toBe(0);
+  });
+
+  it("dropping the connection right after the request head, three times, leaves no slot taken", async () => {
+    const [a, b] = await people("alice", "bob");
+    const { conversationId: dm } = await befriend(app, a, b);
+    for (let i = 0; i < 3; i++) (await rawUploadStart(a, dm)).destroy();
+    await vi.waitFor(async () => {
+      expect(app.deps.uploads.inProgress()).toBe(0);
+      expect(await held()).toEqual([]);
+    });
+    expect(await upload(a, dm, opaque(10))).toMatchObject({ status: 201 });
+    expect(app.deps.uploads.inProgress()).toBe(0);
+    expect(await count("select count(*) n from attachments")).toBe(1);
   });
 
   it("a client that disconnects in the middle of an upload leaves no blob and no row", async () => {

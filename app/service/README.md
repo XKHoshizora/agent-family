@@ -40,8 +40,9 @@ npm run build     # type-check only (tsc --noEmit)
 (default 72 s). The server-wide ones must be longer than the upload deadlines (checked at start-up), so
 uploads are governed by their own deadlines; WebSockets are not subject to them.
 
-**Cross-site requests.** A `POST`, `PUT`, `PATCH` or `DELETE` under `/api` whose `Origin` header is present
-and is not exactly `APP_ORIGIN` is refused with 403 `{"error":"forbidden"}` before anything else runs
+**Cross-site requests.** Any `POST`, `PUT`, `PATCH` or `DELETE`, whatever its path, whose `Origin` header is
+present and is not exactly `APP_ORIGIN` (byte for byte: no other case, port, trailing slash, `null` or list)
+is refused with 403 `{"error":"forbidden"}` before anything else runs
 (`src/app.ts`; the WebSocket upgrade uses the same comparison and also refuses a missing `Origin`).
 Requests without `Origin` (non-browser clients) pass. The session cookie is `HttpOnly`, `SameSite=Lax`, and
 `Secure` (with the `__Secure-` name prefix) when `APP_ORIGIN` is https.

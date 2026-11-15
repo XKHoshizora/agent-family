@@ -1,12 +1,15 @@
+import net from "node:net";
 import { afterAll, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
+import { appOriginCheck } from "../src/origin.ts";
 import { api, befriend, cookieHeaderFrom, signIn, signUp, type Actor } from "./helpers/actors.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { testDatabaseUrl } from "./helpers/env.ts";
 import { useApp } from "./helpers/harness.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
+import { listen } from "./helpers/ws.ts";
 
 const { blobs, files: blobFiles } = useProbeBlobs("af-origin-");
 const { app, db } = useApp({ blobs });
@@ -117,6 +120,110 @@ describe("state-changing requests from another origin", () => {
     expect((await api(app, other, "GET", "/api/me")).status).toBe(401);
   });
 });
+
+describe("the Origin check cannot be sidestepped", () => {
+  it("by a percent-encoded or otherwise disguised path: 403 on a JSON route, the upload route and a Better Auth route", async () => {
+    const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
+    const { conversationId: dm } = await befriend(app, a, b);
+    const evil = "https://evil.example.test";
+    const send = (url: string, origin: string) =>
+      call("POST", url, { who: a, origin, json: { text: "forged", clientTxn: `e${Math.random().toString(36).slice(2)}` } });
+    const messagePaths = [
+      `/%61pi/conversations/${dm}/messages`, // "a" escaped
+      `/%61pi/conversations/${dm}/m%65ssages`,
+      `/api/conversations/${dm}/%6d%65ssages`, // lower-case hex
+      `/api/conversations/${dm}/%6D%65ssages`, // upper-case hex
+      `/%61pi/conversations/${dm}/%6D%65ssages`, // mixed
+      `//api/conversations/${dm}/messages`, // double slash
+      `/api//conversations/${dm}/messages`,
+    ];
+    // The router decodes these: with the app's own Origin the encoded ones reach the handler...
+    expect((await send(messagePaths[0]!, APP_ORIGIN)).statusCode).toBe(201);
+    expect((await send(messagePaths[3]!, APP_ORIGIN)).statusCode).toBe(201);
+    // ...and from a foreign origin every one of them is refused before any of that.
+    for (const url of messagePaths) {
+      const res = await send(url, evil);
+      expect([url, res.statusCode, res.body]).toEqual([url, 403, FORBIDDEN]);
+    }
+    const patched = await call("PATCH", "/%61pi/me", { who: a, origin: evil, json: { displayName: "pwned" } });
+    expect([patched.statusCode, patched.body]).toEqual([403, FORBIDDEN]);
+    const uploaded = await call("POST", `/%61pi/conversations/${dm}/attachments`, {
+      who: a,
+      origin: evil,
+      payload: multipart([{ name: "file", filename: "a.txt", type: "text/plain", data: "hello" }]),
+      contentType: MULTIPART,
+    });
+    expect([uploaded.statusCode, uploaded.body]).toEqual([403, FORBIDDEN]);
+    for (const url of ["/%61pi/auth/sign-out", "/api/auth/sign-%6Fut", "//api/auth/sign-out"]) {
+      const res = await call("POST", url, { who: a, origin: evil, json: {} });
+      expect([url, res.statusCode, res.body]).toEqual([url, 403, FORBIDDEN]);
+    }
+
+    expect(await count("select count(*) n from messages where kind = 'text'")).toBe(2); // only the two above
+    expect((await api(app, a, "GET", "/api/me")).json.displayName).toBe("alice");
+    expect(await count("select count(*) n from attachments")).toBe(0);
+    expect((await api(app, a, "GET", "/api/me")).status).toBe(200); // still signed in
+    // The auth allowlist matches the exact path: an encoded one is not an exposed endpoint even from the app.
+    expect((await call("POST", "/%61pi/auth/sign-out", { who: a, origin: APP_ORIGIN, json: {} })).statusCode).toBe(404);
+  });
+
+  it("by a near-miss Origin: anything but the exact serialisation a browser sends for the app is refused", async () => {
+    const a = await signUp(app, "alice");
+    const verdicts: Array<[string, number]> = [
+      [APP_ORIGIN, 200], // exactly the app: allowed
+      ["http://LOCALHOST:5173", 403], // browsers serialise the host in lower case; this is not one of them
+      ["HTTP://localhost:5173", 403],
+      ["http://localhost:5173/", 403], // an origin has no path, not even "/"
+      ["http://localhost:5173:5173", 403], // malformed
+      ["null", 403], // opaque origin (sandboxed frame, file:, data:)
+      ["", 403], // present but empty
+      [" http://localhost:5173", 403],
+    ];
+    for (const [origin, status] of verdicts) {
+      const res = await call("PATCH", "/api/me", { who: a, origin, json: { displayName: "Alice" } });
+      expect([origin, res.statusCode]).toEqual([origin, status]);
+    }
+    // An explicit default port: a browser never sends one, so for an https app ":443" is not its origin.
+    const check = appOriginCheck("https://app.example.test");
+    expect(check("https://app.example.test")).toBe(true);
+    expect(check("https://app.example.test:443")).toBe(false);
+    expect(check("https://app.example.test/")).toBe(false);
+    expect(check("https://APP.example.test")).toBe(false);
+    expect(check(undefined)).toBe(false);
+
+    // A repeated header, over a real connection: Node joins the values into a list, which is no origin.
+    const { port } = await listen(app);
+    const twice = await rawStatus(port, [
+      "PATCH /api/me HTTP/1.1",
+      `Host: 127.0.0.1:${port}`,
+      `Cookie: ${a.cookie}`,
+      `Origin: ${APP_ORIGIN}`,
+      `Origin: ${APP_ORIGIN}`,
+      "Content-Type: application/json",
+      "Content-Length: 24",
+      "Connection: close",
+    ], '{"displayName":"Twice!"}');
+    expect(twice).toBe(403);
+    expect((await api(app, a, "GET", "/api/me")).json.displayName).toBe("Alice");
+  });
+});
+
+/** Sends a hand-written HTTP/1.1 request and returns the response status. */
+function rawStatus(port: number, head: string[], body: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect({ port, host: "127.0.0.1" }, () => socket.write(`${head.join("\r\n")}\r\n\r\n${body}`));
+    let received = "";
+    socket.on("data", (c) => {
+      received += String(c);
+      const line = /^HTTP\/1\.1 (\d{3})/.exec(received);
+      if (line) {
+        resolve(Number(line[1]));
+        socket.destroy();
+      }
+    });
+    socket.on("error", reject);
+  });
+}
 
 describe("session cookie", () => {
   let httpsApp: FastifyInstance | undefined;

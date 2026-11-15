@@ -1,6 +1,7 @@
 import multipart, { type Multipart, type MultipartFile } from "@fastify/multipart";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import type { Socket } from "node:net";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import { canSend } from "../conversations/store.ts";
@@ -10,14 +11,13 @@ import { requirePrincipal } from "../session.ts";
 import { isMissingBlob, newBlobKey, type BlobStore } from "./blob.ts";
 import { sniff, type Sniffed } from "./sniff.ts";
 import { discardBlob, holdBlob } from "./pending.ts";
+import type { UploadSlots } from "./slots.ts";
 import { findDownloadable, insertAttachment, quotaExceeded, usedBytes } from "./store.ts";
 
 /** Largest file one upload may carry (inclusive). */
 export const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
-/** Uploads per principal per hour, times `RATE_LIMIT_SCALE`. */
+/** Uploads per principal per hour, times `RATE_LIMIT_SCALE`. (At most 3 at once: `slots.ts`.) */
 export const UPLOADS_PER_HOUR = 60;
-/** Uploads one principal may have in progress at once; one more is 429 `rate_limited`. */
-export const MAX_CONCURRENT_UPLOADS = 3;
 export const FILE_NAME_MAX_CHARS = 120;
 /** The one multipart part an upload consists of. */
 export const FILE_FIELD = "file";
@@ -119,17 +119,30 @@ export interface UploadDeadlines {
   totalMs: number;
 }
 
+interface Deadline {
+  /** Rejects (with `BrokenUpload`) when a deadline passes; never resolves. */
+  expired: Promise<never>;
+  disarm(): void;
+}
+
 /**
- * Cuts the connection of a client that stalls while sending the body: idle for `idleMs`, or still
- * sending after `totalMs`. Destroying an unfinished request destroys its socket and ends the multipart
- * stream with an error, so the receiving code fails and its cleanup runs. Disarms itself once the body
- * is complete; returns the disarm function. Arm it only once the body is being consumed (a 'data'
- * listener on a request nobody reads would set it flowing into the void).
+ * Cuts off a client that stalls while sending the body: idle for `idleMs`, or still sending after
+ * `totalMs`. On expiry it destroys the request (for an unfinished request that destroys the socket),
+ * destroys the file stream being stored (`onExpire`), and rejects `expired`, so whatever the receiving
+ * code awaits settles even if the parser never hears of the destroyed request. Disarms itself once the
+ * body is complete. Arm it only once the body is being consumed (a 'data' listener on a request nobody
+ * reads would set it flowing into the void).
  */
-function armDeadlines(req: FastifyRequest, { idleMs, totalMs }: UploadDeadlines): () => void {
+function armDeadlines(req: FastifyRequest, { idleMs, totalMs }: UploadDeadlines, onExpire: (err: Error) => void): Deadline {
+  let fail!: (err: Error) => void;
+  const expired = new Promise<never>((_, reject) => (fail = reject));
+  expired.catch(() => {}); // observed through the races below; never an unhandled rejection
   const cutOff = (why: string) => () => {
     req.log.info({ why }, "upload cut off");
+    const err = new BrokenUpload(`upload cut off: ${why}`);
     req.raw.destroy();
+    onExpire(err);
+    fail(err);
   };
   const idle = setTimeout(cutOff("idle"), idleMs);
   const total = setTimeout(cutOff("too slow"), totalMs);
@@ -142,14 +155,24 @@ function armDeadlines(req: FastifyRequest, { idleMs, totalMs }: UploadDeadlines)
   };
   req.raw.on("data", onData);
   req.raw.once("end", disarm);
-  return disarm;
+  return { expired, disarm };
+}
+
+/** `p`, unless the deadline passes first (then 400, like any broken upload). */
+async function beforeDeadline<T>(p: Promise<T>, deadline: Deadline): Promise<T> {
+  try {
+    return await Promise.race([p, deadline.expired]);
+  } catch (err) {
+    if (err instanceof BrokenUpload) throw invalid();
+    throw err;
+  }
 }
 
 /**
  * Streams the upload's single file part into the blob store under `key`, enforcing the cap while it
  * streams and the deadlines while the body arrives. 400 for any other shape (a field, a second part,
- * no part, another part name, a broken or cut-off body), 413 `too_large` past the cap. The caller
- * discards the blob if this throws.
+ * no part, another part name, a broken or cut-off body, a client already gone), 413 `too_large` past
+ * the cap. The caller discards the blob if this throws.
  */
 async function receiveFile(
   req: FastifyRequest,
@@ -157,13 +180,23 @@ async function receiveFile(
   key: string,
   deadlines: UploadDeadlines,
 ): Promise<{ name: string; size: number; head: Buffer }> {
-  const parts = req.parts(); // starts consuming the body
-  const disarm = armDeadlines(req, deadlines);
+  // A client that left while the pre-check ran will never produce another event on its request: the
+  // parser, which only starts listening below, would wait for it forever.
+  if (req.raw.destroyed) throw invalid();
+  // `parts()` is a generator: nothing runs until the first `next()`, which (synchronously, in this same
+  // turn, so no event can slip between the check above and it) attaches the parser's listeners and pipes
+  // the body into it.
+  const parts = req.parts();
+  const first = nextPart(parts);
+  let file: Readable | undefined;
+  const deadline = armDeadlines(req, deadlines, (err) => file?.destroy(err));
   try {
-    const part = await nextPart(parts);
+    const part = await beforeDeadline(first, deadline);
     if (part?.type !== "file" || part.fieldname !== FILE_FIELD) throw invalid();
+    file = part.file;
     const meter = metered(part.file);
     try {
+      // Settles on expiry too: `onExpire` destroys the file stream it reads.
       await blobs.put(key, meter.stream);
     } catch (err) {
       if (err instanceof TooLarge) throw new AppError(413, "too_large");
@@ -171,11 +204,43 @@ async function receiveFile(
       throw err;
     }
     if (part.file.truncated) throw new AppError(413, "too_large"); // the parser's own cap, a backstop
-    if (await nextPart(parts)) throw invalid();
+    if (await beforeDeadline(nextPart(parts), deadline)) throw invalid();
     return { name: sanitizeFileName(part.filename), size: meter.size(), head: meter.head() };
   } finally {
-    disarm();
+    deadline.disarm();
   }
+}
+
+/**
+ * This request's claim on its principal's upload slot, given back exactly once: by the handler when it
+ * ends, or as soon as the client's connection closes, whichever is first — so a handler still waiting
+ * on something after its client vanished does not keep the slot. The listener is attached before the
+ * handler's first await; a client already gone gets no slot.
+ */
+function claimSlot(req: FastifyRequest, slots: UploadSlots) {
+  const socket = req.raw.socket as Socket | undefined;
+  let holder: string | null = null;
+  let gone = false;
+  const giveBack = () => {
+    if (holder !== null) slots.release(holder);
+    holder = null;
+  };
+  const onClose = () => {
+    gone = true;
+    giveBack();
+  };
+  socket?.once("close", onClose);
+  return {
+    take(principalId: string): void {
+      if (gone || socket?.destroyed || req.raw.destroyed) throw invalid(); // nobody is left to answer
+      if (!slots.tryTake(principalId)) throw new AppError(429, "rate_limited");
+      holder = principalId;
+    },
+    done(): void {
+      giveBack();
+      socket?.off("close", onClose);
+    },
+  };
 }
 
 /** After a refusal in mid-body: detach the parser and let the rest drain unread, so the answer goes out now. */
@@ -189,7 +254,7 @@ function stopReading(req: FastifyRequest): void {
 const attachmentView = z.object({ id: z.string(), name: z.string(), size: z.number(), inline: z.boolean() });
 
 export function registerAttachmentRoutes(app: FastifyInstance): void {
-  const { db, config, blobs } = app.deps;
+  const { db, config, blobs, uploads } = app.deps;
 
   const uploaders = new WeakMap<FastifyRequest, string>();
   const uploadLimit = app.createRateLimit({
@@ -199,8 +264,6 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
   });
 
   const deadlines: UploadDeadlines = { idleMs: config.uploadIdleTimeoutMs, totalMs: config.uploadTotalTimeoutMs };
-  /** Uploads in progress per principal. */
-  const inProgress = new Map<string, number>();
 
   /** After the cheap checks: hold a key, stream the file, then re-check and insert under the send locks. */
   async function acceptUpload(req: FastifyRequest, reply: FastifyReply, conversationId: string, uploaderId: string) {
@@ -263,19 +326,16 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
         },
       },
       async (req, reply) => {
-        const me = await requirePrincipal(req);
-        uploaders.set(req, me.id);
-        const limited = await uploadLimit(req);
-        if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
-        const running = inProgress.get(me.id) ?? 0;
-        if (running >= MAX_CONCURRENT_UPLOADS) throw new AppError(429, "rate_limited");
-        inProgress.set(me.id, running + 1);
+        const slot = claimSlot(req, uploads); // before the first await
         try {
+          const me = await requirePrincipal(req);
+          uploaders.set(req, me.id);
+          const limited = await uploadLimit(req);
+          if ("isExceeded" in limited && limited.isExceeded) throw new AppError(429, "rate_limited");
+          slot.take(me.id);
           return await acceptUpload(req, reply, req.params.id, me.id);
         } finally {
-          const left = (inProgress.get(me.id) ?? 1) - 1;
-          if (left > 0) inProgress.set(me.id, left);
-          else inProgress.delete(me.id);
+          slot.done();
         }
       },
     );

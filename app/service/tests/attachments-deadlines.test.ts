@@ -1,10 +1,11 @@
+import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.ts";
 import { api, befriend, signUp, type Actor } from "./helpers/actors.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { BOUNDARY, CLOSING, MULTIPART, multipart, destroyOpenRequests, openRequest, partHead } from "./helpers/multipart.ts";
-import { closeAllSockets, connect } from "./helpers/ws.ts";
+import { closeAllSockets, connect, listen } from "./helpers/ws.ts";
 
 const IDLE_MS = 400;
 const TOTAL_MS = 2000;
@@ -94,6 +95,36 @@ describe("upload deadlines", () => {
     expect(cut).toBe(true);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(TOTAL_MS - 50);
     await nothingLeft();
+  });
+
+  it("a handler whose client vanished before the body was read settles and lets go of everything", async () => {
+    const { a, dm } = await pair();
+    const { port } = await listen(app);
+    const blocker = await db.pool.connect();
+    try {
+      // Hold the handler in the pre-check (recording the blob key waits for this lock) while the client leaves.
+      await blocker.query("begin");
+      await blocker.query("lock table pending_blobs in exclusive mode");
+      const socket = net.connect({ port, host: "127.0.0.1" });
+      socket.on("error", () => {});
+      await new Promise<void>((resolve) => socket.once("connect", () => resolve()));
+      const head = [
+        `POST /api/conversations/${dm}/attachments HTTP/1.1`,
+        `Host: 127.0.0.1:${port}`,
+        `Cookie: ${a.cookie}`,
+        `Content-Type: ${MULTIPART}`,
+        "Content-Length: 1048576",
+      ].join("\r\n");
+      socket.write(`${head}\r\n\r\n${partHead({ name: "file", filename: "x.bin", type: "application/octet-stream" })}abc`);
+      await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(1));
+      socket.destroy();
+      await vi.waitFor(() => expect(app.deps.uploads.inProgress(a.id)).toBe(0));
+      await blocker.query("commit");
+    } finally {
+      blocker.release();
+    }
+    await nothingLeft();
+    expect(probe.puts).toEqual([]); // nothing was ever written
   });
 
   it("a normal upload still succeeds, also one that pauses for less than the idle deadline", async () => {

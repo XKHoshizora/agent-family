@@ -14,6 +14,7 @@ import { AppError, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
+import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
@@ -37,6 +38,8 @@ export interface Deps {
   conversations: ConversationEvents;
   /** Per-app registry of "a direct-chat read marker moved" listeners; fired after the update. */
   reads: ReadEvents;
+  /** Uploads in progress per principal (at most 3 each). */
+  uploads: UploadSlots;
 }
 
 declare module "fastify" {
@@ -60,6 +63,7 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
     social: overrides.social ?? createSocialEvents(),
     conversations: overrides.conversations ?? createConversationEvents(),
     reads: overrides.reads ?? createReadEvents(),
+    uploads: overrides.uploads ?? createUploadSlots(),
   };
 
   const app = Fastify({
@@ -75,14 +79,14 @@ export async function buildApp(overrides: Partial<Deps> = {}): Promise<FastifyIn
   app.setSerializerCompiler(serializerCompiler);
   registerErrorHandling(app);
 
-  // Cross-site request forgery: a browser names the page that sent a request in `Origin`. A state-changing
-  // API request from any other origin is refused before routing work, body parsing or any handler.
-  // Requests without `Origin` (non-browser clients, same-origin GETs) pass.
+  // Cross-site request forgery: a browser names the page that sent a request in `Origin`. Every
+  // state-changing request from any other origin is refused before body parsing or any handler. It
+  // deliberately looks at the method only, never at the path: the router decodes the path (`/%61pi/…`
+  // reaches `/api/…`), so any decision by the raw URL could be sidestepped. Requests without `Origin`
+  // (non-browser clients, same-origin GETs) pass.
   const fromApp = appOriginCheck(config.appOrigin);
   app.addHook("onRequest", async (req) => {
     if (!STATE_CHANGING.has(req.method)) return;
-    const path = req.url.split("?")[0] ?? "";
-    if (path !== "/api" && !path.startsWith("/api/")) return;
     const origin = req.headers.origin;
     if (origin !== undefined && !fromApp(origin)) throw new AppError(403, "forbidden");
   });
