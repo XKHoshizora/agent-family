@@ -20,13 +20,34 @@ to `.env` and fill in the password. Never commit `.env`.
 
 ## Commands
 
+Development (TypeScript run directly by `tsx`; tests by vitest):
+
 ```
 npm install
-npm run migrate   # node-pg-migrate up against DATABASE_URL
-npm run dev       # tsx watch src/server.ts
-npm test          # vitest, against TEST_DATABASE_URL
-npm run build     # type-check only (tsc --noEmit)
+npm run migrate      # node-pg-migrate up against DATABASE_URL
+npm run dev          # tsx watch src/server.ts
+npm test             # vitest, against TEST_DATABASE_URL
+npm run typecheck    # tsc --noEmit (src and tests)
+npm run invite:create -- [--ttl-hours <n>]          # prints a new invite code
+npm run inbox:list -- [--to <email>]                # the mail outbox
+npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (cron)
 ```
+
+Production: build once with the dev dependencies installed, then run plain Node on the build (no `tsx`,
+no TypeScript at run time; a production install `npm ci --omit=dev` is enough):
+
+```
+npm run build                    # tsc -p tsconfig.build.json: src/ → dist/ (git-ignored), with source maps
+npm run migrate:prod             # node dist/cli.js migrate (finds migrations/ next to dist/)
+npm start                        # node dist/server.js
+npm run invite:create:prod -- [--ttl-hours <n>]
+npm run inbox:list:prod -- [--to <email>]
+npm run attachments:sweep:prod -- [--older-than <min>]
+```
+
+Deploy `dist/`, `migrations/`, `package.json` and `package-lock.json` together: the build looks for
+`../migrations` from `dist/`. `tests/build.test.ts` keeps `npm start` and the `:prod` scripts on `node dist/…`
+and every run-time import of `src/` a production dependency.
 
 ## Configuration (`src/config.ts`)
 
@@ -88,7 +109,7 @@ only these endpoints are exposed: `POST /sign-in/email`, `POST /sign-out`, `GET 
 Each of these declares its query and body; anything else is 400 before Better Auth sees it. A
 `callbackURL` / `redirectTo` must be a path on the site (not `//…`) or a URL on `APP_ORIGIN`. No response
 body carries the session token (sign-in's `token` field is removed): the `HttpOnly` cookie is the session.
-Mail goes to the `mail_outbox` table. CLI: `npx tsx src/cli.ts invite:create [--ttl-hours n]` / `inbox:list [--to <email>]`.
+Mail goes to the `mail_outbox` table. CLI: `npm run invite:create` / `inbox:list` (`:prod` on the build; see Commands).
 The address the IP-keyed limits count is set up as described under Deployment.
 
 ## Deployment
@@ -256,7 +277,7 @@ server's `Content-Type` (markup such as HTML or SVG is always `application/octet
 `HEAD /api/attachments/:id` answers the same status and headers (`Content-Length` included) without a body,
 and without reading the file.
 
-**Unsent uploads** are deleted by `npx tsx src/cli.ts attachments:sweep [--older-than <minutes>]`
+**Unsent uploads** are deleted by `npm run attachments:sweep:prod -- [--older-than <minutes>]`
 (default 60; run it from cron). Send an upload within that time. A blob that cannot be deleted keeps its
 row and is retried on the next sweep.
 

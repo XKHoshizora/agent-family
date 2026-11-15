@@ -8,10 +8,18 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
-    "build": "tsc --noEmit",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "start": "node --enable-source-maps dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "migrate": "tsx src/cli.ts migrate",
-    "test": "vitest run"
+    "migrate:prod": "node --enable-source-maps dist/cli.js migrate",
+    "invite:create": "tsx src/cli.ts invite:create",
+    "invite:create:prod": "node --enable-source-maps dist/cli.js invite:create",
+    "inbox:list": "tsx src/cli.ts inbox:list",
+    "inbox:list:prod": "node --enable-source-maps dist/cli.js inbox:list",
+    "attachments:sweep": "tsx src/cli.ts attachments:sweep",
+    "attachments:sweep:prod": "node --enable-source-maps dist/cli.js attachments:sweep"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1169.0",
