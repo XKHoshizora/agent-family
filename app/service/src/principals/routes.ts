@@ -35,6 +35,9 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
 
   // Handle lookup is the only way to probe for handles, so it is throttled per principal.
   const lookupLimit = perPrincipalLimit(app, 30);
+  // Others see both everywhere (and every avatar is a blob write): 10 changes a minute each.
+  const renameLimit = perPrincipalLimit(app, 10);
+  const avatarLimit = perPrincipalLimit(app, 10);
 
   api.patch(
     "/api/me",
@@ -48,6 +51,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
+      await renameLimit(req, me.id);
       await updateDisplayName(db, me.id, req.body.displayName);
       return { id: me.id, handle: me.handle, displayName: req.body.displayName };
     },
@@ -121,6 +125,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       },
       async (req) => {
         const me = await requirePrincipal(req);
+        await avatarLimit(req, me.id);
         const body = req.body;
         // The declared Content-Type and any file name are ignored: only the bytes decide.
         const { mime } = await sniff(body.subarray(0, SNIFF_BYTES));
