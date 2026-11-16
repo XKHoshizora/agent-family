@@ -3,6 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 /** A search starts this long after the last keystroke. */
 export const SEARCH_DEBOUNCE_MS = 300;
 
+/** The service accepts 1-100 characters. */
+const MAX_QUERY = 100;
+
 const IDLE = { status: "idle", q: "", hits: [], nextBefore: null, loadingMore: false, error: null, moreError: null };
 
 const keyOf = (m) => `${m.conversationId}:${m.seq}`;
@@ -40,7 +43,8 @@ export function useMessageSearch(query, search, scope = "") {
 
   useEffect(() => {
     ticket.current += 1; // whatever an earlier query still has in flight is no longer wanted
-    if (!q) {
+    if (!q || [...q].length > MAX_QUERY) {
+      // (Nothing to ask, or more than the service accepts: it would refuse with 400.)
       setState(IDLE);
       return undefined;
     }

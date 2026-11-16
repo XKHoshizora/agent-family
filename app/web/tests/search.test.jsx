@@ -99,6 +99,18 @@ describe("global search in the conversation list", () => {
     expect(searchAll).toHaveBeenCalledWith({ q: "聚餐", before: null, limit: 20 });
   });
 
+  it("never asks for more than 100 characters: the box is capped and a longer text is not sent", async () => {
+    const searchAll = vi.fn(async () => page([]));
+    await openApp({ sync: baseSync(), api: { searchAll } });
+    expect(listBox().maxLength).toBe(100);
+    typeInList("长".repeat(101));
+    await elapse(500);
+    expect(searchAll).not.toHaveBeenCalled();
+    typeInList("长".repeat(100));
+    await elapse(300);
+    expect(searchAll).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the hits below the local matches with the conversation, the sender and the match emphasised", async () => {
     const searchAll = vi.fn(async () => page([hit(50, "周末聚餐在哪里")]));
     await openApp({ sync: baseSync(), api: { searchAll } });
@@ -269,7 +281,26 @@ describe("search inside a conversation", () => {
     expect(rows[0].querySelector(".row-name").textContent).toBe("小安");
     expect(rows[0].querySelector("mark").textContent).toBe("聚餐");
     expect(screen.getByText("2+ 条结果")).toBeTruthy();
-    expect(listEl().hidden).toBe(true);
+    expect(listEl().style.display).toBe("none");
+    expect(getComputedStyle(listEl()).display).toBe("none");
+  });
+
+  it("closing the search brings the list back where it was, or at the newest messages when it was there", async () => {
+    await inChat({ searchConversation: vi.fn(async () => page([hit(50, "周末聚餐")])) });
+    const list = tallList(2400);
+    typeInChat("聚餐");
+    await elapse(300);
+    await click(button("关闭会话搜索"));
+    expect(list.scrollTop).toBe(3000); // it was at the end: stays at the end
+    await openChatSearch();
+    fireEvent.scroll(list);
+    list.scrollTop = 500;
+    fireEvent.scroll(list);
+    typeInChat("聚餐");
+    await elapse(300);
+    list.scrollTop = 0; // (the browser may have reset it while hidden)
+    await click(button("关闭会话搜索"));
+    expect(list.scrollTop).toBe(500);
   });
 
   it("pages with nextBefore", async () => {
@@ -340,7 +371,7 @@ describe("search inside a conversation", () => {
     fireEvent.keyDown(chatBox(), { key: "Escape" });
     await flush();
     expect(screen.queryByLabelText("在本会话中搜索")).toBeNull();
-    expect(listEl().hidden).toBe(false);
+    expect(listEl().style.display).toBe("");
     expect(hasMessage("m200")).toBe(true);
     await openChatSearch();
     typeInChat("聚餐");
@@ -456,6 +487,18 @@ describe("a detached window", () => {
     const list = tallList(1000);
     await click(button("查看更新的消息"));
     expect(list.scrollTop).toBe(1000);
+  });
+
+  it("keeps the place when the window joins the newest messages while reading forward", async () => {
+    const { listMessages } = await detached();
+    const list = tallList(2400);
+    fireEvent.scroll(list);
+    await flush();
+    fireEvent.scroll(list);
+    await flush();
+    expect(listMessages).toHaveBeenLastCalledWith(G1, { before: 175, limit: 50 });
+    expect(bar()).toBeNull();
+    expect(list.scrollTop).toBe(2400);
   });
 
   it("scrolling to the top loads older messages into the window, not into the newest ones", async () => {

@@ -408,14 +408,15 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     const model = getModel();
     if (!model.conversations[conversationId]) return { ok: false, error: dropped("not_found") };
     if (!Number.isSafeInteger(seq) || seq < 1) return { ok: false, error: dropped("invalid_request") };
+    // Whatever way this jump goes, it is the latest: a far jump still loading must not replace it afterwards.
+    const n = ++windowCounter;
+    jumps.set(conversationId, n);
     if ((model.messages[conversationId] ?? []).some((m) => m.seq === seq)) {
       closeWindowOf(conversationId);
       return { ok: true };
     }
     if (model.windows[conversationId]?.messages.some((m) => m.seq === seq)) return { ok: true };
     const token = tokenFor(conversationId);
-    const n = ++windowCounter;
-    jumps.set(conversationId, n);
     try {
       const page = await api.listMessages(conversationId, { before: seq + JUMP_AFTER, limit: JUMP_WINDOW });
       const why = staleness(token);

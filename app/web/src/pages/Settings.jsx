@@ -182,7 +182,6 @@ function ProfilePage() {
     <section className="page" aria-label="设置">
       <BackButton />
       <header className="profile-head">
-        <Avatar id={ME} size={84} online />
         <div>
           <p className="eyebrow">我的资料</p>
           <h2>{account.displayName} <Tag tone="human">真人</Tag></h2>

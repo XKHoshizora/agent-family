@@ -6,7 +6,16 @@ export function reducer(state, action) {
     case "nav/openConv":
       return {
         ...state,
-        nav: { ...state.nav, section: "chat", convId: action.convId, view: "chat", pane: "main", ...(action.patch || {}) },
+        nav: {
+          ...state.nav,
+          section: "chat",
+          convId: action.convId,
+          view: "chat",
+          pane: "main",
+          // (A message to scroll to belongs to the conversation it was asked for.)
+          focus: state.nav.focus?.convId === action.convId ? state.nav.focus : null,
+          ...(action.patch || {}),
+        },
       };
     case "toast":
       return { ...state, seq: state.seq + 1, toast: { id: state.seq + 1, text: action.text } };

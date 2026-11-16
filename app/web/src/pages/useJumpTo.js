@@ -10,13 +10,17 @@ const QUIET = ["stale", "stopped", "superseded"];
  * the conversation open at where it was, with a toast.
  */
 export function useJumpTo() {
-  const { dispatch, actions } = useStore();
+  const { state, dispatch, actions } = useStore();
   const counter = useRef(0);
+  /** The conversation open now: a jump that finishes after I moved on does not scroll the other one. */
+  const open = useRef(null);
+  open.current = state.nav.convId;
   return useCallback(
     async (conversationId, seq) => {
       dispatch({ type: "nav/openConv", convId: conversationId });
       const res = await actions.jumpToMessage(conversationId, seq);
       if (res.ok) {
+        if (open.current !== conversationId) return;
         counter.current += 1;
         dispatch({ type: "nav", patch: { focus: { convId: conversationId, seq, n: counter.current } } });
       } else if (!QUIET.includes(res.error?.code)) {

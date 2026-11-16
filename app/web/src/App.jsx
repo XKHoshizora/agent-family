@@ -2,6 +2,7 @@ import React, { Suspense, lazy } from "react";
 import { StoreProvider } from "./data/store.jsx";
 import { AuthRoot } from "./auth/AuthRoot.jsx";
 import { Loading } from "./auth/screens.jsx";
+import { ChunkBoundary } from "./ui/ChunkBoundary.jsx";
 
 // The chat application (pages, rail, icons they use) is its own chunk: the sign-in, register, verify and reset
 // screens never download it, only a signed-in session does.
@@ -13,9 +14,11 @@ export function App(props) {
     <AuthRoot {...props}>
       {(dataLayer, key) => (
         <StoreProvider key={key} dataLayer={dataLayer}>
-          <Suspense fallback={<Loading />}>
-            <Shell />
-          </Suspense>
+          <ChunkBoundary>
+            <Suspense fallback={<Loading />}>
+              <Shell />
+            </Suspense>
+          </ChunkBoundary>
         </StoreProvider>
       )}
     </AuthRoot>

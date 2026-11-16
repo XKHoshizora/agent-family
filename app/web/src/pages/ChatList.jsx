@@ -31,7 +31,7 @@ export function SearchBox({ value, onChange, placeholder }) {
   return (
     <label className="search">
       <Search size={18} aria-hidden="true" />
-      <input type="search" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder} />
+      <input type="search" maxLength={100} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={placeholder} />
     </label>
   );
 }

@@ -93,7 +93,9 @@ export function deferred() {
 }
 
 /** Lets every pending promise continuation run. */
-export const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+export const settle = async () => {
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 export const apiError = (status, code, reason = null) => new ApiError(status, code, reason);
 

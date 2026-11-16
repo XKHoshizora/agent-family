@@ -30,7 +30,14 @@ export const request = (id, who, extra = {}) => ({
 /** Lets pending promises and zero-delay timers run. */
 export const flush = () =>
   act(async () => {
-    for (let i = 0; i < 6; i += 1) await vi.advanceTimersByTimeAsync(0);
+    // At least 6 turns; then on while the work is still moving (timers scheduled or cleared), at most 60 in all.
+    let before = -1;
+    for (let i = 0; i < 60; i += 1) {
+      await vi.advanceTimersByTimeAsync(0);
+      const count = vi.getTimerCount();
+      if (i >= 5 && count === before) break;
+      before = count;
+    }
   });
 /** Moves the fake clock forward, running what falls due. */
 export const elapse = (ms) =>
@@ -42,7 +49,7 @@ export const push = (transport, event) => act(() => transport.socket.emit(event)
 
 /** Fake timers and browser stubs the pages need; call from beforeEach, and vi.useRealTimers() in afterEach. */
 export function installBrowser() {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate", "Date"] });
   vi.setSystemTime(NOW);
   vi.spyOn(document, "hasFocus").mockReturnValue(true);
   vi.spyOn(Element.prototype, "getClientRects").mockImplementation(() => [{ top: 0 }]);

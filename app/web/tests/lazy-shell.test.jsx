@@ -2,7 +2,7 @@
 // The signed-in application is a separate chunk: the account screens never ask for it, a signed-in session shows the
 // loading view until it has arrived.
 import React from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
 import { App } from "../src/App.jsx";
 import { createDataLayer } from "../src/data/store.jsx";
@@ -15,6 +15,10 @@ vi.mock("../src/AppShell.jsx", async () => {
   return { default: () => <div>应用已载入</div> };
 });
 
+beforeEach(() => {
+  shell.loads = 0;
+  shell.gate = null;
+});
 afterEach(() => {
   cleanup();
   history.replaceState(null, "", "/");

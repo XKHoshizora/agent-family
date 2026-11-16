@@ -114,7 +114,8 @@ export function ChatView({ conv }) {
     if (!list) return;
     if (showHits) savedScroll.current = list.scrollTop;
     else if (savedScroll.current > 0) {
-      list.scrollTop = savedScroll.current;
+      // (Messages may have arrived while the results covered the list: at the newest ones, stay at the newest.)
+      list.scrollTop = atBottom.current && !detached ? list.scrollHeight : savedScroll.current;
       savedScroll.current = 0;
     }
   }, [showHits]);
@@ -204,7 +205,8 @@ export function ChatView({ conv }) {
       readFailed.current = null;
       setAttention((n) => n + 1);
     }
-    atBottom.current = bottom;
+    // (A detached window never counts as "at the newest message": when it joins them the view must stay where it is.)
+    atBottom.current = bottom && !detached;
     if (list.scrollTop <= TOP_SLACK_PX) loadOlder({ byScroll: true });
     if (bottom) loadNewer({ byScroll: true });
   }
@@ -296,10 +298,10 @@ export function ChatView({ conv }) {
         <Notice
           tone="info"
           action={
-            <>
+            <div className="notice-actions">
               <Btn small onClick={() => loadNewer({ byScroll: false })}>查看更新的消息</Btn>
               <Btn small variant="primary" onClick={backToNewest}>回到最新消息</Btn>
-            </>
+            </div>
           }
         >
           <strong>正在查看较早的消息</strong>
@@ -314,7 +316,7 @@ export function ChatView({ conv }) {
           <SearchFooter search={search} emptyText="没有找到相关消息，请换个关键词" />
         </ul>
       )}
-      <ol className="messages" ref={listRef} onScroll={onScroll} hidden={showHits}>
+      <ol className="messages" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
         {messages.map((msg) => (
           <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}

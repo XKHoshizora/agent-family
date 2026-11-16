@@ -155,7 +155,7 @@ describe("avatar", () => {
     const uploadAvatar = vi.fn(async () => ({ ok: true }));
     await openApp({ sync: baseSync, api: { uploadAvatar } });
     await goSettings();
-    const mine = () => [...document.querySelectorAll(".rail-me img, .settings-me img, .profile-head img")].map((i) => i.getAttribute("src"));
+    const mine = () => [...document.querySelectorAll(".rail-me img, .settings-me img, .avatar-editor img")].map((i) => i.getAttribute("src"));
     expect(mine().every((src) => src === `/api/principals/${ME_ID}/avatar`)).toBe(true);
     const file = png();
     await choose(file);

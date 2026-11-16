@@ -12,7 +12,7 @@ import {
   openWindow,
 } from "../src/data/model.js";
 import { toView } from "../src/data/viewmodel.js";
-import { ANN, BO, G1, apiError, deferred, fakeTimers, fakeTransport, group, range, settle, syncOf, wire } from "./fixtures.js";
+import { ANN, BO, G1, apiError, deferred, fakeTimers, fakeTransport, group, range, syncOf, wire } from "./fixtures.js";
 
 const SENDERS = [ANN, BO];
 const held = () => applySync(initial(), syncOf([group(G1, { lastSeq: 200, readSeq: 200 })], range(G1, 171, 200, SENDERS)));
@@ -101,7 +101,7 @@ async function start(api) {
   const layer = createDataLayer({ transport, api, timers: fakeTimers(), now: () => 0, random: () => 0.5, uuid: () => "tx-1" });
   layers.push(layer);
   layer.start();
-  await settle();
+  await vi.waitFor(() => expect(layer.getSnapshot().model.synced).toBe(true));
   return { layer, transport };
 }
 const fakeApi = (over = {}) => ({
@@ -121,6 +121,17 @@ describe("the actions that load a window", () => {
     expect(await layer.actions.jumpToMessage(G1, 50)).toEqual({ ok: true });
     expect(api.listMessages).toHaveBeenCalledWith(G1, { before: 75, limit: 50 });
     expect(layer.getSnapshot().model.windows[G1].focusSeq).toBe(50);
+  });
+
+  it("a far jump that resolves after a later pick (even of a held message) does not replace it", async () => {
+    const slow = deferred();
+    const api = fakeApi({ listMessages: vi.fn(() => slow.promise) });
+    const { layer } = await start(api);
+    const far = layer.actions.jumpToMessage(G1, 50);
+    expect(await layer.actions.jumpToMessage(G1, 190)).toEqual({ ok: true });
+    slow.resolve(page(25, 74, 25));
+    expect((await far).error.code).toBe("superseded");
+    expect(layer.getSnapshot().model.windows[G1]).toBeUndefined();
   });
 
   it("a held message needs no request, and closes a window that is open", async () => {
