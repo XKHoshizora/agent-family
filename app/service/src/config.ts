@@ -35,6 +35,67 @@ function parseTrustProxy(raw: string | undefined): TrustProxy | string {
   return entries;
 }
 
+export const PROTOCOLS = ["openai_chat", "openai_responses", "anthropic", "gemini"] as const;
+export type Protocol = (typeof PROTOCOLS)[number];
+export const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+
+/** A model the site itself offers. `apiKeyEnv` names the environment variable holding the upstream key. */
+export interface SiteModel {
+  id: string;
+  label: string;
+  tier: "free" | "paid";
+  protocol: Protocol;
+  baseUrl: string;
+  apiKeyEnv: string;
+  model: string;
+  /** Micro-points per token. */
+  inputMicroPerToken: number;
+  outputMicroPerToken: number;
+  maxOutputTokens: number;
+  contextTokens: number;
+  vision: boolean;
+  pdf: boolean;
+  reasoning: ReasoningLevel[];
+}
+
+const siteModelSchema = z.strictObject({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(100),
+  tier: z.enum(["free", "paid"]),
+  protocol: z.enum(PROTOCOLS),
+  baseUrl: z.url(),
+  apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name"),
+  model: z.string().min(1),
+  inputMicroPerToken: z.number().int().min(0),
+  outputMicroPerToken: z.number().int().min(0),
+  maxOutputTokens: z.number().int().positive(),
+  contextTokens: z.number().int().positive(),
+  vision: z.boolean(),
+  pdf: z.boolean(),
+  reasoning: z.array(z.enum(REASONING_LEVELS)),
+});
+
+/** Parses a JSON-valued variable; on failure adds one issue (the variable's name comes from the schema key). */
+function jsonVariable<T extends z.ZodType>(schema: T, fallback: z.output<T>) {
+  return optionalString.transform((v, ctx): z.output<T> => {
+    if (v === undefined) return fallback;
+    let json: unknown;
+    try {
+      json = JSON.parse(v);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "must be valid JSON" });
+      return z.NEVER;
+    }
+    const result = schema.safeParse(json);
+    if (!result.success) {
+      ctx.addIssue({ code: "custom", message: result.error.issues.map((i) => `${i.path.join(".") || "value"}: ${i.message}`).join(", ") });
+      return z.NEVER;
+    }
+    return result.data;
+  });
+}
+
 const optionalString = z
   .string()
   .optional()
@@ -44,6 +105,31 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   APP_ORIGIN: z.url(),
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),
+  /** Encrypts providers' API keys at rest. Required: the service does not start without it. */
+  PROVIDER_KEY_SECRET: z.string().min(32, "PROVIDER_KEY_SECRET must be at least 32 characters"),
+  /** JSON array of the models the site offers (see SiteModel); default none. */
+  SITE_MODELS: jsonVariable(z.array(siteModelSchema), []),
+  /** The free daily allowance of site-model use, in whole points. */
+  FREE_DAILY_POINTS: optionalString
+    .transform((v) => (v === undefined ? "200" : v))
+    .pipe(z.string().regex(/^[0-9]{1,12}$/, "FREE_DAILY_POINTS must be a whole number of points (0 or more)"))
+    .transform((v) => BigInt(v) * 1_000_000n),
+  /** The time zone whose midnight starts a new free-allowance day. */
+  SITE_TIMEZONE: optionalString
+    .transform((v) => (v === undefined ? "Asia/Shanghai" : v))
+    .refine((v) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: v });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "SITE_TIMEZONE must be an IANA time zone name such as Asia/Shanghai"),
+  /** JSON object: how many Agents each account tier may own. Must contain `free`. */
+  AGENT_TIERS: jsonVariable(
+    z.record(z.string().min(1), z.number().int().min(0)).refine((t) => "free" in t, "must contain a \"free\" tier"),
+    { free: 20 } as Record<string, number>,
+  ),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -113,6 +199,25 @@ export interface Config {
   databaseUrl: string;
   appOrigin: string;
   authSecret: string;
+  /** Encrypts providers' API keys at rest (src/providers/crypto.ts only). */
+  providerKeySecret: string;
+  /** The models the site offers. Their upstream keys are read from the variables named by `apiKeyEnv`. */
+  siteModels: SiteModel[];
+  /** Free daily allowance of site-model use, in micro-points. */
+  freeDailyMicro: bigint;
+  /** IANA name of the time zone whose midnight ends a free-allowance day. */
+  siteTimezone: string;
+  /** Agents an account may own, by tier; always has `free`. */
+  agentTiers: Record<string, number>;
+  /** Replies one owner may have running at once; further ones wait queued. */
+  agentMaxConcurrentRuns: number;
+  /** Replies one owner may trigger per minute. */
+  agentRunsPerMinute: number;
+  /** A reply still running after this long is ended. */
+  agentRunTimeoutMs: number;
+  /** For a provider model that does not say: its context window and its maximum output, in tokens. */
+  providerDefaultContextTokens: number;
+  providerDefaultMaxOutputTokens: number;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -167,6 +272,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       "Invalid configuration: S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together",
     );
   }
+  for (const m of e.SITE_MODELS) {
+    const key = env[m.apiKeyEnv];
+    if (key === undefined || key === "") {
+      throw new Error(`Invalid configuration: SITE_MODELS: model "${m.id}" needs the environment variable ${m.apiKeyEnv} (its apiKeyEnv), which is not set`);
+    }
+  }
+  const duplicate = e.SITE_MODELS.find((m, i) => e.SITE_MODELS.findIndex((o) => o.id === m.id) !== i);
+  if (duplicate) throw new Error(`Invalid configuration: SITE_MODELS: id "${duplicate.id}" appears more than once`);
   // The per-upload deadlines govern uploads: the server-wide timeouts must never cut one off first.
   const httpRequestTimeoutMs = e.HTTP_REQUEST_TIMEOUT_MS ?? e.UPLOAD_TOTAL_TIMEOUT_MS + 60_000;
   if (e.HTTP_CONNECTION_TIMEOUT_MS <= e.UPLOAD_IDLE_TIMEOUT_MS) {
@@ -179,6 +292,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     databaseUrl: e.DATABASE_URL,
     appOrigin: e.APP_ORIGIN,
     authSecret: e.AUTH_SECRET,
+    providerKeySecret: e.PROVIDER_KEY_SECRET,
+    siteModels: e.SITE_MODELS,
+    freeDailyMicro: e.FREE_DAILY_POINTS,
+    siteTimezone: e.SITE_TIMEZONE,
+    agentTiers: e.AGENT_TIERS,
+    agentMaxConcurrentRuns: 2,
+    agentRunsPerMinute: 20,
+    agentRunTimeoutMs: 120_000,
+    providerDefaultContextTokens: 16_000,
+    providerDefaultMaxOutputTokens: 2048,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

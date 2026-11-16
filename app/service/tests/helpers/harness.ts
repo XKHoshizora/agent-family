@@ -58,6 +58,7 @@ export function useApp(
       ...process.env,
       DATABASE_URL: testDatabaseUrl(),
       AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+      PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
       APP_ORIGIN: "http://localhost:5173",
       RATE_LIMIT_SCALE: "1000",
       SWEEP_INTERVAL_MINUTES: "0", // no background timer unless a test asks for one

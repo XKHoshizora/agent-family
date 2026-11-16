@@ -188,7 +188,7 @@ describe("body deadline", () => {
   });
 
   it("is HTTP_BODY_TIMEOUT_MS, 30 seconds unless set", () => {
-    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
     expect(loadConfig(base).httpBodyTimeoutMs).toBe(30_000);
     expect(loadConfig({ ...base, HTTP_BODY_TIMEOUT_MS: "1500" }).httpBodyTimeoutMs).toBe(1500);
     for (const bad of ["0", "-1", "soon"]) expect(() => loadConfig({ ...base, HTTP_BODY_TIMEOUT_MS: bad })).toThrow(/HTTP_BODY_TIMEOUT_MS/);

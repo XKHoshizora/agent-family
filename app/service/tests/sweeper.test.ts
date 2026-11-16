@@ -24,7 +24,7 @@ function fakeLog() {
 }
 
 describe("config", () => {
-  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
   it("SWEEP_INTERVAL_MINUTES defaults to 15, 0 disables, anything but a whole number >= 0 is refused", () => {
     expect(loadConfig(base).sweepIntervalMinutes).toBe(15);
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "0" }).sweepIntervalMinutes).toBe(0);
@@ -38,7 +38,7 @@ describe("config", () => {
 });
 
 describe("config HOST", () => {
-  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
   it("defaults to 0.0.0.0; takes an IP address or localhost; anything else is refused", () => {
     expect(loadConfig(base).host).toBe("0.0.0.0");
     expect(loadConfig({ ...base, HOST: "" }).host).toBe("0.0.0.0");

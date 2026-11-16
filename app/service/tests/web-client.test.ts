@@ -221,7 +221,7 @@ describe("WEB_DIST unset", () => {
 });
 
 describe("WEB_DIST configuration", () => {
-  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
   test("unset or empty means off; a value is resolved to an absolute path", () => {
     expect(loadConfig({ ...base }).webDist).toBeUndefined();
     expect(loadConfig({ ...base, WEB_DIST: "" }).webDist).toBeUndefined();

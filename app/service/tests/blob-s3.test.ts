@@ -51,7 +51,7 @@ describe("s3BlobStore (fake client)", () => {
 });
 
 describe("blob store selection", () => {
-  const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+  const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
   it("uses the filesystem unless S3 is configured", () => {
     expect(typeof createBlobStore(loadConfig({ ...base, BLOB_DIR: "./tmp-blobs" })).put).toBe("function");
     expect(loadConfig({ ...base }).s3).toBeUndefined();

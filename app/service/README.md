@@ -57,6 +57,13 @@ and every run-time import of `src/` a production dependency.
 ## Configuration (`src/config.ts`)
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
+`PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable),
+`SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
+`openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl`, `apiKeyEnv` (the name of another variable that holds the upstream key, so the JSON carries
+no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens`,
+`vision`, `pdf`, `reasoning` (levels from `low`..`max`)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
+`SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
+contain `free`, default `{"free":20}`),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),

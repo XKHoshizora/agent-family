@@ -14,7 +14,7 @@ import { useApp } from "./helpers/harness.ts";
 
 const { app } = useApp();
 
-const BASE = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+const BASE = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
 
 /** The test app's wiring with production rate limits and `config` on top; shares the test pool. */
 async function variant(config: Partial<Config>, run: (target: FastifyInstance) => Promise<void>): Promise<void> {

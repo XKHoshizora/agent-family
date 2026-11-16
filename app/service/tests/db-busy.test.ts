@@ -19,7 +19,7 @@ async function drainPool(): Promise<() => void> {
 
 describe("waiting for a database connection (DB_ACQUIRE_TIMEOUT_MS)", () => {
   it("defaults to 10 s and must be a positive number of milliseconds", () => {
-    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
     expect(loadConfig(base).dbAcquireTimeoutMs).toBe(10_000);
     expect(loadConfig({ ...base, DB_ACQUIRE_TIMEOUT_MS: "250" }).dbAcquireTimeoutMs).toBe(250);
     for (const bad of ["0", "-1", "x"]) expect(() => loadConfig({ ...base, DB_ACQUIRE_TIMEOUT_MS: bad })).toThrow(/DB_ACQUIRE_TIMEOUT_MS/);

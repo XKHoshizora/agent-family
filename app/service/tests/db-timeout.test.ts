@@ -17,7 +17,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("the pool's statement timeout (DB_STATEMENT_TIMEOUT_MS)", () => {
   it("defaults to 30 s, is set on every pool connection, and cuts off a statement that runs longer", async () => {
-    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
     expect(loadConfig(base)).toMatchObject({ dbStatementTimeoutMs: 30_000, searchStatementTimeoutMs: 3_000 });
     expect(() => loadConfig({ ...base, DB_STATEMENT_TIMEOUT_MS: "0" })).toThrow(/DB_STATEMENT_TIMEOUT_MS/);
     expect(() => loadConfig({ ...base, SEARCH_STATEMENT_TIMEOUT_MS: "-1" })).toThrow(/SEARCH_STATEMENT_TIMEOUT_MS/);

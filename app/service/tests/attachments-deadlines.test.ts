@@ -204,7 +204,7 @@ describe("server-wide timeouts", () => {
   });
 
   it("are configured, and may never cut off an upload before its own deadlines do", () => {
-    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+    const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
     expect(loadConfig(base)).toMatchObject({
       uploadIdleTimeoutMs: 45_000,
       uploadTotalTimeoutMs: 15 * 60_000,

@@ -243,6 +243,7 @@ describe("session cookie", () => {
         ...process.env,
         DATABASE_URL: testDatabaseUrl(),
         AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+        PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
         APP_ORIGIN: "https://app.example.test",
         RATE_LIMIT_SCALE: "1000",
       }),

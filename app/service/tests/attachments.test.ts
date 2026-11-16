@@ -410,6 +410,7 @@ describe("who can download", () => {
       BLOB_DIR: blobDir,
       APP_ORIGIN: "http://localhost:5173",
       AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+      PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
       S3_ENDPOINT: "",
       S3_REGION: "",
       S3_BUCKET: "",
