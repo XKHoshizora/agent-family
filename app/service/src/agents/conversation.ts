@@ -7,7 +7,7 @@ import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
-import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal } from "./persona.ts";
+import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { ownedAgentOf } from "./runs.ts";
 import { assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
@@ -121,10 +121,12 @@ export interface AgentReply {
  * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed); a
  * persona proposal in it (`parseProposalBlock`: the reply's text only, never its reasoning) is taken out — the fixed
  * `PROPOSAL_PLACEHOLDER` stands in when nothing visible is left — and stored in this same transaction
- * (`storeProposal`, against the persona version read under this lock), the message's body naming it (`proposalId`);
- * a malformed block stays in the text as written. The text is then cut at 8 000 characters, which marks it
- * `truncated`; `reasoning` follows the same rules, is cut at 32 000 characters (no mark) and is stored only when there
- * is some. Throws (a plain Error) when there is nothing to show: no visible text and no reasoning.
+ * (`storeProposal`, against the persona version read under this lock), the message's body naming it (`proposalId`).
+ * The text is then cut at 8 000 characters, which marks it `truncated`. Without a proposal, a reply that was stopped or
+ * cut (`truncated`) loses everything from its first `<af-` on (`withoutUnfinishedBlock`: it ended inside a block it
+ * never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules of message
+ * text, is cut at 32 000 characters (no mark) and is stored only when there is some. Null, storing nothing, when there
+ * is nothing to show: no visible text and no reasoning.
  */
 export async function postAsAgent(
   t: Tx,
@@ -132,7 +134,7 @@ export async function postAsAgent(
   conversationId: string,
   runId: string,
   reply: AgentReply,
-): Promise<{ message: StoredMessage; duplicate: boolean }> {
+): Promise<{ message: StoredMessage; duplicate: boolean } | null> {
   const agent = await lockAgent(t, agentId);
   if (agent.conversationId !== conversationId) throw new Error(`postAsAgent: ${conversationId} is not the conversation of Agent ${agentId}`);
   const prior = await t.query<MessageRow>(
@@ -157,10 +159,11 @@ export async function postAsAgent(
     text = characters.slice(0, MESSAGE_TEXT_MAX).join("").trimEnd();
     truncated = true;
   }
+  if (!proposal && (reply.stopped || truncated)) text = withoutUnfinishedBlock(text);
   let reasoning = cleanModelText(reply.reasoning);
   const thought = Array.from(reasoning);
   if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
-  if (!hasVisibleText(text) && !hasVisibleText(reasoning)) throw new Error("postAsAgent: the reply has nothing to show");
+  if (!hasVisibleText(text) && !hasVisibleText(reasoning)) return null;
 
   const body: MessageBody = { text };
   if (reasoning !== "") body.reasoning = reasoning;

@@ -81,8 +81,12 @@ export interface AgentPort {
    * interrupted the run — also a piece that was already waiting to be delivered, whenever it is delivered.
    */
   emit(run: RunTicket, delta: Delta): void;
-  /** Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete interrupted the run. */
-  post(run: RunTicket, out: Reply): Promise<"posted" | "refused">;
+  /**
+   * Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete
+   * interrupted the run; "empty", storing nothing, when nothing of it is left to show (a reply stopped or cut inside a
+   * persona block it never finished, with nothing before it).
+   */
+  post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
   /**
    * Settles the call and records how the run ended (one transaction), then queues the follow-up for messages that came
    * meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts.

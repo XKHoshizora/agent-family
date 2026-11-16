@@ -8,6 +8,7 @@ import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
 import type { AttachmentRef } from "../messages/model.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
+import { renderProposalBlock } from "./persona.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -177,6 +178,10 @@ interface MessageRow {
   attachment: AttachmentRef | null;
   reply_to: unknown;
   answers: string | null;
+  /** The persona proposal the Agent's reply made, if any (`persona_proposals` by `message_id`). */
+  proposal_persona: string | null;
+  proposal_intro: string | null;
+  proposal_field: string | null;
 }
 
 const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
@@ -187,7 +192,9 @@ const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name:
  * covered up to `coversSeq`. A reply belongs where it was answered: right after the owner's message its run covered
  * when it began (the run is the one named by the message's `client_txn`). Only the text, the attachment and the quote
  * are read of a message — never its stored reasoning. A quote shows what the Agent can see of the quoted message: its
- * text, or its attachment's name.
+ * text, or its attachment's name. A reply of the Agent's that proposed a persona is its text followed by the proposal
+ * as the block it was written in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed;
+ * it counts toward the budget like any text and is never read for a block again.
  */
 async function loadPage(
   q: Queryable,
@@ -197,11 +204,13 @@ async function loadPage(
 ): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
   const { rows } = await q.query<MessageRow>(
     `select m.seq::text as seq, m.sender_id, m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
-            m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers
+            m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
+            pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
        from messages m ${VISIBLE_JOIN}
        left join agent_runs r
          on r.agent_id = $1
         and r.id = (case when m.sender_id = $1 and m.client_txn ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' then m.client_txn end)::uuid
+       left join persona_proposals pp on pp.message_id = m.id and pp.agent_id = $1 and m.sender_id = $1
       where m.conversation_id = $2 and m.seq > $3 and ($4::bigint is null or m.seq < $4::bigint)
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
         and coalesce(r.covers_seq, m.seq) > $3
@@ -229,7 +238,12 @@ async function loadPage(
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
-    const entry: ContextEntry = { role, text: entryText(r.text ?? "", quoted), attachment: r.attachment ? toAttachment(r.attachment) : null };
+    let text = entryText(r.text ?? "", quoted);
+    if (role === "assistant" && r.proposal_persona !== null) {
+      const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
+      text = text === "" ? block : `${text}\n\n${block}`;
+    }
+    const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
     return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null }];
   });
   return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === PAGE };

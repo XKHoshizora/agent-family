@@ -117,6 +117,29 @@ export function parseProposalBlock(text: string): { visible: string; proposal: P
 }
 
 /**
+ * A proposal as the block the Agent wrote it in (one line per part, intro and field only when it names them): what the
+ * model is shown of its own earlier proposal, after that reply's text (agents/context.ts). Never read for a block again:
+ * only a new reply is, when it is posted. `parseProposalBlock` reads it back as the same proposal.
+ */
+export function renderProposalBlock(p: ProposedPersona): string {
+  return [
+    ...(p.intro === null ? [] : [`<af-intro>${p.intro}</af-intro>`]),
+    ...(p.field === null ? [] : [`<af-field>${p.field}</af-field>`]),
+    `<af-persona>${p.persona}</af-persona>`,
+  ].join("\n");
+}
+
+/**
+ * The text of a reply that was stopped or cut (at a limit, or at 8 000 characters) and holds no proposal, without what
+ * follows its first `<af-`: it ended inside a block it never finished, and its owner never sees a tag (the stream held
+ * the same part back). Trimmed at the end; possibly empty.
+ */
+export function withoutUnfinishedBlock(text: string): string {
+  const at = text.indexOf("<af-");
+  return at < 0 ? text : text.slice(0, at).trimEnd();
+}
+
+/**
  * In `postAsAgent`'s transaction, under its `lockAgent`, right after the reply `messageId` was stored: the proposal it
  * carried becomes the row `id` (the id the message's body names), made against the persona version read under that
  * lock; the Agent's earlier `open` proposals are `superseded`.

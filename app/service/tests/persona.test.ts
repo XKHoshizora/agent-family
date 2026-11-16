@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseProposalBlock, PROPOSAL_PLACEHOLDER } from "../src/agents/persona.ts";
+import { parseProposalBlock, PROPOSAL_PLACEHOLDER, renderProposalBlock } from "../src/agents/persona.ts";
 import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import { ReplyStream } from "../src/agents/runtime/stream.ts";
 import { toStored, type MessageRow } from "../src/messages/model.ts";
@@ -143,14 +143,13 @@ describe("a proposal in a reply", () => {
     expect((await agentRow(agent.id)).persona).toBe("第二版设定。");
   });
 
-  it("a block whose persona is 20 001 characters, or whose intro is too long, creates nothing and is posted as written", async () => {
+  it("a block whose persona is 20 001 characters, or whose intro is too long, creates nothing; a complete reply keeps it as written", async () => {
     const { owner, agent, conv } = await owned("long");
-    const long = block("长".repeat(20_001));
-    await answered(owner, conv, long);
+    // Cut at 8 000 characters inside the block it does not make: the reply ends before the tag.
+    await answered(owner, conv, `好的：${block("长".repeat(20_001))}`);
     const reply = await lastFromAgent(owner, conv, agent.id);
     expect(reply).not.toHaveProperty("proposal");
-    expect(reply.text).toBe(Array.from(long).slice(0, 8000).join(""));
-    expect(reply.truncated).toBe(true);
+    expect(reply).toMatchObject({ text: "好的：", truncated: true });
 
     const intro = `<af-intro>${"介".repeat(41)}</af-intro>${block(NEW_PERSONA)}`;
     await answered(owner, conv, intro);
@@ -209,18 +208,65 @@ describe("a proposal in a reply", () => {
     expect((await proposals(agent.id)).map((p) => p.status)).toEqual(["superseded", "superseded", "superseded", "open"]);
   });
 
-  it("a stopped reply with a whole block still proposes; one cut off inside it is posted as written", async () => {
-    const { owner, agent, conv } = await owned("stopped");
-    const hold = gateway.hangAfter(`说到这里。<af-persona>半截`);
+  /** The owner stops a reply that has said `said` and is waiting for more. */
+  async function stoppedAfter(owner: Actor, conv: string, said: string) {
+    const hold = gateway.hangAfter(said);
     await say(owner, conv, "整理设定");
     const running = app.agentWorker.runOnce();
     await hold.reached;
     const run = (await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run;
     await api(app, owner, "POST", `/api/conversations/${conv}/runs/${run.id}/stop`);
     await running;
+    return (await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run;
+  }
+
+  it("a stopped reply with a whole block still proposes", async () => {
+    const { owner, agent, conv } = await owned("whole");
+    await stoppedAfter(owner, conv, `前言。${block(NEW_PERSONA)}`);
+    const reply = await lastFromAgent(owner, conv, agent.id);
+    expect(reply).toMatchObject({ text: "前言。", stopped: true, proposal: { status: "open", persona: NEW_PERSONA } });
+  });
+
+  it("a reply stopped inside a block keeps what came before it, without tags, and proposes nothing", async () => {
+    const { owner, agent, conv } = await owned("stopped");
+    const s = await connect(app, owner);
+    const run = await stoppedAfter(owner, conv, "说到这里。<af-intro>简介</af-intro><af-persona>半截");
+    expect(run.status).toBe("stopped");
+    await s.next(isRun(conv, "stopped"));
     const cut = await lastFromAgent(owner, conv, agent.id);
-    expect(cut).toMatchObject({ text: "说到这里。<af-persona>半截", stopped: true });
+    expect(cut).toMatchObject({ text: "说到这里。", stopped: true });
     expect(cut.proposal).toBeUndefined();
+    // What it shows is exactly what was streamed.
+    expect(deltas(s, conv).map((d) => d.text ?? "").join("")).toBe("说到这里。");
+    expect(await proposals(agent.id)).toEqual([]);
+  });
+
+  it("a reply stopped inside a block with nothing before it posts nothing", async () => {
+    const { owner, agent, conv } = await owned("nothing");
+    const run = await stoppedAfter(owner, conv, "<af-persona>你是一个");
+    expect(run).toMatchObject({ status: "stopped", retryable: false });
+    expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+    expect(await proposals(agent.id)).toEqual([]);
+  });
+
+  it("a reply cut inside a block, at 8 000 characters or at the model's limit, ends before the tag, marked truncated", async () => {
+    const { owner, agent, conv } = await owned("cutoff");
+    const before = "字".repeat(7990);
+    await answered(owner, conv, `${before}<af-persona>${"设".repeat(30_000)}</af-persona>`);
+    expect(await lastFromAgent(owner, conv, agent.id)).toEqual(expect.objectContaining({ text: before, truncated: true }));
+    expect((await lastFromAgent(owner, conv, agent.id)).proposal).toBeUndefined();
+
+    await answered(owner, conv, "好的，设定如下：<af-intro>读书</af-intro><af-persona>你是一个", { truncated: true });
+    expect(await lastFromAgent(owner, conv, agent.id)).toMatchObject({ text: "好的，设定如下：", truncated: true });
+
+    // Nothing before the block: nothing to show, as an answer that said nothing.
+    const count = (await fromAgent(owner, conv, agent.id)).length;
+    await answered(owner, conv, block("长".repeat(20_001)));
+    expect(await fromAgent(owner, conv, agent.id)).toHaveLength(count);
+    expect((await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run).toMatchObject({
+      status: "failed",
+      error: "provider_unavailable",
+    });
     expect(await proposals(agent.id)).toEqual([]);
   });
 });
@@ -307,6 +353,17 @@ describe("parsing the block", () => {
       expect([text.slice(0, 60), parseProposalBlock(text)]).toEqual([text.slice(0, 60), null]);
     }
     expect(parseProposalBlock(`<af-persona>${"p".repeat(20_000)}</af-persona>`)?.proposal.persona).toHaveLength(20_000);
+  });
+
+  it("a proposal re-rendered as its block reads back as the same proposal", () => {
+    for (const proposal of [
+      { persona: "P", intro: null, field: null },
+      { persona: "多行\n设定", intro: "简介", field: "领域" },
+      { persona: "P", intro: "", field: null },
+    ]) {
+      expect(parseProposalBlock(renderProposalBlock(proposal))).toEqual({ visible: "", proposal });
+    }
+    expect(renderProposalBlock({ persona: "P", intro: "I", field: "F" })).toBe("<af-intro>I</af-intro>\n<af-field>F</af-field>\n<af-persona>P</af-persona>");
   });
 
   it("the format both prompts describe is one the parser takes", () => {

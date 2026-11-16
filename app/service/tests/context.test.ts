@@ -600,6 +600,64 @@ describe("the context budget", () => {
   });
 });
 
+describe("a persona the Agent proposed", () => {
+  const proposalsOf = async (agentId: string) =>
+    (await db.query("select status from persona_proposals where agent_id = $1", [agentId])).rows.map((r) => r.status);
+
+  it("is shown to it again in its assistant turn, as the block it wrote, after the reply's text; and is not read as a new one", async () => {
+    const { owner, agent, conv } = await owned("proposer");
+    await say(owner, conv, "帮我想个设定");
+    await answer("好的，我整理了一下。\n<af-intro>读书伙伴</af-intro>\n<af-persona>你是一个陪主人读书的伙伴。</af-persona>");
+    expect((await fromAgent(owner, conv, agent.id))[0].text).toBe("好的，我整理了一下。");
+    await say(owner, conv, "再活泼一点");
+    await answer("好，我再改改。");
+    expect(lastCall().messages).toEqual([
+      { role: "user", parts: [{ type: "text", text: "帮我想个设定" }] },
+      {
+        role: "assistant",
+        parts: [{ type: "text", text: "好的，我整理了一下。\n\n<af-intro>读书伙伴</af-intro>\n<af-persona>你是一个陪主人读书的伙伴。</af-persona>" }],
+      },
+      { role: "user", parts: [{ type: "text", text: "再活泼一点" }] },
+    ]);
+    // Only the new reply was read for a block: the re-rendered one made nothing.
+    expect(await proposalsOf(agent.id)).toEqual(["open"]);
+  });
+
+  it("from before a new topic is not shown", async () => {
+    const { owner, agent, conv } = await owned("topicprop");
+    await say(owner, conv, "想个设定");
+    await answer("<af-persona>旧话题里的设定。</af-persona>");
+    expect(await proposalsOf(agent.id)).toEqual(["open"]);
+    expect((await api(app, owner, "POST", `/api/conversations/${conv}/topic`)).status).toBe(201);
+    await say(owner, conv, "新话题");
+    await answer("好。");
+    expect(lastCall().messages).toEqual([{ role: "user", parts: [{ type: "text", text: "新话题" }] }]);
+  });
+
+  it("counts toward the budget: a 10 000-character proposal that does not fit is left out with what is older", async () => {
+    // An 8 000-token context with 500 for the output.
+    const { owner, agent, conv } = await owned("bigprop", "mid");
+    await say(owner, conv, "写一份很长的设定");
+    const persona = "设".repeat(10_000);
+    await answer(`<af-persona>${persona}</af-persona>`);
+    expect(await proposalsOf(agent.id)).toEqual(["open"]);
+    await say(owner, conv, "收到了吗");
+    await answer("收到了。");
+    const call = lastCall();
+    expect(textsOf(call)).toEqual(["收到了吗"]);
+    const budget = 8000 - 500 - estimateTokens(call.system);
+    expect(budget).toBeLessThan(10_000);
+
+    // With room for it, it is there in full, after the sentence that stood in for the reply's text.
+    const roomy = await owned("bigroom", "eyes");
+    await say(roomy.owner, roomy.conv, "写一份很长的设定");
+    await answer(`<af-persona>${persona}</af-persona>`);
+    await say(roomy.owner, roomy.conv, "收到了吗");
+    await answer("收到了。");
+    expect(textsOf(lastCall())[1]).toBe(`我整理了一份设定，请查看并确认。\n\n<af-persona>${persona}</af-persona>`);
+  });
+});
+
 describe("reasoning", () => {
   it("is stored with the reply (at most 32 000 characters) and returned, but never sent to a model again or found by search", async () => {
     const { owner, agent, conv } = await owned("rsn");

@@ -481,10 +481,19 @@ checked by the rules of an edit (`PATCH /api/agents/:id`). Then, in the transact
 Agent's lock, `postAsAgent`), the block is taken out of the message — its text is what is left, trimmed, or, with
 nothing visible left, the fixed sentence `我整理了一份设定，请查看并确认。` — and the proposal is stored against the persona
 version of that moment; the Agent's earlier `open` proposals become `superseded`. Anything else (two blocks, a nested
-or unclosed one, an unknown `<af-…>` tag, a value over its limit) is no proposal: the reply is stored as written. Only
-the Agent's reply text is read for a block, at the moment it is stored: never your messages, quotes, files or the
-model's reasoning. While the reply streams, its text is pushed only up to the first `<af-`: tags never reach a `delta`;
-the rest arrives with the message.
+or unclosed one, an unknown `<af-…>` tag, a value over its limit) is no proposal: a complete reply is stored as written.
+A reply that was stopped or cut (`stopped`, or `truncated`: at the model's output limit, the time limit or 8 000
+characters) and holds no proposal ended inside a block it never finished: everything from its first `<af-` on is
+dropped, so you never see a tag (with nothing left, it counts as a reply that said nothing: a stop posts nothing, a cut
+reply fails `provider_unavailable`). A stopped reply with a whole block before the stop proposes as usual. Only the
+Agent's reply text is read for a block, at the moment it is stored: never your messages, quotes, files or the model's
+reasoning. While the reply streams, its text is pushed only up to the first `<af-`: tags never reach a `delta`; the
+rest arrives with the message.
+
+**What the Agent sees of it later.** In what the model is shown, a reply that proposed is its text followed by the
+proposal written out again as its block (intro and field when it named them): the Agent can revise what it proposed.
+That is the Agent's own earlier output in its own turn; it is never read for a block again (only a new reply is), it
+counts toward the context budget like any text, and like any message it is not shown after a new topic.
 
 **On the wire** (owner only): the reply carries `"proposal": {"id", "status", "persona", "intro"?, "field"?}` (Wire
 shapes); `intro` / `field` only when the proposal names them. `status`: `open`; `confirmed`; `discarded`; `superseded`
@@ -1461,8 +1470,10 @@ and also looks every 2 s. Per run:
    `tests/runs-pause.test.ts`). The message's `client_txn` is the run's id: a reply is never
    posted twice. Text follows the rules of message text (what a send would refuse is removed); a persona proposal's
    block in it is taken out and stored as the proposal in this same transaction (Persona proposals); then the text is
-   cut at 8 000 characters (`truncated`); reasoning follows the same rules (and is never read for a block), is cut at
-   32 000 characters (no mark) and is kept only when there is some.
+   cut at 8 000 characters (`truncated`), and a stopped or cut reply without a proposal loses what follows its first
+   `<af-`; reasoning follows the same rules (and is never read for a block), is cut at 32 000 characters (no mark) and
+   is kept only when there is some. With nothing left to show, nothing is stored (`post` answers `empty`) and the run
+   ends as one that said nothing (below).
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
    moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
@@ -1489,6 +1500,8 @@ and also looks every 2 s. Per run:
   turn left first, or after the owner's newest message, is left out. System notices, the fixed greeting and the stored
   reasoning are never shown. A message that quotes another starts with `> ` lines holding the first 200 characters of the quoted one (its
   text, or its attachment's name), also when the quoted one is from before the new topic: the owner chose to show it.
+  A reply of the Agent's that proposed a persona is shown as its text followed by the proposal written out again as its
+  block (Persona proposals, "What the Agent sees of it later"); it counts toward the budget like any text.
 - Attachments, read only through the download's own permission with the Agent as reader, and only after their stored
   size passed the limit: a PNG, JPEG or WebP image (what all four protocols take) of at most 5 MB as the image when the
   model sees images, else `[图片：name]` (a GIF always; at most 10 images a call, the newest); a PDF of at most 10 MB as the file when the model reads PDFs,
@@ -1519,8 +1532,8 @@ all of the above, attachments at their estimate.
 
 | How a run ends | Message | Run |
 |---|---|---|
-| The model answered | the answer (`truncated` when the model stopped at its output limit or it was cut at 8 000 characters) | `done` |
-| The owner stopped it | what had been said, `stopped: true` (nothing said: no message) | `stopped` (also when a pause or delete comes after the message was posted) |
+| The model answered | the answer (`truncated` when the model stopped at its output limit or it was cut at 8 000 characters; then without what follows an unfinished proposal block's `<af-`, and with nothing left: `failed`, `provider_unavailable`, no message) | `done` |
+| The owner stopped it | what had been said, `stopped: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: no message) | `stopped` (also when a pause or delete comes after the message was posted) |
 | Paused or deleted while queued | none, no call made, no usage record | `cancelled`, `agent_paused` / `agent_deleted` |
 | Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
 | The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
@@ -1530,7 +1543,7 @@ all of the above, attachments at their estimate.
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two in a row failed, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
-| `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
+| `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
 | The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start (below) |
 
 Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the

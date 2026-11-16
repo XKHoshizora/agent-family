@@ -73,7 +73,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
   }
 
-  async function post(run: RunTicket, reply: Reply): Promise<"posted" | "refused" | "failed"> {
+  async function post(run: RunTicket, reply: Reply): Promise<"posted" | "refused" | "empty" | "failed"> {
     try {
       return await port.post(run, reply);
     } catch (err) {
@@ -177,11 +177,15 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
       if (!said) return finish(run, { status: "stopped" }, usage, fallback);
       const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
+      // All it said was inside a persona block it never finished: as a stop with nothing said.
+      if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
       return finish(run, ended(posted, { status: "stopped" }), usage, fallback);
     }
     // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
     if (!said) return failed(UNAVAILABLE);
     const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
+    // All it said was inside a persona block that a limit cut off: as an answer that said nothing.
+    if (posted === "empty") return failed(UNAVAILABLE);
     return finish(run, ended(posted, { status: "done" }), usage, fallback);
   }
 

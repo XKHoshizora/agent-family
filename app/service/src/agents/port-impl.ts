@@ -302,9 +302,11 @@ export class DbAgentPort implements AgentPort {
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
    * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`).
    */
-  async post(run: RunTicket, out: Reply): Promise<"posted" | "refused"> {
+  async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
     try {
-      const { message, duplicate } = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out));
+      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out));
+      if (!posted) return "empty";
+      const { message, duplicate } = posted;
       if (!duplicate) this.deps.conversations.publish({ messages: [message], conversations: [] }, this.deps.log);
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
       return "posted";
