@@ -3,7 +3,7 @@ import net from "node:net";
 import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { AppError } from "../src/errors.ts";
-import { guardedFetch, isPublicAddress, MAX_PROVIDER_CALLS, normaliseBaseUrl, type Resolve } from "../src/providers/guard.ts";
+import { guardedFetch, isPublicAddress, normaliseBaseUrl, type Resolve } from "../src/providers/guard.ts";
 import { createSlots } from "../src/slots.ts";
 
 /**
@@ -14,6 +14,8 @@ import { createSlots } from "../src/slots.ts";
 
 const refused = { status: 400, code: "address_not_allowed" };
 const unavailable = { status: 502, code: "provider_unavailable" };
+/** A count of calls in flight with room to spare, for tests that are not about the cap. */
+const room = () => createSlots(64);
 
 /** A resolver that answers from a script (the last answer repeats) and records the names it was asked. */
 function scriptedResolver(...answers: string[][]): Resolve & { calls: string[] } {
@@ -176,7 +178,7 @@ describe("normaliseBaseUrl (what a provider's baseUrl is stored as)", () => {
 describe("guardedFetch refuses before connecting", () => {
   it("http:, without resolving the name", async () => {
     const resolve = scriptedResolver(["93.184.216.34"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
     await expect(f("http://api.example.com/v1/models")).rejects.toMatchObject(refused);
     expect(resolve.calls).toEqual([]);
   });
@@ -185,7 +187,7 @@ describe("guardedFetch refuses before connecting", () => {
     const v4 = await listener();
     const v6 = await listener(undefined, "::1");
     const resolve = scriptedResolver(["93.184.216.34"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
     for (const url of [
       `https://127.0.0.1:${v4.port}/v1/models`,
       `https://[::1]:${v6.port}/v1/models`,
@@ -213,7 +215,7 @@ describe("guardedFetch refuses before connecting", () => {
     const local = await listener();
     for (const answer of [["192.168.1.1"], ["93.184.216.34", "10.1.2.3"], ["2001:db8::1", "fd00::1"], ["127.0.0.1"], ["::ffff:192.168.0.1"]]) {
       const resolve = scriptedResolver(answer);
-      const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
+      const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
       expect([answer, await settle(f(`https://intranet.example:${local.port}/v1/models`))]).toEqual([answer, expect.objectContaining(refused)]);
       expect(resolve.calls).toEqual(["intranet.example"]);
     }
@@ -222,7 +224,7 @@ describe("guardedFetch refuses before connecting", () => {
 
   it("credentials in the URL, a host that is not a plain DNS name, a port outside 1–65535, and what is not a URL", async () => {
     const resolve = scriptedResolver(["93.184.216.34"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000 });
     for (const url of [
       "https://user:pass@api.example.com/v1",
       "https://user@api.example.com/v1",
@@ -240,7 +242,7 @@ describe("guardedFetch refuses before connecting", () => {
   });
 
   it("with allowInsecureLocal, loopback is allowed but private addresses still are not, and http: only to loopback", async () => {
-    const f = (resolve: Resolve) => guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 1000, allowInsecureLocal: true });
+    const f = (resolve: Resolve) => guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000, allowInsecureLocal: true });
     expect(await settle(f(scriptedResolver(["10.0.0.5"]))("https://intranet.example/v1"))).toMatchObject(refused);
     expect(await settle(f(scriptedResolver(["203.0.113.7"]))("http://public.example/v1"))).toMatchObject(refused);
     expect(await settle(f(scriptedResolver(["127.0.0.1", "203.0.113.7"]))("http://mixed.example/v1"))).toMatchObject(refused);
@@ -255,7 +257,7 @@ describe("guardedFetch connects to exactly the address it checked", () => {
     // up again to connect, it would get 127.0.0.1 and reach the listener. It must dial the checked address instead
     // (which goes nowhere and times out). Second request: the name now resolves to 127.0.0.1 and is refused.
     const resolve = scriptedResolver(["203.0.113.7"], ["127.0.0.1"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 400 });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 400 });
     const url = `https://rebind.example:${local.port}/v1/models`;
     expect(await settle(f(url))).toMatchObject(unavailable);
     expect(resolve.calls).toEqual(["rebind.example"]);
@@ -272,7 +274,7 @@ describe("guardedFetch connects to exactly the address it checked", () => {
     });
     // A second lookup would answer an address nothing listens on.
     const resolve = scriptedResolver(["127.0.0.1"], ["203.0.113.7"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
     const res = await f(`http://pinned.example:${local.port}/v1/models`);
     expect([res.status, await res.text()]).toEqual([200, "hello"]);
     expect(res).toBeInstanceOf(Response);
@@ -292,7 +294,7 @@ describe("guardedFetch connects to exactly the address it checked", () => {
     await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
     open.push(server);
     const resolve = scriptedResolver(["127.0.0.1"]);
-    const f = guardedFetch({ resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
+    const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
     expect(await settle(f(`https://sni.example:${(server.address() as net.AddressInfo).port}/v1`))).toMatchObject(unavailable);
     expect(names).toEqual(["sni.example"]);
   });
@@ -301,13 +303,13 @@ describe("guardedFetch connects to exactly the address it checked", () => {
     const failing: Resolve = async () => {
       throw Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
     };
-    expect(await settle(guardedFetch({ resolve: failing, maxResponseBytes: 1000, timeoutMs: 1000 })("https://nowhere.example/"))).toMatchObject(unavailable);
-    expect(await settle(guardedFetch({ resolve: scriptedResolver([]), maxResponseBytes: 1000, timeoutMs: 1000 })("https://empty.example/"))).toMatchObject(unavailable);
+    expect(await settle(guardedFetch({ calls: room(), resolve: failing, maxResponseBytes: 1000, timeoutMs: 1000 })("https://nowhere.example/"))).toMatchObject(unavailable);
+    expect(await settle(guardedFetch({ calls: room(), resolve: scriptedResolver([]), maxResponseBytes: 1000, timeoutMs: 1000 })("https://empty.example/"))).toMatchObject(unavailable);
   });
 });
 
 describe("guardedFetch answers", () => {
-  const f = guardedFetch({ maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
+  const f = guardedFetch({ calls: room(), maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
 
   it("does not follow redirects, whatever the caller asks: any 3xx is provider_unavailable", async () => {
     const target = await listener();
@@ -358,7 +360,7 @@ describe("guardedFetch answers", () => {
   });
 
   it("a server that stalls aborts at timeoutMs: before the headers, and in the middle of the body", async () => {
-    const quick = guardedFetch({ maxResponseBytes: 1000, timeoutMs: 300, allowInsecureLocal: true });
+    const quick = guardedFetch({ calls: room(), maxResponseBytes: 1000, timeoutMs: 300, allowInsecureLocal: true });
     const server = await listener((req, res) => {
       if (req.url === "/partial") {
         res.writeHead(200);
@@ -382,7 +384,7 @@ describe("guardedFetch answers", () => {
   });
 
   it("the time limit is between bytes: a slow but steady body is delivered", async () => {
-    const quick = guardedFetch({ maxResponseBytes: 1000, timeoutMs: 300, allowInsecureLocal: true });
+    const quick = guardedFetch({ calls: room(), maxResponseBytes: 1000, timeoutMs: 300, allowInsecureLocal: true });
     const server = await listener((_req, res) => {
       res.writeHead(200);
       let i = 0;
@@ -443,7 +445,7 @@ async function readAll(body: ReadableStream<Uint8Array>): Promise<{ text: string
 
 describe("guardedFetch: the time limit runs between bytes, from the headers on", () => {
   const T = 500;
-  const quick = guardedFetch({ maxResponseBytes: 10_000, timeoutMs: T, allowInsecureLocal: true });
+  const quick = guardedFetch({ calls: room(), maxResponseBytes: 10_000, timeoutMs: T, allowInsecureLocal: true });
 
   /** Headers after `T/2`, then one chunk every `T/2` (`count` in all, then the end unless `stall`). */
   const steady = (count: number, stall = false) =>
@@ -586,15 +588,15 @@ describe("guardedFetch: provider calls in flight, site-wide", () => {
     expect(calls.inProgress()).toBe(0);
   });
 
-  it(`by default one count for the whole process: at most ${MAX_PROVIDER_CALLS} calls at once, across guards`, async () => {
-    expect(MAX_PROVIDER_CALLS).toBe(16);
+  it("guards given one count share it: at most its size of calls at once, across guards (the app gives every guard its one count)", async () => {
+    const MAX = 16;
     const gate = gatedResolver();
     const server = await listener();
     const url = `http://shared.example:${server.port}/`;
-    const options = { resolve: gate.resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true };
+    const options = { calls: createSlots(MAX), resolve: gate.resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true };
     const [a, b] = [guardedFetch(options), guardedFetch(options)];
-    const pending = Array.from({ length: MAX_PROVIDER_CALLS }, (_, i) => (i % 2 === 0 ? a : b)(url));
-    await waitFor(() => gate.waiting.length === MAX_PROVIDER_CALLS);
+    const pending = Array.from({ length: MAX }, (_, i) => (i % 2 === 0 ? a : b)(url));
+    await waitFor(() => gate.waiting.length === MAX);
     expect(await settle(a(url))).toMatchObject(unavailable);
     expect(await settle(b(url))).toMatchObject(unavailable);
     gate.open();

@@ -29,6 +29,7 @@ type Answer = { kind: "reply"; text: string; options: ReplyOptions } | { kind: "
 type Step =
   | Answer
   | { kind: "fail"; code: ModelErrorCode; afterText: string }
+  | { kind: "cut"; text: string }
   | { kind: "hang"; before: string; gate: Promise<Answer>; reached: (call: ModelCall) => void };
 
 export interface ScriptedGateway extends ModelGateway {
@@ -40,6 +41,8 @@ export interface ScriptedGateway extends ModelGateway {
   reply(text: string, options?: ReplyOptions): ScriptedGateway;
   /** The next call throws `ModelError(code)`, after streaming `afterText` if given. */
   fail(code: ModelErrorCode, options?: { afterText?: string }): ScriptedGateway;
+  /** The next call streams `text`, then simply ends: no `finish`, no error (an upstream that cut the stream short). */
+  cut(text: string): ScriptedGateway;
   /** The next call hangs until released (or until its signal aborts). */
   hang(): Hold;
   /**
@@ -98,7 +101,11 @@ export function scriptedGateway(): ScriptedGateway {
         yield { type, delta };
       }
     };
-    let step: Exclude<Step, { kind: "hang" }>;
+    if (scripted.kind === "cut") {
+      yield* emit("text", scripted.text);
+      return;
+    }
+    let step: Exclude<Step, { kind: "hang" } | { kind: "cut" }>;
     if (scripted.kind === "hang") {
       yield* emit("text", scripted.before);
       scripted.reached(call);
@@ -137,6 +144,10 @@ export function scriptedGateway(): ScriptedGateway {
     },
     fail(code, options = {}) {
       queue.push({ kind: "fail", code, afterText: options.afterText ?? "" });
+      return gateway;
+    },
+    cut(text) {
+      queue.push({ kind: "cut", text });
       return gateway;
     },
     hang() {

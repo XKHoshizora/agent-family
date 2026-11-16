@@ -3,7 +3,7 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from "undici";
 import { AppError } from "../errors.ts";
-import { createSlots, type Slots } from "../slots.ts";
+import type { Slots } from "../slots.ts";
 
 /**
  * The address guard. Every request the service makes to a host a user named (their providers' `baseUrl`) goes
@@ -170,15 +170,7 @@ export function normaliseBaseUrl(raw: string, allowInsecureLocal: boolean): stri
 /** How the guard looks a name up: `dns.promises.lookup` with `{ all: true }` (the default), or a test's own. */
 export type Resolve = (hostname: string, options: { all: true }) => Promise<LookupAddress[]>;
 
-/**
- * Calls through the guard (to providers and site models: tests, model lists, answers) that may be in flight at once
- * in the whole service (one process), name lookups included.
- */
-export const MAX_PROVIDER_CALLS = 16;
-
-/** The service-wide count of provider calls in flight: shared by every `guardedFetch` not given its own. */
-const SITE_CALLS: Slots = createSlots(MAX_PROVIDER_CALLS);
-/** The one key calls are counted under: the cap is for everyone together. */
+/** The one key calls are counted under (`GuardOptions.calls`): the cap is for everyone together. */
 const SITE = "site";
 
 export interface GuardOptions {
@@ -192,10 +184,11 @@ export interface GuardOptions {
   timeoutMs: number;
   /**
    * Where calls in flight are counted, one slot each from before the name lookup until the call is over (body read,
-   * cancelled, failed, aborted or timed out); a call that finds no slot is `provider_unavailable` at once. Default: the
-   * service-wide count, at most `MAX_PROVIDER_CALLS`. Tests pass their own.
+   * cancelled, failed, aborted or timed out); a call that finds no slot is `provider_unavailable` at once. In the app:
+   * one count for the whole service (one process), `createSlots(PROVIDER_MAX_CONCURRENT_CALLS)`, which `buildApp` makes
+   * from the configuration and hands to every guard it builds. Tests pass their own.
    */
-  calls?: Slots;
+  calls: Slots;
   /**
    * Tests only, through `BuildOptions` (never from configuration): loopback addresses are allowed, and `http:`
    * to them. Every other rule stands.
@@ -287,7 +280,7 @@ const NULL_BODY_STATUS = new Set([204, 205]);
 export function guardedFetch(opts: GuardOptions): typeof fetch {
   const resolve: Resolve = opts.resolve ?? ((hostname, options) => dns.lookup(hostname, options));
   const local = opts.allowInsecureLocal === true;
-  const calls = opts.calls ?? SITE_CALLS;
+  const { calls } = opts;
 
   async function guarded(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (typeof input !== "string" && !(input instanceof URL)) throw new TypeError("guardedFetch takes a URL or a string, not a Request");

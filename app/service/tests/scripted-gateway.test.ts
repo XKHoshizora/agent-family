@@ -64,6 +64,13 @@ describe("scriptedGateway", () => {
     expect(error).toMatchObject({ code: "provider_unavailable" });
   });
 
+  it("cut streams its text and ends with neither a finish nor an error", async () => {
+    const { events, error } = await run(scriptedGateway().cut("half an answer").stream(call()));
+    expect(text(events)).toBe("half an answer");
+    expect(events.some((e) => e.type === "finish")).toBe(false);
+    expect(error).toBeNull();
+  });
+
   it("hang holds a call until released, then it answers; the signal ends it at once instead", async () => {
     const g = scriptedGateway();
     const held = g.hang();

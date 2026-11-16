@@ -34,6 +34,8 @@ export function useProbeBlobs(prefix = "af-blobs-") {
     failDelete: new Set<string>(),
     /** The next this-many deletes (of any key) throw. */
     failNextDeletes: 0,
+    /** Awaited before every read (after it is recorded in `gets`): it may wait, or throw to make the read fail. */
+    beforeGet: undefined as ((key: string) => Promise<void> | void) | undefined,
   };
   beforeEach(() => {
     for (const f of readdirSync(dir)) rmSync(path.join(dir, f), { force: true });
@@ -42,6 +44,7 @@ export function useProbeBlobs(prefix = "af-blobs-") {
     probe.onPut = undefined;
     probe.failDelete.clear();
     probe.failNextDeletes = 0;
+    probe.beforeGet = undefined;
   });
 
   const disk = fsBlobStore(dir);
@@ -74,8 +77,9 @@ export function useProbeBlobs(prefix = "af-blobs-") {
         throw err;
       }
     },
-    get: (key) => {
+    get: async (key) => {
       probe.gets.push(key);
+      await probe.beforeGet?.(key);
       return disk.get(key);
     },
     async delete(key) {

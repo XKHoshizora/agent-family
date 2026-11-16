@@ -1,9 +1,12 @@
 import type { InjectOptions } from "fastify";
+import http from "node:http";
+import type net from "node:net";
 import { describe, expect, it } from "vitest";
+import { buildApp } from "../src/app.ts";
 import { loadProviderForCall } from "../src/providers/store.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { createAgent, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
-import { useApp } from "./helpers/harness.ts";
+import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { providerBody, useProviderStub } from "./helpers/providers.ts";
 
 const stub = useProviderStub();
@@ -293,6 +296,46 @@ describe("testing the connection", () => {
         baseUrl,
         { status: 200, json: { ok: false, error: "address_not_allowed" } },
       ]);
+    }
+  });
+
+  it("PROVIDER_MAX_CONCURRENT_CALLS caps the app's calls to providers: one count for the provider routes and the model gateway", async () => {
+    // A provider that answers only when told to.
+    const waiting: http.ServerResponse[] = [];
+    const server = http.createServer((_req, res) => void waiting.push(res));
+    await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+    const baseUrl = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/v1`;
+    const capped = await buildApp(
+      { config: { ...app.deps.config, providerMaxConcurrentCalls: 2 }, db },
+      { allowInsecureLocal: true, answerFloor: NO_ANSWER_FLOOR, agentWorker: false },
+    );
+    try {
+      const owner = await signUp(capped, "cappy");
+      const p = (await api(capped, owner, "POST", "/api/providers", providerBody({ baseUrl }))).json;
+      const test = () => api(capped, owner, "POST", `/api/providers/${p.id}/test`);
+      const [first, second] = [test(), test()];
+      const deadline = Date.now() + 5000;
+      while (waiting.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+      expect(waiting).toHaveLength(2);
+
+      // A third call, through the routes or through the model gateway, finds no slot: refused at once.
+      const started = Date.now();
+      expect(await test()).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable" } });
+      await expect(capped.deps.models.listModels({ protocol: "openai_chat", baseUrl, apiKey: "sk-test-abcdefgh12345678" })).rejects.toMatchObject({
+        code: "provider_unavailable",
+      });
+      expect(Date.now() - started).toBeLessThan(1000);
+      expect(waiting).toHaveLength(2);
+
+      for (const res of waiting.splice(0)) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "stub-model" }] }));
+      }
+      expect([(await first).json, (await second).json]).toEqual([{ ok: true }, { ok: true }]);
+    } finally {
+      await capped.close();
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
     }
   });
 });

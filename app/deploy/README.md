@@ -64,6 +64,9 @@ message naming the variable. Values in the right column are for the acceptance e
 | `HTTP_BODY_TIMEOUT_MS` | A request with a body must have arrived whole within this long (default 30000); an upload is released from it once it is admitted and then follows the upload deadlines. | default |
 | `HTTP_CONNECTION_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_KEEP_ALIVE_TIMEOUT_MS` | Server-wide socket idle (120000), whole request (upload total + 60000), keep-alive idle (72000). Must exceed the upload deadlines. Keep the proxy's idle timeout above the keep-alive value. | defaults |
 | `DB_STATEMENT_TIMEOUT_MS`, `DB_ACQUIRE_TIMEOUT_MS`, `SEARCH_STATEMENT_TIMEOUT_MS` | Database limits: statement (30000), wait for a pool connection (10000), one search (3000). Past them: 503 `busy`. | defaults |
+| `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_RUNS_PER_MINUTE`, `AGENT_RUN_TIMEOUT_MS` | Agent replies: running at once per person, further ones wait (1–100, default 2); started per person a minute (1–10000, default 20); how long one may take, its attachment reading included, in ms (1000–3600000, default 120000). | defaults |
+| `PROVIDER_DEFAULT_CONTEXT_TOKENS`, `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` | A provider model's context when its owner gives none (1000–2000000, default 16000) and the output limit of every call to a provider model (1–1000000, default 2048); the first must be larger than the second. | defaults |
+| `PROVIDER_MAX_CONCURRENT_CALLS` | Calls to model providers and site models in flight at once in the whole service (1–1000, default 64); one more is refused as `provider_unavailable`. | default |
 
 ## Must hold
 

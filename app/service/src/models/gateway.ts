@@ -6,6 +6,7 @@ import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
 import { guardedFetch } from "../providers/guard.ts";
 import { createProviderProbe, PROBE_GUARD, ProviderCallError } from "../providers/probe.ts";
+import type { Slots } from "../slots.ts";
 
 /**
  * The model gateway: the one place the service talks to a language model. Every call goes out through the address
@@ -162,6 +163,8 @@ const MODEL_STREAM_MAX_BYTES = 8 * 1024 * 1024;
 const MODEL_IDLE_TIMEOUT_MS = 60_000;
 
 export interface GatewayOptions {
+  /** Where its calls are counted: the app's one count of calls through the guard (`GuardOptions.calls`). */
+  calls: Slots;
   /** Tests only (`BuildOptions`): models may be reached at loopback addresses, over `http:` there. */
   allowInsecureLocal?: boolean;
   /** Default 60 s; tests shorten it. */
@@ -169,13 +172,13 @@ export interface GatewayOptions {
 }
 
 /**
- * The gateway over the AI SDK. Its calls are counted with every other call through the guard (at most
- * `MAX_PROVIDER_CALLS` in flight in the whole service).
+ * The gateway over the AI SDK. Its calls are counted with every other call through the guard (`options.calls`: at
+ * most `PROVIDER_MAX_CONCURRENT_CALLS` in flight in the whole service).
  */
-export function createModelGateway(options: GatewayOptions = {}): ModelGateway {
+export function createModelGateway(options: GatewayOptions): ModelGateway {
   // The SDK reports settings a model ignores through `process.emitWarning`, outside the service's log: not wanted.
   globalThis.AI_SDK_LOG_WARNINGS = false;
-  const guard = options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {};
+  const guard = { calls: options.calls, ...(options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {}) };
   const fetch = guardedFetch({ ...guard, maxResponseBytes: MODEL_STREAM_MAX_BYTES, timeoutMs: options.idleTimeoutMs ?? MODEL_IDLE_TIMEOUT_MS });
   const probe = createProviderProbe(guardedFetch({ ...guard, ...PROBE_GUARD }));
   return {

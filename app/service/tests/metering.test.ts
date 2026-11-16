@@ -402,6 +402,10 @@ describe("settlement", () => {
     expect(await usageRecords(run)).toEqual([]);
     await settleAt(run, null, { cfg: without, outcome: "failed" });
     expect(await record(run)).toMatchObject({ source: "site", model: "meter_free", cost_micro: "0", estimated: true });
+    // No tokens at all cost nothing at any price, whatever the outcome (a run recovered at start-up with its reply posted).
+    const { run: done } = await admitted("unconfigured_done");
+    await settleAt(done, null, { cfg: without, outcome: "done", fallback: NO_TEXT });
+    expect(await record(done)).toMatchObject({ source: "site", outcome: "done", cost_micro: "0", input_tokens: "0", output_tokens: "0" });
   });
 
   it("a persona draft is recorded without an Agent", async () => {
@@ -471,6 +475,21 @@ describe("admitRun", () => {
     const ownRun = await runningRun(db, owner.id, own);
     await admitAt(ownRun, owner, own.resolved);
     await expect(admitAt(ownRun, owner, own.resolved)).rejects.toThrow(/already admitted/);
+  });
+
+  it("refuses a run that already has a usage record, and the database holds at most one record per run", async () => {
+    const owner = await signUp(app, "admitsettled");
+    const fast = await meteredAgent(app, db, owner, FREE);
+    // Settled before it was ever admitted (it ended before reaching a model), yet still running.
+    const run = await runningRun(db, owner.id, fast);
+    await settleAt(run, null, { outcome: "failed", now: new Date() });
+    await expect(admitAt(run, owner, fast.resolved)).rejects.toThrow(/already settled/);
+    expect(await runRow(run)).toEqual({ source: null, model: null, charge_to: null, hold: "0" });
+
+    // A second record for the run, written past settle's own check, is refused by the database itself.
+    const second = db.query("insert into usage_records (owner_id, run_id, purpose, outcome) values ($1, $2, 'reply', 'failed')", [owner.id, run]);
+    await expect(second).rejects.toMatchObject({ code: "23505", constraint: "usage_records_run_id_key" });
+    expect(await usageRecords(run)).toHaveLength(1);
   });
 });
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { lockAccount } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { WriteLock } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
@@ -87,8 +88,13 @@ export async function latestRun(q: Queryable, conversationId: string): Promise<R
   return rows[0] ?? null;
 }
 
-/** Replies `ownerId` has started in the last minute (`agentRunsPerMinute`). */
+/**
+ * Replies `ownerId` has started in the last minute (`agentRunsPerMinute`), counted under the owner's `accounts` row
+ * lock — the last lock of the order, taken here before counting and held until the caller's transaction (which inserts
+ * the run) ends — so that two replies started at once, to two of the owner's Agents, are counted one after the other.
+ */
 async function startedLastMinute(t: Tx, ownerId: string): Promise<number> {
+  await lockAccount(t, ownerId);
   const { rows } = await t.query<{ n: number }>(
     "select count(*)::int as n from agent_runs where owner_id = $1 and purpose = 'reply' and created_at > now() - interval '1 minute'",
     [ownerId],
@@ -103,7 +109,10 @@ export type Interruption = "agent_paused" | "agent_deleted";
  * In the pause's (or delete's) own transaction, which holds `lockAgent`: the Agent's active reply ends for good. A
  * queued one is cancelled at once (it never reached a model: nothing to settle). A running one is marked
  * `interrupted`: `postAsAgent` refuses it and `finish` records it `cancelled` with that reason — even if the Agent is
- * resumed before the worker notices. Returns the cancelled runs to announce and the running ones to stop.
+ * resumed before the worker notices — and what was noted on it (`pending_seq`) is dropped: nothing written before the
+ * pause gets a follow-up. Whatever is noted on it from now on came after a resume (nothing is noted while the Agent
+ * is paused) and is followed up as usual (`finish`). Returns the cancelled runs to announce and the running ones to
+ * stop.
  */
 export async function interruptRuns(t: Tx, agent: AgentRow, reason: Interruption): Promise<{ cancelled: Announced[]; running: string[] }> {
   const queued = await t.query<RunRow>(
@@ -112,7 +121,7 @@ export async function interruptRuns(t: Tx, agent: AgentRow, reason: Interruption
     [agent.id, reason],
   );
   const running = await t.query<{ id: string }>(
-    "update agent_runs set interrupted = $2 where agent_id = $1 and status = 'running' returning id",
+    "update agent_runs set interrupted = $2, pending_seq = null where agent_id = $1 and status = 'running' returning id",
     [agent.id, reason],
   );
   return {

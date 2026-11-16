@@ -44,6 +44,51 @@ describe("agent and metering configuration", () => {
       agentRunTimeoutMs: 120_000,
       providerDefaultContextTokens: 16_000,
       providerDefaultMaxOutputTokens: 2048,
+      providerMaxConcurrentCalls: 64,
+    });
+  });
+
+  test("the protective limits are configuration, each a whole number within its range (empty: the default)", () => {
+    expect(
+      loadConfig({
+        ...base,
+        AGENT_MAX_CONCURRENT_RUNS: "5",
+        AGENT_RUNS_PER_MINUTE: "60",
+        AGENT_RUN_TIMEOUT_MS: "30000",
+        PROVIDER_DEFAULT_CONTEXT_TOKENS: "32000",
+        PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: "4096",
+        PROVIDER_MAX_CONCURRENT_CALLS: "128",
+      }),
+    ).toMatchObject({
+      agentMaxConcurrentRuns: 5,
+      agentRunsPerMinute: 60,
+      agentRunTimeoutMs: 30_000,
+      providerDefaultContextTokens: 32_000,
+      providerDefaultMaxOutputTokens: 4096,
+      providerMaxConcurrentCalls: 128,
+    });
+    const ranges: Array<[name: string, field: string, accepted: Array<[string, number]>, refused: string[]]> = [
+      ["AGENT_MAX_CONCURRENT_RUNS", "agentMaxConcurrentRuns", [["1", 1], ["100", 100], ["", 2]], ["0", "101", "-1", "1.5", "two", "1e2"]],
+      ["AGENT_RUNS_PER_MINUTE", "agentRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 20]], ["0", "10001", "-5", "2.5", "lots"]],
+      ["AGENT_RUN_TIMEOUT_MS", "agentRunTimeoutMs", [["1000", 1000], ["3600000", 3_600_000], ["", 120_000]], ["999", "3600001", "0", "60s"]],
+      ["PROVIDER_DEFAULT_CONTEXT_TOKENS", "providerDefaultContextTokens", [["2049", 2049], ["2000000", 2_000_000], ["", 16_000]], ["999", "2000001", "16k"]],
+      ["PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS", "providerDefaultMaxOutputTokens", [["1", 1], ["15999", 15_999], ["", 2048]], ["0", "-1", "1.5"]],
+      ["PROVIDER_MAX_CONCURRENT_CALLS", "providerMaxConcurrentCalls", [["1", 1], ["1000", 1000], ["", 64]], ["0", "1001", "many"]],
+    ];
+    for (const [name, field, accepted, refused] of ranges) {
+      for (const [value, parsed] of accepted) expect([name, value, (loadConfig({ ...base, [name]: value }) as any)[field]]).toEqual([name, value, parsed]);
+      for (const value of refused) expect(() => loadConfig({ ...base, [name]: value }), `${name}=${value}`).toThrow(new RegExp(name));
+    }
+  });
+
+  test("the default context of a provider model must be larger than the default output limit, or nothing is left for the conversation", () => {
+    expect(() => loadConfig({ ...base, PROVIDER_DEFAULT_CONTEXT_TOKENS: "4096", PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: "4096" })).toThrow(
+      /PROVIDER_DEFAULT_CONTEXT_TOKENS.*PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS/,
+    );
+    expect(() => loadConfig({ ...base, PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: "16000" })).toThrow(/PROVIDER_DEFAULT_CONTEXT_TOKENS/);
+    expect(loadConfig({ ...base, PROVIDER_DEFAULT_CONTEXT_TOKENS: "4097", PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: "4096" })).toMatchObject({
+      providerDefaultContextTokens: 4097,
+      providerDefaultMaxOutputTokens: 4096,
     });
   });
 

@@ -71,6 +71,15 @@ no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `o
 `vision`, `pdf`, `reasoning` (levels from `low`..`max`)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
 `SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
 contain `free`, default `{"free":20}`),
+the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
+`AGENT_MAX_CONCURRENT_RUNS` (replies one person may have running at once, further ones wait queued; 1–100, default 2),
+`AGENT_RUNS_PER_MINUTE` (replies one person may start a minute, counted from the stored runs and not scaled by
+`RATE_LIMIT_SCALE`; 1–10 000, default 20), `AGENT_RUN_TIMEOUT_MS` (how long a reply may take, and also the reading of
+its attachments before the call; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
+context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
+limit of every call to a provider model; 1–1 000 000, default 2 048; it must be less than
+`PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
+and site models in flight at once in the whole service, see Model providers; 1–1 000, default 64),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -275,7 +284,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
-| Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together, counted from the stored runs and not scaled by `RATE_LIMIT_SCALE`; over it a message queues no reply (the message is still sent) and a retry is 429 | owner |
+| Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message queues no reply (the message is still sent) and a retry is 429 | owner |
 | `GET /api/conversations/:id/run` | 120 | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
@@ -309,9 +318,11 @@ still recorded). A call on a site model is admitted before it starts and settled
   then.
 - **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
   it reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
-  `estimated`, at the model's price. A call that failed
-  without any output costs nothing, and so does a reply that could not be stored for the service's own reasons (run
-  error `busy`): its record keeps the true cost, all of it forgiven. It charges that cost, but never more than the call held at admission: whatever is
+  `estimated`, at the model's price. A call that failed (the provider's error, a stream it cut off midway, an answer
+  with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
+  before it failed is discarded and not counted, so with no usage reported it costs nothing. So does a reply that could not be stored for the service's own reasons (run
+  error `busy`): its record keeps the true cost, all of it forgiven; and a run recovered at start-up (Agents and runs),
+  settled on no tokens at all. It charges that cost, but never more than the call held at admission: whatever is
   above the hold (an estimate that turned out low) is forgiven, charged to no one — neither the balance nor any day's
   allowance. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
   ends after it uses the new day's); whatever of its charge exceeds what is left of that day's allowance is forgiven
@@ -368,7 +379,7 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
   as many as `AGENT_TIERS` gives your tier (a tier it no longer names gets the `free` number; counted under the
   account lock, so concurrent creates cannot pass it); 400 for a site `model` id that is not configured, a provider
   that is not yours or does not list that model name, a provider model whose `contextTokens` is not larger than the
-  output limit its calls get (2 048: nothing would be left for the conversation), or a `reasoning` the model does not
+  output limit its calls get (`PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS`, default 2 048: nothing would be left for the conversation), or a `reasoning` the model does not
   allow (a site model: `none` and its own levels; a provider model: `none` only unless it is flagged `reasoning`; with
   no model any level).
 - The conversation is created with the Agent: without a `persona` it holds one message from the Agent, the fixed
@@ -424,8 +435,9 @@ Failures are never messages: they live on the run, which the owner learns from t
 **Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
 "resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
 `context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona — or
-`busy`: the service's own trouble — the reply could not be started or stored, or there was nothing to answer — which
-costs you nothing), for
+`busy`: the service's own trouble — the reply could not be started or stored, its attachments could not be read, or
+there was nothing to answer — which costs you nothing; `provider_unavailable` is also what a reply that was under way
+when the service restarted ends with), for
 `cancelled` `agent_paused` or `agent_deleted`, or none (everything it was to answer is before a new topic you started).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail). `resetsAt` (ISO instant): for
@@ -485,7 +497,7 @@ Agent cannot be pointed at their provider (400).
   host and any port from 1 to 65535. It is stored without query, fragment or trailing slash (`https://API.example.com:443/v1/?x`
   is `https://api.example.com/v1`). Saving checks only that; the address is checked at every call (below).
 - **Models**: at most 100; `name` 1–100 characters, one line, trimmed, unique within the provider; `vision`, `pdf` and
-  `reasoning` default to false and `contextTokens` (1 000–2 000 000) to 16 000. An Agent may use only a listed model, and a
+  `reasoning` default to false and `contextTokens` (1 000–2 000 000) to `PROVIDER_DEFAULT_CONTEXT_TOKENS` (default 16 000). An Agent may use only a listed model, and a
   reasoning level other than `none` only on a model flagged `reasoning`. Removing a model from the list does not change
   the Agents that use it.
 
@@ -499,9 +511,10 @@ address that was checked (the name stays the Host header and the TLS server name
 a moment later changes nothing. Redirects are never followed (any 3xx is `provider_unavailable`), and a call is given up
 (`provider_unavailable`) after a set time without progress (until the headers, from the headers to the first byte of
 the body, then between body chunks) or once its answer passes a set size: for test and refresh below, 15 s (and 30 s
-in all) and 2 MiB; for a model's answer, see Calling a model. At most 16 calls to providers and site models are in
-flight at once in the whole service, from before the name lookup until the answer is read or abandoned; one more is
-`provider_unavailable` at once. A call stopped by its caller closes its connection at once.
+in all) and 2 MiB; for a model's answer, see Calling a model. At most `PROVIDER_MAX_CONCURRENT_CALLS` (default 64) calls
+to providers and site models are in flight at once in the whole service — one count for these routes and every model
+call — from before the name lookup until the answer is read or abandoned; one more is `provider_unavailable` at once. A
+call stopped by its caller closes its connection at once.
 
 #### `POST /api/providers`
 
@@ -551,8 +564,8 @@ or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
 Every model call goes through one gateway (`src/models/gateway.ts`, `Deps.models`), for site models and providers
 alike: `resolveModel` (`src/models/resolve.ts`) turns an Agent's choice into the call — for a site model its upstream,
 model name, output limit, price and tier, the key read from the variable its `apiKeyEnv` names at that moment; for a
-provider model the owner's provider with its key opened, the model's flags and the default output limit for provider
-models (2048 tokens) — or into nothing to call (no model, a site model no longer configured or its key variable unset,
+provider model the owner's provider with its key opened, the model's flags and the output limit for provider
+models (`PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS`, default 2048 tokens) — or into nothing to call (no model, a site model no longer configured or its key variable unset,
 a provider or model gone).
 The gateway uses the Vercel AI SDK 7 (`ai` with `@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`; `streamText`
 only: no hosted gateway, telemetry off, no automatic retry, nothing printed by the SDK), every request through the
@@ -1290,26 +1303,31 @@ process and posted as an ordinary message from the Agent.
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
 or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
-ignored). Otherwise a `queued` run is inserted covering the message (`covers_seq`), unless the owner has started 20
-replies in the last minute (then no run; the message is still sent). The `run` push and the worker's wake-up follow the
+ignored). Otherwise a `queued` run is inserted covering the message (`covers_seq`), unless the owner has started
+`AGENT_RUNS_PER_MINUTE` (20) replies in the last minute (then no run; the message is still sent). That count is taken
+under the owner's `accounts` row lock, the last of the lock order, so two messages to two of the owner's Agents at the
+same moment are counted one after the other and the limit is exact. The `run` push and the worker's wake-up follow the
 commit.
 
 **Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
 queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
-answers everything noted — not one per message, and never two replies at once. A run that ended `done`, `stopped` or
-`failed`, or `cancelled` because its owner started over (no error), is followed; one cancelled by a pause or delete is
-not, and neither is one whose Agent is paused, deleted or without a model by then.
+answers everything noted — not one per message, and never two replies at once. The one rule: a run that has ended is
+followed when something was noted on it and its Agent can still answer (not paused, not deleted, has a model) — however
+the run itself ended. (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a
+resume.)
 
 **Pause and delete** end the Agent's active reply for good, in their own transaction (under the Agent's lock): a queued
 run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it has no usage record); a
-running one is marked `interrupted` with that reason. A marked run is never posted and ends `cancelled`, even if the
-Agent is resumed before the worker notices; its call is abandoned and no further `delta` of it is pushed once the
-request has answered. Nothing is queued while the Agent is paused, and resuming queues nothing: what was written during
-the pause is answered only as part of the next reply the owner's next message starts.
+running one is marked `interrupted` with that reason, and what was noted on it is dropped. A marked run is never posted
+and ends `cancelled`, even if the Agent is resumed before the worker notices; its call is abandoned and no further
+`delta` of it is pushed once the request has answered — not even one that was already waiting to be delivered, however
+late it would be. Nothing is queued or noted while the Agent is paused, and resuming queues nothing: what was written
+during the pause is answered only as part of the next reply a later message of the owner's starts. A message written
+after the resume while the interrupted reply is still ending is noted on it, and its follow-up answers it.
 
-**The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than 2 replies running
-(further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits and also looks every
-2 s. Per run:
+**The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
+(2) replies running (further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits
+and also looks every 2 s. Per run:
 
 1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
    in any of them ends the run `failed`, `busy`):
@@ -1323,14 +1341,18 @@ the pause is answered only as part of the next reply the owner's next message st
       tokens of it: `failed`, `context_too_small`, not retryable (the persona is too long for the model's context, or the
       context too small): nothing is admitted or charged.
    2. No transaction: the attachments' bytes are read and the call is assembled (`buildContext`). A send to the
-      conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`).
+      conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`). It is interruptible and
+      bounded (`tests/runs-faults.test.ts`): once the owner stops the reply or the Agent is paused or deleted, no further
+      file is read (the next step ends the run); the whole step may take at most `AGENT_RUN_TIMEOUT_MS`, after which
+      the run fails `busy`; and when the service is closing the read under way is abandoned and nothing is admitted:
+      the run stays `running`, for recovery at the next start (`tests/runs-restart.test.ts`).
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
       the first step, with no call; otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
       ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
       `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
-   abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after 2 minutes
-   (`agentRunTimeoutMs`), and when the service closes.
+   abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after
+   `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes.
 3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
    delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
    generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
@@ -1371,8 +1393,9 @@ the pause is answered only as part of the next reply the owner's next message st
   held for one call, whatever their kind (10 images of 5 MB fill it; a PDF or file that would pass it is named), each
   checked on its stored size before a byte is read: so the worst case for one reply is 50 MiB of attachment bytes in
   memory (plus the model library's base64 copy of what it sends, about a third more), and at most 8 replies run at
-  once. Blobs are read with no transaction open. A missing blob is shown by name (and logged); a blob store that fails,
-  or takes more than 15 s for one blob, fails the run `busy`.
+  once. Blobs are read with no transaction open. A missing blob is shown by name (and logged), and so is one whose read
+  fails or takes more than 15 s (logged once): one unreadable file does not fail the reply. Two in a row that cannot be
+  read mean the store is down: the run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`.
 - The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
   character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
@@ -1392,18 +1415,35 @@ all of the above, attachments at their estimate.
 | The owner stopped it | what had been said, `stopped: true` (nothing said: no message) | `stopped` (also when a pause or delete comes after the message was posted) |
 | Paused or deleted while queued | none, no call made, no usage record | `cancelled`, `agent_paused` / `agent_deleted` |
 | Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
-| The provider failed (key refused, unreachable, address refused) | none; what it had said is discarded | `failed` with that code |
+| The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
-| An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
+| An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
-| Nothing to answer otherwise, or an attachment that could not be read | none, no call made | `failed`, `busy`, retryable; charged nothing |
-| 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |
-| The service closed during the call | none | left `running` (recovery at start-up comes in a later task) |
+| Nothing to answer otherwise, or its attachments could not be read (two in a row failed, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
+| `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
+| The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start (below) |
 
 Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the
-run. Every run the worker took is settled exactly once (its usage record's `outcome` is the run's status).
+run. Every run the worker took is settled exactly once (its usage record's `outcome` is the run's status; the database
+holds at most one record per run).
+
+**Recovery at start-up** (`port-impl.ts` `recoverRuns`; review focus 5, spec 6.4 and 6.5; `tests/runs-restart.test.ts`).
+When the app is ready, before the worker starts, every run the previous process left `running` — its call, if it had one,
+died with that process — is ended without any model call, each in one transaction under the locks `finish` takes:
+
+- its reply had been posted (the service stopped between post and finish): `done` (`stopped` when the message is
+  marked so), with that one message;
+- else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
+- else `failed`, `provider_unavailable`, retryable: nothing is called again on its own (spec 6.5); the owner retries.
+
+In the same transaction its hold is released by a settlement on no tokens at all, which costs nothing (whatever the
+upstream reported died with the process); a run that already has its usage record gets no second one. A posted or
+cancelled run is followed up by the one rule above (the follow-up is queued for the worker); a failed one is not, since a
+retry answers everything. Queued runs stay queued and are answered once the worker starts. Nothing is pushed — no socket
+can be open yet — so a client learns the state from `GET /api/conversations/:id/run`. The worker's stop and pause flags
+live in the process: a new start has none. A run that cannot be recovered is logged and left for the next start.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,

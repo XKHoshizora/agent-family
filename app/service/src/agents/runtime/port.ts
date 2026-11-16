@@ -70,14 +70,23 @@ export interface AgentPort {
   claimNext(): Promise<RunTicket | null>;
   /**
    * Resolves the model, builds what the model is shown (never no turn at all), admits the call and marks the Agent's
-   * read position — or says why the run ends at once.
+   * read position — or says why the run ends at once. Reading the attachments stops between files once the run should
+   * stop (it then ends as `shouldStop` says) and is bounded by the run's time limit (`failed`, `busy`). `closing`
+   * aborts when the service is closing: before the call is admitted, `begin` then rejects with its reason and records
+   * nothing — the run stays `running`, unadmitted, for the next start to recover.
    */
-  begin(run: RunTicket): Promise<Prepared | RunEnd>;
-  /** Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause or delete interrupted the run. */
+  begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd>;
+  /**
+   * Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause or delete
+   * interrupted the run — also a piece that was already waiting to be delivered, whenever it is delivered.
+   */
   emit(run: RunTicket, delta: Delta): void;
   /** Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete interrupted the run. */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused">;
-  /** Settles the call and records how the run ended (one transaction), then queues the follow-up for messages that came meanwhile. */
+  /**
+   * Settles the call and records how the run ended (one transaction), then queues the follow-up for messages that came
+   * meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts.
+   */
   finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void>;
   /** Whether the run should stop now: its owner asked, or the Agent was paused or deleted. */
   shouldStop(run: RunTicket): boolean;

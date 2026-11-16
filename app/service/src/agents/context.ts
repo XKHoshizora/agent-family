@@ -36,8 +36,16 @@ import {
 const PAGE = 200;
 /** The first bytes of a file looked at before the rest is read as text (`startsLikeText`). */
 const PROBE_BYTES = 4096;
-/** A blob that has not been read after this long is given up on: the reply fails as the service's trouble (`busy`). */
+/** A blob that has not been read after this long is given up on: it is shown by its name, like one that failed. */
 export const BLOB_READ_TIMEOUT_MS = 15_000;
+
+/** The blob store failed on two attachments in a row: it is down, and the reply fails as the service's trouble (`busy`). */
+export class BlobStoreDown extends Error {
+  constructor(cause: unknown) {
+    super("the blob store failed on two attachments in a row", { cause });
+    this.name = "BlobStoreDown";
+  }
+}
 
 /** The run a context is built for: it answers the owner up to `coversSeq`. */
 export interface ContextRun {
@@ -75,13 +83,18 @@ export interface BuiltContext {
 /**
  * At most `max` bytes of a blob, read as a stream and stopped there (`complete`: the blob had no more), or null when
  * the blob is missing. With `probe`, the first `PROBE_BYTES` are shown to it and the read stops when it says no.
- * Rejects when the blob has not been read within `timeoutMs`, and for any other failure of the store.
+ * Rejects when the blob has not been read within `timeoutMs`, with `signal`'s reason as soon as it aborts (the read is
+ * abandoned), and for any other failure of the store.
  */
 export async function readPrefix(
   blobs: BlobStore,
   key: string,
   max: number,
-  { probe, timeoutMs = BLOB_READ_TIMEOUT_MS }: { probe?: (head: Uint8Array) => boolean; timeoutMs?: number } = {},
+  {
+    probe,
+    timeoutMs = BLOB_READ_TIMEOUT_MS,
+    signal,
+  }: { probe?: (head: Uint8Array) => boolean; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<{ data: Buffer; complete: boolean } | null> {
   const held: { stream?: Readable; late?: boolean } = {};
   const reading = (async (): Promise<{ data: Buffer; complete: boolean } | null> => {
@@ -117,8 +130,13 @@ export async function readPrefix(
   })();
   reading.catch(() => {}); // it may fail after the deadline has answered
   let timer: NodeJS.Timeout | undefined;
+  let onAbort: (() => void) | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`the blob ${key} did not arrive within ${timeoutMs} ms`)), timeoutMs);
+    if (!signal) return;
+    onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
   });
   try {
     return await Promise.race([reading, deadline]);
@@ -128,6 +146,7 @@ export async function readPrefix(
     throw err;
   } finally {
     clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -271,22 +290,38 @@ export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.s
  * attachments when the model can take them and they fit — checked on their stored size before a byte is read: a PNG,
  * JPEG or WebP image (a GIF is named) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any
  * other file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never
- * more than the call's `bytesLeft`. A missing blob is shown by name (and logged); any other failure to read one throws.
+ * more than the call's `bytesLeft`. A missing blob is shown by name (and logged). So is one whose read fails or takes
+ * longer than `BLOB_READ_TIMEOUT_MS` (logged once), unless the read before it failed too: two in a row, and the store
+ * is down (`BlobStoreDown` is thrown). Once `stop()` says so, no further blob is read (what is left is shown by name,
+ * and the caller ends the run). When `signal` aborts, the read under way is abandoned and its reason thrown.
  */
 export async function buildContext(
   blobs: BlobStore,
   loaded: LoadedContext,
   resolved: Pick<Resolved, "vision" | "pdf">,
   log: Pick<FastifyBaseLogger, "error">,
+  { signal, stop = () => false }: { signal?: AbortSignal; stop?: () => boolean } = {},
 ): Promise<BuiltContext> {
   const plan = new ContextPlan(loaded.entries, loaded.budget);
+  let lastFailed = false;
 
   async function read(attachment: ContextAttachment, key: string, max: number, probe?: (head: Uint8Array) => boolean) {
-    const got = await readPrefix(blobs, key, max, probe ? { probe } : {});
+    let got: { data: Buffer; complete: boolean } | null;
+    try {
+      got = await readPrefix(blobs, key, max, { ...(probe ? { probe } : {}), ...(signal ? { signal } : {}) });
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason;
+      if (lastFailed) throw new BlobStoreDown(err);
+      lastFailed = true;
+      log.error({ err, attachmentId: attachment.id }, "a sent attachment could not be read: it is shown by its name");
+      return null;
+    }
+    lastFailed = false;
     if (!got) log.error({ attachmentId: attachment.id }, "the blob of a sent attachment is missing");
     return got;
   }
   async function show(slot: number, attachment: ContextAttachment): Promise<void> {
+    if (stop()) return;
     const room = plan.room(slot);
     // Nothing could take its name's place: the budget is used up.
     if (room <= estimateTokens(attachmentLabel(attachment))) return;

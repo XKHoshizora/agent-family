@@ -101,6 +101,16 @@ const optionalString = z
   .optional()
   .transform((v) => (v === undefined || v === "" ? undefined : v));
 
+/** A whole number from `min` to `max` written in decimal digits; unset or empty: `fallback`. */
+const wholeNumber = (fallback: number, min: number, max: number) => {
+  const message = `must be a whole number from ${min} to ${max}`;
+  return optionalString
+    .transform((v) => (v === undefined ? String(fallback) : v))
+    .pipe(z.string().regex(/^[0-9]{1,10}$/, message))
+    .transform(Number)
+    .pipe(z.number().min(min, message).max(max, message));
+};
+
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   APP_ORIGIN: z.url(),
@@ -130,6 +140,18 @@ const envSchema = z.object({
     z.record(z.string().min(1), z.number().int().min(0)).refine((t) => "free" in t, "must contain a \"free\" tier"),
     { free: 20 } as Record<string, number>,
   ),
+  /** Replies one owner may have running at once; further ones wait queued. */
+  AGENT_MAX_CONCURRENT_RUNS: wholeNumber(2, 1, 100),
+  /** Replies one owner may start per minute (counted from the stored runs; not scaled by RATE_LIMIT_SCALE). */
+  AGENT_RUNS_PER_MINUTE: wholeNumber(20, 1, 10_000),
+  /** A reply still running after this long is ended (and so is the reading of its attachments). */
+  AGENT_RUN_TIMEOUT_MS: wholeNumber(120_000, 1_000, 3_600_000),
+  /** A provider model's context window when its owner does not give one, in tokens. */
+  PROVIDER_DEFAULT_CONTEXT_TOKENS: wholeNumber(16_000, 1_000, 2_000_000),
+  /** The output limit every call to a provider model gets, in tokens. */
+  PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: wholeNumber(2048, 1, 1_000_000),
+  /** Calls to providers and site models in flight at once in the whole service (src/providers/guard.ts). */
+  PROVIDER_MAX_CONCURRENT_CALLS: wholeNumber(64, 1, 1000),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -213,11 +235,13 @@ export interface Config {
   agentMaxConcurrentRuns: number;
   /** Replies one owner may trigger per minute. */
   agentRunsPerMinute: number;
-  /** A reply still running after this long is ended. */
+  /** A reply still running after this long is ended; also the most the reading of its attachments may take. */
   agentRunTimeoutMs: number;
   /** For a provider model that does not say: its context window and its maximum output, in tokens. */
   providerDefaultContextTokens: number;
   providerDefaultMaxOutputTokens: number;
+  /** Calls through the address guard (to providers and site models) in flight at once in the whole service. */
+  providerMaxConcurrentCalls: number;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -287,6 +311,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   const duplicate = e.SITE_MODELS.find((m, i) => e.SITE_MODELS.findIndex((o) => o.id === m.id) !== i);
   if (duplicate) throw new Error(`Invalid configuration: SITE_MODELS: id "${duplicate.id}" appears more than once`);
+  if (e.PROVIDER_DEFAULT_CONTEXT_TOKENS <= e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS) {
+    throw new Error(
+      `Invalid configuration: PROVIDER_DEFAULT_CONTEXT_TOKENS (${e.PROVIDER_DEFAULT_CONTEXT_TOKENS}) must be more than PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS (${e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS}): nothing would be left for the conversation`,
+    );
+  }
   // The per-upload deadlines govern uploads: the server-wide timeouts must never cut one off first.
   const httpRequestTimeoutMs = e.HTTP_REQUEST_TIMEOUT_MS ?? e.UPLOAD_TOTAL_TIMEOUT_MS + 60_000;
   if (e.HTTP_CONNECTION_TIMEOUT_MS <= e.UPLOAD_IDLE_TIMEOUT_MS) {
@@ -304,11 +333,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     freeDailyMicro: e.FREE_DAILY_POINTS,
     siteTimezone: e.SITE_TIMEZONE,
     agentTiers: e.AGENT_TIERS,
-    agentMaxConcurrentRuns: 2,
-    agentRunsPerMinute: 20,
-    agentRunTimeoutMs: 120_000,
-    providerDefaultContextTokens: 16_000,
-    providerDefaultMaxOutputTokens: 2048,
+    agentMaxConcurrentRuns: e.AGENT_MAX_CONCURRENT_RUNS,
+    agentRunsPerMinute: e.AGENT_RUNS_PER_MINUTE,
+    agentRunTimeoutMs: e.AGENT_RUN_TIMEOUT_MS,
+    providerDefaultContextTokens: e.PROVIDER_DEFAULT_CONTEXT_TOKENS,
+    providerDefaultMaxOutputTokens: e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS,
+    providerMaxConcurrentCalls: e.PROVIDER_MAX_CONCURRENT_CALLS,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

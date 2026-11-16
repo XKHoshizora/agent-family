@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOLS, REASONING_LEVELS, type Protocol } from "../src/config.ts";
 import { createModelGateway, ModelError, REASONING_PARAMS, type ModelCall, type ModelEvent } from "../src/models/gateway.ts";
+import { createSlots } from "../src/slots.ts";
 import { PNG } from "./helpers/agents.ts";
 import {
   answerCanned,
@@ -32,7 +33,7 @@ afterAll(async () => {
 });
 beforeEach(() => stub.reset());
 
-const gateway = createModelGateway({ allowInsecureLocal: true });
+const gateway = createModelGateway({ calls: createSlots(64), allowInsecureLocal: true });
 
 function call(protocol: Protocol, over: Partial<ModelCall> = {}): ModelCall {
   return {

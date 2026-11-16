@@ -1,0 +1,259 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { api, signUp, type Actor } from "./helpers/actors.ts";
+import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
+import { useProbeBlobs } from "./helpers/blobs.ts";
+import { useApp } from "./helpers/harness.ts";
+import { scriptedGateway } from "./helpers/models.ts";
+import { MULTIPART, multipart } from "./helpers/multipart.ts";
+import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
+
+/**
+ * A model upstream that misbehaves, and attachments that cannot be read (spec 7 item 19, README "Agents and runs"):
+ * whatever happens the service stays up, the run ends in a definite state, the owner sees why on the run, nothing is
+ * left held, and the call has exactly one usage record. Replies here may take at most one second
+ * (`AGENT_RUN_TIMEOUT_MS`), and the reading of attachments too.
+ */
+
+const gateway = scriptedGateway();
+const store = useProbeBlobs("af-faults-");
+const lines: string[] = [];
+const { app, db } = useApp({
+  env: { ...SITE_ENV, AGENT_RUN_TIMEOUT_MS: "1000" },
+  models: gateway,
+  blobs: store.blobs,
+  agentWorker: false,
+  logStream: { write: (line) => void lines.push(line) },
+});
+
+let first = 0;
+beforeEach(() => {
+  first = gateway.calls.length;
+  lines.length = 0;
+});
+afterEach(async () => {
+  await closeAllSockets();
+  expect(gateway.pending()).toBe(0);
+});
+
+const FAST = { source: "site", id: "fast" } as const;
+const PERSONA = "简短地回答。";
+
+async function owned(name: string) {
+  const owner = await signUp(app, name);
+  const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+  return { owner, agent, conv: agent.conversationId as string };
+}
+
+let txn = 0;
+const say = async (owner: Actor, conv: string, text: string) => {
+  const res = await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `f${++txn}` });
+  expect(res.status).toBe(201);
+};
+async function sendFile(owner: Actor, conv: string, filename: string, data: string): Promise<string> {
+  const res = await app.inject({
+    method: "POST",
+    url: `/api/conversations/${conv}/attachments`,
+    headers: { cookie: owner.cookie, "content-type": MULTIPART },
+    payload: multipart([{ name: "file", filename, type: "text/plain", data }]),
+  });
+  expect(res.statusCode).toBe(201);
+  const id = res.json().id as string;
+  expect((await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId: id, clientTxn: `f${++txn}` })).status).toBe(201);
+  return id;
+}
+const blobKeyOf = async (attachmentId: string) =>
+  (await db.query<{ blob_key: string }>("select blob_key from attachments where id = $1", [attachmentId])).rows[0]!.blob_key;
+const latestRun = async (owner: Actor, conv: string) => (await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run;
+const fromAgent = async (owner: Actor, conv: string, agentId: string): Promise<any[]> =>
+  (await api(app, owner, "GET", `/api/conversations/${conv}/messages`)).json.messages.filter((m: any) => m.senderId === agentId);
+const callsHere = () => gateway.calls.slice(first);
+const isRun = (conv: string, status: string) => (e: Push) => e.type === "run" && e.conversationId === conv && e.run.status === status;
+const textsOf = (call: { messages: Array<{ parts: Array<{ type: string; text?: string }> }> }) =>
+  call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text!] : [])));
+const logged = (msg: RegExp) => lines.map((l) => JSON.parse(l) as { msg: string; attachmentId?: string }).filter((l) => msg.test(l.msg));
+
+/**
+ * The invariants of every fault: the service answers, the run is `expected` (as `GET …/run` shows it), nothing is held,
+ * and the run has exactly one usage record, with that outcome; returns the record.
+ */
+async function settled(owner: Actor, conv: string, expected: Record<string, unknown>) {
+  expect((await api(app, owner, "GET", "/api/health")).status).toBe(200);
+  const run = await latestRun(owner, conv);
+  expect(run).toEqual({ id: run.id, ...expected });
+  const held = await db.query<{ h: string }>("select coalesce(sum(hold_micro), 0)::text as h from agent_runs");
+  expect(held.rows[0]!.h).toBe("0");
+  const records = await db.query(
+    "select outcome, estimated, input_tokens::int as input, output_tokens::int as output, cost_micro::text as cost from usage_records where run_id = $1",
+    [run.id],
+  );
+  expect(records.rows).toHaveLength(1);
+  expect(records.rows[0].outcome).toBe(expected.status);
+  return records.rows[0] as { outcome: string; estimated: boolean; input: number; output: number; cost: string };
+}
+
+describe("a model upstream that misbehaves", () => {
+  it("a slow stream still going when the time is up: what it said is posted marked truncated; the run is done", async () => {
+    const { owner, agent, conv } = await owned("slow");
+    gateway.reply("慢慢地说。".repeat(40), { delayMsPerChunk: 100 });
+    await say(owner, conv, "说吧");
+    const t0 = performance.now();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(3000);
+    const [reply] = await fromAgent(owner, conv, agent.id);
+    expect(reply.truncated).toBe(true);
+    expect(reply.text.length).toBeGreaterThan(0);
+    expect("慢慢地说。".repeat(40).startsWith(reply.text)).toBe(true);
+    const record = await settled(owner, conv, { status: "done", retryable: false });
+    expect(record).toMatchObject({ estimated: true, output: Array.from(reply.text).length });
+  });
+
+  it("a stream that says nothing before the time is up: no message, failed provider_unavailable, retryable; costs nothing", async () => {
+    const { owner, agent, conv } = await owned("silent");
+    const hold = gateway.hang();
+    await say(owner, conv, "在吗");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await hold.reached).signal.aborted).toBe(true);
+    expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+    expect(await settled(owner, conv, { status: "failed", error: "provider_unavailable", retryable: true })).toMatchObject({ cost: "0" });
+  });
+
+  it("a stream the upstream cuts off midway: what it said is discarded, nothing posted, failed; no usage reported: it costs nothing", async () => {
+    for (const [name, cutOff] of [
+      ["cut_error", () => gateway.fail("provider_unavailable", { afterText: "说到一半就断了，" })],
+      ["cut_quiet", () => gateway.cut("说到一半就断了，")],
+    ] as const) {
+      const { owner, agent, conv } = await owned(name);
+      const s = await connect(app, owner);
+      cutOff();
+      await say(owner, conv, "讲个故事");
+      expect(await app.agentWorker.runOnce()).toBe(true);
+      await s.next(isRun(conv, "failed"));
+      // The owner saw it streaming; it is not kept.
+      expect(s.events.filter((e) => e.type === "delta").map((e) => e.text).join("")).toBe("说到一半就断了，");
+      expect([name, await fromAgent(owner, conv, agent.id)]).toEqual([name, []]);
+      const record = await settled(owner, conv, { status: "failed", error: "provider_unavailable", retryable: true });
+      expect([name, record]).toMatchObject([name, { estimated: true, output: 0, cost: "0" }]);
+    }
+  });
+
+  it("an upstream error: failed with its code; a refused key is not retryable", async () => {
+    const down = await owned("down");
+    gateway.fail("provider_unavailable");
+    await say(down.owner, down.conv, "你好");
+    await app.agentWorker.runOnce();
+    expect(await settled(down.owner, down.conv, { status: "failed", error: "provider_unavailable", retryable: true })).toMatchObject({ cost: "0" });
+
+    const refused = await owned("refused");
+    gateway.fail("provider_rejected");
+    await say(refused.owner, refused.conv, "你好");
+    await app.agentWorker.runOnce();
+    expect(await settled(refused.owner, refused.conv, { status: "failed", error: "provider_rejected", retryable: false })).toMatchObject({ cost: "0" });
+    expect(await fromAgent(refused.owner, refused.conv, refused.agent.id)).toEqual([]);
+  });
+
+  it("an empty answer: failed provider_unavailable, nothing posted, nothing charged", async () => {
+    const { owner, agent, conv } = await owned("empty");
+    gateway.empty();
+    await say(owner, conv, "你好");
+    await app.agentWorker.runOnce();
+    expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+    expect(await settled(owner, conv, { status: "failed", error: "provider_unavailable", retryable: true })).toMatchObject({ cost: "0" });
+  });
+
+  it("a 50 000-character answer: its first 8 000 characters are posted, marked truncated; settled on what was produced", async () => {
+    const { owner, agent, conv } = await owned("long");
+    gateway.reply("长".repeat(50_000));
+    await say(owner, conv, "写长一点");
+    await app.agentWorker.runOnce();
+    const [reply] = await fromAgent(owner, conv, agent.id);
+    expect(reply).toMatchObject({ text: "长".repeat(8000), truncated: true });
+    expect(await settled(owner, conv, { status: "done", retryable: false })).toMatchObject({ estimated: true, output: 50_000 });
+  });
+
+  it("no usage reported: settled on an estimate and marked so; reported usage is taken as it is", async () => {
+    const quiet = await owned("nousage");
+    gateway.reply("好的。");
+    await say(quiet.owner, quiet.conv, "你好");
+    await app.agentWorker.runOnce();
+    expect(await settled(quiet.owner, quiet.conv, { status: "done", retryable: false })).toMatchObject({ estimated: true, output: 3 });
+
+    const counted = await owned("usage");
+    gateway.reply("好的。", { usage: { inputTokens: 50, outputTokens: 7 } });
+    await say(counted.owner, counted.conv, "你好");
+    await app.agentWorker.runOnce();
+    // 50 × 1 + 7 × 2 micro-points on the free site model.
+    expect(await settled(counted.owner, counted.conv, { status: "done", retryable: false })).toEqual({
+      outcome: "done",
+      estimated: false,
+      input: 50,
+      output: 7,
+      cost: "64",
+    });
+  });
+});
+
+describe("attachments that cannot be read", () => {
+  it("one unreadable file is shown by its name and logged once; the reply goes on", async () => {
+    const { owner, agent, conv } = await owned("onebad");
+    const good = await sendFile(owner, conv, "good.txt", "能读的内容");
+    const bad = await sendFile(owner, conv, "bad.txt", "读不到的内容");
+    const badKey = await blobKeyOf(bad);
+    store.probe.beforeGet = (key) => {
+      if (key === badKey) throw Object.assign(new Error("simulated read failure"), { code: "EIO" });
+    };
+    gateway.reply("看了一个。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(textsOf(callsHere()[0]!)).toEqual(["[文件：good.txt]\n能读的内容", "[文件：bad.txt]"]);
+    expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["看了一个。"]);
+    expect((await latestRun(owner, conv)).status).toBe("done");
+    expect(logged(/could not be read/).map((l) => l.attachmentId)).toEqual([bad]);
+    expect(good).not.toBe(bad);
+  });
+
+  it("two in a row that cannot be read: the store is down, the reply fails busy, retryable, with no model call", async () => {
+    const { owner, conv } = await owned("twobad");
+    await sendFile(owner, conv, "one.txt", "一");
+    await sendFile(owner, conv, "two.txt", "二");
+    store.probe.beforeGet = () => {
+      throw Object.assign(new Error("simulated outage"), { code: "EIO" });
+    };
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(callsHere()).toHaveLength(0);
+    expect(store.probe.gets).toHaveLength(2);
+    expect(await settled(owner, conv, { status: "failed", error: "busy", retryable: true })).toMatchObject({ cost: "0" });
+  });
+
+  it("reading is bounded by the reply's time limit: a store that does not answer fails the reply busy within it", async () => {
+    const { owner, conv } = await owned("stuck");
+    await sendFile(owner, conv, "stuck.txt", "等不到");
+    store.probe.beforeGet = () => new Promise<void>(() => {});
+    const t0 = performance.now();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(performance.now() - t0).toBeLessThan(3000);
+    expect(callsHere()).toHaveLength(0);
+    expect(await settled(owner, conv, { status: "failed", error: "busy", retryable: true })).toMatchObject({ cost: "0" });
+  });
+
+  it("a stop asked for while files are read: no further file is read, no model call; the run is stopped", async () => {
+    const { owner, conv } = await owned("stopread");
+    await sendFile(owner, conv, "a.txt", "甲");
+    await sendFile(owner, conv, "b.txt", "乙");
+    let open!: () => void;
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => (reached = resolve));
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    store.probe.beforeGet = async () => {
+      reached();
+      await gate;
+    };
+    const running = app.agentWorker.runOnce();
+    await reading;
+    const run = await latestRun(owner, conv);
+    expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/${run.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    open();
+    await running;
+    expect(store.probe.gets).toHaveLength(1);
+    expect(callsHere()).toHaveLength(0);
+    expect(await settled(owner, conv, { status: "stopped", retryable: false })).toMatchObject({ cost: "0" });
+  });
+});

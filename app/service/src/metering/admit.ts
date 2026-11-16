@@ -97,10 +97,10 @@ export async function admit(
 }
 
 /**
- * `admit` for the run `runId`, which must be `running`, belong to `ownerId` and not have been admitted yet: locks the
- * run row, admits, and records on it the call's `source` and `model` (`resolved.name`) with its `charge_to` and
- * `hold_micro` — what settlement goes by — all in the caller's transaction. A refusal throws (402 `no_quota`) and
- * writes nothing.
+ * `admit` for the run `runId`, which must be `running`, belong to `ownerId` and be neither admitted nor settled yet (a
+ * hold taken after its usage record would never be released): locks the run row, admits, and records on it the call's
+ * `source` and `model` (`resolved.name`) with its `charge_to` and `hold_micro` — what settlement goes by — all in the
+ * caller's transaction. A refusal throws (402 `no_quota`) and writes nothing.
  */
 export async function admitRun(
   t: Tx,
@@ -118,6 +118,9 @@ export async function admitRun(
   const run = rows[0];
   if (!run || run.owner_id !== ownerId || run.status !== "running") throw new Error(`admitRun: ${runId} is not a running run of ${ownerId}`);
   if (run.source !== null) throw new Error(`admitRun: ${runId} is already admitted`);
+  if ((await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0) {
+    throw new Error(`admitRun: ${runId} is already settled`);
+  }
   const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now);
   await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5 where id = $1", [
     runId,

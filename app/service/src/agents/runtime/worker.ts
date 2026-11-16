@@ -40,8 +40,9 @@ export interface AgentWorker {
   /** `runOnce` until nothing is queued (follow-ups included); how many ran. */
   drain(): Promise<number>;
   /**
-   * Stops: no more claims; calls in flight are abandoned without posting and their runs left `running` (recovered at
-   * the next start); replies already being posted finish. Resolves once nothing runs any more.
+   * Stops: no more claims; calls in flight, and replies still reading their attachments, are abandoned without posting
+   * or admitting and their runs left `running` (recovered at the next start); replies already being posted finish.
+   * Resolves once nothing runs any more.
    */
   stop(): Promise<void>;
 }
@@ -56,7 +57,8 @@ const BUSY: RunEnd = { status: "failed", error: "busy" };
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const { port, models, log } = opts;
   const inFlight = new Set<Promise<void>>();
-  const shutdowns = new Map<string, () => void>();
+  /** Per run being worked on: aborts when the service closes. */
+  const shutdowns = new Map<string, AbortController>();
   let started = false;
   let closing = false;
   let pumping: Promise<void> | null = null;
@@ -85,7 +87,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     posted === "posted" ? ok : posted === "refused" ? { status: "cancelled" } : BUSY;
 
   /** Streams the model's answer to the owner; how the stream ended and what it produced. */
-  async function call(run: RunTicket, prepared: Prepared) {
+  async function call(run: RunTicket, prepared: Prepared, shutdown: AbortSignal) {
     const controller = new AbortController();
     let why: Interruption | null = null;
     const interrupt = (reason: Interruption): void => {
@@ -93,12 +95,13 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       why = reason;
       controller.abort(new Error(`agent run interrupted: ${reason}`));
     };
+    const onShutdown = () => interrupt("shutdown");
     const stopCheck = setInterval(() => port.shouldStop(run) && interrupt("stop"), STOP_CHECK_MS);
     const deadline = setTimeout(() => interrupt("timeout"), opts.runTimeoutMs);
     stopCheck.unref();
     deadline.unref();
-    shutdowns.set(run.id, () => interrupt("shutdown"));
-    if (closing) interrupt("shutdown");
+    shutdown.addEventListener("abort", onShutdown, { once: true });
+    if (shutdown.aborted) interrupt("shutdown");
     if (port.shouldStop(run)) interrupt("stop");
 
     const out = new ReplyStream((delta) => port.emit(run, delta));
@@ -126,29 +129,46 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     } finally {
       clearInterval(stopCheck);
       clearTimeout(deadline);
-      shutdowns.delete(run.id);
+      shutdown.removeEventListener("abort", onShutdown);
     }
     return { out, finished, failure, why: why as Interruption | null };
   }
 
   async function execute(run: RunTicket): Promise<void> {
+    const shutdown = new AbortController();
+    shutdowns.set(run.id, shutdown);
+    if (closing) shutdown.abort(new Error("the service is closing"));
+    try {
+      await work(run, shutdown.signal);
+    } finally {
+      shutdowns.delete(run.id);
+    }
+  }
+
+  async function work(run: RunTicket, shutdown: AbortSignal): Promise<void> {
     let prepared: Prepared | RunEnd;
     try {
-      prepared = await port.begin(run);
+      prepared = await port.begin(run, shutdown);
     } catch (err) {
+      // The service is closing before the call was admitted: the run stays running, to be recovered at the next start.
+      if (shutdown.aborted) return;
       log.error({ err, runId: run.id }, "agent run: could not start");
       return finish(run, BUSY, null, NO_OUTPUT);
     }
     if (isRunEnd(prepared)) return finish(run, prepared, null, NO_OUTPUT);
 
-    const { out, finished, failure, why } = await call(run, prepared);
+    const { out, finished, failure, why } = await call(run, prepared, shutdown);
     // The service is closing: nothing is posted and the run stays running, to be recovered at the next start.
     if (finished === null && why === "shutdown") return out.discard();
     out.flush();
 
     const usage = finished?.usage ?? null;
     const fallback = { inputChars: prepared.inputChars, outputChars: out.outputChars() };
-    if (failure !== null) return finish(run, { status: "failed", error: failure }, usage, fallback);
+    // A failed call is charged only what the upstream reported: what it said is discarded and not counted.
+    const failed = (end: RunEnd) => finish(run, end, usage, { ...fallback, outputChars: 0 });
+    if (failure !== null) return failed({ status: "failed", error: failure });
+    // The upstream ended the stream without its finish (cut off midway).
+    if (finished === null && why === null) return failed(UNAVAILABLE);
 
     const text = cleanModelText(out.text);
     const reasoning = cleanModelText(out.reasoning);
@@ -159,8 +179,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
       return finish(run, ended(posted, { status: "stopped" }), usage, fallback);
     }
-    // A complete answer, or one cut off by the time limit. Nothing said, or a stream that ended without its finish: failed.
-    if (!said || (finished === null && why !== "timeout")) return finish(run, UNAVAILABLE, usage, fallback);
+    // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
+    if (!said) return failed(UNAVAILABLE);
     const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
     return finish(run, ended(posted, { status: "done" }), usage, fallback);
   }
@@ -224,7 +244,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     async stop() {
       closing = true;
       if (timer) clearInterval(timer);
-      for (const interrupt of shutdowns.values()) interrupt();
+      for (const shutdown of shutdowns.values()) shutdown.abort(new Error("the service is closing"));
       await pumping;
       await Promise.all([...inFlight]);
     },

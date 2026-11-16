@@ -26,7 +26,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  *   images, at their token estimate) and the record says `estimated`. `fallback` is ours, so its counts must be
  *   whole numbers of 0 or more: anything else throws before anything is read or written.
  * - Cost (`cost_micro`, the true cost): the tokens at the site model's configured price; 0 for a provider model, for a
- *   `failed` call that produced no output, and for a run never admitted (no model recorded; nothing is charged).
+ *   `failed` call that produced no output, for no tokens at all (a run recovered at start-up settles so), and for a
+ *   run never admitted (no model recorded; nothing is charged).
  * - Charged: the cost up to the run's hold — never more than admission held; the part above it is forgiven. Then by
  *   `charge_to`: `free` grows the free allowance of the site day it is *now* (a call that started before midnight and
  *   ends after it uses the new day's allowance) by the charge, up to what is left of it, and the rest is forgiven too,
@@ -36,7 +37,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
  *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
- * settled already, and for a site model no longer configured when its call cost something.
+ * settled already (`usage_records_run_id_key` holds that in the database too), and for a site model no longer
+ * configured when its call cost something.
  */
 export async function settle(
   t: Tx,
@@ -69,7 +71,7 @@ export async function settle(
   const input = reported ? usage.inputTokens : fallback.inputChars;
   const output = reported ? usage.outputTokens : fallback.outputChars;
   let cost = 0n;
-  if (run.source === "site" && !(outcome === "failed" && output === 0)) {
+  if (run.source === "site" && !(outcome === "failed" && output === 0) && input + output > 0) {
     const site = config.siteModels.find((m) => m.id === run.model);
     if (!site) throw new Error(`settle: site model ${run.model} of run ${runId} is no longer configured`);
     cost = costMicro(site, input, output);

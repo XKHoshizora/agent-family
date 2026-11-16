@@ -106,6 +106,30 @@ describe("pause or delete ends the active reply for good", () => {
     expect(userTexts(gateway.calls.at(-1)!)).toEqual(["你好", "还有一句", "暂停时说的", "恢复了"]);
   });
 
+  it("a message sent right after the resume, while the interrupted reply is still ending, is answered by a follow-up", async () => {
+    const { owner, agent, conv } = await owned("rory");
+    await say(owner, conv, "你好");
+    const run = (await app.agentPort.claimNext())!;
+    expect(isRunEnd(await app.agentPort.begin(run))).toBe(false);
+    await say(owner, conv, "暂停前说的"); // noted on the running reply; the pause drops the note
+    await pause(owner, agent.id);
+    await say(owner, conv, "暂停时说的"); // not answered for itself
+    await resume(owner, agent.id);
+    await say(owner, conv, "恢复后说的"); // the interrupted run is still running: noted on it
+    expect(await app.agentPort.post(run, { text: "说到一半", reasoning: "", stopped: true, truncated: false })).toBe("refused");
+    await app.agentPort.finish(run, { status: "stopped" }, null, NOTHING);
+
+    expect(await runsOf(agent.id)).toEqual([
+      { status: "cancelled", error: "agent_paused" },
+      { status: "queued", error: null },
+    ]);
+    gateway.reply("收到。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["收到。"]);
+    expect(userTexts(gateway.calls.at(-1)!)).toEqual(["你好", "暂停前说的", "暂停时说的", "恢复后说的"]);
+    expect(await app.agentWorker.runOnce()).toBe(false);
+  });
+
   it("messages written while paused get no reply, during the pause or after the resume", async () => {
     const { owner, agent, conv } = await owned("mina");
     await pause(owner, agent.id);
@@ -182,6 +206,42 @@ describe("no delta once the pause has answered", () => {
     await app.agentPort.finish(run, { status: "stopped" }, null, NOTHING);
     await s.next(isRun(conv, "cancelled"));
     expect(s.events.filter((e) => e.type === "delta").map((e) => [e.text, e.reasoning])).toEqual([["甲", undefined]]);
+  });
+
+  it("a delta queued before the pause is dropped even when the hub delivers it after the run has ended", async () => {
+    const { owner, agent, conv } = await owned("lara");
+    const s = await connect(app, owner);
+    await say(owner, conv, "你好");
+    const run = (await app.agentPort.claimNext())!;
+    await app.agentPort.begin(run);
+    app.agentPort.emit(run, { text: "甲" });
+    await s.next((e) => e.type === "delta" && e.text === "甲");
+
+    // The conversation's delivery queue is held: the fan-out of a message waits on a lock of the memberships table.
+    const late = await db.tx((t) => insertMessage(t, conv, owner.id, "text", { text: "排队中" }, "late-2"));
+    let locked!: () => void;
+    let release!: () => void;
+    const isLocked = new Promise<void>((resolve) => (locked = resolve));
+    const holding = db.tx(async (t) => {
+      await t.query("lock table memberships in access exclusive mode");
+      locked();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await isLocked;
+    try {
+      app.deps.conversations.publish({ messages: [late], conversations: [] }, app.log);
+      app.agentPort.emit(run, { text: "乙" }); // waits behind the fan-out
+      await pause(owner, agent.id);
+      // The run ends, and its final push is queued, before the hub gets to the delta.
+      expect(await app.agentPort.post(run, { text: "甲乙", reasoning: "", stopped: true, truncated: false })).toBe("refused");
+      await app.agentPort.finish(run, { status: "stopped" }, null, NOTHING);
+    } finally {
+      release();
+      await holding;
+    }
+    await s.next(isRun(conv, "cancelled"));
+    expect(s.events.filter((e) => e.type === "delta").map((e) => e.text)).toEqual(["甲"]);
+    expect(s.events.some((e) => e.type === "message" && e.message.text === "排队中")).toBe(true);
   });
 
   it("the worker: after the pause has answered, nothing more of the reply reaches the owner", async () => {

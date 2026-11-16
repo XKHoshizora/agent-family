@@ -10,7 +10,7 @@ import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
-import { buildContext, hasOwnerTurn, loadContext, type LoadedContext } from "./context.ts";
+import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, type BuiltContext, type LoadedContext } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
@@ -30,30 +30,19 @@ export interface AgentPortDeps {
 }
 
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
-/** The service's own trouble; here: a reply with nothing to answer and no reason why, which never reaches a model. */
+/**
+ * The service's own trouble; here: a reply with nothing to answer and no reason why, or whose attachments could not be
+ * read (the store is down, or reading took longer than the run may), which never reaches a model.
+ */
 const BUSY: RunEnd = { status: "failed", error: "busy" };
+/** No tokens at all: what a run recovered at start-up is settled on. */
+const NOTHING = { inputChars: 0, outputChars: 0 };
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 
-/**
- * Whether a run that ended so may be followed by a reply to what its owner wrote meanwhile (`pending_seq`): every
- * ending but a cancel by its Agent's pause or delete, which ends the reply for good (nothing written meanwhile is
- * answered). A run cancelled because its owner started over is followed: what came after the new topic is to answer.
- */
-function followsUp(end: RunEnd): boolean {
-  switch (end.status) {
-    case "done":
-    case "stopped":
-    case "failed":
-      return true;
-    case "cancelled":
-      return end.error === undefined;
-  }
-}
-
-/** What `begin` and `finish` read of the run, under its row lock. */
+/** What `begin`, `finish` and recovery read of the run, under its row lock. */
 interface RunState {
   status: string;
   covers_seq: string | null;
@@ -61,6 +50,31 @@ interface RunState {
   interrupted: Interruption | null;
 }
 const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
+
+/**
+ * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
+ * what its owner wrote meanwhile when something was noted on it (`pending_seq` beyond what it covered) and its Agent
+ * can still answer (not paused, not deleted, has a model) — however the run itself ended. A pause or delete drops what
+ * was noted (runs.ts `interruptRuns`) and nothing is noted while the Agent is paused, so what is noted on an
+ * interrupted run came after the resume, and is answered.
+ */
+function followUpSeq(state: RunState, agent: AgentRow): number | null {
+  const covers = Number(state.covers_seq ?? 0);
+  const pending = Number(state.pending_seq ?? 0);
+  return pending > covers && !agent.paused && !agent.deleted && agent.model !== null ? pending : null;
+}
+
+/**
+ * A run's in-process flags, from its claim until it has finished. A delta waiting to be delivered keeps the flags it
+ * was emitted under, so once `silenced` it stays dropped, however late the hub gets to it — also after `finish` has
+ * forgotten the run.
+ */
+interface RunFlags {
+  /** Its owner asked it to stop, or its Agent's pause or delete interrupted it. */
+  stop: boolean;
+  /** Its Agent's pause or delete interrupted it: nothing more of it is pushed. */
+  silenced: boolean;
+}
 
 /**
  * How a run is recorded, from what is true under `lockAgent` rather than what the worker could tell (an owner's stop
@@ -83,13 +97,24 @@ function recorded(end: RunEnd, s: { posted: boolean; interrupted: Interruption |
  * `interruptRuns` (called after their transactions commit, before they answer).
  */
 export class DbAgentPort implements AgentPort {
-  /** Runs that should stop: their owner asked, or their Agent was paused or deleted. Kept until they finish. */
-  private readonly stopping = new Set<string>();
-  /** Runs their Agent's pause or delete interrupted: nothing more of them is pushed. Kept until they finish. */
-  private readonly silenced = new Set<string>();
+  /**
+   * The flags of the runs this process is working on, by id: made when a run is claimed (or first flagged), forgotten
+   * once it has finished. They live in this process only, like the worker: a new start begins with none, and a run left
+   * `running` by the previous one is recovered (`recoverRuns`) before anything could flag it.
+   */
+  private readonly flags = new Map<string, RunFlags>();
   private wakeWorker: () => void = () => {};
 
   constructor(private readonly deps: AgentPortDeps) {}
+
+  private flagsOf(runId: string): RunFlags {
+    let flags = this.flags.get(runId);
+    if (!flags) {
+      flags = { stop: false, silenced: false };
+      this.flags.set(runId, flags);
+    }
+    return flags;
+  }
 
   /** What to call when a run is queued: the worker's wake-up. */
   onQueued(fn: () => void): void {
@@ -104,22 +129,24 @@ export class DbAgentPort implements AgentPort {
 
   /** The owner asked a running run to stop. */
   requestStop(runId: string): void {
-    this.stopping.add(runId);
+    this.flagsOf(runId).stop = true;
   }
 
   /**
    * Runs the Agent's pause or delete has just marked `interrupted` (runs.ts `interruptRuns`): their calls are abandoned
-   * and, from now on, none of their deltas reaches the owner — not even one already waiting in the hub's queue.
+   * and, from now on, none of their deltas reaches the owner — not even one already waiting in the hub's queue, also
+   * when the hub delivers it after the run has finished.
    */
   interruptRuns(runIds: readonly string[]): void {
     for (const id of runIds) {
-      this.silenced.add(id);
-      this.stopping.add(id);
+      const flags = this.flagsOf(id);
+      flags.silenced = true;
+      flags.stop = true;
     }
   }
 
   shouldStop(run: RunTicket): boolean {
-    return this.stopping.has(run.id);
+    return this.flags.get(run.id)?.stop === true;
   }
 
   async claimNext(): Promise<RunTicket | null> {
@@ -139,6 +166,7 @@ export class DbAgentPort implements AgentPort {
     const row = rows[0];
     if (!row) return null;
     const run: RunTicket = { id: row.id, agentId: row.agent_id, ownerId: row.owner_id, conversationId: row.conversation_id };
+    this.flagsOf(run.id);
     this.announce({ ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(row) });
     return run;
   }
@@ -173,13 +201,17 @@ export class DbAgentPort implements AgentPort {
    *    topic (its owner started over), else `failed` `busy`; and so does one whose model's context cannot hold the
    *    owner's newest message, or 200 tokens of it (`failed`, `context_too_small`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
-   *    conversation, a pause or a delete meanwhile does not wait for it.
+   *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
+   *    stop (step 3 then ends it); one file that cannot be read is shown by its name; the store failing on two files
+   *    in a row, or the step taking longer than `agentRunTimeoutMs`, ends the run `failed`, `busy`. When `closing`
+   *    aborts (the service is closing) the read is abandoned and `begin` rejects with its reason before step 3: the run
+   *    stays `running`, unadmitted, for `recoverRuns` at the next start.
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; otherwise
    *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
    *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
    *    else `none`.
    */
-  async begin(run: RunTicket): Promise<Prepared | RunEnd> {
+  async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
     const now = new Date();
     const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number }> => {
@@ -219,7 +251,20 @@ export class DbAgentPort implements AgentPort {
     });
     if ("end" in first) return first.end;
 
-    const context = await buildContext(blobs, first.loaded, first.resolved, log);
+    const deadline = AbortSignal.timeout(config.agentRunTimeoutMs);
+    let context: BuiltContext;
+    try {
+      context = await buildContext(blobs, first.loaded, first.resolved, log, {
+        signal: closing ? AbortSignal.any([closing, deadline]) : deadline,
+        stop: () => this.shouldStop(run),
+      });
+    } catch (err) {
+      if (closing?.aborted) throw closing.reason;
+      if (!deadline.aborted && !(err instanceof BlobStoreDown)) throw err;
+      log.error({ err, runId: run.id }, "agent run: its attachments could not be read");
+      return BUSY;
+    }
+    if (closing?.aborted) throw closing.reason;
 
     const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
       const { agent, state } = await this.lockRun(t, run);
@@ -246,9 +291,11 @@ export class DbAgentPort implements AgentPort {
   }
 
   emit(run: RunTicket, delta: Delta): void {
-    // Checked now and again when the hub delivers it: once the pause or delete has answered, no delta goes out.
-    const wanted = () => !this.silenced.has(run.id);
-    if (wanted()) this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, wanted);
+    // Checked now and again when the hub delivers it, against the flags it was emitted under: once the pause or delete
+    // has answered, no delta goes out, however late it is delivered. A run that has finished emits nothing.
+    const flags = this.flags.get(run.id);
+    if (!flags || flags.silenced) return;
+    this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
 
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused"> {
@@ -265,8 +312,8 @@ export class DbAgentPort implements AgentPort {
   /**
    * One transaction under `lockAgent`: settles the call (it leaves `running` in the same transaction, so its hold
    * never stops counting before its cost lands) — at no charge when it failed on our side (`busy`: the reply could not
-   * be stored) — records how the run ended (`recorded`), and queues the follow-up when the owner wrote meanwhile
-   * (`pending_seq` beyond `covers_seq`), the run was not cancelled and the Agent can still answer. Announced after commit.
+   * be stored) — records how the run ended (`recorded`), and queues the follow-up by `followUpSeq`. Announced after
+   * commit; the run's flags are forgotten then (a delta still waiting keeps its own).
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
     const { db, config } = this.deps;
@@ -290,14 +337,14 @@ export class DbAgentPort implements AgentPort {
         [run.id, final.status, error, resetsAt],
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
-      const covers = Number(state.rows[0].covers_seq ?? 0);
-      const pending = Number(state.rows[0].pending_seq ?? 0);
-      const answers = pending > covers && followsUp(final) && !agent.paused && !agent.deleted && agent.model !== null;
-      const followUp = answers ? await queueRun(t, agent, pending) : null;
-      return { ended, followUp };
+      const next = followUpSeq(state.rows[0], agent);
+      const followUp = next === null ? null : await queueRun(t, agent, next);
+      return { ended, followUp, interrupted: state.rows[0].interrupted !== null };
     });
-    this.stopping.delete(run.id);
-    this.silenced.delete(run.id);
+    // An interrupted run is silenced here too, whether or not the pause's own call (`interruptRuns`) came first.
+    const flags = this.flags.get(run.id);
+    if (flags && result?.interrupted) flags.silenced = true;
+    this.flags.delete(run.id);
     if (!result) return;
     this.announce(result.ended);
     if (result.followUp) this.announce(result.followUp);
@@ -306,4 +353,64 @@ export class DbAgentPort implements AgentPort {
 
 export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
   return new DbAgentPort(deps);
+}
+
+/**
+ * Recovery at start-up, before the worker starts (README "Agents and runs"; spec 6.4, 6.5): every run the previous
+ * process left `running` — its call, if it had one, died with it — is ended without a model call, each in a
+ * transaction of its own under the locks `finish` takes (the Agent's conversation and `agents` rows, then the run's,
+ * then the account's):
+ * - its reply had been posted (the stop fell between post and finish): `done`, or `stopped` when the message says so;
+ * - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
+ * - else `failed`, `provider_unavailable`, retryable.
+ * In the same transaction its hold is released by a settlement that costs nothing (whatever the upstream reported died
+ * with the process: no tokens, all forgiven) — unless it already has its usage record: it is never settled twice. A
+ * posted or cancelled run is followed up by the one rule (`followUpSeq`: queued, for the worker about to start); a
+ * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything. Queued runs are
+ * left as they are. Nothing is pushed (no socket can be open yet): a client learns the state from `GET …/run`. A run
+ * that cannot be recovered is logged and left for the next start. Returns how many were recovered.
+ */
+export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseLogger, "error">): Promise<number> {
+  const { rows } = await db.query<{ id: string; agent_id: string | null }>(
+    "select id, agent_id from agent_runs where status = 'running' order by started_at, id",
+  );
+  let recovered = 0;
+  for (const run of rows) {
+    try {
+      if (await db.tx((t) => recoverRun(t, config, run.id, run.agent_id))) recovered++;
+    } catch (err) {
+      log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the next start");
+    }
+  }
+  return recovered;
+}
+
+/** One run of `recoverRuns`; false when it was no longer running. */
+async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null): Promise<boolean> {
+  // A reply has its Agent; a persona draft has none.
+  const agent = agentId === null ? null : await lockAgent(t, agentId);
+  const state = (await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [runId])).rows[0];
+  if (state?.status !== "running") return false;
+  const posted =
+    agent === null
+      ? null
+      : (
+          await t.query<{ stopped: boolean | null }>(
+            "select (body ->> 'stopped') = 'true' as stopped from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3",
+            [agent.conversationId, agent.id, runId],
+          )
+        ).rows[0];
+  const end: RunEnd = posted
+    ? { status: posted.stopped === true ? "stopped" : "done" }
+    : state.interrupted
+      ? { status: "cancelled", error: state.interrupted }
+      : UNAVAILABLE;
+  // A run settled already had its hold released with its record.
+  const settled = (await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0;
+  if (!settled) await settle(t, config, runId, null, NOTHING, end.status, new Date(), { forgiveAll: true });
+  const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
+  await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [runId, end.status, error]);
+  const next = agent !== null && end.status !== "failed" ? followUpSeq(state, agent) : null;
+  if (agent !== null && next !== null) await queueRun(t, agent, next);
+  return true;
 }

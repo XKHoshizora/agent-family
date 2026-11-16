@@ -19,7 +19,7 @@ import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
-import { createAgentPort, type DbAgentPort } from "./agents/port-impl.ts";
+import { createAgentPort, recoverRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
 import { createAgentWorker, type AgentWorker } from "./agents/runtime/worker.ts";
@@ -137,6 +137,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const config = overrides.config ?? loadConfig();
   const ownsDb = overrides.db === undefined;
   const insecureLocal = options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {};
+  // One count of the calls to providers and site models in flight, for every guard the app builds.
+  const providerCalls = createSlots(config.providerMaxConcurrentCalls);
   const deps: Deps = {
     config,
     db:
@@ -149,8 +151,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     sessions: overrides.sessions ?? createSessionEvents(),
     uploads: overrides.uploads ?? createUploadSlots(),
     searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT),
-    providerProbe: overrides.providerProbe ?? createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...insecureLocal })),
-    models: overrides.models ?? createModelGateway(insecureLocal),
+    providerProbe: overrides.providerProbe ?? createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...insecureLocal, calls: providerCalls })),
+    models: overrides.models ?? createModelGateway({ ...insecureLocal, calls: providerCalls }),
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
@@ -251,8 +253,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // (an upgrade request to any other route is then refused instead of answered over the raw socket).
   await registerSync(app);
 
-  // The reply worker runs in this process (one instance, like the hub). It starts once the app is ready and stops on
-  // close before the hub and the database: calls in flight are abandoned, their runs left running.
+  // The reply worker runs in this process (one instance, like the hub). Once the app is ready, the runs the previous
+  // process left running are recovered and then the worker starts; it stops on close before the hub and the database:
+  // calls in flight are abandoned, their runs left running for the next start.
   const agentPort = createAgentPort({
     db: deps.db,
     config,
@@ -272,7 +275,11 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   agentPort.onQueued(() => agentWorker.wake());
   app.decorate("agentPort", agentPort);
   app.decorate("agentWorker", agentWorker);
-  app.addHook("onReady", async () => agentWorker.start());
+  app.addHook("onReady", async () => {
+    const recovered = await recoverRuns(deps.db, config, app.log);
+    if (recovered > 0) app.log.info({ recovered }, "agent runs left running by the previous start were recovered");
+    agentWorker.start();
+  });
   app.addHook("onClose", async () => agentWorker.stop());
 
   const answerFloor = options.answerFloor ?? ANSWER_FLOOR;

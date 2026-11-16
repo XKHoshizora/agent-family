@@ -3,6 +3,7 @@ import { inspect } from "node:util";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROTOCOLS, type Protocol } from "../src/config.ts";
 import { createModelGateway, ModelError, type ModelCall, type ModelErrorCode, type ModelEvent } from "../src/models/gateway.ts";
+import { createSlots } from "../src/slots.ts";
 import { cannedKeyError, cannedStream, protocolStub, STUB_MODEL, type ProtocolStub } from "./helpers/models.ts";
 
 /**
@@ -22,7 +23,7 @@ afterAll(async () => {
 });
 beforeEach(() => stub.reset());
 
-const gateway = createModelGateway({ allowInsecureLocal: true });
+const gateway = createModelGateway({ calls: createSlots(64), allowInsecureLocal: true });
 
 function call(protocol: Protocol, over: Partial<ModelCall> = {}): ModelCall {
   return {
@@ -148,7 +149,7 @@ describe("upstream refusals and failures become ModelError codes", () => {
   });
 
   it("an upstream silent for longer than the idle limit is provider_unavailable", async () => {
-    const quick = createModelGateway({ allowInsecureLocal: true, idleTimeoutMs: 300 });
+    const quick = createModelGateway({ calls: createSlots(64), allowInsecureLocal: true, idleTimeoutMs: 300 });
     stub.answer((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       res.write(": nothing yet\n\n");
@@ -160,7 +161,7 @@ describe("upstream refusals and failures become ModelError codes", () => {
   });
 
   it("the guard's refusal is address_not_allowed, and nothing is sent", async () => {
-    const strict = createModelGateway({});
+    const strict = createModelGateway({ calls: createSlots(64) });
     for (const baseUrl of [stub.baseUrl, "https://10.0.0.7/v1", "https://169.254.169.254/v1", "ftp://example.com/v1"]) {
       const { error } = await run(strict.stream(call("openai_chat", { baseUrl })));
       expectModelError(error, "address_not_allowed");
