@@ -19,7 +19,15 @@
     "inbox:list": "tsx src/cli.ts inbox:list",
     "inbox:list:prod": "node --enable-source-maps dist/cli.js inbox:list",
     "attachments:sweep": "tsx src/cli.ts attachments:sweep",
-    "attachments:sweep:prod": "node --enable-source-maps dist/cli.js attachments:sweep"
+    "attachments:sweep:prod": "node --enable-source-maps dist/cli.js attachments:sweep",
+    "credits:grant": "tsx src/cli.ts credits:grant",
+    "credits:grant:prod": "node --enable-source-maps dist/cli.js credits:grant",
+    "credits:show": "tsx src/cli.ts credits:show",
+    "credits:show:prod": "node --enable-source-maps dist/cli.js credits:show",
+    "tier:set": "tsx src/cli.ts tier:set",
+    "tier:set:prod": "node --enable-source-maps dist/cli.js tier:set",
+    "models:list": "tsx src/cli.ts models:list",
+    "models:list:prod": "node --enable-source-maps dist/cli.js models:list"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1169.0",

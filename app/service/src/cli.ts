@@ -1,15 +1,17 @@
 import { config as loadDotenv } from "dotenv";
 import { createBlobStore } from "./attachments/blob.ts";
 import { DEFAULT_UNSENT_AFTER_MINUTES, runSweep } from "./attachments/sweeper.ts";
+import { applyLedger, ensureAccount, formatPoints, lockAccount, parsePoints } from "./accounts/store.ts";
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
-import { createDb } from "./db.ts";
+import { createDb, type Db } from "./db.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
 
 const USAGE =
-  "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | attachments:sweep [--older-than <minutes>]";
+  "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | attachments:sweep [--older-than <minutes>] | " +
+  "credits:grant --handle <h> --points <n> [--note <text>] | credits:show --handle <h> | tier:set --handle <h> --tier <name> | models:list";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -22,6 +24,24 @@ function flag(args: string[], name: string): string | undefined {
   if (i === -1) return undefined;
   const value = args[i + 1];
   if (value === undefined || value.startsWith("--")) throw new Error(`${name} needs a value`);
+  return value;
+}
+
+/** The person (never an Agent: accounts belong to humans) whose handle is given. */
+async function humanByHandle(db: Db, handle: string): Promise<{ id: string; handle: string }> {
+  const { rows } = await db.query<{ id: string; handle: string; kind: string }>(
+    "select id, handle::text as handle, kind from principals where handle = $1",
+    [handle],
+  );
+  const row = rows[0];
+  if (!row) throw new Error(`no such handle: ${handle}`);
+  if (row.kind !== "human") throw new Error(`${row.handle} is an Agent; accounts belong to people`);
+  return row;
+}
+
+function requiredFlag(args: string[], name: string): string {
+  const value = flag(args, name);
+  if (value === undefined) throw new Error(`${name} is required`);
   return value;
 }
 
@@ -69,6 +89,55 @@ if (command === "migrate") {
     console.log(`swept ${unsent} unsent attachment(s) older than ${olderThan} minutes and ${abandoned} abandoned blob(s)`);
   } finally {
     await db.close();
+  }
+} else if (command === "credits:grant" || command === "credits:show" || command === "tier:set") {
+  const handle = requiredFlag(args, "--handle");
+  // Every argument is checked before the database is touched.
+  let micro = 0n;
+  if (command === "credits:grant") {
+    const parsed = parsePoints(requiredFlag(args, "--points"));
+    if (parsed === null || parsed === 0n) {
+      throw new Error("--points must be a non-zero decimal number with at most 6 fraction digits (negative takes points back)");
+    }
+    micro = parsed;
+  }
+  let tier = "";
+  if (command === "tier:set") {
+    tier = requiredFlag(args, "--tier");
+    const known = Object.keys(loadConfig().agentTiers);
+    if (!known.includes(tier)) throw new Error(`unknown tier "${tier}"; AGENT_TIERS has: ${known.join(", ")}`);
+  }
+  const db = createDb(databaseUrl());
+  try {
+    const person = await humanByHandle(db, handle);
+    if (command === "credits:grant") {
+      const note = flag(args, "--note") ?? null;
+      const balance = await db.tx(async (t) => {
+        await lockAccount(t, person.id);
+        return applyLedger(t, person.id, micro, "grant", note);
+      });
+      console.log(formatPoints(balance));
+    } else if (command === "tier:set") {
+      await db.tx(async (t) => {
+        await ensureAccount(t, person.id);
+        await t.query("update accounts set tier = $2 where principal_id = $1", [person.id, tier]);
+      });
+      console.log(`${person.handle} is now on tier ${tier}`);
+    } else {
+      const { rows } = await db.query<{ tier: string; balance_micro: string }>(
+        "select tier, balance_micro::text from accounts where principal_id = $1",
+        [person.id],
+      );
+      const row = rows[0];
+      console.log(`${person.handle}\ntier ${row?.tier ?? "free"}\nbalance ${formatPoints(BigInt(row?.balance_micro ?? "0"))}`);
+    }
+  } finally {
+    await db.close();
+  }
+} else if (command === "models:list") {
+  // Prices are micro-points per token. The upstream key (apiKeyEnv) is deliberately never read or printed.
+  for (const m of loadConfig().siteModels) {
+    console.log(`${m.id}  "${m.label}"  tier ${m.tier}  protocol ${m.protocol}  in ${m.inputMicroPerToken}  out ${m.outputMicroPerToken}  (micro-points per token)`);
   }
 } else {
   console.error(USAGE);

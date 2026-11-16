@@ -18,6 +18,7 @@ import { registerBodyDeadline } from "./body-deadline.ts";
 import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
+import { registerAccountRoutes } from "./accounts/routes.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
@@ -229,6 +230,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerConversationRoutes(app);
   registerMessageRoutes(app);
   registerAttachmentRoutes(app);
+  registerAccountRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 

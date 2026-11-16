@@ -33,10 +33,14 @@ describe("production build", () => {
     const prod = Object.entries(pkg.scripts).filter(([name]) => name === "start" || name.endsWith(":prod"));
     expect(prod.map(([name]) => name).sort()).toEqual([
       "attachments:sweep:prod",
+      "credits:grant:prod",
+      "credits:show:prod",
       "inbox:list:prod",
       "invite:create:prod",
       "migrate:prod",
+      "models:list:prod",
       "start",
+      "tier:set:prod",
     ]);
     for (const [name, command] of prod) {
       expect([name, command]).toEqual([name, expect.stringMatching(/^node --enable-source-maps dist\/(server|cli)\.js( [a-z:]+)?$/)]);

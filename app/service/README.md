@@ -36,6 +36,10 @@ npm run typecheck    # tsc --noEmit (src and tests)
 npm run invite:create -- [--ttl-hours <n>]          # prints a new invite code (default 72 h)
 npm run inbox:list -- [--to <email>]                # the mail outbox
 npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (by hand; the server does it itself)
+npm run credits:grant -- --handle <h> --points <n> [--note <text>]   # n: decimal, up to 6 fraction digits, may be negative; prints the new balance
+npm run credits:show -- --handle <h>                # a person's tier and points balance (an Agent's handle is refused)
+npm run tier:set -- --handle <h> --tier <name>      # a tier named in AGENT_TIERS
+npm run models:list                                 # the site models: id, label, tier, protocol, prices (never the key)
 ```
 
 Production: build once with the dev dependencies installed, then run plain Node on the build (no `tsx`,
@@ -48,6 +52,7 @@ npm start                        # node dist/server.js
 npm run invite:create:prod -- [--ttl-hours <n>]
 npm run inbox:list:prod -- [--to <email>]
 npm run attachments:sweep:prod -- [--older-than <min>]
+npm run credits:grant:prod -- --handle <h> --points <n> [--note <text>]   # likewise credits:show:prod, tier:set:prod, models:list:prod
 ```
 
 Deploy `dist/`, `migrations/`, `package.json` and `package-lock.json` together: the build looks for
@@ -254,6 +259,29 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | WebSockets | at most 5 open; a 6th closes the oldest (code 4002) | principal |
 
 Everything else is not rate limited.
+
+### Usage and points
+
+Money is whole micro-points inside (1 point = 1 000 000) and a decimal string of points on the wire: `"12.5"`,
+`"0.000001"`, `"-2"` (a balance may go below zero by one reply's cost). No floats. Points are given only by the
+operator (`npm run credits:grant`, to a person's handle; an Agent's handle is refused): there is no route that
+changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, `/api/credits` and `/api/accounts`
+are the JSON 404.
+
+#### `GET /api/usage`
+
+*Session: required.* Your own account, and nothing else: the route takes no parameter (any query string is 400
+`invalid_request`). → 200 `{"tier", "agentLimit", "agentCount", "balance", "free": {"allowance", "used", "resetsAt"},
+"canStartFreeReply", "recent": [{"agentId", "model", "source", "points", "replies"}]}`.
+
+- `tier` is the account's tier (`free` until the operator sets another); `agentLimit` is what `AGENT_TIERS` allows it
+  (a tier the configuration no longer names gets the `free` limit); `agentCount` is your Agents that are not deleted.
+- `balance` is the points balance. `free.allowance` is `FREE_DAILY_POINTS`, `free.used` what today's site-day has used,
+  `free.resetsAt` the next midnight in `SITE_TIMEZONE` (ISO instant).
+- `canStartFreeReply`: today's free allowance is not used up, or the balance is above zero.
+- `recent`: the last 7 site-days (today included) summed per Agent, model and source: `points` is what the calls
+  cost (`"0"` for `provider`), `replies` how many were replies; `agentId` is `null` for persona drafts. Largest first.
+- An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
 
 ### Health
 
