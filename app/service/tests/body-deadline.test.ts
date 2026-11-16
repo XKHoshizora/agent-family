@@ -60,10 +60,15 @@ async function rawConnection() {
 async function trickle(
   method: string,
   path: string,
-  { contentType = "application/json", cookie, giveUpMs = 5000 }: { contentType?: string; cookie?: string; giveUpMs?: number } = {},
+  {
+    contentType = "application/json",
+    cookie,
+    headers = [],
+    giveUpMs = 5000,
+  }: { contentType?: string; cookie?: string; headers?: string[]; giveUpMs?: number } = {},
 ): Promise<{ heldMs: number; answer: string }> {
   const c = await rawConnection();
-  const head = [`${method} ${path} HTTP/1.1`, `Host: 127.0.0.1:${c.port}`, `Content-Type: ${contentType}`, "Content-Length: 100000"];
+  const head = [`${method} ${path} HTTP/1.1`, `Host: 127.0.0.1:${c.port}`, `Content-Type: ${contentType}`, "Content-Length: 100000", ...headers];
   if (cookie) head.push(`Cookie: ${cookie}`);
   c.socket.write(`${head.join("\r\n")}\r\n\r\n{`);
   const start = performance.now();
@@ -91,6 +96,22 @@ describe("body deadline", () => {
       expect([method, path, heldMs < BODY_MS + 2000]).toEqual([method, path, true]);
     }
     expect((await api(app, a, "GET", "/api/me")).status).toBe(200);
+  });
+
+  it("also when the request was refused before any route or hook ran: foreign Origin, undecodable path, over-long parameter", async () => {
+    const evil = ["Origin: http://evil.example"];
+    const cases: Array<[string, string, string[], string]> = [
+      ["POST", "/api/sync/catchup", evil, "HTTP/1.1 403"],
+      ["POST", "/api/register", evil, "HTTP/1.1 403"],
+      ["POST", "/api/%zz", [], "HTTP/1.1 400"],
+      ["POST", `/api/conversations/${"a".repeat(150)}`, [], "HTTP/1.1 414"],
+      ["PUT", "/api/health", [], ""], // no such method on that path: the not-found handler waits for the body first
+    ];
+    for (const [method, path, headers, refusal] of cases) {
+      const { heldMs, answer } = await trickle(method, path, { headers });
+      const label = `${method} ${path.slice(0, 40)} ${headers.join(" ")}`;
+      expect([label, answer.startsWith(refusal), heldMs >= BODY_MS - 50, heldMs < BODY_MS + 2000]).toEqual([label, true, true, true]);
+    }
   });
 
   it("applies to the upload routes too until an upload is let in: not signed in, or refused before the body is read", async () => {

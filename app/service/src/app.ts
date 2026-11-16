@@ -190,6 +190,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   });
 
   // Slow bodies: a request must have arrived whole within HTTP_BODY_TIMEOUT_MS, unless it is an upload let in.
+  // Armed on the server's `request` event, so it also covers requests refused above or by the router.
   registerBodyDeadline(app, config.httpBodyTimeoutMs);
 
   app.decorate("deps", deps);

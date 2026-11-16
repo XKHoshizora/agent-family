@@ -65,9 +65,11 @@ and every run-time import of `src/` a production dependency.
 `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
 `SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off, at most 1440),
 `UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
-15 min in all), `HTTP_BODY_TIMEOUT_MS` (the body deadline, default 30 s: a request with a body must have arrived whole this long
-after its head, or its connection is closed without an answer — on any route, also an unknown one, and also when
-the answer already went out but the client is still sending; `src/body-deadline.ts`; the two uploads are lifted
+15 min in all), `HTTP_BODY_TIMEOUT_MS` (the body deadline, default 30 s: a request with a body must have arrived
+whole this long after its head, or its connection is closed without an answer — armed on the HTTP server's own
+`request` event, so it holds whatever answers the request: a route, a refusal before any route (a foreign
+`Origin`, an undecodable path, an over-long parameter), an unknown route, and also when the answer already went
+out but the client is still sending; `src/body-deadline.ts`; the two uploads are lifted
 out of it once they let a body in: an attachment upload when its checks have passed and its own deadlines start, an
 avatar upload when its sender is signed in), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle,
 default 2 min), `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min; with the body
