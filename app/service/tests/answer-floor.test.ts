@@ -1,9 +1,12 @@
 import type { FastifyRequest } from "fastify";
+import { once } from "node:events";
+import net from "node:net";
 import { describe, expect, test } from "vitest";
-import { ANSWER_FLOOR, holdUntilFloor, noteArrival } from "../src/auth/answer-floor.ts";
+import { ANSWER_FLOOR, holdUntilFloor, startAnswerClock } from "../src/auth/answer-floor.ts";
 import { createInvite } from "../src/auth/invites.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
+import { listen } from "./helpers/ws.ts";
 
 // Long enough to cover a registration's password hashing on a loaded machine, short enough to keep the file quick.
 const FLOOR = { ms: 300, jitterMs: 10 };
@@ -33,13 +36,13 @@ describe("holdUntilFloor", () => {
 
   test("waits out what is left of the floor, and does not pad work that already took longer", async () => {
     const fresh = {} as FastifyRequest;
-    await noteArrival(fresh);
+    await startAnswerClock(fresh);
     let t0 = performance.now();
     await holdUntilFloor(fresh, { ms: 80, jitterMs: 0 });
     expect(performance.now() - t0).toBeGreaterThanOrEqual(75);
 
     const slow = {} as FastifyRequest;
-    await noteArrival(slow);
+    await startAnswerClock(slow);
     await new Promise((resolve) => setTimeout(resolve, 60));
     t0 = performance.now();
     await holdUntilFloor(slow, { ms: 50, jitterMs: 0 });
@@ -89,6 +92,65 @@ describe("answer floor", () => {
     await register(owner.email)(); // warm up both paths
     await fresh();
     const { as: taken, bs: free } = await interleaved(7, register(owner.email), fresh);
+    expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.abs(median(taken) - median(free))).toBeLessThan(40);
+  });
+
+  /**
+   * Sends a request's head, waits `lateMs` (longer than the floor), then its body. Resolves with the answer's status
+   * and the time from the body being sent to the answer's first byte: a floor counted from the head would be used up.
+   */
+  async function lateBody(path: string, body: object, lateMs = FLOOR.ms + 150): Promise<{ status: number; ms: number }> {
+    const { port } = await listen(app);
+    const socket = net.connect({ port, host: "127.0.0.1" });
+    socket.on("error", () => {});
+    try {
+      await once(socket, "connect");
+      const json = JSON.stringify(body);
+      socket.write(
+        [`POST ${path} HTTP/1.1`, `Host: 127.0.0.1:${port}`, "Content-Type: application/json", `Content-Length: ${Buffer.byteLength(json)}`, "Connection: close", "", ""].join("\r\n"),
+      );
+      await new Promise((resolve) => setTimeout(resolve, lateMs));
+      const answered = once(socket, "data");
+      const sentAt = performance.now();
+      socket.write(json);
+      const [first] = (await answered) as [Buffer];
+      return { status: Number(/^HTTP\/1\.1 (\d{3})/.exec(first.toString("latin1"))![1]), ms: performance.now() - sentAt };
+    } finally {
+      socket.destroy();
+    }
+  }
+
+  test("a body sent late still gets the whole floor: registered and unregistered addresses stay alike", async () => {
+    const a = await signUp(app, "late_known");
+    let n = 0;
+    const reset = (email: string) => async () => {
+      const { status, ms } = await lateBody("/api/auth/request-password-reset", { email });
+      expect(status).toBe(200);
+      return ms;
+    };
+    const unknown = () => reset(`late_ghost${n++}@example.test`)();
+    await reset(a.email)(); // warm up both paths
+    await unknown();
+    const { as: known, bs: absent } = await interleaved(7, reset(a.email), unknown);
+    expect(Math.min(...known, ...absent)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.abs(median(known) - median(absent))).toBeLessThan(40);
+  });
+
+  test("a registration whose body is sent late still gets the whole floor, account or not", async () => {
+    const owner = await signUp(app, "late_owner");
+    let n = 0;
+    const register = (email: string) => async () => {
+      const inviteCode = await createInvite(db, { ttlHours: 1 });
+      const body = { inviteCode, email, password: "a good long password", displayName: "Late", handle: `late_${n++}` };
+      const { status, ms } = await lateBody("/api/register", body);
+      expect(status).toBe(201);
+      return ms;
+    };
+    const fresh = () => register(`late_fresh${n}@example.test`)();
+    await register(owner.email)();
+    await fresh();
+    const { as: taken, bs: free } = await interleaved(5, register(owner.email), fresh);
     expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms);
     expect(Math.abs(median(taken) - median(free))).toBeLessThan(40);
   });

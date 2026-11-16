@@ -6,7 +6,7 @@ import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { displayName } from "../schemas.ts";
 import { findAccountByEmail, lockAccountEmail, removeUnverifiedAccount, type ExistingAccount } from "./accounts.ts";
-import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
+import { holdUntilFloor, startAnswerClock, type AnswerFloor } from "./answer-floor.ts";
 import { runInTransaction } from "./auth.ts";
 import { lockUsableInvite, markInviteUsed } from "./invites.ts";
 import { registrationAttemptMail } from "./mail-copy.ts";
@@ -52,7 +52,8 @@ export function registerRegistrationRoutes(
     "/api/register",
     {
       config: { rateLimit },
-      onRequest: noteArrival,
+      // Once the body is in (however late the client sent it): the answer floor counts from here.
+      preValidation: startAnswerClock,
       schema: {
         params: z.object({}),
         querystring: z.object({}),

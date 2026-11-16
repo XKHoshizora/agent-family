@@ -283,7 +283,7 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
 - 201 `{"ok": true}` whether or not the e-mail already has an account, and the invite is used up either way, so
   neither the answer nor the invite afterwards tells an invite holder which e-mails have accounts. Held back
-  like the reset request's answer: at least 400 ms (plus up to 50 ms at random) after the request arrived;
+  like the reset request's answer: at least 400 ms (plus up to 50 ms at random) after its whole body was in;
   errors are not held back. What happens depends on the e-mail (compared lower-cased):
   - No account: the account and its principal are created and a verification mail is sent (below).
   - A verified account: nothing is created or changed. Its owner gets a `registration_attempt` mail (someone
@@ -350,8 +350,9 @@ accepted but not used: the mail links to the web app).
 
 - 200 `{"status": true, "message": "If this email exists in our system, check your email for the reset link"}`
   for every e-mail, registered or not (only a registered one gets mail). The answer is held back until at least
-  400 ms (plus up to 50 ms at random) after the request arrived, so its timing does not tell a registered address
-  from an unregistered one either; work that takes longer is not padded further. Errors are not held back.
+  400 ms (plus up to 50 ms at random) after its whole body was in (counted from the body, so a body sent late
+  does not use the floor up), so its timing does not tell a registered address from an unregistered one either;
+  work that takes longer is not padded further. Errors are not held back.
 - Mail (`reset_password`): `<APP_ORIGIN>/reset-password?token=…`, valid 1 hour, usable once, and only until
   the password is reset through any link of the account. The web app's page at that path posts the token to
   `POST /api/auth/reset-password`.

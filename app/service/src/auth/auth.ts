@@ -10,7 +10,7 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import { AppError, isBusy } from "../errors.ts";
 import { clientIp } from "../limits.ts";
 import { lockAccountEmail } from "./accounts.ts";
-import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
+import { holdUntilFloor, startAnswerClock, type AnswerFloor } from "./answer-floor.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS, resetPasswordMail, verifyEmailMail } from "./mail-copy.ts";
 import { sendMail } from "./mailer.ts";
 
@@ -544,12 +544,13 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
     return reply.send(/json/i.test(response.headers.get("content-type") ?? "") ? withoutTokens(text) : text);
   };
   const onRequest = async (req: FastifyRequest) => {
-    await noteArrival(req);
     if (!exposed.has(endpointOf(req))) throw new AppError(404, "not_found");
   };
   // After body parsing, because the limiter keys on the e-mail in the body. The limiter counts malformed
   // requests too; then the endpoint's own schemas decide (400 before Better Auth sees anything).
   const preHandler = async (req: FastifyRequest) => {
+    // The body is in: an answer floor counts from here, however late the client sent it.
+    await startAnswerClock(req);
     const endpoint = exposed.get(endpointOf(req));
     if (!endpoint) throw new AppError(404, "not_found");
     await endpoint.limit?.(req);
