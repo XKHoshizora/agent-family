@@ -4,6 +4,7 @@ import { APIError } from "better-auth/api";
 import { z } from "zod";
 import { AppError } from "../errors.ts";
 import { displayName } from "../schemas.ts";
+import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
 import { runInTransaction } from "./auth.ts";
 import { lockUsableInvite, markInviteUsed } from "./invites.ts";
 
@@ -20,7 +21,11 @@ export const registerBody = z.object({
   handle: z.string().regex(/^[a-z0-9_]{3,24}$/),
 });
 
-export function registerRegistrationRoutes(app: FastifyInstance, rateLimit: { max: number; timeWindow: string }): void {
+export function registerRegistrationRoutes(
+  app: FastifyInstance,
+  rateLimit: { max: number; timeWindow: string },
+  answerFloor: AnswerFloor,
+): void {
   const { db, config } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
@@ -28,6 +33,7 @@ export function registerRegistrationRoutes(app: FastifyInstance, rateLimit: { ma
     "/api/register",
     {
       config: { rateLimit },
+      onRequest: noteArrival,
       schema: {
         params: z.object({}),
         querystring: z.object({}),
@@ -76,13 +82,13 @@ export function registerRegistrationRoutes(app: FastifyInstance, rateLimit: { ma
           if (needsInvite) await markInviteUsed(client, inviteCode!, principalId);
         });
       } catch (err) {
-        // Same answer as a successful registration; nothing was written, no invite consumed, no mail sent.
-        if (err instanceof EmailAlreadyRegistered) return reply.code(201).send({ ok: true });
         if (err instanceof APIError && err.statusCode >= 400 && err.statusCode < 500) {
           throw new AppError(400, "invalid_request");
         }
-        throw err;
+        if (!(err instanceof EmailAlreadyRegistered)) throw err;
+        // Otherwise the same answer as a successful registration; nothing was written, no invite consumed, no mail sent.
       }
+      await holdUntilFloor(req, answerFloor);
       return reply.code(201).send({ ok: true });
     },
   );

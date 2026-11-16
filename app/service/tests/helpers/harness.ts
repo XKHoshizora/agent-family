@@ -19,14 +19,25 @@ async function truncateAll(db: Db): Promise<void> {
 }
 
 /**
+ * No answer floor (`BuildOptions.answerFloor`): registrations and reset requests answer as soon as they are done.
+ * What `useApp()` uses unless a test asks for a floor; pass it to an app a test builds itself.
+ */
+export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
+
+/**
  * Builds the app once per test file (against TEST_DATABASE_URL, with rate limits
- * raised) and truncates every table except the migrations table before each test.
+ * raised and no answer floor) and truncates every table except the migrations table before each test.
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, logStream, ...overrides } = extra;
+  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, ...overrides } = extra;
+  const options: BuildOptions = {
+    answerFloor,
+    ...(logStream ? { logStream } : {}),
+    ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
+  };
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;
   const current = <T>(v: T | undefined): T => {
@@ -53,7 +64,7 @@ export function useApp(
       ...env,
     });
     database = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });
-    instance = await buildApp({ config, db: database, ...overrides }, logStream ? { logStream } : {});
+    instance = await buildApp({ config, db: database, ...overrides }, options);
     await instance.ready();
   });
 

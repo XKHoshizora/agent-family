@@ -78,8 +78,11 @@ blobs is not cut off; migrations run on their own connection and are not subject
 this long (or whose new connection takes longer to open) is answered 503 `busy`.
 An invalid value stops the service at start-up with a message naming the variable.
 
-`buildApp(deps?: Partial<Deps>, options?: { logStream })` takes `{ config, db }`; anything omitted is built
-from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool on `TEST_DATABASE_URL`.
+`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor })` takes `{ config, db }`;
+anything omitted is built from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool
+on `TEST_DATABASE_URL`. `answerFloor` (`{ ms, jitterMs }`, default 400 ms + up to 50 ms) is how long a
+registration's and a reset request's success answer takes at least (see those routes); it is a build option, not
+configuration, and only tests change it.
 
 ## Deployment
 
@@ -146,8 +149,9 @@ headers (cookies) are never logged.
 ## Tests
 
 `vitest` global setup runs the migrations once on `TEST_DATABASE_URL`. `useApp()` in
-`tests/helpers/harness.ts` builds the app once per file and truncates every table except
-`pgmigrations` before each test. Test files run serially because they share one database.
+`tests/helpers/harness.ts` builds the app once per file (without an answer floor unless the file asks for one,
+`tests/answer-floor.test.ts`) and truncates every table except `pgmigrations` before each test. Test files run
+serially because they share one database.
 
 ## HTTP API
 
@@ -270,7 +274,8 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   `PATCH /api/me`: 1–40 characters after removing format characters (not joiners) and trimming, one line), `handle`
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
 - 201 `{"ok": true}`. Also for an e-mail that already has an account: then nothing is written, no invite is
-  used and no mail is sent (the answer does not reveal which e-mails exist).
+  used and no mail is sent (the answer does not reveal which e-mails exist). Held back like the reset request's
+  answer: at least 400 ms (plus up to 50 ms at random) after the request arrived; errors are not held back.
 - Mail (`verify_email`): `<APP_ORIGIN>/api/auth/verify-email?token=…&callbackURL=<APP_ORIGIN>/verify` (the
   callback URL-encoded), valid 24 h; opening it lands on the client's `<APP_ORIGIN>/verify` (or
   `/verify?error=CODE`).
@@ -318,7 +323,9 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
 accepted but not used: the mail links to the web app).
 
 - 200 `{"status": true, "message": "If this email exists in our system, check your email for the reset link"}`
-  for every e-mail, registered or not (only a registered one gets mail).
+  for every e-mail, registered or not (only a registered one gets mail). The answer is held back until at least
+  400 ms (plus up to 50 ms at random) after the request arrived, so its timing does not tell a registered address
+  from an unregistered one either; work that takes longer is not padded further. Errors are not held back.
 - Mail (`reset_password`): `<APP_ORIGIN>/reset-password?token=…`, valid 1 hour, usable once. The web app's
   page at that path posts the token to `POST /api/auth/reset-password`.
 - Limit: 10 per minute per client address + e-mail, and 60 per minute per client address.
@@ -939,7 +946,7 @@ across the site. Accepted for now; the limits above bound how much can be learnt
 | 4 | An upload completes although the conversation was frozen while it streamed | the batch 1 counterpart — losing the right to send mid-upload — `tests/attachments.test.ts` "upload that completes after the uploader was unfriended (direct) or removed (group) is refused and leaves no blob"; freezing itself is batch 3 |
 | 5 | Leaving during a freeze still writes a system notice | batch 3 (manual freeze; in batch 1 only direct chats can become unable to send, and they cannot be left) |
 | 6 | A retry id reused in another conversation silently drops the second message | `tests/messages.test.ts` "same clientTxn twice in one conversation stores one message; the same clientTxn in a second conversation stores a new message there" |
-| 7 | Sign-in time tells whether an account exists; no rate limit | `tests/auth.test.ts` "a wrong password takes about as long for an existing as for a non-existing e-mail", "the 11th sign-in attempt for one account from one address is 429 …", "one address cycling through many e-mails …", "password reset answers identically …" |
+| 7 | Sign-in time tells whether an account exists; no rate limit | `tests/auth.test.ts` "a wrong password takes about as long for an existing as for a non-existing e-mail", "the 11th sign-in attempt for one account from one address is 429 …", "one address cycling through many e-mails …", "password reset answers identically …"; `tests/answer-floor.test.ts` (reset request and registration take as long for an e-mail with an account as without) |
 | 8 | The sync cursor is a site-wide counter (anyone sees site-wide activity); a late joiner sees how many messages came before them | site-wide: no global id or counter anywhere — `tests/sync.test.ts` "initial sync contains only my conversations …", `tests/search.test.ts` "the cursor does not reveal how many messages exist site-wide", `tests/enumeration.test.ts`. Per conversation, seqs are gapless and count messages from before you joined (`lastSeq`, the join notice's seq): kept by design, see the client contract |
 | 9 | Approvals never expire; an old approval still works after removal | batch 1 has no join approvals (members add their friends directly; expansion approval is batch 3). Friend requests expire after 24 h — `tests/social.test.ts` "a request older than 24h cannot be accepted and reads as expired"; a removed member loses access at once — `tests/messages.test.ts` "removed member gets 404 on every read and write …", `tests/enumeration.test.ts`, `tests/concurrency.test.ts` "… racing removal of the sender from a group" |
 | 10 | Several malformed parameters cause 500s | `tests/fuzz.test.ts` (the 500s it found are fixed and pinned in `tests/auth.test.ts` "inputs Better Auth answered with a 500 are refused with 400 first …" and `tests/health.test.ts`) |

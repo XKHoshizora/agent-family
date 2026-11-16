@@ -9,6 +9,7 @@ import type { Config } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
 import { AppError, isBusy } from "../errors.ts";
 import { clientIp } from "../limits.ts";
+import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS, resetPasswordMail, verifyEmailMail } from "./mail-copy.ts";
 import { sendMail } from "./mailer.ts";
 
@@ -380,10 +381,12 @@ interface Endpoint {
   query: z.ZodType;
   /** The JSON body; what it parses to is what Better Auth receives (undeclared fields are dropped). */
   body: z.ZodType;
+  /** Its success is the same for every e-mail and must take as long for each: held back to the answer floor. */
+  floor?: true;
 }
 
 /** Mounts Better Auth at `/api/auth/*` for `AUTH_ENDPOINTS` only (registration is POST /api/register). */
-export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number): void {
+export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number, answerFloor: AnswerFloor): void {
   const signIn = accountAndIpLimiter(app, rateLimitScale);
   const resetRequest = accountAndIpLimiter(app, rateLimitScale);
   const redirect = appRedirect(app.deps.config.appOrigin);
@@ -408,6 +411,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
       limit: resetRequest,
       query: noQuery,
       body: z.object({ email: storableText(254), redirectTo: redirect.optional() }),
+      floor: true,
     },
     "POST /reset-password": { limit: null, query: noQuery, body: z.object({ newPassword: password, token: storableText(512) }) },
   };
@@ -435,6 +439,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
       }
       return reply.code(response.status).send({ error: errorCodeOf(response.status, body) });
     }
+    if (exposed.get(endpointOf(req))?.floor) await holdUntilFloor(req, answerFloor);
     reply.status(response.status);
     response.headers.forEach((value, key) => {
       // The body may be rewritten below, so its length is Fastify's to state.
@@ -446,6 +451,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
     return reply.send(/json/i.test(response.headers.get("content-type") ?? "") ? withoutTokens(text) : text);
   };
   const onRequest = async (req: FastifyRequest) => {
+    await noteArrival(req);
     if (!exposed.has(endpointOf(req))) throw new AppError(404, "not_found");
   };
   // After body parsing, because the limiter keys on the e-mail in the body. The limiter counts malformed

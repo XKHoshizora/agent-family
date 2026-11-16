@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 import { loadConfig, type Config } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
+import { ANSWER_FLOOR, type AnswerFloor } from "./auth/answer-floor.ts";
 import { createAuth, createSessionEvents, registerAuthRoutes, type Auth, type SessionEvents } from "./auth/auth.ts";
 import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, frameworkErrors, registerErrorHandling } from "./errors.ts";
@@ -80,6 +81,8 @@ export interface BuildOptions {
   logStream?: { write(line: string): void };
   /** Delay before the first scheduled attachment sweep (default one minute); tests shorten it. */
   sweepInitialDelayMs?: number;
+  /** The least time a registration's or reset request's success takes (default `ANSWER_FLOOR`); tests shorten it. */
+  answerFloor?: AnswerFloor;
 }
 
 /**
@@ -210,8 +213,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // First among the routes: it registers the WebSocket plugin, whose route wrapper must see every route
   // (an upgrade request to any other route is then refused instead of answered over the raw socket).
   await registerSync(app);
-  registerRegistrationRoutes(app, perMinute);
-  registerAuthRoutes(app, config.rateLimitScale);
+  const answerFloor = options.answerFloor ?? ANSWER_FLOOR;
+  registerRegistrationRoutes(app, perMinute, answerFloor);
+  registerAuthRoutes(app, config.rateLimitScale, answerFloor);
   registerSessionRoutes(app);
   registerPrincipalRoutes(app);
   registerSocialRoutes(app);

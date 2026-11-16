@@ -4,7 +4,7 @@ import { buildApp } from "../src/app.ts";
 import { onSessionEnded, runInTransaction, switchablePool } from "../src/auth/auth.ts";
 import { createInvite, hashInviteCode } from "../src/auth/invites.ts";
 import { api, cookieHeaderFrom, mailLink, signIn, signUp } from "./helpers/actors.ts";
-import { useApp } from "./helpers/harness.ts";
+import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 
 const PASSWORD = "correct horse battery";
 
@@ -27,7 +27,7 @@ describe("accounts", () => {
 
   /** Same app wiring, different config; shares the test pool (so closing it leaves the pool open). */
   async function appWith(config: Partial<typeof app.deps.config>): Promise<FastifyInstance> {
-    const built = await buildApp({ config: { ...app.deps.config, ...config }, db: app.deps.db });
+    const built = await buildApp({ config: { ...app.deps.config, ...config }, db: app.deps.db }, { answerFloor: NO_ANSWER_FLOOR });
     await built.ready();
     return built;
   }
