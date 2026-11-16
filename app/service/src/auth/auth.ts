@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { FastifyBaseLogger, FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { betterAuth } from "better-auth";
+import { verifyJWT } from "better-auth/crypto";
 import { fromNodeHeaders } from "better-auth/node";
 import type pg from "pg";
 import { z } from "zod";
@@ -304,23 +305,32 @@ export type Auth = ReturnType<typeof createAuth>;
 
 type Limiter = (req: FastifyRequest) => Promise<void>;
 
-/** Lower-cased, trimmed e-mail from a request body, or undefined when absent or not a string. */
-function bodyEmail(req: FastifyRequest): string | undefined {
-  const email = (req.body as { email?: unknown } | null | undefined)?.email;
+/** Lower-cased, trimmed e-mail, or undefined when not a string or not of a plausible length. */
+function normalisedEmail(email: unknown): string | undefined {
   if (typeof email !== "string") return undefined;
   const normalised = email.trim().toLowerCase();
   return normalised.length > 0 && normalised.length <= 254 ? normalised : undefined;
 }
 
+/** The e-mail of a request body (sign-in, reset request). */
+const bodyEmail = (req: FastifyRequest): string | undefined =>
+  normalisedEmail((req.body as { email?: unknown } | null | undefined)?.email);
+
+/** The e-mail a verification link names (its token's payload, unchecked: only a limiter key). */
+const linkEmail = (req: FastifyRequest): string | undefined => {
+  const token = (req.query as { token?: unknown } | undefined)?.token;
+  return typeof token === "string" ? normalisedEmail(verificationTokenEmail(token)) : undefined;
+};
+
 /**
  * Two counters per request: 10/min per client address + e-mail (so hammering one account never locks out
  * another), and a looser 60/min per address (so one address cannot spray many accounts). Both times `scale`.
  * A missing or malformed e-mail falls back to the address-only key. The address is `clientIp`'s: Better Auth
- * itself never sees one (`disableIpTracking`, its own limiter off).
+ * itself never sees one (`disableIpTracking`, its own limiter off). `emailOf` finds the request's e-mail.
  */
-function accountAndIpLimiter(app: FastifyInstance, scale: number): Limiter {
+function accountAndIpLimiter(app: FastifyInstance, scale: number, emailOf: (req: FastifyRequest) => string | undefined = bodyEmail): Limiter {
   const per = (n: number) => ({ max: Math.max(1, Math.round(n * scale)), timeWindow: "1 minute" });
-  const perAccount = app.createRateLimit({ ...per(10), keyGenerator: (req: FastifyRequest) => `${clientIp(req)}|${bodyEmail(req) ?? ""}` });
+  const perAccount = app.createRateLimit({ ...per(10), keyGenerator: (req: FastifyRequest) => `${clientIp(req)}|${emailOf(req) ?? ""}` });
   const perIp = app.createRateLimit({ ...per(60), keyGenerator: clientIp });
   return async (req) => {
     const results = [await perAccount(req), await perIp(req)];
@@ -407,11 +417,15 @@ interface Endpoint {
   /** Its success is the same for every e-mail and must take as long for each: held back to the answer floor. */
   floor?: true;
   /**
-   * Better Auth's handling (`handle`) runs inside one transaction of ours, which its queries join, wrapped by this:
-   * what to lock before it and write after it. Only an answer below 400 commits.
+   * Decides, before any transaction is opened, whether Better Auth's handling of this request runs inside one of
+   * ours: the work to wrap it in (what to lock before `handle`, what to write after it), or null to just hand the
+   * request on. Only an answer below 400 commits.
    */
-  transaction?: (t: Tx, req: FastifyRequest, handle: () => Promise<Response>) => Promise<Response>;
+  transaction?: (req: FastifyRequest) => Promise<TransactionWork | null>;
 }
+
+/** Better Auth's handling (`handle`) inside a transaction of ours, which its queries join. */
+type TransactionWork = (t: Tx, handle: () => Promise<Response>) => Promise<Response>;
 
 /** Thrown to roll back an `answerInTransaction` whose answer is a failure, carrying that answer out. */
 class Unsuccessful extends Error {
@@ -477,6 +491,7 @@ function verificationTokenEmail(token: string): string | null {
 export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number, answerFloor: AnswerFloor): void {
   const signIn = accountAndIpLimiter(app, rateLimitScale);
   const resetRequest = accountAndIpLimiter(app, rateLimitScale);
+  const verifyLink = accountAndIpLimiter(app, rateLimitScale, linkEmail);
   const redirect = appRedirect(app.deps.config.appOrigin);
   // Better Auth validates the values itself (e-mail format, password length, token); these schemas bound
   // the shape and keep out what it would choke on. Passwords are only hashed, never stored, so any text goes.
@@ -491,16 +506,23 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
     },
     "POST /sign-out": { limit: null, query: noQuery, body: noBody },
     "GET /verify-email": {
-      limit: null,
+      // Like sign-in, per client address + the e-mail the link names, and per address.
+      limit: verifyLink,
       query: z.strictObject({ token: storableText(4096), callbackURL: redirect.optional() }),
       body: noBody,
       // Better Auth checks the link's account by e-mail and then marks whatever account has that e-mail verified.
       // A registration replacing an unverified account holds the address's lock (accounts.ts), so a link to the
-      // replaced account can never verify its replacement in between.
-      transaction: async (t, req, handle) => {
-        const email = verificationTokenEmail((req.query as { token: string }).token);
-        if (email !== null) await lockAccountEmail(t, email);
-        return handle();
+      // replaced account can never verify its replacement in between. Only a link Better Auth will accept is worth
+      // a transaction and that lock: its signature and expiry are checked first (the same check Better Auth makes),
+      // so a forged or stale link costs no connection and never queues in front of a registration.
+      transaction: async (req) => {
+        const payload = await verifyJWT((req.query as { token: string }).token, app.deps.config.authSecret);
+        const email = typeof payload?.email === "string" ? payload.email : null;
+        if (email === null) return null;
+        return async (t, handle) => {
+          await lockAccountEmail(t, email);
+          return handle();
+        };
       },
     },
     "POST /request-password-reset": {
@@ -516,7 +538,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
       // Better Auth keeps one row per reset request and spends only the link used: a reset ends all the others of
       // that account too. One reset per account at a time (its user row is locked first), so of two links used at
       // once the second finds itself already gone.
-      transaction: async (t, req, handle) => {
+      transaction: async (req) => async (t, handle) => {
         const userId = await lockResetLinkOwner(t, (req.body as { token: string }).token);
         const response = await handle();
         if (response.ok && userId !== null) {
@@ -542,9 +564,10 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
     const endpoint = exposed.get(endpointOf(req))!; // preHandler: it exists
     const handle = () => app.auth.handler(request);
     const watch: Watch = {};
-    const response = await watches.run(watch, () =>
-      endpoint.transaction ? answerInTransaction(app.deps.db, (t) => endpoint.transaction!(t, req, handle)) : handle(),
-    );
+    const response = await watches.run(watch, async () => {
+      const work = endpoint.transaction ? await endpoint.transaction(req) : null;
+      return work ? answerInTransaction(app.deps.db, (t) => work(t, handle)) : handle();
+    });
     if (response.status >= 400) {
       const body = await response.text();
       // To the error handler (errors.ts): a busy database is 503 `busy`, anything else a logged 500 `internal`.

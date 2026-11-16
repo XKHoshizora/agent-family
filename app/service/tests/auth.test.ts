@@ -616,6 +616,28 @@ describe("accounts", () => {
     }
   });
 
+  test("verification links are limited like sign-in: 10 per minute per client address and e-mail, 60 per address", async () => {
+    const strict = await appWith({ rateLimitScale: 1 });
+    try {
+      // The e-mail is the one the link names; the limit is counted before the link is checked.
+      const link = (email: string) => {
+        const payload = Buffer.from(JSON.stringify({ email })).toString("base64url");
+        return `/api/auth/verify-email?token=eyJhbGciOiJIUzI1NiJ9.${payload}.c2lnbmF0dXJl`;
+      };
+      const open = (email: string, remoteAddress = "10.0.3.1") => strict.inject({ method: "GET", url: link(email), remoteAddress });
+      for (let i = 0; i < 10; i++) expect((await open("one@example.test")).statusCode).toBe(401);
+      const blocked = await open("one@example.test");
+      expect([blocked.statusCode, blocked.json()]).toEqual([429, { error: "rate_limited" }]);
+      expect((await open("ONE@example.test")).statusCode).toBe(429);
+      expect((await open("two@example.test")).statusCode).toBe(401);
+      expect((await open("one@example.test", "10.0.3.2")).statusCode).toBe(401);
+      for (let i = 0; i < 49; i++) await open(`spray${i}@example.test`);
+      expect((await open("fresh@example.test")).statusCode).toBe(429);
+    } finally {
+      await strict.close();
+    }
+  });
+
   test("/api/register is limited to 10 per minute per address and the reset request to 10 per account", async () => {
     const strict = await appWith({ rateLimitScale: 1 });
     try {

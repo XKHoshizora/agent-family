@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { signJWT } from "better-auth/crypto";
 import { lockAccountEmail } from "../src/auth/accounts.ts";
 import { createInvite, hashInviteCode } from "../src/auth/invites.ts";
 import { api, mailLink, signIn, signUp } from "./helpers/actors.ts";
@@ -220,6 +221,32 @@ describe("registering an e-mail that already has an account", () => {
       expect(await count("select count(*) n from principals where handle = any($1::text[])", [handles])).toBe(1);
       for (const code of codes) expect((await inviteState(code))!.used).toBe(true);
     }
+  });
+
+  test("a forged or expired verification link is answered at once: no transaction, no wait for the address's lock", async () => {
+    await pending("forged@example.test", "forged_one");
+    const realLink = await mailLink(app, "forged@example.test", "verify_email");
+    const realToken = new URL(realLink, "http://x").searchParams.get("token")!;
+    const [head, , signature] = realToken.split(".");
+    const forgedPayload = Buffer.from(JSON.stringify({ email: "forged@example.test", userId: "someone" })).toString("base64url");
+    const forged = `${head}.${forgedPayload}.${signature}`;
+    const expired = await signJWT({ email: "forged@example.test" }, app.deps.config.authSecret, -60);
+    const holder = await db.pool.connect();
+    try {
+      await holder.query("begin");
+      await lockAccountEmail(holder, "forged@example.test");
+      for (const [label, token, error] of [["forged", forged, "INVALID_TOKEN"], ["expired", expired, "TOKEN_EXPIRED"]] as const) {
+        const url = `/api/auth/verify-email?token=${encodeURIComponent(token)}&callbackURL=${encodeURIComponent("http://localhost:5173/verify")}`;
+        const answer = app.inject({ method: "GET", url });
+        const inTime = await Promise.race([answer.then(() => true), sleep(1000).then(() => false)]);
+        expect([label, inTime]).toEqual([label, true]);
+        expect([label, (await answer).headers.location]).toEqual([label, `http://localhost:5173/verify?error=${error}`]);
+      }
+    } finally {
+      await holder.query("rollback");
+      holder.release();
+    }
+    expect((await accountOf("forged@example.test"))[0]!.verified).toBe(false);
   });
 
   test("a verification link waits while a registration of the same e-mail is deciding", async () => {

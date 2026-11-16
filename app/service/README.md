@@ -193,7 +193,7 @@ serially because they share one database.
   runs the `GET` handler). `HEAD /api/attachments/:id` and `HEAD /api/principals/:id/avatar` are their own routes (below): they do not read the whole file.
 - **Order of checks.** Cross-site `Origin` (403) → shape of path, query and body (400) → session (401) →
   rate limit (429) → the route's own rules. Registration counts its rate limit before checking the shape,
-  and so do the sign-in and reset-request limiters in front of Better Auth.
+  and so do the sign-in, reset-request and verification-link limiters in front of Better Auth.
 
 ### Errors
 
@@ -229,6 +229,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/register` | 10 | client address |
 | `POST /api/auth/sign-in/email` | 10 per client address + e-mail, and 60 per client address | address (+ e-mail, trimmed and lower-cased) |
 | `POST /api/auth/request-password-reset` | 10 per client address + e-mail, and 60 per client address (counters of its own) | address (+ e-mail) |
+| `GET /api/auth/verify-email` | 10 per client address + the e-mail the link names, and 60 per client address (counters of its own) | address (+ e-mail) |
 | `GET /api/principals/lookup` | 30 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
@@ -344,6 +345,10 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   `callbackURL?error=INVALID_TOKEN` (or `TOKEN_EXPIRED`, `USER_NOT_FOUND`, `INVALID_USER`).
 - Without: 200 `{"status": true, "user": null}`, or 401 `invalid_token` / `token_expired` / `user_not_found` /
   `invalid_user`. Verifying does not sign in.
+- A genuine, unexpired link is handled in a transaction holding its address's lock (see `POST /api/register`);
+  its signature and expiry are checked before that, so a forged or expired link is answered without a
+  transaction or a lock.
+- Limit: 10 per minute per client address + the e-mail the link names, and 60 per minute per client address.
 
 #### `POST /api/auth/request-password-reset`
 
