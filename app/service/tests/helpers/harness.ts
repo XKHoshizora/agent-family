@@ -27,16 +27,18 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
 /**
  * Builds the app once per test file (against TEST_DATABASE_URL, with rate limits
  * raised and no answer floor) and truncates every table except the migrations table before each test.
+ * `allowInsecureLocal` lets the app's providers reach a local stub over plain HTTP (src/providers/guard.ts).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, ...overrides } = extra;
+  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, ...overrides } = extra;
   const options: BuildOptions = {
     answerFloor,
     ...(logStream ? { logStream } : {}),
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
+    ...(allowInsecureLocal ? { allowInsecureLocal } : {}),
   };
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;

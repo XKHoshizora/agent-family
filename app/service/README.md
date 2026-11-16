@@ -62,7 +62,8 @@ and every run-time import of `src/` a production dependency.
 ## Configuration (`src/config.ts`)
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
-`PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable),
+`PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable:
+a provider's test and refresh then answer 500 and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
 `SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
 `openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl`, `apiKeyEnv` (the name of another variable that holds the upstream key, so the JSON carries
 no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens`,
@@ -98,11 +99,13 @@ blobs is not cut off; migrations run on their own connection and are not subject
 this long (or whose new connection takes longer to open) is answered 503 `busy`.
 An invalid value stops the service at start-up with a message naming the variable.
 
-`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor })` takes `{ config, db }`;
+`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor, allowInsecureLocal })` takes `{ config, db }`;
 anything omitted is built from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool
 on `TEST_DATABASE_URL`. `answerFloor` (`{ ms, jitterMs }`, default 400 ms + up to 50 ms) is how long a
 registration's and a reset request's success answer takes at least (see those routes); it is a build option, not
-configuration, and only tests change it.
+configuration, and only tests change it. So is `allowInsecureLocal` (default off; no variable can turn it on): with it,
+providers may also be reached at loopback addresses, and over plain `http:` there, so tests can stand up a local stub.
+`Deps.providerProbe` is how the provider test and refresh routes reach a provider (default: through the address guard).
 
 ## Deployment
 
@@ -209,8 +212,8 @@ serially because they share one database.
 
 ### Errors
 
-Every error body is `{"error": "<snake_case_code>"}`, sometimes with string details next to it (`reason`).
-Shared codes:
+Every error body is `{"error": "<snake_case_code>"}`, sometimes with details next to it: a string `reason`, or for
+`provider_in_use` the list `agents`. Shared codes:
 
 | Status | `error` | Meaning |
 |---|---|---|
@@ -220,6 +223,10 @@ Shared codes:
 | 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
 | 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent |
+| 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
+| 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
+| 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
+| 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
 | 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
@@ -248,6 +255,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` of `/api/agents/:id` | 30 together | principal |
+| `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
+| `POST /api/providers/:id/test` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
 | `PUT` + `DELETE /api/blocks/:principalId` | 20 together | principal |
 | `POST /api/conversations` | 10 | principal |
@@ -344,6 +353,80 @@ conversation and history stay readable, sending there is 403 `cannot_send` `{"re
 
 *Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent. → 200 `{"ok": true}`; 409 `agent_deleted`.
 Every avatar change (people's too) raises `principals.avatar_version`.
+
+### Model providers
+
+A provider is a person's own account at a model service, which their Agents can answer with
+(`"model": {"source": "provider", "providerId", "model"}`). Everything here is the owner's: for anybody else every
+`/api/providers/:id…` route answers the JSON 404 `not_found` byte for byte as for an id that does not exist, and an
+Agent cannot be pointed at their provider (400).
+
+**Provider** (owner only): `{"id", "name", "protocol": "openai_chat" | "openai_responses" | "anthropic" | "gemini",
+"baseUrl", "keyLast4", "models": [{"name", "vision", "pdf", "reasoning", "contextTokens"}]}`.
+
+- **The API key** is sealed when saved (AES-256-GCM, a key derived from `PROVIDER_KEY_SECRET` with HKDF-SHA-256,
+  `src/providers/crypto.ts`) and never shown again: no answer, push, error or log line carries it; `keyLast4` is its
+  last four characters. It is opened only to make a call to that provider.
+- **`baseUrl`** must be `https:`, without credentials (no `@` before the host), with a plain DNS name or an IP address as
+  host and any port from 1 to 65535. It is stored without query, fragment or trailing slash (`https://API.example.com:443/v1/?x`
+  is `https://api.example.com/v1`). Saving checks only that; the address is checked at every call (below).
+- **Models**: at most 100; `name` 1–100 characters, one line, trimmed, unique within the provider; `vision`, `pdf` and
+  `reasoning` default to false and `contextTokens` (1 000–2 000 000) to 16 000. An Agent may use only a listed model, and a
+  reasoning level other than `none` only on a model flagged `reasoning`. Removing a model from the list does not change
+  the Agents that use it.
+
+**The address guard** (`src/providers/guard.ts`), at every call to a provider, before any connection: the URL must pass
+the `baseUrl` rules; the host name is looked up once, and the call is refused with `address_not_allowed` if any address
+it resolves to (or the address written in the URL) is not public: loopback, private (10/8, 172.16/12, 192.168/16,
+fc00::/7), link-local (169.254/16, fe80::/10, fec0::/10), carrier-grade NAT (100.64/10), unspecified or `0/8`,
+192.0.0/24, benchmarking (198.18/15), multicast (224/4, ff00::/8), reserved and broadcast (240/4), or an IPv4-mapped,
+IPv4-compatible, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) or 6to4 form of one. The connection then goes to exactly an
+address that was checked (the name stays the Host header and the TLS server name), so a name that resolves differently
+a moment later changes nothing. Redirects are never followed (any 3xx is `provider_unavailable`), and a call is given up
+(`provider_unavailable`) after a set time without progress (until the headers, then between body chunks) or once its
+answer passes a set size: for test and refresh below, 15 s (and 30 s in all) and 2 MiB.
+
+#### `POST /api/providers`
+
+*Session: required.* Body (no other key): `name` (1–40 characters, one line, trimmed), `protocol`, `baseUrl` (at most
+1000 characters), `apiKey` (trimmed, then 8–1000 printable ASCII characters without spaces), and optionally `models`
+(`[{"name", "vision"?, "pdf"?, "reasoning"?, "contextTokens"?}]`). → 201 Provider.
+
+- 400 `provider_limit` when you already have 10 providers (counted under the account lock, so concurrent creates
+  cannot pass it); 409 `name_taken` when one of yours has that name.
+
+#### `GET /api/providers`
+
+*Session: required.* → 200 `{"providers": [Provider]}`: yours, oldest first.
+
+#### `PATCH /api/providers/:id`
+
+*Session: required.* Body (no other key; `protocol` cannot change and is 400 too): any of `name`, `baseUrl`, `apiKey` (sealed
+anew; without it the stored key stays), `models` (replaces the list), under the rules of creation. → 200 Provider;
+409 `name_taken`.
+
+#### `DELETE /api/providers/:id`
+
+*Session: required.* → 200 `{"ok": true}`; 409 `{"error": "provider_in_use", "agents": [{"id", "name"}]}` while Agents
+of yours that are not deleted use it (deleted Agents that still name it lose their model). It is locked while checked,
+so no Agent can take it in the meantime.
+
+#### `POST /api/providers/:id/test`
+
+*Session: required.* One authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header
+(`Authorization: Bearer` for the OpenAI protocols; `x-api-key` and `anthropic-version: 2023-06-01` for Anthropic;
+`x-goog-api-key` for Gemini). → 200 `{"ok": true}`, or `{"ok": false, "error": "provider_rejected" | "provider_unavailable" |
+"address_not_allowed"}`: 401 or 403 is `provider_rejected`; anything else that is not a 200 with a JSON body
+`provider_unavailable`. Only the code is passed on: nothing of the provider's answer reaches you or the log, which
+records the provider id, protocol, code and the provider's HTTP status.
+
+#### `POST /api/providers/:id/models/refresh`
+
+*Session: required.* The same request; the model names in its answer (`data[].id`, or `models[].name` without the
+`models/` prefix for Gemini; the one page the endpoint returns) are merged into `models`: models already there keep
+their flags, new names get the defaults, up to 100 in all. Names that would not be accepted as a model name, and any
+containing the key, are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
+or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
 
 ### Health
 

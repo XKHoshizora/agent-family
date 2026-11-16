@@ -3,6 +3,7 @@ import { REASONING_LEVELS, type ReasoningLevel } from "../config.ts";
 import { lockConversation } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
+import { lockProviderModels } from "../providers/store.ts";
 
 export type ReplyMode = "always" | "mention";
 
@@ -133,8 +134,9 @@ export async function countLiveAgents(t: Tx, ownerId: string): Promise<number> {
 /**
  * 400 `invalid_request` unless the model exists for this owner and the reasoning level suits it: a site model
  * must be in `config.siteModels` and allows `none` plus its own `reasoning` levels; a provider model must be
- * listed by a provider of this owner and allows `none` only, unless its `reasoning` flag is set. With no model
- * chosen yet any level is accepted (it is checked when a model is chosen).
+ * listed by a provider of this owner (providers/store.ts; a malformed `models` value lists nothing) and allows
+ * `none` only, unless its `reasoning` flag is set. With no model chosen yet any level is accepted (it is checked
+ * when a model is chosen).
  */
 export async function assertModelChoice(
   q: Queryable,
@@ -150,13 +152,11 @@ export async function assertModelChoice(
     if (!site) throw new AppError(400, "invalid_request");
     allowed = site.reasoning;
   } else {
-    const { rows } = await q.query<{ models: Array<{ name?: unknown; reasoning?: unknown }> }>(
-      "select models from providers where id = $1 and owner_id = $2",
-      [model.providerId, ownerId],
-    );
-    const listed = rows[0]?.models.find((m) => m.name === model.model);
+    // Locked `for key share` (in the caller's transaction): a concurrent delete of the provider waits or has happened.
+    const models = await lockProviderModels(q, ownerId, model.providerId);
+    const listed = models?.find((m) => m.name === model.model);
     if (!listed) throw new AppError(400, "invalid_request");
-    allowed = listed.reasoning === true ? REASONING_LEVELS : [];
+    allowed = listed.reasoning ? REASONING_LEVELS : [];
   }
   if (reasoning !== "none" && !allowed.includes(reasoning)) throw new AppError(400, "invalid_request");
 }

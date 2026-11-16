@@ -11,7 +11,14 @@ export type ErrorCode =
   | "cannot_send"
   | "too_large"
   | "busy"
+  | "provider_in_use"
+  | "address_not_allowed"
+  | "provider_rejected"
+  | "provider_unavailable"
   | (string & {});
+
+/** Extra fields of an error body: strings (`reason`), or a list of small records (`agents` of `provider_in_use`). */
+export type ErrorDetails = Readonly<Record<string, string | ReadonlyArray<Readonly<Record<string, string>>>>>;
 
 /** Postgres `query_canceled`: what a statement past `statement_timeout` fails with. */
 const QUERY_CANCELED = "57014";
@@ -37,7 +44,7 @@ export class AppError extends Error {
     readonly status: number,
     readonly code: ErrorCode,
     /** Extra fields sent next to `error`, e.g. `{ reason: "blocked" }` for `cannot_send`. */
-    readonly details: Readonly<Record<string, string>> = {},
+    readonly details: ErrorDetails = {},
   ) {
     super(code);
     this.name = "AppError";
