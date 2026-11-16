@@ -421,7 +421,8 @@ Failures are never messages: they live on the run, which the owner learns from t
 "resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
 or `busy`: the service's own trouble — the reply could not be started or stored, or there was nothing to answer — which
 costs you nothing), for
-`cancelled` `agent_paused` or `agent_deleted`. `retryable`: it failed and trying again as it is may work (false
+`cancelled` `agent_paused` or `agent_deleted`, or none (everything it was to answer is before a new topic you started).
+`retryable`: it failed and trying again as it is may work (false
 after `provider_rejected` and `address_not_allowed`, and for every run that did not fail). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
 
@@ -459,7 +460,8 @@ appended (see System notices), and from then on the Agent's replies are given on
 notice (Agents and runs). History, search and unread counts are unchanged; two in a row are fine. → 201
 `{"message": WireMessage}` (the notice; it is also pushed). Allowed while the Agent is paused; 403 `cannot_send`
 `{"reason": "agent_deleted"}` once it is deleted. It starts no reply, and a reply already under way goes on with what it
-was given (the old topic). Limit: 30 per minute with the Agent writes.
+was given (the old topic); a reply still queued is given the new topic, so one with nothing after the notice to answer
+ends `cancelled` with no error. Limit: 30 per minute with the Agent writes.
 
 ### Model providers
 
@@ -1303,13 +1305,20 @@ the pause is answered only as part of the next reply the owner's next message st
 (further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits and also looks every
 2 s. Per run:
 
-1. `begin`, one transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
-   `cancelled`, a stop asked for meanwhile `stopped`, a model that no longer resolves `failed` (`provider_unavailable`),
-   and a failure of the service's own here `failed` (`busy`). The run takes on what was
-   noted meanwhile; what the model is shown is built (below; nothing to answer — say, everything is before a new topic
-   — ends it `failed` `busy`, and no model is called); the call is admitted on its input estimate (Usage and points;
-   `no_quota` ends it `failed` before any call); the Agent's read marker moves to what the run covers (`read` push,
-   `peerReadSeq`).
+1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
+   in any of them ends the run `failed`, `busy`):
+   1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
+      `cancelled`, a stop asked for meanwhile `stopped`, a model that no longer resolves `failed`
+      (`provider_unavailable`). The run takes on what was noted meanwhile, and what the model may be shown is read from
+      the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
+      the owner's in it, no model is called: when everything the run was to answer is before a new topic, it ends
+      `cancelled` with no error (the owner started over: nothing failed, nothing to retry); otherwise `failed`, `busy`.
+   2. No transaction: the attachments' bytes are read and the call is assembled (`buildContext`). A send to the
+      conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`).
+   3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
+      the first step, with no call; otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
+      ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
+      `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
    abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after 2 minutes
    (`agentRunTimeoutMs`), and when the service closes.
@@ -1325,17 +1334,21 @@ the pause is answered only as part of the next reply the owner's next message st
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
    Agent after; an interrupted run that posted nothing is `cancelled`.
 
-**What the model is shown** (`context.ts` `buildContext`; its pure part, the plan, in `runtime/context.ts`; spec 6.5):
+**What the model is shown** (`context.ts` `loadContext` and `buildContext`; its pure part, the plan, in
+`runtime/context.ts`; spec 6.5):
 
 - The system text: who the Agent is and whose, the owner's name, today's date in `SITE_TIMEZONE`, that it has no tools
   and must not claim what it cannot do, then the persona (an Agent without one is told to ask its owner about it first).
 - The conversation after the latest `topic_reset` notice (`POST /api/conversations/:id/topic`), as the Agent can see it
-  (the one visibility rule, the Agent as reader): messages up to what the run covers, and the owner's after it. The
-  owner's as `user`, the Agent's as `assistant`, in order; consecutive messages of one side are one turn (their parts
-  in order), because several providers refuse two turns of one side in a row. The call starts and ends with the owner:
-  the Agent's messages after the owner's newest are left out (a follow-up run, which answers what came while the
-  previous reply was written, does not see that reply), and so is an Agent turn left first. System notices, the fixed greeting and the stored reasoning are never
-  shown. A message that quotes another starts with `> ` lines holding the first 200 characters of the quoted one (its
+  (the one visibility rule, the Agent as reader): the owner's messages, and the Agent's replies to what the run covers.
+  The owner's as `user`, the Agent's as `assistant`, in the order they were answered, not the order they were stored: a
+  reply goes right after the owner's message its run had covered when it began (the run is the one its `client_txn`
+  names). So with the owner's messages 1, 2 and 3 and the reply to 1 stored at 4 (2 and 3 came while it was written),
+  the follow-up is shown 1, the reply, 2, 3. A reply that answers something before a new topic belongs to the old topic,
+  even when it was stored after the notice. Consecutive messages of one side are one turn (their parts in order),
+  because several providers refuse two turns of one side in a row. The call starts and ends with the owner: an Agent
+  turn left first, or after the owner's newest message, is left out. System notices, the fixed greeting and the stored
+  reasoning are never shown. A message that quotes another starts with `> ` lines holding the first 200 characters of the quoted one (its
   text, or its attachment's name), also when the quoted one is from before the new topic: the owner chose to show it.
 - Attachments, read only through the download's own permission with the Agent as reader, and only after their stored
   size passed the limit: an image (PNG, JPEG, WebP, GIF) of at most 5 MB as the image when the model sees images, else
@@ -1345,9 +1358,12 @@ the pause is answered only as part of the next reply the owner's next message st
   not the name or type — at most 100 000 characters a file and 200 000 a call (newest first), cut with `…（已截断）`, a
   byte-order mark dropped and what message text may not hold removed (bidi controls, control characters); else
   `[文件：name]` alone. A file is read at most 4 bytes per character it may still show, and its first 4 KB decide whether
-  the rest is read. A message with only an attachment is a turn like any other. A missing blob is shown by name (and
-  logged); a blob store that fails, or takes more than 15 s for one blob, fails the run `busy`. Blobs are read inside
-  `begin`'s transaction, so a send to that conversation waits for them meanwhile.
+  the rest is read. A message with only an attachment is a turn like any other. At most 50 MiB of attachments are
+  held for one call, whatever their kind (10 images of 5 MB fill it; a PDF or file that would pass it is named), each
+  checked on its stored size before a byte is read: so the worst case for one reply is 50 MiB of attachment bytes in
+  memory (plus the model library's base64 copy of what it sends, about a third more), and at most 8 replies run at
+  once. Blobs are read with no transaction open. A missing blob is shown by name (and logged); a blob store that fails,
+  or takes more than 15 s for one blob, fails the run `busy`.
 - The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
   character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
@@ -1370,7 +1386,8 @@ all of the above, attachments at their estimate.
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
-| Nothing to answer (everything is before a new topic), or an attachment that could not be read | none, no call made | `failed`, `busy`, retryable; charged nothing |
+| Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing |
+| Nothing to answer otherwise, or an attachment that could not be read | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |
 | The service closed during the call | none | left `running` (recovery at start-up comes in a later task) |
 

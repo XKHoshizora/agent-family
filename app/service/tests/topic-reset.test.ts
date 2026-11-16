@@ -78,6 +78,12 @@ describe("a new topic", () => {
     expect((await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run).toMatchObject({ status: "done" });
     const texts = (await api(app, owner, "GET", `/api/conversations/${conv}/messages`)).json.messages.map((m: any) => m.text);
     expect(texts).toEqual(["旧问题", expect.stringContaining("开始了新话题"), "旧回答"]);
+
+    // That reply is stored after the notice but answers the old topic: the next reply is not shown it.
+    gateway.reply("新回答");
+    await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { text: "新问题", clientTxn: "t2" });
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.at(-1)!.messages).toEqual([{ role: "user", parts: [{ type: "text", text: "新问题" }] }]);
   });
 });
 

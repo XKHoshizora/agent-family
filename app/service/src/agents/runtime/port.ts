@@ -28,14 +28,15 @@ export interface Prepared {
 
 /**
  * Why a reply failed, as the owner is told (`Run.error`). `busy`: the service's own trouble (the reply could not be
- * started or stored, or there was nothing to answer); such a run is charged nothing.
+ * started or stored, or it had nothing to answer and no new topic explains why); such a run is charged nothing.
  */
 export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy";
 
 /**
  * How a run ends, as the worker saw it. `finish` records what is true under the Agent's lock: a reply that was posted
  * stands (`done`, or `stopped` by its owner), and a run its Agent's pause or delete interrupted is `cancelled` with that
- * reason — the worker cannot tell an owner's stop from a pause, and a refused post looks the same.
+ * reason — the worker cannot tell an owner's stop from a pause, and a refused post looks the same. `cancelled` with no
+ * error from `begin`: everything the reply was to answer is before a new topic its owner started.
  */
 export type RunEnd =
   | { readonly status: "done" }

@@ -20,6 +20,8 @@ export const PDF_MAX_BYTES = 10 * 1024 * 1024;
 export const FILE_MAX_CHARS = 100_000;
 /** Characters of files shown as text in one call at most. */
 export const CALL_FILE_MAX_CHARS = 200_000;
+/** Bytes of attachments one call holds at most — images, PDFs and files' text together (10 images of 5 MB fill it). */
+export const CALL_ATTACHMENT_MAX_BYTES = IMAGES_PER_CALL * IMAGE_MAX_BYTES;
 /** UTF-8 takes at most this many bytes per character: reading 4 × n bytes yields at least n characters of a text. */
 export const UTF8_MAX_BYTES_PER_CHAR = 4;
 /** Ends a file's text that was cut. */
@@ -168,8 +170,9 @@ interface Kept {
 
 /**
  * Which messages a call shows and which attachment contents, within `budget` tokens (`contextBudget`). Built from the
- * messages after the latest new topic, oldest first; the Agent's messages after the owner's newest are left out (a call
- * ends on the owner's turn), and so are messages with nothing to show. What fits, in this order:
+ * messages after the latest new topic in the order they were answered, oldest first; Agent messages after the owner's
+ * newest are left out (a call ends on the owner's turn; answered order leaves none there but after a manual retry), and
+ * so are messages with nothing to show. What fits, in this order:
  *
  * 1. The current turn — the owner's messages after the Agent's last — by name only, newest first, while they fit.
  *    The owner's newest message is always shown: when it alone is over the budget, it is cut from the front
@@ -180,8 +183,9 @@ interface Kept {
  * 4. Their attachments' contents, newest first, each if it fits.
  *
  * So when the budget runs short, older messages' attachment contents go (leaving the name) before older messages do,
- * and the newest attachments are the last to go. At most `IMAGES_PER_CALL` images and `CALL_FILE_MAX_CHARS` characters
- * of files are shown in one call, the newest first; the caller reads files with `fileCharsLeft` as their limit.
+ * and the newest attachments are the last to go. At most `IMAGES_PER_CALL` images, `CALL_FILE_MAX_CHARS` characters
+ * of files and `CALL_ATTACHMENT_MAX_BYTES` bytes of attachments in all are shown in one call, the newest first; the
+ * caller reads nothing larger than `bytesLeft`, and files with `fileCharsLeft` as their limit.
  */
 export class ContextPlan {
   /** Newest first: the current turn's (`current` of them), then older ones. */
@@ -192,6 +196,8 @@ export class ContextPlan {
   private imagesLeft = IMAGES_PER_CALL;
   /** Characters of files a text may still take in this call. */
   fileCharsLeft = CALL_FILE_MAX_CHARS;
+  /** Bytes attachments may still take in this call. */
+  bytesLeft = CALL_ATTACHMENT_MAX_BYTES;
 
   constructor(entries: readonly ContextEntry[], budget: number) {
     this.left = budget;
@@ -260,10 +266,12 @@ export class ContextPlan {
   offer(slot: number, content: AttachmentContent): boolean {
     const k = this.kept[slot]!;
     const cost = partTokens(attachmentPart(k.entry.attachment!, content));
-    if (cost > this.room(slot)) return false;
+    const bytes = content.type === "text" ? Buffer.byteLength(content.text, "utf8") : content.data.length;
+    if (cost > this.room(slot) || bytes > this.bytesLeft) return false;
     if (content.type === "image" && this.imagesLeft === 0) return false;
     if (content.type === "text" && content.chars > this.fileCharsLeft) return false;
     this.left = this.room(slot) - cost;
+    this.bytesLeft -= bytes;
     k.content = content;
     if (content.type === "image") this.imagesLeft--;
     if (content.type === "text") this.fileCharsLeft -= content.chars;

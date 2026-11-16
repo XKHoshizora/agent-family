@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Readable } from "node:stream";
 import { isMissingBlob, type BlobStore } from "../attachments/blob.ts";
-import { findDownloadable } from "../attachments/store.ts";
+import { findDownloadable, type Downloadable } from "../attachments/store.ts";
 import { VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
@@ -25,8 +25,10 @@ import {
 } from "./runtime/context.ts";
 
 /**
- * `buildContext`: the database and blob side of what the model is shown (README "Agents and runs"). It reads the
- * messages and attachments the Agent may see and feeds them to the pure plan in `runtime/context.ts`.
+ * The database and blob side of what the model is shown (README "Agents and runs"), in two steps that `begin` keeps
+ * apart: `loadContext` reads the messages and the attachments' records (SQL only, inside `begin`'s first short
+ * transaction); `buildContext` reads the attachments' bytes and assembles the call with no transaction open, so no
+ * write to the conversation ever waits for a file. The choosing is the pure plan in `runtime/context.ts`.
  */
 
 /** Messages read per query, newest first, until the budget is passed. */
@@ -44,8 +46,21 @@ export interface ContextRun {
   coversSeq: number;
 }
 
+/** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
+export interface LoadedContext {
+  system: string;
+  /** Tokens the conversation may take (`contextBudget`). */
+  budget: number;
+  /** The messages that may be shown, in the order they were answered, oldest first. */
+  entries: ContextEntry[];
+  /** The records of the attachments that may be shown, by id, as the download's permission gave them to the Agent. */
+  attachments: Map<string, Downloadable>;
+  /** The seq of the latest `topic_reset` notice the Agent can see; 0 when there is none. */
+  topicStart: number;
+}
+
 export interface BuiltContext {
-  /** Never empty unless there is nothing to answer (the caller must not call a model then). */
+  /** Never empty when `loadContext` found an owner's message (`hasOwnerTurn`). */
   messages: ModelCall["messages"];
   /** Tokens of the system text and the turns, images and PDFs at their estimate: what admission holds for. */
   inputTokensEstimate: number;
@@ -125,33 +140,52 @@ async function topicStart(q: Queryable, agentId: string, conversationId: string)
   return Number(rows[0]?.seq ?? 0);
 }
 
+/** A message as loaded: its entry, its seq, and where it belongs (`answers`). */
+interface Loaded {
+  entry: ContextEntry;
+  seq: number;
+  /** The owner's message: its seq. The Agent's reply: the seq its run had covered when it began. */
+  answers: number;
+  /** An Agent's reply posted by a run (it goes after the owner's message it answers). */
+  reply: boolean;
+}
+
 interface MessageRow {
   seq: string;
   sender_id: string;
   text: string | null;
   attachment: AttachmentRef | null;
   reply_to: unknown;
+  answers: string | null;
 }
 
+const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
+
 /**
- * Up to `PAGE` messages the Agent can see after `from` and before `before`, newest first, as context entries: text and
- * file messages (not notices, not the fixed greeting) up to `coversSeq`, and the owner's after it. Only the text, the
- * attachment and the quote are read of a message — never its stored reasoning. A quote shows what the Agent can see of
- * the quoted message: its text, or its attachment's name.
+ * Up to `PAGE` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
+ * not the fixed greeting) that belong after the topic start `from` — the owner's, and the Agent's replies to what is
+ * covered up to `coversSeq`. A reply belongs where it was answered: right after the owner's message its run covered
+ * when it began (the run is the one named by the message's `client_txn`). Only the text, the attachment and the quote
+ * are read of a message — never its stored reasoning. A quote shows what the Agent can see of the quoted message: its
+ * text, or its attachment's name.
  */
 async function loadPage(
   q: Queryable,
   run: ContextRun,
   from: number,
   before: number | null,
-): Promise<{ entries: ContextEntry[]; oldest: number | null; more: boolean }> {
+): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
   const { rows } = await q.query<MessageRow>(
     `select m.seq::text as seq, m.sender_id, m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
-            m.body -> 'replyToSeq' as reply_to
+            m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers
        from messages m ${VISIBLE_JOIN}
+       left join agent_runs r
+         on r.agent_id = $1
+        and r.id = (case when m.sender_id = $1 and m.client_txn ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' then m.client_txn end)::uuid
       where m.conversation_id = $2 and m.seq > $3 and ($4::bigint is null or m.seq < $4::bigint)
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
-        and (m.seq <= $5 or m.sender_id = $6)
+        and coalesce(r.covers_seq, m.seq) > $3
+        and (m.sender_id = $6 or coalesce(r.covers_seq, m.seq) <= $5)
       order by m.seq desc
       limit $7`,
     [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, PAGE],
@@ -170,45 +204,81 @@ async function loadPage(
       if (shown !== "") quotes.set(Number(r.seq), shown);
     }
   }
-  const entries = rows.flatMap((r): ContextEntry[] => {
+  const loaded = rows.flatMap((r): Loaded[] => {
     const role = r.sender_id === run.ownerId ? "user" : r.sender_id === run.agentId ? "assistant" : null;
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
-    return [{ role, text: entryText(r.text ?? "", quoted), attachment: r.attachment ? toAttachment(r.attachment) : null }];
+    const seq = Number(r.seq);
+    const entry: ContextEntry = { role, text: entryText(r.text ?? "", quoted), attachment: r.attachment ? toAttachment(r.attachment) : null };
+    return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null }];
   });
-  return { entries, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === PAGE };
+  return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === PAGE };
 }
 
-const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
+/** In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq. */
+const answeredOrder = (list: readonly Loaded[]): ContextEntry[] =>
+  [...list].sort((a, b) => a.answers - b.answers || Number(a.reply) - Number(b.reply) || a.seq - b.seq).map((l) => l.entry);
 
 /**
- * What the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"): the messages after the
- * latest new topic, chosen by `ContextPlan` within the model's context less its output limit and `system`, with the
- * contents of attachments when the model can take them. An attachment is read only through `findDownloadable` with the
- * Agent as the reader — the download's own permission — and only after its stored size passed the limit: an image
- * (PNG, JPEG, WebP, GIF) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any other file
- * as text when its bytes are text (`fileText`), at most 4 bytes per character it may still show. A missing blob is
- * shown by name (and logged); any other failure to read one throws.
+ * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
+ * the messages after the latest new topic in the order they were answered, read newest first until they are more than
+ * the budget (the model's context less its output limit and `system`) can hold, and the records of the attachments the
+ * plan could show — looked up only through `findDownloadable` with the Agent as reader (the download's own
+ * permission); an image is not looked up when the model cannot see images.
  */
-export async function buildContext(
+export async function loadContext(
   q: Queryable,
-  blobs: BlobStore,
   run: ContextRun,
-  resolved: Pick<Resolved, "contextTokens" | "vision" | "pdf" | "call">,
+  resolved: Pick<Resolved, "contextTokens" | "vision" | "call">,
   system: string,
-  log: Pick<FastifyBaseLogger, "error">,
-): Promise<BuiltContext> {
+): Promise<LoadedContext> {
   const budget = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, system);
   const from = await topicStart(q, run.agentId, run.conversationId);
-  const newestFirst: ContextEntry[] = [];
+  const loaded: Loaded[] = [];
+  // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
+  // only that is used while more is left unread (a reply may belong before messages not read yet).
+  let oldest = Number.POSITIVE_INFINITY;
+  let more = true;
   let before: number | null = null;
-  for (;;) {
+  while (more) {
     const page = await loadPage(q, run, from, before);
-    newestFirst.push(...page.entries);
-    if (!page.more || pastBudget(newestFirst, budget)) break;
+    loaded.push(...page.loaded);
+    more = page.more;
+    if (page.oldest !== null) oldest = page.oldest;
+    if (more && pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), budget)) break;
     before = page.oldest;
   }
-  const plan = new ContextPlan(newestFirst.reverse(), budget);
+  const entries = answeredOrder(more ? loaded.filter((l) => l.answers >= oldest) : loaded);
+
+  // The attachments of every message the plan could keep (those it keeps with no attachment contents at all).
+  const could = new ContextPlan(entries, budget);
+  could.keepOlder();
+  const attachments = new Map<string, Downloadable>();
+  for (const [, a] of [...could.attachments(false), ...could.attachments(true)]) {
+    if (a.image && !resolved.vision) continue;
+    const found = await findDownloadable(q, run.agentId, a.id);
+    if (found) attachments.set(a.id, found);
+  }
+  return { system, budget, entries, attachments, topicStart: from };
+}
+
+/** Whether there is anything to answer: an owner's message among what may be shown. */
+export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.some((e) => e.role === "user");
+
+/**
+ * Step two, with no transaction open: the call's turns, chosen by `ContextPlan` from `loaded`, with the contents of
+ * attachments when the model can take them and they fit — checked on their stored size before a byte is read: an
+ * image (PNG, JPEG, WebP, GIF) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any other
+ * file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never more
+ * than the call's `bytesLeft`. A missing blob is shown by name (and logged); any other failure to read one throws.
+ */
+export async function buildContext(
+  blobs: BlobStore,
+  loaded: LoadedContext,
+  resolved: Pick<Resolved, "vision" | "pdf">,
+  log: Pick<FastifyBaseLogger, "error">,
+): Promise<BuiltContext> {
+  const plan = new ContextPlan(loaded.entries, loaded.budget);
 
   async function read(attachment: ContextAttachment, key: string, max: number, probe?: (head: Uint8Array) => boolean) {
     const got = await readPrefix(blobs, key, max, probe ? { probe } : {});
@@ -216,26 +286,25 @@ export async function buildContext(
     return got;
   }
   async function show(slot: number, attachment: ContextAttachment): Promise<void> {
-    // Not even looked up when nothing could take its name's place: the budget is used up, or it is an image that
-    // cannot be shown.
     const room = plan.room(slot);
+    // Nothing could take its name's place: the budget is used up.
     if (room <= estimateTokens(attachmentLabel(attachment))) return;
-    if (attachment.image && (!resolved.vision || !plan.canShowImage())) return;
-    const found = await findDownloadable(q, run.agentId, attachment.id);
+    const found = loaded.attachments.get(attachment.id);
     if (!found) return;
     if (found.inline) {
-      if (!resolved.vision || !plan.canShowImage() || found.size > IMAGE_MAX_BYTES || room < IMAGE_TOKENS) return;
+      if (!resolved.vision || !plan.canShowImage() || found.size > Math.min(IMAGE_MAX_BYTES, plan.bytesLeft) || room < IMAGE_TOKENS) return;
       const got = await read(attachment, found.blobKey, found.size);
       if (got?.complete) plan.offer(slot, { type: "image", mime: found.mime, data: got.data });
     } else if (found.mime === "application/pdf") {
-      if (!resolved.pdf || found.size > PDF_MAX_BYTES || room < pdfTokens(found.size)) return;
+      if (!resolved.pdf || found.size > Math.min(PDF_MAX_BYTES, plan.bytesLeft) || room < pdfTokens(found.size)) return;
       const got = await read(attachment, found.blobKey, found.size);
       if (got?.complete) plan.offer(slot, { type: "pdf", data: got.data });
     } else {
       const maxChars = Math.min(FILE_MAX_CHARS, plan.fileCharsLeft);
       // A text costs at least its name, a line break and one character.
-      if (maxChars === 0 || room < estimateTokens(attachmentLabel(attachment)) + 2) return;
-      const got = await read(attachment, found.blobKey, Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR), startsLikeText);
+      if (maxChars === 0 || plan.bytesLeft === 0 || room < estimateTokens(attachmentLabel(attachment)) + 2) return;
+      const max = Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR, plan.bytesLeft);
+      const got = await read(attachment, found.blobKey, max, startsLikeText);
       const text = got ? fileText(got.data, got.complete, maxChars) : null;
       if (text) plan.offer(slot, { type: "text", ...text });
     }
@@ -245,6 +314,6 @@ export async function buildContext(
   plan.keepOlder();
   for (const [slot, attachment] of plan.attachments(true)) await show(slot, attachment);
   const { messages, tokens } = plan.build();
-  const inputTokensEstimate = estimateTokens(system) + tokens;
+  const inputTokensEstimate = estimateTokens(loaded.system) + tokens;
   return { messages, inputTokensEstimate, inputChars: inputTokensEstimate };
 }

@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readPrefix } from "../src/agents/context.ts";
-import { CUT_MARK, fileText } from "../src/agents/runtime/context.ts";
+import { CALL_ATTACHMENT_MAX_BYTES, ContextPlan, CUT_MARK, fileText, type ContextEntry } from "../src/agents/runtime/context.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
 import { estimateTokens, IMAGE_TOKENS } from "../src/metering/prices.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
@@ -49,11 +49,24 @@ const ENV = {
 
 const gateway = scriptedGateway();
 const store = useProbeBlobs("af-context-");
-const { app, db } = useApp({ env: ENV, models: gateway, blobs: store.blobs, agentWorker: false });
+/** While set, every blob read waits for `opened` (a store that hangs), after calling `reached`. */
+let held: { opened: Promise<void>; reached: () => void } | null = null;
+const blobs: BlobStore = {
+  ...store.blobs,
+  async get(key) {
+    if (held) {
+      held.reached();
+      await held.opened;
+    }
+    return store.blobs.get(key);
+  },
+};
+const { app, db } = useApp({ env: ENV, models: gateway, blobs, agentWorker: false });
 
 let first = 0;
 beforeEach(() => {
   first = gateway.calls.length;
+  held = null;
 });
 afterEach(() => {
   expect(gateway.pending()).toBe(0);
@@ -119,8 +132,8 @@ async function answer(reply: string, options: Parameters<typeof gateway.reply>[1
 }
 
 describe("turns", () => {
-  it("the owner's messages are user turns and the Agent's assistant turns, in order; consecutive ones of one side are one turn; the call ends on the owner's", async () => {
-    const { owner, conv } = await owned("ord");
+  it("the owner's messages are user turns and the Agent's assistant turns, in the order they were answered; consecutive ones of one side are one turn; the call ends on the owner's", async () => {
+    const { owner, agent, conv } = await owned("ord");
     const hold = gateway.hang();
     await say(owner, conv, "甲");
     const running = app.agentWorker.runOnce();
@@ -129,13 +142,22 @@ describe("turns", () => {
     await say(owner, conv, "丙");
     hold.release("答甲");
     await running;
-    // The follow-up answers 乙 and 丙: the Agent's reply to 甲 came after them and is not the call's last turn.
+    // Stored in this order: 甲 1, 乙 2, 丙 3, 答甲 4. 答甲 answers 甲 (its run covered seq 1), so it is shown right
+    // after it; the follow-up answers 乙 and 丙 and ends on them.
+    const stored = (await api(app, owner, "GET", `/api/conversations/${conv}/messages`)).json.messages;
+    expect(stored.map((m: any) => [m.seq, m.text, m.senderId === agent.id])).toEqual([
+      [1, "甲", false],
+      [2, "乙", false],
+      [3, "丙", false],
+      [4, "答甲", true],
+    ]);
     await answer("答乙丙");
     expect(lastCall().messages).toEqual([
+      { role: "user", parts: [{ type: "text", text: "甲" }] },
+      { role: "assistant", parts: [{ type: "text", text: "答甲" }] },
       {
         role: "user",
         parts: [
-          { type: "text", text: "甲" },
           { type: "text", text: "乙" },
           { type: "text", text: "丙" },
         ],
@@ -145,21 +167,16 @@ describe("turns", () => {
     await say(owner, conv, "丁");
     await answer("答丁");
     expect(lastCall().messages).toEqual([
+      { role: "user", parts: [{ type: "text", text: "甲" }] },
+      { role: "assistant", parts: [{ type: "text", text: "答甲" }] },
       {
         role: "user",
         parts: [
-          { type: "text", text: "甲" },
           { type: "text", text: "乙" },
           { type: "text", text: "丙" },
         ],
       },
-      {
-        role: "assistant",
-        parts: [
-          { type: "text", text: "答甲" },
-          { type: "text", text: "答乙丙" },
-        ],
-      },
+      { role: "assistant", parts: [{ type: "text", text: "答乙丙" }] },
       { role: "user", parts: [{ type: "text", text: "丁" }] },
     ]);
   });
@@ -201,8 +218,29 @@ describe("a new topic", () => {
     expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["旧回复BETAWORD", "好的"]);
   });
 
-  it("a reply with nothing to answer never reaches the model: it fails busy and may be retried", async () => {
-    const { owner, conv } = await owned("empty");
+  it("a reply whose messages are all before a new topic never reaches the model: it is cancelled, with nothing to retry", async () => {
+    const { owner, conv } = await owned("over");
+    const calls = gateway.calls.length;
+    await say(owner, conv, "算了，换个话题");
+    // The owner starts over before the queued reply has begun.
+    expect((await api(app, owner, "POST", `/api/conversations/${conv}/topic`)).status).toBe(201);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
+    const run = await latestRun(owner, conv);
+    expect(run).toEqual({ id: run.id, status: "cancelled", retryable: false });
+    expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/retry`)).toEqual({ status: 400, json: { error: "invalid_request" } });
+    // Never admitted: no model on its record and nothing charged.
+    expect((await db.query("select outcome, source, cost_micro::text as cost from usage_records where run_id = $1", [run.id])).rows).toEqual([
+      { outcome: "cancelled", source: null, cost: "0" },
+    ]);
+    // The next message is answered from the new topic on.
+    await say(owner, conv, "新话题");
+    await answer("好。");
+    expect(lastCall().messages).toEqual([{ role: "user", parts: [{ type: "text", text: "新话题" }] }]);
+  });
+
+  it("so is a retry of a failed reply after a new topic", async () => {
+    const { owner, conv } = await owned("retryover");
     gateway.fail("provider_unavailable");
     const hello = await say(owner, conv, "你好");
     await app.agentWorker.runOnce();
@@ -217,12 +255,22 @@ describe("a new topic", () => {
     expect(covers.rows).toEqual([{ c: hello.seq }]);
     expect(await app.agentWorker.runOnce()).toBe(true);
     expect(gateway.calls.length).toBe(calls);
+    expect(await latestRun(owner, conv)).toEqual({ id: retried.json.run.id, status: "cancelled", retryable: false });
+  });
+
+  it("a reply with nothing to answer and no new topic to explain it fails busy, retryable, without a model call", async () => {
+    const { owner, agent, conv } = await owned("nothing");
+    // A run that covers nothing (no trigger makes one; inserted as the service would queue it).
+    await db.query(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq)
+       values ('reply', $1, $2, $3, 'queued', 0)`,
+      [conv, agent.id, owner.id],
+    );
+    const calls = gateway.calls.length;
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
     const run = await latestRun(owner, conv);
     expect(run).toEqual({ id: run.id, status: "failed", error: "busy", retryable: true });
-    // Never admitted: no model on its record and nothing charged.
-    expect((await db.query("select source, cost_micro::text as cost from usage_records where run_id = $1", [run.id])).rows).toEqual([
-      { source: null, cost: "0" },
-    ]);
   });
 });
 
@@ -335,6 +383,51 @@ describe("attachments", () => {
     await sendFile(blind.owner, blind.conv, "doc.pdf", pdf);
     await answer("看不了 PDF。");
     expect(lastCall().messages).toEqual([{ role: "user", parts: [{ type: "text", text: "[文件：doc.pdf]" }] }]);
+  });
+});
+
+describe("reading attachments", () => {
+  it("happens with no transaction open: the owner's message is accepted and a pause answers while a file is being read; the pause then ends the run without a model call", async () => {
+    const { owner, agent, conv } = await owned("hang");
+    let open!: () => void;
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => (reached = resolve));
+    held = { opened: new Promise<void>((resolve) => (open = resolve)), reached };
+    try {
+      await sendFile(owner, conv, "pixel.png", PNG, "看图");
+      const calls = gateway.calls.length;
+      const running = app.agentWorker.runOnce();
+      await reading;
+      // Both take the conversation's lock; neither waits for the read.
+      const later = await say(owner, conv, "还在吗？");
+      expect(later.text).toBe("还在吗？");
+      expect((await api(app, owner, "POST", `/api/agents/${agent.id}/pause`)).status).toBe(200);
+      open();
+      await running;
+      expect(gateway.calls.length).toBe(calls);
+      const run = await latestRun(owner, conv);
+      expect(run).toEqual({ id: run.id, status: "cancelled", error: "agent_paused", retryable: false });
+      expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+      // Never admitted: nothing held, nothing charged.
+      expect((await db.query("select source, hold_micro::text as hold from agent_runs where id = $1", [run.id])).rows).toEqual([
+        { source: null, hold: "0" },
+      ]);
+    } finally {
+      held = null;
+      open();
+    }
+  });
+
+  it("holds at most 50 MB of attachments in one call", () => {
+    const pdf = (i: number): ContextEntry => ({ role: "user", text: "", attachment: { id: `a${i}`, name: `${i}.pdf`, image: false } });
+    const plan = new ContextPlan([0, 1, 2, 3, 4, 5].map(pdf), 100_000_000);
+    expect(CALL_ATTACHMENT_MAX_BYTES).toBe(50 * 1024 * 1024);
+    const tenMegabytes = new Uint8Array(10 * 1024 * 1024);
+    const offered = plan.attachments(false).map(([slot]) => plan.offer(slot, { type: "pdf", data: tenMegabytes }));
+    // Newest first: five of 10 MB fill it; the oldest is named.
+    expect(offered).toEqual([true, true, true, true, true, false]);
+    expect(plan.bytesLeft).toBe(0);
+    expect(plan.build().messages[0]!.parts[0]).toEqual({ type: "text", text: "[文件：0.pdf]" });
   });
 });
 

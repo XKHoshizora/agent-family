@@ -2,15 +2,15 @@ import type { FastifyBaseLogger } from "fastify";
 import type { BlobStore } from "../attachments/blob.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
-import type { Db } from "../db.ts";
+import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
-import { resolveModel } from "../models/resolve.ts";
+import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
-import { buildContext } from "./context.ts";
+import { buildContext, hasOwnerTurn, loadContext, type LoadedContext } from "./context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
@@ -29,8 +29,10 @@ export interface AgentPortDeps {
 }
 
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
-/** The service's own trouble; here: a reply with nothing to answer, which never reaches a model. */
+/** The service's own trouble; here: a reply with nothing to answer and no reason why, which never reaches a model. */
 const BUSY: RunEnd = { status: "failed", error: "busy" };
+/** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
+const STARTED_OVER: RunEnd = { status: "cancelled" };
 
 /** What `begin` and `finish` read of the run, under its row lock. */
 interface RunState {
@@ -122,26 +124,48 @@ export class DbAgentPort implements AgentPort {
     return run;
   }
 
+  /** Locks the Agent (its conversation row, then its `agents` row), then the run's row, and reads both. */
+  private async lockRun(t: Tx, run: RunTicket): Promise<{ agent: AgentRow; state: RunState }> {
+    const agent = await lockAgent(t, run.agentId);
+    const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
+    if (state.rows[0]?.status !== "running") throw new Error(`begin: run ${run.id} is not running`);
+    return { agent, state: state.rows[0] };
+  }
+
   /**
-   * In one transaction under `lockAgent`: a run its Agent's pause or delete interrupted (even if resumed since), a paused
-   * or deleted Agent, a stop already asked for, or a model that does not resolve end the run here. Otherwise the run
-   * takes on what came meanwhile (`covers_seq` = max(covers, pending)), what the model is shown is built
-   * (`buildContext`; a context with no turn ends the run failed `busy` — it never reaches a model), the call is admitted
-   * on its input estimate (402 `no_quota` ends the run failed), and the Agent's read marker moves to what it covers
-   * (announced after commit). The reasoning level is the Agent's when the model allows it, else `none`.
+   * Under `lockRun`: how the run ends instead of calling its model — interrupted by its Agent's pause or delete (even if
+   * resumed since), the Agent paused or deleted, or a stop asked for — or null when it may go on.
+   */
+  private halted(run: RunTicket, agent: AgentRow, state: RunState): RunEnd | null {
+    if (state.interrupted) return { status: "cancelled", error: state.interrupted };
+    if (agent.deleted) return { status: "cancelled", error: "agent_deleted" };
+    if (agent.paused) return { status: "cancelled", error: "agent_paused" };
+    if (this.shouldStop(run)) return { status: "stopped" };
+    return null;
+  }
+
+  /**
+   * Three steps, so that no transaction is open while attachments are read:
+   *
+   * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one whose model does not
+   *    resolve (`failed`, `provider_unavailable`). Otherwise the run takes on what came meanwhile (`covers_seq` =
+   *    max(covers, pending)), and what the model may be shown is read (`loadContext`, SQL only). With no owner's message
+   *    in it the run ends without a call: `cancelled` with no error when everything it was to answer is before a new
+   *    topic (its owner started over), else `failed` `busy`.
+   * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
+   *    conversation, a pause or a delete meanwhile does not wait for it.
+   * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; otherwise
+   *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
+   *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
+   *    else `none`.
    */
   async begin(run: RunTicket): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
     const now = new Date();
-    const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
-      const agent = await lockAgent(t, run.agentId);
-      const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
-      if (state.rows[0]?.status !== "running") throw new Error(`begin: run ${run.id} is not running`);
-      const interrupted = state.rows[0].interrupted;
-      if (interrupted) return { end: { status: "cancelled", error: interrupted } };
-      if (agent.deleted) return { end: { status: "cancelled", error: "agent_deleted" } };
-      if (agent.paused) return { end: { status: "cancelled", error: "agent_paused" } };
-      if (this.shouldStop(run)) return { end: { status: "stopped" } };
+    const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number }> => {
+      const { agent, state } = await this.lockRun(t, run);
+      const halted = this.halted(run, agent, state);
+      if (halted) return { end: halted };
 
       let resolved;
       try {
@@ -153,7 +177,7 @@ export class DbAgentPort implements AgentPort {
       }
       if (!resolved) return { end: UNAVAILABLE };
 
-      const covers = Math.max(Number(state.rows[0].covers_seq ?? 0), Number(state.rows[0].pending_seq ?? 0));
+      const covers = Math.max(Number(state.covers_seq ?? 0), Number(state.pending_seq ?? 0));
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const system = systemPrompt(
@@ -163,15 +187,24 @@ export class DbAgentPort implements AgentPort {
         agent.persona === "" ? "onboarding" : "normal",
         config.siteTimezone,
       );
-      const context = await buildContext(
+      const loaded = await loadContext(
         t,
-        blobs,
         { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers },
         resolved,
         system,
-        log,
       );
-      if (context.messages.length === 0) return { end: BUSY };
+      if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
+      return { resolved, loaded, covers };
+    });
+    if ("end" in first) return first.end;
+
+    const context = await buildContext(blobs, first.loaded, first.resolved, log);
+
+    const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
+      const { agent, state } = await this.lockRun(t, run);
+      const halted = this.halted(run, agent, state);
+      if (halted) return { end: halted };
+      const { resolved, loaded, covers } = first;
       try {
         await admitRun(t, config, run.id, run.ownerId, resolved, context.inputTokensEstimate, now);
       } catch (err) {
@@ -182,7 +215,7 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoningAllowed.includes(agent.reasoning) ? agent.reasoning : "none";
       return {
-        prepared: { call: { ...resolved.call, system, messages: context.messages, reasoning }, inputChars: context.inputChars },
+        prepared: { call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning }, inputChars: context.inputChars },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });
