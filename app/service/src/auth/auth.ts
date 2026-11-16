@@ -6,9 +6,10 @@ import { fromNodeHeaders } from "better-auth/node";
 import type pg from "pg";
 import { z } from "zod";
 import type { Config } from "../config.ts";
-import type { Db, Queryable } from "../db.ts";
+import type { Db, Queryable, Tx } from "../db.ts";
 import { AppError, isBusy } from "../errors.ts";
 import { clientIp } from "../limits.ts";
+import { lockAccountEmail } from "./accounts.ts";
 import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS, resetPasswordMail, verifyEmailMail } from "./mail-copy.ts";
 import { sendMail } from "./mailer.ts";
@@ -95,7 +96,7 @@ export async function authCall<T>(fn: () => Promise<T>): Promise<T> {
 /** Queries on the outer transaction's client while it is ours (and `usable()` holds); a rejection after. */
 function onOuter(outer: OuterTransaction, usable: () => boolean = () => true) {
   return async (text: string, values?: unknown[]) => {
-    if (!outer.open) throw new Error("Better Auth used a registration transaction after it ended");
+    if (!outer.open) throw new Error("Better Auth used a transaction of ours after it ended");
     if (!usable()) throw new Error("Better Auth used a connection after releasing it");
     return watched(() => outer.client.query(nestedSql(text), values));
   };
@@ -128,15 +129,26 @@ export function switchablePool(pool: pg.Pool) {
 
 /**
  * Runs `fn` so that every Better Auth call inside it executes on `client`'s transaction. What Better
- * Auth got hold of inside refuses to run once `fn` has settled. Watched like `authCall`.
+ * Auth got hold of inside refuses to run once `fn` has settled.
  */
-export async function runInTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
+async function joinTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
   const outer: OuterTransaction = { client, open: true };
   try {
-    return await authCall(() => outerTx.run(outer, fn));
+    return await outerTx.run(outer, fn);
   } finally {
     outer.open = false;
   }
+}
+
+/** `joinTransaction`, watched like `authCall`: for direct calls into Better Auth (`auth.api.*`). */
+export async function runInTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
+  return authCall(() => joinTransaction(client, fn));
+}
+
+/** Where Better Auth's hooks read and write: the transaction of ours they run in, if any, else the pool. */
+function currentDb(db: Queryable): Queryable {
+  const outer = outerTx.getStore();
+  return outer ? ({ query: onOuter(outer) } as unknown as Queryable) : db;
 }
 
 // --- session-ended notifications ------------------------------------------------------
@@ -199,10 +211,7 @@ async function announceSessionEnded(
 export function createAuth(config: Config, db: Db, sessions: SessionEvents, log: Pick<FastifyBaseLogger, "error">) {
   // Mail caused by a registration commits with it (and cannot be written once that transaction is
   // over); everything else writes straight to the pool.
-  const mailDb = (): Queryable => {
-    const outer = outerTx.getStore();
-    return outer ? ({ query: onOuter(outer) } as unknown as Queryable) : db;
-  };
+  const mailDb = (): Queryable => currentDb(db);
   const isHttps = new URL(config.appOrigin).protocol === "https:";
 
   return betterAuth({
@@ -383,6 +392,48 @@ interface Endpoint {
   body: z.ZodType;
   /** Its success is the same for every e-mail and must take as long for each: held back to the answer floor. */
   floor?: true;
+  /**
+   * Better Auth's handling (`handle`) runs inside one transaction of ours, which its queries join, wrapped by this:
+   * what to lock before it and write after it. Only an answer below 400 commits.
+   */
+  transaction?: (t: Tx, req: FastifyRequest, handle: () => Promise<Response>) => Promise<Response>;
+}
+
+/** Thrown to roll back an `answerInTransaction` whose answer is a failure, carrying that answer out. */
+class Unsuccessful extends Error {
+  constructor(readonly response: Response) {
+    super("unsuccessful answer");
+  }
+}
+
+/** Runs `fn` in a transaction of ours that Better Auth's queries join; commits only an answer below 400. */
+async function answerInTransaction(db: Db, fn: (t: Tx) => Promise<Response>): Promise<Response> {
+  try {
+    return await db.tx((t) =>
+      joinTransaction(t, async () => {
+        const response = await fn(t);
+        if (response.status >= 400) throw new Unsuccessful(response);
+        return response;
+      }),
+    );
+  } catch (err) {
+    if (err instanceof Unsuccessful) return err.response;
+    throw err;
+  }
+}
+
+/**
+ * The e-mail a verification link's token names: its JWT payload, read without checking the signature (Better Auth
+ * checks it and refuses the link if it is wrong). Null when it names none.
+ */
+function verificationTokenEmail(token: string): string | null {
+  try {
+    const payload: unknown = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"));
+    const email = (payload as { email?: unknown } | null)?.email;
+    return typeof email === "string" ? email : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Mounts Better Auth at `/api/auth/*` for `AUTH_ENDPOINTS` only (registration is POST /api/register). */
@@ -406,6 +457,14 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
       limit: null,
       query: z.strictObject({ token: storableText(4096), callbackURL: redirect.optional() }),
       body: noBody,
+      // Better Auth checks the link's account by e-mail and then marks whatever account has that e-mail verified.
+      // A registration replacing an unverified account holds the address's lock (accounts.ts), so a link to the
+      // replaced account can never verify its replacement in between.
+      transaction: async (t, req, handle) => {
+        const email = verificationTokenEmail((req.query as { token: string }).token);
+        if (email !== null) await lockAccountEmail(t, email);
+        return handle();
+      },
     },
     "POST /request-password-reset": {
       limit: resetRequest,
@@ -428,8 +487,12 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
       headers: fromNodeHeaders(req.headers),
       ...(req.body === undefined || req.body === null ? {} : { body: JSON.stringify(req.body) }),
     });
+    const endpoint = exposed.get(endpointOf(req))!; // preHandler: it exists
+    const handle = () => app.auth.handler(request);
     const watch: Watch = {};
-    const response = await watches.run(watch, () => app.auth.handler(request));
+    const response = await watches.run(watch, () =>
+      endpoint.transaction ? answerInTransaction(app.deps.db, (t) => endpoint.transaction!(t, req, handle)) : handle(),
+    );
     if (response.status >= 400) {
       const body = await response.text();
       // To the error handler (errors.ts): a busy database is 503 `busy`, anything else a logged 500 `internal`.
@@ -439,7 +502,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
       }
       return reply.code(response.status).send({ error: errorCodeOf(response.status, body) });
     }
-    if (exposed.get(endpointOf(req))?.floor) await holdUntilFloor(req, answerFloor);
+    if (endpoint.floor) await holdUntilFloor(req, answerFloor);
     reply.status(response.status);
     response.headers.forEach((value, key) => {
       // The body may be rewritten below, so its length is Fastify's to state.

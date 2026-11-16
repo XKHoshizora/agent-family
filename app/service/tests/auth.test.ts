@@ -115,7 +115,7 @@ describe("accounts", () => {
     const res = await register({ inviteCode: code, email: "late@example.test", handle: "taken_one" });
     expect(res).toEqual({ status: 409, json: { error: "handle_taken" } });
     expect(await count(`select count(*) n from "user" where email = 'late@example.test'`)).toBe(0);
-    expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
+    expect(await count("select count(*) n from invites where used_at is null")).toBe(1);
   });
 
   test("without a usable invite a taken handle is not revealed: invalid_invite either way", async () => {
@@ -139,18 +139,18 @@ describe("accounts", () => {
     expect((await api(app, null, "POST", "/api/register", { handle: "x" })).status).toBe(400);
   });
 
-  test("a taken e-mail gets the same 201, creates nothing, consumes no invite and sends no mail", async () => {
+  test("a taken e-mail gets the same 201 and creates nothing; the invite is used up (more in registration.test.ts)", async () => {
     const first = await signUp(app, "first_owner");
-    const mailBefore = await count("select count(*) n from mail_outbox");
     const code = await invite();
     const res = await register({ inviteCode: code, email: first.email, handle: "second_try" });
     expect(res).toEqual({ status: 201, json: { ok: true } });
     expect(await count("select count(*) n from principals")).toBe(1);
     expect(await count(`select count(*) n from "user"`)).toBe(1);
-    expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
-    expect(await count("select count(*) n from mail_outbox")).toBe(mailBefore);
-    // the invite is still good for a different address
-    expect((await register({ inviteCode: code, email: "fresh@example.test", handle: "fresh_one" })).status).toBe(201);
+    expect(await count("select count(*) n from invites where used_at is null")).toBe(0);
+    expect(await register({ inviteCode: code, email: "fresh@example.test", handle: "fresh_one" })).toEqual({
+      status: 400,
+      json: { error: "invalid_invite" },
+    });
   });
 
   test("registration is atomic: a failure after the auth user is written leaves no user, account, mail or used invite", async () => {
@@ -172,7 +172,7 @@ describe("accounts", () => {
     expect(await count(`select count(*) n from "account"`)).toBe(0);
     expect(await count("select count(*) n from mail_outbox")).toBe(0);
     expect(await count("select count(*) n from principals")).toBe(0);
-    expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
+    expect(await count("select count(*) n from invites where used_at is null")).toBe(1);
   });
 
   test("Better Auth's own sign-up endpoint is not reachable (it would bypass invites)", async () => {

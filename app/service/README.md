@@ -258,8 +258,10 @@ Better Auth's own error codes reach the client lower-cased (`INVALID_TOKEN` → 
 message text; a failure inside it is 500 `internal`, a busy database 503 `busy`. Mail goes to the
 `mail_outbox` table (read it with `npm run inbox:list`). The mails are plain text in Simplified Chinese
 (`src/auth/mail-copy.ts`): subject, a short body, the link on its own line, how long it is valid (24 hours for
-verification, 1 hour for reset: the configured lifetimes) and a line asking to ignore the mail if it was not
-the reader's own doing.
+verification, 1 hour for reset: the configured lifetimes) and a closing line — the verification mail asks a
+reader who did not register not to click the link and to ignore the mail (someone else may have registered
+their address), the reset mail to ignore it if it was not the reader's own doing. A third kind,
+`registration_attempt`, is described under `POST /api/register`.
 
 Sessions last 7 days from sign-in (the cookie's `Max-Age`; with `rememberMe: false` the cookie ends with the
 browser session and the session after a day). Sign-out and a password reset end sessions at once: their
@@ -273,16 +275,34 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   `email` (an e-mail address, at most 254), `password` (10–128 characters), `displayName` (see
   `PATCH /api/me`: 1–40 characters after removing format characters (not joiners) and trimming, one line), `handle`
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
-- 201 `{"ok": true}`. Also for an e-mail that already has an account: then nothing is written, no invite is
-  used and no mail is sent (the answer does not reveal which e-mails exist). Held back like the reset request's
-  answer: at least 400 ms (plus up to 50 ms at random) after the request arrived; errors are not held back.
+- 201 `{"ok": true}` whether or not the e-mail already has an account, and the invite is used up either way, so
+  neither the answer nor the invite afterwards tells an invite holder which e-mails have accounts. Held back
+  like the reset request's answer: at least 400 ms (plus up to 50 ms at random) after the request arrived;
+  errors are not held back. What happens depends on the e-mail (compared lower-cased):
+  - No account: the account and its principal are created and a verification mail is sent (below).
+  - A verified account: nothing is created or changed. Its owner gets a `registration_attempt` mail (someone
+    tried to register this address and no account was created; sign in at `<APP_ORIGIN>/signin`, or reset the
+    password at `<APP_ORIGIN>/forgot`; otherwise ignore it), at most one per address per hour.
+  - An account whose e-mail is not verified yet (it has never signed in): this registration replaces it, in the
+    same transaction. The old account's principal, auth user, sessions, credentials and reset links are
+    deleted; friend requests to it and blocks of it are deleted too (whoever made them gets a `social` push);
+    its handle is free again; the invite it was registered with stays used up. The new password, handle and
+    display name apply and a fresh verification mail is sent. Links mailed for the old account stop working
+    (its verification link redirects with `INVALID_TOKEN`, its reset links are `invalid_token`). An unverified
+    account that holds anything only a signed-in person makes — messages, memberships, friendships, blocks it
+    made, attachments, friend requests it sent — is never replaced or deleted: the registration fails with 500
+    `internal` and changes nothing (this cannot happen unless something else is wrong).
+
+  Registrations of one address are decided one at a time, and a verification link for that address waits
+  until they are done (so a link mailed for a replaced account can never verify its replacement).
 - Mail (`verify_email`): `<APP_ORIGIN>/api/auth/verify-email?token=…&callbackURL=<APP_ORIGIN>/verify` (the
   callback URL-encoded), valid 24 h; opening it lands on the client's `<APP_ORIGIN>/verify` (or
-  `/verify?error=CODE`).
+  `/verify?error=CODE`). A link only ever verifies the account it was mailed for.
   The e-mail must be verified before sign-in works.
 - Errors: 400 `invalid_invite` (missing, unknown, expired or used invite; checked first, so without a usable
-  invite nothing else — not even whether the handle is taken — is revealed), 409 `handle_taken`,
-  400 `invalid_request` (shape, or a value Better Auth refuses).
+  invite nothing else — not even whether the handle is taken — is revealed), 409 `handle_taken` (any principal
+  holds the handle, also an unverified account this registration would otherwise replace; the invite is not
+  used up), 400 `invalid_request` (shape, or a value Better Auth refuses).
 - Limit: 10 per minute per client address.
 
 #### `POST /api/auth/sign-in/email`
@@ -929,7 +949,9 @@ across the site. Accepted for now; the limits above bound how much can be learnt
 - `tests/concurrency.test.ts` races real HTTP requests on the 10-connection pool (sends against an unfriend,
   a block and a removal; 20 adds of one person; two senders; accept against withdraw; a block against a
   group add; the last two members leaving; read markers; uploads at the quota; a request against a block)
-  for several rounds and checks each stated invariant against the database.
+  for several rounds and checks each stated invariant against the database. `tests/registration.test.ts` races
+  eight registrations on one invite (whatever their e-mails, exactly one uses it) and two registrations of one
+  e-mail (one account remains).
 - `tests/enumeration.test.ts`: on every route taking a conversation id, a seq, an attachment, request or
   principal id, an id that exists but is not yours gets byte for byte the answer a random id gets; the two
   intended differences (any existing principal can be blocked and has an avatar) are asserted. Catch-up

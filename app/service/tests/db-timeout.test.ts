@@ -89,7 +89,7 @@ describe("the pool's statement timeout (DB_STATEMENT_TIMEOUT_MS)", () => {
     expect(await count(`select count(*) n from "user"`)).toBe(0);
     expect(await count("select count(*) n from principals")).toBe(0);
     expect(await count("select count(*) n from mail_outbox")).toBe(0);
-    expect(await count("select count(*) n from invites where used_by is null")).toBe(1);
+    expect(await count("select count(*) n from invites where used_at is null")).toBe(1);
     expect((await api(app, null, "POST", "/api/register", body)).status).toBe(201);
   });
 

@@ -2,16 +2,17 @@ import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { APIError } from "better-auth/api";
 import { z } from "zod";
+import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { displayName } from "../schemas.ts";
+import { findAccountByEmail, lockAccountEmail, removeUnverifiedAccount, type ExistingAccount } from "./accounts.ts";
 import { holdUntilFloor, noteArrival, type AnswerFloor } from "./answer-floor.ts";
 import { runInTransaction } from "./auth.ts";
 import { lockUsableInvite, markInviteUsed } from "./invites.ts";
+import { registrationAttemptMail } from "./mail-copy.ts";
+import { sendMail } from "./mailer.ts";
 
 const UNIQUE_VIOLATION = "23505";
-
-/** Thrown inside the registration transaction to roll it back when the e-mail already has an account. */
-class EmailAlreadyRegistered extends Error {}
 
 export const registerBody = z.object({
   inviteCode: z.string().max(100).optional(),
@@ -21,12 +22,30 @@ export const registerBody = z.object({
   handle: z.string().regex(/^[a-z0-9_]{3,24}$/),
 });
 
+/** How often, at most, the owner of an address hears that someone tried to register it again. */
+const ATTEMPT_NOTICE_INTERVAL = "1 hour";
+
+/**
+ * Tells the owner of a verified account that someone tried to register its address; at most once per
+ * ATTEMPT_NOTICE_INTERVAL per address (the caller holds the address's lock, so two attempts cannot both send).
+ */
+async function noticeRegistrationAttempt(t: Tx, account: ExistingAccount, appOrigin: string): Promise<void> {
+  const recent = await t.query(
+    `select 1 from mail_outbox
+      where recipient = $1 and kind = 'registration_attempt' and created_at > now() - $2::interval limit 1`,
+    [account.email, ATTEMPT_NOTICE_INTERVAL],
+  );
+  if (recent.rowCount) return;
+  const mail = registrationAttemptMail(`${appOrigin}/signin`, `${appOrigin}/forgot`);
+  await sendMail(t, "registration_attempt", account.email, mail.subject, mail.body);
+}
+
 export function registerRegistrationRoutes(
   app: FastifyInstance,
   rateLimit: { max: number; timeWindow: string },
   answerFloor: AnswerFloor,
 ): void {
-  const { db, config } = app.deps;
+  const { db, config, social } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   api.post(
@@ -45,27 +64,43 @@ export function registerRegistrationRoutes(
       const { inviteCode, email, password, displayName, handle } = req.body;
       const needsInvite = config.registrationMode === "invite";
 
+      let told: string[];
       try {
-        // One transaction: invite lock, Better Auth's user/account/verification rows (joined to this
-        // transaction, see auth.ts), the principal and the invite consumption all commit together.
-        await db.tx(async (client) => {
+        // One transaction for the whole decision: the invite lock, the address's lock and account, removing an
+        // unverified one, Better Auth's user/account rows and mail (joined to this transaction, see auth.ts), the
+        // principal, and using the invite up all commit together, or nothing does.
+        told = await db.tx(async (client) => {
           // The invite first: without one, nothing (not even whether a handle is taken) is revealed.
           if (needsInvite) {
             if (!inviteCode || !(await lockUsableInvite(client, inviteCode))) throw new AppError(400, "invalid_invite");
           }
 
+          // Whoever holds the handle — also an unverified account this registration would replace — it is taken:
+          // the answer must not depend on whose e-mail is being registered.
           const taken = await client.query("select 1 from principals where handle = $1", [handle]);
           if (taken.rowCount) throw new AppError(409, "handle_taken");
+
+          // From here on the answer is 201, account or not, and the invite is used up either way.
+          await lockAccountEmail(client, email);
+          const existing = await findAccountByEmail(client, email);
+          if (existing?.verified) {
+            // Never touched: its owner is told that someone tried, and nothing is created.
+            await noticeRegistrationAttempt(client, existing, config.appOrigin);
+            if (needsInvite) await markInviteUsed(client, inviteCode!, null);
+            return [];
+          }
+          // An unverified account proves nobody owns the address yet: the newest registration replaces it.
+          const affected = existing ? await removeUnverifiedAccount(client, existing) : [];
 
           const created = await runInTransaction(client, () =>
             app.auth.api.signUpEmail({
               body: { name: displayName, email, password, callbackURL: `${config.appOrigin}/verify` },
             }),
           );
-
-          // Better Auth answers a taken e-mail with a synthetic user and writes nothing.
-          const real = await client.query("select 1 from \"user\" where id = $1", [created.user.id]);
-          if (real.rowCount !== 1) throw new EmailAlreadyRegistered();
+          // Better Auth answers a taken e-mail with a synthetic user and writes nothing; under the address's lock,
+          // with no account left, that cannot be the case.
+          const real = await client.query(`select 1 from "user" where id = $1`, [created.user.id]);
+          if (real.rowCount !== 1) throw new Error("registration: Better Auth created no user for an address without one");
 
           let principalId: string;
           try {
@@ -80,14 +115,16 @@ export function registerRegistrationRoutes(
             throw err;
           }
           if (needsInvite) await markInviteUsed(client, inviteCode!, principalId);
+          return affected;
         });
       } catch (err) {
         if (err instanceof APIError && err.statusCode >= 400 && err.statusCode < 500) {
           throw new AppError(400, "invalid_request");
         }
-        if (!(err instanceof EmailAlreadyRegistered)) throw err;
-        // Otherwise the same answer as a successful registration; nothing was written, no invite consumed, no mail sent.
+        throw err;
       }
+      // Friend requests to and blocks of a replaced account are gone: their makers' lists changed.
+      if (told.length > 0) social.emit(told, req.log);
       await holdUntilFloor(req, answerFloor);
       return reply.code(201).send({ ok: true });
     },

@@ -20,13 +20,17 @@ export async function createInvite(db: Queryable, opts: { ttlHours: number }): P
 /** Locks the invite row; true when it exists, is unused and has not expired. */
 export async function lockUsableInvite(q: Queryable, code: string): Promise<boolean> {
   const { rowCount } = await q.query(
-    "select 1 from invites where code_hash = $1 and used_by is null and expires_at > now() for update",
+    "select 1 from invites where code_hash = $1 and used_at is null and expires_at > now() for update",
     [hashInviteCode(code)],
   );
   return rowCount === 1;
 }
 
-export async function markInviteUsed(q: Queryable, code: string, principalId: string): Promise<void> {
+/**
+ * Uses the invite up (`used_at`). `principalId` is the account it made; null when the registration made none (the
+ * e-mail already had a verified account). An invite stays used up when that account is later removed.
+ */
+export async function markInviteUsed(q: Queryable, code: string, principalId: string | null): Promise<void> {
   await q.query("update invites set used_by = $2, used_at = now() where code_hash = $1", [
     hashInviteCode(code),
     principalId,

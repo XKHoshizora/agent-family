@@ -1,6 +1,6 @@
 import type { Queryable } from "../db.ts";
 
-export type MailKind = "verify_email" | "reset_password";
+export type MailKind = "verify_email" | "reset_password" | "registration_attempt";
 
 /**
  * Delivers mail by writing it to `mail_outbox` (the only transport in this plan).
