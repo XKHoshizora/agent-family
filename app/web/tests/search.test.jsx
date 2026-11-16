@@ -53,7 +53,15 @@ const listEl = () => document.querySelector("ol.messages");
 function tallList(scrollTop, { scrollHeight = 3000, clientHeight = 600 } = {}) {
   const list = listEl();
   let top = scrollTop;
-  Object.defineProperty(list, "scrollTop", { configurable: true, get: () => top, set: (v) => (top = v) });
+  // (A browser reports 0 for a list that is display: none, and forgets the position while it is.)
+  Object.defineProperty(list, "scrollTop", {
+    configurable: true,
+    get: () => (list.style.display === "none" ? 0 : top),
+    set: (v) => {
+      if (list.style.display !== "none") top = v;
+    },
+  });
+  list.forget = () => (top = 0);
   Object.defineProperty(list, "scrollHeight", { configurable: true, get: () => scrollHeight });
   Object.defineProperty(list, "clientHeight", { configurable: true, get: () => clientHeight });
   return list;
@@ -298,7 +306,7 @@ describe("search inside a conversation", () => {
     fireEvent.scroll(list);
     typeInChat("聚餐");
     await elapse(300);
-    list.scrollTop = 0; // (the browser may have reset it while hidden)
+    list.forget();
     await click(button("关闭会话搜索"));
     expect(list.scrollTop).toBe(500);
   });

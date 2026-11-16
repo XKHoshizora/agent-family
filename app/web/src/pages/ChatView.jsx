@@ -69,8 +69,9 @@ export function ChatView({ conv }) {
   const hits = useMemo(() => search.hits.map((m) => searchHitView(m, { meId: state.account?.id ?? null, now: Date.now() })), [search.hits, state.account?.id]);
   const jumpTo = useJumpTo();
   const focus = state.nav.focus;
-  /** Where the list was scrolled to when the search results covered it. */
-  const savedScroll = useRef(0);
+  /** The list's last known scroll position, kept by `onScroll`: a list hidden by the results reports 0, so it is never read then. */
+  const lastTop = useRef(0);
+  const wasShowingHits = useRef(false);
 
   useEffect(() => {
     setSearching(false);
@@ -104,6 +105,7 @@ export function ChatView({ conv }) {
     // (A detached window is read from where the hit is: it never follows to its end.)
     if (!detached && (atBottom.current || mineNew)) {
       list.scrollTop = list.scrollHeight;
+      lastTop.current = list.scrollTop;
       atBottom.current = true;
     }
   }, [conv.id, firstId, last?.id, messages.length, detached]);
@@ -111,13 +113,11 @@ export function ChatView({ conv }) {
   // The results cover the list while there is a query: its scroll position is kept for when they go away.
   useLayoutEffect(() => {
     const list = listRef.current;
-    if (!list) return;
-    if (showHits) savedScroll.current = list.scrollTop;
-    else if (savedScroll.current > 0) {
-      // (Messages may have arrived while the results covered the list: at the newest ones, stay at the newest.)
-      list.scrollTop = atBottom.current && !detached ? list.scrollHeight : savedScroll.current;
-      savedScroll.current = 0;
-    }
+    const returning = wasShowingHits.current && !showHits;
+    wasShowingHits.current = showHits;
+    if (!list || !returning) return;
+    // (Messages may have arrived while the results covered the list: at the newest ones, stay at the newest.)
+    list.scrollTop = atBottom.current && !detached ? list.scrollHeight : lastTop.current;
   }, [showHits]);
 
   // A jump (nav.focus) scrolls to the message once it is shown, and highlights it for a moment.
@@ -126,7 +126,6 @@ export function ChatView({ conv }) {
     const node = [...(listRef.current?.children ?? [])].find((li) => li.dataset.msg === `m${focus.seq}`);
     if (!node) return;
     dispatch({ type: "nav", patch: { focus: null } });
-    savedScroll.current = 0;
     node.scrollIntoView({ block: "center" });
     setFlash(focus.seq);
   }, [focus, conv.id, messages, dispatch]);
@@ -207,6 +206,7 @@ export function ChatView({ conv }) {
     }
     // (A detached window never counts as "at the newest message": when it joins them the view must stay where it is.)
     atBottom.current = bottom && !detached;
+    lastTop.current = list.scrollTop;
     if (list.scrollTop <= TOP_SLACK_PX) loadOlder({ byScroll: true });
     if (bottom) loadNewer({ byScroll: true });
   }

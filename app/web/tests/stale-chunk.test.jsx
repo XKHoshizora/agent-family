@@ -8,8 +8,8 @@ import { RELOAD_GUARD_MS, installStaleChunkReload } from "../src/staleChunk.js";
 
 afterEach(cleanup);
 
-function Boom() {
-  throw new Error("Failed to fetch dynamically imported module");
+function Boom({ message = "Failed to fetch dynamically imported module", name = "Error" }) {
+  throw Object.assign(new Error(message), { name });
 }
 
 describe("ChunkBoundary", () => {
@@ -24,6 +24,36 @@ describe("ChunkBoundary", () => {
     expect(screen.getByRole("alert").textContent).toBe("页面已更新，请刷新");
     fireEvent.click(screen.getByRole("button", { name: "刷新页面" }));
     expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("says something went wrong for any other error, with the same button, and logs the original error", () => {
+    const reload = vi.fn();
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ChunkBoundary reload={reload}>
+        <Boom message="Cannot read properties of undefined" />
+      </ChunkBoundary>,
+    );
+    expect(screen.getByRole("alert").textContent).toBe("出了点问题，请刷新页面");
+    expect(log.mock.calls.some((args) => args.some((a) => a instanceof Error && a.message === "Cannot read properties of undefined"))).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "刷新页面" }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["Failed to fetch dynamically imported module: /assets/AppShell-x.js", "Error"],
+    ["error loading dynamically imported module", "Error"],
+    ["Importing a module script failed.", "TypeError"],
+    ["whatever", "ChunkLoadError"],
+  ])("tells a chunk-load failure apart (%s, %s) and logs it", (message, name) => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(
+      <ChunkBoundary>
+        <Boom message={message} name={name} />
+      </ChunkBoundary>,
+    );
+    expect(screen.getByRole("alert").textContent).toBe("页面已更新，请刷新");
+    expect(log.mock.calls.some((args) => args.some((a) => a instanceof Error && a.message === message))).toBe(true);
   });
 
   it("shows its children when nothing fails", () => {
