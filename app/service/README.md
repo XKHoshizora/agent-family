@@ -443,8 +443,8 @@ Every model call goes through one gateway (`src/models/gateway.ts`, `Deps.models
 alike: `resolveModel` (`src/models/resolve.ts`) turns an Agent's choice into the call — for a site model its upstream,
 model name, output limit, price and tier, the key read from the variable its `apiKeyEnv` names at that moment; for a
 provider model the owner's provider with its key opened, the model's flags and the default output limit for provider
-models (2048 tokens) — or into
-nothing to call (no model, a site model no longer configured or its key variable unset, a provider or model gone).
+models (2048 tokens) — or into nothing to call (no model, a site model no longer configured or its key variable unset,
+a provider or model gone).
 The gateway uses the Vercel AI SDK 7 (`ai` with `@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`; `streamText`
 only: no hosted gateway, telemetry off, no automatic retry, nothing printed by the SDK), every request through the
 address guard.
@@ -464,7 +464,10 @@ offering all four under `https://host/v1` is reached with `baseUrl` `https://hos
 
 **What is sent.** The system text (left out when empty); the turns, a person's as `user` with their text, images and
 PDFs (a PDF as a file with its name; what the model is shown is decided before the call), the Agent's as `assistant`
-text; the output limit. Reasoning, by level (`REASONING_PARAMS`, one table), on the wire:
+text (a file in one is sent as `[文件：{name}]`, an image as `[图片]`); the output limit. Every `openai_responses` call
+also sends `store: false`, so OpenAI keeps no copy of the response (nothing here refers to an earlier one; with a
+reasoning level the SDK then also asks for `include: ["reasoning.encrypted_content"]`). Reasoning, by level
+(`REASONING_PARAMS`, one table), on the wire:
 
 | Level | `openai_chat` | `openai_responses` | `anthropic` | `gemini` |
 |---|---|---|---|---|
@@ -478,6 +481,18 @@ do not reason (which are the ones sent `none`). With any other level an OpenAI m
 the system text goes as a `developer` message, and Chat Completions sends the limit as `max_completion_tokens`. For
 models it recognises by name the SDK adapts further (an Anthropic model that cannot turn thinking off has `thinking`
 dropped).
+
+What follows for a person choosing a model and a level:
+
+- Anthropic levels other than `none` ask for adaptive thinking, which Claude models before 4.6 refuse; Gemini levels
+  other than `none` ask for a thinking level, which Gemini 2.5 models may refuse. The reply then fails as
+  `provider_unavailable`; such a model works at `none`.
+- On `openai_chat` the model's thinking is never shown (the protocol streams none that is read), though it is counted
+  in the usage.
+- A Gemini key that is wrong is answered 400 by Google, so it reads as `provider_unavailable`, not
+  `provider_rejected` (the same in the provider test route).
+- A model silent for 60 s (for example one thinking hard over Chat Completions, which streams nothing meanwhile) is
+  given up on (`provider_unavailable`).
 
 **What comes back.** The answer as text and reasoning deltas (Responses reasoning summaries, Anthropic thinking, Gemini
 thought summaries; Chat Completions streams no reasoning the SDK reads, so there it is not shown, though its tokens are

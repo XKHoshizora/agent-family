@@ -136,6 +136,26 @@ export const REASONING_PARAMS: Readonly<Record<Protocol, Readonly<Record<Reasoni
   },
 };
 
+/**
+ * Provider options every call of a protocol carries besides its reasoning: a Responses call asks OpenAI not to keep
+ * the response (`store: false`; nothing here ever refers to an earlier response).
+ */
+const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
+  openai_chat: {},
+  openai_responses: { openai: { store: false } satisfies OpenAILanguageModelResponsesOptions },
+  anthropic: {},
+  gemini: {},
+};
+
+/** The call's provider options: the protocol's own, with the reasoning level's merged in, per provider namespace. */
+function providerOptionsFor(call: ModelCall): ProviderOptions {
+  const base = PROTOCOL_OPTIONS[call.protocol];
+  const reasoning = REASONING_PARAMS[call.protocol][call.reasoning];
+  const merged: ProviderOptions = {};
+  for (const name of new Set([...Object.keys(base), ...Object.keys(reasoning)])) merged[name] = { ...base[name], ...reasoning[name] };
+  return merged;
+}
+
 /** A model's answer may be long: the guard's size limit for one model stream. */
 const MODEL_STREAM_MAX_BYTES = 8 * 1024 * 1024;
 /** A model stream silent for this long (before its headers, or between its bytes) is given up on. */
@@ -246,7 +266,7 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
       ...(call.system === "" ? {} : { instructions: call.system }),
       messages: toModelMessages(call.messages),
       maxOutputTokens: call.maxOutputTokens,
-      providerOptions: REASONING_PARAMS[call.protocol][call.reasoning],
+      providerOptions: providerOptionsFor(call),
       abortSignal: AbortSignal.any([call.signal, own.signal]),
       maxRetries: 0,
       telemetry: { isEnabled: false },

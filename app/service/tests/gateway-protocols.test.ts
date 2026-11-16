@@ -223,6 +223,19 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
   }
 });
 
+describe("nothing is kept at OpenAI", () => {
+  it.each(REASONING_LEVELS)("reasoning %s: a Responses request carries store: false (Chat Completions has no such field)", async (level) => {
+    await collect(gateway.stream(call("openai_responses", { reasoning: level })));
+    const { body } = onlyRequest();
+    expect(body.store).toBe(false);
+    expect(body).not.toHaveProperty("previous_response_id");
+    expect(body.include ?? []).toEqual(level === "none" ? [] : ["reasoning.encrypted_content"]);
+    stub.reset();
+    await collect(gateway.stream(call("openai_chat", { reasoning: level })));
+    expect(onlyRequest().body).not.toHaveProperty("store");
+  });
+});
+
 describe("fallback: an assistant turn is text only", () => {
   it("a file in it is sent as [文件：{name}], an image as [图片]", async () => {
     await collect(
