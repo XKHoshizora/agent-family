@@ -23,7 +23,7 @@ export interface AgentPortDeps {
   config: Config;
   /** Where attachments are read from for what the model is shown (`buildContext`). */
   blobs: BlobStore;
-  realtime: Pick<Hub, "pushRun" | "pushDelta">;
+  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged">;
   conversations: ConversationEvents;
   reads: ReadEvents;
   log: Pick<FastifyBaseLogger, "error">;
@@ -298,10 +298,15 @@ export class DbAgentPort implements AgentPort {
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
 
+  /**
+   * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
+   * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`).
+   */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused"> {
     try {
       const { message, duplicate } = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out));
       if (!duplicate) this.deps.conversations.publish({ messages: [message], conversations: [] }, this.deps.log);
+      if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
       return "posted";
     } catch (err) {
       if (err instanceof AppError && (err.code === "agent_paused" || err.code === "agent_deleted")) return "refused";
@@ -359,7 +364,8 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * Recovery at start-up, before the worker starts (README "Agents and runs"; spec 6.4, 6.5): every run the previous
  * process left `running` — its call, if it had one, died with it — is ended without a model call, each in a
  * transaction of its own under the locks `finish` takes (the Agent's conversation and `agents` rows, then the run's,
- * then the account's):
+ * then the account's; a persona draft has no Agent: its run row, then the account). A draft has no message either, so
+ * it always ends as the last case:
  * - its reply had been posted (the stop fell between post and finish): `done`, or `stopped` when the message says so;
  * - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
  * - else `failed`, `provider_unavailable`, retryable.

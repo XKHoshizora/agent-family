@@ -22,7 +22,8 @@ export interface Resolved {
 }
 
 /**
- * The Agent's model as something to call, or null when there is none to call: no model chosen, a site model that is
+ * The Agent's model (or, for a persona draft, the model its owner chose) as something to call, or null when there is
+ * none to call: no model chosen, a site model that is
  * no longer configured or whose key variable is unset, a provider that is not (or no longer) the owner's, or a model
  * no longer on its list. A site model's upstream key is read from `process.env[apiKeyEnv]` now (configuration never
  * holds it); a provider's key is opened from the database (`loadProviderForCall`, which throws `KeyUnreadableError`
@@ -31,7 +32,7 @@ export interface Resolved {
 export async function resolveModel(
   q: Queryable,
   config: Pick<Config, "siteModels" | "providerKeySecret" | "providerDefaultMaxOutputTokens">,
-  agent: AgentRow,
+  agent: Pick<AgentRow, "model" | "ownerId">,
 ): Promise<Resolved | null> {
   const choice = agent.model;
   if (choice === null) return null;

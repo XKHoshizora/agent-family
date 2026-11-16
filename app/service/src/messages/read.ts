@@ -18,11 +18,62 @@ function truncate(text: string, max: number): string {
 
 const wireText = (m: StoredMessage): string => (typeof m.body.text === "string" ? m.body.text : "");
 
+type WireProposal = NonNullable<WireMessage["proposal"]>;
+
+/** A persona proposal as `toWireForReaders` reads it: whose Agent's it is decides who is shown it. */
+interface ProposalRow {
+  id: string;
+  message_id: string;
+  owner_id: string;
+  status: WireProposal["status"];
+  persona: string;
+  intro: string | null;
+  field: string | null;
+  /** Open, but the Agent's persona has moved past the version it was made against. */
+  stale: boolean;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The proposal a message's body names (`postAsAgent` writes `proposalId`; nobody can send one), or null. */
+const proposalIdOf = (m: StoredMessage): string | null =>
+  m.kind === "text" && typeof m.body.proposalId === "string" && UUID.test(m.body.proposalId) ? m.body.proposalId : null;
+
 /**
- * Module-private on purpose: it renders whatever quote it is handed. Every exported path decides per
- * reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether `visibleQuote` is.
+ * The proposals `msgs` name, by id, in one query: each with its Agent's owner and whether it is stale now (open, but
+ * the persona version moved: computed at read time, the stored status changes only when a confirmation hits it).
  */
-function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMessage {
+async function proposalsOf(q: Queryable, msgs: StoredMessage[]): Promise<Map<string, ProposalRow>> {
+  const ids = [...new Set(msgs.map(proposalIdOf).filter((id): id is string => id !== null))];
+  if (ids.length === 0) return new Map();
+  const { rows } = await q.query<ProposalRow>(
+    `select pp.id, pp.message_id::text, p.owner_id, pp.status, pp.persona, pp.intro, pp.field,
+            (pp.status = 'open' and pp.base_persona_version <> a.persona_version) as stale
+       from persona_proposals pp
+       join agents a on a.principal_id = pp.agent_id
+       join principals p on p.id = pp.agent_id
+      where pp.id = any($1::uuid[])`,
+    [ids],
+  );
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
+function toWireProposal(r: ProposalRow): WireProposal {
+  return {
+    id: r.id,
+    status: r.stale ? "stale" : r.status,
+    persona: r.persona,
+    ...(r.intro === null ? {} : { intro: r.intro }),
+    ...(r.field === null ? {} : { field: r.field }),
+  };
+}
+
+/**
+ * Module-private on purpose: it renders whatever quote and proposal it is handed. Every exported path decides per
+ * reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether `visibleQuote` is, and shows a proposal
+ * to the Agent's owner only.
+ */
+function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal: ProposalRow | null): WireMessage {
   const wire: WireMessage = {
     conversationId: msg.conversationId,
     seq: msg.seq,
@@ -61,6 +112,7 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMes
     if (typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
     if (msg.body.stopped === true) wire.stopped = true;
     if (msg.body.truncated === true) wire.truncated = true;
+    if (proposal) wire.proposal = toWireProposal(proposal);
   }
   return wire;
 }
@@ -69,8 +121,9 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMes
  * For fan-out: what each reader may see of `msgs`. Per reader (keyed by lower-case id; every reader is a
  * key) the messages that reader can see now, in the given order, each with its quote resolved for that
  * reader — `{visible: true, senderId, text}` only if the quoted message is visible to them, else
- * `{seq, visible: false}`. Both decisions go through VISIBLE_JOIN, in at most two queries however many
- * readers and messages there are.
+ * `{seq, visible: false}` — and, on an Agent's reply that proposed a persona, its `proposal` when the reader is that
+ * Agent's owner. Both visibility decisions go through VISIBLE_JOIN; at most three queries however many readers and
+ * messages there are.
  */
 export async function toWireForReaders(
   q: Queryable,
@@ -105,11 +158,19 @@ export async function toWireForReaders(
     for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, toStored(r));
   }
 
+  const proposals = await proposalsOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
+  /** The proposal `m` made, when `reader` owns the Agent that made it. */
+  const proposalFor = (reader: string, m: StoredMessage): ProposalRow | null => {
+    const id = proposalIdOf(m);
+    const p = id === null ? undefined : proposals.get(id);
+    return p && p.message_id === m.id && p.owner_id === reader ? p : null;
+  };
+
   for (const reader of readers) {
     const list = out.get(reader)!;
     for (const m of msgs) {
       if (!visible.has(`${reader}|${m.id}`)) continue;
-      list.push(toWire(m, quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null));
+      list.push(toWire(m, quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null, proposalFor(reader, m)));
     }
   }
   return out;

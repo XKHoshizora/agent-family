@@ -72,10 +72,11 @@ no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `o
 `SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
 contain `free`, default `{"free":20}`),
 the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
-`AGENT_MAX_CONCURRENT_RUNS` (replies one person may have running at once, further ones wait queued; 1–100, default 2),
+`AGENT_MAX_CONCURRENT_RUNS` (model calls one person may have running at once, replies and persona drafts together;
+further replies wait queued, a further draft is refused; 1–100, default 2),
 `AGENT_RUNS_PER_MINUTE` (replies one person may start a minute, counted from the stored runs and not scaled by
-`RATE_LIMIT_SCALE`; 1–10 000, default 20), `AGENT_RUN_TIMEOUT_MS` (how long a reply may take, and also the reading of
-its attachments before the call; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
+`RATE_LIMIT_SCALE`; 1–10 000, default 20), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
+for a reply also the reading of its attachments before the call; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
 context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
 limit of every call to a provider model; 1–1 000 000, default 2 048; it must be less than
 `PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
@@ -241,14 +242,15 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
 | 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted: sending, uploading, starting a new topic) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
-| 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, or retrying its reply |
+| 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, retrying its reply, or confirming or discarding its persona proposals |
 | 409 | `agent_paused` | Retrying the reply of a paused Agent |
 | 409 | `busy_run` | Retrying while a reply of that Agent is already queued or running |
+| 409 | `stale_proposal` | Confirming or discarding a persona proposal that can no longer be acted on: confirmed already, discarded (confirming), superseded by a newer one, or made against a persona that has changed since (see Persona proposals) |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
 | 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
-| — | `context_too_small` | A run's error only, never an HTTP answer: the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context |
+| 400 | `context_too_small` | A run's error (not an HTTP answer there): the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context. As an HTTP answer only from `POST /api/agents/draft-persona`, when the model's context cannot hold the draft's instruction and data |
 | 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
@@ -276,7 +278,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/principals/lookup` | 30 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
-| `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
+| `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
+| `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429) | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
 | `POST /api/providers/:id/test` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
@@ -305,8 +308,10 @@ operator (`npm run credits:grant`, to a person's handle; an Agent's handle is re
 changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, `/api/credits` and `/api/accounts`
 are the JSON 404.
 
-**What a model call costs** (`src/metering/`). A call on a provider model costs nothing and needs no points (it is
-still recorded). A call on a site model is admitted before it starts and settled when it ends:
+**What a model call costs** (`src/metering/`). A model call is a reply of an Agent or a persona draft
+(`POST /api/agents/draft-persona`): both are runs, admitted, held and settled alike. A call on a provider model costs
+nothing and needs no points (it is still recorded). A call on a site model is admitted before it starts and settled when
+it ends:
 
 - **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call
   can cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500
@@ -384,6 +389,36 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
   no model any level).
 - The conversation is created with the Agent: without a `persona` it holds one message from the Agent, the fixed
   greeting, which is unread for you like any message from someone else. `personaVersion` is 1 when a persona was given.
+  Such an Agent interviews you about who it should be and proposes a persona (Persona proposals, below).
+
+#### `POST /api/agents/draft-persona`
+
+*Session: required.* Spec 6.7 "留空自动起草": the model writes a persona for an Agent you are about to create. Body (no
+other key): `name` (the rule of an Agent's name), optionally `intro` (≤ 40) and `field` (≤ 20) as on creation, and
+`model` (required, not `null`), checked exactly as on creation (a site model that is configured, or a provider of yours
+that lists the model; 400 otherwise). → 200 `{"persona"}`: the model's text with any `<af-…>` tag removed, under the
+rules of message text, trimmed, at most 20 000 characters. It is returned, never stored: put it in the persona box and
+save the Agent to keep it.
+
+- One model call (`src/agents/persona.ts` `draftPersona`), recorded as a run of purpose `draft` (no Agent, no
+  conversation) and metered like a reply (Usage and points): admitted before the call, its maximum cost held, settled
+  after; one usage record of purpose `draft` (`GET /api/usage` lists it with `agentId: null`). No transaction is open
+  during the call.
+- What the model is given: a fixed instruction in Chinese (write a persona in the second person: who it is, what it
+  helps with, its tone; it has no tools and the persona grants no rights) as the system text, which nothing of yours
+  enters; your `name`, `intro` and `field` only as data in the user turn — a fixed line, then them as JSON
+  (`{"名称", "简介", "擅长领域"}`, empty strings for what you left out). Reasoning `none`; the model's output limit.
+- Refused before any call, with nothing recorded: 400 for the model; 402 `no_quota` (as a reply); 400
+  `context_too_small` when the model's context, less its output limit and the instruction, cannot hold the data; 429
+  `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (2) model calls running (replies and drafts
+  together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset, a
+  provider key that cannot be opened).
+- The call failing: 502 `provider_rejected` / `provider_unavailable`, 400 `address_not_allowed`, charged as a failed
+  reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
+  `AGENT_RUN_TIMEOUT_MS` (2 minutes) the call is ended: what it had written is the answer (nothing: 502
+  `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the run is released
+  at the next start like a reply's (Agents and runs, Recovery).
+- Limit: 5 a minute, a budget of its own.
 
 #### `GET /api/agents`
 
@@ -423,6 +458,63 @@ progress ends as on a pause, with `agent_deleted`). → 200 Agent.
 
 *Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent. → 200 `{"ok": true}`; 409 `agent_deleted`.
 Every avatar change (people's too) raises `principals.avatar_version`.
+
+### Persona proposals
+
+Spec 6.7 "边聊边配置". An Agent can propose its own persona in a reply: one without a persona interviews you about who
+it should be (its system text says how, Agents and runs), and any Agent writes one when you ask it to update its persona.
+A proposal is only a proposal. **The one way it changes the Agent is `POST …/proposals/:proposalId/confirm` from your
+own session**; nothing the model writes — a block, "已确认", a request it forges — changes anything of the Agent. A
+proposal can carry the persona, the intro and the field, nothing else (not the model, the pause, the handle or the owner).
+
+**The block.** An Agent's reply proposes when its text (as stored: message-text rules, trimmed) holds exactly
+
+```
+<af-intro>一句话简介</af-intro>        (optional, at most 40 characters, one line)
+<af-field>擅长领域</af-field>          (optional, at most 20 characters, one line)
+<af-persona>完整的人格设定</af-persona>  (required, 1–20 000 characters)
+```
+
+— intro and field in either order, both before the persona, nothing but white space between the parts, each part once,
+and no other `<af-` or `</af-` anywhere in the text (so nothing nested, repeated or unknown); the values are trimmed and
+checked by the rules of an edit (`PATCH /api/agents/:id`). Then, in the transaction that stores the reply (under the
+Agent's lock, `postAsAgent`), the block is taken out of the message — its text is what is left, trimmed, or, with
+nothing visible left, the fixed sentence `我整理了一份设定，请查看并确认。` — and the proposal is stored against the persona
+version of that moment; the Agent's earlier `open` proposals become `superseded`. Anything else (two blocks, a nested
+or unclosed one, an unknown `<af-…>` tag, a value over its limit) is no proposal: the reply is stored as written. Only
+the Agent's reply text is read for a block, at the moment it is stored: never your messages, quotes, files or the
+model's reasoning. While the reply streams, its text is pushed only up to the first `<af-`: tags never reach a `delta`;
+the rest arrives with the message.
+
+**On the wire** (owner only): the reply carries `"proposal": {"id", "status", "persona", "intro"?, "field"?}` (Wire
+shapes); `intro` / `field` only when the proposal names them. `status`: `open`; `confirmed`; `discarded`; `superseded`
+(a newer proposal of the Agent came); `stale` (your persona changed since the proposal was made — by an edit or by
+confirming another — so it would overwrite what you have now: shown so at once, stored so once a confirmation runs into
+it; the card should say "配置已变更，请重新生成提议"). Anybody else reading the message (there is nobody but you and the
+Agent in its conversation) gets it without `proposal`.
+
+**Keeping cards current.** A proposal made, confirmed or discarded sends you the `agent` push: fetch the Agent
+(`GET /api/agents/:id`) and the messages you show with a proposal card (`GET /api/conversations/:id/messages/:seq`)
+again; their `proposal.status` may have changed. (A persona edit sends `agent` too, and can make a card `stale`.)
+
+#### `POST /api/agents/:id/proposals/:proposalId/confirm`
+
+*Session: required.* Body: none, `{}`, or your edits before confirming: any of `persona` (1–20 000 characters),
+`intro` (≤ 40), `field` (≤ 20), under the rules of `PATCH` — and no other key (400: a confirmation can change nothing
+else). Under the Agent's lock: the persona, intro and field become your edit where given, else the proposal's (an intro
+or field the proposal does not name stays as it is); `personaVersion` rises by one (also when the persona text is the
+same); the proposal is `confirmed`. The next reply is given the new persona. → 200 Agent. Allowed while the Agent is
+paused. 404 `not_found` exactly as for an id that does not exist unless the Agent is yours and the proposal is that
+Agent's; 409 `agent_deleted`; 409 `stale_proposal` when the proposal is not `open`, or when your persona has changed
+since it was made (the proposal is then marked `stale`); your persona stays as it is. Limit: 30 per minute with the
+Agent writes.
+
+#### `POST /api/agents/:id/proposals/:proposalId/discard`
+
+*Session: required.* Body: none or `{}`. The proposal becomes `discarded`; the Agent does not change. Idempotent for one
+already discarded. → 200 `{"ok": true}`. 404 as for confirm; 409 `agent_deleted`; 409 `stale_proposal` for a proposal
+that is `confirmed`, `superseded` or `stale` (an open one whose persona has moved on is marked `stale`). Limit: 30 per
+minute with the Agent writes.
 
 ### Replies
 
@@ -1139,12 +1231,16 @@ while the session that asked for it lasts. Limit: 30 per minute.
                                        // never in previews or search, never sent to a model again)
   "stopped": true,                     // an Agent's reply its owner stopped: text is what had been said by then
   "truncated": true,                   // an Agent's reply that was cut (model's output limit, time limit, 8 000 characters)
+  "proposal": { "id": "…", "status": "open" | "confirmed" | "discarded" | "superseded" | "stale",
+                "persona": "…", "intro": "…", "field": "…" },
+                                       // an Agent's reply that proposed a persona, for the Agent's owner only; intro and
+                                       // field only when proposed (Persona proposals)
   "createdAt": "2026-11-16T01:02:03.000Z"
 }
 ```
 
-An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped` and `truncated` appear only on
-those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
+An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated` and `proposal` appear
+only on those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
 
 **System notices** (`kind: "system"`) are written by the service when something happens in a conversation;
 nobody sends them, every member who can see that seq sees them, and they are never unread. `text` is a
@@ -1173,7 +1269,9 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: GET /api/conversations/:id
 { "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: GET /api/social
-{ "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar): GET /api/agents/:id
+{ "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar), or one of its
+                                        // persona proposals was made, confirmed or discarded: GET /api/agents/:id, and
+                                        // the messages you show with a proposal card (Persona proposals)
 { "type": "run", "conversationId": "…", "run": Run }   // a reply of your Agent was queued, started or ended (Replies)
 { "type": "delta", "conversationId": "…", "runId": "…", "text"?: "…", "reasoning"?: "…" }
                                         // the next piece of the reply being generated: append it to the "replying"
@@ -1298,7 +1396,8 @@ buffered pushes by the rules above.
 ## Agents and runs (`src/agents/`)
 
 An Agent's reply is a row in `agent_runs` (purpose `reply`): a run. It is answered by a worker inside the service's
-process and posted as an ordinary message from the Agent.
+process and posted as an ordinary message from the Agent. (A persona draft is a run too, of purpose `draft`, without
+Agent or conversation: its route makes the call itself, `POST /api/agents/draft-persona`; the worker never takes one.)
 
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
@@ -1326,7 +1425,7 @@ during the pause is answered only as part of the next reply a later message of t
 after the resume while the interrupted reply is still ending is noted on it, and its follow-up answers it.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
-(2) replies running (further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits
+(2) runs running, replies and persona drafts together (further replies wait queued), at most 8 at once in the service. It is woken after a trigger commits
 and also looks every 2 s. Per run:
 
 1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
@@ -1350,16 +1449,20 @@ and also looks every 2 s. Per run:
       the first step, with no call; otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
       ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
       `peerReadSeq`).
-2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
-   abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after
-   `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes.
+2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`).
+   The text is pushed only up to the first `<af-` (a persona proposal's block, Persona proposals; looked for in the text
+   as cleaned): from there on no more text delta goes out for that reply, and the rest arrives with the message. A `<`
+   that may begin one waits for the next piece and goes out in its place once it turns out not to. Reasoning deltas are
+   pushed as they come. It is abandoned at once when the owner stops it or the Agent is paused or deleted (checked every
+   50 ms), after `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes.
 3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
    delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
    generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
    `tests/runs-pause.test.ts`). The message's `client_txn` is the run's id: a reply is never
-   posted twice. Text follows the rules of message text (what a send would refuse is removed) and is cut at 8 000
-   characters (`truncated`); reasoning follows the same rules, is cut at 32 000 characters (no mark) and is kept only
-   when there is some.
+   posted twice. Text follows the rules of message text (what a send would refuse is removed); a persona proposal's
+   block in it is taken out and stored as the proposal in this same transaction (Persona proposals); then the text is
+   cut at 8 000 characters (`truncated`); reasoning follows the same rules (and is never read for a block), is cut at
+   32 000 characters (no mark) and is kept only when there is some.
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
    moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
@@ -1368,8 +1471,13 @@ and also looks every 2 s. Per run:
 **What the model is shown** (`context.ts` `loadContext` and `buildContext`; its pure part, the plan, in
 `runtime/context.ts`; spec 6.5):
 
-- The system text: who the Agent is and whose, the owner's name, today's date in `SITE_TIMEZONE`, that it has no tools
-  and must not claim what it cannot do, then the persona (an Agent without one is told to ask its owner about it first).
+- The system text (`runtime/prompt.ts`), the site's fixed part always first: who the Agent is and whose, the owner's
+  name, today's date in `SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do; then how to write a
+  persona proposal (the block, Persona proposals) and that it takes effect only once the owner confirms it, so the Agent
+  must not say its persona has changed before; then the persona. An Agent without one is in onboarding instead: it is
+  told to ask its owner, a question or two at a time, who it should be, what it should help with and in what tone, and
+  to propose a persona once it knows enough. One with a persona is told to propose only when its owner asks it to
+  update its persona. Nothing of the conversation or of a file enters the system text.
 - The conversation after the latest `topic_reset` notice (`POST /api/conversations/:id/topic`), as the Agent can see it
   (the one visibility rule, the Agent as reader): the owner's messages, and the Agent's replies to what the run covers.
   The owner's as `user`, the Agent's as `assistant`, in the order they were answered, not the order they were stored: a
@@ -1437,6 +1545,7 @@ died with that process — is ended without any model call, each in one transact
   marked so), with that one message;
 - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
 - else `failed`, `provider_unavailable`, retryable: nothing is called again on its own (spec 6.5); the owner retries.
+  A persona draft (`POST /api/agents/draft-persona`; no Agent, so locked from its run row) always ends so.
 
 In the same transaction its hold is released by a settlement on no tokens at all, which costs nothing (whatever the
 upstream reported died with the process); a run that already has its usage record gets no second one. A posted or

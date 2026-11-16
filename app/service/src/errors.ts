@@ -21,6 +21,7 @@ export type ErrorCode =
   | "provider_rejected"
   | "provider_unavailable"
   | "context_too_small"
+  | "stale_proposal"
   | (string & {});
 
 /** Extra fields of an error body: strings (`reason`), or a list of small records (`agents` of `provider_in_use`). */

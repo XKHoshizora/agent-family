@@ -8,9 +8,10 @@ import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
 import { registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
 import { swapAvatarKey } from "../principals/store.ts";
-import { agentName, uuidParam, userText } from "../schemas.ts";
+import { agentName, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
+import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
 import { interruptRuns } from "./runs.ts";
 import {
   assertModelChoice,
@@ -25,20 +26,21 @@ import {
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
 
-/** The model as a request names it (`providerId` is normalised to lower case), and as a response shows it. */
-const modelChoice = (providerId: z.ZodType<string>) =>
-  z
-    .union([
-      z.strictObject({ source: z.literal("site"), id: z.string().min(1).max(64) }),
-      z.strictObject({ source: z.literal("provider"), providerId, model: z.string().min(1).max(200) }),
-    ])
-    .nullable();
+/** A model as a request names it (`providerId` is normalised to lower case), and as a response shows it. */
+const chosenModel = (providerId: z.ZodType<string>) =>
+  z.union([
+    z.strictObject({ source: z.literal("site"), id: z.string().min(1).max(64) }),
+    z.strictObject({ source: z.literal("provider"), providerId, model: z.string().min(1).max(200) }),
+  ]);
+/** An Agent's model, `null` until one is chosen. */
+const modelChoice = (providerId: z.ZodType<string>) => chosenModel(providerId).nullable();
 const model = modelChoice(uuidParam);
 const replyMode = z.enum(["always", "mention"]);
 const reasoning = z.enum(REASONING_LEVELS);
-const intro = userText(0, 40, { singleLine: true });
-const field = userText(0, 20, { singleLine: true });
-const persona = userText(0, 20_000);
+const intro = agentIntro;
+const field = agentField;
+const persona = agentPersona;
+const proposalParams = z.object({ id: uuidParam, proposalId: uuidParam });
 
 const agentView = z.object({
   id: z.string(),
@@ -82,8 +84,15 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
-  // Create, edit, pause, resume, delete, avatar and new topics share one budget.
+  // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
+  // Persona drafts (each a model call) have a budget of their own.
+  const draftLimit = perPrincipalLimit(app, 5);
+  /** The drafts whose model call is under way: abandoned when the service starts closing (persona.ts `draftPersona`). */
+  const drafts = new Set<AbortController>();
+  app.addHook("preClose", async () => {
+    for (const closing of drafts) closing.abort(new Error("the service is closing"));
+  });
 
   api.post(
     "/api/agents",
@@ -121,6 +130,37 @@ export function registerAgentRoutes(app: FastifyInstance): void {
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
       return reply.code(201).send(toView(agent));
+    },
+  );
+
+  // A persona written by the model from a name and a line or two (spec 6.7, 2): returned, never stored (persona.ts).
+  api.post(
+    "/api/agents/draft-persona",
+    {
+      schema: {
+        params: empty,
+        querystring: empty,
+        body: z.strictObject({ name: agentName, intro: intro.optional(), field: field.optional(), model: chosenModel(uuidParam) }),
+        response: { 200: z.object({ persona: z.string() }) },
+      },
+    },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await draftLimit(req, me.id);
+      const { name, intro: givenIntro, field: givenField, model: chosen } = req.body;
+      const closing = new AbortController();
+      drafts.add(closing);
+      try {
+        const written = await draftPersona(
+          { db, config, models: app.deps.models, log: req.log },
+          me.id,
+          { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
+          closing.signal,
+        );
+        return { persona: written };
+      } finally {
+        drafts.delete(closing);
+      }
     },
   );
 
@@ -216,6 +256,48 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   stateRoute("post", "/api/agents/:id/pause", { paused: true });
   stateRoute("post", "/api/agents/:id/resume", { paused: false });
   stateRoute("delete", "/api/agents/:id", { deleted: true });
+
+  const staleProposal = () => new AppError(409, "stale_proposal");
+
+  /**
+   * The one way a proposal changes an Agent (persona.ts `confirmProposal`): the owner's session, under `lockOwnedAgent`.
+   * The body may hold the owner's edits of the persona, intro and field, and nothing else (strict: any other key is a
+   * 400). A proposal that can no longer be confirmed is 409 `stale_proposal`, answered after its `stale` mark commits.
+   * The owner's sockets are told (`agent`) to fetch the Agent, and the proposal cards they show, again.
+   */
+  api.post(
+    "/api/agents/:id/proposals/:proposalId/confirm",
+    {
+      schema: {
+        params: proposalParams,
+        querystring: empty,
+        body: z.strictObject({ persona: proposedPersona.optional(), intro: intro.optional(), field: field.optional() }).nullish(),
+        response: { 200: agentView },
+      },
+    },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await writeLimit(req, me.id);
+      const confirmed = await db.tx((t) => confirmProposal(t, me.id, req.params.id, req.params.proposalId, req.body ?? {}));
+      if (!confirmed) throw staleProposal();
+      app.realtime.pushAgentChanged(me.id, confirmed.id);
+      return toView(confirmed);
+    },
+  );
+
+  // The owner turns a proposal down (persona.ts `discardProposal`): the Agent does not change.
+  api.post(
+    "/api/agents/:id/proposals/:proposalId/discard",
+    { schema: { params: proposalParams, querystring: empty, body: empty.nullish(), response: { 200: z.object({ ok: z.literal(true) }) } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await writeLimit(req, me.id);
+      const outcome = await db.tx((t) => discardProposal(t, me.id, req.params.id, req.params.proposalId));
+      if (outcome === "stale") throw staleProposal();
+      if (outcome === "discarded") app.realtime.pushAgentChanged(me.id, req.params.id);
+      return { ok: true as const };
+    },
+  );
 
   // A new topic in the Agent's conversation (agents/conversation.ts `resetTopic`): the notice, as a send answers.
   api.post(

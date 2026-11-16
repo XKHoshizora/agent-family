@@ -14,6 +14,8 @@ export interface ReplyOptions {
   delayMsPerChunk?: number;
   /** The `finish` says the model stopped for length. */
   truncated?: boolean;
+  /** Deltas of at most this many code points (default 8). */
+  chunkSize?: number;
 }
 
 /** A call held by `hang()`. */
@@ -56,11 +58,11 @@ export interface ScriptedGateway extends ModelGateway {
   pending(): number;
 }
 
-/** Chunks of at most 8 code points (a surrogate pair is never split). */
-function chunks(text: string): string[] {
+/** Chunks of at most `size` code points (a surrogate pair is never split). */
+function chunks(text: string, size = 8): string[] {
   const points = Array.from(text);
   const out: string[] = [];
-  for (let i = 0; i < points.length; i += 8) out.push(points.slice(i, i + 8).join(""));
+  for (let i = 0; i < points.length; i += size) out.push(points.slice(i, i + size).join(""));
   return out;
 }
 
@@ -94,8 +96,9 @@ export function scriptedGateway(): ScriptedGateway {
     if (!scripted) throw new Error(`scriptedGateway: call #${n} was not scripted`);
     signal.throwIfAborted();
     let delay = 0;
+    let size = 8;
     const emit = async function* (type: "text" | "reasoning", text: string): AsyncGenerator<ModelEvent> {
-      for (const delta of chunks(text)) {
+      for (const delta of chunks(text, size)) {
         if (delay > 0) await abortable(sleep(delay), signal);
         signal.throwIfAborted();
         yield { type, delta };
@@ -118,6 +121,7 @@ export function scriptedGateway(): ScriptedGateway {
       return;
     }
     delay = step.kind === "reply" ? (step.options.delayMsPerChunk ?? 0) : 0;
+    size = step.kind === "reply" ? (step.options.chunkSize ?? 8) : 8;
     if (step.kind === "fail") {
       yield* emit("text", step.afterText);
       throw new ModelError(step.code);

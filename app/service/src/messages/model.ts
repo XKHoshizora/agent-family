@@ -34,8 +34,9 @@ export interface AttachmentRef {
 /**
  * `messages.body`. Text messages carry `text` (and `replyToSeq` when quoting); file messages carry
  * `attachment` and an optional caption in `text`; system notices carry a `SystemEvent` plus the rendered
- * `text`. An Agent's reply (`postAsAgent`) may add `reasoning` (non-empty), `stopped: true`, `truncated: true`; its
- * greeting `fixed: true`. Later kinds (task cards...) add fields, so readers must not assume more than this.
+ * `text`. An Agent's reply (`postAsAgent`) may add `reasoning` (non-empty), `stopped: true`, `truncated: true` and
+ * `proposalId` (the `persona_proposals` row it made); its greeting `fixed: true`. Later kinds (task cards...) add
+ * fields, so readers must not assume more than this.
  */
 export type MessageBody = {
   text?: string;
@@ -108,6 +109,12 @@ export async function insertMessage(
   return toStored(rows[0]);
 }
 
+/**
+ * A persona proposal's status as its owner sees it. `stale`: stored so once a confirmation ran into it, and shown so
+ * already while it is `open` but the Agent's persona has moved past the version it was made against.
+ */
+export const PROPOSAL_STATUSES = ["open", "confirmed", "discarded", "superseded", "stale"] as const;
+
 /** A message as one reader receives it. Build it with `toWireFor` (src/messages/read.ts). */
 export const wireMessageSchema = z.object({
   conversationId: z.string(),
@@ -142,6 +149,16 @@ export const wireMessageSchema = z.object({
   stopped: z.literal(true).optional(),
   /** An Agent's reply that was cut: by the model's output limit, the reply time limit, or at 8 000 characters. */
   truncated: z.literal(true).optional(),
+  /** An Agent's reply that proposed a persona (agents/persona.ts): shown to the Agent's owner only. */
+  proposal: z
+    .object({
+      id: z.string(),
+      status: z.enum(PROPOSAL_STATUSES),
+      persona: z.string(),
+      intro: z.string().optional(),
+      field: z.string().optional(),
+    })
+    .optional(),
   createdAt: z.string(),
 });
 

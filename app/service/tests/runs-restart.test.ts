@@ -210,6 +210,30 @@ describe("a run left running when the service stopped", () => {
     expect(await records(draft)).toEqual([{ outcome: "failed", source: null, model: null, estimated: true, cost: "0", free: "0", balance: "0" }]);
   });
 
+  it("a persona draft under way when the service stops is abandoned, left running, and released at the next start", async () => {
+    const before = scriptedGateway();
+    const old = await start(before);
+    const owner = await signUp(old, "drafty");
+    const hold = before.hang();
+    const answer = api(old, owner, "POST", "/api/agents/draft-persona", { name: "小橘", model: FAST });
+    const call = await hold.reached;
+    const draft = (await db.query<{ id: string }>("select id from agent_runs where owner_id = $1", [owner.id])).rows[0]!.id;
+    expect(await statusOf(draft)).toMatchObject({ status: "running", source: "site" });
+    expect(await holds()).not.toBe("0");
+
+    await stop(old);
+    expect(call.signal.aborted).toBe(true);
+    expect(await answer).toEqual({ status: 503, json: { error: "busy" } });
+    expect(await statusOf(draft)).toMatchObject({ status: "running" });
+    expect(await records(draft)).toEqual([]);
+
+    const after = scriptedGateway();
+    await start(after);
+    expect(after.calls).toHaveLength(0);
+    expect(await statusOf(draft)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(draft)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+  });
+
   it("the new service carries nothing over from the old one's stop and pause flags: its replies stream and post as usual", async () => {
     const old = await start(scriptedGateway());
     const { owner, agent, conv } = await owned(old, "flags");

@@ -488,8 +488,9 @@ describe("a reply with no call", () => {
   });
 
   it("the conversation must have room for the owner's newest message whole, or for 200 tokens of it", async () => {
-    // A 2 000-token context, 200 of them for the output, and a persona that leaves under 200 for the conversation.
-    const { owner, conv } = await owned("roomy", "tiny", { persona: "简".repeat(1_500) });
+    // A 2 000-token context, 200 of them for the output, and a persona that leaves under 200 for the conversation (the
+    // system text without the persona is about 500 characters).
+    const { owner, conv } = await owned("roomy", "tiny", { persona: "简".repeat(1_230) });
     await say(owner, conv, "你好");
     await answer("好。");
     const budget = 2000 - 200 - estimateTokens(lastCall().system);

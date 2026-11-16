@@ -160,7 +160,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const { out, finished, failure, why } = await call(run, prepared, shutdown);
     // The service is closing: nothing is posted and the run stays running, to be recovered at the next start.
     if (finished === null && why === "shutdown") return out.discard();
-    out.flush();
+    out.end();
 
     const usage = finished?.usage ?? null;
     const fallback = { inputChars: prepared.inputChars, outputChars: out.outputChars() };
