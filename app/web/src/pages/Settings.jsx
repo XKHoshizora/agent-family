@@ -197,7 +197,7 @@ function ProfilePage() {
         <KV rows={[["账号名", `@${account.handle}`], ["邮箱", account.email ?? ""]]} />
         <p className="muted">账号名和邮箱不能修改。</p>
         {session && (
-          <div>
+          <div className="stack-actions row-actions">
             <Btn variant="danger" onClick={signOut}>退出登录</Btn>
           </div>
         )}

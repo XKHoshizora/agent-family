@@ -67,10 +67,13 @@ describe("profile page", () => {
     expect(nameBox().value).toBe("Mei");
   });
 
-  it("keeps the sign-out button", async () => {
+  it("keeps the sign-out button, in an action row spaced like the avatar's (not stuck to the hint above it)", async () => {
     await openApp({ sync: baseSync });
     await goSettings();
-    expect(inMain().getByRole("button", { name: "退出登录" })).toBeTruthy();
+    const signOut = inMain().getByRole("button", { name: "退出登录" });
+    const avatarRow = inMain().getByRole("button", { name: "更换头像" }).parentElement;
+    expect(signOut.parentElement.className).toBe(avatarRow.className);
+    expect(signOut.parentElement.classList.contains("row-actions")).toBe(true);
   });
 });
 
