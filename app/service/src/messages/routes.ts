@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
-import { positiveInt, positiveIntString, userText, uuidParam } from "../schemas.ts";
+import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
 import type { Tx } from "../db.ts";
 import { requirePrincipal } from "../session.ts";
 import { withSlot } from "../slots.ts";
@@ -19,16 +19,18 @@ const sendResult = z.object({ message: wireMessageSchema, duplicate: z.boolean()
 
 const sendBody = z
   .object({
-    // A caption may be empty; a text message may not (the refinement below).
-    text: userText(0, 8000).optional(),
+    // A caption may be empty or invisible; a text message must show something (the refinement below).
+    text: messageText(0, 8000).optional(),
     attachmentId: uuidParam.optional(),
     replyToSeq: positiveInt.optional(),
     clientTxn: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
   })
-  .refine((b) => b.attachmentId !== undefined || (b.text !== undefined && b.text.length > 0), "text or attachmentId is required");
+  .refine(
+    (b) => b.attachmentId !== undefined || (b.text !== undefined && hasVisibleText(b.text)),
+    "a text message needs a visible character; a file message an attachmentId",
+  );
 
-/** 1-100 characters after trimming, one line: `%`, `_` and `\` are ordinary characters (see search.ts). */
-const searchTerm = userText(1, 100, { singleLine: true });
+// Search terms (schemas.ts `searchTerm`): `%`, `_` and `\` are ordinary characters (see search.ts).
 const searchLimit = positiveIntString(50);
 const searchCursor = z
   .string()

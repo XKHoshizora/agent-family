@@ -3,14 +3,13 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
-import { userText, uuidParam } from "../schemas.ts";
+import { groupTitle, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { addMember, createGroup, removeMember, renameGroup } from "./groups.ts";
 import { listMembers } from "./store.ts";
 
 const empty = z.object({});
 const ok = z.object({ ok: z.literal(true) });
-const title = userText(1, 60, { singleLine: true });
 const idParams = z.object({ id: uuidParam });
 
 export function registerConversationRoutes(app: FastifyInstance): void {
@@ -28,7 +27,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
         params: empty,
         querystring: empty,
         body: z.object({
-          title,
+          title: groupTitle,
           // Bounded only to keep input small; the 500-member rule is a 403 in createGroup.
           memberIds: z.array(uuidParam).min(2).max(1000),
         }),
@@ -51,7 +50,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
       schema: {
         params: idParams,
         querystring: empty,
-        body: z.object({ title }),
+        body: z.object({ title: groupTitle }),
         response: { 200: z.object({ id: z.string(), title: z.string() }) },
       },
     },

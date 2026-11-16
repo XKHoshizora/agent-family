@@ -53,16 +53,51 @@ const STRIPPED_FORMAT_CHARS = /(?![\u200C\u200D\u{E0020}-\u{E007F}])\p{Cf}/gu;
 const HAS_BASE_CHARACTER = /[^\u200C\u200D\u{E0020}-\u{E007F}]/u;
 
 /**
- * A person's display name, on registration and `PATCH /api/me` alike: format characters removed except
- * U+200C, U+200D and the tag characters (the rest could reorder or hide what others see), then
- * trimmed; 1–40 characters (code points), not made of joiners alone; one line — no control characters, no
- * line or paragraph separators; no lone surrogates.
+ * A name others see: format characters removed except U+200C, U+200D and the tag characters (the rest could
+ * reorder or hide what others see), then trimmed; 1–`max` characters (code points), not made of joiners alone;
+ * one line — no control characters, no line or paragraph separators; no lone surrogates.
  */
-export const displayName = z
+function visibleName(max: number) {
+  return z
+    .string()
+    .transform((s) => s.replace(STRIPPED_FORMAT_CHARS, ""))
+    .pipe(
+      userText(1, max, { singleLine: true })
+        .refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line")
+        .refine((s) => HAS_BASE_CHARACTER.test(s), "nothing but joiners"),
+    );
+}
+
+/** A person's display name, on registration and `PATCH /api/me` alike: `visibleName`, 1–40. */
+export const displayName = visibleName(40);
+
+/** A group's title, on creation and renaming: the display-name rule (`visibleName`), 1–60. */
+export const groupTitle = visibleName(60);
+
+/**
+ * Bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069): in a message they reorder what others see
+ * ("safe\u202Eelif.exe" shows as "safeexe.file"), so they are removed. They have no use in plain chat text.
+ */
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/**
+ * Message text or a caption: stored as sent except that bidi overrides and isolates are removed, then
+ * `userText(min, max)` (trimmed; line breaks allowed; no NUL or lone surrogates; length counted after removal).
+ */
+export function messageText(min: number, max: number) {
+  return z
+    .string()
+    .transform((s) => s.replace(BIDI_CONTROLS, ""))
+    .pipe(userText(min, max));
+}
+
+/** A search term: what `messageText` would store of it (so it matches stored text), one line, 1–100 characters. */
+export const searchTerm = z
   .string()
-  .transform((s) => s.replace(STRIPPED_FORMAT_CHARS, ""))
-  .pipe(
-    userText(1, 40, { singleLine: true })
-      .refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line")
-      .refine((s) => HAS_BASE_CHARACTER.test(s), "nothing but joiners"),
-  );
+  .transform((s) => s.replace(BIDI_CONTROLS, ""))
+  .pipe(userText(1, 100, { singleLine: true }));
+
+/** Whether text shows anything: a character that is neither white space nor a format character (`\p{Cf}`). */
+export function hasVisibleText(s: string): boolean {
+  return /[^\s\p{Cf}]/u.test(s);
+}

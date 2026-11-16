@@ -514,7 +514,8 @@ Visibility under Sync and realtime.
 
 *Session: required.* Creates a group of you and at least two of your friends; nobody has to confirm.
 
-- Body: `title` (1–60 characters, trimmed, one line), `memberIds` (2–1000 principal ids, distinct, not
+- Body: `title` (the display-name rule of `PATCH /api/me` with 1–60 characters: format characters removed
+  except joiners and tag characters, trimmed, something visible, one line), `memberIds` (2–1000 principal ids, distinct, not
   you).
 - 201 `{"id": "<conversation id>"}`. Everyone joins at once; the first message (seq 1) is the
   `group_created` notice.
@@ -530,7 +531,8 @@ id that does not exist. Fetch it on a `conversation` push instead of a full sync
 
 #### `PATCH /api/conversations/:id`
 
-*Session: required.* The group's creator renames it. Body: `title` (1–60 characters, trimmed, one line).
+*Session: required.* The group's creator renames it. Body: `title` (as on creation: the display-name rule with
+1–60 characters).
 
 - 200 `{"id", "title"}`. The same title again changes nothing and appends no notice; otherwise a
   `group_renamed` notice.
@@ -575,11 +577,14 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 
 *Session: required.* Sends a text or file message as you.
 
-- Body: `clientTxn` (required, `^[A-Za-z0-9_-]{1,64}$`: your retry key), `text` (0–8000 characters,
-  trimmed; line breaks allowed; no NUL or lone surrogates), `attachmentId` (optional: your own upload in this
-  conversation that no message carries yet; makes a `file` message with `text` as its caption),
-  `replyToSeq` (optional positive integer: a message of this conversation you can see). Without
-  `attachmentId`, `text` must not be empty.
+- Body: `clientTxn` (required, `^[A-Za-z0-9_-]{1,64}$`: your retry key), `text` (stored as sent except that
+  bidi overrides and isolates — U+202A–U+202E, U+2066–U+2069, which would reorder what others see — are
+  removed; then trimmed; 0–8000 characters counted after that; line breaks allowed; no NUL or lone
+  surrogates), `attachmentId` (optional: your own upload in this conversation that no message carries yet;
+  makes a `file` message with `text` as its caption), `replyToSeq` (optional positive integer: a message of
+  this conversation you can see). Without `attachmentId`, `text` must contain at least one character that is
+  neither white space nor a format character (`\p{Cf}`: zero-width spaces, joiners, the BOM, …); a caption may
+  be empty or invisible.
 - 201 `{"message": WireMessage, "duplicate": false}`.
 - Retries: the same `clientTxn` again (same sender, same conversation) stores nothing and answers 200
   `{"message": <the stored message>, "duplicate": true}` — even if you could no longer send there now (you
@@ -624,7 +629,7 @@ The rules (matching, order, limits, timing) are under Search below.
 
 #### `GET /api/conversations/:id/search`
 
-*Session: required.* Query: `q` (1–100 characters, trimmed, one line), `before` (optional positive integer),
+*Session: required.* Query: `q` (1–100 characters, one line; see Search), `before` (optional positive integer),
 `limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}`,
 newest first (`principals` as under message history); 404 `not_found` unless you are a current member; 429 / 503 `busy` as under Search.
 
@@ -875,7 +880,8 @@ A client that sends no body bytes for 45 s, or is still sending after 15 minutes
 its partial upload deleted.
 
 **Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
-makes a `file` message (caption 0–8000 characters). The attachment must be your own upload in this
+makes a `file` message (caption 0–8000 characters, bidi overrides and isolates removed as from message text;
+it may be empty or invisible). The attachment must be your own upload in this
 conversation that no message carries yet (400 otherwise); each upload can be sent once.
 
 **Download.** `GET /api/attachments/:id` serves the bytes iff a message carrying the attachment is
@@ -915,6 +921,8 @@ is 400). Each hit carries `conversationId` and `seq`, the place to jump to.
 
 `q` is 1–100 characters after trimming, one line, matched as a substring (`%`, `_` and `\` are ordinary
 characters) of a message's text (captions included) or a file message's name; system notices never match.
+Bidi overrides and isolates are removed from `q` as they are from stored text, so a term copied with them still
+matches (a term of nothing else is 400).
 You only get messages you could read anyway (the same visibility rule), quotes resolved for you. `limit`
 1–50, default 20.
 
