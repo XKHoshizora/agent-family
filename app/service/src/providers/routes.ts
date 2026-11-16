@@ -57,6 +57,9 @@ export function toProviderCallError(err: unknown): ProviderCallError {
   return new ProviderCallError("provider_unavailable");
 }
 
+/** How many entries of a provider's model list a refresh looks at (and so at most returns as `listed`). */
+export const MAX_LISTED_NAMES = 1_000;
+
 /** Every probe request ends within this long, whatever the upstream does. */
 const PROBE_DEADLINE_MS = 30_000;
 const ANTHROPIC_VERSION = "2023-06-01";
@@ -323,12 +326,14 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
         logFailure(req.log, req.params.id, target.protocol, failure);
         throw failure;
       }
-      // Only names a person could have typed, each once, and never one that holds the key (an upstream that echoes it).
-      const listed: string[] = [];
-      for (const raw of names) {
+      // Only the first MAX_LISTED_NAMES entries are looked at (the list is the upstream's, of any length within the
+      // guard's size limit); of those, names a person could have typed, each once, and never one that holds the key.
+      const seen = new Set<string>();
+      for (const raw of names.slice(0, MAX_LISTED_NAMES)) {
         const parsed = modelName.safeParse(raw);
-        if (parsed.success && !listed.includes(parsed.data) && !parsed.data.includes(target.apiKey)) listed.push(parsed.data);
+        if (parsed.success && !parsed.data.includes(target.apiKey)) seen.add(parsed.data);
       }
+      const listed = [...seen];
       const provider = await db.tx((t) => mergeListedModels(t, me.id, req.params.id, listed, config.providerDefaultContextTokens));
       return { listed, provider: toView(provider) };
     },

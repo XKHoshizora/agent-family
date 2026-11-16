@@ -340,6 +340,23 @@ describe("refreshing the model list", () => {
     expect(res.json.provider.models.slice(-2).map((m: any) => m.name)).toEqual(["n1", "n2"]);
   });
 
+  it("a huge list (~150 000 names, just under the 2 MiB limit) is answered quickly: only the first 1 000 names are looked at", async () => {
+    const owner = await signUp(app, "huge");
+    const p = await mustCreate(owner, { baseUrl: stub.baseUrl() });
+    const N = 149_000;
+    const ids = Array.from({ length: N }, (_, i) => i.toString(36).padStart(4, "0"));
+    const body = JSON.stringify({ data: ids.map((id) => ({ id })) });
+    expect(body.length).toBeLessThan(2 * 1024 * 1024);
+    stub.answer(() => ({ status: 200, body }));
+    const started = Date.now();
+    const res = await api(app, owner, "POST", `/api/providers/${p.id}/models/refresh`);
+    const took = Date.now() - started;
+    expect(res.status).toBe(200);
+    expect(res.json.listed).toEqual(ids.slice(0, 1000));
+    expect(res.json.provider.models.map((m: any) => m.name)).toEqual(ids.slice(0, 100));
+    expect(took).toBeLessThan(2000);
+  });
+
   it("an upstream refusal is 502 provider_rejected, a failure 502 provider_unavailable, a private address 400; nothing changes", async () => {
     const owner = await signUp(app, "fay");
     const p = await mustCreate(owner, { baseUrl: stub.baseUrl(), models: [{ name: "kept" }] });

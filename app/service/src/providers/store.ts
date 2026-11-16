@@ -175,9 +175,12 @@ export async function updateProvider(t: Tx, ownerId: string, id: string, patch: 
 export async function mergeListedModels(t: Tx, ownerId: string, id: string, names: string[], defaultContextTokens: number): Promise<ProviderRow> {
   const current = await lockOwnedProvider(t, ownerId, id);
   const models = [...current.models];
+  const known = new Set(models.map((m) => m.name));
   for (const name of names) {
     if (models.length >= MAX_MODELS) break;
-    if (!models.some((m) => m.name === name)) models.push({ name, vision: false, pdf: false, reasoning: false, contextTokens: defaultContextTokens });
+    if (known.has(name)) continue;
+    known.add(name);
+    models.push({ name, vision: false, pdf: false, reasoning: false, contextTokens: defaultContextTokens });
   }
   const { rows } = await t.query<ProviderDbRow>(`update providers set models = $2::jsonb where id = $1 returning ${COLUMNS}`, [id, JSON.stringify(models)]);
   return toRow(rows[0]!);

@@ -424,8 +424,9 @@ records the provider id, protocol, code and the provider's HTTP status.
 
 *Session: required.* The same request; the model names in its answer (`data[].id`, or `models[].name` without the
 `models/` prefix for Gemini; the one page the endpoint returns) are merged into `models`: models already there keep
-their flags, new names get the defaults, up to 100 in all. Names that would not be accepted as a model name, and any
-containing the key, are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
+their flags, new names get the defaults, up to 100 in all. Only the first 1 000 entries of the list are looked at, so
+`listed` holds at most 1 000 names; among them, names that would not be accepted as a model name, any containing the
+key, and repeats are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
 or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
 
 ### Health
