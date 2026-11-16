@@ -56,6 +56,12 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null): WireMes
     const { text: _text, ...event } = msg.body;
     wire.system = { ...event, event: msg.body.event };
   }
+  if (msg.kind === "text") {
+    // Only an Agent's reply carries these (postAsAgent); nobody can send them.
+    if (typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
+    if (msg.body.stopped === true) wire.stopped = true;
+    if (msg.body.truncated === true) wire.truncated = true;
+  }
   return wire;
 }
 
@@ -199,7 +205,7 @@ export async function markRead(q: Queryable, readerId: string, conversationId: s
 
 // --- read-marker events ---------------------------------------------------------------------
 
-/** A principal's read marker in a direct conversation moved forward to `seq`. */
+/** A principal's read marker moved forward to `seq`: someone's in a direct conversation, or an Agent's in its conversation. */
 export interface ReadMarker {
   conversationId: string;
   principalId: string;
@@ -211,7 +217,7 @@ export type ReadListener = (marker: ReadMarker) => void | Promise<void>;
 /** Per-app registry (on `Deps`) of read-marker listeners, in the style of `ConversationEvents`. */
 export interface ReadEvents {
   onRead(fn: ReadListener): () => void;
-  /** Call only after the marker was stored, for direct conversations only. Never throws; failures are logged. */
+  /** Call only after the marker was stored (a direct chat's, or an Agent's in its conversation). Never throws; failures are logged. */
   publish(marker: ReadMarker, log: Pick<FastifyBaseLogger, "error">): void;
 }
 
@@ -234,7 +240,7 @@ export function createReadEvents(): ReadEvents {
   };
 }
 
-/** Subscribe to direct-chat read-marker moves. Returns unsubscribe. */
+/** Subscribe to read-marker moves (direct chats; an Agent's in its conversation). Returns unsubscribe. */
 export function onRead(app: FastifyInstance, fn: ReadListener): () => void {
   return app.deps.reads.onRead(fn);
 }

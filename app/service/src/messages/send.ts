@@ -1,5 +1,5 @@
 import { claimAttachment, linkAttachment } from "../attachments/store.ts";
-import { assertCanSend, lockForWrite, VISIBLE_JOIN } from "../conversations/store.ts";
+import { assertCanSend, lockForWrite, VISIBLE_JOIN, type WriteLock } from "../conversations/store.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "./model.ts";
@@ -23,14 +23,14 @@ const invalid = () => new AppError(400, "invalid_request");
  *
  * A repeated `clientTxn` returns the stored message with `duplicate: true` and writes nothing — even if
  * sending is no longer allowed or its attachment is linked by now — provided the sender can still read
- * it; otherwise 409 `client_txn_reused`.
+ * it; otherwise 409 `client_txn_reused`. `lock` is what the transaction holds (for the reply trigger).
  */
 export async function sendMessage(
   t: Tx,
   conversationId: string,
   senderId: string,
   input: SendInput,
-): Promise<{ message: StoredMessage; duplicate: boolean }> {
+): Promise<{ message: StoredMessage; duplicate: boolean; lock: WriteLock }> {
   const lock = await lockForWrite(t, conversationId, senderId);
 
   const prior = await t.query<MessageRow>(
@@ -40,7 +40,7 @@ export async function sendMessage(
   if (prior.rows[0]) {
     const readable = await t.query(`select 1 from messages m ${VISIBLE_JOIN} where m.id = $2`, [senderId, prior.rows[0].id]);
     if (readable.rowCount === 0) throw new AppError(409, "client_txn_reused");
-    return { message: toStored(prior.rows[0]), duplicate: true };
+    return { message: toStored(prior.rows[0]), duplicate: true, lock };
   }
 
   if (input.attachmentId === undefined && !input.text) throw invalid();
@@ -67,5 +67,5 @@ export async function sendMessage(
 
   const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn);
   if (body.attachment && !(await linkAttachment(t, body.attachment.id, message.id))) throw invalid();
-  return { message, duplicate: false };
+  return { message, duplicate: false, lock };
 }

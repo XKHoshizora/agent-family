@@ -6,7 +6,8 @@ const UNIQUE_VIOLATION = "23505";
 const FOREIGN_KEY_VIOLATION = "23503";
 
 describe("agent, provider, metering and run tables", () => {
-  const { db } = useApp();
+  // Queued reply runs are inserted by hand here: no reply worker may pick them up.
+  const { db } = useApp({ agentWorker: false });
 
   async function human(handle: string): Promise<string> {
     await db.query(

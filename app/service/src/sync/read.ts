@@ -37,7 +37,7 @@ export interface SyncConversation {
   readSeq: number;
   /** Visible messages from others, not system notices, after `readSeq`. */
   unread: number;
-  /** Direct chats only: how far the other party has read. */
+  /** Direct chats: how far the other party has read; Agent conversations: how far the Agent has (it reads when it starts a reply). */
   peerReadSeq?: number;
 }
 
@@ -92,12 +92,13 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
     agent_id: string | null;
     agent_paused: boolean | null;
     agent_deleted: boolean | null;
+    agent_read_seq: string | null;
   }>(
     // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
     // only the peer's read marker is read from their membership.
     `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, c.created_at, me.role, me.read_seq,
             pair.peer_id, peer.read_seq as peer_read_seq,
-            ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted,
+            ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted, agm.read_seq as agent_read_seq,
             (select count(*) from messages m ${VISIBLE_JOIN}
               where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
        from memberships me
@@ -110,6 +111,8 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
          on peer.conversation_id = c.id and peer.principal_id = pair.peer_id and peer.left_seq is null
        left join agent_conversations ac on ac.conversation_id = c.id
        left join agents ag on ag.principal_id = ac.agent_id
+       left join memberships agm
+         on agm.conversation_id = c.id and agm.principal_id = ac.agent_id and agm.left_seq is null
       where me.principal_id = $1 and me.left_seq is null and ($2::uuid is null or me.conversation_id = $2::uuid)
       order by c.created_at, c.id`,
     [me, onlyId],
@@ -162,6 +165,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
       readSeq: Number(c.read_seq),
       unread: Number(c.unread),
       ...(c.type === "direct" && c.peer_read_seq !== null ? { peerReadSeq: Number(c.peer_read_seq) } : {}),
+      ...(c.type === "agent" && c.agent_read_seq !== null ? { peerReadSeq: Number(c.agent_read_seq) } : {}),
     };
   });
 }

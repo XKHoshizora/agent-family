@@ -99,7 +99,7 @@ blobs is not cut off; migrations run on their own connection and are not subject
 this long (or whose new connection takes longer to open) is answered 503 `busy`.
 An invalid value stops the service at start-up with a message naming the variable.
 
-`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor, allowInsecureLocal })` takes `{ config, db }`;
+`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor, allowInsecureLocal, agentWorker })` takes `{ config, db }`;
 anything omitted is built from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool
 on `TEST_DATABASE_URL`. `answerFloor` (`{ ms, jitterMs }`, default 400 ms + up to 50 ms) is how long a
 registration's and a reset request's success answer takes at least (see those routes); it is a build option, not
@@ -107,7 +107,9 @@ configuration, and only tests change it. So is `allowInsecureLocal` (default off
 providers may also be reached at loopback addresses, and over plain `http:` there, so tests can stand up a local stub.
 `Deps.providerProbe` is how the provider test and refresh routes reach a provider (default: through the address guard).
 `Deps.models` is how the service talks to a language model (default: the model gateway, see Calling a model); tests
-inject a scripted one (`scriptedGateway()` in `tests/helpers/models.ts`).
+inject a scripted one (`scriptedGateway()` in `tests/helpers/models.ts`). `agentWorker: false` (tests only) turns the
+reply worker's background loop off: replies then run only when the test calls `app.agentWorker.runOnce()` (claims the
+oldest queued reply and runs it to its end; false when none is queued) or `drain()` (see Agents and runs).
 
 ## Deployment
 
@@ -179,7 +181,8 @@ headers (cookies) are never logged.
 in `process.env` while the file runs (a site model's key is read from there when called). Test files run
 serially because they share one database. Tests never call a real model: rule tests inject `scriptedGateway()`, and
 the gateway's own tests talk to `protocolStub()`, a local server speaking the four protocols' wire formats
-(`tests/helpers/models.ts`).
+(`tests/helpers/models.ts`). `useApp({ agentWorker: false })` drives the reply worker by hand (`app.agentWorker.runOnce()`);
+files that insert queued runs themselves use it too, so no background worker picks them up.
 
 ## HTTP API
 
@@ -228,7 +231,9 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
 | 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
-| 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent |
+| 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, or retrying its reply |
+| 409 | `agent_paused` | Retrying the reply of a paused Agent |
+| 409 | `busy_run` | Retrying while a reply of that Agent is already queued or running |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
 | 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
@@ -268,6 +273,9 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
+| Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together, counted from the stored runs and not scaled by `RATE_LIMIT_SCALE`; over it a message queues no reply (the message is still sent) and a retry is 429 | owner |
+| `GET /api/conversations/:id/run` | 120 | principal |
+| `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
 | `POST /api/conversations/:id/attachments` | 60 per hour; at most 3 in progress | principal |
 | `GET /api/sync` | 60 | principal |
@@ -377,7 +385,9 @@ reasoning level are checked together when either is sent. A `persona` that diffe
 
 #### `POST /api/agents/:id/pause`
 
-*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`. You can still write to a paused Agent.
+*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`. You can still write to a paused Agent;
+it does not reply, and a reply in progress is cancelled: once this answers, nothing more from the Agent is posted (see
+Agents and runs). Resuming does not answer what was written meanwhile.
 
 #### `POST /api/agents/:id/resume`
 
@@ -386,12 +396,54 @@ reasoning level are checked together when either is sent. A `persona` that diffe
 #### `DELETE /api/agents/:id`
 
 *Session: required.* Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
-conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`). → 200 Agent.
+conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; a reply in
+progress is cancelled as on a pause). → 200 Agent.
 
 #### `PUT /api/agents/:id/avatar`
 
 *Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent. → 200 `{"ok": true}`; 409 `agent_deleted`.
 Every avatar change (people's too) raises `principals.avatar_version`.
+
+### Replies
+
+An Agent's replies in its conversation, as runs (how they start, end and fail: Agents and runs below). Every route
+here is the owner's and takes the conversation id: for anybody else, for a conversation that is not an Agent's, and
+for a run of another conversation, it answers the JSON 404 `not_found` byte for byte as for an id that does not exist.
+Failures are never messages: they live on the run, which the owner learns from the `run` push and from
+`GET /api/conversations/:id/run`.
+
+**Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
+"resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`),
+for `cancelled` `agent_paused` or `agent_deleted`. `retryable`: it failed and trying again as it is may work (false
+after `provider_rejected` and `address_not_allowed`, and for every run that did not fail). `resetsAt` (ISO instant): for
+`no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
+
+#### `GET /api/conversations/:id/run`
+
+*Session: required.* → 200 `{"run": Run | null}`: the conversation's latest run — so a page loaded during a reply shows
+"replying", and one loaded after a failure shows it — or null when there is none, or when the latest failed and you
+dismissed it. Limit: 120 per minute.
+
+#### `POST /api/conversations/:id/runs/:runId/stop`
+
+*Session: required.* Body: none or `{}`. Stops the reply: a queued one at once (it never reaches the model; `run`
+`stopped` is pushed); a running one as soon as the worker notices (within 50 ms): what it had said so far is posted
+with `stopped: true` and the run ends `stopped` (nothing said: no message). A run that has ended is left as it is.
+Idempotent. → 200 `{"ok": true}`. Limit: 60 per minute with retry and dismiss.
+
+#### `POST /api/conversations/:id/runs/retry`
+
+*Session: required.* Body: none or `{}`. When the latest run failed, queues a new reply answering up to your last
+message. → 201 `{"run": Run}` (queued; also pushed). 409 `busy_run` while a reply is queued or running; 409
+`agent_paused` / `agent_deleted`; 400 `invalid_request` when the latest run did not fail (or there is none) or the
+Agent has no model; 429 `rate_limited` over the replies one may start a minute (20). Limit: 60 per minute with stop
+and dismiss.
+
+#### `POST /api/conversations/:id/runs/dismiss`
+
+*Session: required.* Body: none or `{}`. You closed the failure notice: when the latest run failed,
+`GET /api/conversations/:id/run` answers `null` from now on (until the next run). Otherwise nothing changes.
+Idempotent. → 200 `{"ok": true}`. Limit: 60 per minute with stop and retry.
 
 ### Model providers
 
@@ -911,7 +963,9 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 - Errors: 404 `not_found` (not a current member, closed, unknown), 403 `cannot_send` with `reason`
   `blocked` or `not_friends` (direct chats), 400 `invalid_request` (empty text without attachment, a
   `replyToSeq` you cannot see, an attachment that is not your unsent upload here).
-- Limit: 120 per minute. Pushes: `message` to every member who can see it.
+- In your Agent's conversation, a message (not a repeat) may start the Agent's reply in the same transaction, or be
+  folded into the one in progress (see Agents and runs).
+- Limit: 120 per minute. Pushes: `message` to every member who can see it; a reply it queues, `run` to you.
 
 #### `GET /api/conversations/:id/messages`
 
@@ -1026,7 +1080,8 @@ while the session that asked for it lasts. Limit: 30 per minute.
   "lastSeq": 42,       // the conversation's newest seq (counts messages from before you joined too)
   "readSeq": 40,       // your read marker
   "unread": 2,         // visible messages from others, not system notices, after readSeq
-  "peerReadSeq": 41    // direct chats only: how far the other side has read
+  "peerReadSeq": 41    // direct chats: how far the other side has read; Agent conversations: how far the Agent has
+                       // (it reads up to what a reply covers when the reply starts); absent in groups
 }
 ```
 
@@ -1044,9 +1099,16 @@ while the session that asked for it lasts. Limit: 30 per minute.
                                        // or { "seq": 7, "visible": false } when you cannot see the quoted message;
                                        // absent when not a reply. A quoted notice: kind "text", senderId null
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
+  "reasoning": "…",                    // an Agent's reply: the model's reasoning, when it gave any (show it folded;
+                                       // never in previews or search, never sent to a model again)
+  "stopped": true,                     // an Agent's reply its owner stopped: text is what had been said by then
+  "truncated": true,                   // an Agent's reply that was cut (model's output limit, time limit, 8 000 characters)
   "createdAt": "2026-11-16T01:02:03.000Z"
 }
 ```
+
+An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped` and `truncated` appear only on
+those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
 
 **System notices** (`kind: "system"`) are written by the service when something happens in a conversation;
 nobody sends them, every member who can see that seq sees them, and they are never unread. `text` is a
@@ -1075,9 +1137,19 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: GET /api/social
 { "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar): GET /api/agents/:id
-{ "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats only (either side)
+{ "type": "run", "conversationId": "…", "run": Run }   // a reply of your Agent was queued, started or ended (Replies)
+{ "type": "delta", "conversationId": "…", "runId": "…", "text"?: "…", "reasoning"?: "…" }
+                                        // the next piece of the reply being generated: append it to the "replying"
+                                        // bubble; the posted `message` replaces the bubble
+{ "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats (either side); in your
+                                        // Agent's conversation, the Agent's marker
 { "type": "pong" }                      // answer to your { "type": "ping" }
 ```
+
+`run` and `delta` go to the Agent's owner only, in order with that conversation's other pushes (`running` after your
+message, every `delta` before the reply's `message`, the `message` before `done`). They are not stored and not
+replayed: after a reconnect, `GET /api/conversations/:id/run` says whether a reply is still under way (its text so far
+is not sent again; the posted message follows).
 
 ## Sync and realtime (`src/sync/`)
 
@@ -1181,8 +1253,73 @@ starts at the join notice, nothing from before it or from your earlier stay is s
 **Reconnect.** 1. Get a ticket and open the socket; buffer pushes. 2. `POST /api/sync/catchup` with
 the position of every conversation you hold; append, advance, drop the `gone` ones; repeat while
 `more`. 3. `GET /api/sync` to refresh metadata, members, read markers and principals and to find
-conversations you were added to — `conversation`, `social` and `read` events sent while you were
-offline are not replayed. 4. Apply the buffered pushes by the rules above.
+conversations you were added to — `conversation`, `social`, `read`, `run` and `delta` events sent while you were
+offline are not replayed; for an Agent's conversation you show, `GET /api/conversations/:id/run`. 4. Apply the
+buffered pushes by the rules above.
+
+## Agents and runs (`src/agents/`)
+
+An Agent's reply is a row in `agent_runs` (purpose `reply`): a run. It is answered by a worker inside the service's
+process and posted as an ordinary message from the Agent.
+
+**Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
+(not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
+or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
+ignored). Otherwise a `queued` run is inserted covering the message (`covers_seq`), unless the owner has started 20
+replies in the last minute (then no run; the message is still sent). The `run` push and the worker's wake-up follow the
+commit.
+
+**Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
+queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
+answers everything noted — not one per message, and never two replies at once. A paused or deleted Agent, or one
+without a model by then, gets no follow-up.
+
+**The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than 2 replies running
+(further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits and also looks every
+2 s. Per run:
+
+1. `begin`, one transaction under the Agent's lock: a paused or deleted Agent ends the run `cancelled`, a stop asked
+   for meanwhile `stopped`, a model that no longer resolves `failed` (`provider_unavailable`). The run takes on what was
+   noted meanwhile; the call is admitted (Usage and points; `no_quota` ends it `failed` before any call); the Agent's
+   read marker moves to what the run covers (`read` push, `peerReadSeq`).
+2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
+   abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after 2 minutes
+   (`agentRunTimeoutMs`), and when the service closes.
+3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
+   delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
+   generated included (`tests/runs-pause-race.test.ts`). The message's `client_txn` is the run's id: a reply is never
+   posted twice. Text follows the rules of message text (what a send would refuse is removed) and is cut at 8 000
+   characters (`truncated`); reasoning is kept only when there is some.
+4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
+   moves the run out of `running`, how it ended is recorded, and the follow-up is queued.
+
+What the model is shown, for now: the system text — who the Agent is and whose, the owner's name, today's date in
+`SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do, then the persona (an Agent without one is
+told to ask its owner about it first) — and every message the Agent can see, as text, the owner's as `user` and the
+Agent's as `assistant` (system notices, the greeting and messages without text left out). The reasoning level is the
+Agent's when the model allows it, else `none`.
+
+| How a run ends | Message | Run |
+|---|---|---|
+| The model answered | the answer (`truncated` when the model stopped at its output limit or it was cut at 8 000 characters) | `done` |
+| The owner stopped it | what had been said, `stopped: true` (nothing said: no message) | `stopped` |
+| Paused or deleted before it posted | none | `cancelled`, `agent_paused` / `agent_deleted` |
+| The provider failed (key refused, unreachable, address refused) | none; what it had said is discarded | `failed` with that code |
+| Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
+| An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
+| 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |
+| The service closed during the call | none | left `running` (recovery at start-up comes in a later task) |
+
+Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the
+run. Every run the worker took is settled exactly once (its usage record's `outcome` is the run's status).
+
+**The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
+(`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,
+`emit`, `post`, `finish`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
+fails when a file there imports `db.ts`, `pg` or any `store.ts`. It is the shape an external Agent's connection would have.
+
+Lock order of every write here: the conversation row → the `agents` row → the run row → the `accounts` row. Like the
+hub, the worker and its stop flags live in this process (single instance only).
 
 ## Attachments (`src/attachments/`)
 

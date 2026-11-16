@@ -1,5 +1,6 @@
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyBaseLogger } from "fastify";
+import type { WireRun } from "../agents/runs.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, peekConversation } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
@@ -40,6 +41,8 @@ export type PushEvent =
   | { type: "gone"; id: string }
   | { type: "social" }
   | { type: "agent"; id: string }
+  | { type: "run"; conversationId: string; run: WireRun }
+  | { type: "delta"; conversationId: string; runId: string; text?: string; reasoning?: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
   | { type: "pong" };
 
@@ -55,7 +58,8 @@ export interface Connection {
 type Task =
   | { kind: "messages"; fromSeq: number; toSeq: number }
   | { kind: "membership"; principalIds: string[] }
-  | { kind: "read"; marker: ReadMarker };
+  | { kind: "read"; marker: ReadMarker }
+  | { kind: "push"; principalId: string; event: PushEvent };
 
 interface Queue {
   tasks: Task[];
@@ -82,7 +86,8 @@ export interface HubDeps {
  * - membership changes: `conversation` to the affected principals who are current members now, `gone`
  *   to those who are not (more than once, when a change announced before they left is delivered after
  *   it) — so after `gone` nothing more of that conversation reaches them until they are added again;
- * - read markers: only in direct chats, to its current members.
+ * - read markers: only in direct chats and Agent conversations, to its current members;
+ * - a reply's progress (`run`, `delta`): to the Agent's owner only, in order with the conversation's messages.
  */
 export class Hub {
   /** Open connections per principal, oldest first. */
@@ -121,6 +126,20 @@ export class Hub {
   /** Tells `principalId`'s sockets that Agent `agentId` changed (config, pause, delete, avatar): refetch it. */
   pushAgentChanged(principalId: string, agentId: string): void {
     this.push(principalId, { type: "agent", id: agentId });
+  }
+
+  /**
+   * Tells `ownerId`'s sockets how a reply in their Agent's conversation stands. Through the conversation's queue, so
+   * it reaches them in order with that conversation's messages (`running` after the owner's message, `done` after the
+   * reply). Not stored, not replayed: a client that reconnects asks `GET /api/conversations/:id/run`.
+   */
+  pushRun(ownerId: string, conversationId: string, run: WireRun): void {
+    this.enqueue(conversationId, { kind: "push", principalId: ownerId, event: { type: "run", conversationId, run } });
+  }
+
+  /** A piece of a reply being generated, to `ownerId`'s sockets only, in order with the run's other pushes. */
+  pushDelta(ownerId: string, conversationId: string, runId: string, delta: { text?: string; reasoning?: string }): void {
+    this.enqueue(conversationId, { kind: "push", principalId: ownerId, event: { type: "delta", conversationId, runId, ...delta } });
   }
 
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */
@@ -244,6 +263,9 @@ export class Hub {
         return this.announceMembership(conversationId, task.principalIds);
       case "read":
         return this.announceRead(conversationId, task.marker);
+      case "push":
+        this.push(task.principalId, task.event);
+        return Promise.resolve();
     }
   }
 
@@ -283,8 +305,8 @@ export class Hub {
 
   private async announceRead(conversationId: string, marker: ReadMarker): Promise<void> {
     const peek = await peekConversation(this.deps.db, conversationId);
-    if (peek?.type !== "direct" || !peek.pair) return; // read positions are shown in direct chats only
-    if (this.connectedAmong(peek.pair).length === 0) return;
+    // Read positions are shown in direct chats and, for the Agent's, in its owner's conversation with it; not in groups.
+    if (peek?.type === "direct" ? !peek.pair || this.connectedAmong(peek.pair).length === 0 : peek?.type !== "agent") return;
     const readers = this.connectedAmong(await currentMemberIds(this.deps.db, conversationId));
     for (const id of readers) {
       this.push(id, { type: "read", conversationId, principalId: marker.principalId.toLowerCase(), seq: marker.seq });

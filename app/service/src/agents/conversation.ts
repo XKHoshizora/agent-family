@@ -3,9 +3,13 @@ import type { Config } from "../config.ts";
 import type { Change } from "../conversations/events.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
-import { insertMessage } from "../messages/model.ts";
-import { assertModelChoice, countLiveAgents, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
+import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
+import { cleanModelText, hasVisibleText } from "../schemas.ts";
+import { assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
+
+/** The longest text a message holds (people's messages are refused above it; an Agent's reply is cut there). */
+export const MESSAGE_TEXT_MAX = 8000;
 
 const UNIQUE_VIOLATION = "23505";
 
@@ -92,4 +96,55 @@ export async function createAgent(
     createdAt: created.rows[0]!.created_at,
   };
   return { agent, change: { messages: greeting, conversations: [{ conversationId, principalIds: [ownerId, id] }] } };
+}
+
+/** An Agent's reply as the worker hands it over. */
+export interface AgentReply {
+  text: string;
+  reasoning: string;
+  stopped: boolean;
+  truncated: boolean;
+}
+
+/**
+ * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` — the
+ * conversation row, then the `agents` row, the locks pause and delete take — so once a pause or delete has committed,
+ * nothing more is posted: 409 `agent_paused` / `agent_deleted`. The message is the Agent's, kind `text`, with
+ * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
+ * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed) and is
+ * cut at 8 000 characters, which marks it `truncated`; `reasoning` is stored only when there is some. Throws (a plain
+ * Error) when there is nothing to show: no visible text and no reasoning.
+ */
+export async function postAsAgent(
+  t: Tx,
+  agentId: string,
+  conversationId: string,
+  runId: string,
+  reply: AgentReply,
+): Promise<{ message: StoredMessage; duplicate: boolean }> {
+  const agent = await lockAgent(t, agentId);
+  if (agent.conversationId !== conversationId) throw new Error(`postAsAgent: ${conversationId} is not the conversation of Agent ${agentId}`);
+  const prior = await t.query<MessageRow>(
+    `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
+    [conversationId, agentId, runId],
+  );
+  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true };
+  if (agent.deleted) throw new AppError(409, "agent_deleted");
+  if (agent.paused) throw new AppError(409, "agent_paused");
+
+  let text = cleanModelText(reply.text);
+  let truncated = reply.truncated;
+  const characters = Array.from(text);
+  if (characters.length > MESSAGE_TEXT_MAX) {
+    text = characters.slice(0, MESSAGE_TEXT_MAX).join("").trimEnd();
+    truncated = true;
+  }
+  const reasoning = cleanModelText(reply.reasoning);
+  if (!hasVisibleText(text) && !hasVisibleText(reasoning)) throw new Error("postAsAgent: the reply has nothing to show");
+
+  const body: MessageBody = { text };
+  if (reasoning !== "") body.reasoning = reasoning;
+  if (reply.stopped) body.stopped = true;
+  if (truncated) body.truncated = true;
+  return { message: await insertMessage(t, conversationId, agentId, "text", body, runId), duplicate: false };
 }

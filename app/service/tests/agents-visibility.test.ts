@@ -65,6 +65,10 @@ describe("an Agent is invisible to everyone but its owner", () => {
       ["POST", "/api/conversations/:id/members", { principalId: stranger.id }],
       ["DELETE", `/api/conversations/:id/members/${owner.id}`],
       ["PATCH", "/api/conversations/:id", { title: "renamed" }],
+      ["GET", "/api/conversations/:id/run"],
+      ["POST", "/api/conversations/:id/runs/retry"],
+      ["POST", "/api/conversations/:id/runs/dismiss"],
+      ["POST", `/api/conversations/:id/runs/${randomUUID()}/stop`],
     ];
     for (const [method, url, body] of routes) {
       const a = await observe(stranger, method as "GET", url.replace(":id", real), body);

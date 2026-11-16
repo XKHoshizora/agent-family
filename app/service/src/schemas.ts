@@ -103,6 +103,23 @@ export function messageText(min: number, max: number) {
     .pipe(userText(min, max).refine((s) => !CONTROLS_BUT_LINE_BREAKS.test(s), "control character"));
 }
 
+/** `CONTROLS_BUT_LINE_BREAKS` and `LONE_SURROGATE`, to remove every occurrence. */
+const UNSAFE_IN_TEXT = /(?![\t\n\r])\p{Cc}|\p{Cs}|[‪-‮⁦-⁩]/gu;
+
+/**
+ * A model's output under the rules of message text: what `messageText` would refuse is removed instead (nobody can
+ * send the output again) — bidi overrides and isolates, control characters other than tab and line breaks, lone
+ * surrogates. Not trimmed: `cleanModelText` is, for storing; streamed pieces are not.
+ */
+export function stripUnsafeText(s: string): string {
+  return s.replace(UNSAFE_IN_TEXT, "");
+}
+
+/** `stripUnsafeText`, then trimmed: an Agent's text as it is stored (the length limit is the caller's). */
+export function cleanModelText(s: string): string {
+  return stripUnsafeText(s).trim();
+}
+
 /** A search term: what `messageText` would store of it (so it matches stored text), one line, 1–100 characters. */
 export const searchTerm = z
   .string()

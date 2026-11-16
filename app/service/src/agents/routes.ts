@@ -177,7 +177,10 @@ export function registerAgentRoutes(app: FastifyInstance): void {
     },
   );
 
-  /** Pause, resume and delete: under `lockAgent`, idempotent, announced to the owner's other tabs when they change something. */
+  /**
+   * Pause, resume and delete: under `lockAgent` (the lock `postAsAgent` takes, so no reply is posted once a pause or
+   * delete has committed), idempotent, announced to the owner's other tabs when they change something.
+   */
   const stateRoute = (method: "post" | "delete", url: string, change: { paused: boolean } | { deleted: true }) =>
     api[method](
       url,
@@ -193,6 +196,8 @@ export function registerAgentRoutes(app: FastifyInstance): void {
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed };
         });
         if (changed) {
+          // A reply in flight stops; whatever it had said is not posted (postAsAgent refuses from now on).
+          if (!("paused" in change && !change.paused)) app.agentPort.interruptAgent(agent.id);
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
           app.realtime.pushAgentChanged(me.id, agent.id);
         }

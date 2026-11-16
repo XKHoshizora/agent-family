@@ -30,18 +30,20 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * `env` is the app's configuration and, while the file runs, also set in `process.env` (restored after), as it would
  * be in production: what is read when used rather than at start-up (a site model's key, `resolveModel`) sees it too.
  * `allowInsecureLocal` lets the app's providers reach a local stub over plain HTTP (src/providers/guard.ts).
- * `models` replaces the model gateway (a `scriptedGateway()` from helpers/models.ts).
+ * `models` replaces the model gateway (a `scriptedGateway()` from helpers/models.ts). `agentWorker: false` turns the
+ * reply worker's background loop off: the test then runs replies itself with `app.agentWorker.runOnce()`.
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads" | "models">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, ...overrides } = extra;
+  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, ...overrides } = extra;
   const options: BuildOptions = {
     answerFloor,
     ...(logStream ? { logStream } : {}),
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
     ...(allowInsecureLocal ? { allowInsecureLocal } : {}),
+    ...(agentWorker === false ? { agentWorker } : {}),
   };
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;

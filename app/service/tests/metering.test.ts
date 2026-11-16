@@ -17,7 +17,8 @@ import { providerBody } from "./helpers/providers.ts";
  * and allowance: see METER_ENV (3 points a day, 2 points the most one call can cost).
  */
 
-const { app, db } = useApp({ env: METER_ENV });
+// Runs are made and moved by hand here (a reply run is briefly `queued`): no reply worker may pick them up.
+const { app, db } = useApp({ env: METER_ENV, agentWorker: false });
 const config = () => app.deps.config;
 const TZ = "Asia/Shanghai";
 /** Noon of 2026-03-01 in Shanghai. */

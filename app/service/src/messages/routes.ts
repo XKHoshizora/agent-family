@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { maybeTrigger } from "../agents/runs.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
@@ -55,14 +56,17 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       await sendLimit(req, me.id);
 
-      // Rendered inside the transaction, under the locks that just proved the sender may read it.
-      const { message, duplicate, wire } = await db.tx(async (t) => {
+      // Rendered inside the transaction, under the locks that just proved the sender may read it. An owner's
+      // message to their Agent queues its reply in the same transaction (agents/runs.ts `maybeTrigger`).
+      const { message, duplicate, wire, queued } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
         const [rendered] = await toWireFor(t, me.id, [sent.message]);
         if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
-        return { ...sent, wire: rendered };
+        const queued = sent.duplicate ? null : await maybeTrigger(t, sent.lock, sent.message, config);
+        return { ...sent, wire: rendered, queued };
       });
       if (!duplicate) conversations.publish({ messages: [message], conversations: [] }, req.log);
+      if (queued) app.agentPort.announce(queued);
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
     },
   );

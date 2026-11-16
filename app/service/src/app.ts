@@ -19,7 +19,10 @@ import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
+import { createAgentPort, type DbAgentPort } from "./agents/port-impl.ts";
+import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
+import { createAgentWorker, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
 import { guardedFetch } from "./providers/guard.ts";
@@ -81,6 +84,10 @@ declare module "fastify" {
     realtime: Hub;
     /** Every route the app serves, in registration order (diagnostics; the fuzz suite walks it). */
     routeList: readonly RouteEntry[];
+    /** The reply worker's port (src/agents/port-impl.ts): routes announce runs and reach a run in flight through it. */
+    agentPort: DbAgentPort;
+    /** The reply worker (src/agents/runtime/worker.ts); with `agentWorker: false` tests run replies with `runOnce()`. */
+    agentWorker: AgentWorker;
   }
 }
 
@@ -99,6 +106,11 @@ export interface BuildOptions {
    * loopback addresses, and over plain `http:` there, so tests can stand up a local stub (src/providers/guard.ts).
    */
   allowInsecureLocal?: boolean;
+  /**
+   * Tests only: `false` turns the reply worker's background loop off (no polling, no wake-ups); replies then run only
+   * when the test calls `app.agentWorker.runOnce()` or `drain()`.
+   */
+  agentWorker?: false;
 }
 
 /**
@@ -238,6 +250,23 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // First among the routes: it registers the WebSocket plugin, whose route wrapper must see every route
   // (an upgrade request to any other route is then refused instead of answered over the raw socket).
   await registerSync(app);
+
+  // The reply worker runs in this process (one instance, like the hub). It starts once the app is ready and stops on
+  // close before the hub and the database: calls in flight are abandoned, their runs left running.
+  const agentPort = createAgentPort({ db: deps.db, config, realtime: app.realtime, conversations: deps.conversations, reads: deps.reads, log: app.log });
+  const agentWorker = createAgentWorker({
+    port: agentPort,
+    models: deps.models,
+    runTimeoutMs: config.agentRunTimeoutMs,
+    background: options.agentWorker !== false,
+    log: app.log,
+  });
+  agentPort.onQueued(() => agentWorker.wake());
+  app.decorate("agentPort", agentPort);
+  app.decorate("agentWorker", agentWorker);
+  app.addHook("onReady", async () => agentWorker.start());
+  app.addHook("onClose", async () => agentWorker.stop());
+
   const answerFloor = options.answerFloor ?? ANSWER_FLOOR;
   registerRegistrationRoutes(app, perMinute, answerFloor);
   registerAuthRoutes(app, config.rateLimitScale, answerFloor);
@@ -249,6 +278,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerAttachmentRoutes(app);
   registerAccountRoutes(app);
   registerAgentRoutes(app);
+  registerRunRoutes(app);
   registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true });
 
   const api = app.withTypeProvider<ZodTypeProvider>();
