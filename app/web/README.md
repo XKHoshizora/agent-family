@@ -26,7 +26,7 @@ errors and the XSS probe (`support/fixtures.mjs`).
 **Local mode** (default). Global setup builds this client and the service (`npm run build` in both;
 `E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
 `TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced) and empties every table but
-`pgmigrations`, then starts one service (`node dist/server.js`) on `http://127.0.0.1:8911` (`E2E_PORT`) that serves
+`pgmigrations`, then starts one service (`node dist/server.js`) on `http://127.0.0.1:8911` (`E2E_PORT`, bound with `HOST=127.0.0.1`, so it is not reachable from the network) that serves
 `dist/` with a random `AUTH_SECRET`, a temporary `BLOB_DIR`, `RATE_LIMIT_SCALE=1000` and `SWEEP_INTERVAL_MINUTES=0`.
 Invites and mail come from the service CLI (`invite:create`, `inbox:list`). The restart spec stops and starts that
 process through a control endpoint of the runner (127.0.0.1, random port and token). Teardown stops the service and

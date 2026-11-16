@@ -16,11 +16,6 @@ function recordSocketCloses() {
 }
 
 test("sign-out in one tab ends the other tab's session (socket 4001) and it lands on sign-in once", async ({ people }) => {
-  // PRODUCT BUG (reported in task-10-report.md): the client signs out with `POST /api/auth/sign-out` and no
-  // body; the service answers 400 invalid_request (README: "Body: none or {}"), so 退出登录 does nothing but
-  // a toast. With a `{}` body the same request is 200. Remove this line once sign-out works from the UI.
-  test.fail(true, "sign-out without a body is refused with 400 (product bug)");
-
   const ann = await people.member("Ann", { open: false });
   await ann.context.addInitScript(recordSocketCloses);
   const first = await people.openApp(ann);

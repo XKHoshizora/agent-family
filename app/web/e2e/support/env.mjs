@@ -52,6 +52,7 @@ const SERVICE_KEYS = [
   "BLOB_DIR",
   "WEB_DIST",
   "PORT",
+  "HOST",
   "S3_ENDPOINT",
   "S3_REGION",
   "S3_BUCKET",

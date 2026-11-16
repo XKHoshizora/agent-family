@@ -210,6 +210,7 @@ export async function startLocalSystem() {
       BLOB_DIR: path.join(RUN_DIR, "blobs"),
       WEB_DIST: path.join(WEB_DIR, "dist"),
       PORT: String(PORT),
+      HOST: "127.0.0.1",
       REGISTRATION_MODE: "invite",
       MAIL_MODE: "outbox",
       // The suite signs up and signs in far more often than a person; it must never meet a limit.
