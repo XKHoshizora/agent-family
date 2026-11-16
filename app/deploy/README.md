@@ -36,7 +36,7 @@ Other commands run in the same image, e.g. the first invitation, the mail outbox
 ```
 docker exec <container> node dist/cli.js invite:create --ttl-hours 72
 docker exec <container> node dist/cli.js inbox:list --to someone@example.com
-docker exec <container> node dist/cli.js attachments:sweep      # run every 10 minutes or so
+docker exec <container> node dist/cli.js attachments:sweep      # by hand only; the server sweeps by itself
 ```
 
 ## Environment
@@ -58,6 +58,7 @@ message naming the variable. Values in the right column are for the acceptance e
 | `BLOB_DIR` | Where avatars and attachments live when `S3_*` is not set. Image default `/data/blobs` (mount a volume there or it is lost with the container; the container runs as the unprivileged `node` user, uid 1000, so a bind-mounted host directory must be writable by uid 1000, e.g. `chown 1000:1000 <dir>`). | unused if S3 is set |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | S3-compatible object storage; all five or none. | all five (container disks are not durable) |
 | `RATE_LIMIT_SCALE` | Multiplier on every rate limit. | `1` |
+| `SWEEP_INTERVAL_MINUTES` | Minutes between the server's own sweeps of unsent uploads and abandoned blobs (first run a minute after start). `0` disables. No cron needed. | `15` (default) |
 | `ATTACHMENT_QUOTA_BYTES` | Attachment bytes one user may store. | `2147483648` (default) |
 | `UPLOAD_IDLE_TIMEOUT_MS`, `UPLOAD_TOTAL_TIMEOUT_MS` | An upload is cut off after this long without body bytes (default 45000) / in all (default 900000). | defaults |
 | `HTTP_CONNECTION_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_KEEP_ALIVE_TIMEOUT_MS` | Server-wide socket idle (120000), whole request (upload total + 60000), keep-alive idle (72000). Must exceed the upload deadlines. Keep the proxy's idle timeout above the keep-alive value. | defaults |
@@ -72,7 +73,7 @@ message naming the variable. Values in the right column are for the acceptance e
   upgrades on `/api/ws`.
 - **Same origin.** Users reach both the pages and `/api` at `APP_ORIGIN`; the Content-Security-Policy of the
   pages allows nothing else.
-- Run `attachments:sweep` periodically; back up the database (and the bucket).
+- The server sweeps unsent uploads itself (`SWEEP_INTERVAL_MINUTES`); `attachments:sweep` is only for running it by hand. Back up the database (and the bucket).
 
 ## Not covered here
 

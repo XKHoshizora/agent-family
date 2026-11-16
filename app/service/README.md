@@ -35,7 +35,7 @@ npm test             # vitest, against TEST_DATABASE_URL
 npm run typecheck    # tsc --noEmit (src and tests)
 npm run invite:create -- [--ttl-hours <n>]          # prints a new invite code (default 72 h)
 npm run inbox:list -- [--to <email>]                # the mail outbox
-npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (cron)
+npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (by hand; the server does it itself)
 ```
 
 Production: build once with the dev dependencies installed, then run plain Node on the build (no `tsx`,
@@ -62,6 +62,7 @@ and every run-time import of `src/` a production dependency.
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
 `CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
 `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
+`SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off),
 `UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
 15 min in all), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle, default 2 min),
 `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min) and `HTTP_KEEP_ALIVE_TIMEOUT_MS`
@@ -139,7 +140,7 @@ own errors go to the same log. A request is logged as method, path, host and add
 replaced by `?[redacted]` (it carries WebSocket tickets, e-mail verification tokens and search terms), and
 headers (cookies) are never logged.
 
-**Cron.** `npm run attachments:sweep:prod` (see Attachments), e.g. every 10 minutes.
+**Sweeping.** The server sweeps unsent uploads and abandoned blobs itself (see Attachments, `SWEEP_INTERVAL_MINUTES`); no cron is needed. `npm run attachments:sweep:prod` remains for running it by hand.
 
 ## Tests
 
@@ -854,8 +855,12 @@ ASCII `filename` and the exact name as `filename*=UTF-8''…`; `X-Content-Type-O
 `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: private, no-store`. No ranges.
 `HEAD /api/attachments/:id` answers the same status and headers without a body, and without reading the file.
 
-**Unsent uploads** are deleted by `npm run attachments:sweep:prod -- [--older-than <minutes>]`
-(default 60; run it from cron). Send an upload within that time. A blob that cannot be deleted keeps its
+**Unsent uploads** are deleted by the sweep once they are older than 60 minutes. The server runs it inside
+its own process (the service is one process by design): once a minute after start, then every
+`SWEEP_INTERVAL_MINUTES` (default 15; `0` disables it). Runs never overlap, a failing run is logged at warn
+and the next one still happens, and one info line (counts) is logged per run that deleted something. The
+timer stops on shutdown. `npm run attachments:sweep:prod -- [--older-than <minutes>]` runs the same sweep by
+hand (default 60). Send an upload within that time. A blob that cannot be deleted keeps its
 row and is retried on the next sweep.
 
 **Blobs nothing references.** Every blob key (attachment or avatar) is recorded in `pending_blobs`, and

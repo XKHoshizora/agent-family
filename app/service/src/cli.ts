@@ -1,7 +1,6 @@
 import { config as loadDotenv } from "dotenv";
 import { createBlobStore } from "./attachments/blob.ts";
-import { abandonedAfterMs, sweepPendingBlobs } from "./attachments/pending.ts";
-import { sweepOrphans } from "./attachments/store.ts";
+import { DEFAULT_UNSENT_AFTER_MINUTES, runSweep } from "./attachments/sweeper.ts";
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
 import { createDb } from "./db.ts";
@@ -55,23 +54,19 @@ if (command === "migrate") {
     await db.close();
   }
 } else if (command === "attachments:sweep") {
-  // Uploads never sent in a message. Run it periodically (cron); it is safe to run at any time.
-  const raw = flag(args, "--older-than") ?? "60";
+  // The server runs this on a timer itself (SWEEP_INTERVAL_MINUTES); this is for running it by hand.
+  const raw = flag(args, "--older-than") ?? String(DEFAULT_UNSENT_AFTER_MINUTES);
   if (!/^\d+$/.test(raw)) throw new Error("--older-than must be a whole number of minutes");
   const olderThan = Number(raw);
   const config = loadConfig(); // the blob store settings, as the server uses them
   const db = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });
   try {
-    const deps = { db, blobs: createBlobStore(config) };
-    const swept = await sweepOrphans(deps, olderThan, {
-      error: ({ err, attachmentId }, msg) => console.error(`${msg} (attachment ${attachmentId}): ${String(err)}`),
-    });
-    // Also blobs no row came to reference: refused uploads whose delete failed, uploads cut off or
-    // interrupted by a crash, replaced avatars. Only once they are past the upload deadline.
-    const abandoned = await sweepPendingBlobs(deps, abandonedAfterMs(config), {
-      error: ({ err, key }, msg) => console.error(`${msg} (blob ${key}): ${String(err)}`),
-    });
-    console.log(`swept ${swept} unsent attachment(s) older than ${olderThan} minutes and ${abandoned} abandoned blob(s)`);
+    const log = {
+      error: ({ err, ...what }: Record<string, unknown>, msg: string) =>
+        console.error(`${msg} (${Object.entries(what).map(([k, v]) => `${k} ${String(v)}`).join(", ")}): ${String(err)}`),
+    };
+    const { unsent, abandoned } = await runSweep({ db, blobs: createBlobStore(config) }, config, log, olderThan);
+    console.log(`swept ${unsent} unsent attachment(s) older than ${olderThan} minutes and ${abandoned} abandoned blob(s)`);
   } finally {
     await db.close();
   }

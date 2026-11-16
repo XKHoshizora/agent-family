@@ -49,6 +49,7 @@ export function useApp(
       AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
       APP_ORIGIN: "http://localhost:5173",
       RATE_LIMIT_SCALE: "1000",
+      SWEEP_INTERVAL_MINUTES: "0", // no background timer unless a test asks for one
       ...env,
     });
     database = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });

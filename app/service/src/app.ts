@@ -13,6 +13,7 @@ import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, frameworkErrors, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
+import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
@@ -77,6 +78,8 @@ const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 export interface BuildOptions {
   /** JSON log lines at info level go here (tests capture them). Default: stdout, and nothing under test. */
   logStream?: { write(line: string): void };
+  /** Delay before the first scheduled attachment sweep (default one minute); tests shorten it. */
+  sweepInitialDelayMs?: number;
 }
 
 /**
@@ -174,6 +177,17 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   app.decorate("deps", deps);
   app.decorate("auth", createAuth(config, deps.db, deps.sessions, app.log));
   if (ownsDb) app.addHook("onClose", async () => deps.db.close());
+
+  // The service is one process by design, so it sweeps unsent uploads and abandoned blobs itself.
+  // Registered after the db's close hook: hooks run last-in first-out, so the timer stops (and a run in
+  // flight finishes) before the pool closes.
+  const sweeper = startSweeper({
+    run: () => runSweep(deps, config, app.log),
+    intervalMinutes: config.sweepIntervalMinutes,
+    ...(options.sweepInitialDelayMs === undefined ? {} : { initialDelayMs: options.sweepInitialDelayMs }),
+    log: app.log,
+  });
+  if (sweeper) app.addHook("onClose", async () => sweeper.stop());
 
   // The single source of throttling (Better Auth's own limiter is off). Routes that declare
   // `config.rateLimit` are counted per client address (`clientIp`); the rest use limits.ts / createRateLimit.

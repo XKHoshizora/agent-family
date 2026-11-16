@@ -93,6 +93,11 @@ const envSchema = z.object({
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   /** A request that gets no pool connection within this long is answered 503 busy. */
   DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  /** How often the server sweeps unsent uploads and abandoned blobs, in minutes; 0 turns it off. */
+  SWEEP_INTERVAL_MINUTES: optionalString
+    .transform((v) => (v === undefined ? "15" : v))
+    .pipe(z.string().regex(/^[0-9]{1,6}$/, "SWEEP_INTERVAL_MINUTES must be a whole number of minutes, 0 or more"))
+    .transform(Number),
   /** A search's statements are cancelled after this long (503 busy). */
   SEARCH_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
 });
@@ -133,6 +138,8 @@ export interface Config {
   dbAcquireTimeoutMs: number;
   /** `statement_timeout` inside a search's transaction. */
   searchStatementTimeoutMs: number;
+  /** Minutes between the in-process attachment sweeps; 0: none (run `attachments:sweep` by hand). */
+  sweepIntervalMinutes: number;
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -189,5 +196,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     dbStatementTimeoutMs: e.DB_STATEMENT_TIMEOUT_MS,
     dbAcquireTimeoutMs: e.DB_ACQUIRE_TIMEOUT_MS,
     searchStatementTimeoutMs: e.SEARCH_STATEMENT_TIMEOUT_MS,
+    sweepIntervalMinutes: e.SWEEP_INTERVAL_MINUTES,
   };
 }
