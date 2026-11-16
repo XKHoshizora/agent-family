@@ -61,6 +61,7 @@ message naming the variable. Values in the right column are for the acceptance e
 | `SWEEP_INTERVAL_MINUTES` | Minutes between the server's own sweeps of unsent uploads and abandoned blobs (first run a minute after start). `0` disables; at most `1440`. No cron needed. | `15` (default) |
 | `ATTACHMENT_QUOTA_BYTES` | Attachment bytes one user may store. | `2147483648` (default) |
 | `UPLOAD_IDLE_TIMEOUT_MS`, `UPLOAD_TOTAL_TIMEOUT_MS` | An upload is cut off after this long without body bytes (default 45000) / in all (default 900000). | defaults |
+| `HTTP_BODY_TIMEOUT_MS` | A request with a body must have arrived whole within this long (default 30000); an upload is released from it once it is admitted and then follows the upload deadlines. | default |
 | `HTTP_CONNECTION_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_KEEP_ALIVE_TIMEOUT_MS` | Server-wide socket idle (120000), whole request (upload total + 60000), keep-alive idle (72000). Must exceed the upload deadlines. Keep the proxy's idle timeout above the keep-alive value. | defaults |
 | `DB_STATEMENT_TIMEOUT_MS`, `DB_ACQUIRE_TIMEOUT_MS`, `SEARCH_STATEMENT_TIMEOUT_MS` | Database limits: statement (30000), wait for a pool connection (10000), one search (3000). Past them: 503 `busy`. | defaults |
 
@@ -77,5 +78,5 @@ message naming the variable. Values in the right column are for the acceptance e
 
 ## Not covered here
 
-The image has been built stage by stage only on a machine without Docker (see the service follow-up report
-for what exactly was run); do a real `docker build` once before relying on it.
+The image is built for real by Railway on every deploy of the acceptance environment; it has not been built
+with a local `docker build` (the development machine has no Docker).
