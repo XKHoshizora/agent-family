@@ -23,13 +23,16 @@ export interface Prepared {
   readonly inputChars: number;
 }
 
-/** Why a reply failed, as the owner is told (`Run.error`). */
-export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota";
+/**
+ * Why a reply failed, as the owner is told (`Run.error`). `busy`: the service's own trouble (the reply could not be
+ * started or stored); such a run is charged nothing.
+ */
+export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy";
 
 /**
- * How a run ends. `stopped` and `cancelled` without an `error` are the worker's view of an interrupted run; `finish`
- * records it as `cancelled` with `agent_paused` / `agent_deleted` when that is why (the worker cannot tell a stop
- * request from a pause).
+ * How a run ends, as the worker saw it. `finish` records what is true under the Agent's lock: a reply that was posted
+ * stands (`done`, or `stopped` by its owner), and a run its Agent's pause or delete interrupted is `cancelled` with that
+ * reason — the worker cannot tell an owner's stop from a pause, and a refused post looks the same.
  */
 export type RunEnd =
   | { readonly status: "done" }
@@ -61,9 +64,9 @@ export interface AgentPort {
   claimNext(): Promise<RunTicket | null>;
   /** Resolves the model, builds what the model is shown, admits the call and marks the Agent's read position — or says why the run ends at once. */
   begin(run: RunTicket): Promise<Prepared | RunEnd>;
-  /** Pushes a piece of the reply to the owner's sockets; nothing is stored. */
+  /** Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause or delete interrupted the run. */
   emit(run: RunTicket, delta: Delta): void;
-  /** Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted by now. */
+  /** Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete interrupted the run. */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused">;
   /** Settles the call and records how the run ended (one transaction), then queues the follow-up for messages that came meanwhile. */
   finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void>;

@@ -98,11 +98,11 @@ describe("display name", () => {
   });
 
   /** One rule for registration and renaming: 1–40 characters, one line, format characters removed. */
-  const REFUSED = ["", "   ", "‮​", "x".repeat(41), "🙂".repeat(41), "bad\u0007name", "tab\tname", "line\nbreak", "para graph", "line sep", "\ud800",
+  const REFUSED = ["", "   ", "\u202e​", "x".repeat(41), "🙂".repeat(41), "bad\u0007name", "tab\tname", "line\nbreak", "para graph", "line sep", "\ud800",
     // Nothing left but joiners (or tag characters) once the rest is stripped.
     "\u200d", "\u200c\u200d", " \u200d ", "\u200b\u200d\u2060", "\u{e0067}\u{e007f}"];
   const CLEANED: Array<[string, string]> = [
-    ["‮evil‬ name", "evil name"],
+    ["\u202eevil\u202c name", "evil name"],
     ["zero​width⁠joiner﻿", "zerowidthjoiner"],
     ["  ​ padded ​ ", "padded"],
     ["🙂".repeat(40), "🙂".repeat(40)],

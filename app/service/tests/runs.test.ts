@@ -283,6 +283,53 @@ describe("stopping, pausing, failing", () => {
     expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/retry`)).toEqual({ status: 409, json: { error: "agent_paused" } });
   });
 
+  it("delete mid-run: the call is abandoned, nothing is posted, the run is cancelled", async () => {
+    const { owner, agent, conv } = await owned("dorian");
+    const hold = gateway.hang();
+    await say(owner, conv, "你好");
+    const running = app.agentWorker.runOnce();
+    const call = await hold.reached;
+    expect((await api(app, owner, "DELETE", `/api/agents/${agent.id}`)).status).toBe(200);
+    await running;
+    expect(call.signal.aborted).toBe(true);
+    expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+    const run = await latestRun(owner, conv);
+    expect(run).toEqual({ id: run.id, status: "cancelled", error: "agent_deleted", retryable: false });
+    expect(await holds()).toBe("0");
+  });
+
+  it("a reply the database refuses to store fails as busy, retryable, and costs the owner nothing", async () => {
+    const { owner, agent, conv } = await owned("bruno");
+    // An injected database error on storing exactly this Agent's messages.
+    const fn = `refuse_agent_${agent.id.replaceAll("-", "")}`;
+    await db.query(
+      `create function ${fn}() returns trigger language plpgsql as $$
+       begin if new.sender_id = '${agent.id}' then raise exception 'injected failure'; end if; return new; end $$`,
+    );
+    await db.query(`create trigger ${fn} before insert on messages for each row execute function ${fn}()`);
+    try {
+      gateway.reply("这条存不下来。", { usage: { inputTokens: 100, outputTokens: 20 } });
+      await say(owner, conv, "你好");
+      expect(await app.agentWorker.runOnce()).toBe(true);
+    } finally {
+      await db.query(`drop trigger ${fn} on messages`);
+      await db.query(`drop function ${fn}()`);
+    }
+    expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+    const run = await latestRun(owner, conv);
+    expect(run).toEqual({ id: run.id, status: "failed", error: "busy", retryable: true });
+    // The true cost (100 × 1 + 20 × 2 micro-points) is recorded and wholly forgiven: no allowance, no balance used.
+    const records = await db.query(
+      `select outcome, cost_micro::text as cost, free_micro::text as free, balance_micro::text as balance, forgiven_micro::text as forgiven
+         from usage_records where run_id = $1`,
+      [run.id],
+    );
+    expect(records.rows).toEqual([{ outcome: "failed", cost: "140", free: "0", balance: "0", forgiven: "140" }]);
+    expect((await db.query("select * from free_usage where owner_id = $1", [owner.id])).rows).toEqual([]);
+    expect((await db.query("select * from balance_ledger where owner_id = $1", [owner.id])).rows).toEqual([]);
+    expect(await holds()).toBe("0");
+  });
+
   it("the provider refusing the key: no message, the run failed and not retryable", async () => {
     const { owner, agent, conv } = await owned("fran");
     const s = await connect(app, owner);

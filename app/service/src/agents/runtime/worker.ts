@@ -50,6 +50,8 @@ type Interruption = "stop" | "timeout" | "shutdown";
 
 const NO_OUTPUT = { inputChars: 0, outputChars: 0 };
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
+/** The service's own trouble: the reply could not be started or stored. Charged nothing (port-impl `finish`). */
+const BUSY: RunEnd = { status: "failed", error: "busy" };
 
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const { port, models, log } = opts;
@@ -78,9 +80,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
   }
 
-  /** The end of a run whose reply was offered to `post`. */
+  /** The end of a run whose reply was offered to `post`; a reply that could not be stored is our failure, not the provider's. */
   const ended = (posted: "posted" | "refused" | "failed", ok: RunEnd): RunEnd =>
-    posted === "posted" ? ok : posted === "refused" ? { status: "cancelled" } : UNAVAILABLE;
+    posted === "posted" ? ok : posted === "refused" ? { status: "cancelled" } : BUSY;
 
   /** Streams the model's answer to the owner; how the stream ended and what it produced. */
   async function call(run: RunTicket, prepared: Prepared) {
@@ -135,7 +137,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       prepared = await port.begin(run);
     } catch (err) {
       log.error({ err, runId: run.id }, "agent run: could not start");
-      return finish(run, UNAVAILABLE, null, NO_OUTPUT);
+      return finish(run, BUSY, null, NO_OUTPUT);
     }
     if (isRunEnd(prepared)) return finish(run, prepared, null, NO_OUTPUT);
 

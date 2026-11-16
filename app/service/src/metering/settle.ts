@@ -32,6 +32,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  *   charged to nobody, not even the next day; `balance` debits the whole charge to the ledger (`usage`), which may
  *   take the balance below zero. `forgiven_micro` is everything of the cost not charged.
  * - Appends the `usage_records` row and zeroes the run's `hold_micro`.
+ * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
+ *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
  * settled already, and for a site model no longer configured when its call cost something.
  */
@@ -43,6 +45,7 @@ export async function settle(
   fallback: { inputChars: number; outputChars: number },
   outcome: Outcome,
   now: Date,
+  { forgiveAll = false }: { forgiveAll?: boolean } = {},
 ): Promise<void> {
   const { rows } = await t.query<{
     owner_id: string;
@@ -72,7 +75,7 @@ export async function settle(
   let freeMicro = 0n;
   let balanceMicro = 0n;
   if (run.charge_to !== null) {
-    const charged = min(cost, BigInt(run.hold_micro));
+    const charged = forgiveAll ? 0n : min(cost, BigInt(run.hold_micro));
     await lockAccount(t, run.owner_id);
     if (run.charge_to === "free") {
       const used = await freeUsedToday(t, run.owner_id, now, config.siteTimezone);

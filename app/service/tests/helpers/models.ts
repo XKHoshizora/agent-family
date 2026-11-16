@@ -26,7 +26,10 @@ export interface Hold {
 
 /** How a call that streams ends up answering. */
 type Answer = { kind: "reply"; text: string; options: ReplyOptions } | { kind: "empty" };
-type Step = Answer | { kind: "fail"; code: ModelErrorCode; afterText: string } | { kind: "hang"; gate: Promise<Answer>; reached: (call: ModelCall) => void };
+type Step =
+  | Answer
+  | { kind: "fail"; code: ModelErrorCode; afterText: string }
+  | { kind: "hang"; before: string; gate: Promise<Answer>; reached: (call: ModelCall) => void };
 
 export interface ScriptedGateway extends ModelGateway {
   /** Every call received, in order, as given (the signal included: `calls[i].signal.aborted`). */
@@ -39,6 +42,11 @@ export interface ScriptedGateway extends ModelGateway {
   fail(code: ModelErrorCode, options?: { afterText?: string }): ScriptedGateway;
   /** The next call hangs until released (or until its signal aborts). */
   hang(): Hold;
+  /**
+   * The next call streams `text`, then hangs until released (or until its signal aborts). `reached` resolves once the
+   * caller has taken all of `text` and asked for more; `release(rest, options)` then streams `rest` and finishes.
+   */
+  hangAfter(text: string): Hold;
   /** The next call finishes at once with no text and no usage. */
   empty(): ScriptedGateway;
   /** Steps queued and not yet taken by a call. */
@@ -82,8 +90,17 @@ export function scriptedGateway(): ScriptedGateway {
     const { signal } = call;
     if (!scripted) throw new Error(`scriptedGateway: call #${n} was not scripted`);
     signal.throwIfAborted();
+    let delay = 0;
+    const emit = async function* (type: "text" | "reasoning", text: string): AsyncGenerator<ModelEvent> {
+      for (const delta of chunks(text)) {
+        if (delay > 0) await abortable(sleep(delay), signal);
+        signal.throwIfAborted();
+        yield { type, delta };
+      }
+    };
     let step: Exclude<Step, { kind: "hang" }>;
     if (scripted.kind === "hang") {
+      yield* emit("text", scripted.before);
       scripted.reached(call);
       step = await abortable(scripted.gate, signal);
     } else {
@@ -93,14 +110,7 @@ export function scriptedGateway(): ScriptedGateway {
       yield { type: "finish", usage: null, truncated: false };
       return;
     }
-    const delay = step.kind === "reply" ? (step.options.delayMsPerChunk ?? 0) : 0;
-    const emit = async function* (type: "text" | "reasoning", text: string): AsyncGenerator<ModelEvent> {
-      for (const delta of chunks(text)) {
-        if (delay > 0) await abortable(sleep(delay), signal);
-        signal.throwIfAborted();
-        yield { type, delta };
-      }
-    };
+    delay = step.kind === "reply" ? (step.options.delayMsPerChunk ?? 0) : 0;
     if (step.kind === "fail") {
       yield* emit("text", step.afterText);
       throw new ModelError(step.code);
@@ -130,11 +140,14 @@ export function scriptedGateway(): ScriptedGateway {
       return gateway;
     },
     hang() {
+      return gateway.hangAfter("");
+    },
+    hangAfter(before) {
       let open!: (answer: Answer) => void;
       let reached!: (call: ModelCall) => void;
       const gate = new Promise<Answer>((resolve) => (open = resolve));
       const reachedPromise = new Promise<ModelCall>((resolve) => (reached = resolve));
-      queue.push({ kind: "hang", gate, reached });
+      queue.push({ kind: "hang", before, gate, reached });
       return {
         reached: reachedPromise,
         release(text, options = {}) {

@@ -9,6 +9,7 @@ import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { createAgent } from "./conversation.ts";
+import { interruptRuns } from "./runs.ts";
 import {
   assertModelChoice,
   listOwnedAgents,
@@ -188,16 +189,22 @@ export function registerAgentRoutes(app: FastifyInstance): void {
       async (req) => {
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
-        const { agent, changed } = await db.tx(async (t) => {
+        const { agent, changed, interrupted } = await db.tx(async (t) => {
           const current = await lockOwnedAgent(t, me.id, req.params.id);
           // A deleted Agent stays deleted: deleting again is a no-op, anything else is refused.
           if (current.deleted && !("deleted" in change)) throw deletedError();
           const changed = await setAgentState(t, current, change);
-          return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed };
+          // Pausing or deleting ends the Agent's active reply for good, in this transaction (runs.ts).
+          const stopping = "deleted" in change || change.paused;
+          const interrupted = stopping ? await interruptRuns(t, current, "deleted" in change ? "agent_deleted" : "agent_paused") : null;
+          return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted };
         });
+        if (interrupted) {
+          // Before answering: from now on nothing of those runs reaches the owner, and their calls are abandoned.
+          app.agentPort.interruptRuns(interrupted.running);
+          for (const cancelled of interrupted.cancelled) app.agentPort.announce(cancelled);
+        }
         if (changed) {
-          // A reply in flight stops; whatever it had said is not posted (postAsAgent refuses from now on).
-          if (!("paused" in change && !change.paused)) app.agentPort.interruptAgent(agent.id);
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
           app.realtime.pushAgentChanged(me.id, agent.id);
         }

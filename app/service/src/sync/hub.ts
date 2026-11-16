@@ -59,7 +59,7 @@ type Task =
   | { kind: "messages"; fromSeq: number; toSeq: number }
   | { kind: "membership"; principalIds: string[] }
   | { kind: "read"; marker: ReadMarker }
-  | { kind: "push"; principalId: string; event: PushEvent };
+  | { kind: "push"; principalId: string; event: PushEvent; wanted?: () => boolean };
 
 interface Queue {
   tasks: Task[];
@@ -137,9 +137,19 @@ export class Hub {
     this.enqueue(conversationId, { kind: "push", principalId: ownerId, event: { type: "run", conversationId, run } });
   }
 
-  /** A piece of a reply being generated, to `ownerId`'s sockets only, in order with the run's other pushes. */
-  pushDelta(ownerId: string, conversationId: string, runId: string, delta: { text?: string; reasoning?: string }): void {
-    this.enqueue(conversationId, { kind: "push", principalId: ownerId, event: { type: "delta", conversationId, runId, ...delta } });
+  /**
+   * A piece of a reply being generated, to `ownerId`'s sockets only, in order with the run's other pushes; dropped if
+   * `wanted` says no by the time it is delivered (the reply was interrupted meanwhile).
+   */
+  pushDelta(
+    ownerId: string,
+    conversationId: string,
+    runId: string,
+    delta: { text?: string; reasoning?: string },
+    wanted?: () => boolean,
+  ): void {
+    const event: PushEvent = { type: "delta", conversationId, runId, ...delta };
+    this.enqueue(conversationId, { kind: "push", principalId: ownerId, event, ...(wanted ? { wanted } : {}) });
   }
 
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */
@@ -264,7 +274,7 @@ export class Hub {
       case "read":
         return this.announceRead(conversationId, task.marker);
       case "push":
-        this.push(task.principalId, task.event);
+        if (task.wanted?.() !== false) this.push(task.principalId, task.event);
         return Promise.resolve();
     }
   }

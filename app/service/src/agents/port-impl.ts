@@ -16,7 +16,7 @@ import type { Hub } from "../sync/hub.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
-import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type RunRow } from "./runs.ts";
+import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 export interface AgentPortDeps {
@@ -30,14 +30,26 @@ export interface AgentPortDeps {
 
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
 
+/** What `begin` and `finish` read of the run, under its row lock. */
+interface RunState {
+  status: string;
+  covers_seq: string | null;
+  pending_seq: string | null;
+  interrupted: Interruption | null;
+}
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
+
 /**
- * How an interrupted run is recorded: the worker cannot tell its owner's stop from a pause or a delete (both make
- * `shouldStop` true, and a refused post looks the same), so the Agent's state decides, read under `lockAgent`.
+ * How a run is recorded, from what is true under `lockAgent` rather than what the worker could tell (an owner's stop
+ * and a pause look alike to it): a reply that was posted stands — `done`, or `stopped` by its owner — whatever happened
+ * to the Agent after; a run its Agent's pause or delete interrupted, and that posted nothing, is `cancelled` with that
+ * reason (also when the Agent was resumed meanwhile); a refused post is `cancelled` for the Agent's state.
  */
-function recorded(end: RunEnd, agent: AgentRow): RunEnd {
-  if (end.status === "stopped" || (end.status === "cancelled" && end.error === undefined)) {
-    if (agent.deleted) return { status: "cancelled", error: "agent_deleted" };
-    if (agent.paused) return { status: "cancelled", error: "agent_paused" };
+function recorded(end: RunEnd, s: { posted: boolean; interrupted: Interruption | null; agent: AgentRow }): RunEnd {
+  if (s.posted) return end.status === "stopped" ? end : { status: "done" };
+  if (s.interrupted) return { status: "cancelled", error: s.interrupted };
+  if (end.status === "cancelled" && end.error === undefined) {
+    return s.agent.deleted ? { status: "cancelled", error: "agent_deleted" } : s.agent.paused ? { status: "cancelled", error: "agent_paused" } : end;
   }
   return end;
 }
@@ -45,13 +57,13 @@ function recorded(end: RunEnd, agent: AgentRow): RunEnd {
 /**
  * `AgentPort` over the database, the hub and the event registries: the one place the reply worker's work turns into
  * SQL. Besides the port it offers the routes what they need to reach a run in flight: `announce`, `requestStop`,
- * `interruptAgent` (called after their transactions commit).
+ * `interruptRuns` (called after their transactions commit, before they answer).
  */
 export class DbAgentPort implements AgentPort {
   /** Runs that should stop: their owner asked, or their Agent was paused or deleted. Kept until they finish. */
   private readonly stopping = new Set<string>();
-  /** Runs claimed in this process and not finished yet. */
-  private readonly active = new Map<string, RunTicket>();
+  /** Runs their Agent's pause or delete interrupted: nothing more of them is pushed. Kept until they finish. */
+  private readonly silenced = new Set<string>();
   private wakeWorker: () => void = () => {};
 
   constructor(private readonly deps: AgentPortDeps) {}
@@ -72,9 +84,15 @@ export class DbAgentPort implements AgentPort {
     this.stopping.add(runId);
   }
 
-  /** The Agent was paused or deleted: whatever of it runs here stops (and is then recorded `cancelled`). */
-  interruptAgent(agentId: string): void {
-    for (const run of this.active.values()) if (run.agentId === agentId) this.stopping.add(run.id);
+  /**
+   * Runs the Agent's pause or delete has just marked `interrupted` (runs.ts `interruptRuns`): their calls are abandoned
+   * and, from now on, none of their deltas reaches the owner — not even one already waiting in the hub's queue.
+   */
+  interruptRuns(runIds: readonly string[]): void {
+    for (const id of runIds) {
+      this.silenced.add(id);
+      this.stopping.add(id);
+    }
   }
 
   shouldStop(run: RunTicket): boolean {
@@ -98,14 +116,14 @@ export class DbAgentPort implements AgentPort {
     const row = rows[0];
     if (!row) return null;
     const run: RunTicket = { id: row.id, agentId: row.agent_id, ownerId: row.owner_id, conversationId: row.conversation_id };
-    this.active.set(run.id, run);
     this.announce({ ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(row) });
     return run;
   }
 
   /**
-   * In one transaction under `lockAgent`: a paused or deleted Agent, a stop already asked for, or a model that does not
-   * resolve end the run here. Otherwise the run takes on what came meanwhile (`covers_seq` = max(covers, pending)), the
+   * In one transaction under `lockAgent`: a run its Agent's pause or delete interrupted (even if resumed since), a paused
+   * or deleted Agent, a stop already asked for, or a model that does not resolve end the run here. Otherwise the run
+   * takes on what came meanwhile (`covers_seq` = max(covers, pending)), the
    * model is shown every message the Agent can see up to now (Task 8 replaces this plain context), the call is admitted
    * (402 `no_quota` ends the run failed), and the Agent's read marker moves to what it covers (announced after commit).
    */
@@ -114,11 +132,10 @@ export class DbAgentPort implements AgentPort {
     const now = new Date();
     const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
       const agent = await lockAgent(t, run.agentId);
-      const state = await t.query<{ status: string; covers_seq: string | null; pending_seq: string | null }>(
-        "select status, covers_seq::text, pending_seq::text from agent_runs where id = $1 for update",
-        [run.id],
-      );
+      const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
       if (state.rows[0]?.status !== "running") throw new Error(`begin: run ${run.id} is not running`);
+      const interrupted = state.rows[0].interrupted;
+      if (interrupted) return { end: { status: "cancelled", error: interrupted } };
       if (agent.deleted) return { end: { status: "cancelled", error: "agent_deleted" } };
       if (agent.paused) return { end: { status: "cancelled", error: "agent_paused" } };
       if (this.shouldStop(run)) return { end: { status: "stopped" } };
@@ -181,7 +198,9 @@ export class DbAgentPort implements AgentPort {
   }
 
   emit(run: RunTicket, delta: Delta): void {
-    this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta);
+    // Checked now and again when the hub delivers it: once the pause or delete has answered, no delta goes out.
+    const wanted = () => !this.silenced.has(run.id);
+    if (wanted()) this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, wanted);
   }
 
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused"> {
@@ -197,21 +216,25 @@ export class DbAgentPort implements AgentPort {
 
   /**
    * One transaction under `lockAgent`: settles the call (it leaves `running` in the same transaction, so its hold
-   * never stops counting before its cost lands), records how the run ended, and queues the follow-up when the owner
-   * wrote meanwhile (`pending_seq` beyond `covers_seq`) and the Agent can still answer. Announced after commit.
+   * never stops counting before its cost lands) — at no charge when it failed on our side (`busy`: the reply could not
+   * be stored) — records how the run ended (`recorded`), and queues the follow-up when the owner wrote meanwhile
+   * (`pending_seq` beyond `covers_seq`), the run was not cancelled and the Agent can still answer. Announced after commit.
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
     const { db, config } = this.deps;
     const now = new Date();
     const result = await db.tx(async (t) => {
       const agent = await lockAgent(t, run.agentId);
-      const state = await t.query<{ status: string; covers_seq: string | null; pending_seq: string | null }>(
-        "select status, covers_seq::text, pending_seq::text from agent_runs where id = $1 for update",
-        [run.id],
-      );
+      const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
       if (state.rows[0]?.status !== "running") return null;
-      const final = recorded(end, agent);
-      await settle(t, config, run.id, usage, fallback, final.status, now);
+      const posted = await t.query("select 1 from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
+        run.conversationId,
+        run.agentId,
+        run.id,
+      ]);
+      const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent });
+      const ours = final.status === "failed" && final.error === "busy";
+      await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours });
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
       const updated = await t.query<RunRow>(
@@ -221,11 +244,12 @@ export class DbAgentPort implements AgentPort {
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const covers = Number(state.rows[0].covers_seq ?? 0);
       const pending = Number(state.rows[0].pending_seq ?? 0);
-      const followUp = pending > covers && !agent.paused && !agent.deleted && agent.model !== null ? await queueRun(t, agent, pending) : null;
+      const answers = pending > covers && final.status !== "cancelled" && !agent.paused && !agent.deleted && agent.model !== null;
+      const followUp = answers ? await queueRun(t, agent, pending) : null;
       return { ended, followUp };
     });
-    this.active.delete(run.id);
     this.stopping.delete(run.id);
+    this.silenced.delete(run.id);
     if (!result) return;
     this.announce(result.ended);
     if (result.followUp) this.announce(result.followUp);

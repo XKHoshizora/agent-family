@@ -109,7 +109,8 @@ export interface AgentReply {
 /**
  * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` — the
  * conversation row, then the `agents` row, the locks pause and delete take — so once a pause or delete has committed,
- * nothing more is posted: 409 `agent_paused` / `agent_deleted`. The message is the Agent's, kind `text`, with
+ * nothing more is posted: 409 `agent_paused` / `agent_deleted`, also for a run that pause or delete marked
+ * `interrupted` after the Agent was resumed. The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
  * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed) and is
  * cut at 8 000 characters, which marks it `truncated`; `reasoning` is stored only when there is some. Throws (a plain
@@ -129,6 +130,10 @@ export async function postAsAgent(
     [conversationId, agentId, runId],
   );
   if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true };
+  // A run its Agent's pause or delete interrupted is never posted, even once the Agent is resumed (runs.ts).
+  const run = await t.query<{ interrupted: string | null }>("select interrupted from agent_runs where id = $1 and agent_id = $2", [runId, agentId]);
+  const interrupted = run.rows[0]?.interrupted;
+  if (interrupted) throw new AppError(409, interrupted);
   if (agent.deleted) throw new AppError(409, "agent_deleted");
   if (agent.paused) throw new AppError(409, "agent_paused");
 

@@ -103,8 +103,8 @@ export function messageText(min: number, max: number) {
     .pipe(userText(min, max).refine((s) => !CONTROLS_BUT_LINE_BREAKS.test(s), "control character"));
 }
 
-/** `CONTROLS_BUT_LINE_BREAKS` and `LONE_SURROGATE`, to remove every occurrence. */
-const UNSAFE_IN_TEXT = /(?![\t\n\r])\p{Cc}|\p{Cs}|[‪-‮⁦-⁩]/gu;
+/** What `messageText` refuses or removes, as one pattern to remove every occurrence: built from those rules' own patterns. */
+const UNSAFE_IN_TEXT = new RegExp(`${CONTROLS_BUT_LINE_BREAKS.source}|${LONE_SURROGATE.source}|${BIDI_CONTROLS.source}`, "gu");
 
 /**
  * A model's output under the rules of message text: what `messageText` would refuse is removed instead (nobody can

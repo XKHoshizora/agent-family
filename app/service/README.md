@@ -307,7 +307,8 @@ still recorded). A call on a site model is admitted before it starts and settled
   then.
 - **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
   it reported none, one token per character, and the record says `estimated`, at the model's price. A call that failed
-  without any output costs nothing. It charges that cost, but never more than the call held at admission: whatever is
+  without any output costs nothing, and so does a reply that could not be stored for the service's own reasons (run
+  error `busy`): its record keeps the true cost, all of it forgiven. It charges that cost, but never more than the call held at admission: whatever is
   above the hold (an estimate that turned out low) is forgiven, charged to no one — neither the balance nor any day's
   allowance. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
   ends after it uses the new day's); whatever of its charge exceeds what is left of that day's allowance is forgiven
@@ -386,8 +387,11 @@ reasoning level are checked together when either is sent. A `persona` that diffe
 #### `POST /api/agents/:id/pause`
 
 *Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`. You can still write to a paused Agent;
-it does not reply, and a reply in progress is cancelled: once this answers, nothing more from the Agent is posted (see
-Agents and runs). Resuming does not answer what was written meanwhile.
+it does not reply. Its reply in progress ends for good, decided in the pause's own transaction: a queued one is
+`cancelled` at once (`run` pushed), a running one is never posted — also if you resume before the model has finished —
+and ends `cancelled`; once this answers, nothing more from the Agent is posted and no further `delta` of that reply
+reaches you (see Agents and runs). Resuming starts nothing: what was written during the pause is not answered; your next
+message is, with everything before it in what the Agent is shown.
 
 #### `POST /api/agents/:id/resume`
 
@@ -396,8 +400,8 @@ Agents and runs). Resuming does not answer what was written meanwhile.
 #### `DELETE /api/agents/:id`
 
 *Session: required.* Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
-conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; a reply in
-progress is cancelled as on a pause). → 200 Agent.
+conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; its reply in
+progress ends as on a pause, with `agent_deleted`). → 200 Agent.
 
 #### `PUT /api/agents/:id/avatar`
 
@@ -413,8 +417,9 @@ Failures are never messages: they live on the run, which the owner learns from t
 `GET /api/conversations/:id/run`.
 
 **Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
-"resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`),
-for `cancelled` `agent_paused` or `agent_deleted`. `retryable`: it failed and trying again as it is may work (false
+"resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
+or `busy`: the service's own trouble — the reply could not be started or stored — which costs you nothing), for
+`cancelled` `agent_paused` or `agent_deleted`. `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected` and `address_not_allowed`, and for every run that did not fail). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
 
@@ -1147,7 +1152,8 @@ Clients must ignore fields and events they do not know: later batches add more.
 ```
 
 `run` and `delta` go to the Agent's owner only, in order with that conversation's other pushes (`running` after your
-message, every `delta` before the reply's `message`, the `message` before `done`). They are not stored and not
+message, every `delta` before the reply's `message`, the `message` before `done`). Once a pause or delete of the Agent
+has answered, no further `delta` of the reply it interrupted is sent (its `cancelled` follows). They are not stored and not
 replayed: after a reconnect, `GET /api/conversations/:id/run` says whether a reply is still under way (its text so far
 is not sent again; the posted message follows).
 
@@ -1271,15 +1277,23 @@ commit.
 
 **Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
 queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
-answers everything noted — not one per message, and never two replies at once. A paused or deleted Agent, or one
-without a model by then, gets no follow-up.
+answers everything noted — not one per message, and never two replies at once. A cancelled run, a paused or deleted
+Agent, or one without a model by then, gets no follow-up.
+
+**Pause and delete** end the Agent's active reply for good, in their own transaction (under the Agent's lock): a queued
+run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it has no usage record); a
+running one is marked `interrupted` with that reason. A marked run is never posted and ends `cancelled`, even if the
+Agent is resumed before the worker notices; its call is abandoned and no further `delta` of it is pushed once the
+request has answered. Nothing is queued while the Agent is paused, and resuming queues nothing: what was written during
+the pause is answered only as part of the next reply the owner's next message starts.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than 2 replies running
 (further ones wait queued), at most 8 at once in the service. It is woken after a trigger commits and also looks every
 2 s. Per run:
 
-1. `begin`, one transaction under the Agent's lock: a paused or deleted Agent ends the run `cancelled`, a stop asked
-   for meanwhile `stopped`, a model that no longer resolves `failed` (`provider_unavailable`). The run takes on what was
+1. `begin`, one transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
+   `cancelled`, a stop asked for meanwhile `stopped`, a model that no longer resolves `failed` (`provider_unavailable`),
+   and a failure of the service's own here `failed` (`busy`). The run takes on what was
    noted meanwhile; the call is admitted (Usage and points; `no_quota` ends it `failed` before any call); the Agent's
    read marker moves to what the run covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
@@ -1287,11 +1301,14 @@ without a model by then, gets no follow-up.
    (`agentRunTimeoutMs`), and when the service closes.
 3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
    delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
-   generated included (`tests/runs-pause-race.test.ts`). The message's `client_txn` is the run's id: a reply is never
+   generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
+   `tests/runs-pause.test.ts`). The message's `client_txn` is the run's id: a reply is never
    posted twice. Text follows the rules of message text (what a send would refuse is removed) and is cut at 8 000
    characters (`truncated`); reasoning is kept only when there is some.
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
-   moves the run out of `running`, how it ended is recorded, and the follow-up is queued.
+   moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
+   true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
+   Agent after; an interrupted run that posted nothing is `cancelled`.
 
 What the model is shown, for now: the system text — who the Agent is and whose, the owner's name, today's date in
 `SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do, then the persona (an Agent without one is
@@ -1302,9 +1319,11 @@ Agent's when the model allows it, else `none`.
 | How a run ends | Message | Run |
 |---|---|---|
 | The model answered | the answer (`truncated` when the model stopped at its output limit or it was cut at 8 000 characters) | `done` |
-| The owner stopped it | what had been said, `stopped: true` (nothing said: no message) | `stopped` |
-| Paused or deleted before it posted | none | `cancelled`, `agent_paused` / `agent_deleted` |
+| The owner stopped it | what had been said, `stopped: true` (nothing said: no message) | `stopped` (also when a pause or delete comes after the message was posted) |
+| Paused or deleted while queued | none, no call made, no usage record | `cancelled`, `agent_paused` / `agent_deleted` |
+| Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
 | The provider failed (key refused, unreachable, address refused) | none; what it had said is discarded | `failed` with that code |
+| The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
 | 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |

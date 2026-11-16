@@ -93,6 +93,31 @@ async function startedLastMinute(t: Tx, ownerId: string): Promise<number> {
   return rows[0]!.n;
 }
 
+/** Why an Agent's reply was cut short by the Agent itself. */
+export type Interruption = "agent_paused" | "agent_deleted";
+
+/**
+ * In the pause's (or delete's) own transaction, which holds `lockAgent`: the Agent's active reply ends for good. A
+ * queued one is cancelled at once (it never reached a model: nothing to settle). A running one is marked
+ * `interrupted`: `postAsAgent` refuses it and `finish` records it `cancelled` with that reason — even if the Agent is
+ * resumed before the worker notices. Returns the cancelled runs to announce and the running ones to stop.
+ */
+export async function interruptRuns(t: Tx, agent: AgentRow, reason: Interruption): Promise<{ cancelled: Announced[]; running: string[] }> {
+  const queued = await t.query<RunRow>(
+    `update agent_runs as r set status = 'cancelled', error = $2, finished_at = now()
+      where r.agent_id = $1 and r.status = 'queued' returning ${RUN_COLUMNS}`,
+    [agent.id, reason],
+  );
+  const running = await t.query<{ id: string }>(
+    "update agent_runs set interrupted = $2 where agent_id = $1 and status = 'running' returning id",
+    [agent.id, reason],
+  );
+  return {
+    cancelled: queued.rows.map((r) => ({ ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(r) })),
+    running: running.rows.map((r) => r.id),
+  };
+}
+
 /** Queues a reply of the locked Agent answering up to `coversSeq`. */
 export async function queueRun(t: Tx, agent: AgentRow, coversSeq: number): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
