@@ -12,8 +12,35 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
 
 ## Test and build
 
-- `npm test` runs vitest (`tests/`).
+- `npm test` runs ESLint and vitest (`tests/`).
 - `npm run build` writes `dist/` (git-ignored).
+- `npm run e2e` runs the browser end-to-end suite (`e2e/`, Playwright, Chromium; not part of `npm test`). Needs
+  Playwright's Chromium once per machine: `npx playwright install chromium`.
+
+## End-to-end suite (`e2e/`)
+
+Each spec creates its own people (one browser context each, random e-mails, handles and passwords), so the specs
+run in any order; one worker, because they share one service. Every page is watched for CSP violations, uncaught
+errors and the XSS probe (`support/fixtures.mjs`).
+
+**Local mode** (default). Global setup builds this client and the service (`npm run build` in both;
+`E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
+`TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced) and empties every table but
+`pgmigrations`, then starts one service (`node dist/server.js`) on `http://127.0.0.1:8911` (`E2E_PORT`) that serves
+`dist/` with a random `AUTH_SECRET`, a temporary `BLOB_DIR`, `RATE_LIMIT_SCALE=1000` and `SWEEP_INTERVAL_MINUTES=0`.
+Invites and mail come from the service CLI (`invite:create`, `inbox:list`). The restart spec stops and starts that
+process through a control endpoint of the runner (127.0.0.1, random port and token). Teardown stops the service and
+deletes the temporary directory; a service left by a crashed run is stopped by the next run. The service log is
+`e2e/test-results/service.log`; failures keep traces and screenshots in `e2e/test-results/`, the HTML report is in
+`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored.
+
+**Remote mode.** `E2E_BASE_URL=https://… E2E_INVITE_CMD="…" E2E_INBOX_CMD="… {email}" npm run e2e` starts nothing
+and talks to that origin. The invite code is the last line of `E2E_INVITE_CMD`'s output that is a 20-character code;
+`E2E_INBOX_CMD` must print what `inbox:list --to <email>` prints, `{email}` being replaced by a generated
+`…@example.test` address. Example for the container: `E2E_INVITE_CMD="docker exec af node dist/cli.js invite:create"`,
+`E2E_INBOX_CMD="docker exec af node dist/cli.js inbox:list --to {email}"`. Only the specs tagged `@remote` run
+(§7.1, §7.2: the real registration limit is 10 a minute per address); `E2E_REMOTE_ALL=1` runs all of them, and the
+restart spec skips itself.
 
 ## Layout
 

@@ -3,9 +3,9 @@ import globals from "globals";
 
 // Correctness only: undefined names and undefined JSX components. No style rules.
 export default [
-  { ignores: ["dist/**", "node_modules/**"] },
+  { ignores: ["dist/**", "node_modules/**", "e2e/test-results/**", "e2e/playwright-report/**"] },
   {
-    files: ["src/**/*.{js,jsx}", "tests/**/*.{js,jsx}", "*.mjs"],
+    files: ["src/**/*.{js,jsx}", "tests/**/*.{js,jsx}", "e2e/**/*.mjs", "*.mjs"],
     plugins: { react },
     languageOptions: {
       ecmaVersion: "latest",

@@ -316,7 +316,7 @@ export function ChatView({ conv }) {
           <SearchFooter search={search} emptyText="没有找到相关消息，请换个关键词" />
         </ul>
       )}
-      <ol className="messages" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
+      <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
         {messages.map((msg) => (
           <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}

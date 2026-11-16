@@ -1,0 +1,143 @@
+// What a person does in the app, by the names they see on screen (roles, labels, texts).
+import { expect } from "@playwright/test";
+
+export const rail = (page) => page.getByRole("navigation", { name: "主导航" });
+
+/** One of the rail's sections: "消息" (it may carry an unread badge), "通讯录", "设置". */
+export async function goTo(page, section) {
+  const name = section === "消息" ? /消息$/ : section;
+  await rail(page).getByRole("button", { name, exact: section !== "消息" }).click();
+}
+
+/** A row of the conversation list (or of the contacts list) whose name is exactly `title`. */
+export const listRow = (page, title) => page.getByRole("button").filter({ has: page.getByText(title, { exact: true }) });
+
+/** The open conversation titled `title`. */
+export const chatPane = (page, title) => page.getByRole("region", { name: title, exact: true });
+
+export const messageList = (chat) => chat.getByTestId("message-list");
+
+/** The messages of an open conversation whose text contains `text`. */
+export const messagesWith = (chat, text) => messageList(chat).getByRole("listitem").filter({ hasText: text });
+
+export const composer = (chat) => chat.getByRole("textbox", { name: "消息内容" });
+
+/** Opens the conversation `title` from the list; resolves with its pane. */
+export async function openChat(page, title) {
+  await goTo(page, "消息");
+  await listRow(page, title).first().click();
+  const chat = chatPane(page, title);
+  await expect(chat).toBeVisible();
+  return chat;
+}
+
+/** Types and sends `text` in the open conversation `title`; resolves once the service stored it (it has a seq). */
+export async function sendText(page, title, text) {
+  const chat = chatPane(page, title);
+  await composer(chat).fill(text);
+  await composer(chat).press("Enter");
+  await expectStored(chat, text);
+}
+
+/** Exactly one message containing `text`, stored at the service (`data-msg` is `m<seq>`, not a pending entry). */
+export async function expectStored(chat, text) {
+  const item = messagesWith(chat, text);
+  await expect(item).toHaveCount(1);
+  await expect(item).toHaveAttribute("data-msg", /^m\d+$/);
+}
+
+/** Exactly one message containing `text` is shown in `chat`. */
+export async function expectOnce(chat, text) {
+  await expect(messagesWith(chat, text)).toHaveCount(1);
+}
+
+/** 消息 → 新建 → 发起群聊 with `title` and the friends named; resolves with the new group's pane (it opens). */
+export async function createGroupUi(page, title, memberNames) {
+  await goTo(page, "消息");
+  await page.getByRole("button", { name: "新建", exact: true }).click();
+  await page.getByRole("button", { name: "发起群聊" }).click();
+  const dialog = page.getByRole("dialog", { name: "发起群聊" });
+  await dialog.getByLabel("群名称").fill(title);
+  for (const name of memberNames) await dialog.getByRole("checkbox", { name }).check();
+  await dialog.getByRole("button", { name: "创建群聊" }).click();
+  await expect(dialog).toBeHidden();
+  const chat = chatPane(page, title);
+  await expect(chat).toBeVisible();
+  return chat;
+}
+
+/** Picks `file` ({name, mimeType, buffer}) in the open conversation's image or file picker; resolves once sent. */
+export async function sendFile(page, title, file, picker = "选择文件") {
+  const chat = chatPane(page, title);
+  await chat.getByLabel(picker).setInputFiles(file);
+  await expectStored(chat, file.name);
+}
+
+/** The open group's 群资料 page (members tab first). */
+async function openGroupProfile(page, title) {
+  await chatPane(page, title).getByRole("button", { name: "群资料" }).click();
+  const profile = page.getByRole("region", { name: "群资料" });
+  await expect(profile).toBeVisible();
+  return profile;
+}
+
+async function backToChat(page, title, profile) {
+  await profile.getByRole("button", { name: "返回群聊" }).click();
+  await expect(chatPane(page, title)).toBeVisible();
+}
+
+/** 群资料 → 添加成员 → the friend named `name`. */
+export async function addMemberUi(page, title, name) {
+  const profile = await openGroupProfile(page, title);
+  await profile.getByRole("button", { name: "添加成员" }).click();
+  const dialog = page.getByRole("dialog", { name: "添加成员" });
+  await dialog.getByRole("listitem").filter({ hasText: name }).getByRole("button", { name: "添加", exact: true }).click();
+  // (The row leaves the dialog as soon as the group's new member list arrives.)
+  await expect(page.getByRole("status").filter({ hasText: `已添加${name}` })).toBeVisible();
+  await dialog.getByRole("button", { name: "完成" }).click();
+  await backToChat(page, title, profile);
+}
+
+/** 群资料 → the member named `name` → 移除 → 确认移除 (the creator only). */
+export async function removeMemberUi(page, title, name) {
+  const profile = await openGroupProfile(page, title);
+  await profile.getByRole("listitem").filter({ hasText: name }).getByRole("button", { name: "移除" }).click();
+  await page.getByRole("dialog", { name: `移除${name}` }).getByRole("button", { name: "确认移除" }).click();
+  await expect(page.getByRole("status").filter({ hasText: `已将${name}移出群聊` })).toBeVisible();
+  await backToChat(page, title, profile);
+}
+
+/** Types `term` into the list's search box (contacts, conversations and, below them, 聊天记录). */
+export async function searchEverywhere(page, term) {
+  await goTo(page, "消息");
+  await page.getByRole("searchbox", { name: "搜索联系人、群聊" }).fill(term);
+}
+
+/** A search hit (global, or in-chat with `scope` the chat) whose highlighted match is exactly `term`. */
+export const hitFor = (page, term, scope = page) => scope.getByRole("button").filter({ has: page.getByText(term, { exact: true }) });
+
+/** The scroll position of the open conversation's message list. */
+export function scrollState(chat) {
+  return messageList(chat).evaluate((list) => ({ top: list.scrollTop, fromBottom: list.scrollHeight - list.scrollTop - list.clientHeight }));
+}
+
+/** Contacts → the person's card. */
+export async function openContact(page, name) {
+  await goTo(page, "通讯录");
+  await listRow(page, name).first().click();
+  await expect(page.getByRole("region", { name: "联系人卡片" })).toBeVisible();
+}
+
+/** Settings → my profile → 退出登录; resolves on the sign-in screen. */
+export async function signOutUi(page) {
+  await goTo(page, "设置");
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByRole("heading", { name: "登录 Agent Family" })).toBeVisible();
+}
+
+/** The sign-in screen, filled and submitted. */
+export async function signInUi(page, { email, password }) {
+  await page.getByLabel("邮箱", { exact: true }).fill(email);
+  await page.getByLabel("密码", { exact: true }).fill(password);
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+}
