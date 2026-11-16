@@ -40,6 +40,11 @@ export const ESTIMATE = 10_000;
 export const MAX_COST = 2_000_000n;
 /** Reported usage that costs exactly `MAX_COST` on either meter model. */
 export const FULL_USAGE = { inputTokens: 10_000, outputTokens: 1_000 } as const;
+/** Reported usage far above what any call holds: 15 points on either meter model (an estimate gone wrong). */
+export const OVER_USAGE = { inputTokens: 100_000, outputTokens: 5_000 } as const;
+/** What `usage` costs on either meter model. */
+export const costOf = (usage: { inputTokens: number; outputTokens: number }): bigint =>
+  BigInt(usage.inputTokens) * 100n + BigInt(usage.outputTokens) * 1000n;
 
 export interface MeteredAgent {
   agentId: string;

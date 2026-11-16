@@ -152,9 +152,39 @@ describe("agent, provider, metering and run tables", () => {
       await rejectedWith(CHECK_VIOLATION, `insert into agent_runs (purpose, agent_id, owner_id, status) values ('reply', $1, $2, 'queued')`, [agent, owner]);
       await rejectedWith(CHECK_VIOLATION, `insert into agent_runs (purpose, conversation_id, owner_id, status) values ('reply', $1, $2, 'queued')`, [conversation, owner]);
       await rejectedWith(CHECK_VIOLATION, `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status) values ('draft', $1, $2, $3, 'running')`, [conversation, agent, owner]);
-      await db.query(`insert into agent_runs (purpose, owner_id, status, charge_to, hold_micro) values ('draft', $1, 'running', 'free', 1000)`, [owner]);
+      await db.query(`insert into agent_runs (purpose, owner_id, status, source, model, charge_to, hold_micro) values ('draft', $1, 'running', 'site', 'fast', 'free', 1000)`, [owner]);
       await db.query(`insert into agent_runs (purpose, owner_id, status) values ('draft', $1, 'running')`, [owner]); // drafts are not limited by the per-agent index
       expect((await db.query(`select hold_micro::text as h from agent_runs order by hold_micro desc`)).rows[0]).toEqual({ h: "1000" });
+    });
+
+    test("a run's recorded model: source and model together, and a charge exactly when it is a site model's call", async () => {
+      const { owner } = await setup();
+      const draft = (cols: string, vals: string) =>
+        `insert into agent_runs (purpose, owner_id, status, ${cols}) values ('draft', $1, 'running', ${vals})`;
+      for (const [cols, vals] of [
+        ["source", "'site'"], // no model
+        ["model", "'fast'"], // no source
+        ["source, model", "'cloud', 'fast'"],
+        ["source, model", "'site', 'fast'"], // a site call charged to nothing
+        ["source, model, charge_to", "'provider', 'm', 'free'"], // a provider call charged
+        ["charge_to", "'balance'"], // charged without a model
+      ] as const) {
+        await rejectedWith(CHECK_VIOLATION, draft(cols, vals), [owner]);
+      }
+      await db.query(draft("source, model, charge_to, hold_micro", "'site', 'fast', 'balance', 5"), [owner]);
+      await db.query(draft("source, model", "'provider', 'm'"), [owner]);
+      await db.query(`insert into agent_runs (purpose, owner_id, status) values ('draft', $1, 'queued')`, [owner]); // not admitted: neither
+      expect((await db.query("select count(*)::int n from agent_runs")).rows).toEqual([{ n: 3 }]);
+    });
+
+    test("a usage record may lack a model only together with its source, and then costs nothing", async () => {
+      const { owner } = await setup();
+      const usage = `insert into usage_records (owner_id, purpose, source, model, cost_micro, outcome) values ($1, 'draft', $2, $3, $4, 'failed')`;
+      await db.query(usage, [owner, null, null, 0]);
+      await rejectedWith(CHECK_VIOLATION, usage, [owner, null, null, 5]);
+      await rejectedWith(CHECK_VIOLATION, usage, [owner, "site", null, 0]);
+      await rejectedWith(CHECK_VIOLATION, usage, [owner, null, "fast", 0]);
+      await rejectedWith(CHECK_VIOLATION, usage, [owner, "cloud", "fast", 0]);
     });
 
     test("persona proposals reference a message and have a status", async () => {

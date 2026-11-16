@@ -9,9 +9,9 @@ import { maxCostMicro } from "./prices.ts";
  * Admission (spec 6.4): before a site-model call, in one transaction under the owner's account lock, decide the one
  * source it will charge — today's free allowance or the points balance — and hold the most it can cost against that
  * source until it is settled (settle.ts). A run's hold counts while the run is `running`; settle it before, or in the
- * transaction that, moves it out of `running`. Because every call in flight holds its maximum cost, what the owner's
- * calls can overrun is bounded: the forgiven free overrun of a day and the negative balance are each less than one
- * call's maximum cost, as long as no call costs more than it held (tests/metering-concurrency.test.ts).
+ * transaction that, moves it out of `running`. Because every call in flight holds its maximum cost and settlement
+ * charges no call more than it held, what the owner's calls can overrun is bounded: the forgiven free overrun of a day
+ * and the negative balance are each less than one call's maximum cost (tests/metering-concurrency.test.ts).
  *
  * Lock order: the run row (admitRun, settle), then the `accounts` row. Neither function locks a conversation or an
  * `agents` row: callers that need those take them first.
@@ -98,26 +98,33 @@ export async function admit(
 
 /**
  * `admit` for the run `runId`, which must be `running`, belong to `ownerId` and not have been admitted yet: locks the
- * run row, admits, and writes `charge_to` and `hold_micro` onto it, all in the caller's transaction. A refusal throws
- * (402 `no_quota`) and writes nothing.
+ * run row, admits, and records on it the call's `source` and `model` (`resolved.name`) with its `charge_to` and
+ * `hold_micro` — what settlement goes by — all in the caller's transaction. A refusal throws (402 `no_quota`) and
+ * writes nothing.
  */
 export async function admitRun(
   t: Tx,
   config: Pick<Config, "freeDailyMicro" | "siteTimezone">,
   runId: string,
   ownerId: string,
-  resolved: Pick<Resolved, "source" | "tier" | "price" | "call">,
+  resolved: Pick<Resolved, "source" | "name" | "tier" | "price" | "call">,
   inputTokensEstimate: number,
   now: Date,
 ): Promise<Admission> {
-  const { rows } = await t.query<{ owner_id: string; status: string; charge_to: string | null; hold_micro: string }>(
-    "select owner_id, status, charge_to, hold_micro::text from agent_runs where id = $1 for update",
+  const { rows } = await t.query<{ owner_id: string; status: string; source: string | null }>(
+    "select owner_id, status, source from agent_runs where id = $1 for update",
     [runId],
   );
   const run = rows[0];
   if (!run || run.owner_id !== ownerId || run.status !== "running") throw new Error(`admitRun: ${runId} is not a running run of ${ownerId}`);
-  if (run.charge_to !== null || run.hold_micro !== "0") throw new Error(`admitRun: ${runId} is already admitted`);
+  if (run.source !== null) throw new Error(`admitRun: ${runId} is already admitted`);
   const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now);
-  await t.query("update agent_runs set charge_to = $2, hold_micro = $3 where id = $1", [runId, admission.chargeTo, admission.holdMicro.toString()]);
+  await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5 where id = $1", [
+    runId,
+    resolved.source,
+    resolved.name,
+    admission.chargeTo,
+    admission.holdMicro.toString(),
+  ]);
   return admission;
 }

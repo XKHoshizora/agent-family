@@ -294,17 +294,24 @@ still recorded). A call on a site model is admitted before it starts and settled
   per image; 300 per KB of PDF) plus the model's whole output limit, at the model's prices. A free-tier model is
   charged to today's free allowance while what is left of it, less what your running calls hold against it, is above
   zero; otherwise to the balance, by the same rule; a paid-tier model only to the balance. With neither, the call does
-  not start: `no_quota` (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance`.
-- **Settlement** charges what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
-  reported none, one token per character, and the record says `estimated`. A call that failed without any output costs
-  nothing. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
-  ends after it uses the new day's); whatever exceeds what is left of that day's allowance is forgiven: charged neither
-  to the balance nor to the next day. A call on the balance is charged in full and may take it below zero; at or below
-  zero nothing more starts on the balance until the operator's grants bring it above zero.
-- So however many replies you start at once, the overrun forgiven in a day and the debt on the balance are each less
-  than one call's maximum cost, as long as a call costs no more than it held (`tests/metering-concurrency.test.ts`).
-- Every call appends one usage record (who, which Agent, which source and model, tokens, cost, and how much of it the
-  allowance, the balance and forgiveness took, outcome); every change of a balance one ledger entry: `grant` and
+  not start: `no_quota` (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance`. The run records
+  the model it was admitted on with its source and hold, and settlement goes by that, whatever the Agent's model is by
+  then.
+- **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
+  it reported none, one token per character, and the record says `estimated`, at the model's price. A call that failed
+  without any output costs nothing. It charges that cost, but never more than the call held at admission: whatever is
+  above the hold (an estimate that turned out low) is forgiven, charged to no one — neither the balance nor any day's
+  allowance. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
+  ends after it uses the new day's); whatever of its charge exceeds what is left of that day's allowance is forgiven
+  too: charged neither to the balance nor to the next day. A call on the balance is charged in full (up to its hold)
+  and may take the balance below zero; at or below zero nothing more starts on the balance until the operator's grants
+  bring it above zero.
+- So however many replies you start at once, the free overrun forgiven in a day and the debt on the balance are each
+  less than one call's maximum cost (`tests/metering-concurrency.test.ts`, also with every call costing far more than it
+  held).
+- Every call appends one usage record (who, which Agent, which source and model, tokens, the true cost, and how much of
+  it the allowance, the balance and forgiveness took, outcome; a run that ended before it was admitted leaves a record
+  with neither source nor model, costing nothing); every change of a balance one ledger entry: `grant` and
   `adjust` (the operator giving points, or taking them back with a negative `credits:grant`) and `usage` (a call, linked
   to its record). A balance always equals the sum of its ledger.
 
@@ -323,7 +330,8 @@ still recorded). A call on a site model is admitted before it starts and settled
   read at that moment).
 - `recent`: the last 7 site-days (today included) summed per Agent, model and source: `model` is the site model's `id`
   or the provider model's name, `points` what the calls cost (`"0"` for `provider`), `replies` how many were replies;
-  `agentId` is `null` for persona drafts. Largest first.
+  `agentId` is `null` for persona drafts. Largest first. Runs that never reached a model (no model recorded) are not
+  listed.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
 
 ### Agents

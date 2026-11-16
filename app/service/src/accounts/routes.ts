@@ -58,7 +58,8 @@ export function registerAccountRoutes(app: FastifyInstance): void {
           `select agent_id, model, source, sum(cost_micro)::text as points,
                   (count(*) filter (where purpose = 'reply'))::int as replies
              from usage_records
-            where owner_id = $1 and created_at >= $2
+            -- A run settled without reaching a model has no model to list (and cost nothing).
+            where owner_id = $1 and created_at >= $2 and source is not null
             group by agent_id, model, source
             order by sum(cost_micro) desc, model, source, agent_id`,
           [me.id, siteDayStart(now, config.siteTimezone, RECENT_DAYS - 1)],
