@@ -36,7 +36,7 @@ npm run typecheck    # tsc --noEmit (src and tests)
 npm run invite:create -- [--ttl-hours <n>]          # prints a new invite code (default 72 h)
 npm run inbox:list -- [--to <email>]                # the mail outbox
 npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (by hand; the server does it itself)
-npm run credits:grant -- --handle <h> --points <n> [--note <text>]   # n: decimal, up to 6 fraction digits, may be negative; prints the new balance
+npm run credits:grant -- --handle <h> --points <n> [--note <text>]   # n: decimal, up to 6 fraction digits, may be negative (an adjustment); prints the new balance
 npm run credits:show -- --handle <h>                # a person's tier and points balance (an Agent's handle is refused)
 npm run tier:set -- --handle <h> --tier <name>      # a tier named in AGENT_TIERS
 npm run models:list                                 # the site models: id, label, tier, protocol, prices (never the key)
@@ -217,13 +217,14 @@ the gateway's own tests talk to `protocolStub()`, a local server speaking the fo
 
 ### Errors
 
-Every error body is `{"error": "<snake_case_code>"}`, sometimes with details next to it: a string `reason`, or for
-`provider_in_use` the list `agents`. Shared codes:
+Every error body is `{"error": "<snake_case_code>"}`, sometimes with details next to it: strings (`reason`,
+`resetsAt`), or for `provider_in_use` the list `agents`. Shared codes:
 
 | Status | `error` | Meaning |
 |---|---|---|
 | 400 | `invalid_request` | Malformed or not acceptable input (also 414 for an over-long path parameter, 415 for an unsupported content type) |
 | 401 | `unauthenticated` | No valid session (or a WebSocket ticket that is unknown, used or expired) |
+| 402 | `no_quota` | A site-model call cannot start: nothing is left to pay for it (see Usage and points). `reason` `free_and_balance` (a free-tier model: today's free allowance and the balance are both used up; `resetsAt`, the next midnight in `SITE_TIMEZONE`, ISO instant) or `balance` (a paid-tier model: no balance) |
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
 | 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
@@ -285,6 +286,28 @@ operator (`npm run credits:grant`, to a person's handle; an Agent's handle is re
 changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, `/api/credits` and `/api/accounts`
 are the JSON 404.
 
+**What a model call costs** (`src/metering/`). A call on a provider model costs nothing and needs no points (it is
+still recorded). A call on a site model is admitted before it starts and settled when it ends:
+
+- **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call
+  can cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500
+  per image; 300 per KB of PDF) plus the model's whole output limit, at the model's prices. A free-tier model is
+  charged to today's free allowance while what is left of it, less what your running calls hold against it, is above
+  zero; otherwise to the balance, by the same rule; a paid-tier model only to the balance. With neither, the call does
+  not start: `no_quota` (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance`.
+- **Settlement** charges what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
+  reported none, one token per character, and the record says `estimated`. A call that failed without any output costs
+  nothing. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
+  ends after it uses the new day's); whatever exceeds what is left of that day's allowance is forgiven: charged neither
+  to the balance nor to the next day. A call on the balance is charged in full and may take it below zero; at or below
+  zero nothing more starts on the balance until the operator's grants bring it above zero.
+- So however many replies you start at once, the overrun forgiven in a day and the debt on the balance are each less
+  than one call's maximum cost, as long as a call costs no more than it held (`tests/metering-concurrency.test.ts`).
+- Every call appends one usage record (who, which Agent, which source and model, tokens, cost, and how much of it the
+  allowance, the balance and forgiveness took, outcome); every change of a balance one ledger entry: `grant` and
+  `adjust` (the operator giving points, or taking them back with a negative `credits:grant`) and `usage` (a call, linked
+  to its record). A balance always equals the sum of its ledger.
+
 #### `GET /api/usage`
 
 *Session: required.* Your own account, and nothing else: the route takes no parameter (any query string is 400
@@ -295,9 +318,12 @@ are the JSON 404.
   (a tier the configuration no longer names gets the `free` limit); `agentCount` is your Agents that are not deleted.
 - `balance` is the points balance. `free.allowance` is `FREE_DAILY_POINTS`, `free.used` what today's site-day has used,
   `free.resetsAt` the next midnight in `SITE_TIMEZONE` (ISO instant).
-- `canStartFreeReply`: today's free allowance is not used up, or the balance is above zero.
-- `recent`: the last 7 site-days (today included) summed per Agent, model and source: `points` is what the calls
-  cost (`"0"` for `provider`), `replies` how many were replies; `agentId` is `null` for persona drafts. Largest first.
+- `canStartFreeReply`: whether a reply on a free-tier model would be admitted now: what is left of today's free
+  allowance, or of the balance, after what your running calls hold against it, is above zero (admission's own rule,
+  read at that moment).
+- `recent`: the last 7 site-days (today included) summed per Agent, model and source: `model` is the site model's `id`
+  or the provider model's name, `points` what the calls cost (`"0"` for `provider`), `replies` how many were replies;
+  `agentId` is `null` for persona drafts. Largest first.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
 
 ### Agents

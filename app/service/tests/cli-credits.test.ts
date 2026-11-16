@@ -76,7 +76,7 @@ describe("credits:grant", () => {
     expect((await db.query("select 1 from balance_ledger")).rowCount).toBe(0);
   }, TIMEOUT);
 
-  it("a grant of 5 then -2 shows 3, with the note in the ledger", async () => {
+  it("a grant of 5 then -2 shows 3, with the note in the ledger; taking points back is recorded as an adjustment", async () => {
     const a = await signUp(app, "clisum");
     const first = await cli("credits:grant", "--handle", a.handle, "--points", "5", "--note", "welcome");
     expect(first.code).toBe(0);
@@ -91,7 +91,7 @@ describe("credits:grant", () => {
     const { rows } = await db.query("select delta_micro::text d, reason, note from balance_ledger order by id");
     expect(rows).toEqual([
       { d: "5000000", reason: "grant", note: "welcome" },
-      { d: "-2000000", reason: "grant", note: null },
+      { d: "-2000000", reason: "adjust", note: null },
     ]);
     // exact fractions
     expect((await cli("credits:grant", "--handle", a.handle, "--points", "0.000001")).stdout.trim()).toBe("3.000001");

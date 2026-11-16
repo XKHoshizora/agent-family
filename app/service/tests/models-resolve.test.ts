@@ -41,6 +41,7 @@ describe("resolveModel", () => {
     expect(process.env.UPSTREAM_TEST_KEY).toBe(SITE_ENV.UPSTREAM_TEST_KEY); // useApp's env is the process's while the file runs
     expect(await resolveModel(db, config(), agent)).toEqual({
       source: "site",
+      name: "thinker",
       call: { protocol: "anthropic", baseUrl: "https://api.example.test/v1", apiKey: SITE_ENV.UPSTREAM_TEST_KEY, model: "think-1", maxOutputTokens: 8192 },
       contextTokens: 200000,
       vision: true,
@@ -81,6 +82,7 @@ describe("resolveModel", () => {
     const deep = await agentWith(owner, { model: { source: "provider", providerId: provider.id, model: "deep" }, reasoning: "xhigh" });
     expect(await resolveModel(db, config(), deep)).toEqual({
       source: "provider",
+      name: "deep",
       call: { protocol: "gemini", baseUrl: "https://api.example.com/v1", apiKey: "gm-key-0123456789", model: "deep", maxOutputTokens: config().providerDefaultMaxOutputTokens },
       contextTokens: 50000,
       vision: true,

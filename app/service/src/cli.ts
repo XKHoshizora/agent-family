@@ -114,7 +114,8 @@ if (command === "migrate") {
       const note = flag(args, "--note") ?? null;
       const balance = await db.tx(async (t) => {
         await lockAccount(t, person.id);
-        return applyLedger(t, person.id, micro, "grant", note);
+        // Taking points back is an adjustment, not a grant.
+        return applyLedger(t, person.id, micro, micro < 0n ? "adjust" : "grant", note);
       });
       console.log(formatPoints(balance));
     } else if (command === "tier:set") {

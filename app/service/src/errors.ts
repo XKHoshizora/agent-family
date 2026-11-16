@@ -11,6 +11,7 @@ export type ErrorCode =
   | "cannot_send"
   | "too_large"
   | "busy"
+  | "no_quota"
   | "provider_in_use"
   | "address_not_allowed"
   | "provider_rejected"

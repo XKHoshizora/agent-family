@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { chargeSource, headroom, readHolds } from "../metering/admit.ts";
 import { requirePrincipal } from "../session.ts";
 import { formatPoints, freeUsedToday, nextSiteMidnight, siteDayStart } from "./store.ts";
 
@@ -43,7 +44,7 @@ export function registerAccountRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await requirePrincipal(req);
       const now = new Date();
-      const [account, agents, used, recent] = await Promise.all([
+      const [account, agents, used, holds, recent] = await Promise.all([
         db.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]),
         db.query<{ n: number }>(
           `select count(*)::int as n
@@ -52,6 +53,7 @@ export function registerAccountRoutes(app: FastifyInstance): void {
           [me.id],
         ),
         freeUsedToday(db, me.id, now, config.siteTimezone),
+        readHolds(db, me.id),
         db.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
           `select agent_id, model, source, sum(cost_micro)::text as points,
                   (count(*) filter (where purpose = 'reply'))::int as replies
@@ -76,7 +78,8 @@ export function registerAccountRoutes(app: FastifyInstance): void {
           used: formatPoints(used),
           resetsAt: nextSiteMidnight(now, config.siteTimezone).toISOString(),
         },
-        canStartFreeReply: used < config.freeDailyMicro || balanceMicro > 0n,
+        // Admission's own rule (src/metering/admit.ts), running calls' holds included; read without the lock.
+        canStartFreeReply: chargeSource("free", headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro: used, balanceMicro, holds })) !== null,
         recent: recent.rows.map((r) => ({
           agentId: r.agent_id,
           model: r.model,

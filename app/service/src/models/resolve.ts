@@ -7,6 +7,8 @@ import type { ModelCall } from "./gateway.ts";
 /** An Agent's model, ready to call: where and how, what it can take, and (site models) what it costs. */
 export interface Resolved {
   source: "site" | "provider";
+  /** What usage records (and `GET /api/usage`) call the model: a site model's id, a provider model's name. */
+  name: string;
   /** Everything of a `ModelCall` that comes from the model, the key in plaintext included: hand it to the gateway only. */
   call: Omit<ModelCall, "system" | "messages" | "signal" | "reasoning">;
   contextTokens: number;
@@ -40,6 +42,7 @@ export async function resolveModel(
     if (!site || apiKey === undefined || apiKey === "") return null;
     return {
       source: "site",
+      name: site.id,
       call: { protocol: site.protocol, baseUrl: site.baseUrl, apiKey, model: site.model, maxOutputTokens: site.maxOutputTokens },
       contextTokens: site.contextTokens,
       vision: site.vision,
@@ -55,6 +58,7 @@ export async function resolveModel(
   if (!provider || !listed) return null;
   return {
     source: "provider",
+    name: listed.name,
     call: { protocol: provider.protocol, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: listed.name, maxOutputTokens: config.providerDefaultMaxOutputTokens },
     contextTokens: listed.contextTokens,
     vision: listed.vision,
