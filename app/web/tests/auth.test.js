@@ -43,7 +43,7 @@ describe("field rules", () => {
     // code points, not UTF-16 units; invisible format characters do not count and do not make a name
     expect(v.displayName("😀".repeat(40))).toBe("");
     expect(v.displayName("😀".repeat(41))).toBe("昵称最多 40 个字");
-    expect(v.displayName("\u200b\u200d\ufeff")).toBe("请输入昵称");
+    expect(v.displayName("\u200b\u200d\ufeff")).toBe("昵称需要包含看得见的文字");
     expect(v.displayName(`${"a".repeat(40)}\u200b`)).toBe("");
     expect(v.displayName(" 小安 ")).toBe("");
   });
@@ -72,6 +72,28 @@ describe("field rules", () => {
     expect(v.hasVisibleText(" \n\t　")).toBe(false);
     expect(v.hasVisibleText("\u200Ba")).toBe(true);
     expect(v.hasVisibleText("。")).toBe(true);
+  });
+
+  // Characters that show nothing although they are not format characters (Hangul fillers, the Braille blank,
+  // variation selectors without a base, the combining grapheme joiner), and controls.
+  const BLANKS = ["\u{3164}", "\u{115F}\u{1160}", "\u{FFA0}", "\u{2800}", "\u{FE0F}", "\u{E0100}", "\u{34F}", "\u{3164} \u{2800}"];
+  const LIVELY = ["\u{1F469}\u{200D}\u{1F4BB}", "1\u{FE0F}\u{20E3}", "\u{1F1EF}\u{1F1F5}", "\u{1F44D}\u{1F3FD}", "\u{2764}\u{FE0F}", "\u{5E9}\u{5DC}\u{5D5}\u{5DD}"];
+
+  it("nothing visible also means characters that show nothing; emoji and right-to-left text are visible", () => {
+    for (const blank of BLANKS) {
+      expect([blank, v.hasVisibleText(blank)]).toEqual([blank, false]);
+      expect([blank, v.groupTitle(blank)]).toEqual([blank, "群名称需要包含看得见的文字"]);
+      expect([blank, v.displayName(blank)]).toEqual([blank, "昵称需要包含看得见的文字"]);
+    }
+    expect(v.hasVisibleText("\u{7}\u{1F}")).toBe(false);
+    for (const lively of LIVELY) {
+      expect([lively, v.hasVisibleText(lively), v.groupTitle(lively), v.displayName(lively)]).toEqual([lively, true, "", ""]);
+    }
+  });
+
+  it("message text: controls other than tab, line feed and carriage return are dropped, as the service would refuse them", () => {
+    expect(v.messageText("a\u{7}b\tc\r\nd\u{85}e\u{0}")).toBe("ab\tc\r\nde");
+    expect(v.displayName("bad\u{7}name")).toBe("昵称只能是一行");
   });
 
   it("handle: ^[a-z0-9_]{3,24}$", () => {

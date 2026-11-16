@@ -556,6 +556,17 @@ describe("composer", () => {
     expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "safeelif.exe" });
   });
 
+  it("characters that show nothing (Hangul filler, Braille blank) cannot be sent; stray controls are dropped before sending", async () => {
+    const { api } = await openApp();
+    await openChat("小安");
+    type("\u{3164}\u{2800}");
+    expect(screen.getByRole("button", { name: "发送" }).disabled).toBe(true);
+    expect(document.querySelector(".composer-hint").textContent).toContain("消息里没有看得见的文字");
+    type("bell\u{7}ed");
+    press("Enter");
+    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "belled" });
+  });
+
   it("drafts are kept per conversation in the data layer", async () => {
     const { layer } = await openApp();
     await openChat("小安");
