@@ -3,10 +3,12 @@ import dns from "node:dns/promises";
 import net from "node:net";
 import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from "undici";
 import { AppError } from "../errors.ts";
+import { createSlots, type Slots } from "../slots.ts";
 
 /**
  * The address guard. Every request the service makes to a host a user named (their providers' `baseUrl`) goes
- * through `guardedFetch`, and nothing else in the service opens a connection to such a host.
+ * through `guardedFetch`, and nothing else in the service opens a connection to such a host. The model gateway sends
+ * site models' calls through it too, so every model call obeys the same rules and the same cap.
  */
 
 // --- which addresses are public ---------------------------------------------------------------------------
@@ -168,12 +170,32 @@ export function normaliseBaseUrl(raw: string, allowInsecureLocal: boolean): stri
 /** How the guard looks a name up: `dns.promises.lookup` with `{ all: true }` (the default), or a test's own. */
 export type Resolve = (hostname: string, options: { all: true }) => Promise<LookupAddress[]>;
 
+/**
+ * Calls through the guard (to providers and site models: tests, model lists, answers) that may be in flight at once
+ * in the whole service (one process), name lookups included.
+ */
+export const MAX_PROVIDER_CALLS = 16;
+
+/** The service-wide count of provider calls in flight: shared by every `guardedFetch` not given its own. */
+const SITE_CALLS: Slots = createSlots(MAX_PROVIDER_CALLS);
+/** The one key calls are counted under: the cap is for everyone together. */
+const SITE = "site";
+
 export interface GuardOptions {
   resolve?: Resolve;
   /** The response body may be at most this long (after decoding); one byte more aborts the request. */
   maxResponseBytes: number;
-  /** The request is aborted when this long passes without progress: until the headers, then between body chunks. */
+  /**
+   * The request is aborted when this long passes without progress: until the headers, then from the headers to the
+   * first body chunk and between body chunks. The total duration is the caller's to bound (`init.signal`).
+   */
   timeoutMs: number;
+  /**
+   * Where calls in flight are counted, one slot each from before the name lookup until the call is over (body read,
+   * cancelled, failed, aborted or timed out); a call that finds no slot is `provider_unavailable` at once. Default: the
+   * service-wide count, at most `MAX_PROVIDER_CALLS`. Tests pass their own.
+   */
+  calls?: Slots;
   /**
    * Tests only, through `BuildOptions` (never from configuration): loopback addresses are allowed, and `http:`
    * to them. Every other rule stands.
@@ -253,34 +275,41 @@ const NULL_BODY_STATUS = new Set([204, 205]);
 
 /**
  * A `fetch` for calling users' providers. For each request: the URL must pass `parseProviderUrl` (https, no
- * credentials, a plain host, a sane port); the host is resolved once and every address checked (`checkedAddresses`);
- * the connection is made to exactly those addresses (the name stays the Host and TLS SNI); redirects are never
- * followed (any 3xx is `provider_unavailable`); the request is aborted after `timeoutMs` without progress and when
- * the body passes `maxResponseBytes` (`provider_unavailable`). Refusals are `AppError(400, "address_not_allowed")`
- * and happen before any connection. Errors never carry the upstream's body or headers, nor the request's. An abort
- * by the caller's own `signal` passes through as that abort.
+ * credentials, a plain host, a sane port); a slot among the calls in flight must be free (`GuardOptions.calls`, else
+ * `provider_unavailable` at once); the host is resolved once and every address checked (`checkedAddresses`); the
+ * connection is made to exactly those addresses (the name stays the Host and TLS SNI); redirects are never followed
+ * (any 3xx is `provider_unavailable`); the request is aborted after `timeoutMs` without progress (re-armed when the
+ * headers arrive and at every body chunk) and when the body passes `maxResponseBytes` (`provider_unavailable`).
+ * Refusals are `AppError(400, "address_not_allowed")` and happen before any connection. Errors never carry the
+ * upstream's body or headers, nor the request's. An abort by the caller's own `signal` passes through as that abort
+ * and closes the connection at once, whether or not the body is being read.
  */
 export function guardedFetch(opts: GuardOptions): typeof fetch {
   const resolve: Resolve = opts.resolve ?? ((hostname, options) => dns.lookup(hostname, options));
   const local = opts.allowInsecureLocal === true;
+  const calls = opts.calls ?? SITE_CALLS;
 
   async function guarded(input: string | URL | Request, init: RequestInit = {}): Promise<Response> {
     if (typeof input !== "string" && !(input instanceof URL)) throw new TypeError("guardedFetch takes a URL or a string, not a Request");
     const url = parseProviderUrl(typeof input === "string" ? input : input.href, local);
     if (!url) throw addressNotAllowed();
+    if (calls.take(SITE) !== "taken") throw providerUnavailable();
 
+    // From here on `finish` gives the slot back, exactly once, however the call ends.
     const own = new AbortController();
     const signal = init.signal ? AbortSignal.any([own.signal, init.signal]) : own.signal;
     let agent: Agent | undefined;
     let timer: NodeJS.Timeout | undefined;
     let finished = false;
     let timedOut = false;
-    /** Ends the request for good: no timer, no connection. Idempotent. */
+    /** Ends the request for good: no timer, no connection, the slot given back. Idempotent. */
     const finish = () => {
       if (finished) return;
       finished = true;
       clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
       if (agent) void agent.destroy().catch(() => {});
+      calls.release(SITE);
     };
     /** (Re)starts the "no progress for timeoutMs" timer. */
     const arm = () => {
@@ -331,6 +360,8 @@ export function guardedFetch(opts: GuardOptions): typeof fetch {
     };
 
     arm();
+    // An abort (the caller's, or the timer's) ends the call at once, even while nobody reads the body.
+    signal.addEventListener("abort", finish, { once: true });
     try {
       const addresses = await checkedAddresses(url, resolve, local, signal);
       signal.throwIfAborted();
@@ -342,6 +373,7 @@ export function guardedFetch(opts: GuardOptions): typeof fetch {
         connect: { lookup: pinnedLookup(addresses), timeout: opts.timeoutMs },
       });
       const res = await undiciFetch(url.href, { ...(init as UndiciRequestInit), signal, redirect: "manual", dispatcher: agent });
+      arm(); // the headers are progress: the first body chunk gets a full `timeoutMs`
       if (res.status >= 300 && res.status < 400) throw providerUnavailable();
       const declared = res.headers.get("content-length");
       if (declared !== null && Number(declared) > opts.maxResponseBytes) throw providerUnavailable();

@@ -27,11 +27,14 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
 /**
  * Builds the app once per test file (against TEST_DATABASE_URL, with rate limits
  * raised and no answer floor) and truncates every table except the migrations table before each test.
+ * `env` is the app's configuration and, while the file runs, also set in `process.env` (restored after), as it would
+ * be in production: what is read when used rather than at start-up (a site model's key, `resolveModel`) sees it too.
  * `allowInsecureLocal` lets the app's providers reach a local stub over plain HTTP (src/providers/guard.ts).
+ * `models` replaces the model gateway (a `scriptedGateway()` from helpers/models.ts).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs" | "uploads">> & { env?: Record<string, string> } & BuildOptions = {},
+  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
   const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, ...overrides } = extra;
   const options: BuildOptions = {
@@ -55,7 +58,12 @@ export function useApp(
       },
     });
 
+  const previous = new Map<string, string | undefined>();
   beforeAll(async () => {
+    for (const [name, value] of Object.entries(env ?? {})) {
+      previous.set(name, process.env[name]);
+      process.env[name] = value;
+    }
     const config = loadConfig({
       ...process.env,
       DATABASE_URL: testDatabaseUrl(),
@@ -78,6 +86,10 @@ export function useApp(
   afterAll(async () => {
     await instance?.close();
     await database?.close();
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
 
   return { app: forward(() => current(instance)), db: forward(() => current(database)) };

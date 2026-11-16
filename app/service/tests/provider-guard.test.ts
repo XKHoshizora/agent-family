@@ -3,7 +3,8 @@ import net from "node:net";
 import tls from "node:tls";
 import { afterEach, describe, expect, it } from "vitest";
 import { AppError } from "../src/errors.ts";
-import { guardedFetch, isPublicAddress, normaliseBaseUrl, type Resolve } from "../src/providers/guard.ts";
+import { guardedFetch, isPublicAddress, MAX_PROVIDER_CALLS, normaliseBaseUrl, type Resolve } from "../src/providers/guard.ts";
+import { createSlots } from "../src/slots.ts";
 
 /**
  * The address guard (`src/providers/guard.ts`): every request to a user-supplied host goes through it. These
@@ -406,5 +407,201 @@ describe("guardedFetch answers", () => {
     const error = (await pending) as Error;
     expect(error).not.toBeInstanceOf(AppError);
     expect(error.name).toBe("AbortError");
+  });
+
+  it("the caller's abort in the middle of the body closes the connection at once, read or not", async () => {
+    let closed = false;
+    const server = await listener((_req, res) => {
+      res.writeHead(200);
+      res.write("part of it");
+      res.on("close", () => (closed = true));
+    });
+    const controller = new AbortController();
+    const res = await f(`http://127.0.0.1:${server.port}/`, { signal: controller.signal });
+    expect(res.status).toBe(200);
+    controller.abort();
+    const deadline = Date.now() + 1000;
+    while (!closed && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    expect(closed).toBe(true);
+  });
+});
+
+/** Reads a body chunk by chunk: what arrived, and the error that ended it (null when it ended normally). */
+async function readAll(body: ReadableStream<Uint8Array>): Promise<{ text: string; error: unknown }> {
+  const reader = body.getReader();
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return { text, error: null };
+      text += Buffer.from(value).toString("utf8");
+    }
+  } catch (error) {
+    return { text, error };
+  }
+}
+
+describe("guardedFetch: the time limit runs between bytes, from the headers on", () => {
+  const T = 500;
+  const quick = guardedFetch({ maxResponseBytes: 10_000, timeoutMs: T, allowInsecureLocal: true });
+
+  /** Headers after `T/2`, then one chunk every `T/2` (`count` in all, then the end unless `stall`). */
+  const steady = (count: number, stall = false) =>
+    listener((_req, res) => {
+      setTimeout(() => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.flushHeaders();
+        let i = 0;
+        const tick = setInterval(() => {
+          res.write(`${i}`);
+          if (++i === count) {
+            clearInterval(tick);
+            if (!stall) res.end();
+          }
+        }, T / 2);
+        res.on("close", () => clearInterval(tick));
+      }, T / 2);
+    });
+
+  it("is re-armed when the headers arrive: a long stream whose first byte comes T/2 after late headers is delivered", async () => {
+    const server = await steady(6);
+    const started = Date.now();
+    const res = await quick(`http://127.0.0.1:${server.port}/`);
+    expect(await readAll(res.body!)).toEqual({ text: "012345", error: null });
+    expect(Date.now() - started).toBeGreaterThan(3 * T);
+  });
+
+  it("a long stream that stalls after some chunks is aborted about timeoutMs after its last byte", async () => {
+    const server = await steady(4, true);
+    const res = await quick(`http://127.0.0.1:${server.port}/`);
+    const started = Date.now();
+    const { text, error } = await readAll(res.body!);
+    expect(text).toBe("0123");
+    expect(error).toMatchObject(unavailable);
+    expect(Date.now() - started).toBeGreaterThan(2 * T);
+    expect(Date.now() - started).toBeLessThan(2 * T + 3000);
+  });
+});
+
+describe("guardedFetch: provider calls in flight, site-wide", () => {
+  /** A resolver whose answers wait until `open()`: a lookup in progress holds its call's slot. */
+  function gatedResolver(address = "127.0.0.1") {
+    const waiting: Array<() => void> = [];
+    const resolve: Resolve = () =>
+      new Promise((ok) => {
+        waiting.push(() => ok([{ address, family: net.isIP(address) }]));
+      });
+    return {
+      resolve,
+      waiting,
+      open: () => {
+        for (const go of waiting.splice(0)) go();
+      },
+    };
+  }
+  const waitFor = async (check: () => boolean) => {
+    const deadline = Date.now() + 2000;
+    while (!check() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+    expect(check()).toBe(true);
+  };
+
+  it("over the cap a call is provider_unavailable at once, without a lookup; ending a call gives its slot back", async () => {
+    const calls = createSlots(2);
+    const gate = gatedResolver();
+    const server = await listener();
+    const f = guardedFetch({ resolve: gate.resolve, calls, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
+    const url = `http://capped.example:${server.port}/`;
+    const first = f(url);
+    const second = f(url);
+    await waitFor(() => gate.waiting.length === 2);
+    expect(calls.inProgress()).toBe(2);
+
+    const started = Date.now();
+    expect(await settle(f(url))).toMatchObject(unavailable);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(gate.waiting).toHaveLength(2); // the refused call looked nothing up
+
+    gate.open();
+    expect(await (await first).text()).toBe("ok");
+    expect(await (await second).text()).toBe("ok");
+    expect(calls.inProgress()).toBe(0);
+    const third = f(url);
+    await waitFor(() => gate.waiting.length === 1);
+    gate.open();
+    expect(await (await third).text()).toBe("ok");
+    expect(server.connections()).toBe(3);
+  });
+
+  it("every way a call ends gives its slot back: refusal after the lookup, 3xx, stall, abort, a cancelled or broken body", async () => {
+    const calls = createSlots(10);
+    const server = await listener((req, res) => {
+      if (req.url === "/redirect") {
+        res.writeHead(302, { location: "/" });
+        res.end();
+      } else if (req.url === "/stall") {
+        res.writeHead(200);
+        res.write("a");
+      } else if (req.url === "/silent") {
+        // never answers
+      } else if (req.url === "/broken") {
+        res.writeHead(200);
+        res.write("a");
+        setTimeout(() => res.socket?.destroy(), 20);
+      } else {
+        res.end("ok");
+      }
+    });
+    const at = (path: string) => `http://127.0.0.1:${server.port}${path}`;
+    const f = guardedFetch({ calls, maxResponseBytes: 1000, timeoutMs: 300, allowInsecureLocal: true });
+
+    const privateName = guardedFetch({ resolve: async () => [{ address: "10.0.0.5", family: 4 }], calls, maxResponseBytes: 1000, timeoutMs: 300 });
+    expect(await settle(privateName("https://intranet.example/"))).toMatchObject(refused);
+    expect(calls.inProgress()).toBe(0);
+
+    expect(await settle(f(at("/redirect")))).toMatchObject(unavailable);
+    expect(calls.inProgress()).toBe(0);
+
+    expect(await settle(f(at("/silent")))).toMatchObject(unavailable);
+    expect(calls.inProgress()).toBe(0);
+
+    expect((await readAll((await f(at("/stall"))).body!)).error).toMatchObject(unavailable);
+    expect(calls.inProgress()).toBe(0);
+
+    expect((await readAll((await f(at("/broken"))).body!)).error).toMatchObject(unavailable);
+    expect(calls.inProgress()).toBe(0);
+
+    const controller = new AbortController();
+    const aborted = settle(f(at("/silent"), { signal: controller.signal }));
+    await waitFor(() => calls.inProgress() === 1);
+    controller.abort();
+    expect(((await aborted) as Error).name).toBe("AbortError");
+    expect(calls.inProgress()).toBe(0);
+
+    const cancelled = await f(at("/stall"));
+    expect(calls.inProgress()).toBe(1);
+    await cancelled.body!.cancel();
+    expect(calls.inProgress()).toBe(0);
+
+    await (await f(at("/"))).text();
+    expect(calls.inProgress()).toBe(0);
+  });
+
+  it(`by default one count for the whole process: at most ${MAX_PROVIDER_CALLS} calls at once, across guards`, async () => {
+    expect(MAX_PROVIDER_CALLS).toBe(16);
+    const gate = gatedResolver();
+    const server = await listener();
+    const url = `http://shared.example:${server.port}/`;
+    const options = { resolve: gate.resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true };
+    const [a, b] = [guardedFetch(options), guardedFetch(options)];
+    const pending = Array.from({ length: MAX_PROVIDER_CALLS }, (_, i) => (i % 2 === 0 ? a : b)(url));
+    await waitFor(() => gate.waiting.length === MAX_PROVIDER_CALLS);
+    expect(await settle(a(url))).toMatchObject(unavailable);
+    expect(await settle(b(url))).toMatchObject(unavailable);
+    gate.open();
+    for (const p of pending) expect(await (await p).text()).toBe("ok");
+    const again = a(url);
+    await waitFor(() => gate.waiting.length === 1);
+    gate.open();
+    expect(await (await again).text()).toBe("ok");
   });
 });

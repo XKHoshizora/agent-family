@@ -21,8 +21,10 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
+import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
 import { guardedFetch } from "./providers/guard.ts";
-import { createProviderProbe, registerProviderRoutes, type ProviderProbe } from "./providers/routes.ts";
+import { createProviderProbe, PROBE_GUARD, type ProviderProbe } from "./providers/probe.ts";
+import { registerProviderRoutes } from "./providers/routes.ts";
 import { createSocialEvents, type SocialEvents } from "./social/events.ts";
 import { registerSocialRoutes } from "./social/routes.ts";
 import { createConversationEvents, type ConversationEvents } from "./conversations/events.ts";
@@ -57,10 +59,9 @@ export interface Deps {
   searches: Slots;
   /** How `POST /api/providers/:id/test` and `…/models/refresh` reach a provider (default: a GET of its model list through `guardedFetch`). */
   providerProbe: ProviderProbe;
+  /** How the service talks to a language model (default: the AI SDK through `guardedFetch`); tests inject a scripted one. */
+  models: ModelGateway;
 }
-
-/** The probe's guard: a model list is small, and an upstream that stalls is given up on. */
-const PROBE_GUARD = { maxResponseBytes: 2 * 1024 * 1024, timeoutMs: 15_000 } as const;
 
 /** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
 export interface RouteEntry {
@@ -123,6 +124,7 @@ const logSerializers = {
 export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOptions = {}): Promise<FastifyInstance> {
   const config = overrides.config ?? loadConfig();
   const ownsDb = overrides.db === undefined;
+  const insecureLocal = options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {};
   const deps: Deps = {
     config,
     db:
@@ -135,9 +137,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     sessions: overrides.sessions ?? createSessionEvents(),
     uploads: overrides.uploads ?? createUploadSlots(),
     searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT),
-    providerProbe:
-      overrides.providerProbe ??
-      createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...(options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {}) })),
+    providerProbe: overrides.providerProbe ?? createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...insecureLocal })),
+    models: overrides.models ?? createModelGateway(insecureLocal),
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);

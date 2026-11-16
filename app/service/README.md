@@ -106,6 +106,8 @@ registration's and a reset request's success answer takes at least (see those ro
 configuration, and only tests change it. So is `allowInsecureLocal` (default off; no variable can turn it on): with it,
 providers may also be reached at loopback addresses, and over plain `http:` there, so tests can stand up a local stub.
 `Deps.providerProbe` is how the provider test and refresh routes reach a provider (default: through the address guard).
+`Deps.models` is how the service talks to a language model (default: the model gateway, see Calling a model); tests
+inject a scripted one (`scriptedGateway()` in `tests/helpers/models.ts`).
 
 ## Deployment
 
@@ -173,8 +175,11 @@ headers (cookies) are never logged.
 
 `vitest` global setup runs the migrations once on `TEST_DATABASE_URL`. `useApp()` in
 `tests/helpers/harness.ts` builds the app once per file (without an answer floor unless the file asks for one,
-`tests/answer-floor.test.ts`) and truncates every table except `pgmigrations` before each test. Test files run
-serially because they share one database.
+`tests/answer-floor.test.ts`) and truncates every table except `pgmigrations` before each test. Its `env` is also put
+in `process.env` while the file runs (a site model's key is read from there when called). Test files run
+serially because they share one database. Tests never call a real model: rule tests inject `scriptedGateway()`, and
+the gateway's own tests talk to `protocolStub()`, a local server speaking the four protocols' wire formats
+(`tests/helpers/models.ts`).
 
 ## HTTP API
 
@@ -383,8 +388,11 @@ fc00::/7), link-local (169.254/16, fe80::/10, fec0::/10), carrier-grade NAT (100
 IPv4-compatible, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) or 6to4 form of one. The connection then goes to exactly an
 address that was checked (the name stays the Host header and the TLS server name), so a name that resolves differently
 a moment later changes nothing. Redirects are never followed (any 3xx is `provider_unavailable`), and a call is given up
-(`provider_unavailable`) after a set time without progress (until the headers, then between body chunks) or once its
-answer passes a set size: for test and refresh below, 15 s (and 30 s in all) and 2 MiB.
+(`provider_unavailable`) after a set time without progress (until the headers, from the headers to the first byte of
+the body, then between body chunks) or once its answer passes a set size: for test and refresh below, 15 s (and 30 s
+in all) and 2 MiB; for a model's answer, see Calling a model. At most 16 calls to providers and site models are in
+flight at once in the whole service, from before the name lookup until the answer is read or abandoned; one more is
+`provider_unavailable` at once. A call stopped by its caller closes its connection at once.
 
 #### `POST /api/providers`
 
@@ -428,6 +436,60 @@ their flags, new names get the defaults, up to 100 in all. Only the first 1 000 
 `listed` holds at most 1 000 names; among them, names that would not be accepted as a model name, any containing the
 key, and repeats are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
 or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
+
+### Calling a model
+
+Every model call goes through one gateway (`src/models/gateway.ts`, `Deps.models`), for site models and providers
+alike: `resolveModel` (`src/models/resolve.ts`) turns an Agent's choice into the call — for a site model its upstream,
+model name, output limit, price and tier, the key read from the variable its `apiKeyEnv` names at that moment; for a
+provider model the owner's provider with its key opened, the model's flags and the default output limit for provider
+models (2048 tokens) — or into
+nothing to call (no model, a site model no longer configured or its key variable unset, a provider or model gone).
+The gateway uses the Vercel AI SDK 7 (`ai` with `@ai-sdk/openai`, `@ai-sdk/anthropic`, `@ai-sdk/google`; `streamText`
+only: no hosted gateway, telemetry off, no automatic retry, nothing printed by the SDK), every request through the
+address guard.
+
+**Where it goes.** The stored `baseUrl` is the SDK's base URL as it is; each protocol appends its own path, so a service
+offering all four under `https://host/v1` is reached with `baseUrl` `https://host/v1` for each:
+
+| Protocol | Request | Key |
+|---|---|---|
+| `openai_chat` | `POST {baseUrl}/chat/completions` (OpenAI Chat Completions, streamed) | `Authorization: Bearer` |
+| `openai_responses` | `POST {baseUrl}/responses` (OpenAI Responses, streamed) | `Authorization: Bearer` |
+| `anthropic` | `POST {baseUrl}/messages` (Anthropic Messages, streamed) | `x-api-key`, `anthropic-version: 2023-06-01` |
+| `gemini` | `POST {baseUrl}/models/{model}:streamGenerateContent?alt=sse` | `x-goog-api-key` |
+
+(The vendors' own base URLs: `https://api.openai.com/v1`, `https://api.anthropic.com/v1`,
+`https://generativelanguage.googleapis.com/v1beta`.)
+
+**What is sent.** The system text (left out when empty); the turns, a person's as `user` with their text, images and
+PDFs (a PDF as a file with its name; what the model is shown is decided before the call), the Agent's as `assistant`
+text; the output limit. Reasoning, by level (`REASONING_PARAMS`, one table), on the wire:
+
+| Level | `openai_chat` | `openai_responses` | `anthropic` | `gemini` |
+|---|---|---|---|---|
+| `none` | nothing | nothing | `thinking: {type: "disabled"}` | nothing |
+| `low` … `xhigh` | `reasoning_effort: <level>` | `reasoning: {effort: <level>, summary: "auto"}` | `thinking: {type: "adaptive", display: "summarized"}`, `output_config: {effort: <level>}` | `generationConfig.thinkingConfig: {thinkingLevel: <level>, includeThoughts: true}` |
+| `max` | as `xhigh` | `effort: "max"` | `effort: "max"` | as `xhigh` |
+
+A level a protocol cannot express is its nearest lower one. `none` turns thinking off where the protocol can, and is
+left out otherwise: Gemini's thinking levels cannot turn it off, and OpenAI refuses `reasoning_effort` from models that
+do not reason (which are the ones sent `none`). With any other level an OpenAI model is treated as one that reasons:
+the system text goes as a `developer` message, and Chat Completions sends the limit as `max_completion_tokens`. For
+models it recognises by name the SDK adapts further (an Anthropic model that cannot turn thinking off has `thinking`
+dropped).
+
+**What comes back.** The answer as text and reasoning deltas (Responses reasoning summaries, Anthropic thinking, Gemini
+thought summaries; Chat Completions streams no reasoning the SDK reads, so there it is not shown, though its tokens are
+counted), then one finish: the usage the upstream reported (reasoning tokens count as output; none reported: no usage)
+and whether the model stopped for length. An answer may be up to 8 MiB on the wire and is given up after 60 s without a
+byte (before or after the headers); how long it may take in all is the caller's to bound.
+
+**Failures** are a `ModelError` with one of three codes and a fixed sentence: 401 or 403 is `provider_rejected`; any
+other error status, a network failure, silence, a redirect, an oversized answer, and a stream that is malformed or ends
+without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`. Besides the
+code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent is kept, printed or logged.
+Stopping a call (its abort signal) ends it at once and closes the upstream connection.
 
 ### Health
 
