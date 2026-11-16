@@ -35,6 +35,18 @@ interface OuterTransaction {
   client: pg.PoolClient;
   /** False once the `runInTransaction` callback has settled. */
   open: boolean;
+  /**
+   * Announcements to make once the transaction has committed (dropped if it rolls back), when whoever opened it
+   * runs them (`answerInTransaction`); without it they are made at once.
+   */
+  afterCommit?: Array<() => void>;
+}
+
+/** Runs `announce` once the transaction of ours it happens in has committed, or at once outside one. */
+function whenCommitted(announce: () => void): void {
+  const queue = outerTx.getStore()?.afterCommit;
+  if (queue) queue.push(announce);
+  else announce();
 }
 
 const outerTx = new AsyncLocalStorage<OuterTransaction>();
@@ -131,8 +143,8 @@ export function switchablePool(pool: pg.Pool) {
  * Runs `fn` so that every Better Auth call inside it executes on `client`'s transaction. What Better
  * Auth got hold of inside refuses to run once `fn` has settled.
  */
-async function joinTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>): Promise<T> {
-  const outer: OuterTransaction = { client, open: true };
+async function joinTransaction<T>(client: pg.PoolClient, fn: () => Promise<T>, afterCommit?: Array<() => void>): Promise<T> {
+  const outer: OuterTransaction = { client, open: true, ...(afterCommit ? { afterCommit } : {}) };
   try {
     return await outerTx.run(outer, fn);
   } finally {
@@ -199,7 +211,8 @@ async function announceSessionEnded(
   try {
     const { rows } = await db.query<{ id: string }>("select id from principals where auth_user_id = $1", [session.userId]);
     const principalId = rows[0]?.id;
-    if (principalId) sessions.emit(principalId, session.id, log);
+    // Inside a reset's transaction: only once it has committed, so nobody is told before the session is really gone.
+    if (principalId) whenCommitted(() => sessions.emit(principalId, session.id, log));
   } catch (err) {
     // Its sockets are still closed by the heartbeat's session check (sync/hub.ts) within 30 s.
     log.error({ err }, "could not announce an ended session");
@@ -409,18 +422,27 @@ class Unsuccessful extends Error {
 
 /** Runs `fn` in a transaction of ours that Better Auth's queries join; commits only an answer below 400. */
 async function answerInTransaction(db: Db, fn: (t: Tx) => Promise<Response>): Promise<Response> {
+  // Announcements made inside (ended sessions) wait for the commit; a rollback drops them.
+  const afterCommit: Array<() => void> = [];
+  let response: Response;
   try {
-    return await db.tx((t) =>
-      joinTransaction(t, async () => {
-        const response = await fn(t);
-        if (response.status >= 400) throw new Unsuccessful(response);
-        return response;
-      }),
+    response = await db.tx((t) =>
+      joinTransaction(
+        t,
+        async () => {
+          const answer = await fn(t);
+          if (answer.status >= 400) throw new Unsuccessful(answer);
+          return answer;
+        },
+        afterCommit,
+      ),
     );
   } catch (err) {
     if (err instanceof Unsuccessful) return err.response;
     throw err;
   }
+  for (const announce of afterCommit) announce();
+  return response;
 }
 
 /**

@@ -337,6 +337,53 @@ describe("accounts", () => {
     }
   });
 
+  test("a reset announces ended sessions only once it has committed, and not at all when it fails", async () => {
+    const a = await signUp(app, "announce_after");
+    const ended: string[] = [];
+    const stillThere: Array<Promise<number>> = [];
+    const off = onSessionEnded(app, (_p, sessionId) => {
+      ended.push(sessionId);
+      // What anyone else sees at the moment of the announcement: the session must already be gone.
+      stillThere.push(count(`select count(*) n from "session" where id = $1`, [sessionId]));
+    });
+    try {
+      // A reset that fails after Better Auth deleted the sessions: rolled back, nothing to announce.
+      await api(app, null, "POST", "/api/auth/request-password-reset", { email: a.email });
+      await db.query("create function test_fail_account() returns trigger language plpgsql as 'begin raise exception ''boom''; end'");
+      await db.query(`create trigger test_fail before update on "account" for each row execute function test_fail_account()`);
+      // Better Auth's router prints an unexpected failure to the console itself; kept out of the test output.
+      const printed = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const failed = await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "a failing new password", token: await resetToken(a.email) });
+        expect(failed).toEqual({ status: 500, json: { error: "internal" } });
+        expect(printed).toHaveBeenCalledWith("# SERVER_ERROR: ", expect.objectContaining({ message: "boom" }));
+      } finally {
+        printed.mockRestore();
+        await db.query(`drop trigger test_fail on "account"`);
+        await db.query("drop function test_fail_account()");
+      }
+      expect(ended).toEqual([]);
+      expect((await api(app, a, "GET", "/api/me")).status).toBe(200);
+
+      // The same link again, now succeeding, with a second link outstanding whose removal (the last step before
+      // commit) is slowed down: the announcement must wait for the commit, so nobody sees the session any more.
+      const token = await resetToken(a.email);
+      await api(app, null, "POST", "/api/auth/request-password-reset", { email: a.email });
+      await db.query("create function test_slow_delete() returns trigger language plpgsql as 'begin perform pg_sleep(0.4); return old; end'");
+      await db.query(`create trigger test_slow before delete on verification for each row execute function test_slow_delete()`);
+      try {
+        expect((await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "a working new password", token })).status).toBe(200);
+      } finally {
+        await db.query("drop trigger test_slow on verification");
+        await db.query("drop function test_slow_delete()");
+      }
+      expect(ended).toHaveLength(1);
+      expect(await Promise.all(stillThere)).toEqual([0]);
+    } finally {
+      off();
+    }
+  });
+
   test("session-ended listeners belong to one app; one that throws or rejects is logged and sign-out still works", async () => {
     const lines: string[] = [];
     const other = await buildApp({ config: app.deps.config, db: app.deps.db }, { logStream: { write: (l) => void lines.push(l) } });
