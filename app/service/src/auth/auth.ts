@@ -278,7 +278,8 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
     },
     databaseHooks: {
       session: {
-        delete: { after: async (session) => announceSessionEnded(db, sessions, log, session) },
+        // On the transaction a reset runs in (registerAuthRoutes), so it needs no second pool connection.
+        delete: { after: async (session) => announceSessionEnded(currentDb(db), sessions, log, session) },
       },
     },
   });
@@ -423,6 +424,20 @@ async function answerInTransaction(db: Db, fn: (t: Tx) => Promise<Response>): Pr
 }
 
 /**
+ * The user a reset link (Better Auth's `reset-password:<token>` verification row) belongs to, with that user's row
+ * locked for the rest of the transaction; null for a link that does not exist.
+ */
+async function lockResetLinkOwner(t: Tx, token: string): Promise<string | null> {
+  const { rows } = await t.query<{ userId: string }>(
+    `select u.id as "userId" from verification v join "user" u on u.id = v.value
+      where v.identifier = $1
+        for no key update of u`,
+    [`reset-password:${token}`],
+  );
+  return rows[0]?.userId ?? null;
+}
+
+/**
  * The e-mail a verification link's token names: its JWT payload, read without checking the signature (Better Auth
  * checks it and refuses the link if it is wrong). Null when it names none.
  */
@@ -472,7 +487,22 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number,
       body: z.object({ email: storableText(254), redirectTo: redirect.optional() }),
       floor: true,
     },
-    "POST /reset-password": { limit: null, query: noQuery, body: z.object({ newPassword: password, token: storableText(512) }) },
+    "POST /reset-password": {
+      limit: null,
+      query: noQuery,
+      body: z.object({ newPassword: password, token: storableText(512) }),
+      // Better Auth keeps one row per reset request and spends only the link used: a reset ends all the others of
+      // that account too. One reset per account at a time (its user row is locked first), so of two links used at
+      // once the second finds itself already gone.
+      transaction: async (t, req, handle) => {
+        const userId = await lockResetLinkOwner(t, (req.body as { token: string }).token);
+        const response = await handle();
+        if (response.ok && userId !== null) {
+          await t.query(`delete from verification where value = $1 and identifier like 'reset-password:%'`, [userId]);
+        }
+        return response;
+      },
+    },
   };
   const exposed = new Map<string, Endpoint>(Object.entries(endpoints));
   const endpointOf = (req: FastifyRequest): string => {

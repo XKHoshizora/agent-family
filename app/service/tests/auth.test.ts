@@ -222,6 +222,50 @@ describe("accounts", () => {
     expect((await signIn(app, a.email, newPassword)).statusCode).toBe(200);
   });
 
+  /** The tokens of every reset mail to `email`, oldest first. */
+  async function resetTokens(email: string): Promise<string[]> {
+    const { rows } = await db.query<{ body: string }>(
+      "select body from mail_outbox where recipient = $1 and kind = 'reset_password' order by id",
+      [email],
+    );
+    return rows.map((r) => new URL(/https?:\/\/\S+/.exec(r.body)![0]).searchParams.get("token")!);
+  }
+
+  test("a reset through one link ends every other link of that account, and no other account's", async () => {
+    const a = await signUp(app, "two_links");
+    const b = await signUp(app, "bystander");
+    for (const email of [a.email, a.email, b.email]) await api(app, null, "POST", "/api/auth/request-password-reset", { email });
+    const [first, second] = await resetTokens(a.email);
+    const [others] = await resetTokens(b.email);
+
+    expect(await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "the first new password", token: first })).toEqual({
+      status: 200,
+      json: { status: true },
+    });
+    expect(await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "a later new password", token: second })).toEqual({
+      status: 400,
+      json: { error: "invalid_token" },
+    });
+    expect((await signIn(app, a.email, "the first new password")).statusCode).toBe(200);
+    expect(await count(`select count(*) n from verification where identifier like 'reset-password:%'`)).toBe(1);
+    expect((await api(app, null, "POST", "/api/auth/reset-password", { newPassword: "bystander's new one", token: others })).status).toBe(200);
+  });
+
+  test("two links of one account used at once: exactly one reset happens", async () => {
+    for (let round = 0; round < 4; round++) {
+      const a = await signUp(app, `racing_links_${round}`);
+      for (let i = 0; i < 3; i++) await api(app, null, "POST", "/api/auth/request-password-reset", { email: a.email });
+      const tokens = await resetTokens(a.email);
+      const results = await Promise.all(
+        tokens.map((token, i) => api(app, null, "POST", "/api/auth/reset-password", { newPassword: `racing password ${i}`, token })),
+      );
+      const won = results.flatMap((r, i) => (r.status === 200 ? [i] : []));
+      expect(won).toHaveLength(1);
+      for (const [i, r] of results.entries()) if (i !== won[0]) expect(r).toEqual({ status: 400, json: { error: "invalid_token" } });
+      expect((await signIn(app, a.email, `racing password ${won[0]}`)).statusCode).toBe(200);
+    }
+  });
+
   test("inputs Better Auth answered with a 500 are refused with 400 first; the app's own links still work", async () => {
     const a = await signUp(app, "bad_inputs");
     const post = (path: string, body: object) => api(app, null, "POST", `/api/auth/${path}`, body);

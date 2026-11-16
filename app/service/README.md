@@ -346,15 +346,19 @@ accepted but not used: the mail links to the web app).
   for every e-mail, registered or not (only a registered one gets mail). The answer is held back until at least
   400 ms (plus up to 50 ms at random) after the request arrived, so its timing does not tell a registered address
   from an unregistered one either; work that takes longer is not padded further. Errors are not held back.
-- Mail (`reset_password`): `<APP_ORIGIN>/reset-password?token=…`, valid 1 hour, usable once. The web app's
-  page at that path posts the token to `POST /api/auth/reset-password`.
+- Mail (`reset_password`): `<APP_ORIGIN>/reset-password?token=…`, valid 1 hour, usable once, and only until
+  the password is reset through any link of the account. The web app's page at that path posts the token to
+  `POST /api/auth/reset-password`.
 - Limit: 10 per minute per client address + e-mail, and 60 per minute per client address.
 
 #### `POST /api/auth/reset-password`
 
 *Session: none.* Query: none allowed. Body: `newPassword` (string; 10–128 characters), `token` (at most 512).
 
-- 200 `{"status": true}`. Every session of the account ends (sockets close with 4001); sign in again.
+- 200 `{"status": true}`. Every session of the account ends (sockets close with 4001); sign in again. Every
+  other reset link of the account ends with it (each reset request mails its own link; after a reset through
+  any of them, the rest are `invalid_token`). Resets of one account happen one at a time: of two links used at
+  once, one resets the password and the other is `invalid_token`.
 - Errors: 400 `invalid_token` (unknown, used or expired), 400 `password_too_short`, 400 `password_too_long`,
   400 `invalid_request`.
 
