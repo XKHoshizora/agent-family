@@ -30,7 +30,8 @@ describe("config", () => {
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "0" }).sweepIntervalMinutes).toBe(0);
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "5" }).sweepIntervalMinutes).toBe(5);
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "" }).sweepIntervalMinutes).toBe(15);
-    for (const bad of ["-1", "1.5", "abc"]) {
+    expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "1440" }).sweepIntervalMinutes).toBe(1440);
+    for (const bad of ["-1", "1.5", "abc", "1441", "40000", "9999999"]) {
       expect(() => loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: bad })).toThrow(/SWEEP_INTERVAL_MINUTES/);
     }
   });
@@ -38,7 +39,10 @@ describe("config", () => {
 
 describe("startSweeper (fake timers)", () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
 
   it("interval 0: no timer at all", () => {
     const { log } = fakeLog();
@@ -151,7 +155,6 @@ describe("startSweeper (fake timers)", () => {
     expect(unrefs).toHaveLength(2);
     for (const unref of unrefs) expect(unref).toHaveBeenCalled();
     await s.stop();
-    vi.restoreAllMocks();
   });
 });
 

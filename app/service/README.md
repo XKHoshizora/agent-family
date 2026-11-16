@@ -62,7 +62,7 @@ and every run-time import of `src/` a production dependency.
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
 `CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
 `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
-`SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off),
+`SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off, at most 1440),
 `UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
 15 min in all), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle, default 2 min),
 `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min) and `HTTP_KEEP_ALIVE_TIMEOUT_MS`

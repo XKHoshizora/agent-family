@@ -93,11 +93,12 @@ const envSchema = z.object({
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   /** A request that gets no pool connection within this long is answered 503 busy. */
   DB_ACQUIRE_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
-  /** How often the server sweeps unsent uploads and abandoned blobs, in minutes; 0 turns it off. */
+  /** How often the server sweeps unsent uploads and abandoned blobs, in minutes; 0 turns it off; at most 1440 (a longer delay overflows Node's timers). */
   SWEEP_INTERVAL_MINUTES: optionalString
     .transform((v) => (v === undefined ? "15" : v))
-    .pipe(z.string().regex(/^[0-9]{1,6}$/, "SWEEP_INTERVAL_MINUTES must be a whole number of minutes, 0 or more"))
-    .transform(Number),
+    .pipe(z.string().regex(/^[0-9]{1,4}$/, "SWEEP_INTERVAL_MINUTES must be a whole number of minutes from 0 to 1440"))
+    .transform(Number)
+    .pipe(z.number().max(1440, "SWEEP_INTERVAL_MINUTES must be at most 1440 (one day)")),
   /** A search's statements are cancelled after this long (503 busy). */
   SEARCH_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(3_000),
 });
