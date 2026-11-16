@@ -76,6 +76,19 @@ message naming the variable. Values in the right column are for the acceptance e
   pages allows nothing else.
 - The server sweeps unsent uploads itself (`SWEEP_INTERVAL_MINUTES`); `attachments:sweep` is only for running it by hand. Back up the database (and the bucket).
 
+## Backup and restore
+
+Two things hold all state: the Postgres database and the attachment store (the bucket, or `BLOB_DIR`).
+
+- Database: `pg_dump -Fc -d <db> -f af.dump`, restore into an empty database with
+  `pg_restore --no-owner -d <newdb> af.dump` (the dump carries the three extensions).
+- Attachments: copy every object to the new bucket under the same key (or copy `BLOB_DIR`).
+- Start the service against the restored pair with the **same `AUTH_SECRET`** and the new `APP_ORIGIN`.
+
+Take the database dump first and the objects second: an object without a row is swept later, a row without an
+object is a broken attachment. Rehearsed on the acceptance environment on 2026-11-16
+(`docs/acceptance/batch1/README.md`); nothing is scheduled yet.
+
 ## Not covered here
 
 The image is built for real by Railway on every deploy of the acceptance environment; it has not been built
