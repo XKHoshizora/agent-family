@@ -1,18 +1,16 @@
 import type { FastifyBaseLogger } from "fastify";
+import type { BlobStore } from "../attachments/blob.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
-import { VISIBLE_JOIN } from "../conversations/store.ts";
-import type { Db, Tx } from "../db.ts";
+import type { Db } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
-import { estimateTokens } from "../metering/prices.ts";
 import { settle } from "../metering/settle.ts";
-import type { MessageBody } from "../messages/model.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
-import type { ModelCall } from "../models/gateway.ts";
 import { resolveModel } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
+import { buildContext } from "./context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
@@ -22,6 +20,8 @@ import { lockAgent, type AgentRow } from "./store.ts";
 export interface AgentPortDeps {
   db: Db;
   config: Config;
+  /** Where attachments are read from for what the model is shown (`buildContext`). */
+  blobs: BlobStore;
   realtime: Pick<Hub, "pushRun" | "pushDelta">;
   conversations: ConversationEvents;
   reads: ReadEvents;
@@ -29,6 +29,8 @@ export interface AgentPortDeps {
 }
 
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
+/** The service's own trouble; here: a reply with nothing to answer, which never reaches a model. */
+const BUSY: RunEnd = { status: "failed", error: "busy" };
 
 /** What `begin` and `finish` read of the run, under its row lock. */
 interface RunState {
@@ -123,12 +125,13 @@ export class DbAgentPort implements AgentPort {
   /**
    * In one transaction under `lockAgent`: a run its Agent's pause or delete interrupted (even if resumed since), a paused
    * or deleted Agent, a stop already asked for, or a model that does not resolve end the run here. Otherwise the run
-   * takes on what came meanwhile (`covers_seq` = max(covers, pending)), the
-   * model is shown every message the Agent can see up to now (Task 8 replaces this plain context), the call is admitted
-   * (402 `no_quota` ends the run failed), and the Agent's read marker moves to what it covers (announced after commit).
+   * takes on what came meanwhile (`covers_seq` = max(covers, pending)), what the model is shown is built
+   * (`buildContext`; a context with no turn ends the run failed `busy` — it never reaches a model), the call is admitted
+   * on its input estimate (402 `no_quota` ends the run failed), and the Agent's read marker moves to what it covers
+   * (announced after commit). The reasoning level is the Agent's when the model allows it, else `none`.
    */
   async begin(run: RunTicket): Promise<Prepared | RunEnd> {
-    const { db, config, log } = this.deps;
+    const { db, config, blobs, log } = this.deps;
     const now = new Date();
     const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
       const agent = await lockAgent(t, run.agentId);
@@ -152,7 +155,6 @@ export class DbAgentPort implements AgentPort {
 
       const covers = Math.max(Number(state.rows[0].covers_seq ?? 0), Number(state.rows[0].pending_seq ?? 0));
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
-      const turns = await this.turns(t, agent.id, run.conversationId);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const system = systemPrompt(
         agent,
@@ -161,9 +163,17 @@ export class DbAgentPort implements AgentPort {
         agent.persona === "" ? "onboarding" : "normal",
         config.siteTimezone,
       );
-      const inputChars = estimateTokens(system) + turns.reduce((n, turn) => n + turn.parts.reduce((m, p) => m + (p.type === "text" ? estimateTokens(p.text) : 0), 0), 0);
+      const context = await buildContext(
+        t,
+        blobs,
+        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers },
+        resolved,
+        system,
+        log,
+      );
+      if (context.messages.length === 0) return { end: BUSY };
       try {
-        await admitRun(t, config, run.id, run.ownerId, resolved, inputChars, now);
+        await admitRun(t, config, run.id, run.ownerId, resolved, context.inputTokensEstimate, now);
       } catch (err) {
         if (!(err instanceof AppError) || err.code !== "no_quota") throw err;
         const resetsAt = err.details.resetsAt;
@@ -172,29 +182,13 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoningAllowed.includes(agent.reasoning) ? agent.reasoning : "none";
       return {
-        prepared: { call: { ...resolved.call, system, messages: turns, reasoning }, inputChars },
+        prepared: { call: { ...resolved.call, system, messages: context.messages, reasoning }, inputChars: context.inputChars },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });
     if ("end" in result) return result.end;
     if (result.read !== null) this.deps.reads.publish({ conversationId: run.conversationId, principalId: run.agentId, seq: result.read }, log);
     return result.prepared;
-  }
-
-  /**
-   * What the model is shown in this task: every message the Agent can see, in order, as text — the owner's as `user`,
-   * the Agent's as `assistant`. System notices, the fixed greeting and messages without text are left out.
-   */
-  private async turns(t: Tx, agentId: string, conversationId: string): Promise<ModelCall["messages"]> {
-    const { rows } = await t.query<{ sender_id: string; kind: string; body: MessageBody }>(
-      `select m.sender_id, m.kind, m.body from messages m ${VISIBLE_JOIN} where m.conversation_id = $2 order by m.seq`,
-      [agentId, conversationId],
-    );
-    return rows.flatMap((r) => {
-      const text = typeof r.body.text === "string" ? r.body.text : "";
-      if (r.kind === "system" || r.body.fixed === true || text === "") return [];
-      return [{ role: r.sender_id === agentId ? ("assistant" as const) : ("user" as const), parts: [{ type: "text" as const, text }] }];
-    });
   }
 
   emit(run: RunTicket, delta: Delta): void {

@@ -19,13 +19,16 @@ export interface RunTicket {
 export interface Prepared {
   /** Holds a provider's key in plaintext: hand it to the gateway and nowhere else. */
   readonly call: Omit<ModelCall, "signal">;
-  /** Characters of the system text and the turns: what settlement counts when the upstream reports no usage. */
+  /**
+   * Characters of the system text and the turns, images and PDFs at their token estimate: what settlement counts when
+   * the upstream reports no usage. A whole number of 0 or more.
+   */
   readonly inputChars: number;
 }
 
 /**
  * Why a reply failed, as the owner is told (`Run.error`). `busy`: the service's own trouble (the reply could not be
- * started or stored); such a run is charged nothing.
+ * started or stored, or there was nothing to answer); such a run is charged nothing.
  */
 export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy";
 
@@ -62,7 +65,10 @@ export interface Usage {
 export interface AgentPort {
   /** The oldest queued reply whose owner has fewer than `agentMaxConcurrentRuns` running, now `running`; null when none. */
   claimNext(): Promise<RunTicket | null>;
-  /** Resolves the model, builds what the model is shown, admits the call and marks the Agent's read position — or says why the run ends at once. */
+  /**
+   * Resolves the model, builds what the model is shown (never no turn at all), admits the call and marks the Agent's
+   * read position — or says why the run ends at once.
+   */
   begin(run: RunTicket): Promise<Prepared | RunEnd>;
   /** Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause or delete interrupted the run. */
   emit(run: RunTicket, delta: Delta): void;

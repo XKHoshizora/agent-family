@@ -253,7 +253,15 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
 
   // The reply worker runs in this process (one instance, like the hub). It starts once the app is ready and stops on
   // close before the hub and the database: calls in flight are abandoned, their runs left running.
-  const agentPort = createAgentPort({ db: deps.db, config, realtime: app.realtime, conversations: deps.conversations, reads: deps.reads, log: app.log });
+  const agentPort = createAgentPort({
+    db: deps.db,
+    config,
+    blobs: deps.blobs,
+    realtime: app.realtime,
+    conversations: deps.conversations,
+    reads: deps.reads,
+    log: app.log,
+  });
   const agentWorker = createAgentWorker({
     port: agentPort,
     models: deps.models,

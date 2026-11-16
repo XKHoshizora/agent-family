@@ -1,15 +1,19 @@
 import { lockAccount } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Change } from "../conversations/events.ts";
+import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
-import { AppError } from "../errors.ts";
+import { AppError, notFound } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
+import { ownedAgentOf } from "./runs.ts";
 import { assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
 
 /** The longest text a message holds (people's messages are refused above it; an Agent's reply is cut there). */
 export const MESSAGE_TEXT_MAX = 8000;
+/** The most of a reply's reasoning that is stored; the rest is cut (it is never shown to a model again). */
+export const REASONING_MAX = 32_000;
 
 const UNIQUE_VIOLATION = "23505";
 
@@ -113,8 +117,9 @@ export interface AgentReply {
  * `interrupted` after the Agent was resumed. The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
  * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed) and is
- * cut at 8 000 characters, which marks it `truncated`; `reasoning` is stored only when there is some. Throws (a plain
- * Error) when there is nothing to show: no visible text and no reasoning.
+ * cut at 8 000 characters, which marks it `truncated`; `reasoning` follows the same rules, is cut at 32 000 characters
+ * (no mark) and is stored only when there is some. Throws (a plain Error) when there is nothing to show: no visible text
+ * and no reasoning.
  */
 export async function postAsAgent(
   t: Tx,
@@ -144,7 +149,9 @@ export async function postAsAgent(
     text = characters.slice(0, MESSAGE_TEXT_MAX).join("").trimEnd();
     truncated = true;
   }
-  const reasoning = cleanModelText(reply.reasoning);
+  let reasoning = cleanModelText(reply.reasoning);
+  const thought = Array.from(reasoning);
+  if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
   if (!hasVisibleText(text) && !hasVisibleText(reasoning)) throw new Error("postAsAgent: the reply has nothing to show");
 
   const body: MessageBody = { text };
@@ -152,4 +159,19 @@ export async function postAsAgent(
   if (reply.stopped) body.stopped = true;
   if (truncated) body.truncated = true;
   return { message: await insertMessage(t, conversationId, agentId, "text", body, runId), duplicate: false };
+}
+
+/**
+ * `POST /api/conversations/:id/topic` (spec 6.2 "新话题"): appends a `topic_reset` notice from the owner to their
+ * Agent's conversation, under `lockAgent` (the conversation row, then the `agents` row) like every write there. What the
+ * model is shown starts after the latest one (`buildContext`); history and search keep everything. 404 unless it is
+ * `ownerId`'s Agent conversation; 403 `cannot_send` (`agent_deleted`) once the Agent is deleted, as a send; allowed
+ * while it is paused. It neither starts a reply nor ends one under way (which was given the old topic).
+ */
+export async function resetTopic(t: Tx, ownerId: string, conversationId: string): Promise<StoredMessage> {
+  const agentId = await ownedAgentOf(t, ownerId, conversationId);
+  if (!agentId) throw notFound();
+  const agent = await lockAgent(t, agentId);
+  if (agent.deleted) throw new AppError(403, "cannot_send", { reason: "agent_deleted" });
+  return appendSystem(t, conversationId, { event: "topic_reset", actorId: ownerId });
 }

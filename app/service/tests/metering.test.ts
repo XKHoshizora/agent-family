@@ -3,7 +3,7 @@ import { freeUsedToday, nextSiteMidnight, siteDay } from "../src/accounts/store.
 import type { Config } from "../src/config.ts";
 import { AppError } from "../src/errors.ts";
 import { admit, admitRun } from "../src/metering/admit.ts";
-import { estimateTokens, IMAGE_TOKENS, maxCostMicro, PDF_TOKENS_PER_KB } from "../src/metering/prices.ts";
+import { estimateTokens, IMAGE_TOKENS, maxCostMicro, PDF_TOKENS_PER_KB, pdfTokens } from "../src/metering/prices.ts";
 import { settle, type Outcome } from "../src/metering/settle.ts";
 import type { Resolved } from "../src/models/resolve.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
@@ -107,6 +107,20 @@ describe("prices", () => {
     const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "mine" }] }))).json;
     const own = await meteredAgent(app, db, owner, { source: "provider", providerId: provider.id, model: "mine" });
     expect(maxCostMicro(own.resolved, ESTIMATE)).toBe(0n);
+    // An input estimate is a whole number of tokens, 0 or more (a caller's bug otherwise), for any model.
+    for (const bad of [1.5, -1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
+      expect(() => maxCostMicro(fast.resolved, bad)).toThrow(/input token estimate must be a whole number/);
+      expect(() => maxCostMicro(own.resolved, bad)).toThrow(/input token estimate must be a whole number/);
+    }
+  });
+
+  it("a PDF is counted at 300 tokens per 1 000 bytes, rounded up", () => {
+    expect(pdfTokens(0)).toBe(0);
+    expect(pdfTokens(1)).toBe(1);
+    expect(pdfTokens(1000)).toBe(300);
+    expect(pdfTokens(1001)).toBe(301);
+    expect(pdfTokens(10 * 1024 * 1024)).toBe(3_145_728);
+    expect(pdfTokens(10 * 1024 * 1024 + 1)).toBe(3_145_729);
   });
 });
 
@@ -334,6 +348,16 @@ describe("settlement", () => {
     const { run } = await admitted("estimated");
     await settleAt(run, null, { fallback: { inputChars: 3_000, outputChars: 400 } });
     expect(await record(run)).toMatchObject({ input_tokens: "3000", output_tokens: "400", estimated: true, cost_micro: "700000", free_micro: "700000" });
+  });
+
+  it("the character counts to fall back on must be whole numbers, 0 or more: anything else is refused and changes nothing", async () => {
+    const { owner, run } = await admitted("badfallback");
+    for (const fallback of [{ inputChars: 1.5, outputChars: 0 }, { inputChars: 10, outputChars: -1 }, { inputChars: Number.NaN, outputChars: 0 }]) {
+      await expect(settleAt(run, FULL_USAGE, { fallback })).rejects.toThrow(/settle: fallback\.(inputChars|outputChars) must be a whole number/);
+    }
+    expect(await usageRecords(run)).toEqual([]);
+    expect(await runRow(run)).toMatchObject({ hold: MAX_COST.toString() });
+    expect(await freeUsage(owner.id)).toEqual([]);
   });
 
   it("a reported usage that is not two whole non-negative numbers counts as none reported", async () => {

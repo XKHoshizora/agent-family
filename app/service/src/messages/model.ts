@@ -10,6 +10,8 @@ export type SystemEvent =
   | { event: "member_left"; actorId: string; principalId: string; newCreatorId: string | null }
   | { event: "member_removed"; actorId: string; principalId: string }
   | { event: "group_renamed"; actorId: string; title: string }
+  /** In an Agent's conversation: its owner started a new topic; nothing before it is shown to the model again. */
+  | { event: "topic_reset"; actorId: string }
   | PairEvent;
 
 /** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */

@@ -4,11 +4,13 @@ import { z } from "zod";
 import { REASONING_LEVELS } from "../config.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
+import { wireMessageSchema } from "../messages/model.ts";
+import { toWireFor } from "../messages/read.ts";
 import { registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
 import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
-import { createAgent } from "./conversation.ts";
+import { createAgent, resetTopic } from "./conversation.ts";
 import { interruptRuns } from "./runs.ts";
 import {
   assertModelChoice,
@@ -80,7 +82,7 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
-  // Create, edit, pause, resume, delete and avatar share one budget.
+  // Create, edit, pause, resume, delete, avatar and new topics share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
 
   api.post(
@@ -214,6 +216,31 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   stateRoute("post", "/api/agents/:id/pause", { paused: true });
   stateRoute("post", "/api/agents/:id/resume", { paused: false });
   stateRoute("delete", "/api/agents/:id", { deleted: true });
+
+  // A new topic in the Agent's conversation (agents/conversation.ts `resetTopic`): the notice, as a send answers.
+  api.post(
+    "/api/conversations/:id/topic",
+    {
+      schema: {
+        params: idParams,
+        querystring: empty,
+        body: empty.nullish(),
+        response: { 201: z.object({ message: wireMessageSchema }) },
+      },
+    },
+    async (req, reply) => {
+      const me = await requirePrincipal(req);
+      await writeLimit(req, me.id);
+      const { notice, wire } = await db.tx(async (t) => {
+        const notice = await resetTopic(t, me.id, req.params.id);
+        const [wire] = await toWireFor(t, me.id, [notice]);
+        if (!wire) throw new Error("resetTopic: the owner cannot read the notice just written");
+        return { notice, wire };
+      });
+      conversations.publish({ messages: [notice], conversations: [] }, req.log);
+      return reply.code(201).send({ message: wire });
+    },
+  );
 
   // The rules and limits of `PUT /api/me/avatar`, for the Agent's avatar.
   registerAvatarPut(app, "/api/agents/:id/avatar", idParams, async (req, body) => {

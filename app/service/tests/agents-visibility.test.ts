@@ -68,6 +68,7 @@ describe("an Agent is invisible to everyone but its owner", () => {
       ["GET", "/api/conversations/:id/run"],
       ["POST", "/api/conversations/:id/runs/retry"],
       ["POST", "/api/conversations/:id/runs/dismiss"],
+      ["POST", "/api/conversations/:id/topic"],
       ["POST", `/api/conversations/:id/runs/${randomUUID()}/stop`],
     ];
     for (const [method, url, body] of routes) {

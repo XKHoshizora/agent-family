@@ -62,7 +62,7 @@ describe("the agent runtime's boundary", () => {
   it("no file under src/agents/runtime/ imports db.ts, pg or a store.ts", () => {
     const files = filesUnder(RUNTIME);
     const names = files.map((f) => path.relative(RUNTIME, f).replaceAll("\\", "/"));
-    for (const expected of ["port.ts", "worker.ts", "stream.ts", "prompt.ts"]) expect(names).toContain(expected);
+    for (const expected of ["port.ts", "worker.ts", "stream.ts", "prompt.ts", "context.ts"]) expect(names).toContain(expected);
     const offending = files.flatMap((f) =>
       importsOf(readFileSync(f, "utf8"))
         .filter(forbidden)

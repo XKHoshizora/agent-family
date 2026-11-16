@@ -229,7 +229,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 401 | `unauthenticated` | No valid session (or a WebSocket ticket that is unknown, used or expired) |
 | 402 | `no_quota` | A site-model call cannot start: nothing is left to pay for it (see Usage and points). `reason` `free_and_balance` (a free-tier model: today's free allowance and the balance are both used up; `resetsAt`, the next midnight in `SITE_TIMEZONE`, ISO instant) or `balance` (a paid-tier model: no balance) |
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
-| 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted) |
+| 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted: sending, uploading, starting a new topic) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
 | 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, or retrying its reply |
 | 409 | `agent_paused` | Retrying the reply of a paused Agent |
@@ -265,7 +265,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/principals/lookup` | 30 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
-| `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` of `/api/agents/:id` | 30 together | principal |
+| `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
 | `POST /api/providers/:id/test` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
@@ -306,7 +306,8 @@ still recorded). A call on a site model is admitted before it starts and settled
   the model it was admitted on with its source and hold, and settlement goes by that, whatever the Agent's model is by
   then.
 - **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
-  it reported none, one token per character, and the record says `estimated`, at the model's price. A call that failed
+  it reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
+  `estimated`, at the model's price. A call that failed
   without any output costs nothing, and so does a reply that could not be stored for the service's own reasons (run
   error `busy`): its record keeps the true cost, all of it forgiven. It charges that cost, but never more than the call held at admission: whatever is
   above the hold (an estimate that turned out low) is forgiven, charged to no one — neither the balance nor any day's
@@ -418,7 +419,8 @@ Failures are never messages: they live on the run, which the owner learns from t
 
 **Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
 "resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
-or `busy`: the service's own trouble — the reply could not be started or stored — which costs you nothing), for
+or `busy`: the service's own trouble — the reply could not be started or stored, or there was nothing to answer — which
+costs you nothing), for
 `cancelled` `agent_paused` or `agent_deleted`. `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected` and `address_not_allowed`, and for every run that did not fail). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
@@ -449,6 +451,15 @@ and dismiss.
 *Session: required.* Body: none or `{}`. You closed the failure notice: when the latest run failed,
 `GET /api/conversations/:id/run` answers `null` from now on (until the next run). Otherwise nothing changes.
 Idempotent. → 200 `{"ok": true}`. Limit: 60 per minute with stop and retry.
+
+#### `POST /api/conversations/:id/topic`
+
+*Session: required.* Body: none or `{}`. Starts a new topic (spec 6.2 "新话题"): a `topic_reset` notice from you is
+appended (see System notices), and from then on the Agent's replies are given only what comes after the latest such
+notice (Agents and runs). History, search and unread counts are unchanged; two in a row are fine. → 201
+`{"message": WireMessage}` (the notice; it is also pushed). Allowed while the Agent is paused; 403 `cannot_send`
+`{"reason": "agent_deleted"}` once it is deleted. It starts no reply, and a reply already under way goes on with what it
+was given (the old topic). Limit: 30 per minute with the Agent writes.
 
 ### Model providers
 
@@ -1131,6 +1142,7 @@ client can render its own:
 | `friendship_restored` | `actorId` (who accepted), `principalId` (who asked) | accepting a request when the pair already has a direct chat |
 | `blocked` | `actorId` (who blocked), `principalId` (who is blocked) | a new block, in the pair's direct chat if any |
 | `unblocked` | `actorId`, `principalId` | lifting a block, in the pair's direct chat if any |
+| `topic_reset` | `actorId` (the owner) | `POST /api/conversations/:id/topic`, in an Agent's conversation: what comes before it is no longer shown to the Agent's model |
 
 Clients must ignore fields and events they do not know: later batches add more.
 
@@ -1294,8 +1306,10 @@ the pause is answered only as part of the next reply the owner's next message st
 1. `begin`, one transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
    `cancelled`, a stop asked for meanwhile `stopped`, a model that no longer resolves `failed` (`provider_unavailable`),
    and a failure of the service's own here `failed` (`busy`). The run takes on what was
-   noted meanwhile; the call is admitted (Usage and points; `no_quota` ends it `failed` before any call); the Agent's
-   read marker moves to what the run covers (`read` push, `peerReadSeq`).
+   noted meanwhile; what the model is shown is built (below; nothing to answer — say, everything is before a new topic
+   — ends it `failed` `busy`, and no model is called); the call is admitted on its input estimate (Usage and points;
+   `no_quota` ends it `failed` before any call); the Agent's read marker moves to what the run covers (`read` push,
+   `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms. It is
    abandoned at once when the owner stops it or the Agent is paused or deleted (checked every 50 ms), after 2 minutes
    (`agentRunTimeoutMs`), and when the service closes.
@@ -1304,17 +1318,47 @@ the pause is answered only as part of the next reply the owner's next message st
    generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
    `tests/runs-pause.test.ts`). The message's `client_txn` is the run's id: a reply is never
    posted twice. Text follows the rules of message text (what a send would refuse is removed) and is cut at 8 000
-   characters (`truncated`); reasoning is kept only when there is some.
+   characters (`truncated`); reasoning follows the same rules, is cut at 32 000 characters (no mark) and is kept only
+   when there is some.
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
    moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
    Agent after; an interrupted run that posted nothing is `cancelled`.
 
-What the model is shown, for now: the system text — who the Agent is and whose, the owner's name, today's date in
-`SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do, then the persona (an Agent without one is
-told to ask its owner about it first) — and every message the Agent can see, as text, the owner's as `user` and the
-Agent's as `assistant` (system notices, the greeting and messages without text left out). The reasoning level is the
-Agent's when the model allows it, else `none`.
+**What the model is shown** (`context.ts` `buildContext`; its pure part, the plan, in `runtime/context.ts`; spec 6.5):
+
+- The system text: who the Agent is and whose, the owner's name, today's date in `SITE_TIMEZONE`, that it has no tools
+  and must not claim what it cannot do, then the persona (an Agent without one is told to ask its owner about it first).
+- The conversation after the latest `topic_reset` notice (`POST /api/conversations/:id/topic`), as the Agent can see it
+  (the one visibility rule, the Agent as reader): messages up to what the run covers, and the owner's after it. The
+  owner's as `user`, the Agent's as `assistant`, in order; consecutive messages of one side are one turn (their parts
+  in order), because several providers refuse two turns of one side in a row. The call starts and ends with the owner:
+  the Agent's messages after the owner's newest are left out (a follow-up run, which answers what came while the
+  previous reply was written, does not see that reply), and so is an Agent turn left first. System notices, the fixed greeting and the stored reasoning are never
+  shown. A message that quotes another starts with `> ` lines holding the first 200 characters of the quoted one (its
+  text, or its attachment's name), also when the quoted one is from before the new topic: the owner chose to show it.
+- Attachments, read only through the download's own permission with the Agent as reader, and only after their stored
+  size passed the limit: an image (PNG, JPEG, WebP, GIF) of at most 5 MB as the image when the model sees images, else
+  `[图片：name]` (at most 10 images a call, the newest); a PDF of at most 10 MB as the file when the model reads PDFs,
+  else `[文件：name]`; any other file as `[文件：name]` followed by its text when its bytes are text — valid UTF-8, no
+  NUL, at most 1 in 100 characters a control character other than tab, line breaks and form feed; decided by the bytes,
+  not the name or type — at most 100 000 characters a file and 200 000 a call (newest first), cut with `…（已截断）`, a
+  byte-order mark dropped and what message text may not hold removed (bidi controls, control characters); else
+  `[文件：name]` alone. A file is read at most 4 bytes per character it may still show, and its first 4 KB decide whether
+  the rest is read. A message with only an attachment is a turn like any other. A missing blob is shown by name (and
+  logged); a blob store that fails, or takes more than 15 s for one blob, fails the run `busy`. Blobs are read inside
+  `begin`'s transaction, so a send to that conversation waits for them meanwhile.
+- The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
+  character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
+  the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
+  then its end) when it alone is over the budget; then the current turn's attachment contents, newest first, each if it
+  fits; then older messages by name only, newest first, while they fit (nothing older than one that does not); then
+  their attachment contents, newest first, each if it fits. So an older message's attachment goes (leaving its name)
+  before older messages do, and what the owner has just sent is the last to go.
+- The reasoning level is the Agent's when the model allows it, else `none`.
+
+A reply's input estimate (what admission holds) and what settlement falls back on when no usage is reported both count
+all of the above, attachments at their estimate.
 
 | How a run ends | Message | Run |
 |---|---|---|
@@ -1326,6 +1370,7 @@ Agent's when the model allows it, else `none`.
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
+| Nothing to answer (everything is before a new topic), or an attachment that could not be read | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |
 | The service closed during the call | none | left `running` (recovery at start-up comes in a later task) |
 

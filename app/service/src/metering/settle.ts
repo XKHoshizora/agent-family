@@ -1,7 +1,7 @@
 import { applyLedger, freeUsedToday, lockAccount, siteDay } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Tx } from "../db.ts";
-import { costMicro } from "./prices.ts";
+import { assertCount, costMicro, isCount } from "./prices.ts";
 
 /**
  * Settlement (spec 6.4): after a call, in one transaction, charge what it cost — at most what it held — to the source
@@ -16,14 +16,15 @@ export interface Usage {
   outputTokens: number;
 }
 
-const isCount = (n: number): boolean => Number.isSafeInteger(n) && n >= 0;
 const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
 
 /**
  * Settles the call of run `runId` with `outcome`, by what its admission recorded on the run (`source`, `model`,
  * `charge_to`, `hold_micro`), whatever the Agent's model is by now:
  * - Tokens: `usage` as reported; when none was reported (or it is not two whole non-negative numbers), one token per
- *   character of `fallback` (estimateTokens' rule) and the record says `estimated`.
+ *   character of `fallback` (estimateTokens' rule; its input side counts what the call showed besides text, such as
+ *   images, at their token estimate) and the record says `estimated`. `fallback` is ours, so its counts must be
+ *   whole numbers of 0 or more: anything else throws before anything is read or written.
  * - Cost (`cost_micro`, the true cost): the tokens at the site model's configured price; 0 for a provider model, for a
  *   `failed` call that produced no output, and for a run never admitted (no model recorded; nothing is charged).
  * - Charged: the cost up to the run's hold — never more than admission held; the part above it is forgiven. Then by
@@ -47,6 +48,8 @@ export async function settle(
   now: Date,
   { forgiveAll = false }: { forgiveAll?: boolean } = {},
 ): Promise<void> {
+  assertCount("settle: fallback.inputChars", fallback.inputChars);
+  assertCount("settle: fallback.outputChars", fallback.outputChars);
   const { rows } = await t.query<{
     owner_id: string;
     agent_id: string | null;

@@ -180,7 +180,7 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, c
   if (latest?.status !== "failed" || agent.model === null) throw new AppError(400, "invalid_request");
   if ((await startedLastMinute(t, ownerId)) >= config.agentRunsPerMinute) throw new AppError(429, "rate_limited");
   const last = await t.query<{ seq: string | null }>(
-    "select max(seq)::text as seq from messages where conversation_id = $1 and sender_id = $2",
+    "select max(seq)::text as seq from messages where conversation_id = $1 and sender_id = $2 and kind <> 'system'",
     [conversationId, ownerId],
   );
   if (last.rows[0]?.seq == null) throw new AppError(400, "invalid_request");

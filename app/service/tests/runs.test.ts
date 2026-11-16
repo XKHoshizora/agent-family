@@ -194,8 +194,16 @@ describe("when there is no reply", () => {
     await say(owner, conv, "@小米 再说一句");
     expect(await app.agentWorker.runOnce()).toBe(true);
     expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["我在。", "又见面了。"]);
-    // A message that does not call it is still part of what it is shown.
-    expect(callsHere()[0]!.messages.map((m) => m.parts)).toContainEqual([{ type: "text", text: "随便说一句，不叫它" }]);
+    // A message that does not call it is still part of what it is shown (with the next one: both are the owner's turn).
+    expect(callsHere()[0]!.messages).toEqual([
+      {
+        role: "user",
+        parts: [
+          { type: "text", text: "随便说一句，不叫它" },
+          { type: "text", text: "@helper_mira 你在吗" },
+        ],
+      },
+    ]);
   });
 });
 

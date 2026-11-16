@@ -11,8 +11,11 @@ function idsIn(e: SystemEvent): string[] {
   return ids;
 }
 
-/** The Chinese sentence for a notice, with display names as they are now. Clients may re-render from the event. */
-export async function renderNotice(q: Queryable, e: SystemEvent): Promise<string> {
+/**
+ * The Chinese sentence for a notice in conversation `conversationId`, with display names as they are now. Clients may
+ * re-render from the event.
+ */
+export async function renderNotice(q: Queryable, conversationId: string, e: SystemEvent): Promise<string> {
   const { rows } = await q.query<{ id: string; display_name: string }>(
     "select id, display_name from principals where id = any($1::uuid[])",
     [idsIn(e)],
@@ -41,6 +44,14 @@ export async function renderNotice(q: Queryable, e: SystemEvent): Promise<string
       return `${n(e.actorId)}拉黑了${n(e.principalId)}，只能由对方解除。双方不能再发送新消息，已有历史不受影响`;
     case "unblocked":
       return `${n(e.actorId)}解除了对${n(e.principalId)}的拉黑`;
+    case "topic_reset": {
+      // The Agent is the conversation's: its name as it is now.
+      const agent = await q.query<{ display_name: string }>(
+        "select p.display_name from agent_conversations ac join principals p on p.id = ac.agent_id where ac.conversation_id = $1",
+        [conversationId],
+      );
+      return `${n(e.actorId)} 开始了新话题，之前的对话不再发给 ${agent.rows[0]?.display_name ?? "某人"}`;
+    }
   }
 }
 
@@ -49,6 +60,6 @@ export async function renderNotice(q: Queryable, e: SystemEvent): Promise<string
  * conversation row lock (and, in a direct conversation, the pair lock before it).
  */
 export async function appendSystem(t: Tx, conversationId: string, e: SystemEvent): Promise<StoredMessage> {
-  const text = await renderNotice(t, e);
+  const text = await renderNotice(t, conversationId, e);
   return insertMessage(t, conversationId, e.actorId, "system", { ...e, text }, null);
 }
