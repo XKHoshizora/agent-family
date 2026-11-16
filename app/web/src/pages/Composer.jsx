@@ -4,6 +4,7 @@ import { ME } from "../data/identities.js";
 import { entity, nameOf, senderName } from "../state/selectors.js";
 import { Avatar, Btn, IconBtn } from "../ui/primitives.jsx";
 import { useSendFiles } from "./useSendFiles.js";
+import { hasVisibleText, messageText } from "../auth/validation.js";
 import { Smile, Image, Paperclip, AtSign, X } from "../icons.js";
 
 const EMOJI = {
@@ -33,8 +34,11 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
   const drag = useRef(null);
   const unsaved = useRef(null);
   const disabled = Boolean(block);
-  const length = [...text.trim()].length;
+  // What the service would store, and whether it would take it: something visible, at most TEXT_LIMIT characters.
+  const body = messageText(text);
+  const length = [...body].length;
   const tooLong = length > TEXT_LIMIT;
+  const invisible = text.trim() !== "" && !hasVisibleText(body);
   // @ suggestions: the conversation's current members, nobody else.
   const people = conv.members.filter(id => id !== ME);
   const matches = mention ? people.filter(id => `${nameOf(state,id)} ${entity(state,id)?.handle || ""}`.toLowerCase().includes(mention.query.toLowerCase())) : [];
@@ -92,8 +96,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     requestAnimationFrame(()=>{inputRef.current?.focus();inputRef.current?.setSelectionRange(cursor,cursor);});
   };
   const send = () => {
-    const body=text.trim();
-    if(!body || disabled || tooLong) return;
+    if(!body || invisible || disabled || tooLong) return;
     actions.sendText(conv.id, body, { replyToSeq: replyTo?.seq ?? null });
     edit(""); saveDraft();
     selection.current={start:0,end:0};
@@ -122,7 +125,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
     if (!e.clipboardData.getData?.("text/plain")) e.preventDefault();
     sendFiles(images);
   };
-  const limitNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : null;
+  const sendNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : invisible ? "消息里没有看得见的文字，无法发送" : null;
   return <footer className="composer" ref={rootRef} onKeyDown={e=>{if(e.key==="Escape"){setEmojiOpen(false);setMention(null);}}}>
     {replyTo && <div className="reply-chip"><span>回复 {senderName(state,replyTo.from)}：{replyTo.kind==="image"?"[图片]":replyTo.text}</span><IconBtn label="取消回复" onClick={()=>setReplyTo(null)}><X size={14}/></IconBtn></div>}
     <div className="composer-tools">
@@ -162,8 +165,8 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
           onClick={e=>detect(e.target.value,e.target.selectionStart,e.target.selectionEnd)} onKeyDown={keyDown} onPaste={paste}
           onKeyUp={e=>{if(!e.nativeEvent.isComposing && ["ArrowLeft","ArrowRight","Home","End"].includes(e.key))detect(e.target.value,e.target.selectionStart,e.target.selectionEnd);}}/>
       </div>
-      <Btn variant="primary" className="send" disabled={disabled||!text.trim()||tooLong} reason={block?.text ?? limitNote} onClick={()=>send()}>发送</Btn>
+      <Btn variant="primary" className="send" disabled={disabled||!body||invisible||tooLong} reason={block?.text ?? sendNote} onClick={()=>send()}>发送</Btn>
     </div>
-    <p className="composer-hint">{disabled?block.text:limitNote?<span className="failed">{limitNote}</span>:"Enter 发送 · Shift+Enter 换行"}</p>
+    <p className="composer-hint">{disabled?block.text:sendNote?<span className="failed">{sendNote}</span>:"Enter 发送 · Shift+Enter 换行"}</p>
   </footer>;
 }

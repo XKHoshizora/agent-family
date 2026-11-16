@@ -125,6 +125,11 @@ describe("starting a group", () => {
     expect(dialog().textContent).not.toContain("至少选择");
     expect(createGroup).not.toHaveBeenCalled();
 
+    setName("\u200B\u2060"); // invisible: the service would refuse it
+    await click(dialogButton("创建群聊"));
+    expect(dialog().textContent).toContain("群名称需要包含看得见的文字");
+    expect(createGroup).not.toHaveBeenCalled();
+
     setName("😀".repeat(60)); // 60 code points (120 UTF-16 units) is fine
     await click(dialogButton("创建群聊"));
     expect(createGroup).toHaveBeenCalledTimes(1);
@@ -338,6 +343,9 @@ describe("renaming", () => {
     fireEvent.change(input(), { target: { value: "字".repeat(61) } });
     await click(button("保存"));
     expect(mainText()).toContain("群名称最多 60 个字");
+    fireEvent.change(input(), { target: { value: "\u200B" } });
+    await click(button("保存"));
+    expect(mainText()).toContain("群名称需要包含看得见的文字");
     expect(renameGroup).not.toHaveBeenCalled();
     fireEvent.change(input(), { target: { value: "  下周也去  " } });
     await click(button("保存"));

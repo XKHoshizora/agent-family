@@ -45,13 +45,39 @@ export function handle(value) {
   return "";
 }
 
-/** A group's name as the service counts it: trimmed, one line, 1-60 code points. */
+/**
+ * Format characters the service removes from group names (as from display names): all of them — bidi overrides
+ * and isolates, zero-width spaces, the BOM, the soft hyphen… — except the joiners U+200C/U+200D and the emoji tag
+ * characters, which carry meaning (emoji sequences, subdivision flags, Persian and Indic text).
+ */
+const STRIPPED_FORMAT = /(?![\u200C\u200D\u{E0020}-\u{E007F}])\p{Cf}/gu;
+/** Something visible: anything but the joiners and tag characters, which only change what is next to them. */
+const BASE_CHARACTER = /[^\u200C\u200D\u{E0020}-\u{E007F}]/u;
+
+/**
+ * A group's name as the service counts it: format characters removed (above), trimmed, something visible in it,
+ * one line, 1-60 code points.
+ */
 export function groupTitle(value) {
-  const v = value.trim();
-  if (!v) return "请输入群名称";
+  if (!value.trim()) return "请输入群名称";
+  const v = value.replace(STRIPPED_FORMAT, "").trim();
+  if (!BASE_CHARACTER.test(v)) return "群名称需要包含看得见的文字";
   if (/[\p{Cc}\u2028\u2029]/u.test(v)) return "群名称只能是一行";
   if ([...v].length > 60) return "群名称最多 60 个字";
   return "";
+}
+
+/** Bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069): the service removes them from messages and captions. */
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
+
+/** A message's text, or a caption, as the service stores it: bidi overrides and isolates removed, then trimmed. */
+export function messageText(value) {
+  return value.replace(BIDI_CONTROLS, "").trim();
+}
+
+/** Whether text shows anything: the service refuses a text message with no character that is neither white space nor a format character. */
+export function hasVisibleText(value) {
+  return /[^\s\p{Cf}]/u.test(value);
 }
 
 /** @returns {Record<string,string>} the failing fields only, in the order of `rules` */

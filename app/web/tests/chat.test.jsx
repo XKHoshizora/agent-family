@@ -542,6 +542,20 @@ describe("composer", () => {
     expect(screen.getByRole("button", { name: "发送" }).disabled).toBe(false);
   });
 
+  it("a message of only invisible characters cannot be sent and says why; bidi overrides are not sent", async () => {
+    const { api } = await openApp();
+    await openChat("小安");
+    type("\u200B\u2060\uFEFF");
+    expect(screen.getByRole("button", { name: "发送" }).disabled).toBe(true);
+    expect(document.querySelector(".composer-hint").textContent).toContain("消息里没有看得见的文字");
+    press("Enter");
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    type("safe\u202Eelif.exe");
+    expect(screen.getByRole("button", { name: "发送" }).disabled).toBe(false);
+    press("Enter");
+    expect(api.sendMessage).toHaveBeenCalledWith(D1, { clientTxn: "tx-1", text: "safeelif.exe" });
+  });
+
   it("drafts are kept per conversation in the data layer", async () => {
     const { layer } = await openApp();
     await openChat("小安");

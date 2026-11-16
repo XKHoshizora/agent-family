@@ -2,6 +2,7 @@
 // and group wrappers call their route and then ask the sync engine for fresh state (pushes do the same).
 // Principal ids may be given as the view model's "me" alias; they are mapped to the real id here.
 import * as routes from "../api/routes.js";
+import { hasVisibleText, messageText } from "../auth/validation.js";
 import { ME } from "./identities.js";
 import {
   applyGone,
@@ -124,12 +125,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   }
 
   /**
-   * Sends text (trimmed; NUL dropped and lone surrogates replaced, which the service refuses; empty is refused
-   * without a request). Resolves {ok, clientTxn, duplicate?, error?}.
+   * Sends text as the service stores it (bidi overrides and isolates removed, trimmed; NUL dropped and lone
+   * surrogates replaced, which the service refuses); text with nothing visible is refused without a request.
+   * Resolves {ok, clientTxn, duplicate?, error?}.
    */
   function sendText(conversationId, text, { replyToSeq = null } = {}) {
-    const body = typeof text === "string" ? wellFormed(text.replaceAll("\u0000", "")).trim() : "";
-    if (!body) return refused("invalid_request");
+    const body = typeof text === "string" ? messageText(wellFormed(text.replaceAll("\u0000", ""))) : "";
+    if (!hasVisibleText(body)) return refused("invalid_request");
     return send(conversationId, { text: body, replyToSeq });
   }
 
@@ -241,7 +243,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (!file || !Number.isFinite(file.size)) return refused("invalid_request");
     if (file.size > MAX_FILE_BYTES) return refused("too_large");
     const clientTxn = uuid();
-    const caption = typeof text === "string" ? wellFormed(text.replaceAll("\u0000", "")).trim() : "";
+    const caption = typeof text === "string" ? messageText(wellFormed(text.replaceAll("\u0000", ""))) : "";
     // Forget files of entries that are gone (another account signed in, the conversation was left).
     for (const key of files.keys()) if (!getModel().pending[key]) files.delete(key);
     files.set(clientTxn, file);

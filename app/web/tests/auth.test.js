@@ -48,6 +48,32 @@ describe("field rules", () => {
     expect(v.displayName(" 小安 ")).toBe("");
   });
 
+  it("group title: the display-name rule with 60 — format characters but the joiners removed, something visible, one line", () => {
+    expect(v.groupTitle("  ")).toBe("请输入群名称");
+    // Nothing but invisible characters: a blank group name for everyone else.
+    for (const invisible of ["\u200B", "\u200B\u2060\uFEFF", "\u202E", "\u200D\u200C", " \u00AD "]) {
+      expect(v.groupTitle(invisible), JSON.stringify(invisible)).toBe("群名称需要包含看得见的文字");
+    }
+    // A bidi override is allowed (the service removes it); length is counted without it.
+    expect(v.groupTitle("safe\u202Eelif.exe")).toBe("");
+    expect(v.groupTitle(`${"字".repeat(60)}\u200B\u202E`)).toBe("");
+    expect(v.groupTitle("字".repeat(61))).toBe("群名称最多 60 个字");
+    expect(v.groupTitle("a\nb")).toBe("群名称只能是一行");
+    expect(v.groupTitle("a\u2028b")).toBe("群名称只能是一行");
+    expect(v.groupTitle("👩\u200D💻 小组")).toBe("");
+    expect(v.groupTitle("😀".repeat(60))).toBe("");
+  });
+
+  it("message text: stored without bidi overrides and isolates, trimmed; it needs something visible", () => {
+    expect(v.messageText("  safe\u202Eelif.exe\u2066 ")).toBe("safeelif.exe");
+    expect(v.messageText("\u202A\u202B\u202C\u202D\u2067\u2068\u2069")).toBe("");
+    expect(v.messageText("👩\u200D💻\u200B")).toBe("👩\u200D💻\u200B"); // only bidi controls go
+    expect(v.hasVisibleText("\u200B\u2060\uFEFF")).toBe(false);
+    expect(v.hasVisibleText(" \n\t　")).toBe(false);
+    expect(v.hasVisibleText("\u200Ba")).toBe(true);
+    expect(v.hasVisibleText("。")).toBe(true);
+  });
+
   it("handle: ^[a-z0-9_]{3,24}$", () => {
     expect(v.handle("")).toBe("请输入账号名");
     for (const bad of ["ab", "a".repeat(25), "Ann_1", "ann-1", "小安小安", "ann 1"]) {
