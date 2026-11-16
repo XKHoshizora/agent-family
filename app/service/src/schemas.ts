@@ -49,13 +49,18 @@ export function userText(min: number, max: number, { singleLine = false }: { sin
  */
 const STRIPPED_FORMAT_CHARS = /(?![\u200C\u200D\u{E0020}-\u{E007F}])\p{Cf}/gu;
 
-/** Something visible: anything but joiners and tag characters, which only modify what is next to them. */
-const HAS_BASE_CHARACTER = /[^\u200C\u200D\u{E0020}-\u{E007F}]/u;
+/**
+ * Something visible: a character that is not white space, not a control character, and not one that shows nothing
+ * on its own — the default-ignorable code points (format characters, joiners, variation selectors, tag characters,
+ * Hangul fillers, the combining grapheme joiner, …) and the Braille blank U+2800. Emoji sequences, keycaps, flags
+ * and right-to-left text all have a visible base character.
+ */
+const VISIBLE_CHARACTER = /[^\s\p{Cc}\p{Default_Ignorable_Code_Point}\u{2800}]/u;
 
 /**
  * A name others see: format characters removed except U+200C, U+200D and the tag characters (the rest could
- * reorder or hide what others see), then trimmed; 1–`max` characters (code points), not made of joiners alone;
- * one line — no control characters, no line or paragraph separators; no lone surrogates.
+ * reorder or hide what others see), then trimmed; 1–`max` characters (code points), with a visible character
+ * (VISIBLE_CHARACTER); one line — no control characters, no line or paragraph separators; no lone surrogates.
  */
 function visibleName(max: number) {
   return z
@@ -64,7 +69,7 @@ function visibleName(max: number) {
     .pipe(
       userText(1, max, { singleLine: true })
         .refine((s) => !/[\p{Zl}\p{Zp}]/u.test(s), "one line")
-        .refine((s) => HAS_BASE_CHARACTER.test(s), "nothing but joiners"),
+        .refine((s) => VISIBLE_CHARACTER.test(s), "nothing visible"),
     );
 }
 
@@ -80,15 +85,19 @@ export const groupTitle = visibleName(60);
  */
 const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/g;
 
+/** Control characters other than tab, line feed and carriage return: refused in message text and captions. */
+const CONTROLS_BUT_LINE_BREAKS = /(?![\t\n\r])\p{Cc}/u;
+
 /**
  * Message text or a caption: stored as sent except that bidi overrides and isolates are removed, then
- * `userText(min, max)` (trimmed; line breaks allowed; no NUL or lone surrogates; length counted after removal).
+ * `userText(min, max)` (trimmed; line breaks allowed; no lone surrogates; length counted after removal); no control
+ * character other than tab, line feed and carriage return (NUL included).
  */
 export function messageText(min: number, max: number) {
   return z
     .string()
     .transform((s) => s.replace(BIDI_CONTROLS, ""))
-    .pipe(userText(min, max));
+    .pipe(userText(min, max).refine((s) => !CONTROLS_BUT_LINE_BREAKS.test(s), "control character"));
 }
 
 /** A search term: what `messageText` would store of it (so it matches stored text), one line, 1–100 characters. */
@@ -97,7 +106,7 @@ export const searchTerm = z
   .transform((s) => s.replace(BIDI_CONTROLS, ""))
   .pipe(userText(1, 100, { singleLine: true }));
 
-/** Whether text shows anything: a character that is neither white space nor a format character (`\p{Cf}`). */
+/** Whether text shows anything: it has a VISIBLE_CHARACTER (not white space, a control or a character that shows nothing). */
 export function hasVisibleText(s: string): boolean {
-  return /[^\s\p{Cf}]/u.test(s);
+  return VISIBLE_CHARACTER.test(s);
 }

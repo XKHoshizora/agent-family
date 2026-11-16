@@ -386,9 +386,10 @@ accepted but not used: the mail links to the web app).
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
   Then it is trimmed; the result must be 1–40 characters, one line (no control characters, no line or
-  paragraph separators), contain no lone surrogates, and be more than joiners and tag characters alone (a
-  name that is empty or only joiners after stripping is 400 `invalid_request`). The same rule applies on
-  registration.
+  paragraph separators), contain no lone surrogates, and contain a visible character as defined for message
+  text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
+  as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
+  same rule applies on registration and, with 1–60 characters, to group titles.
 - 200 `{"id", "handle", "displayName"}` with the name as stored. Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
@@ -590,12 +591,15 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 
 - Body: `clientTxn` (required, `^[A-Za-z0-9_-]{1,64}$`: your retry key), `text` (stored as sent except that
   bidi overrides and isolates — U+202A–U+202E, U+2066–U+2069, which would reorder what others see — are
-  removed; then trimmed; 0–8000 characters counted after that; line breaks allowed; no NUL or lone
-  surrogates), `attachmentId` (optional: your own upload in this conversation that no message carries yet;
-  makes a `file` message with `text` as its caption), `replyToSeq` (optional positive integer: a message of
-  this conversation you can see). Without `attachmentId`, `text` must contain at least one character that is
-  neither white space nor a format character (`\p{Cf}`: zero-width spaces, joiners, the BOM, …); a caption may
-  be empty or invisible.
+  removed; then trimmed; 0–8000 characters counted after that; line breaks allowed; no control character other
+  than tab, line feed and carriage return — NUL included —, no lone surrogates: otherwise 400), `attachmentId`
+  (optional: your own upload in this conversation that no message carries yet; makes a `file` message with
+  `text` as its caption), `replyToSeq` (optional positive integer: a message of this conversation you can
+  see). Without `attachmentId`, `text` must contain a visible character: one that is not white space, not a
+  control character, not a default-ignorable code point (`\p{Default_Ignorable_Code_Point}`: format
+  characters, joiners, variation selectors, tag characters, Hangul fillers U+115F/U+1160/U+3164/U+FFA0, the
+  combining grapheme joiner, …) and not the Braille blank U+2800 (emoji sequences, keycaps, flags and
+  right-to-left text all have one); a caption may be empty or invisible.
 - 201 `{"message": WireMessage, "duplicate": false}`.
 - Retries: the same `clientTxn` again (same sender, same conversation) stores nothing and answers 200
   `{"message": <the stored message>, "duplicate": true}` — even if you could no longer send there now (you
@@ -892,8 +896,8 @@ its partial upload deleted. Until the upload's checks have passed, its body is u
 every request starts with (see Configuration): a refused or signed-out upload cannot keep a connection busy.
 
 **Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
-makes a `file` message (caption 0–8000 characters, bidi overrides and isolates removed as from message text;
-it may be empty or invisible). The attachment must be your own upload in this
+makes a `file` message (caption 0–8000 characters, the rules of message text — bidi overrides and isolates
+removed, control characters other than tab and line breaks refused — except that it may be empty or invisible). The attachment must be your own upload in this
 conversation that no message carries yet (400 otherwise); each upload can be sent once.
 
 **Download.** `GET /api/attachments/:id` serves the bytes iff a message carrying the attachment is

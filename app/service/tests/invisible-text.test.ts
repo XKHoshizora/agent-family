@@ -55,6 +55,43 @@ describe("group titles follow the display-name rule (1-60)", () => {
   });
 });
 
+/**
+ * Characters that show nothing on their own but are not format characters: Hangul fillers, the Braille blank,
+ * variation selectors without a base, the combining grapheme joiner, Khmer inherent vowels, Mongolian selectors.
+ */
+const BLANKS = ["\u3164", "\u115F", "\u1160", "\uFFA0", "\u2800", "\uFE0F", "\u{E0100}", "\u034F", "\u17B5", "\u180B", "\u3164\u2800 \uFE0F"];
+/** Emoji and right-to-left text that must keep working everywhere a visible character is required. */
+const LIVELY = [
+  "\u{1F469}\u200D\u{1F4BB}", // ZWJ sequence
+  "1\uFE0F\u20E3", // keycap
+  "\u{1F1EF}\u{1F1F5}", // flag (regional indicators)
+  "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}", // subdivision flag (tag characters)
+  "\u{1F44D}\u{1F3FD}", // skin tone
+  "\u2764\uFE0F", // variation selector after its base
+  "\u05E9\u05DC\u05D5\u05DD", // Hebrew
+  "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645", // Persian with ZWNJ
+];
+
+describe("nothing visible also means: no characters that show nothing (not only format characters)", () => {
+  it("such a title or display name is refused; emoji and right-to-left names are not", async () => {
+    const [a, b, c] = await three();
+    await befriend(app, a, b);
+    await befriend(app, a, c);
+    const g = await group(app, a, "team", [b, c]);
+    for (const title of BLANKS) {
+      const label = JSON.stringify(title);
+      expect([label, await api(app, a, "POST", "/api/conversations", { title, memberIds: [b.id, c.id] })]).toEqual([label, INVALID]);
+      expect([label, await api(app, a, "PATCH", `/api/conversations/${g}`, { title })]).toEqual([label, INVALID]);
+      expect([label, await api(app, a, "PATCH", "/api/me", { displayName: title })]).toEqual([label, INVALID]);
+    }
+    for (const title of LIVELY) {
+      const label = JSON.stringify(title);
+      expect([label, await api(app, a, "PATCH", `/api/conversations/${g}`, { title })]).toEqual([label, { status: 200, json: { id: g, title } }]);
+      expect([label, (await api(app, a, "PATCH", "/api/me", { displayName: title })).status]).toEqual([label, 200]);
+    }
+  });
+});
+
 describe("message text and captions", () => {
   async function pair(): Promise<{ a: Actor; b: Actor; dm: string }> {
     const [a, b] = [await signUp(app, "alice"), await signUp(app, "bob")];
@@ -68,6 +105,33 @@ describe("message text and captions", () => {
       expect([JSON.stringify(text), await send(a, dm, { text })]).toEqual([JSON.stringify(text), INVALID]);
     }
     expect(await api(app, a, "GET", `/api/conversations/${dm}/messages`).then((r) => r.json.messages.filter((m: { kind: string }) => m.kind === "text"))).toEqual([]);
+  });
+
+  it("nor of characters that show nothing; emoji and right-to-left text still go through as sent", async () => {
+    const { a, dm } = await pair();
+    for (const text of BLANKS) {
+      expect([JSON.stringify(text), await send(a, dm, { text })]).toEqual([JSON.stringify(text), INVALID]);
+    }
+    for (const text of [...LIVELY, "\u05E9\u05DC\u05D5\u05DD\u200F!"]) {
+      const sent = await send(a, dm, { text });
+      expect([JSON.stringify(text), sent.status, sent.json.message?.text]).toEqual([JSON.stringify(text), 201, text]);
+    }
+  });
+
+  it("control characters other than tab, line feed and carriage return are refused, in text and in captions", async () => {
+    const { a, dm } = await pair();
+    for (const text of ["\u0007", "\u001F", "\u0085", "a\u0007b", "x\u000By", "page\u000Cbreak", "a\u007Fb"]) {
+      expect([JSON.stringify(text), await send(a, dm, { text })]).toEqual([JSON.stringify(text), INVALID]);
+    }
+    const kept = "col\tumn\r\nnext line";
+    expect((await send(a, dm, { text: kept })).json.message.text).toBe(kept);
+    const upload = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${dm}/attachments`,
+      headers: { cookie: a.cookie, "content-type": MULTIPART },
+      payload: multipart([{ name: "file", filename: "a.txt", type: "text/plain", data: "hello" }]),
+    });
+    expect(await send(a, dm, { attachmentId: JSON.parse(upload.body).id, text: "cap\u0007tion" })).toEqual(INVALID);
   });
 
   it("is stored as sent except for bidi overrides and isolates, which are removed", async () => {
