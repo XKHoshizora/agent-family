@@ -236,6 +236,36 @@ describe("nothing is kept at OpenAI", () => {
   });
 });
 
+describe("fallback: with a reasoning level an OpenAI model is sent as one that reasons", () => {
+  it("openai_chat: at none the system text is a system message and the limit max_tokens; at high a developer message and max_completion_tokens", async () => {
+    await collect(gateway.stream(call("openai_chat", { reasoning: "none" })));
+    let { body } = onlyRequest();
+    expect(body.messages[0]).toEqual({ role: "system", content: SYSTEM });
+    expect(body.max_tokens).toBe(256);
+    expect(body).not.toHaveProperty("max_completion_tokens");
+
+    stub.reset();
+    await collect(gateway.stream(call("openai_chat", { reasoning: "high" })));
+    ({ body } = onlyRequest());
+    expect(body.messages[0]).toEqual({ role: "developer", content: SYSTEM });
+    expect(body.max_completion_tokens).toBe(256);
+    expect(body).not.toHaveProperty("max_tokens");
+  });
+
+  it("openai_responses: at none the system text is a system message, at high a developer message; the limit is max_output_tokens either way", async () => {
+    await collect(gateway.stream(call("openai_responses", { reasoning: "none" })));
+    let { body } = onlyRequest();
+    expect(body.input[0]).toEqual({ role: "system", content: SYSTEM });
+    expect(body.max_output_tokens).toBe(256);
+
+    stub.reset();
+    await collect(gateway.stream(call("openai_responses", { reasoning: "high" })));
+    ({ body } = onlyRequest());
+    expect(body.input[0]).toEqual({ role: "developer", content: SYSTEM });
+    expect(body.max_output_tokens).toBe(256);
+  });
+});
+
 describe("fallback: an assistant turn is text only", () => {
   it("a file in it is sent as [文件：{name}], an image as [图片]", async () => {
     await collect(
