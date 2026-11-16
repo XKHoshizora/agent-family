@@ -93,6 +93,8 @@ const envSchema = z.object({
   ),
   /** Server-wide: an idle kept-alive connection is closed after this long. */
   HTTP_KEEP_ALIVE_TIMEOUT_MS: z.coerce.number().int().positive().default(72_000),
+  /** A request must have arrived whole this long after its head, else its connection is closed (uploads let in excepted). */
+  HTTP_BODY_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   /** Postgres cancels any statement on the app's pool that runs longer than this (503 busy). */
   DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   /** A request that gets no pool connection within this long is answered 503 busy. */
@@ -139,6 +141,8 @@ export interface Config {
   httpConnectionTimeoutMs: number;
   httpRequestTimeoutMs: number;
   httpKeepAliveTimeoutMs: number;
+  /** How long a request may take to arrive whole, counted from its head, unless it is an upload let in (src/body-deadline.ts). */
+  httpBodyTimeoutMs: number;
   /** `statement_timeout` of every pool connection (migrations use their own connection). */
   dbStatementTimeoutMs: number;
   /** How long a pool user waits for a connection (pg's `connectionTimeoutMillis`). */
@@ -201,6 +205,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     httpConnectionTimeoutMs: e.HTTP_CONNECTION_TIMEOUT_MS,
     httpRequestTimeoutMs,
     httpKeepAliveTimeoutMs: e.HTTP_KEEP_ALIVE_TIMEOUT_MS,
+    httpBodyTimeoutMs: e.HTTP_BODY_TIMEOUT_MS,
     dbStatementTimeoutMs: e.DB_STATEMENT_TIMEOUT_MS,
     dbAcquireTimeoutMs: e.DB_ACQUIRE_TIMEOUT_MS,
     searchStatementTimeoutMs: e.SEARCH_STATEMENT_TIMEOUT_MS,

@@ -56,7 +56,12 @@ export function destroyOpenRequests(): void {
 
 export async function openRequest(
   app: FastifyInstance,
-  { path, cookie, contentType = MULTIPART }: { path: string; cookie: string; contentType?: string },
+  {
+    path,
+    cookie,
+    contentType = MULTIPART,
+    method = "POST",
+  }: { path: string; cookie: string; contentType?: string; method?: "POST" | "PUT" },
 ): Promise<OpenRequest> {
   const { port } = await listen(app);
   // Keep-alive, as a browser: the server can then answer early and drain the rest of the body.
@@ -64,7 +69,7 @@ export async function openRequest(
   const req = http.request({
     host: "127.0.0.1",
     port,
-    method: "POST",
+    method,
     path,
     agent,
     headers: { cookie, "content-type": contentType, "transfer-encoding": "chunked" },

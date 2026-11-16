@@ -14,6 +14,7 @@ import { registerRegistrationRoutes } from "./auth/register.ts";
 import { AppError, frameworkErrors, registerErrorHandling } from "./errors.ts";
 import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
+import { registerBodyDeadline } from "./body-deadline.ts";
 import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
@@ -131,7 +132,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         : { level: "info", serializers: logSerializers },
     trustProxy: config.trustProxy,
     // Server-wide limits (WebSockets are exempt: `ws` clears the socket timeout on upgrade, and an upgraded
-    // connection is no longer a request). Uploads run under their own, tighter deadlines (attachments/routes.ts).
+    // connection is no longer a request). Uploads run under their own, tighter deadlines (attachments/routes.ts);
+    // everything else under the much shorter body deadline (body-deadline.ts), so `requestTimeout` is only the
+    // uploads' backstop.
     connectionTimeout: config.httpConnectionTimeoutMs,
     requestTimeout: config.httpRequestTimeoutMs,
     keepAliveTimeout: config.httpKeepAliveTimeoutMs,
@@ -185,6 +188,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     const origin = req.headers.origin;
     if (origin !== undefined && !fromApp(origin)) throw new AppError(403, "forbidden");
   });
+
+  // Slow bodies: a request must have arrived whole within HTTP_BODY_TIMEOUT_MS, unless it is an upload let in.
+  registerBodyDeadline(app, config.httpBodyTimeoutMs);
 
   app.decorate("deps", deps);
   app.decorate("auth", createAuth(config, deps.db, deps.sessions, app.log));

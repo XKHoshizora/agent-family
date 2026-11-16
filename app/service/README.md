@@ -65,10 +65,16 @@ and every run-time import of `src/` a production dependency.
 `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
 `SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off, at most 1440),
 `UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
-15 min in all), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle, default 2 min),
-`HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min) and `HTTP_KEEP_ALIVE_TIMEOUT_MS`
-(default 72 s). The server-wide ones must be longer than the upload deadlines (checked at start-up), so
-uploads are governed by their own deadlines; WebSockets are not subject to them.
+15 min in all), `HTTP_BODY_TIMEOUT_MS` (the body deadline, default 30 s: a request with a body must have arrived whole this long
+after its head, or its connection is closed without an answer — on any route, also an unknown one, and also when
+the answer already went out but the client is still sending; `src/body-deadline.ts`; the two uploads are lifted
+out of it once they let a body in: an attachment upload when its checks have passed and its own deadlines start, an
+avatar upload when its sender is signed in), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle,
+default 2 min), `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min; with the body
+deadline it only matters for the uploads) and `HTTP_KEEP_ALIVE_TIMEOUT_MS` (default 72 s). The server-wide ones
+must be longer than the upload deadlines (checked at start-up), so attachment uploads are governed by their own
+deadlines and a signed-in avatar upload by the server-wide ones; WebSockets are subject to none of them (an
+upgrade has no body).
 `DB_STATEMENT_TIMEOUT_MS` (default 30 s) is Postgres' `statement_timeout` on every connection of the app's
 pool (and of the CLI's): a statement running longer, lock waits included, is cancelled and the request
 answered 503 `busy`. Only statements count, not the time between them, so a long upload or a sweep deleting
@@ -393,6 +399,8 @@ accepted but not used: the mail links to the web app).
   (GIF, SVG, …) is 400 `invalid_request`. The declared type is ignored.
 - 200 `{"ok": true}`.
 - Limit: 10 per minute (refused uploads count).
+- A signed-in sender's body may take as long as the server-wide timeouts allow; anyone else's must arrive within
+  the body deadline (`HTTP_BODY_TIMEOUT_MS`, see Configuration). The answers are unchanged.
 
 #### `GET /api/principals/:id/avatar`
 
@@ -877,7 +885,8 @@ bidi and zero-width characters removed; at most 120 characters; `file` when empt
 principal: 50 MB per file (413 `too_large`, enforced while streaming), 60 uploads per hour and 3 at a time
 (429 `rate_limited`), 2 GiB stored in total, sent or not (413 `{"error": "too_large", "reason": "quota"}`).
 A client that sends no body bytes for 45 s, or is still sending after 15 minutes, is disconnected and
-its partial upload deleted.
+its partial upload deleted. Until the upload's checks have passed, its body is under the 30-second body deadline
+every request starts with (see Configuration): a refused or signed-out upload cannot keep a connection busy.
 
 **Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
 makes a `file` message (caption 0–8000 characters, bidi overrides and isolates removed as from message text;

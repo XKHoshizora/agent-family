@@ -5,6 +5,7 @@ import type { Socket } from "node:net";
 import { Readable } from "node:stream";
 import { z } from "zod";
 import { canSend } from "../conversations/store.ts";
+import { liftBodyDeadline } from "../body-deadline.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
@@ -190,6 +191,8 @@ async function receiveFile(
   const parts = req.parts();
   const first = nextPart(parts);
   let file: Readable | undefined;
+  // The upload is let in: its own deadlines take over from the body deadline every request starts under.
+  liftBodyDeadline(req);
   const deadline = armDeadlines(req, deadlines, (err) => file?.destroy(err));
   try {
     const part = await beforeDeadline(first, deadline);

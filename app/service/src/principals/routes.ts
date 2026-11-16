@@ -6,6 +6,7 @@ import { displayName, uuidParam } from "../schemas.ts";
 import { isMissingBlob, newBlobKey } from "../attachments/blob.ts";
 import { discardBlob, holdBlob, releaseBlob } from "../attachments/pending.ts";
 import { sniff } from "../attachments/sniff.ts";
+import { liftBodyDeadline } from "../body-deadline.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { requirePrincipal } from "../session.ts";
@@ -153,6 +154,17 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       "/api/me/avatar",
       {
         bodyLimit: AVATAR_MAX_BYTES,
+        // Up to 2 MiB from a slow connection may take long: a signed-in person's upload is governed by the
+        // server-wide timeouts, not the body deadline (body-deadline.ts). Anyone else's body stays under it; the
+        // handler still gives every answer (the order of checks is unchanged).
+        preParsing: async (req) => {
+          try {
+            await requirePrincipal(req);
+            liftBodyDeadline(req);
+          } catch {
+            // Not signed in (or the session could not be checked now): the body deadline stays.
+          }
+        },
         schema: {
           params: z.object({}),
           querystring: z.object({}),
