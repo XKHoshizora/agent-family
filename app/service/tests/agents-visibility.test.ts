@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { api, befriend, signIn, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
+import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
 const { blobs } = useProbeBlobs("af-agents-vis-");
 const { app, db } = useApp({ blobs, env: SITE_ENV });
+
+afterEach(closeAllSockets);
 
 /** What a request answers with, byte for byte: status, content type and body. */
 async function observe(who: Actor, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", url: string, body?: unknown, raw?: Buffer) {
@@ -106,18 +109,63 @@ describe("an Agent is invisible to everyone but its owner", () => {
     expect(agent.handle).toBe("lookup_bot");
   });
 
-  it("an Agent id cannot be put into a group, neither at creation nor later (400)", async () => {
-    const [owner, f1, f2] = [await signUp(app, "gus"), await signUp(app, "gil"), await signUp(app, "gwen")];
+  it("an Agent id cannot be put into a group: refused byte-identically to a random uuid, for its owner and for a stranger", async () => {
+    const [owner, stranger, f1, f2, f3, f4] = [
+      await signUp(app, "gus"),
+      await signUp(app, "gil"),
+      await signUp(app, "gwen"),
+      await signUp(app, "gabe"),
+      await signUp(app, "gina"),
+      await signUp(app, "gary"),
+    ];
     const agent = await mustCreateAgent(app, owner);
     await befriend(app, owner, f1);
     await befriend(app, owner, f2);
-    const refused = { status: 400, json: { error: "invalid_request" } };
-    expect(await api(app, owner, "POST", "/api/conversations", { title: "g", memberIds: [f1.id, f2.id, agent.id] })).toEqual(refused);
-    const made = await api(app, owner, "POST", "/api/conversations", { title: "g", memberIds: [f1.id, f2.id] });
-    expect(made.status).toBe(201);
-    expect(await api(app, owner, "POST", `/api/conversations/${made.json.id}/members`, { principalId: agent.id })).toEqual(refused);
+    await befriend(app, stranger, f3);
+    await befriend(app, stranger, f4);
+    const nobody = randomUUID();
+    for (const [who, a, b] of [
+      [owner, f1, f2],
+      [stranger, f3, f4],
+    ] as const) {
+      const create = (id: string) => observe(who, "POST", "/api/conversations", { title: "g", memberIds: [a.id, b.id, id] });
+      const refused = await create(agent.id);
+      expect(refused).toEqual(await create(nobody));
+      expect([refused.status, refused.body]).toEqual([403, '{"error":"forbidden"}']);
+      const made = await api(app, who, "POST", "/api/conversations", { title: "g", memberIds: [a.id, b.id] });
+      expect(made.status).toBe(201);
+      const add = (id: string) => observe(who, "POST", `/api/conversations/${made.json.id}/members`, { principalId: id });
+      expect(await add(agent.id)).toEqual(await add(nobody));
+      expect((await add(agent.id)).status).toBe(403);
+    }
     const members = await db.query("select count(*)::int as n from memberships where principal_id = $1", [agent.id]);
     expect(members.rows[0].n).toBe(1); // its own dedicated conversation only
+  });
+
+  it("changes to an Agent are pushed to its owner's sockets and nobody else's", async () => {
+    const [owner, stranger] = [await signUp(app, "wanda"), await signUp(app, "walt")];
+    const agent = await mustCreateAgent(app, owner);
+    const [mine, theirs] = [await connect(app, owner), await connect(app, stranger)];
+    const isAgent = (e: Push) => e.type === "agent" && e.id === agent.id;
+    const count = () => mine.events.filter(isAgent).length;
+    const step = async (run: () => Promise<unknown>) => {
+      const before = count();
+      await run();
+      await mine.waitFor((e) => isAgent(e) && count() > before);
+    };
+    await step(() => api(app, owner, "PATCH", `/api/agents/${agent.id}`, { intro: "x" }));
+    await step(() => api(app, owner, "POST", `/api/agents/${agent.id}/pause`));
+    await step(() => api(app, owner, "POST", `/api/agents/${agent.id}/resume`));
+    await step(() =>
+      app.inject({ method: "PUT", url: `/api/agents/${agent.id}/avatar`, headers: { cookie: owner.cookie, "content-type": "image/png" }, payload: PNG }),
+    );
+    await step(() => api(app, owner, "DELETE", `/api/agents/${agent.id}`));
+    expect(mine.events.filter(isAgent)).toHaveLength(5);
+    // The stranger's own traffic arrives; the Agent's never does.
+    await api(app, stranger, "PATCH", `/api/agents/${agent.id}`, { intro: "mine" });
+    await api(app, stranger, "POST", "/api/ws-ticket");
+    await new Promise((r) => setTimeout(r, 300));
+    expect(theirs.events.filter((e) => e.type === "agent")).toEqual([]);
   });
 
   it("an Agent can never be a signed-in principal: it has no sign-in account", async () => {

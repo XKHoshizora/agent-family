@@ -39,6 +39,7 @@ export type PushEvent =
   | { type: "conversation"; id: string }
   | { type: "gone"; id: string }
   | { type: "social" }
+  | { type: "agent"; id: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
   | { type: "pong" };
 
@@ -115,6 +116,11 @@ export class Hub {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     for (const off of this.unsubscribe.splice(0)) off();
+  }
+
+  /** Tells `principalId`'s sockets that Agent `agentId` changed (config, pause, delete, avatar): refetch it. */
+  pushAgentChanged(principalId: string, agentId: string): void {
+    this.push(principalId, { type: "agent", id: agentId });
   }
 
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */

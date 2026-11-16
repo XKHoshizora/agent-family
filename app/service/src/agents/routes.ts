@@ -172,6 +172,7 @@ export function registerAgentRoutes(app: FastifyInstance): void {
         return updateAgent(t, current, patch);
       });
       conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
+      app.realtime.pushAgentChanged(me.id, agent.id);
       return toView(agent);
     },
   );
@@ -191,7 +192,10 @@ export function registerAgentRoutes(app: FastifyInstance): void {
           const changed = await setAgentState(t, current, change);
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed };
         });
-        if (changed) conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
+        if (changed) {
+          conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
+          app.realtime.pushAgentChanged(me.id, agent.id);
+        }
         return toView(agent);
       },
     );
@@ -212,5 +216,6 @@ export function registerAgentRoutes(app: FastifyInstance): void {
       if (current.deleted) throw deletedError();
       return swapAvatarKey(t, id, key);
     });
+    app.realtime.pushAgentChanged(me.id, id);
   });
 }

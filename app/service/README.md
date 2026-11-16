@@ -292,7 +292,7 @@ An Agent is a principal of kind `agent` owned by one person for good, with a ded
 whose members are exactly the owner and the Agent. Everything here is the owner's: for anybody else every
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
-`POST /api/friend-requests` (also for its owner), and its id cannot be put into a group (400 `invalid_request`).
+`POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
 
 **Agent** (owner only): `{"id", "handle", "name", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
@@ -879,6 +879,7 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: GET /api/conversations/:id
 { "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: GET /api/social
+{ "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar): GET /api/agents/:id
 { "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats only (either side)
 { "type": "pong" }                      // answer to your { "type": "ping" }
 ```
