@@ -284,8 +284,13 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   `email` (an e-mail address, at most 254), `password` (10–128 characters), `displayName` (see
   `PATCH /api/me`: 1–40 characters after removing format characters (not joiners) and trimming, one line), `handle`
   (`^[a-z0-9_]{3,24}$`: lower-case letters, digits, `_`).
-- 201 `{"ok": true}` whether or not the e-mail already has an account, and the invite is used up either way, so
-  neither the answer nor the invite afterwards tells an invite holder which e-mails have accounts. Held back
+- 201 `{"ok": true}` whether or not the e-mail already has an account, and the invite is used up either way: the
+  answer, its timing and the invite afterwards are the same. What an invite holder can still learn, accepted:
+  one answer per invite. After a 201 for an address, whether the chosen handle now exists (a handle lookup, a
+  second registration with that handle — 409 —, or signing in with the chosen password — 403
+  `email_not_verified` against 401) tells whether the address already had a verified account (then nothing was
+  created). Each such probe uses up a single-use invite and, for a verified account, mails its owner a
+  `registration_attempt` notice (at most hourly). Held back
   like the reset request's answer: at least 400 ms (plus up to 50 ms at random) after its whole body was in;
   errors are not held back. What happens depends on the e-mail (compared lower-cased):
   - No account: the account and its principal are created and a verification mail is sent (below).
