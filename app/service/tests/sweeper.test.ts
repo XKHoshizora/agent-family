@@ -37,6 +37,18 @@ describe("config", () => {
   });
 });
 
+describe("config HOST", () => {
+  const base = { DATABASE_URL: "postgres://x/y", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32) };
+  it("defaults to 0.0.0.0; takes an IP address or localhost; anything else is refused", () => {
+    expect(loadConfig(base).host).toBe("0.0.0.0");
+    expect(loadConfig({ ...base, HOST: "" }).host).toBe("0.0.0.0");
+    for (const ok of ["127.0.0.1", "::1", "::", "192.168.1.20", "localhost"]) expect(loadConfig({ ...base, HOST: ok }).host).toBe(ok);
+    for (const bad of ["example.com", "999.1.1.1", "0.0.0", "127.0.0.1:8787", "LOCALHOST ", "http://localhost"]) {
+      expect(() => loadConfig({ ...base, HOST: bad })).toThrow(/HOST/);
+    }
+  });
+});
+
 describe("startSweeper (fake timers)", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {

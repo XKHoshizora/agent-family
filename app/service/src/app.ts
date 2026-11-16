@@ -134,6 +134,15 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     keepAliveTimeout: config.httpKeepAliveTimeoutMs,
     frameworkErrors,
   });
+  // Fastify refuses `content-type: application/json` with an empty body (400) before any route runs, but a
+  // client that has no fields to send may well say "JSON" and send nothing. An empty body is "no body" (what a
+  // request without a content type already is); anything else parses exactly as before, and a route that needs
+  // fields still fails its own schema. Routes that declare their own parsers (avatar upload) are unaffected.
+  const parseJson = app.getDefaultJsonParser("error", "error");
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    if (body === "") return done(null, undefined);
+    parseJson(req, body as string, done);
+  });
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
   registerErrorHandling(app);

@@ -57,6 +57,7 @@ and every run-time import of `src/` a production dependency.
 ## Configuration (`src/config.ts`)
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
+`HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
@@ -298,7 +299,7 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
 
 #### `POST /api/auth/sign-out`
 
-*Session: optional.* Query: none allowed. Body: none or `{}`. → 200 `{"success": true}` and an expiring
+*Session: optional.* Query: none allowed. Body: none, empty (with or without `content-type: application/json`) or `{}`. → 200 `{"success": true}` and an expiring
 `Set-Cookie`, with or without a session. The session ends: its WebSockets close with 4001.
 
 #### `GET /api/auth/verify-email`
@@ -642,7 +643,7 @@ case) → the last seq you have (0 … 2^53−1). → 200 `{"messages": WireMess
 
 #### `POST /api/ws-ticket`
 
-*Session: required.* Body: none or `{}`. → 200 `{"ticket": "…"}`: opens one socket, once, within 30 seconds,
+*Session: required.* Body: none, empty (with or without `content-type: application/json`) or `{}`. → 200 `{"ticket": "…"}`: opens one socket, once, within 30 seconds,
 while the session that asked for it lasts. Limit: 30 per minute.
 
 #### `GET /api/ws`

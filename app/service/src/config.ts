@@ -48,6 +48,10 @@ const envSchema = z.object({
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
   PORT: z.coerce.number().int().min(0).max(65535).default(3000),
+  /** The address the server binds: an IPv4/IPv6 address or `localhost`. Default `0.0.0.0` (every interface). */
+  HOST: optionalString
+    .transform((v) => (v === undefined ? "0.0.0.0" : v))
+    .pipe(z.string().refine((v) => isIP(v) !== 0 || v === "localhost", "HOST must be an IP address or localhost")),
   S3_ENDPOINT: optionalString,
   S3_REGION: optionalString,
   S3_BUCKET: optionalString,
@@ -111,6 +115,8 @@ export interface Config {
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
   port: number;
+  /** The address `server.ts` listens on. */
+  host: string;
   s3?: {
     endpoint: string;
     region: string;
@@ -172,6 +178,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,
+    host: e.HOST,
     ...(anyS3
       ? {
           s3: {

@@ -468,7 +468,7 @@ export function registerAuthRoutes(app: FastifyInstance, rateLimitScale: number)
   typed.get(`${AUTH_BASE_PATH}/*`, { schema, onRequest, preHandler }, handler);
   typed.post(
     `${AUTH_BASE_PATH}/*`,
-    { schema: { ...schema, body: z.record(z.string(), z.unknown()).optional() }, onRequest, preHandler },
+    { schema: { ...schema, body: z.record(z.string(), z.unknown()).nullish() }, onRequest, preHandler },
     handler,
   );
 }
