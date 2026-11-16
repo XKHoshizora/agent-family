@@ -29,8 +29,10 @@ export interface Prepared {
 /**
  * Why a reply failed, as the owner is told (`Run.error`). `busy`: the service's own trouble (the reply could not be
  * started or stored, or it had nothing to answer and no new topic explains why); such a run is charged nothing.
+ * `context_too_small`: the model's context, less its output limit and the system text, cannot hold the owner's newest
+ * message (or 200 tokens of it); no call is made.
  */
-export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy";
+export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy" | "context_too_small";
 
 /**
  * How a run ends, as the worker saw it. `finish` records what is true under the Agent's lock: a reply that was posted

@@ -75,10 +75,17 @@ describe("agent and metering configuration", () => {
       ["missing field", [{ ...model, model: undefined }]],
       ["bad base url", [{ ...model, baseUrl: "not a url" }]],
       ["duplicate ids", [model, model]],
+      ["context no larger than the output limit", [{ ...model, contextTokens: 2048 }]],
+      ["context smaller than the output limit", [{ ...model, contextTokens: 1000 }]],
     ];
     for (const [name, value] of bad) {
       expect(() => loadConfig(withModels(value)), name).toThrow(/SITE_MODELS/);
     }
+  });
+
+  test("SITE_MODELS: a model's context must be larger than its output limit, or nothing is left for the conversation", () => {
+    expect(() => loadConfig(withModels([{ ...model, contextTokens: 2048 }]))).toThrow(/SITE_MODELS: model "fast" has contextTokens 2048, not more than its maxOutputTokens 2048/);
+    expect(loadConfig(withModels([{ ...model, contextTokens: 2049 }])).siteModels[0]!.contextTokens).toBe(2049);
   });
 
   test("SITE_MODELS: an apiKeyEnv that is unset (or empty) fails start-up naming it", () => {

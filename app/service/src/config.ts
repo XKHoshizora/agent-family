@@ -273,6 +273,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     );
   }
   for (const m of e.SITE_MODELS) {
+    if (m.contextTokens <= m.maxOutputTokens) {
+      throw new Error(
+        `Invalid configuration: SITE_MODELS: model "${m.id}" has contextTokens ${m.contextTokens}, not more than its maxOutputTokens ${m.maxOutputTokens}: nothing would be left for the conversation`,
+      );
+    }
+  }
+  for (const m of e.SITE_MODELS) {
     const key = env[m.apiKeyEnv];
     if (key === undefined || key === "") {
       throw new Error(`Invalid configuration: SITE_MODELS: model "${m.id}" needs the environment variable ${m.apiKeyEnv} (its apiKeyEnv), which is not set`);

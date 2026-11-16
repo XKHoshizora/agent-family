@@ -134,16 +134,17 @@ export async function countLiveAgents(t: Tx, ownerId: string): Promise<number> {
 /**
  * 400 `invalid_request` unless the model exists for this owner and the reasoning level suits it: a site model
  * must be in `config.siteModels` and allows `none` plus its own `reasoning` levels; a provider model must be
- * listed by a provider of this owner (providers/store.ts; a malformed `models` value lists nothing) and allows
- * `none` only, unless its `reasoning` flag is set. With no model chosen yet any level is accepted (it is checked
- * when a model is chosen).
+ * listed by a provider of this owner (providers/store.ts; a malformed `models` value lists nothing), with a context
+ * larger than the output limit its calls get (`providerDefaultMaxOutputTokens`; a site model's is checked when the
+ * configuration loads), and allows `none` only, unless its `reasoning` flag is set. With no model chosen yet any level
+ * is accepted (it is checked when a model is chosen).
  */
 export async function assertModelChoice(
   q: Queryable,
   ownerId: string,
   model: AgentModel,
   reasoning: ReasoningLevel,
-  config: Pick<Config, "siteModels">,
+  config: Pick<Config, "siteModels" | "providerDefaultMaxOutputTokens">,
 ): Promise<void> {
   if (model === null) return;
   let allowed: readonly ReasoningLevel[];
@@ -155,7 +156,7 @@ export async function assertModelChoice(
     // Locked `for key share` (in the caller's transaction): a concurrent delete of the provider waits or has happened.
     const models = await lockProviderModels(q, ownerId, model.providerId);
     const listed = models?.find((m) => m.name === model.model);
-    if (!listed) throw new AppError(400, "invalid_request");
+    if (!listed || listed.contextTokens <= config.providerDefaultMaxOutputTokens) throw new AppError(400, "invalid_request");
     allowed = listed.reasoning ? REASONING_LEVELS : [];
   }
   if (reasoning !== "none" && !allowed.includes(reasoning)) throw new AppError(400, "invalid_request");

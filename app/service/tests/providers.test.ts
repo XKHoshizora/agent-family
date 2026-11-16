@@ -384,7 +384,7 @@ describe("an Agent's provider model", () => {
       ).rows[0]!.id;
     const object = await insert("object", '{"name":"m"}');
     const text = await insert("text", '"m"');
-    const mixed = await insert("mixed", '[1, {"name": 5}, {"name": "m", "reasoning": "yes"}, {"name": "ok", "vision": false, "pdf": false, "reasoning": true, "contextTokens": 1000}]');
+    const mixed = await insert("mixed", '[1, {"name": 5}, {"name": "m", "reasoning": "yes"}, {"name": "ok", "vision": false, "pdf": false, "reasoning": true, "contextTokens": 4000}]');
 
     const listed = (await api(app, owner, "GET", "/api/providers")).json.providers;
     expect(listed.map((p: any) => [p.name, p.models.map((m: any) => m.name)])).toEqual([["object", []], ["text", []], ["mixed", ["ok"]]]);

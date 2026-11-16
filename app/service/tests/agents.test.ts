@@ -199,13 +199,15 @@ describe("model and reasoning", () => {
     expect((await api(app, owner, "PATCH", `/api/agents/${id}`, { model: null })).json.model).toBeNull();
   });
 
-  it("a provider model must be the caller's own and listed; it reasons only when flagged", async () => {
+  it("a provider model must be the caller's own and listed, with a context larger than its output limit; it reasons only when flagged", async () => {
     const [owner, other] = [await signUp(app, "polly"), await signUp(app, "oscar")];
     const mine = await providerWith(owner.id, [
-      { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 1000 },
-      { name: "deep", vision: false, pdf: false, reasoning: true, contextTokens: 1000 },
+      { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 4000 },
+      { name: "deep", vision: false, pdf: false, reasoning: true, contextTokens: 4000 },
+      // No larger than the output limit a provider model's call gets (2 048): nothing would be left to show it.
+      { name: "tiny", vision: false, pdf: false, reasoning: false, contextTokens: 2048 },
     ]);
-    const theirs = await providerWith(other.id, [{ name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 1000 }]);
+    const theirs = await providerWith(other.id, [{ name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 4000 }]);
     const choose = (providerId: string, model: string) => ({ source: "provider", providerId, model });
 
     expect((await createAgent(app, owner, { model: choose(theirs, "plain") })).status).toBe(400);
@@ -214,7 +216,11 @@ describe("model and reasoning", () => {
     expect((await createAgent(app, owner, { model: choose(mine, "plain"), reasoning: "low" })).status).toBe(400);
     const deep = await createAgent(app, owner, { model: choose(mine, "deep"), reasoning: "xhigh" });
     expect(deep).toMatchObject({ status: 201, json: { model: { source: "provider", providerId: mine, model: "deep" }, reasoning: "xhigh" } });
-    expect((await createAgent(app, owner, { model: choose(mine, "plain") })).status).toBe(201);
+    const plain = await createAgent(app, owner, { model: choose(mine, "plain") });
+    expect(plain.status).toBe(201);
+    expect(app.deps.config.providerDefaultMaxOutputTokens).toBe(2048);
+    expect((await createAgent(app, owner, { model: choose(mine, "tiny") })).status).toBe(400);
+    expect(await api(app, owner, "PATCH", `/api/agents/${plain.json.id}`, { model: choose(mine, "tiny") })).toEqual({ status: 400, json: { error: "invalid_request" } });
   });
 });
 

@@ -11,6 +11,7 @@ import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
 import { buildContext, hasOwnerTurn, loadContext, type LoadedContext } from "./context.ts";
+import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
@@ -33,6 +34,24 @@ const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
 const BUSY: RunEnd = { status: "failed", error: "busy" };
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
+/** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
+const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
+
+/**
+ * Whether a run that ended so may be followed by a reply to what its owner wrote meanwhile (`pending_seq`): every
+ * ending but a cancel by its Agent's pause or delete, which ends the reply for good (nothing written meanwhile is
+ * answered). A run cancelled because its owner started over is followed: what came after the new topic is to answer.
+ */
+function followsUp(end: RunEnd): boolean {
+  switch (end.status) {
+    case "done":
+    case "stopped":
+    case "failed":
+      return true;
+    case "cancelled":
+      return end.error === undefined;
+  }
+}
 
 /** What `begin` and `finish` read of the run, under its row lock. */
 interface RunState {
@@ -151,7 +170,8 @@ export class DbAgentPort implements AgentPort {
    *    resolve (`failed`, `provider_unavailable`). Otherwise the run takes on what came meanwhile (`covers_seq` =
    *    max(covers, pending)), and what the model may be shown is read (`loadContext`, SQL only). With no owner's message
    *    in it the run ends without a call: `cancelled` with no error when everything it was to answer is before a new
-   *    topic (its owner started over), else `failed` `busy`.
+   *    topic (its owner started over), else `failed` `busy`; and so does one whose model's context cannot hold the
+   *    owner's newest message, or 200 tokens of it (`failed`, `context_too_small`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it.
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; otherwise
@@ -194,6 +214,7 @@ export class DbAgentPort implements AgentPort {
         system,
       );
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
+      if (!holdsNewest(loaded.entries, loaded.budget)) return { end: TOO_SMALL };
       return { resolved, loaded, covers };
     });
     if ("end" in first) return first.end;
@@ -271,7 +292,7 @@ export class DbAgentPort implements AgentPort {
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const covers = Number(state.rows[0].covers_seq ?? 0);
       const pending = Number(state.rows[0].pending_seq ?? 0);
-      const answers = pending > covers && final.status !== "cancelled" && !agent.paused && !agent.deleted && agent.model !== null;
+      const answers = pending > covers && followsUp(final) && !agent.paused && !agent.deleted && agent.model !== null;
       const followUp = answers ? await queueRun(t, agent, pending) : null;
       return { ended, followUp };
     });

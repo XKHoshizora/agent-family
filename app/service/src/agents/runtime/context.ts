@@ -12,6 +12,13 @@ import { stripUnsafeText } from "../../schemas.ts";
 export const QUOTE_MAX_CHARS = 200;
 /** The largest image shown to a model as an image. */
 export const IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** The image formats shown to a model as images: those all four protocols take. Others (GIF) are shown by name. */
+export const MODEL_IMAGE_MIMES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/webp"]);
+/**
+ * Tokens the conversation must have at least for a call to be made: the owner's newest message whole, or this many of
+ * it, whichever is fewer. Less, and the run fails `context_too_small` instead of answering a fragment.
+ */
+export const MIN_CONVERSATION_TOKENS = 200;
 /** Images one call shows at most: the newest. */
 export const IMAGES_PER_CALL = 10;
 /** The largest PDF handed to a model that reads PDFs. */
@@ -95,6 +102,12 @@ function attachmentPart(a: ContextAttachment, content: AttachmentContent | null)
 /** Tokens the message takes at least: its text and its attachment's name. */
 export function minimalTokens(e: ContextEntry): number {
   return estimateTokens(e.text) + (e.attachment ? estimateTokens(attachmentLabel(e.attachment)) : 0);
+}
+
+/** Whether `budget` holds what a call needs at least (`MIN_CONVERSATION_TOKENS`); false when there is no owner's message. */
+export function holdsNewest(entries: readonly ContextEntry[], budget: number): boolean {
+  const newest = [...entries].reverse().find((e) => e.role === "user");
+  return newest !== undefined && budget >= Math.min(MIN_CONVERSATION_TOKENS, minimalTokens(newest));
 }
 
 /**

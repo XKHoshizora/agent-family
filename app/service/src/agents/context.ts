@@ -16,6 +16,7 @@ import {
   FILE_MAX_CHARS,
   fileText,
   IMAGE_MAX_BYTES,
+  MODEL_IMAGE_MIMES,
   pastBudget,
   PDF_MAX_BYTES,
   startsLikeText,
@@ -267,10 +268,10 @@ export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.s
 
 /**
  * Step two, with no transaction open: the call's turns, chosen by `ContextPlan` from `loaded`, with the contents of
- * attachments when the model can take them and they fit — checked on their stored size before a byte is read: an
- * image (PNG, JPEG, WebP, GIF) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any other
- * file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never more
- * than the call's `bytesLeft`. A missing blob is shown by name (and logged); any other failure to read one throws.
+ * attachments when the model can take them and they fit — checked on their stored size before a byte is read: a PNG,
+ * JPEG or WebP image (a GIF is named) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any
+ * other file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never
+ * more than the call's `bytesLeft`. A missing blob is shown by name (and logged); any other failure to read one throws.
  */
 export async function buildContext(
   blobs: BlobStore,
@@ -292,7 +293,8 @@ export async function buildContext(
     const found = loaded.attachments.get(attachment.id);
     if (!found) return;
     if (found.inline) {
-      if (!resolved.vision || !plan.canShowImage() || found.size > Math.min(IMAGE_MAX_BYTES, plan.bytesLeft) || room < IMAGE_TOKENS) return;
+      if (!MODEL_IMAGE_MIMES.has(found.mime) || !resolved.vision || !plan.canShowImage()) return;
+      if (found.size > Math.min(IMAGE_MAX_BYTES, plan.bytesLeft) || room < IMAGE_TOKENS) return;
       const got = await read(attachment, found.blobKey, found.size);
       if (got?.complete) plan.offer(slot, { type: "image", mime: found.mime, data: got.data });
     } else if (found.mime === "application/pdf") {

@@ -66,7 +66,8 @@ and every run-time import of `src/` a production dependency.
 a provider's test and refresh then answer 500 and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
 `SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
 `openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl`, `apiKeyEnv` (the name of another variable that holds the upstream key, so the JSON carries
-no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens`,
+no secret; start-up fails naming it if unset), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens` (larger than
+`maxOutputTokens`, else start-up fails naming the model),
 `vision`, `pdf`, `reasoning` (levels from `low`..`max`)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
 `SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
 contain `free`, default `{"free":20}`),
@@ -238,6 +239,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
+| — | `context_too_small` | A run's error only, never an HTTP answer: the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context |
 | 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
@@ -365,8 +367,10 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
 - 409 `handle_taken` (any person's or Agent's handle); 403 `agent_limit` when your Agents that are not deleted are
   as many as `AGENT_TIERS` gives your tier (a tier it no longer names gets the `free` number; counted under the
   account lock, so concurrent creates cannot pass it); 400 for a site `model` id that is not configured, a provider
-  that is not yours or does not list that model name, or a `reasoning` the model does not allow (a site model: `none`
-  and its own levels; a provider model: `none` only unless it is flagged `reasoning`; with no model any level).
+  that is not yours or does not list that model name, a provider model whose `contextTokens` is not larger than the
+  output limit its calls get (2 048: nothing would be left for the conversation), or a `reasoning` the model does not
+  allow (a site model: `none` and its own levels; a provider model: `none` only unless it is flagged `reasoning`; with
+  no model any level).
 - The conversation is created with the Agent: without a `persona` it holds one message from the Agent, the fixed
   greeting, which is unread for you like any message from someone else. `personaVersion` is 1 when a persona was given.
 
@@ -419,11 +423,12 @@ Failures are never messages: they live on the run, which the owner learns from t
 
 **Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
 "resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
-or `busy`: the service's own trouble — the reply could not be started or stored, or there was nothing to answer — which
+`context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona — or
+`busy`: the service's own trouble — the reply could not be started or stored, or there was nothing to answer — which
 costs you nothing), for
 `cancelled` `agent_paused` or `agent_deleted`, or none (everything it was to answer is before a new topic you started).
 `retryable`: it failed and trying again as it is may work (false
-after `provider_rejected` and `address_not_allowed`, and for every run that did not fail). `resetsAt` (ISO instant): for
+after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
 
 #### `GET /api/conversations/:id/run`
@@ -1291,8 +1296,9 @@ commit.
 
 **Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
 queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
-answers everything noted — not one per message, and never two replies at once. A cancelled run, a paused or deleted
-Agent, or one without a model by then, gets no follow-up.
+answers everything noted — not one per message, and never two replies at once. A run that ended `done`, `stopped` or
+`failed`, or `cancelled` because its owner started over (no error), is followed; one cancelled by a pause or delete is
+not, and neither is one whose Agent is paused, deleted or without a model by then.
 
 **Pause and delete** end the Agent's active reply for good, in their own transaction (under the Agent's lock): a queued
 run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it has no usage record); a
@@ -1313,6 +1319,9 @@ the pause is answered only as part of the next reply the owner's next message st
       the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
       the owner's in it, no model is called: when everything the run was to answer is before a new topic, it ends
       `cancelled` with no error (the owner started over: nothing failed, nothing to retry); otherwise `failed`, `busy`.
+      Nor is it called when the conversation's budget (below) holds neither the owner's newest message whole nor 200
+      tokens of it: `failed`, `context_too_small`, not retryable (the persona is too long for the model's context, or the
+      context too small): nothing is admitted or charged.
    2. No transaction: the attachments' bytes are read and the call is assembled (`buildContext`). A send to the
       conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`).
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
@@ -1351,8 +1360,8 @@ the pause is answered only as part of the next reply the owner's next message st
   reasoning are never shown. A message that quotes another starts with `> ` lines holding the first 200 characters of the quoted one (its
   text, or its attachment's name), also when the quoted one is from before the new topic: the owner chose to show it.
 - Attachments, read only through the download's own permission with the Agent as reader, and only after their stored
-  size passed the limit: an image (PNG, JPEG, WebP, GIF) of at most 5 MB as the image when the model sees images, else
-  `[图片：name]` (at most 10 images a call, the newest); a PDF of at most 10 MB as the file when the model reads PDFs,
+  size passed the limit: a PNG, JPEG or WebP image (what all four protocols take) of at most 5 MB as the image when the
+  model sees images, else `[图片：name]` (a GIF always; at most 10 images a call, the newest); a PDF of at most 10 MB as the file when the model reads PDFs,
   else `[文件：name]`; any other file as `[文件：name]` followed by its text when its bytes are text — valid UTF-8, no
   NUL, at most 1 in 100 characters a control character other than tab, line breaks and form feed; decided by the bytes,
   not the name or type — at most 100 000 characters a file and 200 000 a call (newest first), cut with `…（已截断）`, a
@@ -1367,7 +1376,8 @@ the pause is answered only as part of the next reply the owner's next message st
 - The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
   character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
-  then its end) when it alone is over the budget; then the current turn's attachment contents, newest first, each if it
+  then its end) when it alone is over the budget (which then holds at least 200 tokens: with less the run fails
+  `context_too_small`, see `begin`); then the current turn's attachment contents, newest first, each if it
   fits; then older messages by name only, newest first, while they fit (nothing older than one that does not); then
   their attachment contents, newest first, each if it fits. So an older message's attachment goes (leaving its name)
   before older messages do, and what the owner has just sent is the last to go.
@@ -1386,7 +1396,8 @@ all of the above, attachments at their estimate.
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable` |
-| Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing |
+| Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
+| The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or an attachment that could not be read | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | 2 minutes passed | what had been said, `truncated: true` (nothing said: `failed`, `provider_unavailable`) | `done` |
 | The service closed during the call | none | left `running` (recovery at start-up comes in a later task) |

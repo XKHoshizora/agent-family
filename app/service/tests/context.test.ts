@@ -4,6 +4,7 @@ import { readPrefix } from "../src/agents/context.ts";
 import { CALL_ATTACHMENT_MAX_BYTES, ContextPlan, CUT_MARK, fileText, type ContextEntry } from "../src/agents/runtime/context.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
 import { estimateTokens, IMAGE_TOKENS } from "../src/metering/prices.ts";
+import type { RunEnd } from "../src/agents/runtime/port.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, PNG } from "./helpers/agents.ts";
@@ -11,6 +12,7 @@ import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
+import { providerBody } from "./helpers/providers.ts";
 
 /**
  * What the model is shown (spec 6.2 "新话题", 6.5 "发给模型的内容", "思考程度"; README "Agents and runs"): the
@@ -306,6 +308,23 @@ describe("attachments", () => {
     expect(store.probe.gets).not.toContain(await blobKeyOf(attachment));
   });
 
+  it("only PNG, JPEG and WebP are sent as images (every protocol takes them); a GIF is named and not read", async () => {
+    const { owner, conv } = await owned("gif");
+    const gif = Buffer.from("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b", "hex");
+    const attachment = await sendFile(owner, conv, "dance.gif", gif, "动图");
+    await answer("看不了动图。");
+    expect(lastCall().messages).toEqual([
+      {
+        role: "user",
+        parts: [
+          { type: "text", text: "动图" },
+          { type: "text", text: "[图片：dance.gif]" },
+        ],
+      },
+    ]);
+    expect(store.probe.gets).not.toContain(await blobKeyOf(attachment));
+  });
+
   it("at most 10 images in one call, the newest", async () => {
     const { owner, agent, conv } = await owned("many");
     expect((await api(app, owner, "POST", `/api/agents/${agent.id}/pause`)).status).toBe(200);
@@ -428,6 +447,65 @@ describe("reading attachments", () => {
     expect(offered).toEqual([true, true, true, true, true, false]);
     expect(plan.bytesLeft).toBe(0);
     expect(plan.build().messages[0]!.parts[0]).toEqual({ type: "text", text: "[文件：0.pdf]" });
+  });
+});
+
+describe("a reply with no call", () => {
+  it("one that started over is followed by a reply to what its owner wrote while it ended", async () => {
+    const { owner, conv } = await owned("follow");
+    await say(owner, conv, "旧话题的话");
+    expect((await api(app, owner, "POST", `/api/conversations/${conv}/topic`)).status).toBe(201);
+    // The worker's steps by hand, so the owner can write between begin and finish.
+    const run = (await app.agentPort.claimNext())!;
+    const end = await app.agentPort.begin(run);
+    expect(end).toEqual({ status: "cancelled" });
+    const later = await say(owner, conv, "新话题的第一句");
+    await app.agentPort.finish(run, end as RunEnd, null, { inputChars: 0, outputChars: 0 });
+    expect((await db.query("select status, error from agent_runs where id = $1", [run.id])).rows).toEqual([{ status: "cancelled", error: null }]);
+    const next = await latestRun(owner, conv);
+    expect(next).toMatchObject({ status: "queued" });
+    expect((await db.query("select covers_seq::int as c from agent_runs where id = $1", [next.id])).rows).toEqual([{ c: later.seq }]);
+    await answer("好的。");
+    expect(lastCall().messages).toEqual([{ role: "user", parts: [{ type: "text", text: "新话题的第一句" }] }]);
+  });
+
+  it("a model whose context cannot hold the owner's message fails context_too_small, not retryable, and is not called", async () => {
+    const owner = await signUp(app, "smallctx");
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "small", contextTokens: 16_000 }] }))).json;
+    const agent = await mustCreateAgent(app, owner, { model: { source: "provider", providerId: provider.id, model: "small" }, persona: PERSONA });
+    // Its context is then set below the output limit its calls get (2 048): nothing is left for the conversation.
+    expect((await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { models: [{ name: "small", contextTokens: 1000 }] })).status).toBe(200);
+    expect(app.deps.config.providerDefaultMaxOutputTokens).toBeGreaterThan(1000);
+    const calls = gateway.calls.length;
+    await say(owner, agent.conversationId, "你好");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
+    const run = await latestRun(owner, agent.conversationId);
+    expect(run).toEqual({ id: run.id, status: "failed", error: "context_too_small", retryable: false });
+    expect((await db.query("select source, cost_micro::text as cost from usage_records where run_id = $1", [run.id])).rows).toEqual([
+      { source: null, cost: "0" },
+    ]);
+  });
+
+  it("the conversation must have room for the owner's newest message whole, or for 200 tokens of it", async () => {
+    // A 2 000-token context, 200 of them for the output, and a persona that leaves under 200 for the conversation.
+    const { owner, conv } = await owned("roomy", "tiny", { persona: "简".repeat(1_500) });
+    await say(owner, conv, "你好");
+    await answer("好。");
+    const budget = 2000 - 200 - estimateTokens(lastCall().system);
+    expect(budget).toBeGreaterThan(60);
+    expect(budget).toBeLessThan(200);
+
+    const calls = gateway.calls.length;
+    await say(owner, conv, "长".repeat(300));
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
+    expect(await latestRun(owner, conv)).toMatchObject({ status: "failed", error: "context_too_small", retryable: false });
+
+    // A message that fits whole is answered (what does not fit before it is left out).
+    await say(owner, conv, "短一点：".concat("字".repeat(40)));
+    await answer("收到。");
+    expect(textsOf(lastCall()).at(-1)).toBe("短一点：".concat("字".repeat(40)));
   });
 });
 

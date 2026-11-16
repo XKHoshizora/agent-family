@@ -43,7 +43,7 @@ export async function createAgent(
   t: Tx,
   ownerId: string,
   input: NewAgent,
-  config: Pick<Config, "agentTiers" | "siteModels">,
+  config: Pick<Config, "agentTiers" | "siteModels" | "providerDefaultMaxOutputTokens">,
 ): Promise<{ agent: AgentRow; change: Change }> {
   const account = await lockAccount(t, ownerId);
   const limit = config.agentTiers[account.tier] ?? config.agentTiers.free!;
