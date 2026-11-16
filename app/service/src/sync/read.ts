@@ -1,4 +1,4 @@
-import { VISIBLE_JOIN } from "../conversations/store.ts";
+import { VISIBLE_JOIN, type ConversationType } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
 import { mentionedIn, readPrincipals, type SyncPrincipal } from "../messages/principals.ts";
@@ -16,7 +16,7 @@ type Role = "speaker" | "observer";
 
 export interface SyncConversation {
   id: string;
-  type: "direct" | "group";
+  type: ConversationType;
   title: string | null;
   /** Groups only: a direct chat has no creator role (and `isCreator` is false for both of its members). */
   creatorId?: string;
@@ -26,7 +26,11 @@ export interface SyncConversation {
   createdAt: string;
   /** Direct chats only: the other party, from the pair the conversation belongs to (as the send path). */
   peerId?: string;
-  canSend: { ok: true } | { ok: false; reason: "blocked" | "not_friends" | "closed" };
+  /** Agent conversations only: the Agent (its owner's dedicated conversation has no peer). */
+  agentId?: string;
+  /** Agent conversations only. */
+  agent?: { paused: boolean; deleted: boolean };
+  canSend: { ok: true } | { ok: false; reason: "blocked" | "not_friends" | "closed" | "agent_deleted" };
   members: Array<{ id: string; role: Role; isCreator: boolean }>;
   /** The conversation's last assigned seq (it reveals how much was said, also before the caller joined). */
   lastSeq: number;
@@ -74,7 +78,7 @@ function onSnapshot<T>(db: Db, fn: (t: Tx) => Promise<T>): Promise<T> {
 async function conversationEntries(t: Tx, me: string, onlyId: string | null = null): Promise<SyncConversation[]> {
   const conversations = await t.query<{
     id: string;
-    type: "direct" | "group";
+    type: ConversationType;
     title: string | null;
     creator_id: string;
     seq: string;
@@ -85,11 +89,15 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
     peer_id: string | null;
     peer_read_seq: string | null;
     unread: string;
+    agent_id: string | null;
+    agent_paused: boolean | null;
+    agent_deleted: boolean | null;
   }>(
     // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
     // only the peer's read marker is read from their membership.
     `select c.id, c.type, c.title, c.creator_id, c.seq, c.closed_at is not null as closed, c.created_at, me.role, me.read_seq,
             pair.peer_id, peer.read_seq as peer_read_seq,
+            ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted,
             (select count(*) from messages m ${VISIBLE_JOIN}
               where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
        from memberships me
@@ -100,6 +108,8 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
        ) pair on true
        left join memberships peer
          on peer.conversation_id = c.id and peer.principal_id = pair.peer_id and peer.left_seq is null
+       left join agent_conversations ac on ac.conversation_id = c.id
+       left join agents ag on ag.principal_id = ac.agent_id
       where me.principal_id = $1 and me.left_seq is null and ($2::uuid is null or me.conversation_id = $2::uuid)
       order by c.created_at, c.id`,
     [me, onlyId],
@@ -133,7 +143,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
     return verdict === undefined ? "not_friends" : verdict;
   };
   return conversations.rows.map((c) => {
-    const verdict = c.type === "direct" ? directVerdict(c.peer_id) : null;
+    const verdict = c.type === "direct" ? directVerdict(c.peer_id) : c.agent_deleted ? "agent_deleted" : null;
     return {
       id: c.id,
       type: c.type,
@@ -143,6 +153,9 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
       closed: c.closed,
       createdAt: c.created_at.toISOString(),
       ...(c.type === "direct" && c.peer_id ? { peerId: c.peer_id } : {}),
+      ...(c.type === "agent" && c.agent_id
+        ? { agentId: c.agent_id, agent: { paused: c.agent_paused === true, deleted: c.agent_deleted === true } }
+        : {}),
       canSend: c.closed ? { ok: false, reason: "closed" } : verdict ? { ok: false, reason: verdict } : { ok: true },
       members: membersOf.get(c.id) ?? [],
       lastSeq: Number(c.seq),

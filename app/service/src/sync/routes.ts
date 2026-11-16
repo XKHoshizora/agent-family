@@ -18,14 +18,16 @@ const role = z.enum(["speaker", "observer"]);
 /** One conversation as the caller sees it: an element of `/api/sync`'s `conversations`, and `GET /api/conversations/:id`. */
 const conversationEntry = z.object({
   id: z.string(),
-  type: z.enum(["direct", "group"]),
+  type: z.enum(["direct", "group", "agent"]),
   title: z.string().nullable(),
   creatorId: z.string().optional(),
   myRole: role,
   closed: z.boolean(),
   createdAt: z.string(),
   peerId: z.string().optional(),
-  canSend: z.object({ ok: z.boolean(), reason: z.enum(["blocked", "not_friends", "closed"]).optional() }),
+  agentId: z.string().optional(),
+  agent: z.object({ paused: z.boolean(), deleted: z.boolean() }).optional(),
+  canSend: z.object({ ok: z.boolean(), reason: z.enum(["blocked", "not_friends", "closed", "agent_deleted"]).optional() }),
   members: z.array(z.object({ id: z.string(), role, isCreator: z.boolean() })),
   lastSeq: z.number(),
   readSeq: z.number(),

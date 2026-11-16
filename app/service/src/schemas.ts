@@ -76,6 +76,9 @@ function visibleName(max: number) {
 /** A person's display name, on registration and `PATCH /api/me` alike: `visibleName`, 1–40. */
 export const displayName = visibleName(40);
 
+/** An Agent's name, on creation and editing: the display-name rule (`visibleName`), 1–20. */
+export const agentName = visibleName(20);
+
 /** A group's title, on creation and renaming: the display-name rule (`visibleName`), 1–60. */
 export const groupTitle = visibleName(60);
 

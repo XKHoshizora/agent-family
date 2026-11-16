@@ -21,6 +21,12 @@ async function mayAdd(t: Tx, actorId: string, targetId: string): Promise<boolean
   return (await areFriends(t, actorId, targetId)) && !(await blockBetween(t, actorId, targetId));
 }
 
+/** An Agent is never a group member: its id is refused like any other malformed request (400 `invalid_request`). */
+async function refuseAgents(t: Tx, ids: string[]): Promise<void> {
+  const { rowCount } = await t.query("select 1 from principals where id = any($1::uuid[]) and kind = 'agent' limit 1", [ids]);
+  if (rowCount) throw new AppError(400, "invalid_request");
+}
+
 /**
  * Locks an open group for a change by `actorId`: the pair lock with `pairWith` first (when the change
  * checks their relationship), then the row. 404 for direct chats, closed or missing groups and non-members.
@@ -56,6 +62,7 @@ export async function createGroup(
     throw new AppError(400, "invalid_request");
   }
   if (memberIds.length + 1 > MAX_GROUP_MEMBERS) throw forbidden();
+  await refuseAgents(t, memberIds);
   await lockPairs(t, memberIds.map((m) => [creatorId, m] as const));
   for (const m of memberIds) if (!(await mayAdd(t, creatorId, m))) throw forbidden();
 
@@ -85,6 +92,7 @@ export async function createGroup(
  */
 export async function addMember(t: Tx, conversationId: string, actorId: string, targetId: string): Promise<Change> {
   const { conversation } = await lockGroup(t, conversationId, actorId, targetId);
+  await refuseAgents(t, [targetId]);
   if (await currentMembership(t, conversationId, targetId)) throw new AppError(409, "already_member");
   if (!(await mayAdd(t, actorId, targetId))) throw forbidden();
   const before = await currentMemberIds(t, conversationId);

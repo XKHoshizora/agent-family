@@ -1,5 +1,5 @@
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
-import { VISIBLE_JOIN, visibleJoin } from "../conversations/store.ts";
+import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
@@ -172,7 +172,7 @@ export interface ReadResult {
   readSeq: number;
   /** The marker before this call; equal to `readSeq` when nothing moved. */
   previous: number;
-  type: "direct" | "group";
+  type: ConversationType;
 }
 
 /**
@@ -181,7 +181,7 @@ export interface ReadResult {
  * Null when not a current member. The row is locked first, so `previous` is exact under concurrency.
  */
 export async function markRead(q: Queryable, readerId: string, conversationId: string, seq: number): Promise<ReadResult | null> {
-  const { rows } = await q.query<{ read_seq: string; previous: string; type: "direct" | "group" }>(
+  const { rows } = await q.query<{ read_seq: string; previous: string; type: ConversationType }>(
     `with prev as (
        select ms.id, ms.read_seq from memberships ms
         where ms.conversation_id = $1 and ms.principal_id = $2 and ms.left_seq is null

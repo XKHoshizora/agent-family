@@ -30,9 +30,11 @@ export const VISIBLE_JOIN = visibleJoin("$1");
 
 export const MAX_GROUP_MEMBERS = 500;
 
+export type ConversationType = "direct" | "group" | "agent";
+
 export interface ConversationRow {
   id: string;
-  type: "direct" | "group";
+  type: ConversationType;
   title: string | null;
   creatorId: string;
   /** The last assigned message seq. */
@@ -52,7 +54,7 @@ export interface Membership {
 
 interface ConversationDbRow {
   id: string;
-  type: "direct" | "group";
+  type: ConversationType;
   title: string | null;
   creator_id: string;
   seq: string;
@@ -119,8 +121,8 @@ export async function currentMemberIds(q: Queryable, conversationId: string): Pr
 export async function peekConversation(
   q: Queryable,
   conversationId: string,
-): Promise<{ type: "direct" | "group"; pair: [string, string] | null } | null> {
-  const { rows } = await q.query<{ type: "direct" | "group"; a_id: string | null; b_id: string | null }>(
+): Promise<{ type: ConversationType; pair: [string, string] | null } | null> {
+  const { rows } = await q.query<{ type: ConversationType; a_id: string | null; b_id: string | null }>(
     `select c.type, d.a_id, d.b_id from conversations c left join direct_pairs d on d.conversation_id = c.id
       where c.id = $1`,
     [conversationId],
@@ -160,23 +162,40 @@ export async function lockForWrite(t: Tx, conversationId: string, principalId: s
   return { conversation, membership, peerId };
 }
 
-export type CanSend = { ok: true } | { ok: false; reason: "blocked" | "not_friends" };
+export type CanSend = { ok: true } | { ok: false; reason: "blocked" | "not_friends" | "agent_deleted" };
 
-async function permission(q: Queryable, type: "direct" | "group", principalId: string, peerId: string | null): Promise<CanSend> {
+async function permission(
+  q: Queryable,
+  type: ConversationType,
+  conversationId: string,
+  principalId: string,
+  peerId: string | null,
+): Promise<CanSend> {
   if (type === "group") return { ok: true };
+  if (type === "agent") {
+    // The members are exactly the owner and the Agent; no friendship is consulted. The Agent's row is read
+    // plainly: deleting takes the conversation row lock first (`lockAgent`), which every writer here holds.
+    const { rows } = await q.query<{ deleted: boolean }>(
+      `select a.deleted_at is not null as deleted
+         from agent_conversations ac join agents a on a.principal_id = ac.agent_id where ac.conversation_id = $1`,
+      [conversationId],
+    );
+    return rows[0]?.deleted === false ? { ok: true } : { ok: false, reason: "agent_deleted" };
+  }
   const reason = await canDirectSend(q, principalId, peerId!);
   return reason ? { ok: false, reason } : { ok: true };
 }
 
 /**
  * Whether `principalId` may send in the conversation right now: direct chats follow the pair's
- * friendship and blocks, groups let every current member send. Null when not a current member of an
+ * friendship and blocks, groups let every current member send, an Agent's conversation lets its owner send
+ * until the Agent is deleted. Null when not a current member of an
  * open conversation. Advisory outside a transaction: the upload route's pre-check uses it, and sends and
  * uploads re-check under the locks. `GET /api/sync` gives the same verdict for all its direct chats at
  * once (canDirectSendMany); every one of these takes the other party from `direct_pairs`.
  */
 export async function canSend(q: Queryable, conversationId: string, principalId: string): Promise<CanSend | null> {
-  const { rows } = await q.query<{ type: "direct" | "group"; a_id: string | null; b_id: string | null }>(
+  const { rows } = await q.query<{ type: ConversationType; a_id: string | null; b_id: string | null }>(
     `select c.type, d.a_id, d.b_id
        from conversations c
        join memberships ms on ms.conversation_id = c.id and ms.principal_id = $2 and ms.left_seq is null
@@ -187,12 +206,12 @@ export async function canSend(q: Queryable, conversationId: string, principalId:
   const r = rows[0];
   if (!r) return null;
   const peerId = r.type === "direct" ? (r.a_id === principalId ? r.b_id : r.a_id) : null;
-  return permission(q, r.type, principalId, peerId);
+  return permission(q, r.type, conversationId, principalId, peerId);
 }
 
 /** Inside a write holding `lockForWrite`: 403 `cannot_send` with the reason, the same refusal a send gets. */
 export async function assertCanSend(t: Tx, lock: WriteLock): Promise<void> {
-  const verdict = await permission(t, lock.conversation.type, lock.membership.principalId, lock.peerId);
+  const verdict = await permission(t, lock.conversation.type, lock.conversation.id, lock.membership.principalId, lock.peerId);
   if (!verdict.ok) throw new AppError(403, "cannot_send", { reason: verdict.reason });
 }
 

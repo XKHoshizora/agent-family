@@ -217,7 +217,9 @@ Shared codes:
 | 400 | `invalid_request` | Malformed or not acceptable input (also 414 for an over-long path parameter, 415 for an unsupported content type) |
 | 401 | `unauthenticated` | No valid session (or a WebSocket ticket that is unknown, used or expired) |
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
-| 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other) |
+| 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted) |
+| 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
+| 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent |
 | 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
@@ -245,6 +247,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/principals/lookup` | 30 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
+| `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` of `/api/agents/:id` | 30 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
 | `PUT` + `DELETE /api/blocks/:principalId` | 20 together | principal |
 | `POST /api/conversations` | 10 | principal |
@@ -282,6 +285,65 @@ are the JSON 404.
 - `recent`: the last 7 site-days (today included) summed per Agent, model and source: `points` is what the calls
   cost (`"0"` for `provider`), `replies` how many were replies; `agentId` is `null` for persona drafts. Largest first.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
+
+### Agents
+
+An Agent is a principal of kind `agent` owned by one person for good, with a dedicated conversation (type `agent`)
+whose members are exactly the owner and the Agent. Everything here is the owner's: for anybody else every
+`/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
+byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
+`POST /api/friend-requests` (also for its owner), and its id cannot be put into a group (400 `invalid_request`).
+
+**Agent** (owner only): `{"id", "handle", "name", "intro", "field", "persona", "personaVersion", "replyMode":
+"always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
+{"source": "provider", "providerId", "model"} | null, "paused", "deleted", "conversationId", "createdAt"}`.
+
+#### `POST /api/agents`
+
+*Session: required.* Body (no other key): `handle` (`^[a-z0-9_]{3,24}$`, never changes), `name` (1–20 characters,
+the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `persona` (≤ 20 000 characters), `replyMode`
+(default `always`), `reasoning` (default `none`), `model` (default `null`). → 201 Agent.
+
+- 409 `handle_taken` (any person's or Agent's handle); 403 `agent_limit` when your Agents that are not deleted are
+  as many as `AGENT_TIERS` gives your tier (a tier it no longer names gets the `free` number; counted under the
+  account lock, so concurrent creates cannot pass it); 400 for a site `model` id that is not configured, a provider
+  that is not yours or does not list that model name, or a `reasoning` the model does not allow (a site model: `none`
+  and its own levels; a provider model: `none` only unless it is flagged `reasoning`; with no model any level).
+- The conversation is created with the Agent: without a `persona` it holds one message from the Agent, the fixed
+  greeting, which is unread for you like any message from someone else. `personaVersion` is 1 when a persona was given.
+
+#### `GET /api/agents`
+
+*Session: required.* → 200 `{"agents": [Agent]}`: yours, oldest first, deleted ones included (`deleted: true`).
+
+#### `GET /api/agents/:id`
+
+*Session: required.* → 200 Agent (also a deleted one); 404 `not_found` unless yours.
+
+#### `PATCH /api/agents/:id`
+
+*Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
+`persona`, `replyMode`, `reasoning`, `model` (`null` clears it), under the rules of creation; the model and the
+reasoning level are checked together when either is sent. A `persona` that differs from the stored one raises
+`personaVersion` by one. → 200 Agent; 409 `agent_deleted`.
+
+#### `POST /api/agents/:id/pause`
+
+*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`. You can still write to a paused Agent.
+
+#### `POST /api/agents/:id/resume`
+
+*Session: required.* Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`.
+
+#### `DELETE /api/agents/:id`
+
+*Session: required.* Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
+conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`). → 200 Agent.
+
+#### `PUT /api/agents/:id/avatar`
+
+*Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent. → 200 `{"ok": true}`; 409 `agent_deleted`.
+Every avatar change (people's too) raises `principals.avatar_version`.
 
 ### Health
 
@@ -757,12 +819,14 @@ while the session that asked for it lasts. Limit: 30 per minute.
 
 ```jsonc
 {
-  "id": "…", "type": "direct" | "group", "title": "team" /* null in direct chats */,
+  "id": "…", "type": "direct" | "group" | "agent", "title": "team" /* null in direct chats */,
   "creatorId": "…",                                // groups only: a direct chat has no creator role
   "myRole": "speaker" | "observer", "closed": false,
   "createdAt": "2026-11-16T01:02:03.000Z",       // when the conversation was created; /api/sync lists them in this order
   "peerId": "…",                                   // direct chats only: the other person of the pair
-  "canSend": { "ok": true } | { "ok": false, "reason": "blocked" | "not_friends" | "closed" },
+  "agentId": "…",                                  // Agent conversations only: the Agent (no peerId)
+  "agent": { "paused": false, "deleted": false },  // Agent conversations only
+  "canSend": { "ok": true } | { "ok": false, "reason": "blocked" | "not_friends" | "closed" | "agent_deleted" },
   "members": [{ "id": "…", "role": "speaker", "isCreator": true }],   // current members, join order; isCreator only in groups
   "lastSeq": 42,       // the conversation's newest seq (counts messages from before you joined too)
   "readSeq": 40,       // your read marker
