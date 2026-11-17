@@ -66,14 +66,20 @@ const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
  * can still answer (not paused, not deleted, has a model) — however the run itself ended. A pause or delete drops what
  * was noted (runs.ts `interruptRuns`), and so does the Agent's leaving the run's group (group-leave.ts
  * `endRunsInGroup`); nothing is noted while the Agent is paused or out of that group, so what is noted on an
- * interrupted run came after the resume, and is answered. In a group, whether it is queued and as whose is runs.ts
- * `queueFollowUp`'s: one only Agents' messages called for is not queued while the group is halted.
+ * interrupted run came after the resume, and is answered. A run that ended `agent_removed` (its Agent is no longer a
+ * member of the run's group, however that was found) is followed by nothing: what was noted on it is dropped
+ * (`droppedOnEnd`). In a group, whether it is queued and as whose is runs.ts `queueFollowUp`'s: one only Agents'
+ * messages called for is not queued while the group is halted.
  */
-function followUpSeq(state: RunState, agent: AgentRow): number | null {
+function followUpSeq(state: RunState, agent: AgentRow, end: RunEnd): number | null {
+  if (droppedOnEnd(end)) return null;
   const covers = Number(state.covers_seq ?? 0);
   const pending = Number(state.pending_seq ?? 0);
   return pending > covers && !agent.paused && !agent.deleted && agent.model !== null ? pending : null;
 }
+
+/** A run that ends so is followed by nothing, and what was noted on it (`pending_seq`) is cleared as it ends. */
+const droppedOnEnd = (end: RunEnd): boolean => end.status === "cancelled" && end.error === "agent_removed";
 
 /**
  * A run's in-process flags, from its claim until it has finished. A delta waiting to be delivered keeps the flags it
@@ -416,11 +422,13 @@ export class DbAgentPort implements AgentPort {
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
       const updated = await t.query<RunRow>(
-        `update agent_runs as r set status = $2, error = $3, resets_at = $4, finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
-        [run.id, final.status, error, resetsAt],
+        `update agent_runs as r set status = $2, error = $3, resets_at = $4, finished_at = now(),
+                pending_seq = case when $5::boolean then null else r.pending_seq end
+          where r.id = $1 returning ${RUN_COLUMNS}`,
+        [run.id, final.status, error, resetsAt, droppedOnEnd(final)],
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
-      const next = followUpSeq(state.rows[0], agent);
+      const next = followUpSeq(state.rows[0], agent, final);
       const followUp = next === null ? null : await queueFollowUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next);
       return { ended, followUp, interrupted: state.rows[0].interrupted !== null };
     });
@@ -526,13 +534,15 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   if (!settled) await settle(t, config, runId, null, NOTHING, end.status, new Date(), { forgiveAll: true, log });
   const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
   const updated = await t.query<RunRow>(
-    `update agent_runs as r set status = $2, error = $3, finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
-    [runId, end.status, error],
+    `update agent_runs as r set status = $2, error = $3, finished_at = now(),
+            pending_seq = case when $4::boolean then null else r.pending_seq end
+      where r.id = $1 returning ${RUN_COLUMNS}`,
+    [runId, end.status, error, droppedOnEnd(end)],
   );
   if (reply === null) return [];
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
-  const next = end.status !== "failed" ? followUpSeq(state, agent) : null;
+  const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
   const followUp = next === null ? null : await queueFollowUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next);
   return followUp === null ? [ended] : [ended, followUp];
 }
