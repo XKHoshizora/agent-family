@@ -3,7 +3,8 @@ import { useStore } from "../data/store.jsx";
 import { Avatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
 import { AgentForm, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
-import { levelLabel, modelLabel } from "./ModelPicker.jsx";
+import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
+import { LabLogo } from "../ui/LabLogo.jsx";
 import { useAction } from "./useAction.js";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
@@ -68,7 +69,13 @@ export function AgentsList() {
                   <StatusTag agent={a} />
                 </span>
                 <span className="row-sub">
-                  <span className="row-preview">{a.loaded ? `${a.field || "未填写擅长领域"} · ${modelLabel(state, a.model) ?? "未选择模型"}` : "正在读取…"}</span>
+                  <span className="row-preview">{a.loaded ? (
+                      <>
+                        {`${a.field || "未填写擅长领域"} · `}
+                        <LabLogo lab={modelLab(state, a.model)} size={16} />
+                        {modelLabel(state, a.model) ?? "未选择模型"}
+                      </>
+                    ) : "正在读取…"}</span>
                 </span>
               </span>
             </button>
@@ -220,7 +227,7 @@ function AgentDetail({ agent }) {
                   rows={[
                     ["主人", "你（不可修改）"],
                     ["擅长领域", agent.field || "未填写"],
-                    ["模型", modelLabel(state, agent.model) ?? "未选择"],
+                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}</>],
                     ["思考程度", levelLabel(agent.reasoning)],
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],

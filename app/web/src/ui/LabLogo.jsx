@@ -31,7 +31,7 @@ export function isLabLogo(lab) {
 /** The lab's logo as a small decorative image, or nothing for an id that is not in LAB_LOGOS. */
 export function LabLogo({ lab, size = 18 }) {
   if (!isLabLogo(lab)) return null;
-  return <img src={`/logos/labs/${lab}.svg`} alt="" width={size} height={size} loading="lazy" decoding="async" />;
+  return <img className="lab-logo" src={`/logos/labs/${lab}.svg`} alt="" width={size} height={size} loading="lazy" decoding="async" />;
 }
 
 // [start of the name, lab]. A model name is lower-cased and an "org/" prefix ("openai/gpt-4o") is dropped, then the

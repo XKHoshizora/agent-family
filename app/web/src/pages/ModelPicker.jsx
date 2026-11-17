@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Btn, Notice, Reason } from "../ui/primitives.jsx";
+import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 
 /** The reasoning levels in the service's order, and how the form says them. */
 export const LEVELS = [
@@ -26,6 +27,16 @@ export function modelLabel(state, model) {
   if (model.source === "site") return state.siteModels.find((m) => m.id === model.id)?.label ?? model.id;
   const provider = state.providers[model.providerId];
   return provider ? `${provider.name} · ${model.model}` : model.model;
+}
+
+/** The lab of a chosen model, for its logo: a site model by its id, then its label; a provider model by its name; else null. */
+export function modelLab(state, model) {
+  if (!model) return null;
+  if (model.source === "site") {
+    const site = state.siteModels.find((m) => m.id === model.id);
+    return labOfModel(model.id) ?? labOfModel(site?.label);
+  }
+  return labOfModel(model.model);
 }
 
 /**

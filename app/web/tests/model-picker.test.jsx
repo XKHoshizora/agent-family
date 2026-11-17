@@ -5,6 +5,7 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { AG1, MODELS, P1, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, deferred, providerOf, syncOf, usageOf } from "./fixtures.js";
+import { modelLab } from "../src/pages/ModelPicker.jsx";
 import { click, flush, inMain, installBrowser, mainText, openApp } from "./harness.jsx";
 
 beforeEach(installBrowser);
@@ -97,6 +98,17 @@ describe("the model picker", () => {
     expect(groups()[0]).toEqual(["站点提供", ["(尚未开放)"]]);
     await chooseModel("gpt-x");
     expect(modelBox().value).not.toBe("");
+  });
+
+  it("the picker is a native select, so no logo goes in it; the lab of a choice is read from a site model's id or label, a provider model's name", async () => {
+    await openForm();
+    expect(modelBox().querySelector("img")).toBeNull();
+    const state = { siteModels: [{ id: "site-1", label: "Claude Mini" }, { id: "free-1", label: "小模型" }] };
+    expect(modelLab(state, { source: "site", id: "gpt-4o" })).toBe("openai");
+    expect(modelLab(state, { source: "site", id: "site-1" })).toBe("anthropic");
+    expect(modelLab(state, { source: "site", id: "free-1" })).toBeNull();
+    expect(modelLab(state, { source: "provider", providerId: "p", model: "gemini-2" })).toBe("google");
+    expect(modelLab(state, { source: "provider", providerId: "p", model: "house-blend" })).toBeNull();
   });
 
   it("no provider: that group says so; a provider without models says it has none", async () => {

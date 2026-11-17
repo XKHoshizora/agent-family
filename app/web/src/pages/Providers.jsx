@@ -6,6 +6,7 @@ import { ChevronLeft, Lock, Plus, Search } from "../icons.js";
 import { useAction } from "./useAction.js";
 import { refusalText, settled } from "./AgentForm.jsx";
 import { levelLabel } from "./ModelPicker.jsx";
+import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 
 /** The four interface types (the service's `protocol`), by the names people know them by. Fixed once created. */
 export const PROTOCOLS = [
@@ -277,7 +278,7 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
   return (
     <li>
       <div className="member-body">
-        <strong>{model.name}</strong>
+        <strong><LabLogo lab={labOfModel(model.name)} size={16} />{model.name}</strong>
         <p>
           {parts.map((part, i) => (
             <React.Fragment key={i}>
@@ -338,7 +339,7 @@ function SyncRow({ model, added, full, onAdd, onRemove }) {
     <li>
       <div className="member-body">
         <span className="sync-name">
-          <strong>{model.name}</strong>
+          <strong><LabLogo lab={labOfModel(model.name)} size={16} />{model.name}</strong>
           {label && <span className="muted"> · {label}</span>}
         </span>
         {tags.length > 0 && (

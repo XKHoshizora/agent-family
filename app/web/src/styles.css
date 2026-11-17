@@ -57,6 +57,7 @@ button:disabled { cursor: not-allowed; }
 :focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
 .muted { color: var(--ink-3); }
+.lab-logo { display: inline-block; flex: none; vertical-align: -0.2em; margin-right: 6px; }
 .spacer, .grow { flex: 1; }
 .only-mobile { display: none !important; }
 

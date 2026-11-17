@@ -454,6 +454,9 @@ describe("the models of a provider", () => {
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     expect(modelNames()).toEqual(["gpt-x", "plain", "tiny"]);
     expect(modelRow("tiny").textContent).toContain("上下文太小");
+    // A model whose lab is known (gpt-x) shows its logo before the name; one that is not (plain) shows none.
+    expect(modelRow("gpt-x").querySelector("strong img").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(modelRow("plain").querySelector("img")).toBeNull();
     await click(within(modelRow("tiny")).getByRole("button", { name: /移除/ }));
     type("模型名称", "  vision-1 ");
     fireEvent.keyDown(inMain().getByLabelText("模型名称"), { key: "Enter" });
@@ -577,6 +580,11 @@ describe("同步模型", () => {
     expect(rowOf("gpt-x").textContent).toContain("已添加");
     expect(within(rowOf("gpt-x")).getByRole("button", { name: "移除：gpt-x" })).toBeTruthy();
     expect(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" })).toBeTruthy();
+
+    // The logo of the model's lab (guessed from its name) before it; none for a model of no known lab.
+    expect(rowOf("claude-long").querySelector("strong img").getAttribute("src")).toBe("/logos/labs/anthropic.svg");
+    expect(rowOf("gpt-6-sol").querySelector("strong img").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(rowOf("house-blend").querySelector("img")).toBeNull();
 
     const others = inSync().getByRole("button", { name: /可能不是对话模型/ });
     expect(others.getAttribute("aria-expanded")).toBe("false");

@@ -111,7 +111,7 @@ export const APP_CLASSES = new Set(
   current device-rows device-static disc-actions disc-bar disc-text document-address document-label document-preview
   document-tools done dots dropping emoji-grid emoji-heading emoji-picker emoji-tabs empty-main exp-block exp-candidate
   exp-footer exp-meta exp-new eyebrow failed field field-error field-hint field-label field-msg file-card flash footnotes
-  form-actions group-avatar grow head-actions human-input icon-btn identity-line info-lines inline kv kv-row lead
+  form-actions group-avatar grow head-actions human-input icon-btn identity-line info-lines inline kv kv-row lab-logo lead
   list-col list-head list-note list-title main-col md md-code md-copy md-host md-link md-note md-plain md-table md-text
   member-actions member-body member-rows mention-empty mention-heading mention-picker menu menu-anchor messages mine
   mini-kv modal modal-backdrop modal-body modal-foot modal-head modal-wide msg msg-action msg-divider msg-foot msg-main msg-meta
