@@ -107,6 +107,9 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   }
   const mine = msg.from === ME;
   const agent = !mine && isAgent(state, msg.from);
+  // What only an owner is shown of a reply (its thinking, a persona proposal) belongs to the conversation with my own
+  // Agent: never in a group, whoever's Agent it is.
+  const ownersOnly = agent && conv.type === "agent" && conv.agentId === msg.from;
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
   const showReceipt = mine && (conv.type === "human" || conv.type === "agent");
   const cancelUpload = () => actions.cancelUpload(msg.clientTxn);
@@ -125,9 +128,9 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
           {agent && <span className="owner">主人：{nameOf(state, ownerOf(state, msg.from))}</span>}
           <time>{msg.at}</time>
         </div>
-        {agent && <Thinking text={msg.reasoning} />}
+        {ownersOnly && <Thinking text={msg.reasoning} />}
         <Body msg={msg} agent={agent} />
-        {agent && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
+        {ownersOnly && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
         <div className="msg-foot">
           {agent && msg.stopped && <Tag tone="muted">已停止</Tag>}
           {agent && msg.truncated && <Tag tone="muted">已截断</Tag>}

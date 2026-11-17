@@ -286,15 +286,38 @@ function agentView(a, version, loaded) {
     personaVersion: a.personaVersion ?? 0,
     privateReply: PRIVATE_REPLY[a.replyMode] ?? PRIVATE_REPLY.always,
     replyMode: a.replyMode ?? "always",
+    groupMentions: a.groupMentions === "owner" ? "owner" : "members",
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),
     deleted: Boolean(a.deleted),
     ownerId: ME,
+    mine: true,
     conversationId: a.conversationId ?? null,
     createdAt: a.createdAt ?? null,
     avatar: avatarUrl(a.id, version),
     loaded,
+  };
+}
+
+/**
+ * Someone else's Agent (a co-member of a group): what its principal entry tells a co-member — name, account name,
+ * avatar, intro, field and its owner (`ownerId`: their real id, null when not said) — and nothing else. What only its
+ * owner knows (persona, model, paused, its conversation…) is absent, not defaulted.
+ */
+function othersAgentView(p, version, ownerId) {
+  return {
+    id: p.id,
+    kind: "agent",
+    name: p.displayName,
+    displayName: p.displayName,
+    handle: `@${p.handle}`,
+    intro: typeof p.intro === "string" ? p.intro : "",
+    field: typeof p.field === "string" ? p.field : "",
+    ownerId,
+    mine: false,
+    avatar: avatarUrl(p.id, version),
+    loaded: false,
   };
 }
 
@@ -320,7 +343,7 @@ export function toView(model, { now = Date.now() } = {}) {
   const versions = model.avatarVersions ?? {};
 
   const people = {};
-  // An Agent is never a person: it is listed under `agents` (every Agent anyone here can see is mine).
+  // An Agent is never a person: it is listed under `agents` (mine, and anyone else's I share a group with).
   for (const p of Object.values(model.principals)) if (p.id !== meId && p.kind !== "agent") people[p.id] = personView(p, versions[p.id]);
   if (social) {
     const named = [...social.friends, ...social.blocked, ...social.blockedBy, ...social.incoming.map((r) => r.principal), ...social.outgoing.map((r) => r.principal)];
@@ -338,12 +361,29 @@ export function toView(model, { now = Date.now() } = {}) {
     };
   }
 
+  // My Agents are those of `model.agents` (`GET /api/agents`), and an Agent a principal entry names is mine when it
+  // says I own it or, saying no owner, when I hold its conversation (only its owner has one). Any other is someone else's.
   const agents = {};
   for (const a of Object.values(model.agents ?? {})) agents[a.id] = agentView(a, versions[a.id], true);
   for (const p of Object.values(model.principals)) {
     if (p.kind !== "agent" || agents[p.id]) continue;
+    const owner = typeof p.ownerId === "string" ? p.ownerId : null;
     const conv = Object.values(model.conversations).find((c) => c.agentId === p.id);
-    const known = { id: p.id, handle: p.handle, name: p.displayName, conversationId: conv?.id ?? null, paused: conv?.agent?.paused, deleted: conv?.agent?.deleted };
+    const mine = owner === null ? Boolean(conv) : owner === meId;
+    if (!mine) {
+      agents[p.id] = othersAgentView(p, versions[p.id], owner);
+      continue;
+    }
+    const known = {
+      id: p.id,
+      handle: p.handle,
+      name: p.displayName,
+      intro: p.intro,
+      field: p.field,
+      conversationId: conv?.id ?? null,
+      paused: conv?.agent?.paused,
+      deleted: conv?.agent?.deleted,
+    };
     agents[p.id] = agentView(known, versions[p.id], false);
   }
   const nameOf = (id) => people[id]?.name ?? agents[id]?.name ?? null;

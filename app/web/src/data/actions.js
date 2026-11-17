@@ -628,7 +628,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
 
   const agentActions = {
     loadAgents: () => attempt(() => api.listAgents(), { after: (res) => setModel(applyAgents(getModel(), res?.agents)), text: commonErrorText }),
-    /** body: {handle, name, intro?, field?, persona?, replyMode?, reasoning?, model?} → value: the Agent. Its conversation follows by sync. */
+    /**
+     * body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, reasoning?, model?} → value: the Agent. Its
+     * conversation follows by sync.
+     */
     createAgent: (body) =>
       attempt(() => api.createAgent(body), {
         after: (agent) => {

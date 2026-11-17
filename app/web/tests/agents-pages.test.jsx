@@ -13,6 +13,8 @@ import {
   AG2,
   ANN,
   D1,
+  G1,
+  ME_ID,
   MODELS,
   P1,
   PRINCIPALS,
@@ -25,6 +27,7 @@ import {
   direct,
   emptySocial,
   fakeFile,
+  group,
   providerOf,
   syncOf,
   usageOf,
@@ -69,8 +72,8 @@ const rowOf = (name) => inList().getByText(name, { selector: ".row-name" }).clos
  * The app with my Agents (as `GET /api/agents` answers them) and their conversations, on the Agent page.
  * `models` and `providers` are what the form reads.
  */
-async function openAgents({ agents = [], api = {}, models = MODELS, providers = [PROVIDER], social = emptySocial(), extra = [] } = {}) {
-  const principals = [...PRINCIPALS, ...agents.map((a) => agentPrincipal(a.id, a.handle, a.name))];
+async function openAgents({ agents = [], api = {}, models = MODELS, providers = [PROVIDER], social = emptySocial(), extra = [], others = [] } = {}) {
+  const principals = [...PRINCIPALS, ...agents.map((a) => agentPrincipal(a.id, a.handle, a.name)), ...others];
   const conversations = [...extra, ...agents.map((a) => agentConv(a.conversationId, a.id, { agent: { paused: a.paused, deleted: a.deleted } }))];
   const sync = () => syncOf(conversations, [], principals);
   const app = await openApp({
@@ -161,7 +164,7 @@ describe("creating an Agent", () => {
     await chooseModel("小模型 · 免费");
     await click(createButton());
     expect(createAgent).toHaveBeenCalledTimes(1);
-    expect(createAgent.mock.calls[0][0]).toEqual({ handle: "mybot", name: "MyBot", replyMode: "always", reasoning: "none", model: SITE_MODEL });
+    expect(createAgent.mock.calls[0][0]).toEqual({ handle: "mybot", name: "MyBot", replyMode: "always", groupMentions: "members", reasoning: "none", model: SITE_MODEL });
     await flush();
     expect(sectionShown()).toContain("消息");
     expect(chatTitle()).toBe("MyBot");
@@ -238,6 +241,7 @@ describe("creating an Agent", () => {
       field: "旅行",
       persona: "你是一位旅行家。",
       replyMode: "mention",
+      groupMentions: "members",
       reasoning: "high",
       model: { source: "provider", providerId: P1, model: "gpt-x" },
     });
@@ -678,6 +682,63 @@ describe("editing an Agent", () => {
       expect(document.querySelector(".main-col [role=tablist]")).toBeTruthy();
       expect(uploadAgentAvatar).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("群里谁可以叫它 (groupMentions)", () => {
+  const box = () => inMain().getByLabelText("群里谁可以叫它");
+
+  it("creating: 所有群成员 by default, 仅我 sends owner; the hint says the owner pays", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    expect(box().value).toBe("members");
+    expect(within(box()).getAllByRole("option").map((o) => o.textContent)).toEqual(["所有群成员", "仅我"]);
+    expect(box().closest(".field").textContent).toContain("被叫到时它会在群里回复，费用算你的。");
+    type("名称", "MyBot");
+    fireEvent.change(box(), { target: { value: "owner" } });
+    await chooseModel("小模型 · 免费");
+    await click(createButton());
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ groupMentions: "owner" });
+  });
+
+  it("editing: opens with the stored choice and sends it only when changed; the Agent's page shows it", async () => {
+    const record = agentOf(AG1, { model: SITE_MODEL, groupMentions: "owner" });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    await openAgents({ agents: [record], api: { patchAgent } });
+    await openRow("小助手");
+    expect(document.querySelector(".main-col .kv").textContent).toContain("群里谁可以叫它仅我");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(box().value).toBe("owner");
+    type("简介", "新简介");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    fireEvent.change(box(), { target: { value: "members" } });
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[1][1]).toEqual({ groupMentions: "members" });
+    expect(document.querySelector(".main-col .kv").textContent).toContain("群里谁可以叫它所有群成员");
+  });
+});
+
+describe("someone else's Agent (batch 2C)", () => {
+  it("in a group I share with its owner is not one of my Agents: not listed here, nor under 我的 Agent", async () => {
+    const OAG = "00000000-0000-4000-8000-0000000000b9";
+    const annBot = { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN, intro: "帮小安记事", field: "记事" };
+    const members = [ME_ID, ANN, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    const listAgents = vi.fn(async () => ({ agents: [agentOf(AG1, { model: SITE_MODEL })] }));
+    await openAgents({
+      agents: [agentOf(AG1, { model: SITE_MODEL })],
+      extra: [group(G1, { members })],
+      others: [annBot],
+      social: { ...emptySocial(), friends: [PEOPLE[ANN]] },
+      api: { listAgents },
+    });
+    expect(rowNames()).toEqual(["小助手"]);
+    // (Nothing of mine is waiting for its record: the list is not asked for again.)
+    expect(listAgents).not.toHaveBeenCalled();
+    await goContacts();
+    expect(rowNames()).toEqual(["小安", "小助手"]);
   });
 });
 

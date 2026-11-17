@@ -5,9 +5,9 @@ import { useStore } from "../data/store.jsx";
 import { groupErrorText } from "../data/errorTexts.js";
 import { groupTitle } from "../auth/validation.js";
 import { ME } from "../data/identities.js";
-import { convTitle, nameOf } from "../state/selectors.js";
+import { convTitle, isAgent, myAgents, nameOf } from "../state/selectors.js";
 import { eligibleFriends, matchesPerson } from "../state/social.js";
-import { Avatar, Btn, Field, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
+import { Avatar, Btn, Field, IdentityLine, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
 import { useAction } from "./useAction.js";
 
 /** Fewest friends a group starts with (the service's rule). */
@@ -99,14 +99,19 @@ export function NewGroupModal({ onClose }) {
   );
 }
 
-/** "添加成员": my friends who are not in the group yet (nobody with a block in either direction). */
+/**
+ * "添加成员": my friends who are not in the group yet (nobody with a block in either direction), and below them my own
+ * Agents that are not deleted and not in it yet (someone else's Agent is never offered). The search is the friends'.
+ */
 export function AddMemberModal({ conv, onClose }) {
   const { state, dispatch, actions } = useStore();
   const { busy, run } = useAction();
   const [query, setQuery] = useState("");
   const [added, setAdded] = useState([]);
-  const offered = eligibleFriends(state, conv.memberRoles.map((m) => m.id));
+  const inGroup = conv.memberRoles.map((m) => m.id);
+  const offered = eligibleFriends(state, inGroup);
   const shown = offered.filter((id) => matchesPerson(state.people[id], query));
+  const agents = myAgents(state).filter((a) => !a.deleted && !inGroup.includes(a.id));
 
   const add = async (id) => {
     const res = await run(id, () => actions.addMember(conv.id, id), (e) => groupErrorText("add", e));
@@ -115,10 +120,17 @@ export function AddMemberModal({ conv, onClose }) {
       dispatch({ type: "toast", text: `已添加${nameOf(state, id)}` });
     }
   };
+  const addButton = (id) => (
+    <div className="member-actions">
+      <Btn small variant="primary" disabled={busy !== null || added.includes(id)} onClick={() => add(id)}>
+        {added.includes(id) ? "已添加" : busy === id ? "添加中…" : "添加"}
+      </Btn>
+    </div>
+  );
   return (
     <Modal title="添加成员" onClose={onClose} footer={<Btn onClick={onClose}>完成</Btn>}>
       <SearchField value={query} onChange={setQuery} />
-      {offered.length === 0 && <p className="muted">没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。</p>}
+      {offered.length === 0 && agents.length === 0 && <p className="muted">没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。</p>}
       {offered.length > 0 && shown.length === 0 && <p className="muted">没有找到匹配的好友。</p>}
       <ul className="member-rows" aria-label="可添加的好友">
         {shown.map((id) => (
@@ -128,19 +140,32 @@ export function AddMemberModal({ conv, onClose }) {
               <strong>{nameOf(state, id)}</strong>
               <p className="muted">{state.people[id].handle}</p>
             </div>
-            <div className="member-actions">
-              <Btn small variant="primary" disabled={busy !== null || added.includes(id)} onClick={() => add(id)}>
-                {added.includes(id) ? "已添加" : busy === id ? "添加中…" : "添加"}
-              </Btn>
-            </div>
+            {addButton(id)}
           </li>
         ))}
       </ul>
+      {agents.length > 0 && (
+        <>
+          <h3>我的 Agent</h3>
+          <ul className="member-rows" aria-label="可添加的 Agent">
+            {agents.map((a) => (
+              <li key={a.id}>
+                <Avatar id={a.id} size={40} />
+                <div className="member-body">
+                  <IdentityLine id={a.id} showOwner={false} />
+                  <p className="muted">{a.handle}</p>
+                </div>
+                {addButton(a.id)}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
     </Modal>
   );
 }
 
-/** The creator removes a member: confirm first. */
+/** The creator removes a member, or an owner their own Agent: confirm first. */
 export function RemoveMemberModal({ conv, memberId, onClose }) {
   const { state, dispatch, actions } = useStore();
   const { busy, run } = useAction();
@@ -173,12 +198,12 @@ export function RemoveMemberModal({ conv, memberId, onClose }) {
 }
 
 /**
- * Who becomes creator when I (the creator) leave, as the service decides it: the earliest remaining member. The
- * conversation lists its members in join order, so that is the first one who is not me; null when nobody is left,
- * `undefined` when I cannot tell who it is (that person is not known by name here).
+ * Who becomes creator when I (the creator) leave, as the service decides it: the earliest remaining person (never an
+ * Agent). The conversation lists its members in join order, so that is the first one who is neither me nor an Agent;
+ * null when no person is left (the group closes), `undefined` when I cannot tell who it is (not known by name here).
  */
 export function successorOf(state, conv) {
-  const next = conv.memberRoles.find((m) => m.id !== ME);
+  const next = conv.memberRoles.find((m) => m.id !== ME && !isAgent(state, m.id));
   if (!next) return null;
   return state.people[next.id] ? next.id : undefined;
 }

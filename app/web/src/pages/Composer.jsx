@@ -19,6 +19,12 @@ export const TEXT_LIMIT = 8000;
 const DRAFT_SAVE_MS = 300;
 
 /**
+ * What choosing someone in the @ picker inserts: for an Agent `@` and its account name (what calls it: names are not
+ * unique in a group), for a person `@` and their name.
+ */
+const mentionOf = (state, id) => (isAgent(state, id) ? `@${entity(state, id).handle.replace(/^@/, "")}` : `@${nameOf(state, id)}`);
+
+/**
  * `sendFiles(files)` sends what is picked or pasted (the chat's, which also hears it; else the composer's own);
  * `note` is a line under the composer (the image hint of an Agent conversation).
  */
@@ -89,7 +95,7 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     selection.current={start:cursor,end:cursor};
     requestAnimationFrame(()=>{ inputRef.current?.focus(); inputRef.current?.setSelectionRange(cursor,cursor); });
   };
-  const chooseMention = id => replace(`@${nameOf(state,id)} `,mention);
+  const chooseMention = id => replace(`${mentionOf(state,id)} `,mention);
   const openMentions = () => {
     if (mention) { setMention(null); return; }
     const range=selection.current;
@@ -161,7 +167,7 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
           <div className="mention-heading">提及会话中的成员 <small>↑↓ 选择 · Enter 确认</small></div>
           {!matches.length && <p className="mention-empty">没有匹配的成员</p>}
           {matches.map((id,i)=><button key={id} id={`mention-${id}`} role="option" aria-selected={i===selected} type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>chooseMention(id)}>
-            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>{isAgent(state,id)?`Agent · 主人：${nameOf(state,ownerOf(state,id))}${state.agents[id].paused?" · 已暂停":""}`:"真人 · 会话成员"}</small></span>
+            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>{isAgent(state,id)?`${entity(state,id).handle} · Agent · 主人：${nameOf(state,ownerOf(state,id))}${state.agents[id].paused?" · 已暂停":""}`:"真人 · 会话成员"}</small></span>
           </button>)}
         </div>}
         <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":"发送消息，或 @ 会话成员"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined}

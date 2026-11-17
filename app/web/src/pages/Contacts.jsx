@@ -3,7 +3,7 @@ import { useStore } from "../data/store.jsx";
 import { friendErrorText } from "../data/errorTexts.js";
 import { expiryText } from "../data/viewmodel.js";
 import { ME } from "../data/identities.js";
-import { entity, nameOf } from "../state/selectors.js";
+import { entity, myAgents, nameOf } from "../state/selectors.js";
 import {
   blockedMe,
   directConvWith,
@@ -21,7 +21,6 @@ import { BlockModal } from "./BlockModal.jsx";
 import { AddFriendModal } from "./AddFriendModal.jsx";
 import { useAction, useNow } from "./useAction.js";
 import { openAgentChat } from "./AgentForm.jsx";
-import { myAgents } from "./Agents.jsx";
 import { ChevronLeft, UserPlus } from "../icons.js";
 
 const REL = {
@@ -42,7 +41,7 @@ export function ContactsList() {
   const requests = [...incoming.map((r) => ({ ...r, kind: "incoming" })), ...outgoing.map((r) => ({ ...r, kind: "outgoing" }))].filter((r) => visible(r.id));
   const allFriends = friendIds(state);
   const friends = allFriends.filter(visible);
-  // My own Agents (only mine exist here), below my friends as in the prototype; a deleted one is not a contact.
+  // My own Agents (never someone else's from a group), below my friends as in the prototype; a deleted one is not a contact.
   const allAgents = myAgents(state).filter((a) => !a.deleted);
   const agents = allAgents.filter((a) => matchesPerson(a, query));
   const nothing = allFriends.length === 0 && incoming.length === 0 && outgoing.length === 0 && allAgents.length === 0;

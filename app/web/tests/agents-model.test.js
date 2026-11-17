@@ -428,6 +428,17 @@ describe("Agents", () => {
     expect(s.conversations[A2]).toMatchObject({ type: "agent", agentId: AG2, agent: { paused: true, deleted: true }, peerId: null });
     expect(s.conversations[D1]).toMatchObject({ agentId: null, agent: null });
   });
+
+  it("an Agent's principal keeps its owner when a later answer names it without one (an Agent's owner never changes)", () => {
+    const OAG = "00000000-0000-4000-8000-0000000000b9";
+    const bot = (fields = {}) => ({ ...agentPrincipal(OAG, "annbot", "安的助手"), ...fields });
+    let s = M.applySync(M.initial(), syncOf([direct(D1, ANN)], [], [...PRINCIPALS, bot({ ownerId: ANN, intro: "记事" })]));
+    expect(s.principals[OAG]).toMatchObject({ ownerId: ANN, intro: "记事" });
+    s = M.applyPrincipals(s, { [OAG]: bot({ displayName: "新名字", intro: "" }) });
+    expect(s.principals[OAG]).toMatchObject({ displayName: "新名字", ownerId: ANN, intro: "" });
+    s = M.applySync(s, syncOf([direct(D1, ANN)], [], [...PRINCIPALS, bot()]));
+    expect(s.principals[OAG].ownerId).toBe(ANN);
+  });
 });
 
 describe("persona proposal cards", () => {

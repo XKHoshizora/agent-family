@@ -2,8 +2,25 @@ import { ME } from "../data/identities.js";
 import { previewOfMarkdown } from "../ui/markdownPreview.js";
 
 export const entity = (state, id) => state.people[id] || state.agents[id] || null;
+/** Any Agent: mine, or someone else's in a group I am in. */
 export const isAgent = (state, id) => Boolean(state.agents[id]);
-export const ownerOf = (state, id) => (state.agents[id] ? state.agents[id].ownerId : id);
+/** One of my own Agents (never someone else's). */
+export const isMyAgent = (state, id) => Boolean(state.agents[id]?.mine);
+/** An Agent's owner ("me" for mine; null when nobody said), anyone else themselves. Unknown by name: nameOf says 未知. */
+export const ownerOf = (state, id) => (state.agents[id] ? state.agents[id].ownerId ?? null : id);
+
+const createdAtOf = (agent) => {
+  const ms = Date.parse(agent.createdAt ?? "");
+  return Number.isFinite(ms) ? ms : Number.MAX_SAFE_INTEGER;
+};
+
+/** My Agents (only mine: someone else's in a group never), in the list's order: oldest first, the deleted ones last. */
+export function myAgents(state) {
+  return Object.values(state.agents)
+    .filter((a) => a.mine)
+    .sort((a, b) => Number(a.deleted) - Number(b.deleted) || createdAtOf(a) - createdAtOf(b));
+}
+
 export const nameOf = (state, id) => entity(state, id)?.name || "未知";
 // A message's sender (or a quote's) whom nobody has named here: they left before this client saw them.
 export const senderName = (state, id) => entity(state, id)?.name || "已退出的成员";
@@ -20,7 +37,7 @@ export function convTitle(state, conv) {
 
 export function convSubtitle(state, conv) {
   if (conv.type === "agent") return "你的 Agent · 专属会话";
-  return conv.type === "group" ? `${conv.members.length} 位真人` : "真人私聊";
+  return conv.type === "group" ? `${conv.members.filter((id) => !isAgent(state, id)).length} 位真人` : "真人私聊";
 }
 
 /** A deleted Agent's conversation: read only, said in the frozen-conversation style. */

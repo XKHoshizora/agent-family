@@ -3,7 +3,29 @@
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
-import { ANN, BO, D1, G1, ME_ID, apiError, deferred, direct, group, notice, syncOf, wire } from "./fixtures.js";
+import {
+  A1,
+  A2,
+  AG1,
+  AG2,
+  ANN,
+  BO,
+  D1,
+  G1,
+  ME_ID,
+  PRINCIPALS,
+  agentConv,
+  agentOf,
+  agentPrincipal,
+  apiError,
+  at,
+  deferred,
+  direct,
+  group,
+  notice,
+  syncOf,
+  wire,
+} from "./fixtures.js";
 import {
   CY,
   DORA,
@@ -324,6 +346,131 @@ describe("removing members", () => {
     await click(dialogButton("确认移除"));
     expect(toastText()).toBe(text);
     expect(dialog()).not.toBeNull();
+  });
+});
+
+describe("Agents in a group (batch 2C)", () => {
+  const AG3 = "00000000-0000-4000-8000-0000000000b3"; // an Agent of mine, already in the group
+  const A3 = "00000000-0000-4000-8000-0000000000d3";
+  const OAG = "00000000-0000-4000-8000-0000000000b9"; // 小安's Agent
+  /** My Agents as `GET /api/agents` lists them: 小助手, 厨师 (deleted), 书记员. */
+  const myBots = () => [
+    agentOf(AG1, { createdAt: at(1) }),
+    agentOf(AG2, { handle: "cook", name: "厨师", conversationId: A2, deleted: true, createdAt: at(2) }),
+    agentOf(AG3, { handle: "scribe", name: "书记员", conversationId: A3, intro: "记下要点", createdAt: at(3) }),
+  ];
+  const bots = [
+    { ...agentPrincipal(AG1), ownerId: ME_ID },
+    { ...agentPrincipal(AG2, "cook", "厨师"), ownerId: ME_ID },
+    { ...agentPrincipal(AG3, "scribe", "书记员"), ownerId: ME_ID, intro: "记下要点", field: "" },
+    { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN, intro: "帮小安记事", field: "记事" },
+  ];
+  /** G1 with `members`, created by `creatorId`; my Agents' conversations; everyone named. */
+  const withAgents = (members, creatorId = ME_ID) => () =>
+    syncOf(
+      [
+        direct(D1, ANN, { lastSeq: 1, readSeq: 1 }),
+        group(G1, { creatorId, members, lastSeq: 1, readSeq: 1 }),
+        agentConv(A1, AG1),
+        agentConv(A2, AG2, { agent: { paused: false, deleted: true }, canSend: { ok: false, reason: "agent_deleted" } }),
+        agentConv(A3, AG3),
+      ],
+      [wire(D1, 1, ANN, "早"), wire(G1, 1, ANN, "大家好")],
+      [...PRINCIPALS, ...bots],
+    );
+  /** I created it; 书记员 (mine) and 安的助手 (小安's) are in it. */
+  const CREATED = [MEMBER(ME_ID, true), MEMBER(ANN), MEMBER(BO), MEMBER(AG3), MEMBER(OAG)];
+  const handlers = { agents: () => ({ agents: myBots() }) };
+  const listIn = (label) => within(dialog()).getByRole("list", { name: label });
+  const namesIn = (label) => [...listIn(label).querySelectorAll("strong")].map((x) => x.textContent);
+
+  it("添加成员 also offers my own Agents that are not deleted and not in the group, under 我的 Agent, added the same way", async () => {
+    const addMember = vi.fn(async () => ({ ok: true }));
+    await openApp({ sync: withAgents(CREATED), social: social(), api: { addMember }, handlers });
+    await openProfile();
+    expect(mainText()).toContain("只能添加你的好友和你自己的 Agent，和你有拉黑关系的人除外。群里最多 500 人。");
+    await click(button("添加成员"));
+    expect(namesIn("可添加的好友")).toEqual(["朵拉"]);
+    expect(within(dialog()).getByRole("heading", { name: "我的 Agent" })).toBeTruthy();
+    expect(namesIn("可添加的 Agent")).toEqual(["小助手"]);
+    const row = listIn("可添加的 Agent").querySelector("li");
+    expect(row.textContent).toContain("@helper");
+    expect(within(row).getByText("Agent", { selector: ".tag" })).toBeTruthy();
+    await click(within(row).getByRole("button", { name: "添加" }));
+    expect(addMember).toHaveBeenCalledWith(G1, AG1);
+    expect(toastText()).toBe("已添加小助手");
+  });
+
+  it("the Agent section is hidden when none is left; 'nobody to add' only when neither friends nor Agents are left", async () => {
+    const members = [MEMBER(ME_ID, true), MEMBER(ANN), MEMBER(BO), MEMBER(DORA), MEMBER(AG3)];
+    const addMember = vi.fn(async () => {
+      env.sync = withAgents([...members, MEMBER(AG1)]);
+      return { ok: true };
+    });
+    const { env } = await openApp({ sync: withAgents(members), social: social(), api: { addMember }, handlers });
+    await openProfile();
+    await click(button("添加成员"));
+    expect(dialog().textContent).not.toContain("没有可以添加的好友");
+    expect(namesIn("可添加的 Agent")).toEqual(["小助手"]);
+    await click(within(dialog()).getByRole("button", { name: "添加" }));
+    expect(addMember).toHaveBeenCalledWith(G1, AG1);
+    expect(within(dialog()).queryByRole("heading", { name: "我的 Agent" })).toBeNull();
+    expect(within(dialog()).queryByRole("list", { name: "可添加的 Agent" })).toBeNull();
+    expect(dialog().textContent).toContain("没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。");
+  });
+
+  it("an Agent's row carries the Agent tag, its owner, and its intro · field; 共 N 位成员 counts everyone, the chat header people only", async () => {
+    await openApp({ sync: withAgents(CREATED), social: social(), handlers });
+    await openChat("周末小组");
+    expect(document.querySelector(".main-col .chat-title p").textContent).toBe("3 位真人");
+    await openProfile();
+    expect(inMain().getByText("共 5 位成员")).toBeTruthy();
+    const theirs = memberRow("安的助手");
+    expect(within(theirs).getByText("Agent", { selector: ".tag" })).toBeTruthy();
+    expect(theirs.textContent).toContain("主人：小安");
+    expect(theirs.textContent).toContain("@annbot");
+    expect(theirs.textContent).toContain("帮小安记事 · 记事");
+    expect(memberRow("书记员").textContent).toContain("主人：你");
+    expect(memberRow("书记员").textContent).toContain("记下要点");
+    expect(memberRow("小安").textContent).not.toMatch(/主人|Agent/);
+  });
+
+  it("移除: the creator sees it on everyone else, Agents included", async () => {
+    await openApp({ sync: withAgents(CREATED), social: social(), handlers });
+    await openProfile();
+    for (const name of ["小安", "阿波", "书记员", "安的助手"]) expect(within(memberRow(name)).getByRole("button", { name: "移除" })).toBeTruthy();
+    expect(within(memberRow("你")).queryByRole("button", { name: "移除" })).toBeNull();
+  });
+
+  it("an owner who is not the creator may remove their own Agent and nobody else (asked first); someone else's Agent has no 移除", async () => {
+    const members = [MEMBER(ANN, true), MEMBER(ME_ID), MEMBER(BO), MEMBER(AG3), MEMBER(OAG)];
+    const removeMember = vi.fn(async () => {
+      env.sync = withAgents(members.filter((m) => m.id !== AG3), ANN);
+      return { ok: true };
+    });
+    const { env } = await openApp({ sync: withAgents(members, ANN), social: social(), api: { removeMember }, handlers });
+    await openProfile();
+    for (const name of ["你", "小安", "阿波", "安的助手"]) expect(within(memberRow(name)).queryByRole("button", { name: "移除" })).toBeNull();
+    await click(within(memberRow("书记员")).getByRole("button", { name: "移除" }));
+    expect(removeMember).not.toHaveBeenCalled();
+    await click(dialogButton("确认移除"));
+    expect(removeMember).toHaveBeenCalledWith(G1, AG3);
+    expect(toastText()).toBe("已将书记员移出群聊");
+    expect(inMain().getByText("共 4 位成员")).toBeTruthy();
+  });
+
+  it("the creator leaving is told the earliest remaining person takes over, never an Agent", async () => {
+    await openApp({ sync: withAgents([MEMBER(ME_ID, true), MEMBER(AG3), MEMBER(ANN), MEMBER(OAG)]), social: social(), handlers });
+    await openProfile("周末小组", "群设置");
+    await click(button("退出本群"));
+    expect(dialog().textContent).toContain("最早加入的成员小安会成为新的创建者");
+  });
+
+  it("the creator with only Agents left is told the group closes", async () => {
+    await openApp({ sync: withAgents([MEMBER(ME_ID, true), MEMBER(AG3)]), social: social(), handlers });
+    await openProfile("周末小组", "群设置");
+    await click(button("退出本群"));
+    expect(dialog().textContent).toContain("你是群里的最后一位成员，退出后这个群会关闭。");
   });
 });
 

@@ -13,6 +13,11 @@ export const REPLY_MODES = [
   ["always", "收到消息时回复"],
   ["mention", "仅在我点名时回复"],
 ];
+/** Who may call it with @ in a group it is in, by the service's `groupMentions` (the first is the default). */
+export const GROUP_MENTIONS = [
+  ["members", "所有群成员"],
+  ["owner", "仅我"],
+];
 const PERSONA_MAX = 20000;
 const chars = (text) => [...text].length;
 
@@ -59,6 +64,7 @@ const recordFields = (a) => ({
   field: a?.field ?? "",
   persona: a?.persona ?? "",
   replyMode: a?.replyMode ?? "always",
+  groupMentions: a?.groupMentions ?? "members",
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
 });
@@ -213,6 +219,7 @@ export function AgentForm({ agent = null }) {
     if (field) body.field = field;
     if (persona) body.persona = persona;
     body.replyMode = f.replyMode;
+    body.groupMentions = f.groupMentions;
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -250,7 +257,7 @@ export function AgentForm({ agent = null }) {
     // sent, so a change made elsewhere meanwhile is not overwritten by the value this form opened with.
     const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
     const patch = {};
-    for (const key of ["name", "intro", "field", "persona", "replyMode"]) if (mine(key)) patch[key] = storedValue(key, f);
+    for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions"]) if (mine(key)) patch[key] = storedValue(key, f);
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -410,6 +417,13 @@ export function AgentForm({ agent = null }) {
         <Field label="私聊回复方式" hint="“点名”就是在消息里 @ 它。">
           <select value={f.replyMode} onChange={set("replyMode")}>
             {REPLY_MODES.map(([id, label]) => (
+              <option key={id} value={id}>{label}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="群里谁可以叫它" hint="被叫到时它会在群里回复，费用算你的。">
+          <select value={f.groupMentions} onChange={set("groupMentions")}>
+            {GROUP_MENTIONS.map(([id, label]) => (
               <option key={id} value={id}>{label}</option>
             ))}
           </select>

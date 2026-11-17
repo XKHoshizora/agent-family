@@ -40,7 +40,10 @@ export function initial() {
     /** Whose drafts and unsent messages these are; survives `resetKeepingDrafts`. */
     owner: null,
     synced: false,
-    /** id → {id, handle, displayName, kind}. */
+    /**
+     * id → {id, handle, displayName, kind, avatarVersion}; an Agent's also `ownerId`, `intro`, `field` (what a co-member
+     * of a group is told of it). An Agent's owner never changes: once known it is kept (`withOwner`).
+     */
     principals: {},
     conversations: {},
     /** conversation id → WireMessage[] (plus `clientTxn` on my messages confirmed over HTTP). */
@@ -220,6 +223,9 @@ function notePosted(state, conversationId, arrived, pushed) {
   return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
 }
 
+/** A principal entry as an answer names it, keeping the owner known of an Agent when the answer does not say it. */
+const withOwner = (held, p) => (typeof p.ownerId !== "string" && typeof held?.ownerId === "string" ? { ...p, ownerId: held.ownerId } : p);
+
 function putConversation(state, conv, list) {
   return {
     ...state,
@@ -290,7 +296,7 @@ export function applySync(state, sync) {
   const principals = { ...state.principals };
   const avatarVersions = { ...state.avatarVersions };
   for (const p of sync.principals) {
-    principals[p.id] = p;
+    principals[p.id] = withOwner(principals[p.id], p);
     if (isVersion(p.avatarVersion)) avatarVersions[p.id] = p.avatarVersion;
   }
   if (isVersion(sync.me.avatarVersion)) avatarVersions[meId] = sync.me.avatarVersion;
@@ -430,7 +436,7 @@ export function applyPrincipals(state, principals) {
   const valid = list.filter((p) => p && typeof p.id === "string" && typeof p.handle === "string" && typeof p.displayName === "string");
   if (valid.length === 0) return state;
   const next = { ...state.principals };
-  for (const p of valid) next[p.id] = p;
+  for (const p of valid) next[p.id] = withOwner(next[p.id], p);
   return { ...state, principals: next, avatarVersions: raiseVersionsOf(state.avatarVersions, valid) };
 }
 

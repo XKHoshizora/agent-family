@@ -2,21 +2,14 @@ import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Avatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
-import { AgentForm, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
+import { AgentForm, GROUP_MENTIONS, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
 import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
+import { isMyAgent, myAgents } from "../state/selectors.js";
 import { useAction } from "./useAction.js";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
-const createdAtOf = (agent) => {
-  const ms = Date.parse(agent.createdAt ?? "");
-  return Number.isFinite(ms) ? ms : Number.MAX_SAFE_INTEGER;
-};
-
-/** My Agents in the list's order: oldest first, the deleted ones last. */
-export function myAgents(state) {
-  return Object.values(state.agents).sort((a, b) => Number(a.deleted) - Number(b.deleted) || createdAtOf(a) - createdAtOf(b));
-}
+const groupMentionsLabel = (agent) => (GROUP_MENTIONS.find(([id]) => id === agent.groupMentions) ?? GROUP_MENTIONS[0])[1];
 
 /** The status tag of an Agent; none while its record is not loaded (its model is not known yet). */
 function StatusTag({ agent, long = false }) {
@@ -231,6 +224,7 @@ function AgentDetail({ agent }) {
                     ["思考程度", levelLabel(agent.reasoning)],
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],
+                    ["群里谁可以叫它", groupMentionsLabel(agent)],
                   ]}
                 />
                 <Reason>人格文档只影响它如何回复，不授予任何权限。</Reason>
@@ -256,7 +250,8 @@ function AgentDetail({ agent }) {
 export function AgentMain() {
   const { state } = useStore();
   const { nav } = state;
-  const agent = state.agents[nav.agentId];
+  // (Someone else's Agent, known from a group, has no page here.)
+  const agent = isMyAgent(state, nav.agentId) ? state.agents[nav.agentId] : null;
   if (nav.agentView === "create") return <AgentForm key="create" />;
   if (!agent) return <div className="empty-main">选择一个 Agent</div>;
   // A form opens only on a loaded record (never an empty form that could wipe the persona) of an Agent not deleted.

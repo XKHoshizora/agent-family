@@ -3,12 +3,18 @@ import { useStore } from "../data/store.jsx";
 import { groupErrorText } from "../data/errorTexts.js";
 import { groupTitle } from "../auth/validation.js";
 import { ME } from "../data/identities.js";
-import { convTitle, nameOf } from "../state/selectors.js";
+import { convTitle, entity, isMyAgent, nameOf } from "../state/selectors.js";
 import { Avatar, ConvAvatar, Tag, Btn, Field, IdentityLine, KV, Reason, focusInvalid } from "../ui/primitives.jsx";
 import { Pills } from "./ChatList.jsx";
 import { AddMemberModal, LeaveModal, RemoveMemberModal } from "./GroupModals.jsx";
 import { useAction } from "./useAction.js";
 import { ChevronLeft } from "../icons.js";
+
+/** An Agent's intro and field, as one line ("" for a person, or an Agent with neither). */
+const aboutOf = (state, id) => {
+  const agent = state.agents[id];
+  return agent ? [agent.intro, agent.field].filter(Boolean).join(" · ") : "";
+};
 
 function Members({ conv }) {
   const { state } = useStore();
@@ -18,22 +24,28 @@ function Members({ conv }) {
     <>
       <h3>群成员</h3>
       <ul className="member-rows">
-        {conv.memberRoles.map(({ id, isCreator }) => (
-          <li key={id}>
-            <Avatar id={id} size={44} />
-            <div className="member-body">
-              <IdentityLine id={id} extra={isCreator ? <Tag tone="solid">创建者</Tag> : null} />
-              <p className="muted">{state.people[id]?.handle ?? ""}</p>
-            </div>
-            <div className="member-actions">
-              {creator && id !== ME && <Btn small onClick={() => setDialog({ kind: "remove", id })}>移除</Btn>}
-            </div>
-          </li>
-        ))}
+        {conv.memberRoles.map(({ id, isCreator }) => {
+          const about = aboutOf(state, id);
+          // The creator may remove anyone else; an Agent's owner may take their own Agent out.
+          const removable = id !== ME && (creator || isMyAgent(state, id));
+          return (
+            <li key={id}>
+              <Avatar id={id} size={44} />
+              <div className="member-body">
+                <IdentityLine id={id} extra={isCreator ? <Tag tone="solid">创建者</Tag> : null} />
+                <p className="muted">{entity(state, id)?.handle ?? ""}</p>
+                {about && <p className="muted">{about}</p>}
+              </div>
+              <div className="member-actions">
+                {removable && <Btn small onClick={() => setDialog({ kind: "remove", id })}>移除</Btn>}
+              </div>
+            </li>
+          );
+        })}
       </ul>
       <div className="stack-actions">
         <Btn variant="primary" onClick={() => setDialog({ kind: "add" })}>添加成员</Btn>
-        <Reason>只能添加你的好友，和你有拉黑关系的人除外。群里最多 500 人。</Reason>
+        <Reason>只能添加你的好友和你自己的 Agent，和你有拉黑关系的人除外。群里最多 500 人。</Reason>
       </div>
       {dialog?.kind === "add" && <AddMemberModal conv={conv} onClose={() => setDialog(null)} />}
       {dialog?.kind === "remove" && <RemoveMemberModal conv={conv} memberId={dialog.id} onClose={() => setDialog(null)} />}

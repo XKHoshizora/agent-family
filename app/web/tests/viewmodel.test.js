@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
 import { toView, formatAt, expiryText, formatPoints } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
-import { convSubtitle, convTitle, entity, isAgent, lastPreview, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
+import { convSubtitle, convTitle, entity, isAgent, lastPreview, myAgents, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
 import {
   A1,
   A2,
@@ -386,6 +386,11 @@ describe("Agents (batch 2A)", () => {
     expect(v.agents[AG2].deleted).toBe(true);
   });
 
+  it("who may call my Agent in a group (groupMentions): members unless it says owner", () => {
+    expect(toView(agentModel(), { now: NOW }).agents[AG1].groupMentions).toBe("members");
+    expect(toView(agentModel({ agents: [agentOf(AG1, { groupMentions: "owner" })] }), { now: NOW }).agents[AG1].groupMentions).toBe("owner");
+  });
+
   it("providers (public fields only), usage with points for display, site models and the provider defaults", () => {
     let m = M.applyProviders(M.initial(), [{ id: "p1", name: "我的", protocol: "anthropic", baseUrl: "https://a.example", keyLast4: "abcd", models: [] }]);
     m = M.applyUsage(m, {
@@ -404,6 +409,55 @@ describe("Agents (batch 2A)", () => {
     expect(v.siteModels).toEqual([{ id: "free-1", label: "免费模型", tier: "free", vision: true, pdf: false, reasoning: [], contextTokens: 32000 }]);
     expect(v.providerDefaults).toEqual({ contextTokens: 16000, maxOutputTokens: 2048 });
     expect(toView(M.initial(), { now: NOW })).toMatchObject({ providers: {}, usage: null, siteModels: [], providerDefaults: null });
+  });
+});
+
+describe("someone else's Agent in a group I am in (batch 2C)", () => {
+  const OAG = "00000000-0000-4000-8000-0000000000b9";
+  const STRANGER = "00000000-0000-4000-8000-0000000000ee";
+  /** 小安's Agent as a co-member learns it: public fields and its owner, nothing else. */
+  const annBot = (fields = {}) => ({ ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN, intro: "帮小安记事", field: "记事", ...fields });
+  const MEMBERS = [ME_ID, ANN, BO, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+  function sharedModel(principal = annBot(), { agents = [agentOf(AG1)] } = {}) {
+    const sync = syncOf([agentConv(A1, AG1), group(G1, { members: MEMBERS })], [], [...PRINCIPALS, agentPrincipal(AG1), principal]);
+    return M.applyAgents(M.applySync(M.initial(), sync), agents);
+  }
+
+  it("is an Agent with its real owner and its public fields only, and never one of my Agents", () => {
+    const v = toView(sharedModel(), { now: NOW });
+    expect(v.agents[OAG]).toMatchObject({ id: OAG, kind: "agent", name: "安的助手", handle: "@annbot", intro: "帮小安记事", field: "记事", ownerId: ANN, mine: false });
+    for (const key of ["persona", "personaVersion", "model", "reasoning", "replyMode", "privateReply", "groupMentions", "paused", "deleted", "conversationId"]) {
+      expect(v.agents[OAG]).not.toHaveProperty(key);
+    }
+    expect(v.people[OAG]).toBeUndefined();
+    expect(isAgent(v, OAG)).toBe(true);
+    expect(ownerOf(v, OAG)).toBe(ANN);
+    expect(nameOf(v, ownerOf(v, OAG))).toBe("小安");
+    expect(v.agents[AG1]).toMatchObject({ ownerId: ME, mine: true });
+    expect(myAgents(v).map((a) => a.id)).toEqual([AG1]);
+  });
+
+  it("an owner nobody has named here is unknown (主人：未知); an Agent with no owner and no conversation of mine is not mine", () => {
+    const stranger = toView(sharedModel(annBot({ ownerId: STRANGER })), { now: NOW });
+    expect(ownerOf(stranger, OAG)).toBe(STRANGER);
+    expect(nameOf(stranger, ownerOf(stranger, OAG))).toBe("未知");
+    const { ownerId: _none, ...ownerless } = annBot();
+    const unknown = toView(sharedModel(ownerless), { now: NOW });
+    expect(ownerOf(unknown, OAG)).toBeNull();
+    expect(nameOf(unknown, ownerOf(unknown, OAG))).toBe("未知");
+    expect(myAgents(unknown).map((a) => a.id)).toEqual([AG1]);
+  });
+
+  it("an Agent whose principal names me as its owner is mine, also before its record is loaded", () => {
+    const v = toView(sharedModel(annBot({ ownerId: ME_ID }), { agents: [] }), { now: NOW });
+    expect(v.agents[OAG]).toMatchObject({ ownerId: ME, mine: true, loaded: false });
+    expect(myAgents(v).map((a) => a.id).sort()).toEqual([AG1, OAG].sort());
+  });
+
+  it("the group's subtitle counts the people only", () => {
+    const v = toView(sharedModel(), { now: NOW });
+    expect(v.convs[G1].members).toEqual([ME, ANN, BO, OAG]);
+    expect(convSubtitle(v, v.convs[G1])).toBe("3 位真人");
   });
 });
 

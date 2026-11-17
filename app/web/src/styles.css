@@ -561,6 +561,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .modal-head .icon-btn { flex: none; }
 .modal-head h2 { font-size: 19px; font-weight: 700; }
 .modal-body { min-height: 0; padding: 4px 22px 14px; overflow-y: auto; font-size: 15px; }
+/* A second list in a dialog (添加成员: 我的 Agent under the friends). */
+.modal-body h3 { font-size: 15px; font-weight: 600; margin: 16px 0 2px; }
 .modal-foot { display: flex; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; gap: 10px; padding: 12px 22px 18px; }
 .modal-foot .btn { max-width: 100%; height: auto; min-height: 38px; white-space: normal; padding-top: 8px; padding-bottom: 8px; }
 .modal-wide { width: min(640px, 100%); }

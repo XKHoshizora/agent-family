@@ -830,12 +830,67 @@ describe("scrolling", () => {
 });
 
 describe("mentions", () => {
-  it("@ offers the Agent, and choosing it inserts @ and its name", async () => {
+  it("@ offers the Agent with its account name, and choosing it inserts @ and its account name", async () => {
     await openAgentChat({ agent: { replyMode: "mention" } });
     fireEvent.change(input(), { target: { value: "@", selectionStart: 1, selectionEnd: 1 } });
     const option = screen.getByRole("option", { name: /小助手/ });
+    expect(option.textContent).toContain("@helper");
     expect(option.textContent).toContain("Agent · 主人：你");
     fireEvent.click(option);
-    expect(input().value).toBe("@小助手 ");
+    expect(input().value).toBe("@helper ");
+  });
+});
+
+describe("Agents in a group (batch 2C)", () => {
+  const G1 = "00000000-0000-4000-8000-0000000000c2";
+  const BO = "00000000-0000-4000-8000-0000000000a3";
+  const OAG = "00000000-0000-4000-8000-0000000000b9"; // 小安's Agent
+  const annBot = { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN, intro: "帮小安记事", field: "记事" };
+  const members = [ME_ID, ANN, BO, AG1, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+  const groupOf = (lastSeq) => ({ id: G1, type: "group", title: "周末小组", creatorId: ME_ID, myRole: "speaker", closed: false, canSend: { ok: true }, members, lastSeq, readSeq: lastSeq, unread: 0 });
+
+  /** The group with my 小助手 and 小安's 安的助手 in it, open; `messages` of the group. */
+  async function openGroup(messages = []) {
+    const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
+    const sync = () => syncOf([groupOf(lastSeq), agentConv(A1, AG1)], messages, [...PRINCIPALS, { ...agentPrincipal(), ownerId: ME_ID }, annBot]);
+    const app = await openApp({
+      sync,
+      api: { listProviders: vi.fn(async () => ({ providers: [] })) },
+      handlers: { agents: () => ({ agents: [agentOf(AG1, { model: SITE_FREE, paused: true })] }), models: () => MODELS },
+    });
+    await click(screen.getByText("周末小组", { selector: ".list-col .row-name" }));
+    return app;
+  }
+
+  it("the @ picker shows each Agent with its account name and owner; choosing one inserts @ and its account name, a person stays @ and the name", async () => {
+    await openGroup();
+    fireEvent.change(input(), { target: { value: "@", selectionStart: 1, selectionEnd: 1 } });
+    const theirs = screen.getByRole("option", { name: /安的助手/ });
+    expect(theirs.textContent).toContain("@annbot");
+    expect(theirs.textContent).toContain("Agent · 主人：小安");
+    expect(theirs.textContent).not.toContain("已暂停");
+    expect(screen.getByRole("option", { name: /小助手/ }).textContent).toContain("Agent · 主人：你 · 已暂停");
+    fireEvent.click(theirs);
+    expect(input().value).toBe("@annbot ");
+    fireEvent.change(input(), { target: { value: "@annbot @", selectionStart: 9, selectionEnd: 9 } });
+    fireEvent.click(screen.getByRole("option", { name: /阿波/ }));
+    expect(input().value).toBe("@annbot @阿波 ");
+  });
+
+  it("a message of someone else's Agent shows its tag, its real owner and its Markdown, and none of the owner's controls", async () => {
+    const reply = wire(G1, 2, OAG, "**记好了**：周六见", {
+      reasoning: "不该给别人看的思考",
+      proposal: { id: PID, status: "open", persona: "不该给别人看的人格" },
+    });
+    await openGroup([wire(G1, 1, ANN, "@annbot 记一下"), reply]);
+    const li = storedLi(2);
+    expect(within(li).getByText("Agent", { selector: ".tag" })).toBeTruthy();
+    expect(li.querySelector(".msg-meta .owner").textContent).toBe("主人：小安");
+    expect(li.querySelector(".bubble .md strong").textContent).toBe("记好了");
+    expect(li.querySelector(".thinking")).toBeNull();
+    expect(li.querySelector(".proposal-card")).toBeNull();
+    expect(li.textContent).not.toMatch(/思考过程|不该给别人看|配置提议/);
+    expect(within(li).queryByRole("button", { name: /重试|停止生成|确认|放弃/ })).toBeNull();
+    expect(timeline().querySelector("li.run-status, li.streaming")).toBeNull();
   });
 });
