@@ -208,9 +208,9 @@ describe("server-wide timeouts", () => {
     const base = { DATABASE_URL: "postgres://x", APP_ORIGIN: "http://localhost:5173", AUTH_SECRET: "x".repeat(32), PROVIDER_KEY_SECRET: "p".repeat(32) };
     expect(loadConfig(base)).toMatchObject({
       uploadIdleTimeoutMs: 45_000,
-      uploadTotalTimeoutMs: 15 * 60_000,
+      uploadTotalTimeoutMs: 60 * 60_000,
       httpConnectionTimeoutMs: 120_000,
-      httpRequestTimeoutMs: 16 * 60_000,
+      httpRequestTimeoutMs: 61 * 60_000,
       httpKeepAliveTimeoutMs: 72_000,
     });
     expect(app.server.requestTimeout).toBe(TOTAL_MS + 60_000);

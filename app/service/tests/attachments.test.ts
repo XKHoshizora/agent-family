@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { newBlobKey } from "../src/attachments/blob.ts";
 import { abandonedAfterMs, holdBlob, sweepPendingBlobs } from "../src/attachments/pending.ts";
-import { ATTACHMENT_MAX_BYTES, contentDisposition, sanitizeFileName } from "../src/attachments/routes.ts";
+import { contentDisposition, sanitizeFileName } from "../src/attachments/routes.ts";
 import { MAX_CONCURRENT_UPLOADS } from "../src/attachments/slots.ts";
 import { sweepOrphans } from "../src/attachments/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -22,7 +22,9 @@ import { closeAllSockets, connect, listen, type Push } from "./helpers/ws.ts";
 // A blob store on a temp dir that records how it is used (tests/helpers/blobs.ts).
 const { dir: blobDir, blobs, probe, files: blobFiles, putStarted } = useProbeBlobs("af-att-");
 
-const { app, db } = useApp({ blobs });
+// A small per-file limit for the tests (the configured one is 1 GiB by default): the size rules are the same.
+const LIMIT = 4 * 1024 * 1024;
+const { app, db } = useApp({ blobs, config: { attachmentMaxBytes: LIMIT } });
 afterEach(async () => {
   destroyOpenRequests();
   await closeAllSockets();
@@ -393,14 +395,14 @@ describe("who can download", () => {
     const [old, recent] = [(await upload(a, dm, opaque(5))).json.id, (await upload(a, dm, opaque(5))).json.id];
     await backdate(old, 61);
     await backdate(recent, 30);
-    // Blobs no row came to reference: one past the upload deadline (15 min + 1 min grace), one not yet.
+    // Blobs no row came to reference: one past the upload deadline (60 min + 1 min grace), one not yet.
     const [lost, inFlight] = [newBlobKey("att"), newBlobKey("att")];
     for (const key of [lost, inFlight]) {
       await holdBlob(db, key);
       await blobs.put(key, Buffer.from("orphan"));
     }
-    await backdateHeld(lost, 17 * 60_000);
-    await backdateHeld(inFlight, 10 * 60_000);
+    await backdateHeld(lost, 62 * 60_000);
+    await backdateHeld(inFlight, 50 * 60_000);
 
     const tsx = createRequire(import.meta.url).resolve("tsx/cli");
     const cwd = fileURLToPath(new URL("..", import.meta.url));
@@ -809,10 +811,10 @@ describe("upload refusals", () => {
     expect(await count("select count(*) n from attachments")).toBe(0);
   });
 
-  it("51 MB is refused without buffering it in memory", async () => {
+  it("one byte over the limit is refused without buffering it in memory", async () => {
     const [a, b] = await people("alice", "bob");
     const { conversationId: dm } = await befriend(app, a, b);
-    const total = 51 * MB;
+    const total = LIMIT + 1 + MB; // well past the limit; the end of the body is never needed
     const withheld = 512 * 1024;
 
     const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
@@ -827,27 +829,35 @@ describe("upload refusals", () => {
     expect(probe.puts).toHaveLength(1);
     const [put] = probe.puts;
     expect(put!.streamed).toBe(true);
-    expect(put!.chunks).toBeGreaterThan(50);
+    expect(put!.chunks).toBeGreaterThan(3);
     expect(put!.largestChunk).toBeLessThanOrEqual(MB);
-    expect(put!.bytes).toBeLessThanOrEqual(ATTACHMENT_MAX_BYTES);
-    expect(put!.bytes).toBeGreaterThan(ATTACHMENT_MAX_BYTES - MB);
+    expect(put!.bytes).toBeLessThanOrEqual(LIMIT);
+    expect(put!.bytes).toBeGreaterThan(LIMIT - MB);
     expect(blobFiles()).toEqual([]);
     expect(await count("select count(*) n from attachments")).toBe(0);
     expect(await held()).toEqual([]);
   }, 30_000);
 
-  it("exactly 50 MB is accepted", async () => {
+  it("exactly the limit is accepted, and the same file one byte over is refused with 413 too_large", async () => {
     const [a, b] = await people("alice", "bob");
     const { conversationId: dm } = await befriend(app, a, b);
     const open = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
     await open.write(partHead({ name: "file", filename: "max.bin", type: "application/octet-stream" }));
-    await open.fill(ATTACHMENT_MAX_BYTES);
+    await open.fill(LIMIT);
     await open.write(CLOSING);
     await open.end();
     const res = await open.response;
     expect(res.status).toBe(201);
-    expect(JSON.parse(res.body)).toMatchObject({ name: "max.bin", size: ATTACHMENT_MAX_BYTES, inline: false });
+    expect(JSON.parse(res.body)).toMatchObject({ name: "max.bin", size: LIMIT, inline: false });
     expect(blobFiles()).toHaveLength(1);
+
+    const over = await openRequest(app, { path: `/api/conversations/${dm}/attachments`, cookie: a.cookie });
+    await over.write(partHead({ name: "file", filename: "over.bin", type: "application/octet-stream" }));
+    await over.fill(LIMIT + 1);
+    await over.write(CLOSING);
+    await over.end();
+    expect(await over.response).toEqual({ status: 413, body: '{"error":"too_large"}' });
+    expect(blobFiles()).toHaveLength(1); // only the accepted one is kept
   }, 30_000);
 });
 

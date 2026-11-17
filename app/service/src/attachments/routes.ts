@@ -16,8 +16,6 @@ import { discardBlob, holdBlob } from "./pending.ts";
 import type { UploadSlots } from "./slots.ts";
 import { findDownloadable, insertAttachment, quotaExceeded, usedBytes, type Downloadable } from "./store.ts";
 
-/** Largest file one upload may carry (inclusive). */
-export const ATTACHMENT_MAX_BYTES = 50 * 1024 * 1024;
 /** Uploads per principal per hour, times `RATE_LIMIT_SCALE`. (At most 3 at once: `slots.ts`.) */
 export const UPLOADS_PER_HOUR = 60;
 export const FILE_NAME_MAX_CHARS = 120;
@@ -82,16 +80,16 @@ class BrokenUpload extends Error {}
 
 /**
  * Passes the file through unchanged, counting it and keeping its first bytes for sniffing. Stops (and
- * so tears down the source) the moment it passes the cap — nothing waits for the rest of the body.
+ * so tears down the source) the moment it passes `maxBytes` — nothing waits for the rest of the body.
  */
-function metered(file: MultipartFile["file"]): { stream: Readable; size: () => number; head: () => Buffer } {
+function metered(file: MultipartFile["file"], maxBytes: number): { stream: Readable; size: () => number; head: () => Buffer } {
   let size = 0;
   let head = Buffer.alloc(0);
   async function* pass() {
     try {
       for await (const chunk of file as AsyncIterable<Buffer>) {
         size += chunk.length;
-        if (size > ATTACHMENT_MAX_BYTES) throw new TooLarge();
+        if (size > maxBytes) throw new TooLarge();
         if (head.length < SNIFF_BYTES) head = Buffer.concat([head, chunk.subarray(0, SNIFF_BYTES - head.length)]);
         yield chunk;
       }
@@ -181,6 +179,7 @@ async function receiveFile(
   blobs: BlobStore,
   key: string,
   deadlines: UploadDeadlines,
+  maxBytes: number,
 ): Promise<{ name: string; size: number; head: Buffer }> {
   // A client that left while the pre-check ran will never produce another event on its request: the
   // parser, which only starts listening below, would wait for it forever.
@@ -198,7 +197,7 @@ async function receiveFile(
     const part = await beforeDeadline(first, deadline);
     if (part?.type !== "file" || part.fieldname !== FILE_FIELD) throw invalid();
     file = part.file;
-    const meter = metered(part.file);
+    const meter = metered(part.file, maxBytes);
     try {
       // Settles on expiry too: `onExpire` destroys the file stream it reads.
       await blobs.put(key, meter.stream);
@@ -277,7 +276,7 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
     await holdBlob(db, key);
     let file: { name: string; size: number; head: Buffer };
     try {
-      file = await receiveFile(req, blobs, key, deadlines);
+      file = await receiveFile(req, blobs, key, deadlines, config.attachmentMaxBytes);
     } catch (err) {
       stopReading(req);
       await discardBlob({ db, blobs }, key, req.log);
@@ -305,7 +304,7 @@ export function registerAttachmentRoutes(app: FastifyInstance): void {
   void app.register(async (scope) => {
     await scope.register(multipart, {
       // The cap itself is enforced while streaming (`metered`); the parser's limits shape the request.
-      limits: { fileSize: ATTACHMENT_MAX_BYTES + 1, files: 1, fields: 0, parts: 1, headerPairs: 20 },
+      limits: { fileSize: config.attachmentMaxBytes + 1, files: 1, fields: 0, parts: 1, headerPairs: 20 },
     });
 
     scope.withTypeProvider<ZodTypeProvider>().post(

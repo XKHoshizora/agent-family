@@ -18,7 +18,8 @@ const { app, db } = useApp({
   blobs,
   // Enough upload slots that the quota, not the 3-at-once cap, decides the quota race.
   uploads: createUploadSlots(100),
-  env: { ATTACHMENT_QUOTA_BYTES: String(QUOTA) },
+  // Set past `loadConfig`'s rules: a quota under the smallest per-file size they allow.
+  config: { attachmentQuotaBytes: QUOTA, attachmentMaxBytes: QUOTA },
 });
 afterEach(closeAllSockets);
 

@@ -53,7 +53,7 @@ describe("sendFile", () => {
     expect(last(D1).src).toBeUndefined();
   });
 
-  it("refuses a file over 50 MB without a request or an entry; exactly 50 MB is accepted", async () => {
+  it("refuses a file over 1 GB without a request or an entry; exactly 1 GB is accepted", async () => {
     const { actions, up, messages } = await loaded();
     await expect(actions.sendFile(D1, fakeFile("big.bin", MAX_FILE_BYTES + 1))).resolves.toMatchObject({ ok: false, clientTxn: null, error: { code: "too_large" } });
     expect(up.uploadAttachment).not.toHaveBeenCalled();

@@ -2,7 +2,7 @@
 // as `ApiError`s and the unsent entries carry them.
 
 /** The most a file may weigh, as people read it (the limit itself is `MAX_FILE_BYTES` in actions.js). */
-export const FILE_LIMIT_TEXT = "50 MB";
+export const FILE_LIMIT_TEXT = "1 GB";
 
 export function failureText(error) {
   const code = error?.code;

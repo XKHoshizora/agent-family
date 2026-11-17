@@ -49,7 +49,7 @@ import {
 } from "./model.js";
 
 /** The service refuses a file over this (413 `too_large`); the client does not even try. */
-export const MAX_FILE_BYTES = 50 * 1024 * 1024;
+export const MAX_FILE_BYTES = 1024 * 1024 * 1024;
 /** Hits per page of either search (the service's default). */
 export const SEARCH_PAGE = 20;
 /** A hit is shown in a window of this many messages (at most), the hit being near its middle. */

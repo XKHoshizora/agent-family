@@ -14,7 +14,11 @@ beforeEach(() => {
 });
 
 const QUOTA = 4096;
-const { app, db } = useApp({ blobs: fsBlobStore(blobDir), env: { ATTACHMENT_QUOTA_BYTES: String(QUOTA) } });
+// A tiny quota, below the smallest per-file size `loadConfig` allows: set past its rules.
+const { app, db } = useApp({
+  blobs: fsBlobStore(blobDir),
+  config: { attachmentQuotaBytes: QUOTA, attachmentMaxBytes: QUOTA },
+});
 
 const QUOTA_REFUSAL = { error: "too_large", reason: "quota" };
 const bytes = (n: number) => Buffer.alloc(n, 0x61);

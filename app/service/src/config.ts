@@ -195,12 +195,14 @@ const envSchema = z.object({
   }),
   /** Multiplier applied to every rate limit; tests raise it. */
   RATE_LIMIT_SCALE: z.coerce.number().positive().default(1),
+  /** Largest file one upload may carry, in bytes (1 MiB to 5 GiB; never more than the quota: checked below). */
+  ATTACHMENT_MAX_BYTES: wholeNumber(1024 ** 3, 1024 ** 2, 5 * 1024 ** 3),
   /** Total attachment bytes one principal may store (sent or not). */
-  ATTACHMENT_QUOTA_BYTES: z.coerce.number().int().positive().default(2 * 1024 ** 3),
+  ATTACHMENT_QUOTA_BYTES: z.coerce.number().int().positive().default(20 * 1024 ** 3),
   /** An upload whose client sends no body bytes for this long is cut off. */
   UPLOAD_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(45_000),
   /** An upload still receiving its body after this long is cut off. */
-  UPLOAD_TOTAL_TIMEOUT_MS: z.coerce.number().int().positive().default(15 * 60_000),
+  UPLOAD_TOTAL_TIMEOUT_MS: z.coerce.number().int().positive().default(60 * 60_000),
   /** Server-wide: a connection with no traffic for this long is closed (WebSockets are exempt). */
   HTTP_CONNECTION_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   /** Server-wide backstop for receiving a whole request; default: the upload deadline plus a minute. */
@@ -277,6 +279,8 @@ export interface Config {
   clientIpHeader: string | undefined;
   /** Fastify's `trustProxy`: which X-Forwarded-For hops `req.ip` may look through. */
   trustProxy: TrustProxy;
+  /** Largest file one upload may carry (inclusive). */
+  attachmentMaxBytes: number;
   attachmentQuotaBytes: number;
   /** Per-upload deadlines: no body bytes for `uploadIdleTimeoutMs`, or still receiving after `uploadTotalTimeoutMs`. */
   uploadIdleTimeoutMs: number;
@@ -362,6 +366,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       `Invalid configuration: PROVIDER_DEFAULT_CONTEXT_TOKENS (${e.PROVIDER_DEFAULT_CONTEXT_TOKENS}) must be more than PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS (${e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS}): nothing would be left for the conversation`,
     );
   }
+  if (e.ATTACHMENT_MAX_BYTES > e.ATTACHMENT_QUOTA_BYTES) {
+    throw new Error(
+      `Invalid configuration: ATTACHMENT_MAX_BYTES (${e.ATTACHMENT_MAX_BYTES}) must not exceed ATTACHMENT_QUOTA_BYTES (${e.ATTACHMENT_QUOTA_BYTES}): no file could be stored`,
+    );
+  }
   // The per-upload deadlines govern uploads: the server-wide timeouts must never cut one off first.
   const httpRequestTimeoutMs = e.HTTP_REQUEST_TIMEOUT_MS ?? e.UPLOAD_TOTAL_TIMEOUT_MS + 60_000;
   if (e.HTTP_CONNECTION_TIMEOUT_MS <= e.UPLOAD_IDLE_TIMEOUT_MS) {
@@ -413,6 +422,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     rateLimitScale: e.RATE_LIMIT_SCALE,
     clientIpHeader: e.CLIENT_IP_HEADER,
     trustProxy: e.TRUST_PROXY,
+    attachmentMaxBytes: e.ATTACHMENT_MAX_BYTES,
     attachmentQuotaBytes: e.ATTACHMENT_QUOTA_BYTES,
     uploadIdleTimeoutMs: e.UPLOAD_IDLE_TIMEOUT_MS,
     uploadTotalTimeoutMs: e.UPLOAD_TOTAL_TIMEOUT_MS,

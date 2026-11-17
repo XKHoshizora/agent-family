@@ -158,14 +158,14 @@ describe("picking files", () => {
     expect(within(mine()[0]).getByText("上传中 50%")).toBeTruthy();
   });
 
-  it("a file over 50 MB is refused before any request, with a toast and no message; 50 MB itself goes", async () => {
+  it("a file over 1 GB is refused before any request, with a toast and no message; 1 GB itself goes", async () => {
     await openApp();
     await openChat("小安");
-    await pickFiles([fakeFile("巨大.iso", 50 * 1024 * 1024 + 1)]);
+    await pickFiles([fakeFile("巨大.iso", 1024 * 1024 * 1024 + 1)]);
     expect(uploads.uploadAttachment).not.toHaveBeenCalled();
-    expect(toastText()).toBe("「巨大.iso」超过 50 MB，无法发送");
+    expect(toastText()).toBe("「巨大.iso」超过 1 GB，无法发送");
     expect(mine()).toHaveLength(0);
-    await pickFiles([fakeFile("刚好.bin", 50 * 1024 * 1024)]);
+    await pickFiles([fakeFile("刚好.bin", 1024 * 1024 * 1024)]);
     expect(uploads.uploadAttachment).toHaveBeenCalledTimes(1);
   });
 
@@ -268,10 +268,10 @@ describe("failures", () => {
     return mine()[0];
   };
 
-  it("too_large: 文件超过 50 MB; no retry (it would fail the same way), cancel stays", async () => {
+  it("too_large: 文件超过 1 GB; no retry (it would fail the same way), cancel stays", async () => {
     const li = await failWith(apiError(413, "too_large"));
     expect(within(li).getByText(/发送失败，未发布/)).toBeTruthy();
-    expect(within(li).getByText("文件超过 50 MB，无法发送")).toBeTruthy();
+    expect(within(li).getByText("文件超过 1 GB，无法发送")).toBeTruthy();
     expect(within(li).queryByRole("button", { name: /重试/ })).toBeNull();
     expect(within(li).getByRole("button", { name: "取消" })).toBeTruthy();
   });
