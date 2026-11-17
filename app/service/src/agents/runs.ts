@@ -220,8 +220,9 @@ export type TriggeredBy = "human" | "agent";
  * running one is marked `interrupted`: `postAsAgent` refuses it and `finish` records it `cancelled` with that reason —
  * even if the Agent is resumed before the worker notices — and what was noted on it (`pending_seq`) is dropped: nothing
  * written before the pause gets a follow-up. Whatever is noted on it from now on came after a resume (nothing is noted
- * while the Agent is paused) and is followed up as usual (`finish`). Returns the cancelled runs to announce, each with
- * its own conversation, and the running ones to stop.
+ * while the Agent is paused; what an Agent's message in a group writes for it as the pause commits, which this cannot
+ * see, the resume ends: `endWhatPauseMissed`) and is followed up as usual (`finish`). Returns the cancelled runs to
+ * announce, each with its own conversation, and the running ones to stop.
  */
 export async function interruptRuns(
   t: Tx,
@@ -240,6 +241,34 @@ export async function interruptRuns(
   return {
     cancelled: queued.rows.map((r) => ({ ownerId: agent.ownerId, conversationId: r.conversation_id, run: toWireRun(r) })),
     running: running.rows.map((r) => r.id),
+  };
+}
+
+/**
+ * In the resume's own transaction, which holds `lockAgent` and found the Agent paused: what the pause could not see
+ * ends now, before the Agent can answer again. An Agent's message in a group reads the Agents it calls without locking
+ * them (`triggerFromAgent`), so a pause that commits inside that message's transaction misses what it then writes — a
+ * run it queues (none other can be queued while the Agent is paused: a person's mention, a retry, a follow-up and
+ * recovery all refuse a paused Agent), and a mention its fold notes on a reply the pause interrupted. So, in every
+ * conversation: a queued run of the Agent is `cancelled` `agent_paused` (it never reached a model), and so is one the
+ * worker claimed meanwhile (it does not look at the pause): every running run not marked yet is marked `interrupted`
+ * `agent_paused`, as the pause marked the others, and nothing noted on a running one is followed up. Returns, as
+ * `interruptRuns` does, the cancelled runs to announce and the newly marked ones to stop.
+ */
+export async function endWhatPauseMissed(t: Tx, agent: AgentRow): Promise<{ cancelled: Announced[]; running: string[] }> {
+  const queued = await t.query<RunRow & { conversation_id: string }>(
+    `update agent_runs as r set status = 'cancelled', error = 'agent_paused', finished_at = now()
+      where r.agent_id = $1 and r.status = 'queued' returning ${RUN_COLUMNS}, r.conversation_id`,
+    [agent.id],
+  );
+  const claimed = await t.query<{ id: string }>(
+    "update agent_runs set interrupted = 'agent_paused' where agent_id = $1 and status = 'running' and interrupted is null returning id",
+    [agent.id],
+  );
+  await t.query("update agent_runs set pending_seq = null where agent_id = $1 and status = 'running' and pending_seq is not null", [agent.id]);
+  return {
+    cancelled: queued.rows.map((r) => ({ ownerId: agent.ownerId, conversationId: r.conversation_id, run: toWireRun(r) })),
+    running: claimed.rows.map((r) => r.id),
   };
 }
 
@@ -419,9 +448,13 @@ export interface AgentTriggered {
  * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
  * paused, with a model, `groupMentions` `members`. Their `agents` rows are read, not locked: the poster's is held
  * already, and locking another's after it could take two Agents' rows out of id order — two Agents calling each other
- * from two groups at once would deadlock. Their rows need not be held: their runs in this group are written only under
- * the group's row, which this transaction holds (the one-active-run index backs that), and a pause or delete committing
- * meanwhile is met by the worker, which ends such a run without a call (`begin`). With nobody to call, nothing more.
+ * from two groups at once would deadlock. The fold-or-insert decision needs no target's row: the group's row, which
+ * this transaction holds, orders it with every other trigger, retry, follow-up and halt in this group (the one-active-run
+ * index backs that). A pause or delete that commits meanwhile takes the target's row, not the group's, and cannot see
+ * the run this inserts or the mention it notes (no predicate lock): a deleted Agent's run is ended by the worker without
+ * a call (`begin`), and a paused one's by the resume, before the Agent answers again (`endWhatPauseMissed`; the worker's
+ * `begin` too while it is still paused) — unless both the pause and the resume commit inside this transaction's few
+ * queries: then the resume cannot see it either. With nobody to call, nothing more.
  * Then, in turn:
  * - halted (ruling 11): the group's latest message from a person is at or before `agents_halted_seq` → nothing;
  * - the chain limit (ruling 10): the group's last `agentChainLimit` messages that are not notices were all Agents' (this

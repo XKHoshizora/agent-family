@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isRunEnd } from "../src/agents/runtime/port.ts";
+import { isRunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
-import { api, signUp, type Actor } from "./helpers/actors.ts";
+import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
@@ -262,5 +262,122 @@ describe("no delta once the pause has answered", () => {
     await s.next(isRun(conv, "cancelled"), { from: at });
     expect(s.events.slice(at).filter((e) => e.type === "delta")).toEqual([]);
     expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
+  });
+});
+
+/**
+ * A pause cannot be undone by a quick resume. An Agent's message in a group reads the Agents it calls without locking
+ * them (runs.ts `triggerFromAgent`), so a pause committing inside that message's transaction cannot see what it then
+ * writes: a reply queued for the paused Agent, or a mention noted on its interrupted reply. The resume, which holds the
+ * Agent's row as the pause did, ends them. Each interleaving is reproduced by writing, between the pause and the resume,
+ * the row that message's transaction writes.
+ */
+describe("what a pause could not see is ended by the resume", () => {
+  /** An Agent of a new owner, put by its owner into a group of the owner and two mates. */
+  async function inGroup(name: string) {
+    const owner = await signUp(app, name);
+    const mate = await signUp(app, `${name}mate`);
+    const g = await group(app, owner, `${name} 的群`, [mate, await signUp(app, `${name}third`)]);
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: "简短地回答。" });
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    return { owner, mate, agent, g };
+  }
+  const seqOf = async (conv: string) => Number((await db.query("select seq from conversations where id = $1", [conv])).rows[0].seq);
+  /** A run of the Agent in `conv`, called for by an Agent's message, as that message's transaction inserts it. */
+  const insertRun = async (agentId: string, ownerId: string, conv: string, status: "queued" | "running", covers: number) =>
+    (
+      await db.query<{ id: string }>(
+        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by, started_at)
+         values ('reply', $1, $2, $3, $4, $5, 'agent', case when $4 = 'running' then now() end) returning id`,
+        [conv, agentId, ownerId, status, covers],
+      )
+    ).rows[0]!.id;
+  /** What the owner was charged, free allowance and balance. */
+  const charged = async (ownerId: string) =>
+    Number((await db.query("select coalesce(sum(free_micro + balance_micro), 0)::int as n from usage_records where owner_id = $1", [ownerId])).rows[0].n);
+
+  it("a reply queued for the Agent after its pause committed is cancelled by the resume and announced: never claimed, no call, nothing charged", async () => {
+    const { owner, mate, agent, g } = await inGroup("ivy");
+    const s = await connect(app, owner);
+    await say(mate, g, "写在暂停之前");
+    const covers = await seqOf(g);
+    await pause(owner, agent.id);
+    const stray = await insertRun(agent.id, owner.id, g, "queued", covers);
+    await resume(owner, agent.id);
+
+    expect(await runsOf(agent.id)).toEqual([{ status: "cancelled", error: "agent_paused" }]);
+    expect((await s.next((e) => e.type === "run" && e.run?.id === stray)).run).toEqual({ id: stray, status: "cancelled", error: "agent_paused", retryable: false });
+    expect(await app.agentWorker.runOnce()).toBe(false);
+    expect(gateway.calls.length).toBe(first);
+    expect(await usageOf(stray)).toEqual([]);
+    expect(await charged(owner.id)).toBe(0);
+    expect(await fromAgent(owner, g, agent.id)).toEqual([]);
+    // A mention after the resume calls it as usual.
+    await say(mate, g, `@${agent.handle} 现在呢`);
+    expect((await runsOf(agent.id)).at(-1)).toEqual({ status: "queued", error: null });
+  });
+
+  it("one the worker claimed meanwhile (it does not look at the pause) ends at its start, without a call", async () => {
+    const { owner, mate, agent, g } = await inGroup("ike");
+    await say(mate, g, "写在暂停之前");
+    const covers = await seqOf(g);
+    await pause(owner, agent.id);
+    await insertRun(agent.id, owner.id, g, "queued", covers);
+    const claimed = (await app.agentPort.claimNext())!;
+    expect([claimed.agentId, claimed.conversationId]).toEqual([agent.id, g]);
+    await resume(owner, agent.id);
+
+    expect(app.agentPort.shouldStop(claimed)).toBe(true);
+    const begun = await app.agentPort.begin(claimed);
+    expect(begun).toEqual({ status: "cancelled", error: "agent_paused" });
+    if (!isRunEnd(begun)) throw new Error("begin should have ended the run");
+    await app.agentPort.finish(claimed, begun, null, NOTHING);
+    expect(await runsOf(agent.id)).toEqual([{ status: "cancelled", error: "agent_paused" }]);
+    expect(await app.agentWorker.runOnce()).toBe(false);
+    expect(gateway.calls.length).toBe(first);
+    expect(await charged(owner.id)).toBe(0);
+    expect(await fromAgent(owner, g, agent.id)).toEqual([]);
+  });
+
+  it("a mention noted on the interrupted reply after the pause dropped what was noted is dropped by the resume: no follow-up", async () => {
+    const { owner, mate, agent, g } = await inGroup("iris");
+    await say(mate, g, "第一句");
+    const id = await insertRun(agent.id, owner.id, g, "running", await seqOf(g));
+    const ticket: RunTicket = { id, agentId: agent.id, ownerId: owner.id, conversationId: g };
+    // The message of the Agent's that called it was written before the pause; its fold waited on the run's row, which
+    // the pause held, and noted it once the pause had committed.
+    await say(mate, g, "暂停前写的");
+    const noted = await seqOf(g);
+    await pause(owner, agent.id);
+    await db.query("update agent_runs set pending_seq = $2 where id = $1", [id, noted]);
+    await resume(owner, agent.id);
+
+    expect((await db.query("select pending_seq, interrupted from agent_runs where id = $1", [id])).rows).toEqual([{ pending_seq: null, interrupted: "agent_paused" }]);
+    await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
+    expect(await runsOf(agent.id)).toEqual([{ status: "cancelled", error: "agent_paused" }]);
+    expect(await app.agentWorker.runOnce()).toBe(false);
+    expect(gateway.calls.length).toBe(first);
+    expect(await charged(owner.id)).toBe(0);
+  });
+
+  it("after such a resume a message is answered as usual; resuming an Agent that is not paused cancels nothing", async () => {
+    const { owner, agent, conv } = await owned("ida");
+    await pause(owner, agent.id);
+    await insertRun(agent.id, owner.id, conv, "queued", await seqOf(conv));
+    await resume(owner, agent.id);
+    expect(await runsOf(agent.id)).toEqual([{ status: "cancelled", error: "agent_paused" }]);
+
+    await say(owner, conv, "恢复后说的");
+    expect(await latestRun(owner, conv)).toMatchObject({ status: "queued" });
+    await resume(owner, agent.id);
+    expect(await latestRun(owner, conv)).toMatchObject({ status: "queued" });
+    gateway.reply("在的。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["在的。"]);
+    expect(userTexts(gateway.calls.at(-1)!)).toEqual(["恢复后说的"]);
+    expect(await runsOf(agent.id)).toEqual([
+      { status: "cancelled", error: "agent_paused" },
+      { status: "done", error: null },
+    ]);
   });
 });

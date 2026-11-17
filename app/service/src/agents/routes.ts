@@ -14,7 +14,7 @@ import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
-import { interruptRuns } from "./runs.ts";
+import { endWhatPauseMissed, interruptRuns } from "./runs.ts";
 import {
   assertModelChoice,
   GROUP_MENTIONS,
@@ -270,7 +270,9 @@ export function registerAgentRoutes(
 
   /**
    * Pause, resume and delete: under `lockAgent` (the lock `postAsAgent` takes, so no reply is posted once a pause or
-   * delete has committed), idempotent, announced to the owner's other tabs when they change something. Once a delete has
+   * delete has committed), idempotent, announced to the owner's other tabs when they change something. A resume that
+   * changes something ends, before the Agent answers again, the runs its pause could not see (runs.ts
+   * `endWhatPauseMissed`), announced and stopped after commit as the pause's are. Once a delete has
    * committed, the Agent leaves every group it is in, a transaction per group (group-leave.ts `leaveGroupsOfDeleted`;
    * also on a repeated delete, which so finishes a leaving that failed), before the answer; a group it could not leave
    * is left by the start-up sweep.
@@ -288,9 +290,14 @@ export function registerAgentRoutes(
           // A deleted Agent stays deleted: deleting again is a no-op, anything else is refused.
           if (current.deleted && !("deleted" in change)) throw deletedError();
           const changed = await setAgentState(t, current, change);
-          // Pausing or deleting ends the Agent's active reply for good, in this transaction (runs.ts).
+          // Pausing or deleting ends the Agent's active reply for good, in this transaction (runs.ts); resuming a paused
+          // Agent first ends what its pause could not see (`endWhatPauseMissed`).
           const stopping = "deleted" in change || change.paused;
-          const interrupted = stopping ? await interruptRuns(t, current, "deleted" in change ? "agent_deleted" : "agent_paused") : null;
+          const interrupted = stopping
+            ? await interruptRuns(t, current, "deleted" in change ? "agent_deleted" : "agent_paused")
+            : changed
+              ? await endWhatPauseMissed(t, current)
+              : null;
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted };
         });
         if (interrupted) {
