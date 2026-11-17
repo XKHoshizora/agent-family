@@ -1538,8 +1538,10 @@ and also looks every 2 s. Per run:
   checked on its stored size before a byte is read: so the worst case for one reply is 50 MiB of attachment bytes in
   memory (plus the model library's base64 copy of what it sends, about a third more), and at most 8 replies run at
   once. Blobs are read with no transaction open. A missing blob is shown by name (and logged), and so is one whose read
-  fails or takes more than 15 s (logged once): one unreadable file does not fail the reply. Two in a row that cannot be
-  read mean the store is down: the run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`.
+  fails or takes more than 15 s (logged once): an unreadable file does not fail the reply. Only when two reads have
+  failed and none of this reply's has succeeded (a missing blob counts as an answer of the store) is the store down: the
+  run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
+  later failure is shown by its name (`tests/runs-faults.test.ts`).
 - The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
   character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
@@ -1565,7 +1567,7 @@ all of the above, attachments at their estimate.
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
-| Nothing to answer otherwise, or its attachments could not be read (two in a row failed, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
+| Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
 | The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start (below) |
 

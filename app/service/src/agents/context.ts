@@ -40,10 +40,13 @@ const PROBE_BYTES = 4096;
 /** A blob that has not been read after this long is given up on: it is shown by its name, like one that failed. */
 export const BLOB_READ_TIMEOUT_MS = 15_000;
 
-/** The blob store failed on two attachments in a row: it is down, and the reply fails as the service's trouble (`busy`). */
+/**
+ * The blob store failed on two attachments of a reply and has served none of them: it is down, and the reply fails as
+ * the service's trouble (`busy`).
+ */
 export class BlobStoreDown extends Error {
   constructor(cause: unknown) {
-    super("the blob store failed on two attachments in a row", { cause });
+    super("the blob store failed on two attachments and served none", { cause });
     this.name = "BlobStoreDown";
   }
 }
@@ -305,9 +308,11 @@ export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.s
  * JPEG or WebP image (a GIF is named) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any
  * other file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never
  * more than the call's `bytesLeft`. A missing blob is shown by name (and logged). So is one whose read fails or takes
- * longer than `BLOB_READ_TIMEOUT_MS` (logged once), unless the read before it failed too: two in a row, and the store
- * is down (`BlobStoreDown` is thrown). Once `stop()` says so, no further blob is read (what is left is shown by name,
- * and the caller ends the run). When `signal` aborts, the read under way is abandoned and its reason thrown.
+ * longer than `BLOB_READ_TIMEOUT_MS` (logged once) — unless no read of this build has succeeded and this is the second
+ * that failed: then the store is down (`BlobStoreDown` is thrown). Once one read has succeeded (a missing blob counts:
+ * the store answered), every later failure is shown by its name. Once `stop()` says so, no further blob is read (what
+ * is left is shown by name, and the caller ends the run). When `signal` aborts, the read under way is abandoned and its
+ * reason thrown.
  */
 export async function buildContext(
   blobs: BlobStore,
@@ -317,7 +322,9 @@ export async function buildContext(
   { signal, stop = () => false }: { signal?: AbortSignal; stop?: () => boolean } = {},
 ): Promise<BuiltContext> {
   const plan = new ContextPlan(loaded.entries, loaded.budget);
-  let lastFailed = false;
+  /** Whether a read of this build has succeeded (the store answered), and how many have failed. */
+  let served = false;
+  let failed = 0;
 
   async function read(attachment: ContextAttachment, key: string, max: number, probe?: (head: Uint8Array) => boolean) {
     let got: { data: Buffer; complete: boolean } | null;
@@ -325,12 +332,12 @@ export async function buildContext(
       got = await readPrefix(blobs, key, max, { ...(probe ? { probe } : {}), ...(signal ? { signal } : {}) });
     } catch (err) {
       if (signal?.aborted) throw signal.reason;
-      if (lastFailed) throw new BlobStoreDown(err);
-      lastFailed = true;
+      failed++;
+      if (!served && failed >= 2) throw new BlobStoreDown(err);
       log.error({ err, attachmentId: attachment.id }, "a sent attachment could not be read: it is shown by its name");
       return null;
     }
-    lastFailed = false;
+    served = true;
     if (!got) log.error({ attachmentId: attachment.id }, "the blob of a sent attachment is missing");
     return got;
   }

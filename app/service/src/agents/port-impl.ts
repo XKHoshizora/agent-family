@@ -202,8 +202,8 @@ export class DbAgentPort implements AgentPort {
    *    owner's newest message, or 200 tokens of it (`failed`, `context_too_small`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
-   *    stop (step 3 then ends it); one file that cannot be read is shown by its name; the store failing on two files
-   *    in a row, or the step taking longer than `agentRunTimeoutMs`, ends the run `failed`, `busy`. When `closing`
+   *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
+   *    before it has served one, or the step taking longer than `agentRunTimeoutMs`, ends the run `failed`, `busy`. When `closing`
    *    aborts (the service is closing) the read is abandoned and `begin` rejects with its reason before step 3: the run
    *    stays `running`, unadmitted, for `recoverRuns` at the next start.
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when

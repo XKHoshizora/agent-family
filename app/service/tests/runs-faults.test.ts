@@ -210,6 +210,24 @@ describe("attachments that cannot be read", () => {
     expect(good).not.toBe(bad);
   });
 
+  it("a store that has served an attachment of this reply is not down: two later failures are each shown by name", async () => {
+    const { owner, agent, conv } = await owned("laterbad");
+    const bad1 = await sendFile(owner, conv, "bad1.txt", "读不到一");
+    const bad2 = await sendFile(owner, conv, "bad2.txt", "读不到二");
+    await sendFile(owner, conv, "good.txt", "能读的内容"); // the newest: read first
+    const badKeys = new Set([await blobKeyOf(bad1), await blobKeyOf(bad2)]);
+    store.probe.beforeGet = (key) => {
+      if (badKeys.has(key)) throw Object.assign(new Error("simulated read failure"), { code: "EIO" });
+    };
+    gateway.reply("看了一个。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(store.probe.gets).toHaveLength(3);
+    expect(textsOf(callsHere()[0]!)).toEqual(["[文件：bad1.txt]", "[文件：bad2.txt]", "[文件：good.txt]\n能读的内容"]);
+    expect((await fromAgent(owner, conv, agent.id)).map((m) => m.text)).toEqual(["看了一个。"]);
+    expect(logged(/could not be read/).map((l) => l.attachmentId)).toEqual([bad2, bad1]);
+    expect(await settled(owner, conv, { status: "done", retryable: false })).toMatchObject({ outcome: "done" });
+  });
+
   it("two in a row that cannot be read: the store is down, the reply fails busy, retryable, with no model call", async () => {
     const { owner, conv } = await owned("twobad");
     await sendFile(owner, conv, "one.txt", "一");
