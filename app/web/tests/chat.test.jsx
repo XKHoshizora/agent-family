@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // The chat pages over the real data layer (fake transport and API): list, timeline, composer, details.
 import React from "react";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { App } from "../src/App.jsx";
@@ -267,6 +268,29 @@ describe("reading", () => {
     await openChat("周末小组");
     expect(receipt("群里的我")).toBeUndefined();
     expect(mainText()).not.toMatch(/已读|已发送/);
+  });
+
+  it("the foot under my bubble holds the receipt and the 回复 control, and the CSS keeps the control out of the receipt's way", async () => {
+    const sync = () =>
+      syncOf([direct(D1, ANN, { lastSeq: 2, readSeq: 2, peerReadSeq: 2 })], [wire(D1, 1, ANN, "早"), wire(D1, 2, ME_ID, "看到了")]);
+    await openApp({ sync });
+    await openChat("小安");
+    const foot = (text) => screen.getByText(text, { selector: ".bubble" }).closest("li").querySelector(".msg-main > .msg-foot");
+    const mine = foot("看到了");
+    expect(mine.closest("li").className).toContain("mine");
+    expect(mine.querySelector(":scope > .receipt")).not.toBeNull();
+    expect(mine.querySelector(":scope > .msg-action")).not.toBeNull();
+    expect(foot("早").closest("li").className).toContain("theirs");
+    expect(foot("早").querySelector(":scope > .msg-action")).not.toBeNull();
+
+    // jsdom has no layout (the e2e spec measures): here, the rules that this structure relies on.
+    const css = readFileSync("src/styles.css", "utf8");
+    const rule = (selector) => css.split("\n").find((line) => line.startsWith(`${selector} {`)) ?? "";
+    expect(rule(".msg-main")).toMatch(/align-items:\s*flex-start/); // theirs: as wide as its content, not the name line
+    expect(rule(".msg.mine .msg-main")).toMatch(/align-items:\s*flex-end/);
+    expect(rule(".msg.mine .msg-foot")).toMatch(/position:\s*relative/);
+    expect(rule(".msg.mine .msg-action")).toMatch(/position:\s*absolute/); // takes no room: 已读 stays under the bubble's edge
+    expect(rule(".msg.mine .msg-action")).toMatch(/right:\s*100%/);
   });
 });
 
