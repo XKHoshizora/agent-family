@@ -770,14 +770,14 @@ describe("follow-ups in a group", () => {
       }
       expect(counts).toEqual([2, 3, 3, 3, 3, 3, 3]);
       // Two follow-ups were queued (a person's, then an Agent's); the third met the limit: the failed run, a person's (a
-      // person's mention was noted on that reply), announced to its owner by the reply's end, right after that reply.
-      const told = pushed.mock.calls.map(([ownerId, conversationId, run]) => [ownerId, conversationId, run.status, run.error ?? null]);
-      const firstLimited = told.findIndex((c) => c[3] === "rate_limited");
+      // person's mention was noted on that reply), announced by the reply's end, right after that reply.
+      const told = pushed.mock.calls.map(([conversationId, run]) => [conversationId, run.status, run.error ?? null]);
+      const firstLimited = told.findIndex((c) => c[2] === "rate_limited");
       expect(told.slice(firstLimited - 1, firstLimited + 1)).toEqual([
-        [w.owner.id, w.g, "done", null],
-        [w.owner.id, w.g, "failed", "rate_limited"],
+        [w.g, "done", null],
+        [w.g, "failed", "rate_limited"],
       ]);
-      const limited = pushed.mock.calls[firstLimited]![2];
+      const limited = pushed.mock.calls[firstLimited]![1];
       expect(limited).toEqual({ id: limited.id, status: "failed", error: "rate_limited", retryable: true });
       expect((await runsOf(anna.id, w.g)).map((r) => [r.status, r.error, r.by])).toEqual([
         ["done", null, "human"],

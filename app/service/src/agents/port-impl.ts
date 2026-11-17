@@ -148,9 +148,12 @@ export class DbAgentPort implements AgentPort {
     this.wakeWorker = fn;
   }
 
-  /** After the transaction that changed it committed: the run goes to its owner's sockets; a queued one wakes the worker. */
+  /**
+   * After the transaction that changed it committed: the run goes to its owner's sockets (the hub reads who that is
+   * from the run's row, `Hub.pushRun`); a queued one wakes the worker.
+   */
   announce(a: Announced): void {
-    this.deps.realtime.pushRun(a.ownerId, a.conversationId, a.run);
+    this.deps.realtime.pushRun(a.conversationId, a.run);
     if (a.run.status === "queued") this.wakeWorker();
   }
 

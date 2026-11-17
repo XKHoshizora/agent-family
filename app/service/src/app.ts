@@ -319,7 +319,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerAttachmentRoutes(app);
   registerAccountRoutes(app);
   // One budget for an owner's reads of their Agents, providers and replies (GET /api/agents, /api/agents/:id,
-  // /api/providers, /api/conversations/:id/run): 120 a minute together.
+  // /api/providers, /api/conversations/:id/run, and a group's /api/conversations/:id/runs): 120 a minute together.
   const ownReads = perPrincipalLimit(app, 120);
   const { endDrafts } = registerAgentRoutes(app, { draftRuns, readLimit: ownReads });
   // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —

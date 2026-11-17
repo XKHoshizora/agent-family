@@ -12,7 +12,7 @@ import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/
  * state"; README "Replies", "Pushes"; plan ruling 3, Task 6). The Agent's owner gets the run (`run` push with `agentId`,
  * `GET …/runs` entry with `run`); every other current member only `replying` / `unavailable` / null; anyone else
  * nothing. Runs are inserted and announced by hand (`agentPort.announce`, the one call site every route and the worker
- * use): no reply is ever posted here and no worker runs.
+ * use); the worker runs (`runOnce`) only where a reply under way is stopped.
  */
 
 const gateway = scriptedGateway();
@@ -85,6 +85,8 @@ interface Seed {
   status: RunStatus;
   error?: string;
   covers?: number;
+  /** What was noted on it beyond what it covered (`pending_seq`). */
+  pending?: number;
   resetsAt?: string;
   dismissed?: boolean;
   by?: "human" | "agent";
@@ -94,12 +96,12 @@ interface Seed {
 async function seedRun(agent: Agent, owner: Actor, conv: string, s: Seed): Promise<RunRow> {
   const covers = s.covers ?? (await seqOf(conv));
   const { rows } = await db.query<RunRow>(
-    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, resets_at, dismissed_at, triggered_by,
-                                  started_at, finished_at)
-     values ('reply', $1, $2, $3, $4, $5, $6, $7, case when $8 then now() end, $9,
+    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, pending_seq, resets_at, dismissed_at,
+                                  triggered_by, started_at, finished_at)
+     values ('reply', $1, $2, $3, $4, $5, $6, $7, $8, case when $9 then now() end, $10,
              case when $4 <> 'queued' then now() end, case when $4 not in ('queued', 'running') then now() end)
      returning ${RUN_COLUMNS}`,
-    [conv, agent.id, owner.id, s.status, s.error ?? null, covers, s.resetsAt ?? null, s.dismissed === true, s.by ?? "human"],
+    [conv, agent.id, owner.id, s.status, s.error ?? null, covers, s.pending ?? null, s.resetsAt ?? null, s.dismissed === true, s.by ?? "human"],
   );
   return rows[0]!;
 }
@@ -294,6 +296,82 @@ describe("the run push in a group", () => {
     expect(memberS.events.filter((e) => e.type === "run")).toEqual([]);
   });
 
+  it("what each reader is told is the database's at delivery: a stale announcement gives the others the state now, and the run goes to the owner the run row names, whoever the announcement names", async () => {
+    const w = await world();
+    const [ownerS, memberS, thirdS] = await connectAll(w.owner, w.member, w.third);
+    const queued = await seedRun(w.anna, w.owner, w.g, { status: "queued" });
+    await db.query("update agent_runs set status = 'done', started_at = now(), finished_at = now() where id = $1", [queued.id]);
+
+    // Announced as it was (queued) after it ended: its owner gets the run announced; the others the state there now.
+    announce(w.owner, w.g, queued);
+    expect((await ownerS.next((e) => e.type === "run" && e.conversationId === w.g)).run).toEqual(toWireRun(queued));
+    for (const s of [memberS, thirdS]) expect((await nextState(s, w.g, w.anna.id)).state).toBeNull();
+
+    // An announcement naming another member as its owner: the run still reaches only the run's owner, and that member
+    // only the state, as every other member.
+    app.agentPort.announce({ ownerId: w.member.id, conversationId: w.g, run: toWireRun(queued) });
+    for (const s of [memberS, thirdS]) {
+      const from = s.events.indexOf(runPushes(s, w.g)[0]!) + 1;
+      expect((await nextState(s, w.g, w.anna.id, from)).state).toBeNull();
+    }
+    await ownerS.waitFor(() => runPushes(ownerS, w.g).length >= 2);
+    expect(runPushes(ownerS, w.g).map((e) => e.run)).toEqual([toWireRun(queued), toWireRun(queued)]);
+    // In the Agent's own conversation too.
+    const own = await seedRun(w.anna, w.owner, w.anna.conversationId, { status: "failed", error: "provider_unavailable" });
+    app.agentPort.announce({ ownerId: w.member.id, conversationId: w.anna.conversationId, run: toWireRun(own) });
+    expect(await ownerS.next((e) => e.type === "run" && e.conversationId === w.anna.conversationId)).toEqual({
+      type: "run",
+      conversationId: w.anna.conversationId,
+      run: toWireRun(own),
+    });
+    for (const s of [memberS, thirdS]) {
+      await settled(s);
+      expect(runPushes(s, w.anna.conversationId)).toEqual([]);
+      expect(runPushes(s, w.g).every((e) => Object.keys(e).sort().join() === REDUCED_KEYS.join())).toBe(true);
+    }
+  });
+
+  it("a delivery whose read fails is tried once more; failing twice it is dropped and logged, and the next delivery goes out", async () => {
+    const w = await world();
+    const [ownerS, thirdS] = await connectAll(w.owner, w.third);
+    const failed = await seedRun(w.anna, w.owner, w.g, { status: "failed", error: "provider_unavailable" });
+    // The delivery's own read (`runAudience`) fails `failures` times; every other query goes through.
+    const query = app.deps.db.query.bind(app.deps.db);
+    let failures = 0;
+    vi.spyOn(app.deps.db, "query").mockImplementation(((text: unknown, values?: unknown) => {
+      if (failures > 0 && typeof text === "string" && text.includes("left join memberships am")) {
+        failures--;
+        return Promise.reject(new Error("connection reset"));
+      }
+      return (query as (t: unknown, v?: unknown) => unknown)(text, values);
+    }) as never);
+    const logged = vi.spyOn(app.log, "error");
+
+    // Once: tried again, and delivered.
+    failures = 1;
+    announce(w.owner, w.g, failed);
+    expect((await ownerS.next((e) => e.type === "run" && e.conversationId === w.g)).run).toEqual(toWireRun(failed));
+    expect((await nextState(thirdS, w.g, w.anna.id)).state).toBe("unavailable");
+    expect(failures).toBe(0);
+    expect(logged).not.toHaveBeenCalled();
+
+    // Twice: dropped, for everyone, and logged once with the run.
+    failures = 2;
+    announce(w.owner, w.g, failed);
+    await vi.waitFor(() => expect(logged).toHaveBeenCalled());
+    await Promise.all([ownerS, thirdS].map(settled));
+    expect([ownerS, thirdS].map((s) => runPushes(s, w.g).length)).toEqual([1, 1]);
+    expect(failures).toBe(0);
+    expect(logged.mock.calls.map(([fields, message]) => [(fields as { runId?: string }).runId, message])).toEqual([
+      [failed.id, "realtime: a run push was dropped: who is told what could not be read (twice)"],
+    ]);
+
+    // The conversation's queue goes on: the next delivery reaches them.
+    announce(w.owner, w.g, failed);
+    await thirdS.waitFor(() => runPushes(thirdS, w.g).length >= 2);
+    await ownerS.waitFor(() => runPushes(ownerS, w.g).length >= 2);
+  });
+
   it("one delivery reads the database once, however many members; re-announcing the reused rate_limited run tells the others the same state again", async () => {
     const w = await world();
     const sockets = await connectAll(w.owner, w.member, w.member, w.third, w.third);
@@ -444,6 +522,43 @@ describe("the owner's controls over a group run", () => {
     expect((await rowOf(bobs.id)).status).toBe("stopped");
   });
 
+  it("stop of a running reply: the worker working on it stops it (what it said is posted, stopped); nobody else can; the others are told null", async () => {
+    const w = await world();
+    const [ownerS, memberS] = await connectAll(w.owner, w.member);
+    const hold = gateway.hangAfter("我先看看");
+    await say(w.member, w.g, "@anna 帮我看看");
+    const run = (await db.query<{ id: string }>("select id from agent_runs where agent_id = $1 and conversation_id = $2", [w.anna.id, w.g])).rows[0]!;
+    const working = app.agentWorker.runOnce();
+    await hold.reached;
+    expect((await rowOf(run.id)).status).toBe("running");
+    expect((await nextState(memberS, w.g, w.anna.id)).state).toBe("replying");
+
+    // Anyone but its owner: as a run that does not exist, and it goes on.
+    const stop = post(`/api/conversations/${w.g}/runs/${run.id}/stop`);
+    for (const who of [w.member, w.third]) expect(await observe(who, stop)).toEqual(await observe(who, post(`/api/conversations/${w.g}/runs/${OTHER_RANDOM}/stop`)));
+    expect((await rowOf(run.id)).status).toBe("running");
+
+    expect(await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/${run.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    expect(await working).toBe(true);
+    expect((await rowOf(run.id)).status).toBe("stopped");
+    const posted = await db.query("select body ->> 'text' as text, body ->> 'stopped' as stopped from messages where client_txn = $1", [run.id]);
+    expect(posted.rows).toEqual([{ text: "我先看看", stopped: "true" }]);
+    expect((await ownerS.next((e) => e.type === "run" && e.run?.status === "stopped")).run).toEqual({ id: run.id, status: "stopped", retryable: false });
+    await memberS.waitFor(() => runPushes(memberS, w.g).filter((e) => e.state === null).length > 0);
+    expect(runPushes(memberS, w.g).at(-1)).toEqual({ type: "run", conversationId: w.g, agentId: w.anna.id, state: null });
+  });
+
+  it("stop of a running reply nobody here is working on: released as recovery releases one; the others are told it is unavailable", async () => {
+    const w = await world();
+    const [ownerS, memberS] = await connectAll(w.owner, w.member);
+    const running = await seedRun(w.anna, w.owner, w.g, { status: "running" });
+    expect(await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/${running.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    const released = { id: running.id, status: "failed", error: "provider_unavailable", retryable: true };
+    expect(toWireRun(await rowOf(running.id))).toEqual(released);
+    expect((await ownerS.next((e) => e.type === "run" && e.run?.id === running.id)).run).toEqual(released);
+    expect((await nextState(memberS, w.g, w.anna.id)).state).toBe("unavailable");
+  });
+
   it("retry: answers again what the failed run covered (not its owner's last message); agentId is required in a group; only its owner's", async () => {
     const w = await world();
     const asked = await say(w.member, w.g, "帮我看看");
@@ -485,6 +600,32 @@ describe("the owner's controls over a group run", () => {
     expect(await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.anna.id })).toEqual({ status: 409, json: { error: "busy_run" } });
   });
 
+  it("retry: keeps whose message the failed run answered (an Agent's stays an Agent's, so a halt still stops it) and also answers what was noted on it", async () => {
+    const w = await world();
+    const asked = await say(w.member, w.g, "先说一句");
+    const noted = await say(w.third, w.g, "又说一句");
+    // A reply an Agent's message called for, with a later message noted on it, that failed (released, not followed up).
+    const failed = await seedRun(w.anna, w.owner, w.g, { status: "failed", error: "provider_unavailable", covers: asked, pending: noted, by: "agent" });
+    const retried = await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.anna.id });
+    expect(retried.status).toBe(201);
+    const runOf = async (id: string) =>
+      (await db.query("select status, error, covers_seq::int as covers, pending_seq::int as pending, triggered_by as by from agent_runs where id = $1", [id])).rows[0];
+    expect(await runOf(retried.json.run.id)).toEqual({ status: "queued", error: null, covers: noted, pending: null, by: "agent" });
+    expect((await runOf(failed.id)).status).toBe("failed");
+    // A member's halt ends it as it ends every reply Agents called for.
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    expect(await runOf(retried.json.run.id)).toMatchObject({ status: "cancelled", error: "halted" });
+
+    // A person's failed reply is retried as a person's, and a halt leaves it alone.
+    await say(w.member, w.g, "继续");
+    const persons = await seedRun(w.anna, w.owner, w.g, { status: "failed", error: "provider_unavailable", by: "human" });
+    const again = await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.anna.id });
+    expect(again.status).toBe(201);
+    expect(await runOf(again.json.run.id)).toEqual({ status: "queued", error: null, covers: (await runOf(persons.id)).covers, pending: null, by: "human" });
+    expect((await api(app, w.member, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    expect((await runOf(again.json.run.id)).status).toBe("queued");
+  });
+
   it("retry: not after a halt or the Agent's leaving, nor for one that left; paused or deleted as in its own conversation", async () => {
     const w = await world();
     const retry = (agentId: string) => api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId });
@@ -512,6 +653,14 @@ describe("the owner's controls over a group run", () => {
     expect((await api(app, w.owner, "POST", `/api/agents/${w.anna.id}/resume`)).status).toBe(200);
     expect((await retry(w.anna.id)).status).toBe(201);
     expect((await db.query("select count(*)::int as n from agent_runs where conversation_id = $1 and status = 'queued'", [w.g])).rows[0].n).toBe(1);
+
+    // Deleted (which also takes it out of the group): 409 agent_deleted, as in its own conversation; nothing is queued.
+    const bobFailed = await seedRun(w.bob, w.member, w.g, { status: "failed", error: "provider_unavailable" });
+    expect((await api(app, w.member, "DELETE", `/api/agents/${w.bob.id}`)).status).toBe(200);
+    expect(await api(app, w.member, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.bob.id })).toEqual({ status: 409, json: { error: "agent_deleted" } });
+    expect((await api(app, w.member, "POST", `/api/conversations/${w.bob.conversationId}/runs/retry`)).json).toEqual({ error: "agent_deleted" });
+    expect((await db.query("select id from agent_runs where agent_id = $1 and status = 'queued'", [w.bob.id])).rows).toEqual([]);
+    expect((await rowOf(bobFailed.id)).status).toBe("failed");
   });
 
   it("dismiss: its owner's only; the others are told null; idempotent; it works for an Agent that has left", async () => {

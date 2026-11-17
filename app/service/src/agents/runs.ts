@@ -11,13 +11,13 @@ import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
- * dismiss, the latest run of a conversation, and what a group's members may know of its Agents' replies
- * (`groupRuns`, `runAudience`: the owner the run, everyone else its state). The worker's side is `port-impl.ts`. A run belongs to one conversation
- * (`conversation_id`), and everything here acts on that one: an Agent has at most one queued or running run per
- * conversation, and a message is folded only into the active run of its own conversation. In a group a message calls
- * Agents by `@handle` (`triggerInGroup`, `triggerFromAgent`), under brakes on Agents calling Agents (the chain limit,
- * the halt, the chain budget). Lock order everywhere: the run's conversation row → `agents` rows (`lockAgent`; several
- * in id order) → run rows → `accounts` rows (several in id order).
+ * dismiss, the latest run of a conversation, and what a group's members may know of its Agents' replies (`groupRuns`,
+ * `runAudience`: the owner the run, everyone else its state). The worker's side is `port-impl.ts`. A run belongs to
+ * one conversation (`conversation_id`), and everything here acts on that one: an Agent has at most one queued or
+ * running run per conversation, and a message is folded only into the active run of its own conversation. In a group
+ * a message calls Agents by `@handle` (`triggerInGroup`, `triggerFromAgent`), under brakes on Agents calling Agents
+ * (the chain limit, the halt, the chain budget). Lock order everywhere: the run's conversation row → `agents` rows
+ * (`lockAgent`; several in id order) → run rows → `accounts` rows (several in id order).
  */
 
 export const RUN_STATUSES = ["queued", "running", "done", "failed", "stopped", "cancelled"] as const;
@@ -125,6 +125,8 @@ export async function groupRuns(q: Queryable, readerId: string, conversationId: 
 export interface RunAudience {
   type: ConversationType;
   agentId: string;
+  /** The run's owner (`agent_runs.owner_id`): the one principal ever pushed the run itself. */
+  ownerId: string;
   /** A group's current members, people and Agents; empty in any other conversation. */
   memberIds: string[];
   /** In a group, what its members other than the run's owner are told: the Agent's state there now. */
@@ -133,12 +135,19 @@ export interface RunAudience {
 
 /**
  * One statement for one delivery of run `runId` of `conversationId`, however many members the conversation has: its
- * type, the run's Agent, and in a group its current members and the Agent's state there now — that of its latest run in
- * its current stay (`latestInStay`), null once it is not a member. Null when there is no such run.
+ * type, the run's Agent and owner, and in a group its current members and the Agent's state there now — that of its
+ * latest run in its current stay (`latestInStay`), null once it is not a member. Null when there is no such run.
  */
 export async function runAudience(q: Queryable, conversationId: string, runId: string): Promise<RunAudience | null> {
-  const { rows } = await q.query<{ type: ConversationType; agent_id: string; members: string[] | null; status: RunStatus | null; dismissed_at: Date | null }>(
-    `select c.type, a.agent_id,
+  const { rows } = await q.query<{
+    type: ConversationType;
+    agent_id: string;
+    owner_id: string;
+    members: string[] | null;
+    status: RunStatus | null;
+    dismissed_at: Date | null;
+  }>(
+    `select c.type, a.agent_id, a.owner_id,
             case when c.type = 'group'
                  then array(select ms.principal_id from memberships ms where ms.conversation_id = c.id and ms.left_seq is null) end as members,
             r.status, r.dismissed_at
@@ -152,7 +161,7 @@ export async function runAudience(q: Queryable, conversationId: string, runId: s
   const row = rows[0];
   if (!row) return null;
   const latest = row.status === null ? null : { status: row.status, dismissed_at: row.dismissed_at };
-  return { type: row.type, agentId: row.agent_id, memberIds: row.members ?? [], state: groupRunState(latest) };
+  return { type: row.type, agentId: row.agent_id, ownerId: row.owner_id, memberIds: row.members ?? [], state: groupRunState(latest) };
 }
 
 /** A run to push to its owner after the transaction that changed it commits. */
@@ -703,10 +712,18 @@ async function ownAgentInGroup(
   return { agentId, joinedSeq: rows[0].joined === null ? null : Number(rows[0].joined) };
 }
 
-/** The Agent's latest reply run in the conversation (whatever its stay), with what it covered. */
-async function latestRunOf(q: Queryable, agentId: string, conversationId: string): Promise<(RunRow & { covers: string | null }) | null> {
-  const { rows } = await q.query<RunRow & { covers: string | null }>(
-    `select ${RUN_COLUMNS}, r.covers_seq::text as covers from agent_runs r
+/**
+ * The Agent's latest reply run in the conversation (whatever its stay): what it covered (`covers`), that and what was
+ * noted on it besides (`answers`: the greater of `covers_seq` and `pending_seq`), and whose message called for it.
+ */
+async function latestRunOf(
+  q: Queryable,
+  agentId: string,
+  conversationId: string,
+): Promise<(RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy }) | null> {
+  const { rows } = await q.query<RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy }>(
+    `select ${RUN_COLUMNS}, r.covers_seq::text as covers, greatest(r.covers_seq, coalesce(r.pending_seq, 0))::text as answers, r.triggered_by
+       from agent_runs r
       where r.agent_id = $1 and r.conversation_id = $2 and r.purpose = 'reply' order by r.created_at desc, r.id desc limit 1`,
     [agentId, conversationId],
   );
@@ -749,10 +766,12 @@ export async function retryRun(
 
 /**
  * Retry in a group (wire contract "Run state"): the owner's Agent's latest run there, when it failed in the Agent's
- * current stay, is answered again — a new queued run covering what it covered (`covers_seq`), a person's (the owner asked
- * for it). Not for an Agent that is not in the group now, nor for a run from before it last joined; a run a halt or the
- * Agent's leaving cancelled (`halted`, `agent_removed`) did not fail: 400 like any other. Lock order: the group's row →
- * the Agent's → run rows → the owner's `accounts` row.
+ * current stay, is answered again — a new queued run covering what it covered and what was noted on it (the greater of
+ * its `covers_seq` and `pending_seq`: a run recovery or a release failed is not followed up), called for by whoever
+ * called the failed one (`triggered_by` kept: one an Agent's message called for is still an Agent's, so a member's
+ * halt still ends it). Not for an Agent that is not in the group now, nor for a run from before it last joined; a run
+ * a halt or the Agent's leaving cancelled (`halted`, `agent_removed`) did not fail: 400 like any other. Lock order:
+ * the group's row → the Agent's → run rows → the owner's `accounts` row.
  */
 async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agentId: string | undefined, config: Pick<Config, "agentRunsPerMinute">): Promise<Announced> {
   const own = await ownAgentInGroup(t, ownerId, conversationId, agentId);
@@ -767,7 +786,7 @@ async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agen
     throw new AppError(400, "invalid_request");
   }
   if ((await startedLastMinute(t, ownerId)) >= config.agentRunsPerMinute) throw new AppError(429, "rate_limited");
-  return queueRun(t, agent, conversationId, covers, "human");
+  return queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by);
 }
 
 /**
@@ -796,7 +815,6 @@ export async function stopRun(t: Tx, ownerId: string, conversationId: string, ru
 
 /** A failure its owner dismissed in a group: the others are told its Agent's state again (`Hub.pushRunState`). */
 export interface Dismissed {
-  ownerId: string;
   conversationId: string;
   runId: string;
 }
@@ -816,7 +834,7 @@ export async function dismissRun(t: Tx, ownerId: string, conversationId: string,
         returning id`,
       [own.agentId, conversationId],
     );
-    return rows[0] ? { ownerId, conversationId, runId: rows[0].id } : null;
+    return rows[0] ? { conversationId, runId: rows[0].id } : null;
   }
   if (!(await ownedAgentOf(t, ownerId, conversationId))) throw notFound();
   await t.query(

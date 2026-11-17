@@ -108,7 +108,7 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
       await writeLimit(req, me.id);
       const dismissed = await db.tx((t) => dismissRun(t, me.id, req.params.id, req.body?.agentId));
       // In a group the others' line for that Agent goes (its owner, who closed it, is not told).
-      if (dismissed) app.realtime.pushRunState(dismissed.ownerId, dismissed.conversationId, dismissed.runId);
+      if (dismissed) app.realtime.pushRunState(dismissed.conversationId, dismissed.runId);
       return { ok: true as const };
     },
   );
