@@ -162,12 +162,73 @@ const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
   gemini: {},
 };
 
-/** The call's provider options: the protocol's own, with the reasoning level's merged in, per provider namespace. */
-function providerOptionsFor(call: ModelCall): ProviderOptions {
+/**
+ * What a call may send that an upstream may not know, besides `REASONING_PARAMS`: `thinking`, the thinking switch of
+ * a Chat Completions call with `thinkingSwitch` (body field `thinking: {type: "disabled"}` at `none`, `{type:
+ * "enabled"}` at any other level, next to the level's `reasoning_effort`); `summary`, the reasoning summary a
+ * Responses call asks for at any level but `none` (`reasoning.summary: "auto"`). An upstream that refuses one — a 400
+ * whose body names it — is asked once more without it, and its later calls leave it out (`Refusals`).
+ */
+export type OptionalField = "thinking" | "summary";
+/** How a refusal names each field: what a 400's body is looked through for (its first `REFUSAL_CHARS`). */
+const NAMES: Readonly<Record<OptionalField, RegExp>> = { thinking: /thinking/i, summary: /summary/i };
+const REFUSAL_CHARS = 4096;
+/** Upstreams whose refusals are remembered at most; the one used longest ago is forgotten first. */
+export const MAX_REMEMBERED_UPSTREAMS = 1000;
+
+/** The optional fields the call sends, given what its upstream refused (`left`: left out). */
+function optionalFields(call: ModelCall, left: ReadonlySet<OptionalField>): OptionalField[] {
+  const fields: OptionalField[] = [];
+  if (call.protocol === "openai_chat" && call.thinkingSwitch === true && !left.has("thinking")) fields.push("thinking");
+  if (call.protocol === "openai_responses" && call.reasoning !== "none" && !left.has("summary")) fields.push("summary");
+  return fields;
+}
+
+/** What upstreams refused, by `ModelCall.upstreamId`, in this process: at most `MAX_REMEMBERED_UPSTREAMS` of them. */
+export class Refusals {
+  private readonly byUpstream = new Map<string, Set<OptionalField>>();
+
+  of(upstreamId: string | undefined): Set<OptionalField> {
+    const refused = upstreamId === undefined ? undefined : this.byUpstream.get(upstreamId);
+    if (upstreamId === undefined || refused === undefined) return new Set();
+    this.byUpstream.delete(upstreamId);
+    this.byUpstream.set(upstreamId, refused); // used now: forgotten last
+    return new Set(refused);
+  }
+
+  add(upstreamId: string | undefined, field: OptionalField): void {
+    if (upstreamId === undefined) return;
+    const refused = this.byUpstream.get(upstreamId) ?? new Set();
+    refused.add(field);
+    this.byUpstream.delete(upstreamId);
+    this.byUpstream.set(upstreamId, refused);
+    if (this.byUpstream.size > MAX_REMEMBERED_UPSTREAMS) this.byUpstream.delete(this.byUpstream.keys().next().value!);
+  }
+}
+
+/** Whether `err` is the upstream refusing `field`: a 400 whose body names it. Only read here; never kept. */
+function refuses(err: unknown, field: OptionalField): boolean {
+  const seen = new Set<unknown>();
+  for (let e: unknown = err; e != null && !seen.has(e); e = (e as { cause?: unknown }).cause) {
+    seen.add(e);
+    if (APICallError.isInstance(e)) return e.statusCode === 400 && NAMES[field].test((e.responseBody ?? "").slice(0, REFUSAL_CHARS));
+  }
+  return false;
+}
+
+/**
+ * The call's provider options: the protocol's own, with the reasoning level's merged in, per provider namespace; a
+ * Responses call whose upstream refused the summary asks for none (`reasoningSummary: null`: left out, where the SDK
+ * would otherwise ask for one).
+ */
+function providerOptionsFor(call: ModelCall, left: ReadonlySet<OptionalField>): ProviderOptions {
   const base = PROTOCOL_OPTIONS[call.protocol];
   const reasoning = REASONING_PARAMS[call.protocol][call.reasoning];
   const merged: ProviderOptions = {};
   for (const name of new Set([...Object.keys(base), ...Object.keys(reasoning)])) merged[name] = { ...base[name], ...reasoning[name] };
+  if (call.protocol === "openai_responses" && call.reasoning !== "none" && left.has("summary")) {
+    merged.openai = { ...merged.openai, reasoningSummary: null } satisfies OpenAILanguageModelResponsesOptions;
+  }
   return merged;
 }
 
@@ -195,8 +256,9 @@ export function createModelGateway(options: GatewayOptions): ModelGateway {
   const guard = { calls: options.calls, ...(options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {}) };
   const fetch = guardedFetch({ ...guard, maxResponseBytes: MODEL_STREAM_MAX_BYTES, timeoutMs: options.idleTimeoutMs ?? MODEL_IDLE_TIMEOUT_MS });
   const probe = createProviderProbe(guardedFetch({ ...guard, ...PROBE_GUARD }));
+  const refusals = new Refusals();
   return {
-    stream: (call) => streamCall(call, fetch),
+    stream: (call) => streamCall(call, fetch, refusals),
     async listModels(p) {
       try {
         return await probe.listModels(p);
@@ -273,26 +335,62 @@ function toModelError(err: unknown): ModelError {
   return new ModelError("provider_unavailable");
 }
 
-/** `fetch` with every successful response's body read by `tap` on its way to the SDK (Chat Completions). */
-function tapped(fetch: typeof globalThis.fetch, tap: ChatReasoningTap): typeof globalThis.fetch {
+/**
+ * The `fetch` of a Chat Completions call: the request's JSON body gets the thinking switch when it is sent
+ * (`thinking`), and every successful response's body is read by `tap` on its way to the SDK. The key stays in the
+ * headers the SDK set; nothing here reads them.
+ */
+function chatFetch(fetch: typeof globalThis.fetch, tap: ChatReasoningTap, thinking: { type: "enabled" | "disabled" } | null): typeof globalThis.fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
-    const res = await fetch(input, init);
+    const body = thinking !== null && typeof init?.body === "string" ? JSON.stringify({ ...JSON.parse(init.body), thinking }) : undefined;
+    const res = await fetch(input, body === undefined ? init : { ...init, body });
     if (!res.ok || res.body === null) return res;
     return new Response(res.body.pipeThrough(tap.transform()), { status: res.status, statusText: res.statusText, headers: res.headers });
   }) as typeof globalThis.fetch;
 }
 
 /**
- * The call as events. On Chat Completions (where the SDK reads no reasoning) a delta's own reasoning field is read off
- * the stream (`ChatReasoningTap`) and comes out in its place among the text, as soon as it arrives; an answer that
- * streamed none of it before its first text and opens with `<think>` has that block taken out as reasoning
- * (`ThinkTags`). Reasoning never becomes text.
+ * The call as events: one attempt (`attempt`), and when the upstream refused an optional field it sent
+ * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream.
  */
-async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): AsyncGenerator<ModelEvent> {
-  call.signal.throwIfAborted();
+async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refusals: Refusals): AsyncGenerator<ModelEvent> {
+  try {
+    call.signal.throwIfAborted();
+    const left = refusals.of(call.upstreamId);
+    for (let retry = false; ; retry = true) {
+      const sent = optionalFields(call, left);
+      let started = false;
+      try {
+        for await (const event of attempt(call, fetch, left)) {
+          started = true;
+          yield event;
+        }
+        return;
+      } catch (err) {
+        const refused = started || retry || call.signal.aborted ? undefined : sent.find((field) => refuses(err, field));
+        if (refused === undefined) throw err;
+        left.add(refused);
+        refusals.add(call.upstreamId, refused);
+      }
+    }
+  } catch (err) {
+    call.signal.throwIfAborted();
+    throw toModelError(err);
+  }
+}
+
+/**
+ * One request of the call, as events; a failure is thrown as it came (`streamCall` makes it a `ModelError`). On Chat
+ * Completions (where the SDK reads no reasoning) a delta's own reasoning field is read off the stream
+ * (`ChatReasoningTap`) and comes out in its place among the text, as soon as it arrives; an answer that streamed none
+ * of it before its first text and opens with `<think>` has that block taken out as reasoning (`ThinkTags`). Reasoning
+ * never becomes text.
+ */
+async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: ReadonlySet<OptionalField>): AsyncGenerator<ModelEvent> {
   // Ends the upstream request however this iterator ends: finished, failed, stopped, or left early by its reader.
   const own = new AbortController();
   const tap = call.protocol === "openai_chat" ? new ChatReasoningTap() : null;
+  const thinking = optionalFields(call, left).includes("thinking") ? { type: call.reasoning === "none" ? ("disabled" as const) : ("enabled" as const) } : null;
   /** Chat Completions: undecided until the first text, then whether the answer is looked at for `<think>`. */
   let tags: ThinkTags | null | undefined = tap ? undefined : null;
   /** Reasoning arrived in the protocol's own field. */
@@ -300,11 +398,11 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
   let parts: AsyncIterator<StreamPart> | undefined;
   try {
     const result = streamText({
-      model: languageModel(call, tap ? tapped(fetch, tap) : fetch),
+      model: languageModel(call, tap ? chatFetch(fetch, tap, thinking) : fetch),
       ...(call.system === "" ? {} : { instructions: call.system }),
       messages: toModelMessages(call.messages),
       maxOutputTokens: call.maxOutputTokens,
-      providerOptions: providerOptionsFor(call),
+      providerOptions: providerOptionsFor(call, left),
       abortSignal: AbortSignal.any([call.signal, own.signal]),
       maxRetries: 0,
       telemetry: { isEnabled: false },
@@ -358,9 +456,6 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
       }
     }
     throw new ModelError("provider_unavailable");
-  } catch (err) {
-    call.signal.throwIfAborted();
-    throw toModelError(err);
   } finally {
     own.abort();
     // Not awaited: a read still pending ends with the abort.

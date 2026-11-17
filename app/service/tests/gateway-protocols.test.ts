@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOLS, REASONING_LEVELS, type Protocol } from "../src/config.ts";
-import { createModelGateway, ModelError, REASONING_PARAMS, type ModelCall, type ModelEvent } from "../src/models/gateway.ts";
+import { createModelGateway, MAX_REMEMBERED_UPSTREAMS, ModelError, REASONING_PARAMS, Refusals, type ModelCall, type ModelEvent } from "../src/models/gateway.ts";
 import { createSlots } from "../src/slots.ts";
 import { PNG } from "./helpers/agents.ts";
 import {
@@ -13,6 +13,7 @@ import {
   protocolStub,
   STUB_MODEL,
   type ProtocolStub,
+  type StubRequest,
 } from "./helpers/models.ts";
 
 /**
@@ -340,6 +341,142 @@ describe("Chat Completions reasoning", () => {
     });
     const events = await collect(gateway.stream(call("anthropic")));
     expect(runs(events)).toEqual([["text", `<think>Hello</think>${CANNED_TEXT.slice("Hello".length)}`]]);
+  });
+});
+
+const pick = (from: any, keys: string[]) => Object.fromEntries(keys.filter((k) => from?.[k] !== undefined).map((k) => [k, from[k]]));
+
+describe("what each protocol is sent, per level: the call's output limit as it is, the effort, the thinking switch, the summary", () => {
+  // A limit as resolveModel makes one at a level (the reply's 2 048 and high's 12 000): the gateway adds nothing to it.
+  const LIMIT = 14_048;
+  it.each(REASONING_LEVELS)("reasoning %s", async (level) => {
+    const sent = async (protocol: Protocol, over: Partial<ModelCall> = {}) => {
+      stub.reset();
+      await collect(gateway.stream(call(protocol, { reasoning: level, maxOutputTokens: LIMIT, ...over })));
+      return onlyRequest().body;
+    };
+    const capped = level === "max" ? "xhigh" : level; // Chat Completions and Gemini have no max
+    const CHAT = ["max_tokens", "max_completion_tokens", "reasoning_effort", "thinking"];
+    expect(pick(await sent("openai_chat"), CHAT)).toEqual(level === "none" ? { max_tokens: LIMIT } : { max_completion_tokens: LIMIT, reasoning_effort: capped });
+    // The thinking switch: disabled at none; enabled at a level, next to the level's own effort.
+    expect(pick(await sent("openai_chat", { thinkingSwitch: true }), CHAT)).toEqual(
+      level === "none"
+        ? { max_tokens: LIMIT, thinking: { type: "disabled" } }
+        : { max_completion_tokens: LIMIT, reasoning_effort: capped, thinking: { type: "enabled" } },
+    );
+    expect(pick(await sent("openai_chat", { thinkingSwitch: false }), CHAT)).not.toHaveProperty("thinking");
+    // The other protocols are sent the same with or without the switch; at none, exactly as before.
+    for (const over of [{}, { thinkingSwitch: true }]) {
+      const responses = await sent("openai_responses", over);
+      expect(pick(responses, ["max_output_tokens", "reasoning", "thinking"])).toEqual(
+        level === "none" ? { max_output_tokens: LIMIT } : { max_output_tokens: LIMIT, reasoning: { effort: level, summary: "auto" } },
+      );
+      expect(pick(await sent("anthropic", over), ["max_tokens", "thinking", "output_config"])).toEqual(
+        level === "none"
+          ? { max_tokens: LIMIT, thinking: { type: "disabled" } }
+          : { max_tokens: LIMIT, thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: level } },
+      );
+      const gemini = await sent("gemini", over);
+      expect(gemini).not.toHaveProperty("thinking");
+      expect(pick(gemini.generationConfig, ["maxOutputTokens", "thinkingConfig"])).toEqual(
+        level === "none" ? { maxOutputTokens: LIMIT } : { maxOutputTokens: LIMIT, thinkingConfig: { thinkingLevel: capped, includeThoughts: true } },
+      );
+    }
+  });
+});
+
+describe("an optional field the upstream refuses (the thinking switch, the reasoning summary)", () => {
+  /** A 400 naming the field to a request that carries it (`carries`), else the canned stream. */
+  const refusing = (carries: (body: any) => boolean, message: string) => (req: StubRequest, res: import("node:http").ServerResponse) => {
+    if (!carries(req.body)) return answerCanned(req, res);
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { message, type: "invalid_request_error", param: null, code: null } }));
+  };
+  const withoutThinking = (body: any) => {
+    const { thinking: _, ...rest } = body;
+    return rest;
+  };
+  const answered = (events: ModelEvent[]) => deltas(events, "text").join("") === CANNED_TEXT && events.at(-1)?.type === "finish";
+
+  it("Chat Completions: a 400 naming `thinking` is asked once more without it, and that upstream's later calls leave it out", async () => {
+    stub.answer(refusing((b) => "thinking" in b, "Unrecognized request argument supplied: thinking"));
+    const upstreamId = "provider:refuses-thinking";
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.thinking)).toEqual([{ type: "disabled" }, undefined]);
+    expect(withoutThinking(stub.requests[0]!.body)).toEqual(stub.requests[1]!.body); // otherwise the same request
+
+    stub.requests.length = 0;
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId, reasoning: "high" }))))).toBe(true);
+    expect(stub.requests.map((r) => [r.body.thinking, r.body.reasoning_effort])).toEqual([[undefined, "high"]]);
+
+    // Another upstream is asked with it; a call naming no upstream is retried every time and nothing is remembered.
+    stub.requests.length = 0;
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId: "provider:other" }))))).toBe(true);
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true }))))).toBe(true);
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null, "disabled", null, "disabled", null]);
+  });
+
+  it("Responses: a 400 naming the summary is asked once more with the effort alone, and that upstream's later calls ask for none", async () => {
+    stub.answer(
+      refusing(
+        (b) => b.reasoning?.summary !== undefined,
+        "Your organization must be verified to generate reasoning summaries. Unsupported value: 'reasoning.summary'",
+      ),
+    );
+    const upstreamId = "site:responses-no-summary";
+    expect(answered(await collect(gateway.stream(call("openai_responses", { reasoning: "high", upstreamId }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "high", summary: "auto" }, { effort: "high" }]);
+    stub.requests.length = 0;
+    expect(answered(await collect(gateway.stream(call("openai_responses", { reasoning: "low", upstreamId }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "low" }]);
+  });
+
+  it("a 400 that does not name the field, another status, or a field the call did not send: answered once, not retried", async () => {
+    for (const [status, message, over] of [
+      [400, "max_tokens is too large", { thinkingSwitch: true }],
+      [422, "Unrecognized request argument supplied: thinking", { thinkingSwitch: true }],
+      [400, "Unrecognized request argument supplied: thinking", {}],
+    ] as const) {
+      stub.reset();
+      stub.answer((_req, res) => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { message } }));
+      });
+      const error = await collect(gateway.stream(call("openai_chat", { ...over, upstreamId: `provider:once-${status}` }))).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(error).toMatchObject({ code: "provider_unavailable", upstreamStatus: status });
+      expect(stub.requests).toHaveLength(1);
+    }
+  });
+
+  it("asked once more at most: a refusal of the retry too is the call's failure", async () => {
+    stub.answer((_req, res) => {
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "thinking is not supported here" } }));
+    });
+    const error = await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId: "provider:refuses-all" }))).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(ModelError);
+    expect(error).toMatchObject({ code: "provider_unavailable", upstreamStatus: 400 });
+    expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null]);
+  });
+
+  it("what upstreams refused is remembered for at most MAX_REMEMBERED_UPSTREAMS of them, the one used longest ago forgotten first", () => {
+    const refusals = new Refusals();
+    refusals.add("provider:first", "thinking");
+    for (let i = 1; i < MAX_REMEMBERED_UPSTREAMS; i++) refusals.add(`provider:${i}`, "summary");
+    expect([...refusals.of("provider:first")]).toEqual(["thinking"]); // used: now the most recent
+    refusals.add("provider:new", "thinking");
+    expect([...refusals.of("provider:first")]).toEqual(["thinking"]);
+    expect([...refusals.of("provider:1")]).toEqual([]); // the one used longest ago
+    expect([...refusals.of("provider:2")]).toEqual(["summary"]);
+    refusals.add(undefined, "thinking");
+    expect([...refusals.of(undefined)]).toEqual([]);
   });
 });
 
