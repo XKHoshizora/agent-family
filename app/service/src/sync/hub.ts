@@ -41,6 +41,7 @@ export type PushEvent =
   | { type: "gone"; id: string }
   | { type: "social" }
   | { type: "agent"; id: string }
+  | { type: "principal"; id: string; avatarVersion: number }
   | { type: "run"; conversationId: string; run: WireRun }
   | { type: "delta"; conversationId: string; runId: string; text?: string; reasoning?: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
@@ -126,6 +127,38 @@ export class Hub {
   /** Tells `principalId`'s sockets that Agent `agentId` changed (config, pause, delete, avatar): refetch it. */
   pushAgentChanged(principalId: string, agentId: string): void {
     this.push(principalId, { type: "agent", id: agentId });
+  }
+
+  /**
+   * After a committed avatar change of `principalId`: tells everyone who can see that principal (they themselves, whoever
+   * shares a conversation with them now, their friends, and an Agent's owner) the new `avatarVersion`, so their clients
+   * load the image again. Recipients and version are read in one query, so nobody who shares nothing with them hears of it.
+   * Never throws: the change is already committed, and a client that missed the push learns the version at its next sync.
+   */
+  async pushPrincipalChanged(principalId: string): Promise<void> {
+    if (this.stopped || this.byPrincipal.size === 0) return;
+    try {
+      const { rows } = await this.deps.db.query<{ version: number | null; recipients: string[] }>(
+        `with seen as (
+           select $1::uuid as id
+           union select m2.principal_id
+                   from memberships m1
+                   join memberships m2 on m2.conversation_id = m1.conversation_id and m2.left_seq is null
+                  where m1.principal_id = $1 and m1.left_seq is null
+           union select case when f.a_id = $1 then f.b_id else f.a_id end from friendships f where f.a_id = $1 or f.b_id = $1
+           union select owner_id from principals where id = $1 and owner_id is not null
+         )
+         select (select avatar_version from principals where id = $1) as version, array(select id from seen) as recipients`,
+        [principalId],
+      );
+      const version = rows[0]?.version;
+      if (version === null || version === undefined) return;
+      for (const id of this.connectedAmong(rows[0]!.recipients)) {
+        this.push(id, { type: "principal", id: principalId.toLowerCase(), avatarVersion: version });
+      }
+    } catch (err) {
+      this.deps.log.error({ err, principalId }, "avatar announcement failed");
+    }
   }
 
   /**

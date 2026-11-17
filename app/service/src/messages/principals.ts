@@ -7,6 +7,7 @@ export interface SyncPrincipal {
   id: string;
   handle: string;
   displayName: string;
+  avatarVersion: number;
   kind: "human" | "agent";
 }
 
@@ -14,6 +15,7 @@ export const syncPrincipalSchema = z.object({
   id: z.string(),
   handle: z.string(),
   displayName: z.string(),
+  avatarVersion: z.number(),
   kind: z.enum(["human", "agent"]),
 });
 
@@ -35,11 +37,11 @@ export function mentionedIn(m: WireMessage): string[] {
 
 /** The principals with these ids (unknown ids are skipped), by handle: the one reader behind `/api/sync` and message reads. */
 export async function readPrincipals(q: Queryable, ids: Iterable<string>): Promise<SyncPrincipal[]> {
-  const { rows } = await q.query<{ id: string; handle: string; display_name: string; kind: "human" | "agent" }>(
-    "select id, handle::text as handle, display_name, kind from principals where id = any($1::uuid[]) order by handle",
+  const { rows } = await q.query<{ id: string; handle: string; display_name: string; avatar_version: number; kind: "human" | "agent" }>(
+    "select id, handle::text as handle, display_name, avatar_version, kind from principals where id = any($1::uuid[]) order by handle",
     [[...ids]],
   );
-  return rows.map((p) => ({ id: p.id, handle: p.handle, displayName: p.display_name, kind: p.kind }));
+  return rows.map((p) => ({ id: p.id, handle: p.handle, displayName: p.display_name, avatarVersion: p.avatar_version, kind: p.kind }));
 }
 
 /**

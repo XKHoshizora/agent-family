@@ -173,10 +173,10 @@ export interface SocialView {
   blockedBy: PublicPrincipal[];
 }
 
-type PRow = { id: string; handle: string; display_name: string };
+type PRow = { id: string; handle: string; display_name: string; avatar_version: number };
 type RRow = PRow & { rid: string; created_at: Date; expires_at: Date };
 
-const pub = (r: PRow): PublicPrincipal => ({ id: r.id, handle: r.handle, displayName: r.display_name });
+const pub = (r: PRow): PublicPrincipal => ({ id: r.id, handle: r.handle, displayName: r.display_name, avatarVersion: r.avatar_version });
 const entry = (r: RRow): RequestEntry => ({
   id: r.rid,
   principal: pub(r),
@@ -187,14 +187,14 @@ const entry = (r: RRow): RequestEntry => ({
 /** The caller's own friends, live pending requests, and block lists; nothing about anyone else's. */
 export async function socialView(db: Queryable, me: string): Promise<SocialView> {
   const friends = await db.query<PRow>(
-    `select p.id, p.handle::text as handle, p.display_name
+    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version
        from friendships f join principals p on p.id = case when f.a_id = $1 then f.b_id else f.a_id end
       where f.a_id = $1 or f.b_id = $1 order by p.handle`,
     [me],
   );
   const requests = (mine: "r.to_id" | "r.from_id", theirs: "r.from_id" | "r.to_id") =>
     db.query<RRow>(
-      `select r.id as rid, r.created_at, r.expires_at, p.id, p.handle::text as handle, p.display_name
+      `select r.id as rid, r.created_at, r.expires_at, p.id, p.handle::text as handle, p.display_name, p.avatar_version
          from friend_requests r join principals p on p.id = ${theirs}
         where ${mine} = $1 and r.status = 'pending' and r.expires_at >= now()
         order by r.created_at desc`,
@@ -203,12 +203,12 @@ export async function socialView(db: Queryable, me: string): Promise<SocialView>
   const incoming = await requests("r.to_id", "r.from_id");
   const outgoing = await requests("r.from_id", "r.to_id");
   const blocked = await db.query<PRow>(
-    `select p.id, p.handle::text as handle, p.display_name from blocks b join principals p on p.id = b.blocked_id
+    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version from blocks b join principals p on p.id = b.blocked_id
       where b.blocker_id = $1 order by p.handle`,
     [me],
   );
   const blockedBy = await db.query<PRow>(
-    `select p.id, p.handle::text as handle, p.display_name from blocks b join principals p on p.id = b.blocker_id
+    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version from blocks b join principals p on p.id = b.blocker_id
       where b.blocked_id = $1 order by p.handle`,
     [me],
   );

@@ -46,6 +46,7 @@ const agentView = z.object({
   id: z.string(),
   handle: z.string(),
   name: z.string(),
+  avatarVersion: z.number(),
   intro: z.string(),
   field: z.string(),
   persona: z.string(),
@@ -64,6 +65,7 @@ const toView = (a: AgentRow): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
   name: a.name,
+  avatarVersion: a.avatarVersion,
   intro: a.intro,
   field: a.field,
   persona: a.persona,
@@ -338,5 +340,6 @@ export function registerAgentRoutes(app: FastifyInstance): void {
       return swapAvatarKey(t, id, key);
     });
     app.realtime.pushAgentChanged(me.id, id);
+    await app.realtime.pushPrincipalChanged(id);
   });
 }

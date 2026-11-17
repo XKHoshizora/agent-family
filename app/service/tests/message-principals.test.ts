@@ -15,7 +15,7 @@ const say = (who: Actor, conv: string, text: string, extra: object = {}) =>
   api(app, who, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `p${++txn}`, ...extra });
 const history = (who: Actor, conv: string, query = "") => api(app, who, "GET", `/api/conversations/${conv}/messages${query}`);
 const leave = (who: Actor, conv: string) => api(app, who, "DELETE", `/api/conversations/${conv}/members/${who.id}`);
-const publicShape = (who: Actor, displayName: string) => ({ id: who.id, handle: who.handle, displayName, kind: "human" });
+const publicShape = (who: Actor, displayName: string) => ({ id: who.id, handle: who.handle, displayName, avatarVersion: 0, kind: "human" });
 
 describe("principals of message reads", () => {
   /** alice's group with bob and carol; bob speaks, then leaves. */

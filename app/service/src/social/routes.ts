@@ -34,7 +34,7 @@ export function onSocialChanged(app: FastifyInstance, fn: SocialListener): () =>
   return app.deps.social.on(fn);
 }
 
-const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string() });
+const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
 const requestEntry = z.object({
   id: z.string(),
   principal: publicPrincipal,

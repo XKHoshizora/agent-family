@@ -370,7 +370,7 @@ whose members are exactly the owner and the Agent. Everything here is the owner'
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
 `POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
 
-**Agent** (owner only): `{"id", "handle", "name", "intro", "field", "persona", "personaVersion", "replyMode":
+**Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
 {"source": "provider", "providerId", "model"} | null, "paused", "deleted", "conversationId", "createdAt"}`.
 
@@ -864,7 +864,7 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/me`
 
-*Session: required.* → 200 `{"id", "handle", "displayName", "email"}`: the signed-in principal.
+*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email"}`: the signed-in principal.
 
 ### Profiles and principals
 
@@ -881,7 +881,7 @@ accepted but not used: the mail links to the web app).
   text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
   as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
   same rule applies on registration and, with 1–60 characters, to group titles.
-- 200 `{"id", "handle", "displayName"}` with the name as stored. Other members see it the next time they
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored. Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
 
@@ -914,7 +914,7 @@ read (to tell its type), never the whole file. `Content-Length` is only sent for
 *Session: required.* Finds a principal by exact handle — the way to get someone's id to befriend them.
 
 - Query: `handle` (at most 100, lower-cased, then `^[a-z0-9_]{3,24}$`). No prefix or partial matches.
-- 200 `{"id", "handle", "displayName"}` (also for yourself); 404 `not_found`.
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` (also for yourself); 404 `not_found`.
 - Limit: 30 per minute, found or not (the limit is what stops probing for handles).
 
 ### Friends and blocks
@@ -931,11 +931,11 @@ direction keeps the chat and its history but nobody can send there (`canSend.rea
 
 ```jsonc
 {
-  "friends":   [{ "id": "…", "handle": "bob", "displayName": "Bob" }],          // by handle
-  "incoming":  [{ "id": "<request id>", "principal": { "id", "handle", "displayName" }, "createdAt": "…", "expiresAt": "…" }],
+  "friends":   [{ "id": "…", "handle": "bob", "displayName": "Bob", "avatarVersion": 0 }],   // by handle
+  "incoming":  [{ "id": "<request id>", "principal": { "id", "handle", "displayName", "avatarVersion" }, "createdAt": "…", "expiresAt": "…" }],
   "outgoing":  [ /* the same shape; principal is the recipient */ ],             // both newest first, live pending only
-  "blocked":   [{ "id", "handle", "displayName" }],                              // whom you blocked, by handle
-  "blockedBy": [{ "id", "handle", "displayName" }]                               // who blocked you, by handle
+  "blocked":   [{ "id", "handle", "displayName", "avatarVersion" }],                              // whom you blocked, by handle
+  "blockedBy": [{ "id", "handle", "displayName", "avatarVersion" }]                               // who blocked you, by handle
 }
 ```
 
@@ -1045,7 +1045,7 @@ id that does not exist. Fetch it on a `conversation` push instead of a full sync
 
 #### `GET /api/conversations/:id/members`
 
-*Session: required.* → 200 `{"members": [{"id", "handle", "displayName", "kind", "role", "isCreator"}]}`:
+*Session: required.* → 200 `{"members": [{"id", "handle", "displayName", "avatarVersion", "kind", "role", "isCreator"}]}`:
 current members in join order; `kind` `human` | `agent`; `isCreator` only ever true in groups. 404
 `not_found` unless you are a current member.
 
@@ -1109,7 +1109,7 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 *Session: required.* History, a page at a time.
 
 - Query: `before` (optional positive integer: only seqs below it), `limit` (1–100, default 50).
-- 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}`: up to `limit` messages you
+- 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}`: up to `limit` messages you
   can see, the newest page first, each page ascending by seq; pass `nextBefore` as `before` for the next
   older page (`null`: nothing older you can see). `principals` names everyone these messages name — senders
   (also members who have since left), a visible quote's sender, the people in system notices — as
@@ -1118,7 +1118,7 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 
 #### `GET /api/conversations/:id/messages/:seq`
 
-*Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
+*Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
 you joined, not a member, no such seq — identical).
 
 #### `POST /api/conversations/:id/read`
@@ -1138,7 +1138,7 @@ The rules (matching, order, limits, timing) are under Search below.
 #### `GET /api/conversations/:id/search`
 
 *Session: required.* Query: `q` (1–100 characters, one line; see Search), `before` (optional positive integer),
-`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "kind" } }}`,
+`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}`,
 newest first (`principals` as under message history); 404 `not_found` unless you are a current member; 429 / 503 `busy` as under Search.
 
 #### `GET /api/search`
@@ -1199,7 +1199,8 @@ while the session that asked for it lasts. Limit: 30 per minute.
 
 ## Wire shapes
 
-**Principal** (in `/api/sync`'s `principals`): `{"id", "handle", "displayName", "kind": "human" | "agent"}`.
+**Principal** (in `/api/sync`'s `principals`, and the `principals` of message reads and searches): `{"id", "handle", "displayName", "avatarVersion", "kind": "human" | "agent"}`.
+`avatarVersion` counts the principal's avatar changes (0 until the first). A client puts it in the avatar URL, `GET /api/principals/:id/avatar?v=<avatarVersion>`, so a changed avatar is a new URL and is fetched again at once (the route ignores `v`, and still answers `Cache-Control: private, max-age=60`); on a `principal` push it updates the version it shows. The smaller shapes that name a principal (`me`, the lookup, `friends` and the other `/api/social` lists, members) carry `avatarVersion` too.
 
 **Conversation** (an element of `/api/sync`'s `conversations`, and `GET /api/conversations/:id`):
 
@@ -1281,6 +1282,9 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar), or one of its
                                         // persona proposals was made, confirmed or discarded: GET /api/agents/:id, and
                                         // the messages you show with a proposal card (Persona proposals)
+{ "type": "principal", "id": "…", "avatarVersion": 3 }   // someone's avatar changed (yours, a friend's, anyone who shares a
+                                        // conversation with you; for your Agent, to you only): show the new version
+                                        // (Principal). Not replayed: /api/sync carries the current one
 { "type": "run", "conversationId": "…", "run": Run }   // a reply of your Agent was queued, started or ended (Replies)
 { "type": "delta", "conversationId": "…", "runId": "…", "text"?: "…", "reasoning"?: "…" }
                                         // the next piece of the reply being generated: append it to the "replying"
@@ -1326,9 +1330,9 @@ downloads.
 
 ```jsonc
 {
-  "me": { "id": "…", "handle": "alice", "displayName": "Alice", "email": "alice@example.test" },
+  "me": { "id": "…", "handle": "alice", "displayName": "Alice", "avatarVersion": 0, "email": "alice@example.test" },
   "conversations": [ /* Conversation, see Wire shapes; the ones you are a current member of */ ],
-  "principals": [{ "id": "…", "handle": "bob", "displayName": "Bob", "kind": "human" | "agent" }],   // by handle
+  "principals": [{ "id": "…", "handle": "bob", "displayName": "Bob", "avatarVersion": 0, "kind": "human" | "agent" }],   // by handle
   "messages": [ /* WireMessage: per conversation its newest 30 visible messages, ascending by seq */ ]
 }
 ```
@@ -1340,7 +1344,7 @@ Older history: `GET /api/conversations/:id/messages?before=`.
 
 **Principals of a read.** A message can be sent by someone your client never saw (a member who left before
 your first sync). So `GET /api/conversations/:id/messages`, `GET /api/conversations/:id/messages/:seq`
-and both search routes add `"principals": { "<id>": { "id", "handle", "displayName", "kind" } }`: the same
+and both search routes add `"principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }`: the same
 entries as `/api/sync`'s `principals`, keyed by id, for everyone the returned messages name (sender, a
 visible quote's sender, a system notice's participants). It is computed from the messages as rendered for
 you, so a message you cannot see, or a quote shown as `{"visible": false}`, names nobody. An empty page has

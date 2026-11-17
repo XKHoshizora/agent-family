@@ -10,6 +10,7 @@ export interface Principal {
   id: string;
   handle: string;
   displayName: string;
+  avatarVersion: number;
   email: string;
   sessionId: string;
 }
@@ -22,8 +23,8 @@ export interface Principal {
 export async function requirePrincipal(req: FastifyRequest): Promise<Principal> {
   const session = await authCall(() => req.server.auth.api.getSession({ headers: fromNodeHeaders(req.headers) }));
   if (!session || !session.user.emailVerified) throw new AppError(401, "unauthenticated");
-  const { rows } = await req.server.deps.db.query<{ id: string; handle: string; display_name: string }>(
-    "select id, handle, display_name from principals where auth_user_id = $1",
+  const { rows } = await req.server.deps.db.query<{ id: string; handle: string; display_name: string; avatar_version: number }>(
+    "select id, handle, display_name, avatar_version from principals where auth_user_id = $1",
     [session.user.id],
   );
   const row = rows[0];
@@ -32,6 +33,7 @@ export async function requirePrincipal(req: FastifyRequest): Promise<Principal> 
     id: row.id,
     handle: row.handle,
     displayName: row.display_name,
+    avatarVersion: row.avatar_version,
     email: session.user.email,
     sessionId: session.session.id,
   };
@@ -59,13 +61,13 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         params: z.object({}),
         querystring: z.object({}),
         response: {
-          200: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), email: z.string() }),
+          200: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), email: z.string() }),
         },
       },
     },
     async (req) => {
       const p = await requirePrincipal(req);
-      return { id: p.id, handle: p.handle, displayName: p.displayName, email: p.email };
+      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email };
     },
   );
 }

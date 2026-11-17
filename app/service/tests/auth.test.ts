@@ -52,7 +52,7 @@ describe("accounts", () => {
     const me = await api(app, { cookie: cookieHeaderFrom(ok.headers["set-cookie"]) }, "GET", "/api/me");
     expect(me.status).toBe(200);
     expect(me.json).toMatchObject({ handle: "new_person", displayName: "New Person", email: "new@example.test" });
-    expect(Object.keys(me.json).sort()).toEqual(["displayName", "email", "handle", "id"]);
+    expect(Object.keys(me.json).sort()).toEqual(["avatarVersion", "displayName", "email", "handle", "id"]);
   });
 
   test("the verification link lands on the client's /verify page: success plain, failure with ?error=CODE", async () => {

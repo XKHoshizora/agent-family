@@ -1,6 +1,7 @@
 import net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, befriend, cookieHeaderFrom, group, mailLink, signIn, signUp, type Actor } from "./helpers/actors.ts";
+import { PNG } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { closeAllSockets, connect, issueTicket, listen, rawUpgrade, tryConnect, type Push } from "./helpers/ws.ts";
 
@@ -80,7 +81,7 @@ describe("GET /api/sync", () => {
 
     const s = await sync(d);
     expect(s.status).toBe(200);
-    expect(s.json.me).toEqual({ id: d.id, handle: d.handle, displayName: "dave", email: d.email });
+    expect(s.json.me).toEqual({ id: d.id, handle: d.handle, displayName: "dave", avatarVersion: 0, email: d.email });
     expect(s.json.conversations.map((x: any) => x.id).sort()).toEqual([ad, g].sort());
 
     const byId = (x: { id: string }, y: { id: string }) => x.id.localeCompare(y.id);
@@ -136,7 +137,7 @@ describe("GET /api/sync", () => {
 
     // Everyone referenced, nobody else (erin is alice's friend but nowhere in dave's view).
     expect(s.json.principals.map((p: any) => p.id).sort()).toEqual([a.id, b.id, c.id, d.id].sort());
-    expect(s.json.principals.find((p: any) => p.id === b.id)).toEqual({ id: b.id, handle: b.handle, displayName: "bob", kind: "human" });
+    expect(s.json.principals.find((p: any) => p.id === b.id)).toEqual({ id: b.id, handle: b.handle, displayName: "bob", avatarVersion: 0, kind: "human" });
   });
 
   it("is empty and well-formed for a brand-new user", async () => {
@@ -144,9 +145,9 @@ describe("GET /api/sync", () => {
     expect(await sync(n)).toEqual({
       status: 200,
       json: {
-        me: { id: n.id, handle: n.handle, displayName: "newbie", email: n.email },
+        me: { id: n.id, handle: n.handle, displayName: "newbie", avatarVersion: 0, email: n.email },
         conversations: [],
-        principals: [{ id: n.id, handle: n.handle, displayName: "newbie", kind: "human" }],
+        principals: [{ id: n.id, handle: n.handle, displayName: "newbie", avatarVersion: 0, kind: "human" }],
         messages: [],
       },
     });
@@ -777,5 +778,57 @@ describe("websocket authentication", () => {
     await app.realtime.tick();
     await dead.ended;
     expect(live.isClosed).toBe(false);
+  });
+});
+
+describe("avatar changes are announced with a version", () => {
+  const putMine = (who: Actor, payload: Buffer = PNG) =>
+    app.inject({ method: "PUT", url: "/api/me/avatar", headers: { cookie: who.cookie, "content-type": "image/png" }, payload });
+  const isPrincipal = (id: string) => (e: Push) => e.type === "principal" && e.id === id;
+
+  it("reaches the uploader, friends and people who share a conversation, and nobody else; every wire principal carries the version", async () => {
+    const [a, b, c, d, e, f] = await people("alice", "bob", "carol", "dave", "erin", "fay");
+    const g = await group(app, b, "team", [a, f]); // alice and fay are no friends: they only share this group
+    await befriend(app, a, e);
+    const sockets = new Map<Actor, Awaited<ReturnType<typeof connect>>>();
+    for (const who of [a, b, c, d, e, f]) sockets.set(who, await connect(app, who));
+
+    expect(((await sync(b)).json.principals as any[]).find((p) => p.id === a.id)).toMatchObject({ avatarVersion: 0 });
+    expect((await putMine(a)).statusCode).toBe(200);
+    for (const who of [a, b, e, f]) {
+      expect(await sockets.get(who)!.next(isPrincipal(a.id))).toEqual({ type: "principal", id: a.id, avatarVersion: 1 });
+    }
+    // A sentinel for the ones that must hear nothing: they receive something later, and by then the push would have come.
+    await api(app, c, "POST", "/api/friend-requests", { handle: d.handle });
+    await sockets.get(c)!.next((ev) => ev.type === "social");
+    await sockets.get(d)!.next((ev) => ev.type === "social");
+    for (const who of [c, d]) expect(sockets.get(who)!.events.filter((ev) => ev.type === "principal")).toEqual([]);
+
+    const seen = (await sync(b)).json;
+    expect(seen.principals.find((p: any) => p.id === a.id)).toMatchObject({ avatarVersion: 1 });
+    expect(seen.me).toMatchObject({ avatarVersion: 0 });
+    expect((await sync(a)).json.me).toMatchObject({ avatarVersion: 1 });
+    expect((await api(app, a, "GET", "/api/me")).json).toMatchObject({ avatarVersion: 1 });
+    expect((await api(app, b, "GET", `/api/conversations/${g}/members`)).json.members.find((m: any) => m.id === a.id)).toMatchObject({ avatarVersion: 1 });
+    expect((await api(app, b, "GET", "/api/social")).json.friends.find((f: any) => f.id === a.id)).toMatchObject({ avatarVersion: 1 });
+    expect((await api(app, c, "GET", `/api/principals/lookup?handle=${a.handle}`)).json).toMatchObject({ id: a.id, avatarVersion: 1 });
+    const sent = await say(a, g, "hi");
+    const msgs = await api(app, b, "GET", `/api/conversations/${g}/messages?limit=10`);
+    expect(msgs.json.principals[a.id]).toMatchObject({ avatarVersion: 1 });
+    expect(sent.status).toBe(201);
+    // The avatar route still ignores ?v= and is cached for a minute.
+    const got = await app.inject({ method: "GET", url: `/api/principals/${a.id}/avatar?v=7`, headers: { cookie: b.cookie } });
+    expect([got.statusCode, got.headers["cache-control"]]).toEqual([200, "private, max-age=60"]);
+  });
+
+  it("a refused upload announces nothing", async () => {
+    const [a, b] = await people("alice", "bob");
+    await befriend(app, a, b);
+    const sb = await connect(app, b);
+    expect((await putMine(a, Buffer.from("<svg/>"))).statusCode).toBe(400);
+    await api(app, a, "PATCH", "/api/me", { displayName: "Alice B" }); // no push of its own; sentinel below instead
+    expect((await putMine(a)).statusCode).toBe(200);
+    await sb.next(isPrincipal(a.id));
+    expect(sb.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1 }]);
   });
 });

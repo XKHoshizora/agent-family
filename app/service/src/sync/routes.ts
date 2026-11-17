@@ -36,10 +36,10 @@ const conversationEntry = z.object({
 });
 
 const syncResponse = z.object({
-  me: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), email: z.string() }),
+  me: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), email: z.string() }),
   conversations: z.array(conversationEntry),
   principals: z.array(
-    z.object({ id: z.string(), handle: z.string(), displayName: z.string(), kind: z.enum(["human", "agent"]) }),
+    z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), kind: z.enum(["human", "agent"]) }),
   ),
   messages: z.array(wireMessageSchema),
 });
@@ -68,7 +68,7 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
       const me = await requirePrincipal(req);
       await syncLimit(req, me.id);
       const view = await syncView(db, me.id);
-      return { me: { id: me.id, handle: me.handle, displayName: me.displayName, email: me.email }, ...view };
+      return { me: { id: me.id, handle: me.handle, displayName: me.displayName, avatarVersion: me.avatarVersion, email: me.email }, ...view };
     },
   );
 

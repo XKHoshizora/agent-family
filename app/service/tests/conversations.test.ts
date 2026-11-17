@@ -53,7 +53,7 @@ describe("group creation", () => {
     expect(list.status).toBe(200);
     expect(list.json.members).toHaveLength(3);
     const byId = new Map(list.json.members.map((m: any) => [m.id, m]));
-    expect(byId.get(a.id)).toEqual({ id: a.id, handle: a.handle, displayName: "alice", kind: "human", role: "speaker", isCreator: true });
+    expect(byId.get(a.id)).toEqual({ id: a.id, handle: a.handle, displayName: "alice", avatarVersion: 0, kind: "human", role: "speaker", isCreator: true });
     expect(byId.get(b.id)).toMatchObject({ handle: b.handle, displayName: "bob", kind: "human", role: "speaker", isCreator: false });
     expect(byId.get(c.id)).toMatchObject({ isCreator: false });
 

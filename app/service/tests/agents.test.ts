@@ -1,11 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { api, signUp } from "./helpers/actors.ts";
 import { createAgent, mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
+import { connect, closeAllSockets } from "./helpers/ws.ts";
 import { useApp } from "./helpers/harness.ts";
 
 const { blobs } = useProbeBlobs("af-agents-");
 const { app, db } = useApp({ blobs, env: SITE_ENV });
+
+afterEach(closeAllSockets);
 
 const GREETING = (name: string) =>
   `你好，我是「${name}」，你刚刚创建的 Agent。我现在还没有设定。你希望我是谁、主要帮你做什么、用什么语气说话？直接告诉我就行，说完我会整理成一份设定给你确认。`;
@@ -288,5 +291,23 @@ describe("avatars", () => {
 
     expect((await putAvatar(owner, agent.id, Buffer.from("<svg/>"))).status).toBe(400);
     expect(await version(agent.id)).toBe(2);
+  });
+});
+
+describe("avatar announcements", () => {
+  it("an Agent's avatar change is pushed to its owner only, with the version; the Agent view carries it", async () => {
+    const owner = await signUp(app, "avery");
+    const other = await signUp(app, "blake");
+    const agent = await mustCreateAgent(app, owner);
+    expect(agent.avatarVersion).toBe(0);
+    const so = await connect(app, owner);
+    const sx = await connect(app, other);
+    expect(await putAvatar(owner, agent.id)).toEqual({ status: 200, json: { ok: true } });
+    expect(await so.next((e) => e.type === "principal")).toEqual({ type: "principal", id: agent.id, avatarVersion: 1 });
+    await api(app, other, "POST", "/api/friend-requests", { handle: owner.handle });
+    await sx.next((e) => e.type === "social");
+    expect(sx.events.filter((e) => e.type === "principal")).toEqual([]);
+    expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json).toMatchObject({ avatarVersion: 1 });
+    expect((await sync(owner)).principals.find((p: any) => p.id === agent.id)).toMatchObject({ avatarVersion: 1 });
   });
 });

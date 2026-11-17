@@ -76,6 +76,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
                 id: z.string(),
                 handle: z.string(),
                 displayName: z.string(),
+                avatarVersion: z.number(),
                 kind: z.enum(["human", "agent"]),
                 role: z.enum(["speaker", "observer"]),
                 isCreator: z.boolean(),

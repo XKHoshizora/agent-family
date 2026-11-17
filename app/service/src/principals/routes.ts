@@ -12,7 +12,7 @@ import { defaultAvatarSvg } from "./avatar.ts";
 import { registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
 import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
 
-const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string() });
+const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
 
 const AVATAR_HEADERS = {
   "x-content-type-options": "nosniff",
@@ -66,7 +66,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
       await updateDisplayName(db, me.id, req.body.displayName);
-      return { id: me.id, handle: me.handle, displayName: req.body.displayName };
+      return { id: me.id, handle: me.handle, displayName: req.body.displayName, avatarVersion: me.avatarVersion };
     },
   );
 
@@ -140,5 +140,6 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
     const me = await requirePrincipal(req);
     await avatarLimit(req, me.id);
     await storeAvatar(app, req.log, body, (t, key) => swapAvatarKey(t, me.id, key));
+    await app.realtime.pushPrincipalChanged(me.id);
   });
 }

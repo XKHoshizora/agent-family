@@ -4,6 +4,8 @@ export interface PublicPrincipal {
   id: string;
   handle: string;
   displayName: string;
+  /** Changes with every avatar change; clients put it in the avatar URL (`?v=`). */
+  avatarVersion: number;
 }
 
 /**
@@ -11,12 +13,12 @@ export interface PublicPrincipal {
  * reached through the owner's Agent routes only, and cannot be looked up or befriended.
  */
 export async function findByHandle(db: Queryable, handle: string): Promise<PublicPrincipal | null> {
-  const { rows } = await db.query<{ id: string; handle: string; display_name: string }>(
-    "select id, handle::text as handle, display_name from principals where handle = $1 and kind = 'human'",
+  const { rows } = await db.query<{ id: string; handle: string; display_name: string; avatar_version: number }>(
+    "select id, handle::text as handle, display_name, avatar_version from principals where handle = $1 and kind = 'human'",
     [handle],
   );
   const r = rows[0];
-  return r ? { id: r.id, handle: r.handle, displayName: r.display_name } : null;
+  return r ? { id: r.id, handle: r.handle, displayName: r.display_name, avatarVersion: r.avatar_version } : null;
 }
 
 export async function findAvatarSubject(

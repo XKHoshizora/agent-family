@@ -16,6 +16,8 @@ export interface AgentRow {
   handle: string;
   /** `principals.display_name`. */
   name: string;
+  /** `principals.avatar_version`. */
+  avatarVersion: number;
   intro: string;
   field: string;
   persona: string;
@@ -34,6 +36,7 @@ interface AgentDbRow {
   owner_id: string;
   handle: string;
   name: string;
+  avatar_version: number;
   intro: string;
   field: string;
   persona: string;
@@ -50,7 +53,7 @@ interface AgentDbRow {
   created_at: Date;
 }
 
-const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, a.intro, a.field, a.persona,
+const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
        a.persona_version, a.reply_mode, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
   from agents a
@@ -69,6 +72,7 @@ function toAgent(r: AgentDbRow): AgentRow {
     ownerId: r.owner_id,
     handle: r.handle,
     name: r.name,
+    avatarVersion: r.avatar_version,
     intro: r.intro,
     field: r.field,
     persona: r.persona,

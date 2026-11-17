@@ -330,7 +330,7 @@ describe("privacy", () => {
       incoming: [],
       outgoing: [],
       blocked: [],
-      blockedBy: [{ id: a.id, handle: a.handle, displayName: "alice" }],
+      blockedBy: [{ id: a.id, handle: a.handle, displayName: "alice", avatarVersion: 0 }],
     });
     expect((await api(app, c, "DELETE", `/api/friends/${a.id}`)).json).toEqual(NOT_FOUND);
   });

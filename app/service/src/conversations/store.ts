@@ -266,6 +266,7 @@ export interface MemberView {
   id: string;
   handle: string;
   displayName: string;
+  avatarVersion: number;
   kind: "human" | "agent";
   role: "speaker" | "observer";
   /** Only ever true in groups. */
@@ -282,11 +283,12 @@ export async function listMembers(q: Queryable, readerId: string, conversationId
     id: string;
     handle: string;
     display_name: string;
+    avatar_version: number;
     kind: "human" | "agent";
     role: "speaker" | "observer";
     is_creator: boolean;
   }>(
-    `select p.id, p.handle::text as handle, p.display_name, p.kind, ms.role,
+    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version, p.kind, ms.role,
             (c.type = 'group' and c.creator_id = p.id) as is_creator
        from memberships me
        join conversations c on c.id = me.conversation_id
@@ -302,6 +304,7 @@ export async function listMembers(q: Queryable, readerId: string, conversationId
     id: r.id,
     handle: r.handle,
     displayName: r.display_name,
+    avatarVersion: r.avatar_version,
     kind: r.kind,
     role: r.role,
     isCreator: r.is_creator,

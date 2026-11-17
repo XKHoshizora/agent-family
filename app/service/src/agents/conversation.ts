@@ -89,6 +89,7 @@ export async function createAgent(
     ownerId,
     handle: input.handle,
     name: input.name,
+    avatarVersion: 0,
     intro: input.intro,
     field: input.field,
     persona: input.persona,

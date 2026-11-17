@@ -38,7 +38,7 @@ describe("lookup", () => {
 
     const hit = await api(app, alice, "GET", "/api/principals/lookup?handle=BOBBY");
     expect(hit.status).toBe(200);
-    expect(hit.json).toEqual({ id: bob.id, handle: "bobby", displayName: "bobby" });
+    expect(hit.json).toEqual({ id: bob.id, handle: "bobby", displayName: "bobby", avatarVersion: 0 });
 
     const prefix = await api(app, alice, "GET", "/api/principals/lookup?handle=bob");
     expect(prefix.status).toBe(404);
@@ -73,7 +73,7 @@ describe("display name", () => {
     const bob = await signUp(app, "bobby");
     const res = await api(app, alice, "PATCH", "/api/me", { displayName: "  Alice A.  ", id: bob.id });
     expect(res.status).toBe(200);
-    expect(res.json).toEqual({ id: alice.id, handle: "alice", displayName: "Alice A." });
+    expect(res.json).toEqual({ id: alice.id, handle: "alice", displayName: "Alice A.", avatarVersion: 0 });
     expect((await api(app, alice, "GET", "/api/me")).json.displayName).toBe("Alice A.");
     expect((await api(app, bob, "GET", "/api/me")).json.displayName).toBe("bobby");
   });
