@@ -330,7 +330,8 @@ describe("stopping, pausing, failing", () => {
           [runId],
         )
       ).rows;
-    const workerOn = (port: AgentPort) => createAgentWorker({ port, models: gateway, runTimeoutMs: 120_000, background: false, log: app.log });
+    const workerOn = (port: AgentPort) =>
+      createAgentWorker({ port, models: gateway, runTimeoutMs: 120_000, maxRunsInFlight: 8, background: false, log: app.log });
 
     // The owner's stop (as the stop route flags a run its worker is working on).
     const stopped = await owned("between");

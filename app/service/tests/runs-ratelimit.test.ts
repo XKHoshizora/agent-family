@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildApp } from "../src/app.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
-import { useApp } from "./helpers/harness.ts";
+import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
@@ -131,6 +132,36 @@ describe("replies started a minute", () => {
       expect(limited.rows[0]!.agent_id).not.toBe(queued.rows[0]!.agent_id);
       // Leave nothing queued for the next round's owner.
       await db.query("update agent_runs set status = 'cancelled' where owner_id = $1 and status = 'queued'", [owner.id]);
+    }
+  });
+});
+
+describe("replies in flight in the whole service", () => {
+  it("AGENT_MAX_RUNS_IN_FLIGHT caps what the worker runs at once: with 1, a second owner's reply waits queued until the first ends", async () => {
+    const own = scriptedGateway();
+    const capped = await buildApp(
+      { config: { ...app.deps.config, agentMaxRunsInFlight: 1 }, db, models: own },
+      { answerFloor: NO_ANSWER_FLOOR, staleRunSweep: false }, // the worker's background loop runs
+    );
+    try {
+      await capped.ready();
+      const [a, b] = [await signUp(capped, "inflight_a"), await signUp(capped, "inflight_b")];
+      const [agentA, agentB] = [await mustCreateAgent(capped, a, { model: FAST, persona: PERSONA }), await mustCreateAgent(capped, b, { model: FAST, persona: PERSONA })];
+      const [first, second] = [own.hang(), own.hang()];
+      await api(capped, a, "POST", `/api/conversations/${agentA.conversationId}/messages`, { text: "一", clientTxn: "if1" });
+      await first.reached;
+      await api(capped, b, "POST", `/api/conversations/${agentB.conversationId}/messages`, { text: "二", clientTxn: "if2" });
+      await new Promise((resolve) => setTimeout(resolve, 300)); // the worker was woken by the send: it claims nothing more
+      expect(own.calls).toHaveLength(1);
+      expect((await api(capped, b, "GET", `/api/conversations/${agentB.conversationId}/run`)).json.run).toMatchObject({ status: "queued" });
+
+      first.release("回一");
+      await second.reached;
+      expect(own.calls).toHaveLength(2);
+      second.release("回二");
+      await vi.waitFor(async () => expect((await api(capped, b, "GET", `/api/conversations/${agentB.conversationId}/run`)).json.run).toMatchObject({ status: "done" }));
+    } finally {
+      await capped.close();
     }
   });
 });

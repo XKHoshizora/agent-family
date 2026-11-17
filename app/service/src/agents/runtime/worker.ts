@@ -13,8 +13,6 @@ import { ReplyStream } from "./stream.ts";
 export const POLL_MS = 2_000;
 /** How often a reply in flight checks whether it should stop (owner's stop, pause, delete). */
 export const STOP_CHECK_MS = 50;
-/** Replies in flight at once in the whole service (each holds an outbound call; see the guard's own cap). */
-export const MAX_RUNS_IN_FLIGHT = 8;
 /**
  * How long the service's stop gives the runs it was working on to end (their calls abandoned, each ended as recovery
  * would end it, `AgentPort.release`), and the persona drafts under way likewise; what has not ended by then is left
@@ -45,6 +43,11 @@ export interface WorkerOptions {
   models: Pick<ModelGateway, "stream">;
   /** A reply still streaming after this long is ended: posted as truncated if it said something, else failed. */
   runTimeoutMs: number;
+  /**
+   * Replies the background loop runs at once in the whole service (`AGENT_MAX_RUNS_IN_FLIGHT`): each holds its
+   * attachments in memory and an outbound call (see the guard's own cap). `runOnce` is not counted against it.
+   */
+  maxRunsInFlight: number;
   /** False: no background loop; replies run only through `runOnce` / `drain` (tests drive the worker by hand). */
   background: boolean;
   log: WorkerLog;
@@ -74,7 +77,7 @@ export interface AgentWorker {
 type Interruption = "stop" | "timeout" | "shutdown";
 
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
-  const { port, models, log } = opts;
+  const { port, models, log, maxRunsInFlight } = opts;
   const inFlight = new Set<Promise<void>>();
   /** Per run being worked on: aborts when the service closes. */
   const shutdowns = new Map<string, AbortController>();
@@ -244,11 +247,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       again = true;
       return;
     }
-    pumping = (async () => {
+    const pump = (async () => {
       try {
         do {
           again = false;
-          while (!closing && inFlight.size < MAX_RUNS_IN_FLIGHT) {
+          while (!closing && inFlight.size < maxRunsInFlight) {
             const run = await port.claimNext();
             if (!run) break;
             void track(run);
@@ -256,10 +259,15 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         } while (again && !closing);
       } catch (err) {
         log.error({ err }, "agent worker: could not claim a reply; trying again shortly");
-      } finally {
-        pumping = null;
       }
     })();
+    // Cleared once the pump has ended, never before it is set: a pump with every place taken ends without awaiting
+    // anything, and a `finally` inside it would run before this assignment and leave the worker stuck for good. A
+    // wake-up that came after the pump's last look is answered by a new one.
+    pumping = pump.finally(() => {
+      pumping = null;
+      if (again) wake();
+    });
   }
 
   return {

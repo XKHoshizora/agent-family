@@ -155,6 +155,8 @@ const envSchema = z.object({
   PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: wholeNumber(2048, 1, 1_000_000),
   /** Calls to providers and site models in flight at once in the whole service (src/providers/guard.ts). */
   PROVIDER_MAX_CONCURRENT_CALLS: wholeNumber(64, 1, 1000),
+  /** Replies the worker runs at once in the whole service (each holds its attachments in memory and an outbound call). */
+  AGENT_MAX_RUNS_IN_FLIGHT: wholeNumber(8, 1, 64),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -245,6 +247,8 @@ export interface Config {
   providerDefaultMaxOutputTokens: number;
   /** Calls through the address guard (to providers and site models) in flight at once in the whole service. */
   providerMaxConcurrentCalls: number;
+  /** Replies the worker runs at once in the whole service (src/agents/runtime/worker.ts). */
+  agentMaxRunsInFlight: number;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -369,6 +373,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     providerDefaultContextTokens: e.PROVIDER_DEFAULT_CONTEXT_TOKENS,
     providerDefaultMaxOutputTokens: e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS,
     providerMaxConcurrentCalls: e.PROVIDER_MAX_CONCURRENT_CALLS,
+    agentMaxRunsInFlight: e.AGENT_MAX_RUNS_IN_FLIGHT,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

@@ -281,6 +281,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     port: agentPort,
     models: deps.models,
     runTimeoutMs: config.agentRunTimeoutMs,
+    maxRunsInFlight: config.agentMaxRunsInFlight,
     background: options.agentWorker !== false,
     log: app.log,
   });
