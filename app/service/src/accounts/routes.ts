@@ -49,12 +49,15 @@ export function registerAccountRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
       const now = new Date();
-      const [account, agentCount, used, holds, recent] = await Promise.all([
-        db.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]),
-        countLiveAgents(db, me.id),
-        freeUsedToday(db, me.id, now, config.siteTimezone),
-        readHolds(db, me.id),
-        db.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
+      // One connection, one read-only snapshot (taken at its first read): a settlement committing meanwhile is seen
+      // whole or not at all — never a usage record without its charge, or a hold without its call.
+      const { account, agentCount, used, holds, recent } = await db.tx(async (t) => {
+        await t.query("set transaction isolation level repeatable read, read only");
+        const account = await t.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]);
+        const agentCount = await countLiveAgents(t, me.id);
+        const used = await freeUsedToday(t, me.id, now, config.siteTimezone);
+        const holds = await readHolds(t, me.id);
+        const recent = await t.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
           // What the person was charged (the allowance and the balance), not the true cost: what was forgiven is not
           // theirs to see as spent.
           `select agent_id, model, source, sum(free_micro + balance_micro)::text as points,
@@ -65,8 +68,9 @@ export function registerAccountRoutes(app: FastifyInstance): void {
             group by agent_id, model, source
             order by sum(free_micro + balance_micro) desc, model, source, agent_id`,
           [me.id, siteDayStart(now, config.siteTimezone, RECENT_DAYS - 1)],
-        ),
-      ]);
+        );
+        return { account, agentCount, used, holds, recent };
+      });
       // An account with no row yet is a free-tier account with nothing in it; reading never creates one.
       const tier = account.rows[0]?.tier ?? "free";
       const balanceMicro = BigInt(account.rows[0]?.balance_micro ?? "0");

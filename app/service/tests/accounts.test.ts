@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyLedger, ensureAccount, formatPoints, freeUsedToday, lockAccount, nextSiteMidnight, parsePoints, siteDay } from "../src/accounts/store.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -172,6 +172,36 @@ describe("GET /api/usage", () => {
     await db.query("update accounts set tier = 'retired' where principal_id = $1", [a.id]);
     const retired = await api(app, a, "GET", "/api/usage");
     expect([retired.json.tier, retired.json.agentLimit]).toEqual(["retired", 20]);
+  });
+
+  it("is read in one snapshot: a settlement that commits while it reads is seen whole or not at all", async () => {
+    const a = await signUp(app, "usagesnap");
+    const agent = await insertAgent(a.id, "snap_bot");
+    await db.tx((t) => applyLedger(t, a.id, 5_000_000n, "grant", null));
+    // A settlement in progress: it holds usage_records until the read is waiting for it, then charges 2 points to the
+    // balance with its usage record, both in one commit.
+    const settling = await db.pool.connect();
+    try {
+      await settling.query("begin");
+      await settling.query("lock table usage_records in access exclusive mode");
+      const pid = (await settling.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
+      const reading = api(app, a, "GET", "/api/usage");
+      await vi.waitFor(async () => expect((await db.query("select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid))", [pid])).rowCount).toBe(1));
+      const record = await settling.query<{ id: string }>(
+        `insert into usage_records (owner_id, agent_id, purpose, source, model, cost_micro, free_micro, balance_micro, forgiven_micro, outcome)
+         values ($1, $2, 'reply', 'site', 'fast', 2000000, 0, 2000000, 0, 'done') returning id::text`,
+        [a.id, agent],
+      );
+      await applyLedger(settling, a.id, -2_000_000n, "usage", null, record.rows[0]!.id);
+      await settling.query("commit");
+      const seen = (await reading).json;
+      // Before the settlement (or after it): never the record without its charge.
+      expect([seen.balance, seen.recent]).toEqual(["5", []]);
+    } finally {
+      settling.release();
+    }
+    const after = (await api(app, a, "GET", "/api/usage")).json;
+    expect([after.balance, after.recent.map((r: { points: string }) => r.points)]).toEqual(["3", ["2"]]);
   });
 
   it("canStartFreeReply: allowance left or balance above zero", async () => {

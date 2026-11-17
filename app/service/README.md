@@ -350,6 +350,8 @@ How a model call is admitted, held, settled and forgiven, and the bound on what 
   are not listed.
 - Limit: 60 per minute.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
+- Everything in the answer is read in one snapshot (one read-only transaction on one connection): a call settled
+  meanwhile is in it whole — its charge, its record and its released hold — or not at all.
 
 ### Agents
 
