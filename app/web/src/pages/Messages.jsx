@@ -120,15 +120,22 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
     if (block) dispatch({ type: "toast", text: block.text });
     else actions.retrySend(msg.clientTxn);
   };
+  const stamp = (
+    <time dateTime={msg.createdAt ?? undefined} title={msg.atTitle || undefined}>
+      {msg.at}
+    </time>
+  );
   return (
     <li className={`msg ${mine ? "mine" : "theirs"}${flash ? " flash" : ""}`} data-msg={msg.id}>
       <Avatar id={msg.from} size={40} />
       <div className="msg-main">
         <div className="msg-meta">
+          {/* My own (right-aligned) messages read time then name, so the name stays next to the avatar. */}
+          {mine && stamp}
           <strong>{senderName(state, msg.from)}</strong>
           {agent && <Tag>Agent</Tag>}
           {agent && <span className="owner">主人：{nameOf(state, ownerOf(state, msg.from))}</span>}
-          <time>{msg.at}</time>
+          {!mine && stamp}
         </div>
         {ownersOnly && <Thinking text={msg.reasoning} />}
         <Body msg={msg} agent={agent} />

@@ -19,6 +19,32 @@ export function formatAt(ms, now) {
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
+const clock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+/**
+ * A message bubble's time, local, 24-hour, no seconds: today "23:05", yesterday "昨天 23:05", this year
+ * "11月15日 23:05", an earlier year "2025年11月15日 23:05". (The conversation list keeps `formatAt`.)
+ */
+export function formatMessageAt(ms, now) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  const n = new Date(now);
+  const today = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  const yesterday = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1).getTime();
+  if (ms >= today) return clock(d);
+  if (ms >= yesterday) return `昨天 ${clock(d)}`;
+  const day = `${d.getMonth() + 1}月${d.getDate()}日 ${clock(d)}`;
+  return d.getFullYear() === n.getFullYear() ? day : `${d.getFullYear()}年${day}`;
+}
+
+/** A message bubble's tooltip, the full form: "2026年11月17日 星期二 23:05". */
+export function formatMessageTitle(ms) {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 星期${WEEKDAYS[d.getDay()]} ${clock(d)}`;
+}
+
 const timeOf = (iso) => {
   const ms = Date.parse(iso);
   return Number.isFinite(ms) ? ms : null;
@@ -196,7 +222,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }
     kind,
     text,
     caption: attachment ? m.text ?? "" : null,
-    at: formatAt(timeOf(m.createdAt), now),
+    at: formatMessageAt(timeOf(m.createdAt), now),
+    atTitle: formatMessageTitle(timeOf(m.createdAt)),
     createdAt: m.createdAt,
     // Read by the other side: the peer of a direct chat, or the Agent of its conversation.
     status: m.senderId === meId && pair && peerReadSeq !== null && m.seq <= peerReadSeq ? "read" : "sent",
@@ -275,7 +302,8 @@ function pendingView(p, { held, alias, now }) {
     kind: attachment ? "file" : "text",
     text: attachment ? attachment.name : p.text,
     caption: attachment ? p.text : null,
-    at: formatAt(p.at, now),
+    at: formatMessageAt(p.at, now),
+    atTitle: formatMessageTitle(p.at),
     createdAt: Number.isFinite(p.at) ? new Date(p.at).toISOString() : null,
     status: p.status,
     clientTxn: p.clientTxn,

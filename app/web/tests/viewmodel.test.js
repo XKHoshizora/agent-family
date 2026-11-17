@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
-import { toView, formatAt, expiryText, formatPoints } from "../src/data/viewmodel.js";
+import { toView, formatAt, formatMessageAt, formatMessageTitle, expiryText, formatPoints } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
 import { convSubtitle, convTitle, entity, isAgent, lastPreview, myAgents, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
 import {
@@ -537,5 +537,33 @@ describe("expiryText", () => {
     expect(expiryText(iso(NOW - 5000), NOW)).toBe("已过期");
     expect(expiryText(undefined, NOW)).toBe("");
     expect(expiryText("soon", NOW)).toBe("");
+  });
+
+  it("formats a message bubble's time: clock today, 昨天 + clock, then date + clock with the year only for an earlier year", () => {
+    const now = new Date(2026, 10, 17, 23, 30).getTime();
+    const f = (...a) => formatMessageAt(new Date(...a).getTime(), now);
+    expect(f(2026, 10, 17, 23, 5)).toBe("23:05");
+    expect(f(2026, 10, 17, 0, 0)).toBe("00:00");
+    expect(f(2026, 10, 16, 23, 59)).toBe("昨天 23:59");
+    expect(f(2026, 10, 16, 0, 0)).toBe("昨天 00:00");
+    expect(f(2026, 10, 15, 23, 59)).toBe("11月15日 23:59");
+    expect(f(2026, 0, 1, 0, 7)).toBe("1月1日 00:07");
+    expect(f(2025, 11, 31, 23, 5)).toBe("2025年12月31日 23:05");
+    expect(formatMessageAt(null, now)).toBe("");
+    // Just after midnight, the evening before is yesterday.
+    const early = new Date(2026, 10, 17, 0, 1).getTime();
+    expect(formatMessageAt(new Date(2026, 10, 16, 23, 5).getTime(), early)).toBe("昨天 23:05");
+    // New Year's Day: the last day of last year is yesterday, then an earlier year.
+    const ny = new Date(2026, 0, 1, 9, 0).getTime();
+    expect(formatMessageAt(new Date(2025, 11, 31, 23, 5).getTime(), ny)).toBe("昨天 23:05");
+    expect(formatMessageAt(new Date(2025, 11, 30, 23, 5).getTime(), ny)).toBe("2025年12月30日 23:05");
+    // The conversation list's form is unchanged.
+    expect(formatAt(new Date(2026, 10, 16, 23, 5).getTime(), now)).toBe("昨天");
+  });
+
+  it("formats a message bubble's tooltip with the weekday", () => {
+    expect(formatMessageTitle(new Date(2026, 10, 17, 23, 5).getTime())).toBe("2026年11月17日 星期二 23:05");
+    expect(formatMessageTitle(new Date(2025, 0, 5, 8, 9).getTime())).toBe("2025年1月5日 星期日 08:09");
+    expect(formatMessageTitle(undefined)).toBe("");
   });
 });
