@@ -270,6 +270,8 @@ interface Fixture {
   agentConv: string;
   run: string;
   proposal: string;
+  /** The same Agent is a member of `group` too (batch 2C), and a reply of it there failed. */
+  groupRun: string;
   /** Another Agent of `me`'s, the one `DELETE /api/agents/:id` deletes. */
   victimAgent: string;
   /** `me`'s provider; an Agent uses it, so deleting it is 409 `provider_in_use` every time. */
@@ -320,6 +322,14 @@ async function fixture(): Promise<Fixture> {
   const runs = await db.query<{ id: string; status: string }>("select id, status from agent_runs where agent_id = $1 order by created_at", [agent.id]);
   if (runs.rows.map((r) => r.status).join() !== "done,failed") throw new Error(`fixture runs ${JSON.stringify(runs.rows)}`);
   const proposal = await db.query<{ id: string }>("select id from persona_proposals where agent_id = $1", [agent.id]);
+  // Its owner puts it into the group, where a reply of it failed: the group's run routes have a run and an Agent to act on.
+  const seated = await api(app, me, "POST", `/api/conversations/${g}/members`, { principalId: agent.id });
+  if (seated.status !== 201) throw new Error(`fixture seat ${seated.status}`);
+  const groupRun = await db.query<{ id: string }>(
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at)
+     select 'reply', $1, $2, $3, 'failed', 'provider_unavailable', seq, now() from conversations where id = $1 returning id`,
+    [g, agent.id, me.id],
+  );
   return {
     me,
     peer,
@@ -334,6 +344,7 @@ async function fixture(): Promise<Fixture> {
     agentConv: agent.conversationId,
     run: runs.rows[0]!.id,
     proposal: proposal.rows[0]!.id,
+    groupRun: groupRun.rows[0]!.id,
     victimAgent: victimAgent.id,
     provider: provider.json.id,
   };
@@ -343,6 +354,8 @@ async function fixture(): Promise<Fixture> {
 const AGENT_CONVERSATION = /^\/api\/conversations\/:id\/(run|runs|topic)(\/|$)/;
 /** A group member's brakes on its Agents (batch 2C): reached with the fixture's group. */
 const GROUP_AGENTS = /^\/api\/conversations\/:id\/agents\//;
+/** A group's replies as a member may know them (batch 2C): reached with the fixture's group, not the Agent's conversation. */
+const GROUP_RUNS = "/api/conversations/:id/runs";
 /** The routes of Agents, providers, usage and replies (this batch's): checked more strictly below. */
 const isAgentRoute = (url: string) => /^\/api\/(agents|providers|usage)(\/|$)/.test(url) || AGENT_CONVERSATION.test(url) || GROUP_AGENTS.test(url);
 
@@ -359,7 +372,7 @@ function validParams(route: Pick<RouteEntry, "method" | "url">, fx: Fixture): Re
       const collection = url.split(`/:${name}`)[0]!.split("/").pop();
       out[name] =
         collection === "conversations"
-          ? AGENT_CONVERSATION.test(url)
+          ? AGENT_CONVERSATION.test(url) && url !== GROUP_RUNS
             ? fx.agentConv
             : fx.group
           : collection === "attachments"
@@ -437,10 +450,18 @@ const qs = (q: Record<string, string>): string => {
 
 const HAS_BODY = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
-/** Every probe for one route, each to be sent signed in and signed out. */
-function probesFor(route: RouteEntry, fx: Fixture): Array<InjectOptions & { label: string }> {
+/**
+ * Every probe for one route, each to be sent signed in and signed out. `over` reaches a route another way than
+ * `validParams` and `plausibleBody` would (other real ids, another body); with a body given, that body is sent as it is
+ * too.
+ */
+function probesFor(
+  route: RouteEntry,
+  fx: Fixture,
+  over: { params?: Record<string, string>; body?: Record<string, unknown> } = {},
+): Array<InjectOptions & { label: string }> {
   const { method, url } = route;
-  const good = validParams(route, fx);
+  const good = { ...validParams(route, fx), ...over.params };
   const queryKeys = shapeKeys(route.schema?.querystring);
   const baseQuery = plausibleQuery(queryKeys, fx);
   const at = (values: Record<string, string>, query = baseQuery) => fill(url, values) + qs(query);
@@ -463,13 +484,14 @@ function probesFor(route: RouteEntry, fx: Fixture): Array<InjectOptions & { labe
 
   // Bodies.
   if (HAS_BODY.has(method)) {
-    const body = plausibleBody(route, fx);
+    const body = over.body ?? plausibleBody(route, fx);
     const fields = [...new Set([...Object.keys(body), ...shapeKeys(route.schema?.body)])];
     const json = (payload: string | undefined, contentType = "application/json") => ({
       url: at(good),
       ...(payload === undefined ? {} : { payload, headers: contentType ? { "content-type": contentType } : {} }),
     });
     out.push({ label: "no body", ...json(undefined) });
+    if (over.body) out.push({ label: "the body given", ...json(JSON.stringify(body)) });
     for (const raw of BAD_BODIES) out.push({ label: `body ${raw.slice(0, 40)}`, ...json(raw) });
     for (const ct of BAD_CONTENT_TYPES) out.push({ label: `content-type "${ct}"`, ...json(JSON.stringify(body), ct) });
     for (const field of fields) {
@@ -515,6 +537,24 @@ describe("fuzz", () => {
     }
 
     const findings: Finding[] = [];
+    // First, while the fixture's Agent is as the fixture left it (the pass below pauses it, edits it, …): the owner's run
+    // routes in the group (batch 2C), with the Agent's id in the body and its failed run there. Each is held to the rule
+    // below for this batch's routes: a malformed path parameter is a 4xx, and one probe at least gets past the checks.
+    const SHALLOW = new Set([400, 401, 404, 405, 413, 414, 415, 429]);
+    const inGroup = routes.filter((r) => r.method === "POST" && /^\/api\/conversations\/:id\/runs\/(retry|dismiss|:runId\/stop)$/.test(r.url));
+    expect(inGroup.map((r) => r.url).sort()).toEqual(["/api/conversations/:id/runs/:runId/stop", "/api/conversations/:id/runs/dismiss", "/api/conversations/:id/runs/retry"]);
+    for (const route of inGroup) {
+      const probes = probesFor(route, fx, { params: { id: fx.group, runId: fx.groupRun }, body: { agentId: fx.agent } });
+      const got = await probeAll(signedInAndOut(probes, fx.me.cookie), findings);
+      const name = `${route.method} ${route.url} (a group)`;
+      expect([name, got.filter((x) => x.label.startsWith("path ") && (x.status < 400 || x.status >= 500))]).toEqual([name, []]);
+      if (route.url.endsWith("/retry") || route.url.endsWith("/dismiss")) {
+        expect([name, got.some((x) => x.label.startsWith("body.agentId="))]).toEqual([name, true]);
+      }
+      expect([name, got.some((x) => x.label.endsWith("[signed in]") && !SHALLOW.has(x.status))]).toEqual([name, true]);
+    }
+    expect(findings).toEqual([]);
+
     const sent = await Promise.all(routes.map((r) => probeAll(signedInAndOut(probesFor(r, fx), fx.me.cookie), findings)));
     expect(findings).toEqual([]);
     expect(sent.flat().length).toBeGreaterThan(4000);
@@ -531,10 +571,10 @@ describe("fuzz", () => {
       "POST /api/conversations/:id/runs/:runId/stop",
       "POST /api/conversations/:id/topic",
       "POST /api/conversations/:id/agents/halt",
+      "GET /api/conversations/:id/runs",
     ]) {
       expect(agentRoutes.map((r) => `${r.method} ${r.url}`)).toContain(known);
     }
-    const SHALLOW = new Set([400, 401, 404, 405, 413, 414, 415, 429]);
     const wrongBodies: string[] = [];
     for (const [i, route] of routes.entries()) {
       if (!isAgentRoute(route.url)) continue;

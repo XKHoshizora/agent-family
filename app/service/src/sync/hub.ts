@@ -1,6 +1,6 @@
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyBaseLogger } from "fastify";
-import type { WireRun } from "../agents/runs.ts";
+import { runAudience, type GroupRunState, type WireRun } from "../agents/runs.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, peekConversation } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
@@ -42,7 +42,11 @@ export type PushEvent =
   | { type: "social" }
   | { type: "agent"; id: string }
   | { type: "principal"; id: string; avatarVersion: number }
+  // An Agent's own conversation: to its owner.
   | { type: "run"; conversationId: string; run: WireRun }
+  // A group: to the Agent's owner, and what every other current member is told of it.
+  | { type: "run"; conversationId: string; agentId: string; run: WireRun }
+  | { type: "run"; conversationId: string; agentId: string; state: GroupRunState }
   | { type: "delta"; conversationId: string; runId: string; text?: string; reasoning?: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
   | { type: "pong" };
@@ -60,7 +64,9 @@ type Task =
   | { kind: "messages"; fromSeq: number; toSeq: number }
   | { kind: "membership"; principalIds: string[] }
   | { kind: "read"; marker: ReadMarker }
-  | { kind: "push"; principalId: string; event: PushEvent; wanted?: () => boolean };
+  | { kind: "push"; principalId: string; event: PushEvent; wanted?: () => boolean }
+  /** Run `runId` of the conversation: `run` to its owner (none: the owner is not told), its state to a group's others. */
+  | { kind: "run"; ownerId: string; conversationId: string; runId: string; run: WireRun | null };
 
 interface Queue {
   tasks: Task[];
@@ -88,7 +94,9 @@ export interface HubDeps {
  *   to those who are not (more than once, when a change announced before they left is delivered after
  *   it) — so after `gone` nothing more of that conversation reaches them until they are added again;
  * - read markers: only in direct chats and Agent conversations, to its current members;
- * - a reply's progress (`run`, `delta`): to the Agent's owner only, in order with the conversation's messages.
+ * - a reply's progress (`run`, `delta`), in order with the conversation's messages: `delta` to the Agent's owner only;
+ *   `run` to its owner, and in a group also its state (`replying` / `unavailable` / null) to every other current member,
+ *   read once per delivery whatever their number (`announceRun`).
  */
 export class Hub {
   /** Open connections per principal, oldest first. */
@@ -162,12 +170,21 @@ export class Hub {
   }
 
   /**
-   * Tells `ownerId`'s sockets how a reply in their Agent's conversation stands. Through the conversation's queue, so
-   * it reaches them in order with that conversation's messages (`running` after the owner's message, `done` after the
-   * reply). Not stored, not replayed: a client that reconnects asks `GET /api/conversations/:id/run`.
+   * Tells `ownerId`'s sockets how a reply of their Agent stands, and in a group every other current member what they
+   * may know of it (`announceRun`). Through the conversation's queue, so it reaches them in order with that
+   * conversation's messages (`running` after the message it answers, `done` after the reply). Not stored, not replayed:
+   * a client that reconnects asks `GET /api/conversations/:id/run` (an Agent's own conversation) or `…/runs` (a group).
    */
   pushRun(ownerId: string, conversationId: string, run: WireRun): void {
-    this.enqueue(conversationId, { kind: "push", principalId: ownerId, event: { type: "run", conversationId, run } });
+    this.enqueue(conversationId, { kind: "run", ownerId, conversationId, runId: run.id, run });
+  }
+
+  /**
+   * In a group, after the run's owner dismissed its failure: the other current members are told the Agent's state there
+   * again (null now, unless a newer run of it says otherwise). The owner, who closed it, is told nothing.
+   */
+  pushRunState(ownerId: string, conversationId: string, runId: string): void {
+    this.enqueue(conversationId, { kind: "run", ownerId, conversationId, runId, run: null });
   }
 
   /**
@@ -309,6 +326,34 @@ export class Hub {
       case "push":
         if (task.wanted?.() !== false) this.push(task.principalId, task.event);
         return Promise.resolve();
+      case "run":
+        return this.announceRun(task);
+    }
+  }
+
+  /**
+   * One delivery of a run, decided against the database now, with one statement however many members the conversation
+   * has (`runAudience`): so announcing an unchanged run again (an Agent's one `rate_limited` run in a group, at every
+   * mention over its owner's limit) costs one read and repeats the same state, which a client applies as a state.
+   * - An Agent's own conversation: `{type, conversationId, run}` to its owner, as it always was.
+   * - A group: `{…, agentId, run}` to the Agent's owner — also when they have just left the group with it, so its last
+   *   run there ends what their client showed —; `{…, agentId, state}` to every other current member, the Agent's state
+   *   there now (wire contract "Run state": never the run, its id, `error`, `retryable` or `resetsAt`); nobody else.
+   */
+  private async announceRun(task: Extract<Task, { kind: "run" }>): Promise<void> {
+    if (this.byPrincipal.size === 0) return;
+    const audience = await runAudience(this.deps.db, task.conversationId, task.runId);
+    if (!audience) return;
+    const { conversationId, run } = task;
+    const ownerId = task.ownerId.toLowerCase();
+    if (audience.type !== "group") {
+      if (run) this.push(ownerId, { type: "run", conversationId, run });
+      return;
+    }
+    const { agentId, state } = audience;
+    if (run) this.push(ownerId, { type: "run", conversationId, agentId, run });
+    for (const id of this.connectedAmong(audience.memberIds)) {
+      if (id !== ownerId) this.push(id, { type: "run", conversationId, agentId, state });
     }
   }
 

@@ -5,17 +5,21 @@ import { notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
-import { dismissRun, haltAgents, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
+import { dismissRun, groupRuns, haltAgents, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
 const ok = z.object({ ok: z.literal(true) });
+/** Retry and dismiss: which Agent's run, in a group (required there); in an Agent's own conversation it plays no part. */
+const agentBody = z.object({ agentId: uuidParam.optional() }).nullish();
 
 /**
- * The owner's view of their Agent's replies, per conversation (README "Agents and runs"). For anyone else, and for a
- * conversation that is not an Agent's, every route answers the JSON 404 exactly as for an id that does not exist. The
- * one route here that is not the owner's: a group member's halt of Agents calling each other (`…/agents/halt`).
- * `readLimit`: the budget `GET …/run` shares with the owner's other reads of their Agents and providers.
+ * The owner's view of their Agent's replies, per conversation (README "Replies"). For anyone else, and for a
+ * conversation that is not an Agent's or a group, every route answers the JSON 404 exactly as for an id that does not
+ * exist. In a group a run's owner stops, retries and dismisses it (retry and dismiss name the Agent, `agentId`), and
+ * every current member reads what they may know of the group's replies (`GET …/runs`). The one route here that is not
+ * about one owner's runs: a group member's halt of Agents calling each other (`…/agents/halt`).
+ * `readLimit`: the budget `GET …/run` and `GET …/runs` share with the owner's other reads of their Agents and providers.
  */
 export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLimit: PrincipalLimit }): void {
   const { db, config, conversations } = app.deps;
@@ -34,6 +38,18 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
       const run = await latestRun(db, req.params.id);
       // A failure the owner dismissed is no longer shown.
       return { run: run && !(run.status === "failed" && run.dismissed_at !== null) ? toWireRun(run) : null };
+    },
+  );
+
+  // A group's replies as this member may know them: the state of each Agent's, the run of their own (runs.ts `groupRuns`).
+  const groupEntry = z.object({ agentId: z.string(), state: z.enum(["replying", "unavailable"]), run: wireRunSchema.optional() });
+  api.get(
+    "/api/conversations/:id/runs",
+    { schema: { params: idParams, querystring: empty, response: { 200: z.object({ runs: z.array(groupEntry) }) } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
+      return { runs: await groupRuns(db, me.id, req.params.id) };
     },
   );
 
@@ -57,11 +73,11 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
 
   api.post(
     "/api/conversations/:id/runs/retry",
-    { schema: { params: idParams, querystring: empty, body: noBody, response: { 201: z.object({ run: wireRunSchema }) } } },
+    { schema: { params: idParams, querystring: empty, body: agentBody, response: { 201: z.object({ run: wireRunSchema }) } } },
     async (req, reply) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      const queued = await db.tx((t) => retryRun(t, me.id, req.params.id, config));
+      const queued = await db.tx((t) => retryRun(t, me.id, req.params.id, req.body?.agentId, config));
       app.agentPort.announce(queued);
       return reply.code(201).send({ run: queued.run });
     },
@@ -86,11 +102,13 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
 
   api.post(
     "/api/conversations/:id/runs/dismiss",
-    { schema: { params: idParams, querystring: empty, body: noBody, response: { 200: ok } } },
+    { schema: { params: idParams, querystring: empty, body: agentBody, response: { 200: ok } } },
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      await dismissRun(db, me.id, req.params.id);
+      const dismissed = await db.tx((t) => dismissRun(t, me.id, req.params.id, req.body?.agentId));
+      // In a group the others' line for that Agent goes (its owner, who closed it, is not told).
+      if (dismissed) app.realtime.pushRunState(dismissed.ownerId, dismissed.conversationId, dismissed.runId);
       return { ok: true as const };
     },
   );

@@ -109,6 +109,12 @@ describe("enumeration: an existing id that is not yours is answered like a rando
       ["one message", (id) => json("GET", `/api/conversations/${id}/messages/1`)],
       ["search", (id) => json("GET", `/api/conversations/${id}/search?q=secret`)],
       ["read marker", (id) => json("POST", `/api/conversations/${id}/read`, { seq: 1 })],
+      // A group's replies and its brakes on Agents (batch 2C).
+      ["group replies", (id) => json("GET", `/api/conversations/${id}/runs`)],
+      ["halt Agents", (id) => json("POST", `/api/conversations/${id}/agents/halt`)],
+      ["stop a run", (id) => json("POST", `/api/conversations/${id}/runs/${RANDOM}/stop`)],
+      ["retry an Agent's run", (id) => json("POST", `/api/conversations/${id}/runs/retry`, { agentId: RANDOM })],
+      ["dismiss an Agent's run", (id) => json("POST", `/api/conversations/${id}/runs/dismiss`, { agentId: RANDOM })],
       [
         "upload",
         (id) => ({
@@ -442,6 +448,80 @@ describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
     expect((await observe(owner, routes[0]![1](real))).status).toBe(200);
     expect((await observe(owner, json("POST", `/api/providers/${provider}/test`))).status).toBe(200);
     expect((await observe(owner, json("POST", `/api/providers/${provider}/models/list`))).status).toBe(200);
+  });
+
+  it("in a group: a run, or an Agent's run, of anyone but you is a random one's; a group you are not in is a random conversation; nor do an Agent's own conversation or a direct chat have a group's replies", async () => {
+    const [owner, other, mate, leaver, stranger] = [
+      await signUp(app, "grp_owner"),
+      await signUp(app, "grp_other"),
+      await signUp(app, "grp_mate"),
+      await signUp(app, "grp_leaver"),
+      await signUp(app, "grp_stranger"),
+    ];
+    const g = await group(app, owner, "replies", [other, mate, leaver]);
+    expect((await remove(leaver, g, leaver)).status).toBe(200);
+    const seat = async (who: Actor, handle: string) => {
+      const agent = await mustCreateAgent(app, who, { handle, name: handle, model: FAST, persona: "你是助手。" });
+      expect((await api(app, who, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+      return agent as { id: string; conversationId: string };
+    };
+    const anna = await seat(owner, "grp_anna");
+    const theirs = await seat(other, "grp_theirs");
+    const failedRun = async (agentId: string, ownerId: string, conv: string) =>
+      (
+        await db.query<{ id: string }>(
+          `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at)
+           select 'reply', $1, $2, $3, 'failed', 'provider_unavailable', seq, now() from conversations where id = $1 returning id`,
+          [conv, agentId, ownerId],
+        )
+      ).rows[0]!.id;
+    const annaRun = await failedRun(anna.id, owner.id, g);
+    const theirRun = await failedRun(theirs.id, other.id, g);
+    const ownChatRun = await failedRun(anna.id, owner.id, anna.conversationId);
+    const { conversationId: direct } = await befriend(app, owner, stranger);
+    const stop = (run: string) => json("POST", `/api/conversations/${g}/runs/${run}/stop`);
+    const retry = (agentId: string) => json("POST", `/api/conversations/${g}/runs/retry`, { agentId });
+    const dismiss = (agentId: string) => json("POST", `/api/conversations/${g}/runs/dismiss`, { agentId });
+
+    // Fellow members — one owns another Agent there — and the owner, with someone else's run, Agent or person.
+    for (const [who, foreignRuns, foreignAgents] of [
+      [mate, { annaRun, theirRun, ownChatRun }, { anna: anna.id, theirs: theirs.id, person: owner.id }],
+      [other, { annaRun, ownChatRun, upperCase: annaRun.toUpperCase() }, { anna: anna.id, person: mate.id, upperCase: anna.id.toUpperCase() }],
+      [owner, { theirRun }, { theirs: theirs.id, person: other.id }],
+    ] as const) {
+      expect((await indistinguishable(who, `${who.handle} stop`, stop, foreignRuns, OTHER_RANDOM)).body).toBe('{"error":"not_found"}');
+      for (const [label, request] of [
+        ["retry", retry],
+        ["dismiss", dismiss],
+      ] as const) {
+        expect((await indistinguishable(who, `${who.handle} ${label}`, request, foreignAgents)).body).toBe('{"error":"not_found"}');
+      }
+    }
+    // A former member and a stranger: every group route on it, as on a conversation that does not exist.
+    const onGroup: Array<[string, (id: string) => InjectOptions]> = [
+      ["group replies", (id) => json("GET", `/api/conversations/${id}/runs`)],
+      ["halt", (id) => json("POST", `/api/conversations/${id}/agents/halt`)],
+      ["stop", (id) => json("POST", `/api/conversations/${id}/runs/${annaRun}/stop`)],
+      ["retry", (id) => json("POST", `/api/conversations/${id}/runs/retry`, { agentId: anna.id })],
+      ["dismiss", (id) => json("POST", `/api/conversations/${id}/runs/dismiss`, { agentId: anna.id })],
+      ["retry without agentId", (id) => json("POST", `/api/conversations/${id}/runs/retry`)],
+    ];
+    for (const who of [leaver, stranger]) {
+      for (const [label, request] of onGroup) {
+        expect((await indistinguishable(who, `${who.handle} ${label}`, request, { g, upperCase: g.toUpperCase() })).status).toBe(404);
+      }
+    }
+    // A group's replies are a group's: the owner's own Agent conversation and a direct chat answer as a random id.
+    const replies = (id: string) => json("GET", `/api/conversations/${id}/runs`);
+    expect((await indistinguishable(owner, "replies of another kind of conversation", replies, { own: anna.conversationId, direct })).status).toBe(404);
+
+    // Nothing anybody tried changed anything; and the owners' own requests are answered (positive control).
+    const states = await db.query("select id, status, dismissed_at from agent_runs where id = any($1::uuid[]) order by id", [[annaRun, theirRun, ownChatRun]]);
+    expect(states.rows.map((r) => [r.status, r.dismissed_at])).toEqual([0, 1, 2].map(() => ["failed", null]));
+    expect((await db.query("select count(*)::int as n from agent_runs where conversation_id = $1", [g])).rows[0].n).toBe(2);
+    expect((await api(app, owner, "GET", `/api/conversations/${g}/runs`)).json.runs).toHaveLength(2);
+    expect(await api(app, other, "POST", `/api/conversations/${g}/runs/dismiss`, { agentId: theirs.id })).toEqual({ status: 200, json: { ok: true } });
+    expect(await api(app, owner, "POST", `/api/conversations/${g}/runs/${annaRun}/stop`)).toEqual({ status: 200, json: { ok: true } });
   });
 });
 

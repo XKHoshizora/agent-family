@@ -207,16 +207,17 @@ describe("a person's message in a group", () => {
     const first = await say(w.member, w.g, "@anna 你好");
     expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, covers: first, pending: null, by: "human", interrupted: null }]);
     expect(await runsOf(anna2.id, w.g)).toEqual([]);
-    const annaPush = await ownerSocket.next((e) => e.type === "run" && e.conversationId === w.g);
+    // The owner gets the run; another member of the group only its state (`run` without a run, Task 6).
+    const annaPush = await ownerSocket.next((e) => e.type === "run" && e.conversationId === w.g && "run" in e);
     expect(annaPush.run).toMatchObject({ status: "queued", retryable: false });
 
     // Two named: two runs, each announced to its own owner.
     const second = await say(w.third, w.g, "@ANNA_2 和 @bobbot 一起看看");
     expect(await runsOf(anna2.id, w.g)).toEqual([{ status: "queued", error: null, covers: second, pending: null, by: "human", interrupted: null }]);
     expect(await runsOf(bob.id, w.g)).toEqual([{ status: "queued", error: null, covers: second, pending: null, by: "human", interrupted: null }]);
-    const bobPush = await memberSocket.next((e) => e.type === "run" && e.conversationId === w.g);
+    const bobPush = await memberSocket.next((e) => e.type === "run" && e.conversationId === w.g && "run" in e);
     expect(bobPush.run.status).toBe("queued");
-    await ownerSocket.waitFor((e) => e.type === "run" && e.conversationId === w.g && e.run.id !== annaPush.run.id);
+    await ownerSocket.waitFor((e) => e.type === "run" && e.conversationId === w.g && "run" in e && e.run.id !== annaPush.run.id);
 
     // An Agent of another group, one in no group, a person, nobody: nothing.
     const before = await allRuns();
@@ -592,7 +593,7 @@ describe("POST /api/conversations/:id/agents/halt", () => {
     expect(app.agentPort.shouldStop(ticket(runningByAgent, a.id, w.owner.id))).toBe(true);
     expect(app.agentPort.shouldStop(ticket(runningByPerson, e.id, w.third.id))).toBe(false);
     // The cancelled run's owner is told; the group gets the notice.
-    const cancelled = await memberSocket.next((x) => x.type === "run" && x.run.id === queuedByAgent);
+    const cancelled = await memberSocket.next((x) => x.type === "run" && x.run?.id === queuedByAgent);
     expect([cancelled.conversationId, cancelled.run]).toEqual([w.g, { id: queuedByAgent, status: "cancelled", error: "halted", retryable: false }]);
     const notice = await thirdSocket.next((x) => x.type === "message" && x.message.kind === "system" && x.message.system?.event === "agents_halted");
     expect(notice.message).toMatchObject({ seq: at + 1, senderId: null, text: "third 让 Agent 停止了接话", system: { event: "agents_halted", actorId: w.third.id } });
