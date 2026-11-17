@@ -10,8 +10,12 @@
 /** One thing the tap saw, in stream order: a piece of reasoning, or a piece of the answer's text (one SDK text delta). */
 type Seen = { kind: "reasoning"; text: string } | { kind: "text" };
 
-/** The most of one unfinished line or event the tap holds; past it the tap stops reading the stream (it still passes). */
+/**
+ * The longest line, and the most data of one event, the tap reads (characters); past it the tap stops reading the
+ * stream (it still passes).
+ */
 const MAX_EVENT_CHARS = 1024 * 1024;
+const LF = 10;
 
 /** A delta's reasoning: `reasoning_content`, else `reasoning` when it is a string (as some compatible servers send it). */
 function reasoningOf(delta: Record<string, unknown>): string {
@@ -32,13 +36,19 @@ const nonEmpty = (v: unknown): boolean => typeof v === "string" && v !== "";
  * - `beforeText()`, when the SDK gives a text delta: the reasoning that came before it, and its mark.
  * - `rest()`, at the end: what is left.
  *
- * It looks at choice 0 only, as the SDK does. Bounded: it holds at most `MAX_EVENT_CHARS` of an unfinished line or
- * event, and stops reading (not passing) a stream that goes past it; what it queued is at most what the stream
+ * It looks at choice 0 only, as the SDK does. It reads in time proportional to the bytes, however they are cut into
+ * chunks: each chunk is looked through once (`feed`). Bounded: it holds at most `MAX_EVENT_CHARS` of a line or of an
+ * event's data, and stops reading (not passing) a stream that goes past it; what it queued is at most what the stream
  * carried, which the address guard bounds.
  */
 export class ChatReasoningTap {
   private readonly queue: Seen[] = [];
-  private line = "";
+  /** The unfinished line, as the pieces it came in (joined once, when it ends), and its length so far. */
+  private line: string[] = [];
+  private lineChars = 0;
+  /** The unfinished line ended with a CR last in its piece: whether an LF follows (a CRLF) shows in the next piece. */
+  private heldCR = false;
+  /** The current event's `data:` values, and their length so far. */
   private data: string[] = [];
   private dataChars = 0;
   private reading = true;
@@ -102,29 +112,66 @@ export class ChatReasoningTap {
     return out;
   }
 
-  /** Text decoded from the stream: split into lines (CRLF, LF or CR), each handled once it is complete. */
+  /**
+   * A piece of text decoded from the stream: split into lines (CRLF, LF or CR), each handled once it is complete.
+   * Only the new piece is searched for line ends; the unfinished line is kept as its pieces, counted as it grows, and
+   * joined once, when it ends — so a line costs time in proportion to its length however it is cut, and one longer
+   * than `MAX_EVENT_CHARS` stops the reading without ever being joined. A CR last in the piece is the end of its line
+   * either way, but whether it is a CRLF shows only in the next piece: the line is handled then (`heldCR`), as the
+   * SDK's own reader does, so a stream whose last byte is a CR never has that line read.
+   */
   private feed(text: string): void {
-    let buffer = this.line + text;
-    let start = 0;
-    for (let i = 0; i < buffer.length; i++) {
-      const c = buffer.charCodeAt(i);
-      if (c !== 10 && c !== 13) continue;
-      // A CR last in the buffer may be the first half of a CRLF: wait for the next piece.
-      if (c === 13 && i + 1 === buffer.length) break;
-      this.handleLine(buffer.slice(start, i));
+    if (text === "") return;
+    let from = 0;
+    if (this.heldCR) {
+      this.heldCR = false;
+      if (text.charCodeAt(0) === LF) from = 1; // the rest of a CRLF
+      this.endLine("");
       if (!this.reading) return;
-      if (c === 13 && buffer.charCodeAt(i + 1) === 10) i++;
-      start = i + 1;
     }
-    buffer = buffer.slice(start);
-    if (buffer.length > MAX_EVENT_CHARS) return this.stop();
-    this.line = buffer;
+    const ends = /\r\n?|\n/g;
+    ends.lastIndex = from;
+    for (let end = ends.exec(text); end !== null; end = ends.exec(text)) {
+      const piece = text.slice(from, end.index);
+      from = end.index + end[0].length;
+      if (from === text.length && end[0] === "\r") {
+        if (this.grow(piece)) this.heldCR = true;
+        return;
+      }
+      this.endLine(piece);
+      if (!this.reading) return;
+    }
+    this.grow(text.slice(from));
+  }
+
+  /** `piece` added to the unfinished line; false when that makes the line too long, and the reading stopped. */
+  private grow(piece: string): boolean {
+    if (piece === "") return true;
+    this.lineChars += piece.length;
+    if (this.lineChars > MAX_EVENT_CHARS) {
+      this.stop();
+      return false;
+    }
+    this.line.push(piece);
+    return true;
+  }
+
+  /** The unfinished line, ending with `piece`, handled; unless it is too long (the reading stops). */
+  private endLine(piece: string): void {
+    if (!this.grow(piece)) return;
+    const line = this.line.join("");
+    this.line = [];
+    this.lineChars = 0;
+    this.handleLine(line);
   }
 
   private stop(): void {
     this.reading = false;
-    this.line = "";
+    this.line = [];
+    this.lineChars = 0;
+    this.heldCR = false;
     this.data = [];
+    this.dataChars = 0;
   }
 
   /** One server-sent event line: `data:` fields gather until the blank line that ends the event; the rest is ignored. */
@@ -165,7 +212,7 @@ export class ChatReasoningTap {
 
 const OPEN = "<think>";
 const CLOSE = "</think>";
-/** The most leading white space held while waiting to see whether the answer opens with `<think>`. */
+/** The most leading white space an answer may have and still open with `<think>`: held until that shows. */
 const MAX_LEADING = 256;
 
 export type Split = { type: "text" | "reasoning"; delta: string };
@@ -180,11 +227,16 @@ function partialTagAtEnd(s: string, tag: string): number {
  * An answer's text, split into reasoning and text when it opens (after leading white space) with `<think>`: what
  * comes up to the matching `</think>` is reasoning, the rest the answer (its leading white space dropped); with the tag
  * never closed, all of it is reasoning. Only the opening of the answer counts — a `<think>` later in the text is text,
- * so an answer that mentions the tag is never swallowed. Streaming: it holds back only what may still turn out to be a
- * tag (the leading white space and a partial `<think>`, at most `MAX_LEADING` characters; a partial `</think>`).
+ * so an answer that mentions the tag is never swallowed; so is one with more than `MAX_LEADING` characters of white
+ * space before it. Streaming: it holds back only what may still turn out to be a tag (the leading white space and a
+ * partial `<think>`; a partial `</think>`), looks at each piece once, and reads the same however the text is cut.
  */
 export class ThinkTags {
   private state: "start" | "inside" | "after" | "answer" = "start";
+  /** Before the answer is known to open with `<think>` or not: its leading white space, then as much of the tag as came. */
+  private space = "";
+  private tag = "";
+  /** Inside the block: a partial `</think>` at the end of what came. */
   private held = "";
 
   /** One piece of the answer's text, as the reasoning and text it is so far. */
@@ -196,31 +248,49 @@ export class ThinkTags {
         return this.after(piece);
       case "inside":
         return this.inside(piece);
-      case "start": {
-        this.held += piece;
-        const rest = this.held.trimStart();
-        if (rest.startsWith(OPEN)) {
-          this.state = "inside";
-          this.held = "";
-          return this.inside(rest.slice(OPEN.length));
-        }
-        // Still white space, or white space and the start of `<think>`: wait (a little).
-        if (OPEN.startsWith(rest) && this.held.length <= MAX_LEADING) return [];
-        this.state = "answer";
-        const text = this.held;
-        this.held = "";
-        return [{ type: "text", delta: text }];
-      }
+      case "start":
+        return this.start(piece);
     }
   }
 
   /** What is still held, at the end of the answer: a start that never became a tag is text; an unclosed thought, reasoning. */
   end(): Split[] {
+    if (this.state === "start") {
+      const text = this.space + this.tag;
+      this.space = this.tag = "";
+      return text === "" ? [] : [{ type: "text", delta: text }];
+    }
     const held = this.held;
     this.held = "";
-    if (held === "") return [];
-    if (this.state === "start") return [{ type: "text", delta: held }];
-    return this.state === "inside" ? [{ type: "reasoning", delta: held }] : [];
+    return this.state === "inside" && held !== "" ? [{ type: "reasoning", delta: held }] : [];
+  }
+
+  /** Still undecided: white space (once no part of the tag came), then the next characters the tag needs. */
+  private start(piece: string): Split[] {
+    let rest = piece;
+    if (this.tag === "") {
+      rest = piece.trimStart();
+      this.space += piece.slice(0, piece.length - rest.length);
+      if (this.space.length > MAX_LEADING) return this.answer(rest);
+    }
+    const needed = OPEN.length - this.tag.length;
+    const tag = this.tag + rest.slice(0, needed);
+    if (tag === OPEN) {
+      this.state = "inside";
+      this.space = this.tag = "";
+      return this.inside(rest.slice(needed));
+    }
+    if (!OPEN.startsWith(tag)) return this.answer(rest);
+    this.tag = tag; // all of `rest`, and still the start of the tag
+    return [];
+  }
+
+  /** Not an answer that opens with `<think>`: what was held and `rest` are text, and so is all that follows. */
+  private answer(rest: string): Split[] {
+    this.state = "answer";
+    const text = this.space + this.tag + rest;
+    this.space = this.tag = "";
+    return [{ type: "text", delta: text }];
   }
 
   private inside(piece: string): Split[] {
