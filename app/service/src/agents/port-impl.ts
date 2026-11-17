@@ -327,7 +327,7 @@ export class DbAgentPort implements AgentPort {
         return { end: { status: "failed", error: "no_quota", ...(typeof resetsAt === "string" ? { resetsAt } : {}) } };
       }
       const marked = await markRead(t, agent.id, run.conversationId, covers);
-      const reasoning = resolved.reasoningAllowed.includes(agent.reasoning) ? agent.reasoning : "none";
+      const reasoning = resolved.reasoning;
       return {
         prepared: { call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning }, inputChars: context.inputChars },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
