@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "../src/errors.ts";
 import { admitRun, type Admission } from "../src/metering/admit.ts";
-import { settle, type Usage } from "../src/metering/settle.ts";
+import { settle, type SettleLog, type Usage } from "../src/metering/settle.ts";
 import type { Resolved } from "../src/models/resolve.ts";
 import { signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -26,6 +26,12 @@ const usageOf = (round: number): Usage => (round < 2 ? FULL_USAGE : OVER_USAGE);
  * day whatever the clock says when the suite runs: a round that crossed midnight would use two days' allowances.
  */
 const NOW = new Date("2026-03-01T04:00:00Z");
+/** Every model here is configured: a settlement warning would be a bug. */
+const NO_WARNINGS: SettleLog = {
+  warn: (_details, msg) => {
+    throw new Error(`unexpected settlement warning: ${msg}`);
+  },
+};
 
 type Attempt = { run: string; admission: Admission } | { run: string; refused: AppError };
 
@@ -39,7 +45,7 @@ async function tryAdmit(run: string, ownerId: string, resolved: Resolved): Promi
 }
 
 const settleWith = (run: string, usage: Usage) =>
-  db.tx((t) => settle(t, config(), run, usage, { inputChars: 0, outputChars: 0 }, "done", NOW));
+  db.tx((t) => settle(t, config(), run, usage, { inputChars: 0, outputChars: 0 }, "done", NOW, { log: NO_WARNINGS }));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

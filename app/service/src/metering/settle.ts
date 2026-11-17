@@ -10,6 +10,11 @@ import { assertCount, costMicro, isCount } from "./prices.ts";
 
 export type Outcome = "done" | "stopped" | "failed" | "cancelled";
 
+/** Where settlement says what it could not do (a call on a site model no longer configured). Every caller passes one. */
+export interface SettleLog {
+  warn(details: Record<string, unknown>, msg: string): void;
+}
+
 /** Token counts the upstream reported. */
 export interface Usage {
   inputTokens: number;
@@ -49,7 +54,7 @@ export async function settle(
   fallback: { inputChars: number; outputChars: number },
   outcome: Outcome,
   now: Date,
-  { forgiveAll = false, log }: { forgiveAll?: boolean; log?: { warn(details: Record<string, unknown>, msg: string): void } } = {},
+  { forgiveAll = false, log }: { forgiveAll?: boolean; log: SettleLog },
 ): Promise<void> {
   assertCount("settle: fallback.inputChars", fallback.inputChars);
   assertCount("settle: fallback.outputChars", fallback.outputChars);
@@ -79,7 +84,7 @@ export async function settle(
       cost = costMicro(site, input, output);
     } else {
       priced = false;
-      log?.warn({ runId, model: run.model }, "settle: the run's site model is no longer configured, so its cost is unknown: recorded as 0 and not charged");
+      log.warn({ runId, model: run.model }, "settle: the run's site model is no longer configured, so its cost is unknown: recorded as 0 and not charged");
     }
   }
 

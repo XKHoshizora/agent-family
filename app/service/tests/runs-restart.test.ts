@@ -199,7 +199,7 @@ describe("a run left running when the service stopped", () => {
     const ticket = (await old.agentPort.claimNext())!;
     await old.agentPort.begin(ticket);
     // Settled, but the service stopped before the run left `running`.
-    await db.tx((t) => settle(t, old.deps.config, ticket.id, null, NOTHING, "failed", new Date()));
+    await db.tx((t) => settle(t, old.deps.config, ticket.id, null, NOTHING, "failed", new Date(), { log: old.log }));
     const draft = await runningRun(db, owner.id);
     await stop(old);
 

@@ -4,7 +4,7 @@ import type { Config } from "../src/config.ts";
 import { AppError } from "../src/errors.ts";
 import { admit, admitRun } from "../src/metering/admit.ts";
 import { estimateTokens, IMAGE_TOKENS, maxCostMicro, PDF_TOKENS_PER_KB, pdfTokens } from "../src/metering/prices.ts";
-import { settle, type Outcome } from "../src/metering/settle.ts";
+import { settle, type Outcome, type SettleLog } from "../src/metering/settle.ts";
 import type { Resolved } from "../src/models/resolve.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -24,6 +24,12 @@ const TZ = "Asia/Shanghai";
 /** Noon of 2026-03-01 in Shanghai. */
 const NOON = new Date("2026-03-01T04:00:00Z");
 const NO_TEXT = { inputChars: 0, outputChars: 0 };
+/** The log settlement gets unless a test watches it: a warning where none is expected fails the settlement. */
+const NO_WARNINGS: SettleLog = {
+  warn: (_details, msg) => {
+    throw new Error(`unexpected settlement warning: ${msg}`);
+  },
+};
 
 const FREE = { source: "site", id: "meter_free" } as const;
 const PAID = { source: "site", id: "meter_paid" } as const;
@@ -39,10 +45,10 @@ function settleAt(
     outcome = "done" as Outcome,
     now = NOON,
     cfg = config() as Config,
-    log = undefined as { warn(details: Record<string, unknown>, msg: string): void } | undefined,
+    log = NO_WARNINGS as SettleLog,
   } = {},
 ) {
-  return db.tx((t) => settle(t, cfg, runId, usage, fallback, outcome, now, log ? { log } : {}));
+  return db.tx((t) => settle(t, cfg, runId, usage, fallback, outcome, now, { log }));
 }
 
 /** The refusal `p` rejects with, as plain data. */
