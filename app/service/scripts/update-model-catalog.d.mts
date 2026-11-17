@@ -20,6 +20,7 @@ export const API_URL: string;
 export const LEVELS: string[];
 export function levelsOf(entry: unknown): string[] | undefined;
 export function reduceCatalog(models: unknown, api?: unknown): CatalogEntry[];
+export const DNS_NAME: RegExp;
 export function reduceProviders(api: unknown): CatalogProvider[];
 export function formatCatalog(entries: ReadonlyArray<CatalogEntry | CatalogProvider>): string;
 export function catalogReadme(facts: { fetched: string; count: number; providers?: number }): string;

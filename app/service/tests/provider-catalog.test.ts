@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it } from "vitest";
-import { formatCatalog, reduceProviders } from "../scripts/update-model-catalog.mjs";
+import { DNS_NAME, formatCatalog, reduceProviders } from "../scripts/update-model-catalog.mjs";
 import { catalogueModels } from "../src/providers/catalogue.ts";
 import { modelHints } from "../src/providers/hints.ts";
 import { ProviderCallError, type ProviderProbe } from "../src/providers/probe.ts";
@@ -30,6 +30,16 @@ describe("reduceProviders (the update script)", () => {
       { id: "deepseek", hosts: ["api.deepseek.com"], models: ["deepseek-chat", "deepseek-reasoner"] },
       { id: "zhipuai", hosts: ["open.bigmodel.cn"], models: ["glm-4.6", "glm-5"] },
     ]);
+    // A host must be a plain DNS name: a template placeholder, an address without a dot, an IPv6 literal are left out.
+    expect(
+      reduceProviders({
+        a: { api: "https://${databricks_host}/serving", models: { m: {} } },
+        b: { api: "https://${acct}.snowflakecomputing.com/api", models: { m: {} } },
+        c: { api: "https://localhost/v1", models: { m: {} } },
+        d: { api: "https://[::1]/v1", models: { m: {} } },
+        e: { api: "https://my-host.example.co/v1", models: { m: {} } },
+      }),
+    ).toEqual([{ id: "e", hosts: ["my-host.example.co"], models: ["m"] }]);
     for (const bad of [null, [], "x", 1, undefined]) expect(reduceProviders(bad)).toEqual([]);
   });
 });
@@ -43,7 +53,7 @@ describe("the committed provider snapshot", () => {
     expect(text).toBe(formatCatalog(providers));
     for (const [i, p] of providers.entries()) {
       expect([p.id, Object.keys(p)]).toEqual([p.id, ["id", "hosts", "models"]]);
-      expect([p.id, p.hosts.length > 0, p.hosts.every((h) => h === h.toLowerCase() && !h.includes("/")), p.models.length > 0]).toEqual([p.id, true, true, true]);
+      expect([p.id, p.hosts.length > 0, p.hosts.every((h) => h === h.toLowerCase() && !h.includes("/") && DNS_NAME.test(h)), p.models.length > 0]).toEqual([p.id, true, true, true]);
       expect([p.id, [...p.models].sort()]).toEqual([p.id, p.models]);
       if (i > 0) expect([providers[i - 1]!.id < p.id]).toEqual([true]);
     }

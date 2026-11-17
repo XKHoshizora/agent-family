@@ -4,7 +4,7 @@ import { CHAT_TEST } from "../src/providers/routes.ts";
 import { DETAIL_CHARS, holdsKeyPiece, KEY_PIECE, upstreamDetail } from "../src/providers/upstream-detail.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
-import { answerCanned, protocolStub, STUB_MODEL, type ProtocolStub, type StubHandler } from "./helpers/models.ts";
+import { answerCanned, protocolStub, scriptedGateway, STUB_MODEL, type ProtocolStub, type StubHandler } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
 
 /**
@@ -190,7 +190,7 @@ describe("what the upstream said (detail), for the provider's owner", () => {
     expect(upstreamDetail(400, JSON.stringify({ error: "invalid_model" }), KEY)).toEqual({ upstreamStatus: "400", message: "invalid_model" });
     expect(upstreamDetail(400, JSON.stringify([{ error: { message: "Gemini says no" } }]), KEY)).toEqual({ upstreamStatus: "400", message: "Gemini says no" });
     expect(upstreamDetail(404, JSON.stringify({ detail: "Not Found" }), KEY)).toEqual({ upstreamStatus: "404", message: '{"detail":"Not Found"}' });
-    expect(upstreamDetail(503, "upstream connect error\r\n\t\u001b[31mreset\u0000 ‮gnp.​", KEY)).toEqual({ upstreamStatus: "503", message: "upstream connect error [31mreset gnp." });
+    expect(upstreamDetail(503, "upstream connect error\r\n\t\u001b[31mreset\u0000 \u202egnp.​", KEY)).toEqual({ upstreamStatus: "503", message: "upstream connect error [31mreset gnp." });
     const long = upstreamDetail(500, JSON.stringify({ error: { message: "长".repeat(5000) } }), KEY);
     expect([...(long as { message: string }).message]).toHaveLength(DETAIL_CHARS);
     expect(upstreamDetail(500, "", KEY)).toEqual({ upstreamStatus: "500" });
@@ -209,6 +209,67 @@ describe("what the upstream said (detail), for the provider's owner", () => {
     expect(upstreamDetail(401, JSON.stringify({ error: { message: `key ends with ${KEY.slice(-5)}` } }), KEY)).toEqual({ upstreamStatus: "401", message: `key ends with ${KEY.slice(-5)}` });
     expect(holdsKeyPiece(`x${KEY.slice(10, 16)}x`, KEY)).toBe(true);
     expect(holdsKeyPiece(KEY.slice(10, 15), KEY)).toBe(false);
+  });
+
+  /** `key` cut into runs of at most 5 characters, each pair joined by `sep`: no 6-character run of it is left whole. */
+  const split = (key: string, sep: string) => (key.match(/.{1,5}/g) ?? []).join(sep);
+  const REDACTED = { upstreamStatus: "401", message: null, redacted: true };
+
+  it("upstreamDetail: a key split by characters the cleaning removes is not put back together (the check runs on the text returned)", () => {
+    const separators: Array<[string, string]> = [
+      ["zero-width space", "\u200b"],
+      ["soft hyphen", "\u00ad"],
+      ["NUL", "\u0000"],
+      ["zero-width joiner", "\u200d"],
+      ["zero-width non-joiner", "\u200c"],
+      ["bidi override", "\u202e"],
+      ["bidi isolate", "\u2066"],
+      ["BEL", "\u0007"],
+    ];
+    for (const [name, sep] of separators) {
+      const spelled = split(KEY, sep);
+      expect([name, holdsKeyPiece(spelled, KEY)]).toEqual([name, false]); // the raw text alone would pass the old check
+      for (const body of [JSON.stringify({ error: { message: `Bad key: ${spelled}` } }), `Bad key: ${spelled}`, JSON.stringify({ message: spelled })]) {
+        expect([name, upstreamDetail(401, body, KEY)]).toEqual([name, REDACTED]);
+      }
+    }
+  });
+
+  it("upstreamDetail: a key spelled out with white space between its characters is dropped", () => {
+    for (const sep of [" ", "  ", "\t", "\n", " \u200b "]) {
+      expect([JSON.stringify(sep), upstreamDetail(401, JSON.stringify({ error: { message: `key: ${[...KEY].join(sep)}` } }), KEY)]).toEqual([JSON.stringify(sep), REDACTED]);
+    }
+    // White space alone does not condemn a message.
+    expect(upstreamDetail(401, JSON.stringify({ error: { message: "key is not valid for this model" } }), KEY)).toEqual({ upstreamStatus: "401", message: "key is not valid for this model" });
+  });
+
+  it("upstreamDetail: the key in base64, base64url, percent-encoded or as \\uXXXX escapes is dropped", () => {
+    const say = (text: string, key = KEY) => upstreamDetail(401, JSON.stringify({ error: { message: text } }), key);
+    expect(say(`got ${Buffer.from(KEY).toString("base64")}`)).toEqual(REDACTED);
+    expect(say(`got ${Buffer.from(KEY).toString("base64").replace(/=+$/, "")}`)).toEqual(REDACTED);
+    // A key whose base64 has `+` and `/`, so that the url-safe form is a different text.
+    const odd = "k1?>?>?>?>?>z9y8x7?>";
+    const b64 = Buffer.from(odd).toString("base64");
+    const url = Buffer.from(odd).toString("base64url");
+    expect(b64).not.toBe(url);
+    const at = url.search(/[-_]/);
+    expect(at).toBeGreaterThanOrEqual(0);
+    const window = url.slice(Math.max(0, at - 4), Math.max(0, at - 4) + 8);
+    expect(b64.includes(window)).toBe(false);
+    expect(say(`got ${b64}`, odd)).toEqual(REDACTED);
+    expect(say(`got ${window}`, odd)).toEqual(REDACTED);
+    // Percent-encoded: a key with reserved characters fewer than 6 apart has no 6-run left in that form.
+    const reserved = "abc+def/ghi=jkl+mno";
+    expect(holdsKeyPiece(encodeURIComponent(reserved), reserved)).toBe(false);
+    expect(say(`got ${encodeURIComponent(reserved)}`, reserved)).toEqual(REDACTED);
+    expect(say(`got ${encodeURIComponent(reserved).toLowerCase()}`, reserved)).toEqual(REDACTED);
+    expect(say(`got abc%2Bdef%2Fghi`, reserved)).toEqual(REDACTED);
+    // \uXXXX escapes (a doubly escaped JSON text), decoding to a 6-run of the key.
+    const escaped = [...KEY.slice(0, 12)].map((c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    expect(upstreamDetail(401, `bad ${escaped}`, KEY)).toEqual(REDACTED);
+    expect(say(`bad ${escaped}`)).toEqual(REDACTED);
+    // Seven characters of base64 are a coincidence, not the key.
+    expect(say(`ref ${b64.slice(3, 10)}`, odd)).toEqual({ upstreamStatus: "401", message: `ref ${b64.slice(3, 10)}` });
   });
 
   it("test and models/list answer the detail alike; the refresh never does, nor the log", async () => {
@@ -243,6 +304,17 @@ describe("what the upstream said (detail), for the provider's owner", () => {
     for (const e of failures) expect(Object.keys(e).filter((k) => !["level", "time", "pid", "hostname", "reqId", "msg"].includes(k)).sort()).toEqual(["error", "protocol", "providerId", "upstreamStatus"]);
   });
 
+  it("a model name from the upstream's list that holds a 6-character run of the key (not only the whole key) is not offered", async () => {
+    const owner = await signUp(app, "lister2");
+    const p = await provider(owner);
+    const names = ["fine-model", `pre-${KEY.slice(4, 4 + KEY_PIECE)}-post`, `${KEY.slice(-9).toUpperCase()}`, `has-${KEY.slice(0, 5)}-only`, KEY, "other-model"];
+    stub.answer((_req, res) => send(res, 200, { data: names.map((id) => ({ id })) }));
+    const res = await listOf(owner, p.id);
+    expect(res.status).toBe(200);
+    expect((res.json.listed as Array<{ name: string }>).map((m) => m.name)).toEqual(["fine-model", `has-${KEY.slice(0, 5)}-only`, "other-model"]);
+    expect(holdsKeyPiece(res.raw, KEY)).toBe(false);
+  });
+
   it("no detail without an upstream answer: a refused address, an unreachable host", async () => {
     const owner = await signUp(app, "nowhere");
     const p = await provider(owner, { baseUrl: "https://192.168.0.10/v1" });
@@ -250,5 +322,23 @@ describe("what the upstream said (detail), for the provider's owner", () => {
     expect((await listOf(owner, p.id)).json).toEqual({ ok: false, error: "address_not_allowed" });
     const closed = await provider(owner, { name: "closed", baseUrl: "http://127.0.0.1:1/v1" });
     expect((await testOf(owner, closed.id)).json).toEqual({ ok: false, error: "provider_unavailable" });
+  });
+});
+
+describe("the connection test names its upstream as a reply does", () => {
+  const gateway = scriptedGateway();
+  const second = useApp({ models: gateway, allowInsecureLocal: true });
+
+  it("the call carries upstreamId provider:<id>@<baseUrl>, the key src/models/resolve.ts gives a reply, so a refusal learnt by one is honoured by the other", async () => {
+    const owner = await signUp(second.app, "namer");
+    const created = await api(second.app, owner, "POST", "/api/providers", providerBody({ apiKey: KEY, baseUrl: "https://Api.Example.com/", models: [{ name: "m", reasoning: true }] }));
+    expect(created.status).toBe(201);
+    const { id, baseUrl } = created.json as { id: string; baseUrl: string };
+    expect(baseUrl).toBe("https://api.example.com/v1");
+    gateway.reply("hi");
+    const res = await api(second.app, owner, "POST", `/api/providers/${id}/test`, { model: "m" });
+    expect(res.json).toMatchObject({ ok: true, mode: "chat" });
+    expect(gateway.calls).toHaveLength(1);
+    expect(gateway.calls[0]!.upstreamId).toBe(`provider:${id}@${baseUrl}`);
   });
 });

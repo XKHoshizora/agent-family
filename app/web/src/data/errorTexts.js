@@ -287,7 +287,7 @@ export function providerErrorText(action, error) {
       : "还有 Agent 在使用这个供应商，请先给它们换一个模型。";
   }
   const text = pick(PROVIDER, action, error);
-  // Only a status number is ever shown, nothing else of the provider's answer.
+  // The sentence only ever names a status number; what else the provider said is shown apart, as 详情 (the `detail` of the answer, Providers.jsx).
   const status = WITH_STATUS.has(action) && /^\d{3}$/.test(error?.upstreamStatus ?? "") ? error.upstreamStatus : null;
   if (!status) return text;
   if (error.code === "provider_unavailable" && (status === "404" || status === "405")) {

@@ -12,6 +12,7 @@ import { catalogueModels } from "./catalogue.ts";
 import { KeyUnreadableError } from "./crypto.ts";
 import { modelHints } from "./hints.ts";
 import { ProviderCallError, toProviderCallError, type ProviderCallCode } from "./probe.ts";
+import { holdsKeyPiece } from "./upstream-detail.ts";
 import {
   CONTEXT_TOKENS,
   MAX_MODELS,
@@ -36,13 +37,13 @@ export const MAX_LISTED_MODELS = 500;
 /**
  * The names of a provider's model list worth showing: of its first MAX_LISTED_NAMES entries (the list is the upstream's,
  * of any length within the guard's size limit), names a person could have typed (trimmed), each once, in its order, and
- * never one that holds the key.
+ * never one that holds the key or any 6-character run of it (`holdsKeyPiece`).
  */
 function usableNames(names: string[], apiKey: string): string[] {
   const seen = new Set<string>();
   for (const raw of names.slice(0, MAX_LISTED_NAMES)) {
     const parsed = modelName.safeParse(raw);
-    if (parsed.success && !parsed.data.includes(apiKey)) seen.add(parsed.data);
+    if (parsed.success && !holdsKeyPiece(parsed.data, apiKey)) seen.add(parsed.data);
   }
   return [...seen];
 }

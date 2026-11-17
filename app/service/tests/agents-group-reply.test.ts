@@ -329,7 +329,7 @@ describe("a reply in a group", () => {
     const [miaSocket, nedSocket, ownerSocket] = [await connect(app, mia), await connect(app, ned), await connect(app, owner)];
     await say(ned, g, "@helper_bot 你是谁？");
     // A bidi override and a control character (removed), white space around it (trimmed), and more than 32 000 characters.
-    const thought = `  ‮${SECRET.reasoning}\u0007 我的设定是：${PERSONA}${"想".repeat(40_000)}  `;
+    const thought = `  \u202e${SECRET.reasoning}\u0007 我的设定是：${PERSONA}${"想".repeat(40_000)}  `;
     await answer("我是小助手。", { reasoning: thought, chunkSize: 4096 });
     const kept = Array.from(`${SECRET.reasoning} 我的设定是：${PERSONA}${"想".repeat(40_000)}`).slice(0, 32_000).join("");
 

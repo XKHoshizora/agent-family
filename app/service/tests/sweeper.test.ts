@@ -197,7 +197,7 @@ describe("inside the app", () => {
     const lost = newBlobKey("att");
     await holdBlob(db, lost);
     await blobs.put(lost, Buffer.from("x"));
-    await db.query("update pending_blobs set created_at = now() - interval '17 minutes' where key = $1", [lost]);
+    await db.query("update pending_blobs set created_at = now() - interval '62 minutes' where key = $1", [lost]);
     expect(files()).toHaveLength(2);
 
     const lines: string[] = [];

@@ -62,7 +62,7 @@ describe("production build", () => {
     for (const p of new Set(packages)) expect([p, p in pkg.dependencies]).toEqual([p, true]);
   });
 
-  it("a JSON file src/ imports (the model catalogue) is inside src/, imported as JSON, so the build copies it to dist/", () => {
+  it("a JSON file src/ imports (the model and provider catalogues) is inside src/, imported as JSON, so the build copies it to dist/", () => {
     const tsconfig = JSON.parse(readFileSync(path.join(root, "tsconfig.json"), "utf8")) as { compilerOptions: Record<string, unknown> };
     expect(tsconfig.compilerOptions.resolveJsonModule).toBe(true);
     const imports: string[] = [];
@@ -75,6 +75,6 @@ describe("production build", () => {
         imports.push(path.relative(root, target).split(path.sep).join("/"));
       }
     }
-    expect(imports).toEqual(["src/providers/model-catalog.json"]);
+    expect(imports).toEqual(["src/providers/provider-catalog.json", "src/providers/model-catalog.json"]);
   });
 });

@@ -24,8 +24,8 @@ const EXAMPLE_ADDRESS = {
   gemini: "https://generativelanguage.googleapis.com/v1beta",
 };
 
-/** A path segment that names an API version (`v1`, `v4`, `v1beta`…): the whole segment. */
-const VERSION_SEGMENT = /^v\d+[a-z]*$/;
+/** A path segment that names an API version (`v1`, `v4`, `v1beta`, `v1beta1`…): the whole segment. */
+const VERSION_SEGMENT = /^v\d+(?:[a-z]+\d*)?$/;
 /** The version the service appends to an address that names none, per type. */
 const DEFAULT_VERSION = { openai_chat: "v1", openai_responses: "v1", anthropic: "v1", gemini: "v1beta" };
 /** A plain DNS name as the URL parser leaves it (lower case, punycode): the service's rule for a host. */

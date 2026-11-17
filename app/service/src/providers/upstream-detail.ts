@@ -14,14 +14,42 @@ export const KEY_PIECE = 6;
 /** How much of an error body is read at most; the rest is not looked at. */
 export const DETAIL_BODY_BYTES = 64 * 1024;
 
+/** Whether `hay` holds a `size`-long run of `key` (the whole key when it is shorter), ignoring case when `caseless`. */
+function holdsRun(hay: string, key: string, size: number, caseless: boolean): boolean {
+  if (key === "") return false;
+  const k = caseless ? key.toLowerCase() : key;
+  const h = caseless ? hay.toLowerCase() : hay;
+  if (k.length < size) return h.includes(k);
+  const pieces = new Set<string>();
+  for (let i = 0; i + size <= k.length; i++) pieces.add(k.slice(i, i + size));
+  for (let i = 0; i + size <= h.length; i++) if (pieces.has(h.slice(i, i + size))) return true;
+  return false;
+}
+
 /** Whether `text` holds the key or any `KEY_PIECE`-long run of it, ignoring case. */
 export function holdsKeyPiece(text: string, apiKey: string): boolean {
-  const key = apiKey.toLowerCase();
-  const hay = text.toLowerCase();
-  if (key.length < KEY_PIECE) return key !== "" && hay.includes(key);
-  const pieces = new Set<string>();
-  for (let i = 0; i + KEY_PIECE <= key.length; i++) pieces.add(key.slice(i, i + KEY_PIECE));
-  for (let i = 0; i + KEY_PIECE <= hay.length; i++) if (pieces.has(hay.slice(i, i + KEY_PIECE))) return true;
+  return holdsRun(text, apiKey, KEY_PIECE, true);
+}
+
+/** Runs of this many characters of the key's base64 / base64url form count as the key (longer than a piece: fewer coincidences). */
+const ENCODED_PIECE = 8;
+
+/** `text` with `\uXXXX` escapes decoded. */
+const unescaped = (text: string): string => text.replace(/\\u([0-9a-fA-F]{4})/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+/** `text` with every white space, control and format character removed (escapes decoded first): the key spelled out in pieces. */
+const squashed = (text: string): string => unescaped(text).replace(/[\s\p{Cc}\p{Cf}]/gu, "");
+
+/** Whether `text` holds the key as it is, spelled out in pieces, as `\uXXXX` escapes, percent-encoded, or in base64 or base64url. */
+function leaksKey(text: string, apiKey: string): boolean {
+  const key = Buffer.from(apiKey, "utf8");
+  const b64 = key.toString("base64").replace(/=+$/, "");
+  const b64url = key.toString("base64url");
+  const percent = encodeURIComponent(apiKey);
+  for (const v of new Set([text, unescaped(text), squashed(text)])) {
+    if (holdsKeyPiece(v, apiKey)) return true;
+    if (holdsRun(v, b64, ENCODED_PIECE, false) || holdsRun(v, b64url, ENCODED_PIECE, false)) return true;
+    if (percent !== apiKey && holdsRun(v, percent, KEY_PIECE, true)) return true;
+  }
   return false;
 }
 
@@ -64,8 +92,11 @@ export function upstreamDetail(status: number | undefined, body: string | null, 
   const upstreamStatus = status === undefined ? {} : { upstreamStatus: String(status) };
   if (body === null || body === "") return upstreamStatus;
   const raw = jsonMessage(body) ?? body;
-  if (holdsKeyPiece(body, apiKey) || holdsKeyPiece(raw, apiKey)) return { ...upstreamStatus, message: null, redacted: true };
-  const message = bounded(cleaned(raw));
+  // The text that would be returned is checked as it is returned (cleaned), not only as it came: cleaning removes
+  // separators, and a key split by them would otherwise be put back together.
+  const text = cleaned(raw);
+  if (leaksKey(body, apiKey) || leaksKey(raw, apiKey) || leaksKey(text, apiKey)) return { ...upstreamStatus, message: null, redacted: true };
+  const message = bounded(text);
   return message === "" ? upstreamStatus : { ...upstreamStatus, message };
 }
 

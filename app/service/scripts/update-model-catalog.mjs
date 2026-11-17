@@ -71,6 +71,9 @@ export function reduceCatalog(models, api = {}) {
   return out.sort((a, b) => (a.id === b.id ? (a.lab < b.lab ? -1 : a.lab > b.lab ? 1 : 0) : a.id < b.id ? -1 : 1));
 }
 
+/** A plain DNS name as the URL parser leaves it (lower case, punycode): the service's rule for a host (no `${…}` placeholder, no space; a dot; letters, digits, hyphens). */
+export const DNS_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
 /** A model id as a provider's owner could add it: trimmed, 1–100 characters, one line. */
 const usableModelId = (id) => id !== "" && !CONTROL.test(id) && [...id].length <= 100;
 
@@ -95,7 +98,7 @@ export function reduceProviders(api) {
       continue;
     }
     const models = [...new Set(Object.keys(isObject(entry.models) ? entry.models : {}).map((m) => m.trim()))].filter(usableModelId).sort();
-    if (host === "" || models.length === 0) continue;
+    if (!DNS_NAME.test(host) || models.length === 0) continue;
     out.push({ id, hosts: [host], models });
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

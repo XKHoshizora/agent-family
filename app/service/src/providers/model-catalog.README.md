@@ -9,7 +9,7 @@ catalogue itself.
 - Fetched: 2026-11-17
 - Licence: MIT (below)
 - Entries: 631
-- Providers (provider-catalog.json): 294
+- Providers (provider-catalog.json): 292
 
 Each entry: `id` (the model id, lower case), `lab`, `name` (its display name), `vision` (takes images), `pdf` (takes
 PDFs), `reasoning`, `chat` (takes and answers text, and is not an embedding, reranking, speech, transcription, image,
