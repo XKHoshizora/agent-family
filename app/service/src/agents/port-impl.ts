@@ -54,7 +54,8 @@ const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
  * can still answer (not paused, not deleted, has a model) — however the run itself ended. A pause or delete drops what
  * was noted (runs.ts `interruptRuns`), and so does the Agent's leaving the run's group (group-leave.ts
  * `endRunsInGroup`); nothing is noted while the Agent is paused or out of that group, so what is noted on an
- * interrupted run came after the resume, and is answered.
+ * interrupted run came after the resume, and is answered. In a group, whether it is queued and as whose is runs.ts
+ * `queueFollowUp`'s: one only Agents' messages called for is not queued while the group is halted.
  */
 function followUpSeq(state: RunState, agent: AgentRow): number | null {
   const covers = Number(state.covers_seq ?? 0);
