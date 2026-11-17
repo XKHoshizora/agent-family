@@ -19,8 +19,9 @@ const { app, db } = useApp({
   env: {
     UPLOAD_IDLE_TIMEOUT_MS: String(IDLE_MS),
     UPLOAD_TOTAL_TIMEOUT_MS: String(TOTAL_MS),
-    HTTP_CONNECTION_TIMEOUT_MS: String(CONNECTION_IDLE_MS),
   },
+  // Below the 20 s start-up allows (a persona draft must answer 10 s before it): no draft is made here.
+  config: { httpConnectionTimeoutMs: CONNECTION_IDLE_MS },
 });
 afterEach(async () => {
   destroyOpenRequests();

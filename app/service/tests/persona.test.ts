@@ -5,9 +5,10 @@ import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import { ReplyStream } from "../src/agents/runtime/stream.ts";
 import { toStored, type MessageRow } from "../src/messages/model.ts";
 import { toWireFor } from "../src/messages/read.ts";
+import { buildApp } from "../src/app.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
-import { useApp } from "./helpers/harness.ts";
+import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { grant, runningRun } from "./helpers/metering.ts";
 import { scriptedGateway, type ReplyOptions } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
@@ -622,6 +623,29 @@ describe("drafting a persona", () => {
     const owner = await signUp(app, "nested");
     gateway.reply("<af-<af-x>persona>你是小橘。</af-<af-y>persona><af-pers");
     expect(await draft(owner, { name: "小橘", model: FAST })).toEqual({ status: 200, json: { persona: "你是小橘。" } });
+  });
+
+  it("is ended below the HTTP connection timeout: its deadline is the lesser of AGENT_RUN_TIMEOUT_MS and that timeout less 10 s", async () => {
+    // A connection idle for 10.4 s is closed by the server: the draft must have answered 10 s before, at 0.4 s here.
+    const hung = scriptedGateway();
+    const short = await buildApp(
+      { config: { ...app.deps.config, agentRunTimeoutMs: 120_000, httpConnectionTimeoutMs: 10_400 }, db, models: hung },
+      { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, staleRunSweep: false },
+    );
+    try {
+      const owner = await signUp(short, "deadline");
+      const hold = hung.hang();
+      const t0 = performance.now();
+      const answer = api(short, owner, "POST", "/api/agents/draft-persona", { name: "x", model: FAST });
+      const call = await hold.reached;
+      const outcome = await Promise.race([answer, new Promise((resolve) => setTimeout(() => resolve("still waiting after 3 s"), 3000))]);
+      expect(outcome).toEqual({ status: 502, json: { error: "provider_unavailable" } });
+      expect(performance.now() - t0).toBeGreaterThanOrEqual(350);
+      expect(call.signal.aborted).toBe(true);
+      expect(await runs(owner.id)).toEqual([{ purpose: "draft", status: "failed", error: "provider_unavailable", agent_id: null, conversation_id: null, hold: "0" }]);
+    } finally {
+      await short.close();
+    }
   });
 
   it("a draft that another instance's recovery ended during its call answers 503 busy and logs at warn that it ended elsewhere", async () => {

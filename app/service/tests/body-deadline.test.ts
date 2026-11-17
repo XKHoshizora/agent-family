@@ -20,8 +20,9 @@ const { app } = useApp({
     HTTP_BODY_TIMEOUT_MS: String(BODY_MS),
     UPLOAD_IDLE_TIMEOUT_MS: String(UPLOAD_IDLE_MS),
     UPLOAD_TOTAL_TIMEOUT_MS: String(UPLOAD_TOTAL_MS),
-    HTTP_CONNECTION_TIMEOUT_MS: String(CONNECTION_IDLE_MS),
   },
+  // Below the 20 s start-up allows (a persona draft must answer 10 s before it): no draft is made here.
+  config: { httpConnectionTimeoutMs: CONNECTION_IDLE_MS },
 });
 
 const sockets = new Set<net.Socket>();

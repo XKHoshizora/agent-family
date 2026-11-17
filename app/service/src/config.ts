@@ -285,6 +285,20 @@ export interface Config {
   sweepIntervalMinutes: number;
 }
 
+/** How long before the server closes an idle connection a persona draft must have answered on it. */
+export const DRAFT_SOCKET_MARGIN_MS = 10_000;
+/** The least a persona draft is given; a connection timeout that leaves less fails start-up. */
+export const MIN_DRAFT_DEADLINE_MS = 10_000;
+
+/**
+ * How long a persona draft's model call may take (`POST /api/agents/draft-persona`): `agentRunTimeoutMs`, but always
+ * `DRAFT_SOCKET_MARGIN_MS` below the server's connection idle timeout — the request waits for the model with nothing
+ * on the wire, and the server would close its connection before it could answer.
+ */
+export function draftDeadlineMs(config: Pick<Config, "agentRunTimeoutMs" | "httpConnectionTimeoutMs">): number {
+  return Math.min(config.agentRunTimeoutMs, config.httpConnectionTimeoutMs - DRAFT_SOCKET_MARGIN_MS);
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const parsed = envSchema.safeParse(env);
   if (!parsed.success) {
@@ -333,6 +347,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
   if (httpRequestTimeoutMs <= e.UPLOAD_TOTAL_TIMEOUT_MS) {
     throw new Error("Invalid configuration: HTTP_REQUEST_TIMEOUT_MS must be greater than UPLOAD_TOTAL_TIMEOUT_MS");
+  }
+  // A persona draft answers its request only when the model has: it must do so before the idle connection is closed.
+  if (e.HTTP_CONNECTION_TIMEOUT_MS - DRAFT_SOCKET_MARGIN_MS < MIN_DRAFT_DEADLINE_MS) {
+    throw new Error(
+      `Invalid configuration: HTTP_CONNECTION_TIMEOUT_MS (${e.HTTP_CONNECTION_TIMEOUT_MS}) must be at least ${DRAFT_SOCKET_MARGIN_MS + MIN_DRAFT_DEADLINE_MS}: a persona draft must answer ${DRAFT_SOCKET_MARGIN_MS / 1000} s before the connection's idle timeout, which would leave it less than ${MIN_DRAFT_DEADLINE_MS / 1000} s`,
+    );
   }
   return {
     databaseUrl: e.DATABASE_URL,

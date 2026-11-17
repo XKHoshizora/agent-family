@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import { lockAccount } from "../accounts/store.ts";
-import type { Config } from "../config.ts";
+import { draftDeadlineMs, type Config } from "../config.ts";
 import type { Db, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
@@ -309,7 +309,7 @@ const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const
  *    instruction, must hold the data (400 `context_too_small`); then admission (402 `no_quota`). Any refusal rolls all
  *    of it back: nothing is recorded, nothing called.
  * 2. The call: the fixed `DRAFT_INSTRUCTION` as the system text, the fields as data (`draftData`), reasoning `none`,
- *    ended after `agentRunTimeoutMs`. When `closing` aborts (the service is stopping), the call is abandoned and the
+ *    ended after `draftDeadlineMs` (`agentRunTimeoutMs`, but 10 s below the connection idle timeout). When `closing` aborts (the service is stopping), the call is abandoned and the
  *    run is ended as recovery would end it (`release`: `failed`, `provider_unavailable`, nothing charged; when that
  *    cannot be written it stays `running`, for the stale-run sweep or the next start); the caller is answered 503 `busy`.
  * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported) and the run ended
@@ -357,7 +357,7 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
   // From here until the draft has ended, the run is this process's: the stale-run sweep leaves it alone.
   inFlight.add(started.runId);
   try {
-    const deadline = AbortSignal.timeout(config.agentRunTimeoutMs);
+    const deadline = AbortSignal.timeout(draftDeadlineMs(config));
     let text = "";
     let reasoning = "";
     let finished: { usage: Usage | null } | null = null;

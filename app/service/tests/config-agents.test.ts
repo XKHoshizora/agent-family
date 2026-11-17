@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { loadConfig } from "../src/config.ts";
+import { draftDeadlineMs, loadConfig } from "../src/config.ts";
 
 const base = {
   DATABASE_URL: "postgres://x/y",
@@ -90,6 +90,18 @@ describe("agent and metering configuration", () => {
       providerDefaultContextTokens: 4097,
       providerDefaultMaxOutputTokens: 4096,
     });
+  });
+
+  test("a persona draft must answer before the connection's idle timeout: HTTP_CONNECTION_TIMEOUT_MS less 10 s must leave 10 s", () => {
+    // (The connection timeout must also exceed the upload idle deadline, lowered here so only this rule can refuse.)
+    const short = { ...base, UPLOAD_IDLE_TIMEOUT_MS: "1000" };
+    expect(() => loadConfig({ ...short, HTTP_CONNECTION_TIMEOUT_MS: "19999" })).toThrow(/HTTP_CONNECTION_TIMEOUT_MS/);
+    expect(() => loadConfig({ ...short, HTTP_CONNECTION_TIMEOUT_MS: "5000" })).toThrow(/persona draft/);
+    const config = loadConfig({ ...short, HTTP_CONNECTION_TIMEOUT_MS: "20000" });
+    expect(draftDeadlineMs(config)).toBe(10_000);
+    expect(draftDeadlineMs(loadConfig(base))).toBe(110_000); // the defaults: 120 s connection, 120 s runs
+    expect(draftDeadlineMs(loadConfig({ ...base, AGENT_RUN_TIMEOUT_MS: "30000" }))).toBe(30_000);
+    expect(draftDeadlineMs(loadConfig({ ...base, AGENT_RUN_TIMEOUT_MS: "1000" }))).toBe(1_000);
   });
 
   test("PROVIDER_KEY_SECRET is required and at least 32 characters", () => {

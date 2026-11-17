@@ -101,7 +101,9 @@ out but the client is still sending; `src/body-deadline.ts`; the two uploads are
 out of it once they let a body in: an attachment upload when its checks have passed and its own deadlines start, an
 avatar upload when its sender is signed in), and the server-wide `HTTP_CONNECTION_TIMEOUT_MS` (socket idle,
 default 2 min), `HTTP_REQUEST_TIMEOUT_MS` (whole request, default the upload total + 1 min; with the body
-deadline it only matters for the uploads) and `HTTP_KEEP_ALIVE_TIMEOUT_MS` (default 72 s). The server-wide ones
+deadline it only matters for the uploads) and `HTTP_KEEP_ALIVE_TIMEOUT_MS` (default 72 s). `HTTP_CONNECTION_TIMEOUT_MS`
+must be at least 20 s (else start-up fails naming it): a persona draft's request waits for the model with nothing on the
+wire, so its deadline is `AGENT_RUN_TIMEOUT_MS` but at most this less 10 s (110 s with the defaults). The server-wide ones
 must be longer than the upload deadlines (checked at start-up), so attachment uploads are governed by their own
 deadlines and a signed-in avatar upload by the server-wide ones; WebSockets are subject to none of them (an
 upgrade has no body).
@@ -403,8 +405,9 @@ save the Agent to keep it.
   provider key that cannot be opened).
 - The call failing: 502 `provider_rejected` / `provider_unavailable`, 400 `address_not_allowed`, charged as a failed
   reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
-  `AGENT_RUN_TIMEOUT_MS` (2 minutes) the call is ended: what it had written is the answer (nothing: 502
-  `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the stopping
+  its deadline — `AGENT_RUN_TIMEOUT_MS`, but at most `HTTP_CONNECTION_TIMEOUT_MS` less 10 s, so it answers before the
+  server closes the idle connection (110 s with the defaults) — the call is ended: what it had written is the answer
+  (nothing: 502 `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the stopping
   service ends the run as recovery would (`failed`, `provider_unavailable`, nothing charged; Agents and runs, Recovery);
   if that cannot be written within its 5 s, the run is released by the stale-run sweep or the next start. When the run was ended elsewhere while the model was
   answering (another instance's recovery, or the stale-run sweep), nothing more is recorded and the answer is 503

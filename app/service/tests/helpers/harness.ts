@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, beforeEach } from "vitest";
 import { buildApp, type BuildOptions, type Deps } from "../../src/app.ts";
-import { loadConfig } from "../../src/config.ts";
+import { loadConfig, type Config } from "../../src/config.ts";
 import { createDb, type Db } from "../../src/db.ts";
 import { testDatabaseUrl } from "./env.ts";
 
@@ -34,12 +34,14 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * routes reach a provider. `agentWorker: false` turns the
  * reply worker's background loop off: the test then runs replies itself with `app.agentWorker.runOnce()`. The stale-run
  * sweep's timer is off unless `staleRunSweep` asks for it (`app.staleRunSweep.run()` sweeps by hand).
+ * `config` replaces fields of the loaded configuration, past `loadConfig`'s rules (a file that needs a value they
+ * refuse, such as a connection timeout of under a second, for what it tests; nothing else is affected).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe">> & { env?: Record<string, string> } & BuildOptions = {},
+  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe">> & { env?: Record<string, string>; config?: Partial<Config> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, ...overrides } = extra;
+  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, ...overrides } = extra;
   const options: BuildOptions = {
     answerFloor,
     staleRunSweep,
@@ -69,16 +71,19 @@ export function useApp(
       previous.set(name, process.env[name]);
       process.env[name] = value;
     }
-    const config = loadConfig({
-      ...process.env,
-      DATABASE_URL: testDatabaseUrl(),
-      AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
-      PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
-      APP_ORIGIN: "http://localhost:5173",
-      RATE_LIMIT_SCALE: "1000",
-      SWEEP_INTERVAL_MINUTES: "0", // no background timer unless a test asks for one
-      ...env,
-    });
+    const config = {
+      ...loadConfig({
+        ...process.env,
+        DATABASE_URL: testDatabaseUrl(),
+        AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+        PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
+        APP_ORIGIN: "http://localhost:5173",
+        RATE_LIMIT_SCALE: "1000",
+        SWEEP_INTERVAL_MINUTES: "0", // no background timer unless a test asks for one
+        ...env,
+      }),
+      ...configured,
+    };
     database = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });
     instance = await buildApp({ config, db: database, ...overrides }, options);
     await instance.ready();
