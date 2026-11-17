@@ -1,4 +1,4 @@
-import React, { useId, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { commonErrorText } from "../data/errorTexts.js";
 import { HANDLE_PATTERN, agentName as agentNameProblem, handle as handleProblem } from "../auth/validation.js";
@@ -52,9 +52,31 @@ export function suggestHandle(name, random) {
 /** The persona as it is sent: NUL dropped (the service refuses it), trimmed (the service stores it trimmed). */
 const personaOf = (text) => text.replaceAll("\u0000", "").trim();
 
+/** The editable fields of a record (an Agent of the view model, or none), as the form holds them. */
+const recordFields = (a) => ({
+  name: a?.name ?? "",
+  intro: a?.intro ?? "",
+  field: a?.field ?? "",
+  persona: a?.persona ?? "",
+  replyMode: a?.replyMode ?? "always",
+  reasoning: a?.reasoning ?? "none",
+  model: modelKey(a?.model ?? null),
+});
+
+/** A field of the form as it would be stored (the text fields trimmed), to compare with the record. */
+const storedValue = (key, f) => {
+  if (key === "persona") return personaOf(f.persona);
+  if (key === "name" || key === "intro" || key === "field") return f[key].trim();
+  return f[key];
+};
+
 /**
  * Create (no `agent`) or edit one of my Agents: the prototype's form with the avatar, the account name, the model and
  * its reasoning level, and the persona (with 帮我起草) in place of the role. Refusals are shown in the form, never toasted.
+ *
+ * Editing sends only the fields the owner changed. While the form is open the record may change elsewhere (another
+ * device, a confirmed persona proposal): a field the owner has not touched then shows the new value; a field they have
+ * touched keeps their text, and a notice says that saving overwrites it.
  */
 export function AgentForm({ agent = null }) {
   const { state, dispatch, actions } = useStore();
@@ -63,24 +85,48 @@ export function AgentForm({ agent = null }) {
   const formRef = useRef(null);
   const personaId = useId();
   const [random] = useState(randomPart);
-  const [f, setF] = useState(() => ({
-    name: agent?.name ?? "",
-    handle: agent ? "" : suggestHandle("", random),
-    intro: agent?.intro ?? "",
-    field: agent?.field ?? "",
-    persona: agent?.persona ?? "",
-    replyMode: agent?.replyMode ?? "always",
-    reasoning: agent?.reasoning ?? "none",
-    model: modelKey(agent?.model ?? null),
-  }));
+  const [f, setF] = useState(() => ({ ...recordFields(agent), handle: agent ? "" : suggestHandle("", random) }));
   const [handleTyped, setHandleTyped] = useState(false);
   const [touched, setTouched] = useState(false);
+  /** The avatar picked and not sent yet (sent after the create, or with the save). */
   const [avatarFile, setAvatarFile] = useState(null);
+  /** Why the avatar of the last save did not upload (the rest was saved). */
+  const [avatarError, setAvatarError] = useState("");
   /** The service's refusal of the last create or save: {code, text}. */
   const [refusal, setRefusal] = useState(null);
   /** The outcome of the last 帮我起草: {done: true} or {error: text}. */
   const [draftNote, setDraftNote] = useState(null);
   const [confirmDraft, setConfirmDraft] = useState(false);
+  const [confirmLeave, setConfirmLeave] = useState(false);
+  /** The fields the owner changed (typed, chosen, drafted); only these are ever sent when editing. */
+  const edited = useRef(new Set());
+  /** The record's fields as this form last saw them, to tell what changed elsewhere. */
+  const record = recordFields(agent);
+  const recordKey = JSON.stringify(record);
+  const seen = useRef(record);
+  const current = useRef(f);
+  current.current = f;
+  const [changedElsewhere, setChangedElsewhere] = useState(false);
+  const editing = agent !== null;
+
+  // Keyed by the record's values (the view model makes a new Agent object whenever anything changes).
+  useEffect(() => {
+    if (!editing) return;
+    const now = JSON.parse(recordKey);
+    const before = seen.current;
+    seen.current = now;
+    const changed = Object.keys(now).filter((key) => now[key] !== before[key]);
+    const theirs = changed.filter((key) => !edited.current.has(key));
+    if (theirs.length > 0) {
+      setF((cur) => {
+        const next = { ...cur };
+        for (const key of theirs) next[key] = now[key];
+        return next;
+      });
+    }
+    // A field I changed that now differs from the record (my own save brings back what I typed: no notice).
+    if (changed.some((key) => edited.current.has(key) && storedValue(key, current.current) !== now[key])) setChangedElsewhere(true);
+  }, [recordKey, editing]);
 
   const options = choiceList(sources, agent?.model ?? null, agent?.reasoning ?? "none");
   const choice = sources.status === "ready" ? options.find((o) => o.key === f.model) ?? null : null;
@@ -114,10 +160,12 @@ export function AgentForm({ agent = null }) {
 
   const set = (key) => (event) => {
     const value = event.target.value;
+    edited.current.add(key);
     setF((cur) => ({ ...cur, [key]: value }));
   };
   const setName = (event) => {
     const value = event.target.value;
+    edited.current.add("name");
     setF((cur) => ({ ...cur, name: value, handle: agent || handleTyped ? cur.handle : suggestHandle(value, random) }));
   };
   const setHandle = (event) => {
@@ -128,15 +176,27 @@ export function AgentForm({ agent = null }) {
   };
   const setModel = (key) => {
     const next = options.find((o) => o.key === key);
-    setF((cur) => ({ ...cur, model: key, reasoning: next?.levels.includes(cur.reasoning) ? cur.reasoning : "none" }));
+    const level = next?.levels.includes(f.reasoning) ? f.reasoning : "none";
+    edited.current.add("model");
+    // A level the new model does not take is reset, and that is a change of mine too.
+    if (level !== f.reasoning) edited.current.add("reasoning");
+    setF((cur) => ({ ...cur, model: key, reasoning: level }));
   };
   const setPersona = (event) => {
     const value = event.target.value;
+    edited.current.add("persona");
     setF((cur) => ({ ...cur, persona: value }));
-    if (draftNote?.done) setDraftNote(null);
+    // Whatever the last draft said is about text that is no longer there.
+    if (draftNote) setDraftNote(null);
+  };
+  const pickAvatar = (file) => {
+    setAvatarFile(file);
+    setAvatarError("");
   };
 
   const back = () => dispatch({ type: "nav", patch: { agentView: "detail", pane: agent ? "main" : "list" } });
+  // Editing: an avatar picked and not saved is not dropped without asking.
+  const leave = () => (agent && avatarFile ? setConfirmLeave(true) : back());
 
   /** A refusal to show in the form (`busy_here`: another action of this form is running, nothing to say). */
   const refused = (error) => {
@@ -186,22 +246,38 @@ export function AgentForm({ agent = null }) {
   };
 
   const save = async () => {
+    // Only what I changed, and only where it differs from the record as it is now: a field I did not touch is never
+    // sent, so a change made elsewhere meanwhile is not overwritten by the value this form opened with.
+    const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
     const patch = {};
-    if (name !== agent.name) patch.name = name;
-    if (intro !== agent.intro) patch.intro = intro;
-    if (field !== agent.field) patch.field = field;
-    if (persona !== agent.persona) patch.persona = persona;
-    if (f.replyMode !== agent.replyMode) patch.replyMode = f.replyMode;
-    // The service checks the model and the reasoning level together: a new model goes with its level.
-    const modelChanged = !choice.stale && choice.key !== modelKey(agent.model);
+    for (const key of ["name", "intro", "field", "persona", "replyMode"]) if (mine(key)) patch[key] = storedValue(key, f);
+    // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
+    // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
+    const modelChanged = mine("model") && !choice.stale;
     if (modelChanged) patch.model = choice.model;
-    if (modelChanged || reasoning !== agent.reasoning) patch.reasoning = reasoning;
-    if (Object.keys(patch).length === 0) {
+    if (modelChanged || (edited.current.has("reasoning") && reasoning !== record.reasoning)) patch.reasoning = reasoning;
+    const changes = Object.keys(patch).length > 0;
+    if (!changes && !avatarFile) {
       back();
       return;
     }
-    const res = await run("save", () => settled(actions.patchAgent(agent.id, patch)), () => "");
+    setAvatarError("");
+    const res = await run(
+      "save",
+      async () => {
+        if (changes) await settled(actions.patchAgent(agent.id, patch));
+        if (!avatarFile) return null;
+        const upload = await actions.uploadAgentAvatar(agent.id, avatarFile);
+        return upload.ok ? null : upload.text;
+      },
+      () => "",
+    );
     if (!res.ok) return refused(res.error);
+    if (res.value) {
+      // The rest is saved (my fields now equal the record): saving again sends the avatar alone.
+      setAvatarError(changes ? `其他修改已保存，但头像没有上传成功：${res.value}` : `头像没有上传成功：${res.value}`);
+      return;
+    }
     dispatch({ type: "nav", patch: { agentView: "detail" } });
   };
 
@@ -234,6 +310,7 @@ export function AgentForm({ agent = null }) {
       setDraftNote({ error: commonErrorText(null) });
       return;
     }
+    edited.current.add("persona");
     setF((cur) => ({ ...cur, persona: res.value.persona }));
     setDraftNote({ done: true });
   };
@@ -251,7 +328,7 @@ export function AgentForm({ agent = null }) {
 
   return (
     <section className="page" aria-label={agent ? "编辑 Agent" : "创建 Agent"}>
-      <button type="button" className="back" onClick={back}>
+      <button type="button" className="back" onClick={leave}>
         <ChevronLeft size={20} aria-hidden="true" /> 返回
       </button>
       <header className="profile-head">
@@ -261,13 +338,17 @@ export function AgentForm({ agent = null }) {
         </div>
       </header>
       <form ref={formRef} className="page-body form" onSubmit={submit} noValidate>
+        {changedElsewhere && <Notice tone="warn">这个 Agent 的配置刚刚在别处有改动，保存会用你这里的内容覆盖你改过的几项。</Notice>}
         <div className="field">
           <span className="field-label">头像</span>
-          {agent ? (
-            <AvatarEditor id={agent.id} upload={(file) => settled(actions.uploadAgentAvatar(agent.id, file))} errorText={refusalText} />
-          ) : (
-            <AvatarEditor id={null} onPick={setAvatarFile} disabled={busy !== null} />
-          )}
+          {/* Held until the form is saved (after the Agent is created, or with the other changes). */}
+          <AvatarEditor
+            id={agent ? agent.id : null}
+            onPick={pickAvatar}
+            disabled={busy !== null}
+            hint={agent ? "支持 PNG、JPEG、WebP，不超过 2 MB；保存后生效。" : undefined}
+          />
+          {avatarError && <p className="field-msg" role="alert">{avatarError}</p>}
         </div>
         <Field label="名称" error={shown("name")}>
           <input value={f.name} onChange={setName} autoComplete="off" placeholder="例如：我的美食助手" />
@@ -339,7 +420,7 @@ export function AgentForm({ agent = null }) {
         {refusal && refusal.code !== "handle_taken" && <Notice tone="warn">{limitText}</Notice>}
         <div className="form-actions">
           <Reason>{blockReason}</Reason>
-          <Btn onClick={back}>取消</Btn>
+          <Btn onClick={leave}>取消</Btn>
           <Btn variant="primary" type="submit" disabled={Boolean(blockReason) || busy !== null} reason={blockReason}>
             {busy === "save" ? (agent ? "保存中…" : "创建中…") : agent ? "保存" : "创建 Agent"}
           </Btn>
@@ -357,6 +438,20 @@ export function AgentForm({ agent = null }) {
           }
         >
           <p>起草的内容会替换人格文档里现有的文字。</p>
+        </Modal>
+      )}
+      {confirmLeave && (
+        <Modal
+          title="放弃新头像？"
+          onClose={() => setConfirmLeave(false)}
+          footer={
+            <>
+              <Btn data-autofocus onClick={() => setConfirmLeave(false)}>继续编辑</Btn>
+              <Btn variant="danger" onClick={back}>放弃</Btn>
+            </>
+          }
+        >
+          <p>头像还没有保存，确定放弃吗？</p>
         </Modal>
       )}
     </section>

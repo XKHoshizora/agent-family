@@ -28,7 +28,7 @@ import {
   usageOf,
   wire,
 } from "./fixtures.js";
-import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, rowNames, toastText } from "./harness.jsx";
+import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, push, rowNames, toastText } from "./harness.jsx";
 
 beforeEach(() => {
   installBrowser();
@@ -412,6 +412,9 @@ describe("帮我起草", () => {
     });
     await click(inMain().getByRole("button", { name: "帮我起草" }));
     expect(field.textContent).toContain("所选模型的上下文太小，放不下起草所需的内容，请换一个模型。");
+    fireEvent.change(personaBox(), { target: { value: "我自己来写" } });
+    expect(field.textContent).not.toContain("所选模型的上下文太小");
+    expect(field.querySelector('[role="alert"]')).toBeNull();
   });
 });
 
@@ -503,6 +506,144 @@ describe("editing an Agent", () => {
     expect(document.querySelector(".main-col .profile-head h2").textContent).toContain("已删除");
     expect(inMain().queryByRole("button", { name: "保存" })).toBeNull();
     expect(toastText()).toBeNull();
+  });
+
+  const CHANGED_ELSEWHERE = "这个 Agent 的配置刚刚在别处有改动，保存会用你这里的内容覆盖你改过的几项。";
+  /** The record changes elsewhere while the form is open (another device, a confirmed proposal): an `agent` push. */
+  const changeElsewhere = async (app, fields) => {
+    app.transport.handlers.agent = () => ({ ...agent(), ...fields });
+    await push(app.transport, { type: "agent", id: AG1 });
+    await flush();
+  };
+  const openEdit = async (api = {}) => {
+    const app = await openAgents({ agents: [agent()], api });
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    return app;
+  };
+
+  it("a field changed elsewhere that I did not touch shows the new value and is not sent back", async () => {
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...agent(), persona: "别处改的人格", personaVersion: 2, ...patch }));
+    const app = await openEdit({ patchAgent });
+    await changeElsewhere(app, { persona: "别处改的人格", personaVersion: 2 });
+    expect(personaBox().value).toBe("别处改的人格");
+    type("简介", "新简介");
+    expect(mainText()).not.toContain(CHANGED_ELSEWHERE);
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent).toHaveBeenCalledTimes(1);
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+  });
+
+  it("a field I touched that changes elsewhere keeps my text, says that saving overwrites it, and sends only mine", async () => {
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...agent(), ...patch }));
+    const app = await openEdit({ patchAgent });
+    fireEvent.change(personaBox(), { target: { value: "我改过的人格" } });
+    await changeElsewhere(app, { persona: "别处改的人格", personaVersion: 2, intro: "别处改的简介" });
+    expect(personaBox().value).toBe("我改过的人格");
+    expect(inMain().getByLabelText("简介").value).toBe("别处改的简介");
+    expect(mainText()).toContain(CHANGED_ELSEWHERE);
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[0][1]).toEqual({ persona: "我改过的人格" });
+  });
+
+  it("a stored reasoning level the model no longer takes is not reset by saving another field", async () => {
+    const stale = agentOf(AG1, { intro: "旧简介", model: { source: "site", id: "free-1" }, reasoning: "high" });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...stale, ...patch }));
+    await openAgents({ agents: [stale], api: { patchAgent } });
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(inMain().queryByLabelText("思考程度")).toBeNull();
+    type("简介", "新简介");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+  });
+
+  describe("the avatar", () => {
+    const png = () => fakeFile("bot.png", 1000, "image/png");
+    const pick = async (file) => {
+      fireEvent.change(inMain().getByLabelText("选择头像图片"), { target: { files: [file] } });
+      await flush();
+    };
+
+    it("is held and sent by 保存, after the other changes; the form has no separate 保存头像", async () => {
+      const order = [];
+      const patchAgent = vi.fn(async (_id, patch) => {
+        order.push("patch");
+        return { ...agent(), ...patch };
+      });
+      const uploadAgentAvatar = vi.fn(async () => {
+        order.push("avatar");
+        return { ok: true };
+      });
+      await openEdit({ patchAgent, uploadAgentAvatar });
+      const file = png();
+      await pick(file);
+      expect(document.querySelector('img[alt="新头像预览"]')).toBeTruthy();
+      expect(inMain().queryByRole("button", { name: "保存头像" })).toBeNull();
+      expect(uploadAgentAvatar).not.toHaveBeenCalled();
+      type("简介", "新简介");
+      await click(inMain().getByRole("button", { name: "保存" }));
+      expect(order).toEqual(["patch", "avatar"]);
+      expect(uploadAgentAvatar).toHaveBeenCalledWith(AG1, file);
+      expect(document.querySelector(".main-col .lead").textContent).toBe("新简介");
+    });
+
+    it("alone, 保存 uploads it without any other request", async () => {
+      const patchAgent = vi.fn();
+      const uploadAgentAvatar = vi.fn(async () => ({ ok: true }));
+      await openEdit({ patchAgent, uploadAgentAvatar });
+      await pick(png());
+      await click(inMain().getByRole("button", { name: "保存" }));
+      expect(uploadAgentAvatar).toHaveBeenCalledTimes(1);
+      expect(patchAgent).not.toHaveBeenCalled();
+      expect(document.querySelector(".main-col [role=tablist]")).toBeTruthy();
+    });
+
+    it("that fails to upload keeps the form, says the rest was saved, and is sent alone when saving again", async () => {
+      const patchAgent = vi.fn(async (_id, patch) => ({ ...agent(), ...patch }));
+      const uploadAgentAvatar = vi.fn(async () => {
+        throw apiError(413, "too_large");
+      });
+      await openEdit({ patchAgent, uploadAgentAvatar });
+      await pick(png());
+      type("简介", "新简介");
+      await click(inMain().getByRole("button", { name: "保存" }));
+      expect(mainText()).toContain("其他修改已保存，但头像没有上传成功：头像不能超过 2 MB。");
+      expect(toastText()).toBeNull();
+      expect(inMain().getByLabelText("简介").value).toBe("新简介");
+      uploadAgentAvatar.mockImplementation(async () => ({ ok: true }));
+      await click(inMain().getByRole("button", { name: "保存" }));
+      expect(patchAgent).toHaveBeenCalledTimes(1);
+      expect(uploadAgentAvatar).toHaveBeenCalledTimes(2);
+      expect(document.querySelector(".main-col [role=tablist]")).toBeTruthy();
+    });
+
+    it("picked and not saved: 取消 asks once before dropping it", async () => {
+      const uploadAgentAvatar = vi.fn();
+      await openEdit({ uploadAgentAvatar });
+      await pick(png());
+      await click(inMain().getByRole("button", { name: "取消" }));
+      expect(dialog().textContent).toContain("头像还没有保存，确定放弃吗？");
+      await click(within(dialog()).getByRole("button", { name: "继续编辑" }));
+      expect(dialog()).toBeNull();
+      expect(inMain().getByLabelText("简介")).toBeTruthy();
+      await click(inMain().getByRole("button", { name: "取消" }));
+      await click(within(dialog()).getByRole("button", { name: "放弃" }));
+      expect(document.querySelector(".main-col [role=tablist]")).toBeTruthy();
+      expect(uploadAgentAvatar).not.toHaveBeenCalled();
+    });
+
+    it("nothing picked, or the pick dropped (不用这张): 取消 leaves at once and nothing is uploaded", async () => {
+      const uploadAgentAvatar = vi.fn();
+      await openEdit({ uploadAgentAvatar });
+      await pick(png());
+      await click(inMain().getByRole("button", { name: "不用这张" }));
+      expect(document.querySelector('img[alt="新头像预览"]')).toBeNull();
+      await click(inMain().getByRole("button", { name: "取消" }));
+      expect(dialog()).toBeNull();
+      expect(document.querySelector(".main-col [role=tablist]")).toBeTruthy();
+      expect(uploadAgentAvatar).not.toHaveBeenCalled();
+    });
   });
 });
 

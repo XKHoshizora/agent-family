@@ -22,9 +22,10 @@ export function avatarFileProblem(file) {
  *   when it fails, `doneText` when it worked. My own avatar, an existing Agent's.
  * - With `onPick(file | null)` instead: the picked file is only held, for the page to send later (a new Agent's, once
  *   it exists). `disabled` while the page is busy.
- * `id`: whose avatar shows while nothing is picked (null: the blank one of an Agent not created yet).
+ * `id`: whose avatar shows while nothing is picked (null: the blank one of an Agent not created yet). `hint` replaces the
+ * line under it (the formats and the size, by default).
  */
-export function AvatarEditor({ id = ME, upload, errorText, doneText = "头像已更新", onPick, disabled = false }) {
+export function AvatarEditor({ id = ME, upload, errorText, doneText = "头像已更新", onPick, disabled = false, hint }) {
   const { dispatch } = useStore();
   const { busy, run } = useAction();
   const [picked, setPicked] = useState(null);
@@ -80,7 +81,8 @@ export function AvatarEditor({ id = ME, upload, errorText, doneText = "头像已
     buttons = picked ? (
       <>
         <Btn disabled={disabled} onClick={browse}>换一张</Btn>
-        <Btn disabled={disabled} onClick={drop}>取消</Btn>
+        {/* Not "取消": the form around it has its own. */}
+        <Btn disabled={disabled} onClick={drop}>不用这张</Btn>
       </>
     ) : (
       <Btn disabled={disabled} onClick={browse}>选择头像</Btn>
@@ -112,7 +114,7 @@ export function AvatarEditor({ id = ME, upload, errorText, doneText = "头像已
         {buttons}
       </div>
       <p className={error ? "field-msg" : "field-hint"} role={error ? "alert" : undefined}>
-        {error || (held ? "支持 PNG、JPEG、WebP，不超过 2 MB；不选择则使用默认头像。" : "支持 PNG、JPEG、WebP，不超过 2 MB。")}
+        {error || hint || (held ? "支持 PNG、JPEG、WebP，不超过 2 MB；不选择则使用默认头像。" : "支持 PNG、JPEG、WebP，不超过 2 MB。")}
       </p>
     </div>
   );
