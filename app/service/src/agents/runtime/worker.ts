@@ -1,6 +1,6 @@
 import { ModelError, type ModelGateway } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
-import { BUSY, isRunEnd, NOTHING, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
+import { BUSY, isRunEnd, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
 import { ReplyStream } from "./stream.ts";
 
 /**
@@ -18,6 +18,7 @@ export const MAX_RUNS_IN_FLIGHT = 8;
 
 export interface WorkerLog {
   error(details: Record<string, unknown>, msg: string): void;
+  warn(details: Record<string, unknown>, msg: string): void;
 }
 
 export interface WorkerOptions {
@@ -147,7 +148,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     } catch (err) {
       // The service is closing before the call was admitted: the run stays running, to be recovered at the next start.
       if (shutdown.aborted) return;
-      log.error({ err, runId: run.id }, "agent run: could not start");
+      // Ended elsewhere meanwhile (another instance's recovery, or the stale-run sweep): expected, not an error; `finish`
+      // then finds it ended and changes nothing.
+      if (err instanceof RunNotRunning) log.warn({ runId: run.id, status: err.status }, "agent run: ended elsewhere before it could start; nothing is called");
+      else log.error({ err, runId: run.id }, "agent run: could not start");
       return finish(run, BUSY, null, NOTHING);
     }
     if (isRunEnd(prepared)) return finish(run, prepared, null, NOTHING);

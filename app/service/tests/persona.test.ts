@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { draftText, parseProposalBlock, PROPOSAL_PLACEHOLDER, renderProposalBlock } from "../src/agents/persona.ts";
+import { recoverRuns } from "../src/agents/port-impl.ts";
 import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import { ReplyStream } from "../src/agents/runtime/stream.ts";
 import { toStored, type MessageRow } from "../src/messages/model.ts";
@@ -621,6 +622,23 @@ describe("drafting a persona", () => {
     const owner = await signUp(app, "nested");
     gateway.reply("<af-<af-x>persona>你是小橘。</af-<af-y>persona><af-pers");
     expect(await draft(owner, { name: "小橘", model: FAST })).toEqual({ status: 200, json: { persona: "你是小橘。" } });
+  });
+
+  it("a draft that another instance's recovery ended during its call answers 503 busy and logs at warn that it ended elsewhere", async () => {
+    const owner = await signUp(app, "elsewhere");
+    const hold = gateway.hang();
+    const answer = draft(owner, { name: "x", model: FAST });
+    await hold.reached;
+    const runId = (await db.query<{ id: string }>("select id from agent_runs where owner_id = $1", [owner.id])).rows[0]!.id;
+    // What a second instance does at its start: it ends the run (failed, released, recorded).
+    expect(await recoverRuns(db, app.deps.config, app.log)).toBe(1);
+    lines.length = 0;
+    hold.release("你是一个助手。");
+    expect(await answer).toEqual({ status: 503, json: { error: "busy" } });
+    const logged = lines.map((l) => JSON.parse(l) as { msg: string; runId?: string; level: number }).filter((l) => l.runId === runId);
+    expect(logged).toEqual([expect.objectContaining({ runId, level: 40, msg: expect.stringMatching(/persona draft: .*ended elsewhere/) })]);
+    expect(await runs(owner.id)).toEqual([{ purpose: "draft", status: "failed", error: "provider_unavailable", agent_id: null, conversation_id: null, hold: "0" }]);
+    expect(await records(owner.id)).toHaveLength(1);
   });
 
   it("a draft whose settlement fails is logged with its run id (and answered 500)", async () => {

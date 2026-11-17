@@ -40,8 +40,11 @@ afterEach(async () => {
 });
 
 /** A new app on the test database (as if the service started), ready, its worker driven by hand. */
-async function start(models: ModelGateway, blobs: BlobStore = store.blobs): Promise<FastifyInstance> {
-  const app = await buildApp({ config: base.deps.config, db, models, blobs }, { agentWorker: false, answerFloor: NO_ANSWER_FLOOR });
+async function start(models: ModelGateway, blobs: BlobStore = store.blobs, lines?: string[]): Promise<FastifyInstance> {
+  const app = await buildApp(
+    { config: base.deps.config, db, models, blobs },
+    { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, ...(lines ? { logStream: { write: (l: string) => void lines.push(l) } } : {}) },
+  );
   await app.ready();
   open.push(app);
   return app;
@@ -313,6 +316,45 @@ describe("a second instance started while the first still answers (a deploy wher
     expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
     expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
     expect(after.calls).toHaveLength(0);
+  });
+});
+
+describe("a run another instance ended while this one was still starting it", () => {
+  it("is not started: the worker logs it at warn (not as an error) and records nothing more", async () => {
+    let open!: () => void;
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => (reached = resolve));
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    store.probe.beforeGet = async () => {
+      reached();
+      await gate;
+    };
+    const lines: string[] = [];
+    const before = scriptedGateway();
+    const old = await start(before, store.blobs, lines);
+    const { owner, agent, conv } = await owned(old, "startled");
+    const upload = await old.inject({
+      method: "POST",
+      url: `/api/conversations/${conv}/attachments`,
+      headers: { cookie: owner.cookie, "content-type": MULTIPART },
+      payload: multipart([{ name: "file", filename: "notes.txt", type: "text/plain", data: "一些笔记" }]),
+    });
+    expect((await api(old, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId: upload.json().id, clientTxn: "rs-startled" })).status).toBe(201);
+    const running = old.agentWorker.runOnce();
+    await reading; // begin's step 2
+    const run = await latestRun(old, owner, conv);
+
+    await start(scriptedGateway()); // a second instance: its recovery ends the run
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    open();
+    await running;
+
+    expect(before.calls).toHaveLength(0);
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(run.id)).toHaveLength(1);
+    expect(await db.query("select 1 from messages where sender_id = $1", [agent.id]).then((r) => r.rowCount)).toBe(0);
+    const about = lines.map((l) => JSON.parse(l) as { msg: string; runId?: string; level: number }).filter((l) => l.runId === run.id);
+    expect(about).toEqual([expect.objectContaining({ level: 40, msg: expect.stringMatching(/ended elsewhere/) })]);
   });
 });
 

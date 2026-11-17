@@ -53,6 +53,21 @@ export const BUSY: RunEnd = { status: "failed", error: "busy" };
 /** No tokens at all: what a run that never called a model, or one recovered at start-up, is settled on. */
 export const NOTHING: Readonly<{ inputChars: number; outputChars: number }> = { inputChars: 0, outputChars: 0 };
 
+/**
+ * The run is no longer `running`: something else ended it meanwhile — another instance's recovery at its start (a
+ * deploy where old and new instances overlap), or the stale-run sweep. `begin` and `post` refuse it so; nothing more of
+ * it is called, posted or recorded, and it stays as that recovery recorded it.
+ */
+export class RunNotRunning extends Error {
+  constructor(
+    readonly runId: string,
+    readonly status: string | null,
+  ) {
+    super(`run ${runId} is ${status ?? "gone"}, not running`);
+    this.name = "RunNotRunning";
+  }
+}
+
 /** A piece of the reply on its way to the owner's sockets. */
 export interface Delta {
   text?: string;
@@ -77,7 +92,8 @@ export interface AgentPort {
   claimNext(): Promise<RunTicket | null>;
   /**
    * Resolves the model, builds what the model is shown (never no turn at all), admits the call and marks the Agent's
-   * read position — or says why the run ends at once. Reading the attachments stops between files once the run should
+   * read position — or says why the run ends at once; rejects with `RunNotRunning` when the run was ended elsewhere
+   * meanwhile. Reading the attachments stops between files once the run should
    * stop (it then ends as `shouldStop` says) and is bounded by the run's time limit (`failed`, `busy`). `closing`
    * aborts when the service is closing: before the call is admitted, `begin` then rejects with its reason and records
    * nothing — the run stays `running`, unadmitted, for the next start to recover.

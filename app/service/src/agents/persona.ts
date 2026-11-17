@@ -383,8 +383,16 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
         ? UNAVAILABLE
         : ({ status: "done" } as const);
   const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
+  let endedElsewhere: string | null = null;
   try {
     await db.tx(async (t) => {
+      // The run row first (the order `settle` keeps): one that is no longer running was ended elsewhere meanwhile —
+      // another instance's recovery or the stale-run sweep settled it already; nothing more is recorded.
+      const now = await t.query<{ status: string }>("select status from agent_runs where id = $1 for update", [started.runId]);
+      if (now.rows[0]?.status !== "running") {
+        endedElsewhere = now.rows[0]?.status ?? "gone";
+        return;
+      }
       await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { log });
       await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
         started.runId,
@@ -393,9 +401,14 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
       ]);
     });
   } catch (err) {
-    // Nothing of it was recorded: the run stays running, its hold counting, until the next start recovers it.
-    log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the next start");
+    // Nothing of it was recorded: the run stays running, its hold counting, until the stale-run sweep or the next start
+    // releases it.
+    log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
     throw err;
+  }
+  if (endedElsewhere !== null) {
+    log.warn({ runId: started.runId, status: endedElsewhere }, "persona draft: ended elsewhere (another instance's recovery or the stale-run sweep) before it was settled; answered busy");
+    throw new AppError(503, "busy");
   }
   if (end.status === "failed") throw new ModelError(end.error);
   return persona;

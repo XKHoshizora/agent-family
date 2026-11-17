@@ -12,8 +12,8 @@ import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
 import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, type BuiltContext, type LoadedContext } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
-import { postAsAgent, RunNotRunning } from "./conversation.ts";
-import { BUSY, NOTHING, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
+import { postAsAgent } from "./conversation.ts";
+import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
 import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
@@ -167,7 +167,8 @@ export class DbAgentPort implements AgentPort {
   private async lockRun(t: Tx, run: RunTicket): Promise<{ agent: AgentRow; state: RunState }> {
     const agent = await lockAgent(t, run.agentId);
     const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
-    if (state.rows[0]?.status !== "running") throw new Error(`begin: run ${run.id} is not running`);
+    // Ended elsewhere meanwhile (another instance's recovery, or the stale-run sweep): nothing more of it is done here.
+    if (state.rows[0]?.status !== "running") throw new RunNotRunning(run.id, state.rows[0]?.status ?? null);
     return { agent, state: state.rows[0] };
   }
 

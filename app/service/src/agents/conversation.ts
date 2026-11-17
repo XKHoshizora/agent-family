@@ -9,6 +9,7 @@ import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type Messag
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
+import { RunNotRunning } from "./runtime/port.ts";
 import { ownedAgentOf } from "./runs.ts";
 import { agentLimit, assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
@@ -101,21 +102,6 @@ export async function createAgent(
     createdAt: created.rows[0]!.created_at,
   };
   return { agent, change: { messages: greeting, conversations: [{ conversationId, principalIds: [ownerId, id] }] } };
-}
-
-/**
- * `postAsAgent` refused because the run is no longer `running`: something else ended it meanwhile — another instance's
- * recovery at start-up, while this one was still answering (a deploy where old and new instances overlap). Nothing was
- * posted; the run stays as that recovery recorded it.
- */
-export class RunNotRunning extends Error {
-  constructor(
-    readonly runId: string,
-    readonly status: string | null,
-  ) {
-    super(`postAsAgent: run ${runId} is ${status ?? "gone"}, not running`);
-    this.name = "RunNotRunning";
-  }
 }
 
 /** An Agent's reply as the worker hands it over. */

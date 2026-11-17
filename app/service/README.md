@@ -401,8 +401,10 @@ save the Agent to keep it.
   reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
   `AGENT_RUN_TIMEOUT_MS` (2 minutes) the call is ended: what it had written is the answer (nothing: 502
   `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the run is released
-  at the next start like a reply's (Agents and runs, Recovery). When its settlement cannot be stored (500 `internal`),
-  that is logged with the run's id and the run, still `running`, is released the same way.
+  at the next start like a reply's (Agents and runs, Recovery). When the run was ended elsewhere while the model was
+  answering (another instance's recovery, or the stale-run sweep), nothing more is recorded and the answer is 503
+  `busy` (logged at warn). When its settlement cannot be stored (500 `internal`), that is logged with the run's id and
+  the run, still `running`, is released by the stale-run sweep or the next start.
 - Limit: 5 a minute, a budget of its own.
 
 #### `GET /api/agents`
