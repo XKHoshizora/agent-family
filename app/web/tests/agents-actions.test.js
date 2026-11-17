@@ -115,11 +115,61 @@ describe("providers: the API key is sent once and kept nowhere", () => {
 });
 
 describe("providers: the other actions", () => {
-  it("loadProviders, testProvider, refreshProviderModels and deleteProvider", async () => {
+  it("listProviderModels: the provider's list with its hints, nothing kept; a failure as 测试连接's, with the provider's status", async () => {
+    const entry = (name, fields = {}) => ({ name, vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false, ...fields });
+    const known = { known: true, label: "GPT-6 Sol", vision: true, pdf: true, reasoning: true, contextTokens: 1050000, reasoningLevels: ["low", "high"] };
+    const listProviderModels = vi.fn(async () => ({
+      ok: true,
+      listed: [
+        entry("gpt-x", { added: true }),
+        entry("gpt-6-sol", known),
+        entry("text-embedding-3", { chat: false }),
+        { name: 5 },
+        null,
+        { name: "loose", vision: "yes", label: 7, contextTokens: "big", reasoningLevels: ["turbo"] },
+        entry("odd-levels", { known: true, label: "Odd", reasoning: true, contextTokens: 1.5, reasoningLevels: ["max", "low", "none"] }),
+      ],
+    }));
+    const { actions, model } = await loaded({ api: { listProviders: vi.fn(async () => ({ providers: [provider()] })), listProviderModels } });
+    await actions.loadProviders();
+    const before = JSON.stringify(model().providers);
+    await expect(actions.listProviderModels(PID)).resolves.toEqual({
+      ok: true,
+      value: {
+        listed: [
+          entry("gpt-x", { added: true }),
+          entry("gpt-6-sol", known),
+          entry("text-embedding-3", { chat: false }),
+          entry("loose"),
+          // Only a whole positive context, and the known levels in order, are kept.
+          entry("odd-levels", { known: true, label: "Odd", reasoning: true, reasoningLevels: ["low", "max"] }),
+        ],
+      },
+    });
+    expect(listProviderModels).toHaveBeenCalledWith(PID);
+    expect(JSON.stringify(model().providers)).toBe(before);
+
+    listProviderModels.mockResolvedValueOnce({ ok: false, error: "provider_unavailable", upstreamStatus: "404" });
+    await expect(actions.listProviderModels(PID)).resolves.toEqual({
+      ok: false,
+      error: { code: "provider_unavailable", reason: null, status: 200, upstreamStatus: "404" },
+      text: "这个供应商没有提供模型列表（状态码 404），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。",
+    });
+    listProviderModels.mockResolvedValueOnce({ ok: false, error: "provider_rejected", upstreamStatus: "401" });
+    await expect(actions.listProviderModels(PID)).resolves.toMatchObject({
+      ok: false,
+      text: "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。（供应商返回的状态码：401）",
+    });
+    listProviderModels.mockRejectedValueOnce(apiError(429, "rate_limited"));
+    await expect(actions.listProviderModels(PID)).resolves.toMatchObject({ ok: false, error: { code: "rate_limited", status: 429 }, text: "操作太频繁了，请稍等一分钟再试。" });
+    listProviderModels.mockResolvedValueOnce({ ok: true, listed: "nope" });
+    await expect(actions.listProviderModels(PID)).resolves.toEqual({ ok: true, value: { listed: [] } });
+  });
+
+  it("loadProviders, testProvider and deleteProvider", async () => {
     const api = {
       listProviders: vi.fn(async () => ({ providers: [provider()] })),
       testProvider: vi.fn(async () => ({ ok: false, error: "provider_rejected" })),
-      refreshProviderModels: vi.fn(async () => ({ listed: ["gpt-x", "gpt-y"], provider: provider({ models: [] }) })),
       deleteProvider: vi.fn(async () => Promise.reject(apiError(409, "provider_in_use", null, { agents: [{ id: AG1, name: "小助手" }, { id: "x", name: "写作助手" }] }))),
     };
     const { actions, model } = await loaded({ api });
@@ -135,8 +185,6 @@ describe("providers: the other actions", () => {
     await expect(actions.testProvider(PID)).resolves.toMatchObject({ ok: false, error: { code: "provider_unavailable", status: 200, upstreamStatus: "404" } });
     api.testProvider.mockResolvedValueOnce({ ok: true });
     await expect(actions.testProvider(PID)).resolves.toEqual({ ok: true, value: { ok: true } });
-    await expect(actions.refreshProviderModels(PID)).resolves.toEqual({ ok: true, value: { listed: ["gpt-x", "gpt-y"], provider: provider({ models: [] }) } });
-    expect(model().providers[PID].models).toEqual([]);
     const inUse = await actions.deleteProvider(PID);
     expect(inUse.text).toBe("还有 Agent 在使用这个供应商：小助手、写作助手。请先给它们换一个模型。");
     expect(model().providers[PID]).toBeDefined();

@@ -34,6 +34,7 @@ import {
   markSending,
   markSent,
   markUploading,
+  modelLevels,
   openWindow,
   publicProvider,
   removeProvider,
@@ -595,6 +596,35 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const forgetProvider = (providerId) => (error) => {
     if (error.status === 404) setModel(removeProvider(getModel(), providerId));
   };
+  /**
+   * A call to my provider (`action`: test | list): the service answers 200 either way, `{ok: false, error,
+   * upstreamStatus?}` when the provider failed. That failure resolves as a refused action's, with the provider's own
+   * HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
+   */
+  /** One entry of a provider's model list as `/models/list` gives it, with only what it should hold. */
+  const listedModel = (m) => {
+    const known = m.known === true;
+    const levels = known ? modelLevels(m.reasoningLevels) : null;
+    return {
+      name: m.name,
+      vision: m.vision === true,
+      pdf: m.pdf === true,
+      reasoning: m.reasoning === true,
+      chat: m.chat !== false,
+      known,
+      ...(known && typeof m.label === "string" && m.label !== "" ? { label: m.label } : {}),
+      ...(known && Number.isInteger(m.contextTokens) && m.contextTokens > 0 ? { contextTokens: m.contextTokens } : {}),
+      ...(levels ? { reasoningLevels: levels } : {}),
+      added: m.added === true,
+    };
+  };
+  const providerCall = async (action, sent) => {
+    const result = await attempt(() => sent, { text: providerText(action) });
+    if (!result.ok || result.value?.ok !== false) return result;
+    const error = { code: typeof result.value.error === "string" ? result.value.error : "unknown", reason: null, status: 200 };
+    if (typeof result.value.upstreamStatus === "string") error.upstreamStatus = result.value.upstreamStatus;
+    return failure(error, providerErrorText(action, error));
+  };
 
   const agentActions = {
     loadAgents: () => attempt(() => api.listAgents(), { after: (res) => setModel(applyAgents(getModel(), res?.agents)), text: commonErrorText }),
@@ -701,19 +731,19 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
      * One call to the provider: {ok: true} or the reason it failed (the service answers 200 either way), with the
      * provider's own HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
      */
-    testProvider: async (providerId) => {
-      const result = await attempt(() => api.testProvider(providerId), { text: providerText("test") });
-      if (!result.ok || result.value?.ok !== false) return result;
-      const error = { code: typeof result.value.error === "string" ? result.value.error : "unknown", reason: null, status: 200 };
-      if (typeof result.value.upstreamStatus === "string") error.upstreamStatus = result.value.upstreamStatus;
-      return failure(error, providerErrorText("test", error));
+    testProvider: (providerId) => providerCall("test", api.testProvider(providerId)),
+    /**
+     * The provider's own model list, for its owner to choose from (nothing is stored, nothing kept here) → value:
+     * {listed: [{name, vision, pdf, reasoning, chat, known, label?, contextTokens?, reasoningLevels?, added}]}: hints,
+     * the catalogue's when `known` (with its display name, context and levels), else guesses from the name; a failure
+     * as testProvider's.
+     */
+    listProviderModels: async (providerId) => {
+      const result = await providerCall("list", api.listProviderModels(providerId));
+      if (!result.ok) return result;
+      const listed = Array.isArray(result.value?.listed) ? result.value.listed : [];
+      return { ok: true, value: { listed: listed.filter((m) => typeof m?.name === "string").map(listedModel) } };
     },
-    /** The provider's model list merged in from the provider → value: {listed, provider}. */
-    refreshProviderModels: (providerId) =>
-      attempt(() => api.refreshProviderModels(providerId), {
-        map: (res) => ({ listed: Array.isArray(res?.listed) ? res.listed : [], provider: publicProvider(res?.provider) }),
-        ...providerWrite("refresh", (res) => setModel(applyProvider(getModel(), res.provider))),
-      }),
 
     loadUsage: () => attempt(() => api.getUsage(), { after: (usage) => setModel(applyUsage(getModel(), usage)), text: commonErrorText }),
     /** The site's models again (Settings and the Agent form open). */

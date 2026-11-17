@@ -937,14 +937,27 @@ export function publicProvider(answer) {
     protocol: p.protocol,
     baseUrl: p.baseUrl,
     keyLast4: p.keyLast4,
-    models: (Array.isArray(p.models) ? p.models : []).map((m) => ({
-      name: m.name,
-      vision: Boolean(m.vision),
-      pdf: Boolean(m.pdf),
-      reasoning: Boolean(m.reasoning),
-      contextTokens: m.contextTokens,
-    })),
+    models: (Array.isArray(p.models) ? p.models : []).map((m) => {
+      const levels = modelLevels(m.reasoningLevels);
+      return {
+        name: m.name,
+        vision: Boolean(m.vision),
+        pdf: Boolean(m.pdf),
+        reasoning: Boolean(m.reasoning),
+        contextTokens: m.contextTokens,
+        ...(levels ? { reasoningLevels: levels } : {}),
+      };
+    }),
   };
+}
+
+/** The thinking levels a provider model may list as the ones it supports, in the service's order. */
+export const MODEL_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+/** A model's `reasoningLevels` as the service gives them: the known levels, in order; null when there are none (every level). */
+export function modelLevels(value) {
+  if (!Array.isArray(value)) return null;
+  const levels = MODEL_LEVELS.filter((level) => value.includes(level));
+  return levels.length > 0 ? levels : null;
 }
 
 const isProvider = (p) => p && typeof p.id === "string";

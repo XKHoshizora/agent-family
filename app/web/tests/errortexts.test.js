@@ -86,7 +86,7 @@ const PROVIDER_ROUTES = {
   edit: ["name_taken", "invalid_request", "not_found", "rate_limited"],
   delete: ["provider_in_use", "not_found", "rate_limited"],
   test: ["provider_rejected", "provider_unavailable", "address_not_allowed", "not_found", "rate_limited"],
-  refresh: ["provider_rejected", "provider_unavailable", "address_not_allowed", "not_found", "rate_limited"],
+  list: ["provider_rejected", "provider_unavailable", "address_not_allowed", "not_found", "rate_limited"],
 };
 
 for (const [label, textOf, routes] of [
@@ -124,7 +124,7 @@ describe("the sentences batch 2A names", () => {
     expect(providerErrorText("test", err("address_not_allowed"))).toBe("这个接口地址不被允许：需要是 https 开头的公网地址。");
     // A saved key that can no longer be opened is answered provider_rejected too: the sentence asks for the key again.
     expect(providerErrorText("test", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。");
-    expect(providerErrorText("refresh", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。");
+    expect(providerErrorText("list", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。");
     expect(providerErrorText("test", err("provider_unavailable"))).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
     expect(agentErrorText("draft", err("busy", 503))).toBe("服务现在有点忙，请稍后再试。");
     // A 404 on the reply routes is "not yours / not here", never "it has ended".
@@ -151,6 +151,13 @@ describe("the sentences batch 2A names", () => {
     // Only a status number is ever added: anything else the answer might carry is not shown.
     expect(tested("provider_unavailable", "<b>oops</b>")).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
     expect(tested("address_not_allowed", undefined)).toBe("这个接口地址不被允许：需要是 https 开头的公网地址。");
+  });
+
+  it("同步模型 (the model list) says what 测试连接 says, the provider's status and the missing model list included", () => {
+    for (const [code, upstreamStatus] of [["provider_unavailable", "500"], ["provider_rejected", "401"], ["provider_unavailable", "404"], ["provider_unavailable", "405"], ["provider_unavailable", undefined], ["address_not_allowed", undefined]]) {
+      const error = { code, status: 200, reason: null, upstreamStatus };
+      expect([code, upstreamStatus, providerErrorText("list", error)]).toEqual([code, upstreamStatus, providerErrorText("test", error)]);
+    }
   });
 
   it("no_quota: the free allowance and the balance are used up (with when it comes back), or the balance alone", () => {

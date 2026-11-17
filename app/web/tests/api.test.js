@@ -80,7 +80,7 @@ const table = [
   ["patchProvider", () => routes.patchProvider(ID, { name: "q" }), "PATCH", `/api/providers/${ID}`, { name: "q" }],
   ["deleteProvider", () => routes.deleteProvider(ID), "DELETE", `/api/providers/${ID}`, undefined],
   ["testProvider", () => routes.testProvider(ID), "POST", `/api/providers/${ID}/test`, undefined],
-  ["refreshProviderModels", () => routes.refreshProviderModels(ID), "POST", `/api/providers/${ID}/models/refresh`, undefined],
+  ["listProviderModels", () => routes.listProviderModels(ID), "POST", `/api/providers/${ID}/models/list`, undefined],
   ["getUsage", () => routes.getUsage(), "GET", "/api/usage", undefined],
   ["getModels", () => routes.getModels(), "GET", "/api/models", undefined],
 ];

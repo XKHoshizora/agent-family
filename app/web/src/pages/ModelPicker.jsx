@@ -46,7 +46,9 @@ export function modelChoices(state) {
     models: p.models.map((m) => {
       const model = { source: "provider", providerId: p.id, model: m.name };
       const tooSmall = Number.isFinite(m.contextTokens) && m.contextTokens <= limit;
-      return { key: modelKey(model), model, label: tooSmall ? `${m.name}（上下文太小）` : m.name, paid: false, levels: m.reasoning ? ALL_LEVELS : ["none"], usable: !tooSmall };
+      // A model that lists the levels it supports offers those (as a site model does), else every level when it reasons.
+      const levels = !m.reasoning ? ["none"] : m.reasoningLevels ? ALL_LEVELS.filter((l) => l === "none" || m.reasoningLevels.includes(l)) : ALL_LEVELS;
+      return { key: modelKey(model), model, label: tooSmall ? `${m.name}（上下文太小）` : m.name, paid: false, levels, usable: !tooSmall };
     }),
   }));
   const any = site.length > 0 || providers.some((p) => p.models.some((m) => m.usable));

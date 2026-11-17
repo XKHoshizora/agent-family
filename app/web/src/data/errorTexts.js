@@ -242,12 +242,15 @@ const PROVIDER = {
   },
   delete: { not_found: PROVIDER_NOT_FOUND },
   test: PROVIDER_CALL,
-  refresh: PROVIDER_CALL,
+  list: PROVIDER_CALL,
 };
+/** The provider calls whose answer can carry the provider's own HTTP status. */
+const WITH_STATUS = new Set(["test", "list"]);
 
 /**
- * Why a provider action was refused. action: create | edit | delete | test | refresh. For `test`, `error.upstreamStatus`
- * (the provider's HTTP status, a string) is added to the sentence; a 404 or 405 means the provider has no model list there.
+ * Why a provider action was refused. action: create | edit | delete | test | list (同步模型's model list). For `test` and
+ * `list`, `error.upstreamStatus` (the provider's HTTP status, a string) is added to the sentence; a 404 or 405 means the
+ * provider has no model list there.
  */
 export function providerErrorText(action, error) {
   if (error?.code === "provider_in_use" && action in PROVIDER) {
@@ -258,7 +261,7 @@ export function providerErrorText(action, error) {
   }
   const text = pick(PROVIDER, action, error);
   // Only a status number is ever shown, nothing else of the provider's answer.
-  const status = action === "test" && /^\d{3}$/.test(error?.upstreamStatus ?? "") ? error.upstreamStatus : null;
+  const status = WITH_STATUS.has(action) && /^\d{3}$/.test(error?.upstreamStatus ?? "") ? error.upstreamStatus : null;
   if (!status) return text;
   if (error.code === "provider_unavailable" && (status === "404" || status === "405")) {
     return `这个供应商没有提供模型列表（状态码 ${status}），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。`;

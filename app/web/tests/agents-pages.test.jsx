@@ -450,6 +450,23 @@ describe("思考程度", () => {
     await chooseModel("plain");
     expect(inMain().queryByLabelText("思考程度")).toBeNull();
   });
+
+  it("a provider model that lists its reasoningLevels offers 不思考 and those only", async () => {
+    const listing = providerOf(undefined, {
+      models: [
+        { name: "some-levels", vision: false, pdf: false, reasoning: true, contextTokens: 64000, reasoningLevels: ["low", "high", "max"] },
+        { name: "all-levels", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+      ],
+    });
+    await openAgents({ providers: [listing] });
+    await openCreate();
+    await chooseModel("some-levels");
+    expect(levels()).toEqual(["不思考", "低", "高", "最高"]);
+    fireEvent.change(inMain().getByLabelText("思考程度"), { target: { value: "max" } });
+    await chooseModel("all-levels");
+    expect(levels()).toEqual(["不思考", "低", "中", "高", "很高", "最高"]);
+    expect(inMain().getByLabelText("思考程度").value).toBe("max");
+  });
 });
 
 describe("no model source at all", () => {
