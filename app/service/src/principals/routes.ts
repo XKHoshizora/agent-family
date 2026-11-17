@@ -9,7 +9,7 @@ import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
-import { registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
+import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
 import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
 
 const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
@@ -48,9 +48,10 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
 
   // Handle lookup is the only way to probe for handles, so it is throttled per principal.
   const lookupLimit = perPrincipalLimit(app, 30);
-  // Others see both everywhere (and every avatar is a blob write): 10 changes a minute each.
+  // Others see both everywhere (and every avatar is a blob write): 10 changes a minute each; the avatar budget also
+  // counts your Agents' avatars.
   const renameLimit = perPrincipalLimit(app, 10);
-  const avatarLimit = perPrincipalLimit(app, 10);
+  const avatarLimit = avatarBudget(app);
 
   api.patch(
     "/api/me",

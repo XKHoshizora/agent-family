@@ -280,7 +280,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/principals/lookup` | 30 | principal |
 | `GET /api/usage` | 60 | principal |
 | `PATCH /api/me` | 10 | principal |
-| `PUT /api/me/avatar` | 10 | principal |
+| `PUT /api/me/avatar` + `PUT /api/agents/:id/avatar` (yours and your Agents' avatars) | 10 together | principal |
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
 | `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429) | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
@@ -464,7 +464,8 @@ progress ends as on a pause, with `agent_deleted`). → 200 Agent.
 
 #### `PUT /api/agents/:id/avatar`
 
-*Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent. → 200 `{"ok": true}`; 409 `agent_deleted`.
+*Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent: it counts against the same 10 uploads a
+minute as your own avatar, and also against the 30 Agent writes. → 200 `{"ok": true}`; 409 `agent_deleted`.
 Every avatar change (people's too) raises `principals.avatar_version`.
 
 ### Persona proposals
@@ -903,7 +904,7 @@ accepted but not used: the mail links to the web app).
   `invalid_request`), at most 2 MiB (413 `too_large`). The bytes decide: PNG, JPEG or WebP; anything else
   (GIF, SVG, …) is 400 `invalid_request`. The declared type is ignored.
 - 200 `{"ok": true}`.
-- Limit: 10 per minute (refused uploads count).
+- Limit: 10 per minute together with your Agents' avatars (refused uploads count).
 - A signed-in sender's body may take as long as the server-wide timeouts allow; anyone else's must arrive within
   the body deadline (`HTTP_BODY_TIMEOUT_MS`, see Configuration). The answers are unchanged.
 

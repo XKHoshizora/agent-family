@@ -53,4 +53,20 @@ describe("profile change rate limits", () => {
     expect((await putAvatar(b)).status).toBe(200);
     expect((await api(app, a, "PATCH", "/api/me", { displayName: "Erin" })).status).toBe(200);
   });
+
+  it("an Agent's avatar counts against the same 10 a minute as your own (besides the Agent writes' 30)", async () => {
+    const [a, b] = [await signUp(app, "gina"), await signUp(app, "hank")];
+    const agent = (await api(app, a, "POST", "/api/agents", { handle: "rl_avatar_bot", name: "Bot" })).json;
+    const putAgentAvatar = (who: { cookie: string }, id: string) =>
+      app
+        .inject({ method: "PUT", url: `/api/agents/${id}/avatar`, headers: { cookie: who.cookie, "content-type": "image/png" }, payload: PNG })
+        .then((r) => ({ status: r.statusCode, json: r.json() }));
+    for (let i = 1; i <= 5; i++) expect((await putAvatar(a)).status).toBe(200);
+    for (let i = 6; i <= 10; i++) expect((await putAgentAvatar(a, agent.id)).status).toBe(200);
+    expect(await putAgentAvatar(a, agent.id)).toEqual({ status: 429, json: { error: "rate_limited" } });
+    expect(await putAvatar(a)).toEqual({ status: 429, json: { error: "rate_limited" } });
+    // The Agent writes' own budget is not used up: an edit still goes through.
+    expect((await api(app, a, "PATCH", `/api/agents/${agent.id}`, { intro: "still fine" })).status).toBe(200);
+    expect((await putAvatar(b)).status).toBe(200);
+  });
 });

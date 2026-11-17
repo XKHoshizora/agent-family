@@ -7,11 +7,29 @@ import { sniff } from "../attachments/sniff.ts";
 import { liftBodyDeadline } from "../body-deadline.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { requirePrincipal } from "../session.ts";
 
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
 const AVATAR_MIMES = new Set(["image/png", "image/jpeg", "image/webp"]);
 export const SNIFF_BYTES = 4100;
+/** Avatar uploads one principal may make a minute: their own and their Agents' together (every one is a blob write). */
+export const AVATAR_UPLOADS_PER_MINUTE = 10;
+
+const avatarBudgets = new WeakMap<FastifyInstance, PrincipalLimit>();
+
+/**
+ * The avatar budget of `app`: one `perPrincipalLimit` of `AVATAR_UPLOADS_PER_MINUTE`, shared by `PUT /api/me/avatar` and
+ * `PUT /api/agents/:id/avatar` (the latter counts against the Agent writes' budget too). Call it while registering.
+ */
+export function avatarBudget(app: FastifyInstance): PrincipalLimit {
+  let budget = avatarBudgets.get(app);
+  if (!budget) {
+    budget = perPrincipalLimit(app, AVATAR_UPLOADS_PER_MINUTE);
+    avatarBudgets.set(app, budget);
+  }
+  return budget;
+}
 
 /**
  * Registers a raw-image `PUT` (the rules of `PUT /api/me/avatar`) in its own encapsulated scope, so the 2 MB

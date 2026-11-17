@@ -6,7 +6,7 @@ import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
-import { registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
+import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
 import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
@@ -90,6 +90,8 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   const writeLimit = perPrincipalLimit(app, 30);
   // Persona drafts (each a model call) have a budget of their own.
   const draftLimit = perPrincipalLimit(app, 5);
+  // An Agent's avatar also counts against the avatar budget its owner's own avatar uses (10 a minute).
+  const avatarLimit = avatarBudget(app);
   /** The drafts whose model call is under way: abandoned when the service starts closing (persona.ts `draftPersona`). */
   const drafts = new Set<AbortController>();
   app.addHook("preClose", async () => {
@@ -326,10 +328,11 @@ export function registerAgentRoutes(app: FastifyInstance): void {
     },
   );
 
-  // The rules and limits of `PUT /api/me/avatar`, for the Agent's avatar.
+  // The rules and limits of `PUT /api/me/avatar`, for the Agent's avatar: the avatar budget, and the Agent writes'.
   registerAvatarPut(app, "/api/agents/:id/avatar", idParams, async (req, body) => {
     const me = await requirePrincipal(req);
     await writeLimit(req, me.id);
+    await avatarLimit(req, me.id);
     const id = (req.params as { id: string }).id;
     const seen = await readOwnedAgent(db, me.id, id);
     if (!seen) throw notFound();
