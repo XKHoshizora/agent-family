@@ -219,18 +219,19 @@ const StreamRich = memo(Rich);
 
 /**
  * The text of a reply being written. Without `paced` every piece is shown at once; with it, a prefix of the text
- * received that grows at every frame (ui/reveal.js: `ended` — nothing more will come, the rest within a moment; `all`
- * — everything received now), with `placeholder` shown until its first characters. The tree is asked for what is shown,
+ * received that grows at every frame (ui/reveal.js: `ended` — nothing more will come, the rest within `endWithin` ms;
+ * `all` — everything received now), with `placeholder` shown until its first characters; `onShown(upTo, length)` is told
+ * how far it has got whenever that changes. The tree is asked for what is shown,
  * at most every STREAM_EVERY_MS, one request at a time, and is shown at an animation frame, like every tree. A tree is
  * taken only if what is shown still is the text it was made for — unpaced, unchanged; paced, the same text grown by
  * the frames since (any other text is a stale tree, dropped). Until the next tree, what is shown after the taken one is
  * shown after it, plain. After STREAM_LATE_MAX late answers in a row the rest of the reply is plain (with the note).
  * The stored message that replaces this is rendered on its own.
  */
-export function StreamingAgentText({ text, paced = false, ended = false, all = false, placeholder = null }) {
+export function StreamingAgentText({ text, paced = false, ended = false, endWithin = undefined, all = false, placeholder = null, onShown = null }) {
   const received = useMemo(() => withoutBidiControls(text), [text]);
   const epoch = useEpoch(received);
-  const upTo = useReveal(received, epoch, { paced, ended, all });
+  const upTo = useReveal(received, epoch, { paced, ended, endWithin, all });
   const shown = upTo === received.length ? received : received.slice(0, upTo);
   const client = markdownClient();
   const view = useMarkdownView();
@@ -315,6 +316,11 @@ export function StreamingAgentText({ text, paced = false, ended = false, all = f
     if (paced && grown.current !== upTo) view.changed();
     grown.current = upTo;
   }, [view, paced, upTo]);
+  const told = useRef(onShown);
+  told.current = onShown;
+  useLayoutEffect(() => {
+    told.current?.(upTo, received.length);
+  }, [upTo, received.length]);
 
   let rich = null;
   let note = false;

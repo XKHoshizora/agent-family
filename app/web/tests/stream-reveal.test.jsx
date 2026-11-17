@@ -13,6 +13,7 @@ import {
   REVEAL_CUSHION_MAX_MS,
   REVEAL_CUSHION_MIN_MS,
   REVEAL_END_MS,
+  REVEAL_FINISH_MS,
   REVEAL_MAX_LAG_MS,
   REVEAL_TOKEN_MAX,
   endReveal,
@@ -69,7 +70,8 @@ describe("the pace (nextReveal)", () => {
     const late = frames.filter((f) => f.t > 1000);
     const adding = late.filter((f, i) => i > 0 && f.revealed > late[i - 1].revealed).length;
     expect(adding).toBeLessThan(late.length / 3); // most frames add nothing: the pace is a character every 100 ms
-    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length}`).toBeLessThanOrEqual(300);
+    // (Behind by about the cushion kept waiting, and a frame or two.)
+    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length}`).toBeLessThanOrEqual(REVEAL_CUSHION_MIN_MS + 200);
 
     // 200 characters a second, in pieces of 10 every 50 ms: about 3 a frame, never far behind.
     const fast = simulate({ arrivals: steady({ every: 50, size: 10, count: 60 }), until: 3200 });
@@ -77,14 +79,17 @@ describe("the pace (nextReveal)", () => {
     const added = middle[middle.length - 1].revealed - middle[0].revealed;
     expect(added / middle.length).toBeGreaterThan(2.5);
     expect(added / middle.length).toBeLessThan(4);
-    for (const f of middle) expect(f.received - f.revealed).toBeLessThanOrEqual(50);
+    for (const f of middle) expect(f.received - f.revealed).toBeLessThanOrEqual(0.2 * REVEAL_CUSHION_MIN_MS + 40);
   });
 
-  it("a trickle is shown as it comes: a few frames behind once its pace is known, a little more in its first second", () => {
+  it("a trickle is shown as it comes: about the cushion behind once its pace is known, a little more in its first second", () => {
     // (In the first second the pace is taken over a whole second: a little slower than the trickle's.)
     const arrivals = steady({ every: 100, size: 3, count: 30 });
     const frames = simulate({ arrivals, until: 3500 });
-    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length} at ${at}`).toBeLessThanOrEqual(at < 1000 ? 400 : 200);
+    // (The last piece, with nothing after it, waits a little longer: under the cushion the pace halves. Its stored
+    // message, when it comes, finishes it within REVEAL_FINISH_MS.)
+    const lastAt = arrivals[arrivals.length - 1][0];
+    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length} at ${at}`).toBeLessThanOrEqual(REVEAL_CUSHION_MIN_MS + (at < 1000 || at === lastAt ? 250 : 100));
   });
 
   it("a stall grows the cushion (up to its most); it decays back over a few seconds", () => {
@@ -94,7 +99,7 @@ describe("the pace (nextReveal)", () => {
     const cushionAt = (ms) => frames.find((f) => f.t >= ms).state.cushion;
     expect(cushionAt(1900)).toBeCloseTo(REVEAL_CUSHION_MIN_MS, 0);
     expect(cushionAt(4040)).toBeGreaterThan(REVEAL_CUSHION_MAX_MS * 0.95);
-    expect(cushionAt(6000)).toBeLessThan(REVEAL_CUSHION_MAX_MS * 0.5);
+    expect(cushionAt(6000)).toBeLessThan((REVEAL_CUSHION_MIN_MS + REVEAL_CUSHION_MAX_MS) / 2);
     expect(cushionAt(10000)).toBeLessThan(REVEAL_CUSHION_MIN_MS + 50);
     // Regular gaps are no stall.
     const regular = simulate({ arrivals: steady({ every: 500, size: 60, count: 12 }), until: 6500 });
@@ -155,6 +160,54 @@ describe("the pace (nextReveal)", () => {
       const before = frames[i - 6];
       if (before.revealed < before.received) expect(frames[i].revealed, `at ${frames[i].t}`).toBeGreaterThan(before.revealed);
     }
+  });
+
+  it("ordinary provider gaps are bridged: bursts of about 5 characters every 0.3–0.7 s rarely leave the reveal waiting", () => {
+    let seed = 11;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const arrivals = [];
+    let at = 0;
+    let length = 0;
+    for (let i = 0; i < 80; i += 1) {
+      length += 3 + Math.floor(random() * 5);
+      arrivals.push([at, length]);
+      at += 300 + Math.floor(random() * 400);
+    }
+    const frames = simulate({ arrivals, until: at + 3000 });
+    const middle = frames.filter((f) => f.t > 1000 && f.t < at);
+    const idle = middle.filter((f) => f.revealed === f.received).length;
+    expect(idle / middle.length).toBeLessThan(0.15);
+    let pause = 0;
+    let longest = 0;
+    for (const f of middle) {
+      pause = f.revealed === f.received ? pause + FRAME : 0;
+      longest = Math.max(longest, pause);
+    }
+    expect(longest).toBeLessThan(400);
+    for (const [when, upTo] of arrivals) expect(shownAt(frames, upTo) - when).toBeLessThanOrEqual(REVEAL_MAX_LAG_MS + FRAME);
+  });
+
+  it(`the stored message came: what is left is shown frame by frame within ${REVEAL_FINISH_MS} ms, at whole graphemes`, () => {
+    const text = "😀".repeat(1500);
+    let state = revealStart();
+    let revealed = 0;
+    ({ revealed, state } = nextReveal(revealed, text.length, FRAME, state, text));
+    state = endReveal(state, REVEAL_FINISH_MS);
+    const ends = [];
+    for (let t = FRAME; t <= REVEAL_FINISH_MS + FRAME && revealed < text.length; t += FRAME) {
+      ({ revealed, state } = nextReveal(revealed, text.length, FRAME, state, text));
+      ends.push(revealed);
+    }
+    expect(revealed).toBe(text.length);
+    expect(ends.length).toBeGreaterThan(3);
+    for (const end of ends) expect(end % 2).toBe(0);
+    // An end told sooner (the cut) is not put off by a later one.
+    let cut = endReveal(revealStart(), REVEAL_END_MS);
+    ({ state: cut } = nextReveal(0, 3000, FRAME, cut));
+    expect(endReveal(cut, REVEAL_FINISH_MS)).toBe(cut);
   });
 
   it(`once nothing more will come, the rest is shown within ${REVEAL_END_MS} ms`, () => {
@@ -308,7 +361,7 @@ describe("a reply being revealed", () => {
     expect(frames.pending).toBe(0);
   });
 
-  it("a trickle appears as it comes, a piece or so behind; once it is all shown no frame is asked", async () => {
+  it("a trickle appears as it comes, about the cushion behind; once it is all shown no frame is asked", async () => {
     const text = sample(60);
     const { container, rerender } = render(bubble(text.slice(0, 3)));
     for (let i = 1; i <= 20; i += 1) {
@@ -316,7 +369,7 @@ describe("a reply being revealed", () => {
       for (let ms = 0; ms < 96; ms += FRAME) frames.step(); // (six frames: 96 ms)
       const shown = container.querySelector(".wait") ? "" : shownText(container);
       expect(text.startsWith(shown)).toBe(true);
-      expect(shown.length).toBeGreaterThanOrEqual(3 * (i - 2));
+      expect(shown.length).toBeGreaterThanOrEqual(3 * (i - 5)); // (30 a second, the cushion 300 ms: some 3 pieces)
     }
     for (let i = 0; i < 100 && frames.pending > 0; i += 1) frames.step();
     expect(shownText(container)).toBe(text);
@@ -333,6 +386,23 @@ describe("a reply being revealed", () => {
     for (let ms = 0; ms <= REVEAL_END_MS + FRAME; ms += FRAME) frames.step();
     expect(shownText(container)).toBe(text);
     expect(frames.pending).toBe(0);
+  });
+
+  it(`finishing (its stored message came): the rest within ${REVEAL_FINISH_MS} ms of frames; onShown tells how far it has got`, async () => {
+    const text = sample(3000);
+    const seen = [];
+    const onShown = (upTo, length) => seen.push([upTo, length]);
+    const { rerender } = render(bubble(text, { onShown }));
+    frames.step();
+    frames.step();
+    expect(seen.at(-1)[0]).toBeGreaterThan(0);
+    expect(seen.at(-1)[0]).toBeLessThan(3000);
+    rerender(bubble(text, { onShown, ended: true, endWithin: REVEAL_FINISH_MS }));
+    let n = 0;
+    for (; n < 200 && frames.pending > 0; n += 1) frames.step();
+    expect(n).toBeGreaterThan(3);
+    expect(n * FRAME).toBeLessThanOrEqual(REVEAL_FINISH_MS + FRAME);
+    expect(seen.at(-1)).toEqual([3000, 3000]);
   });
 
   it("`all` (a stop, a failure): everything received at once, and no frame left", async () => {

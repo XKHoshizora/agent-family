@@ -30,7 +30,7 @@ import {
 import { click, dialog, elapse, flush, installBrowser, mainText, openApp, push, toastText } from "./harness.jsx";
 import { useWorkers } from "./markdown-worker.js";
 import { thinkingLine, useThinkingSeconds } from "../src/pages/AgentChatBits.jsx";
-import { REVEAL_MAX_LAG_MS } from "../src/ui/reveal.js";
+import { REVEAL_FINISH_MS, REVEAL_MAX_LAG_MS, setRevealFrames } from "../src/ui/reveal.js";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -332,6 +332,8 @@ describe("the streaming bubble", () => {
             if (bubble !== null && !placeholder) streamed = bubble;
           }
         }
+        // (A bubble still finishing what it had received when its stored message came is done within a moment.)
+        await elapse(REVEAL_FINISH_MS + 100);
         expect(timeline().querySelectorAll('li[data-msg="m3"]'), label).toHaveLength(1);
         expect(bubbleLi(), label).toBeNull();
         expect(streamed === "" || "你好呀".startsWith(streamed), label).toBe(true);
@@ -347,7 +349,7 @@ describe("the streaming bubble", () => {
 
   const BURST = "一二三四五六七八九十".repeat(50); // 500 characters, in one piece
 
-  it("a burst is revealed over frames, and the stored message replaces the bubble at once, nothing left to wait for", async () => {
+  it(`a burst is revealed over frames; its stored message coming meanwhile waits until the bubble has finished, within ${REVEAL_FINISH_MS} ms`, async () => {
     const { transport } = await openAgentChat();
     await runPush(transport, runOf(R1, "running"));
     await deltaPush(transport, { text: BURST });
@@ -357,12 +359,119 @@ describe("the streaming bubble", () => {
     expect(part.length).toBeGreaterThan(0);
     expect(part.length).toBeLessThan(BURST.length);
     expect(BURST.startsWith(part)).toBe(true);
-    await elapse(100);
-    expect(bubbleText().length).toBeGreaterThan(part.length);
-    // The stored reply comes while most of the burst is still unrevealed: it is shown whole, at once.
+    // The stored reply comes while most of the burst is still unrevealed: the bubble stays and finishes, faster; the
+    // stored reply is not shown beside it (never both), also once the run is done.
     await messagePush(transport, wire(A1, 3, AG1, `${BURST}。`));
+    await runPush(transport, runOf(R1, "done"));
+    let shown = bubbleText().length;
+    let waited = 0;
+    while (bubbleLi() !== null && waited <= REVEAL_FINISH_MS + 32) {
+      expect(storedLi(3)).toBeNull();
+      expect(BURST.startsWith(bubbleText())).toBe(true);
+      expect(bubbleText().length).toBeGreaterThanOrEqual(shown);
+      shown = bubbleText().length;
+      await elapse(16);
+      waited += 16;
+    }
+    expect(waited).toBeGreaterThan(48);
+    expect(waited).toBeLessThanOrEqual(REVEAL_FINISH_MS + 32);
+    // Then the stored reply in its place, once.
+    expect(bubbleLi()).toBeNull();
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(`${BURST}。`);
+  });
+
+  it("the stored message replaces the bubble at once when nothing is left to reveal, under reduced motion, or in a hidden tab", async () => {
+    // Nothing left: at once.
+    const first = await openAgentChat();
+    await runPush(first.transport, runOf(R1, "running"));
+    await deltaPush(first.transport, { text: "短短一句" });
+    await revealed();
+    await messagePush(first.transport, wire(A1, 3, AG1, "短短一句。"));
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3)).not.toBeNull();
+    cleanup();
+    // Reduced motion: everything is shown at once, so nothing is left.
+    window.matchMedia = (query) => ({ matches: query === "(prefers-reduced-motion: reduce)", addEventListener() {}, removeEventListener() {} });
+    try {
+      const second = await openAgentChat();
+      await runPush(second.transport, runOf(R1, "running"));
+      await deltaPush(second.transport, { text: BURST });
+      expect(bubbleText()).toBe(BURST);
+      await messagePush(second.transport, wire(A1, 3, AG1, `${BURST}。`));
+      expect(bubbleLi()).toBeNull();
+      expect(storedLi(3)).not.toBeNull();
+    } finally {
+      delete window.matchMedia;
+    }
+    cleanup();
+    // The tab hidden while the bubble finishes: the stored reply at once.
+    let hidden = false;
+    vi.spyOn(document, "hidden", "get").mockImplementation(() => hidden);
+    const third = await openAgentChat();
+    await runPush(third.transport, runOf(R1, "running"));
+    await deltaPush(third.transport, { text: BURST });
+    await elapse(50);
+    await messagePush(third.transport, wire(A1, 3, AG1, `${BURST}。`));
+    expect(bubbleLi()).not.toBeNull();
+    hidden = true;
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    await flush();
     expect(bubbleLi()).toBeNull();
     expect(storedLi(3).querySelector(".bubble").textContent).toBe(`${BURST}。`);
+  });
+
+  it("a finishing bubble whose frames never come still gives way to its stored reply, a moment later", async () => {
+    // (Frames that never run: the bubble cannot finish by itself.)
+    setRevealFrames({ request: () => 0, cancel: () => {} });
+    try {
+      const { transport } = await openAgentChat();
+      await runPush(transport, runOf(R1, "running"));
+      await deltaPush(transport, { text: BURST });
+      await messagePush(transport, wire(A1, 3, AG1, `${BURST}。`));
+      expect(bubbleLi()).not.toBeNull();
+      expect(storedLi(3)).toBeNull();
+      await elapse(REVEAL_FINISH_MS + 1000);
+      expect(bubbleLi()).toBeNull();
+      expect(storedLi(3).querySelector(".bubble").textContent).toBe(`${BURST}。`);
+    } finally {
+      setRevealFrames({ request: (run) => setTimeout(() => run(Date.now()), 16), cancel: (id) => clearTimeout(id) });
+    }
+  });
+
+  it("a stopped reply, a newer message, or leaving the conversation: the stored reply at once", async () => {
+    // Stopped: everything received was shown at the press; the stopped reply replaces it at once.
+    const first = await openAgentChat();
+    await runPush(first.transport, runOf(R1, "running"));
+    await deltaPush(first.transport, { text: BURST });
+    await elapse(50);
+    await click(within(bubbleLi()).getByRole("button", { name: "停止生成" }));
+    await messagePush(first.transport, wire(A1, 3, AG1, BURST, { stopped: true }));
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3)).not.toBeNull();
+    cleanup();
+    // A message after the reply while the bubble finishes: the reply in its place at once, in order.
+    const second = await openAgentChat();
+    await runPush(second.transport, runOf(R1, "running"));
+    await deltaPush(second.transport, { text: BURST });
+    await elapse(50);
+    await messagePush(second.transport, wire(A1, 3, AG1, `${BURST}。`));
+    expect(bubbleLi()).not.toBeNull();
+    await messagePush(second.transport, wire(A1, 4, ME_ID, "好的"));
+    expect(bubbleLi()).toBeNull();
+    expect([...timeline().querySelectorAll("li[data-msg]")].slice(-2).map((li) => li.dataset.msg)).toEqual(["m3", "m4"]);
+    cleanup();
+    // Leaving while it finishes: coming back shows the stored reply, no bubble.
+    const third = await openAgentChat({ extra: [direct(D1, ANN)] });
+    await runPush(third.transport, runOf(R1, "running"));
+    await deltaPush(third.transport, { text: BURST });
+    await elapse(50);
+    await messagePush(third.transport, wire(A1, 3, AG1, `${BURST}。`));
+    expect(bubbleLi()).not.toBeNull();
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3)).not.toBeNull();
   });
 
   it("停止生成 shows at once everything received; a failure ends the bubble with nothing half-revealed left", async () => {
@@ -1103,6 +1212,29 @@ describe("scrolling", () => {
     list.grow(100);
     await deltaPush(transport, { text: "第二段" });
     expect(list.scrollTop).toBe(2600);
+  });
+
+  it("a bubble finishing after its stored message came: the swap keeps a list at its end there, and a scrolled-up list where it was", async () => {
+    const { transport, list } = await streaming();
+    await deltaPush(transport, { text: "第一段".repeat(200) });
+    await elapse(50);
+    await messagePush(transport, wire(A1, 3, AG1, "第一段".repeat(200)));
+    expect(bubbleLi()).not.toBeNull();
+    list.grow(150); // (the stored reply is taller than the bubble was)
+    await elapse(REVEAL_FINISH_MS + 100);
+    expect(bubbleLi()).toBeNull();
+    expect(list.scrollTop).toBe(2550);
+
+    cleanup();
+    const again = await streaming();
+    await deltaPush(again.transport, { text: "第一段".repeat(200) });
+    await elapse(50);
+    scrollTo(again.list, 1000);
+    await messagePush(again.transport, wire(A1, 3, AG1, "第一段".repeat(200)));
+    again.list.grow(150);
+    await elapse(REVEAL_FINISH_MS + 100);
+    expect(bubbleLi()).toBeNull();
+    expect(again.list.scrollTop).toBe(1000);
   });
 
   it("the list pulled up because its content shrank stays stuck to its end", async () => {

@@ -24,8 +24,8 @@ import { useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
 
 /** The pace is measured over at least this long from the first piece (the first pieces do not set a wild pace). */
 export const REVEAL_RATE_MIN_MS = 1000;
-/** The cushion kept waiting, as time at the pace: at least this, ... */
-export const REVEAL_CUSHION_MIN_MS = 80;
+/** The cushion kept waiting, as time at the pace: at least this (it bridges a provider's usual 0.3–0.7 s gaps), ... */
+export const REVEAL_CUSHION_MIN_MS = 300;
 /** ... at most this (after stalls). */
 export const REVEAL_CUSHION_MAX_MS = 800;
 /** A raised cushion decays back toward its least with this time constant. */
@@ -49,6 +49,8 @@ export const REVEAL_EXCESS_MS = 400;
 export const REVEAL_MAX_LAG_MS = 1200;
 /** Once nothing more will come, what is left is shown within this many milliseconds. */
 export const REVEAL_END_MS = 300;
+/** Once its stored message has come, what a bubble has left to show is shown within this many milliseconds. */
+export const REVEAL_FINISH_MS = 800;
 /** The first frame after a pause counts as this long; a longer frame counts as REVEAL_MAX_FRAME_MS. */
 export const REVEAL_FRAME_MS = 16;
 export const REVEAL_MAX_FRAME_MS = 100;
@@ -79,8 +81,11 @@ export const revealStart = () => ({
   ended: false,
   endBy: null,
 });
-/** The same state, told that nothing more will come. */
-export const endReveal = (state) => (state.ended ? state : { ...state, ended: true });
+/**
+ * The same state, told that nothing more will come: all of it is to be shown within `withinMs` (of play time, from the
+ * next frame). Told already, it stays as it was (an end told sooner is not put off).
+ */
+export const endReveal = (state, withinMs = REVEAL_END_MS) => (state.ended ? state : { ...state, ended: true, endWithin: withinMs });
 
 const isHigh = (c) => c >= 0xd800 && c <= 0xdbff;
 const isLow = (c) => c >= 0xdc00 && c <= 0xdfff;
@@ -124,7 +129,7 @@ export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart()
     changed = true;
   }
   if (state.ended && endBy === null) {
-    endBy = state.play + REVEAL_END_MS;
+    endBy = state.play + (state.endWithin ?? REVEAL_END_MS);
     changed = true;
   }
   const from = Math.max(0, Math.min(revealedLen, receivedLen));
@@ -334,10 +339,10 @@ function useAtOnce(watching) {
 /**
  * How much of `text` is shown, as its length. `text` grows by appending while `epoch` stays the same (another epoch:
  * another text, shown from its start). `paced`: revealed at the frames (otherwise all of it at once); `ended`: nothing
- * more will come (the rest within REVEAL_END_MS); `all`: everything received is shown now. One frame at a time is
+ * more will come (the rest within `endWithin`, REVEAL_END_MS unless said); `all`: everything received is shown now. One frame at a time is
  * asked, only while something waits; none is left once it is all shown, at unmount, or when it is shown at once.
  */
-export function useReveal(text, epoch, { paced = true, ended = false, all = false } = {}) {
+export function useReveal(text, epoch, { paced = true, ended = false, endWithin = REVEAL_END_MS, all = false } = {}) {
   const atOnce = useAtOnce(paced);
   const instant = !paced || all || atOnce;
   const [, shown] = useReducer((n) => n + 1, 0);
@@ -353,16 +358,16 @@ export function useReveal(text, epoch, { paced = true, ended = false, all = fals
       stop(s);
       Object.assign(s, { epoch, upTo: 0, pace: revealStart(), last: null });
     }
-    if (ended) s.pace = endReveal(s.pace);
+    if (ended) s.pace = endReveal(s.pace, endWithin);
     if (instant) {
       // Everything received is shown; what comes later is paced from there.
       stop(s);
       if (s.upTo !== text.length) s.upTo = text.length;
-      if (s.pace.received !== text.length || s.pace.marks.length > 0) s.pace = { ...revealStart(), clock: s.pace.clock, received: text.length, ended: s.pace.ended };
+      if (s.pace.received !== text.length || s.pace.marks.length > 0) s.pace = { ...revealStart(), clock: s.pace.clock, received: text.length, ended: s.pace.ended, endWithin: s.pace.endWithin };
       return;
     }
     if (s.upTo < text.length && s.frame === null) ask(s);
-  }, [text, epoch, instant, ended]);
+  }, [text, epoch, instant, ended, endWithin]);
 
   useEffect(() => {
     const s = ref.current;

@@ -4,6 +4,7 @@ import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
+import { REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { MessageItem } from "./Messages.jsx";
 import {
   AGENT_PAUSED_TEXT,
@@ -30,6 +31,8 @@ import { droppedFiles, useSendFiles } from "./useSendFiles.js";
  * stops following only when the person scrolls up (never because what is in it grew).
  */
 const BOTTOM_SLACK_PX = 48;
+/** A bubble finishing after its stored message came gives way to it at the latest this long after (its frames stalled). */
+const FINISH_GIVE_UP_MS = REVEAL_FINISH_MS + 1000;
 /** This close to the top, the page of older messages is loaded. */
 const TOP_SLACK_PX = 120;
 /** The newest message is marked read once the open chat has been in view this long. */
@@ -101,13 +104,42 @@ export function ChatView({ conv }) {
   const replying = isReplying(run);
   const failedRun = run?.status === "failed" ? run : null;
   const paused = agentChat && !block && Boolean(agent ? agent.paused : conv.agent?.paused);
+  // A reply whose stored message came while its bubble still had some of what it had received to reveal: the bubble
+  // stays and finishes (within REVEAL_FINISH_MS: StreamBubble `finishing`), and the stored message waits meanwhile —
+  // never both. Decided while rendering, so the bubble is never taken down for a moment. Not for a stopped reply (all of
+  // it was shown at the press), nor with nothing left to reveal (reduced motion, a hidden tab: everything is shown). It
+  // ends when the bubble is done (in the same commit the stored message takes its place), when anything comes after
+  // the reply, when the conversation changes or a new reply starts, and at the latest FINISH_GIVE_UP_MS later.
+  const shownStream = useRef(null);
+  const revealedAll = useRef({ runId: null, done: true });
+  const [finish, setFinish] = useState(null);
+  if (agentChat && !replying && finish === null && shownStream.current) {
+    const seen = shownStream.current;
+    const reply = newestFrom(conv.messages, conv.agentId);
+    const held = revealedAll.current;
+    const posted = !detached && seen.convId === conv.id && conv.run?.id === seen.runId && conv.run.posted;
+    if (posted && reply && !reply.stopped && last?.id === reply.id && held.runId === seen.runId && !held.done) {
+      setFinish({ convId: conv.id, runId: seen.runId, stream: seen.stream, run: conv.run, messageId: reply.id });
+    }
+  }
+  const finishing = finish && finish.convId === conv.id && !replying && !detached && last?.id === finish.messageId ? finish : null;
+  useLayoutEffect(() => {
+    shownStream.current = replying && conv.stream ? { convId: conv.id, runId: run.id, stream: conv.stream } : null;
+    if (finish && !finishing) setFinish(null);
+  });
+  useEffect(() => {
+    if (!finish) return undefined;
+    const timer = setTimeout(() => setFinish(null), FINISH_GIVE_UP_MS);
+    return () => clearTimeout(timer);
+  }, [finish]);
+  const listed = finishing ? messages.filter((m) => m.id !== finishing.messageId) : messages;
   // A group: each Agent's reply being written, my Agent's status line, someone else's 暂时无法回复 — at the end of the
   // list (not under a detached window); and 让 Agent 停下 above the composer while its Agents talk to each other.
   const groupRows = group && !detached ? conv.agentRuns ?? [] : [];
   const hasAgents = group && conv.members.some((id) => isAgent(state, id));
   const live = state.connection === "live";
   /** What changes at the end of the list besides messages: the bubble growing, the status lines coming or going. */
-  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${failedRun?.id ?? ""}|${groupRows
+  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${finishing ? `finishing:${finishing.runId}` : ""}|${failedRun?.id ?? ""}|${groupRows
     .map((r) => `${r.agentId}:${r.kind}:${r.run?.id ?? ""}`)
     .join(",")}`;
   // A group with Agents: what their replies are now is fetched when it opens, and again when the connection comes back
@@ -439,10 +471,19 @@ export function ChatView({ conv }) {
       )}
       <MarkdownView listRef={listRef} newest={newestAgentTexts} onChange={keepNewestInView}>
         <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
-          {messages.map((msg) => (
+          {listed.map((msg) => (
             <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
           ))}
-          {replying && <StreamBubble conv={conv} />}
+          {(replying || finishing) && (
+            <StreamBubble
+              conv={conv}
+              finishing={finishing}
+              onReveal={(runId, done) => {
+                revealedAll.current = { runId, done };
+              }}
+              onFinished={() => setFinish(null)}
+            />
+          )}
           {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
           {groupRows.map((row) =>
             row.kind === "replying" ? (

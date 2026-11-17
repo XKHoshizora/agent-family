@@ -9,6 +9,7 @@ import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
 import { nameOf, publishBlock } from "../state/selectors.js";
 import { StreamingAgentText } from "../ui/AgentText.jsx";
+import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { refusalText, settled } from "./AgentForm.jsx";
 import { useAction, useNow } from "./useAction.js";
@@ -166,9 +167,9 @@ function LiveThinking({ text, cut, summary, streaming }) {
 /**
  * 停止生成 for a reply of mine: the reply of an Agent conversation, or (`agentId`) of my Agent in a group. The button stays
  * disabled from the press until that run ends (a new run has its own button); a stop that could not be sent says why.
- * `onStopping(true)` at the press, `onStopping(false)` when the stop could not be sent.
+ * `onStopping(true)` at the press, `onStopping(false)` when the stop could not be sent; `disabled`: nothing to stop any more.
  */
-function StopButton({ conversationId, agentId = null, runId, onStopping = null }) {
+function StopButton({ conversationId, agentId = null, runId, disabled = false, onStopping = null }) {
   const { dispatch, actions } = useStore();
   const [stopping, setStopping] = useState(null);
   const stop = async () => {
@@ -183,7 +184,7 @@ function StopButton({ conversationId, agentId = null, runId, onStopping = null }
     dispatch({ type: "toast", text: res.text });
   };
   return (
-    <Btn small disabled={stopping === runId} onClick={stop}>
+    <Btn small disabled={disabled || stopping === runId} onClick={stop}>
       <Square size={12} aria-hidden="true" /> 停止生成
     </Btn>
   );
@@ -201,14 +202,18 @@ function StopButton({ conversationId, agentId = null, runId, onStopping = null }
  * 停止生成 (until a stop that could not be sent) and a run that is not running any more show everything received at
  * once. A very long reply shows its first part only, and says so under it (what is left of that part is revealed
  * within a moment); the stored reply shows what the service kept, and replaces the bubble the moment it arrives,
- * revealed or not. Busy for assistive technology while it grows: the stored reply that replaces it is announced
- * instead (ChatView).
+ * revealed or not — unless `finishing` (ChatView): its stored message came while some of what it had received was still
+ * unrevealed, so the bubble shows that stream (`finishing.stream`, `finishing.run`) to its end within REVEAL_FINISH_MS,
+ * 停止生成 disabled, and calls `onFinished()` then. `onReveal(runId, done)` tells ChatView, whenever it changes, whether
+ * all the text received is shown. Busy for assistive technology while it grows: the stored reply that replaces it is
+ * announced instead (ChatView).
  */
-export function StreamBubble({ conv }) {
+export function StreamBubble({ conv, finishing = null, onReveal = null, onFinished = null }) {
   const { state } = useStore();
-  const run = conv.run;
-  const text = conv.stream?.text ?? "";
-  const reasoning = conv.stream?.reasoning ?? "";
+  const run = finishing ? finishing.run : conv.run;
+  const stream = finishing ? finishing.stream : conv.stream;
+  const text = stream?.text ?? "";
+  const reasoning = stream?.reasoning ?? "";
   const thinks = (state.agents[conv.agentId]?.reasoning ?? "none") !== "none";
   const thinking = thinks && !text;
   const clock = useRunClock(run.id, reasoning, text);
@@ -230,7 +235,7 @@ export function StreamBubble({ conv }) {
           <strong>{nameOf(state, conv.agentId)}</strong>
           <Tag>Agent</Tag>
         </div>
-        <LiveThinking key={run.id} text={reasoning} cut={conv.stream?.reasoningCut} summary={summary} streaming={thinking} />
+        <LiveThinking key={run.id} text={reasoning} cut={stream?.reasoningCut} summary={summary} streaming={thinking} />
         <div className="bubble">
           {text ? (
             <>
@@ -238,18 +243,23 @@ export function StreamBubble({ conv }) {
                 key={run.id}
                 text={text}
                 paced
-                ended={Boolean(conv.stream.cut)}
-                all={stopped === run.id || run.status !== "running"}
+                ended={Boolean(stream.cut) || Boolean(finishing)}
+                endWithin={stream.cut ? REVEAL_END_MS : REVEAL_FINISH_MS}
+                all={stopped === run.id || (!finishing && run.status !== "running")}
                 placeholder={thinks ? <Writing text="" /> : waiting}
+                onShown={(upTo, length) => {
+                  onReveal?.(run.id, upTo >= length);
+                  if (finishing && upTo >= length) onFinished?.();
+                }}
               />
-              {conv.stream.cut && <StreamCutNote />}
+              {stream.cut && <StreamCutNote />}
             </>
           ) : (
             waiting
           )}
         </div>
         <div className="msg-foot">
-          <StopButton key={run.id} conversationId={conv.id} runId={run.id} onStopping={(on) => setStopped(on ? run.id : null)} />
+          <StopButton key={run.id} conversationId={conv.id} runId={run.id} disabled={Boolean(finishing)} onStopping={(on) => setStopped(on ? run.id : null)} />
         </div>
       </div>
     </li>
