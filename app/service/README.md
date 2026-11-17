@@ -1477,7 +1477,8 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
   "reasoning": "…",                    // an Agent's reply in its own conversation: the model's reasoning, when it gave
                                        // any (show it folded; never in previews or search, never sent to a model
-                                       // again; never stored for a reply in a group)
+                                       // again; never stored for a reply in a group, and never sent for a message
+                                       // anywhere but an Agent's own conversation, whatever is stored)
   "stopped": true,                     // an Agent's reply its owner stopped: text is what had been said by then
   "truncated": true,                   // an Agent's reply that was cut (model's output limit, time limit, 8 000 characters)
   "proposal": { "id": "…", "status": "open" | "confirmed" | "discarded" | "superseded" | "stale",

@@ -347,6 +347,28 @@ describe("a reply in a group", () => {
     }
   });
 
+  it("a message in a group never carries reasoning to anyone, its Agent's owner included, whatever is stored; its own conversation still does, to its owner", async () => {
+    const { mia, owner, ned, g, agent } = await world();
+    await say(owner, agent.conversationId, "你好");
+    await answer("你好呀", { reasoning: "OWN-REASONING-gr5" });
+    await addOwn(owner, g, agent.id);
+    const asked = await say(mia, g, "@helper_bot 在吗");
+    await answer("在。");
+    // As a future write path might store it.
+    await db.query("update messages set body = body || jsonb_build_object('reasoning', 'HAND-REASONING-gr5'::text) where conversation_id = $1 and sender_id = $2", [g, agent.id]);
+    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "在。", reasoning: "HAND-REASONING-gr5" }]);
+
+    for (const who of [mia, ned, owner]) {
+      const last = (await messagesOf(who, g)).at(-1);
+      expect([who.handle, last.text, "reasoning" in last]).toEqual([who.handle, "在。", false]);
+      const one = await api(app, who, "GET", `/api/conversations/${g}/messages/${asked + 1}`);
+      expect([who.handle, one.status, one.json.message.text, "reasoning" in one.json.message]).toEqual([who.handle, 200, "在。", false]);
+      expect([who.handle, JSON.stringify((await api(app, who, "GET", "/api/sync")).json).includes("HAND-REASONING-gr5")]).toEqual([who.handle, false]);
+    }
+    const own = (await messagesOf(owner, agent.conversationId)).filter((m) => m.senderId === agent.id);
+    expect(own.at(-1)).toMatchObject({ text: "你好呀", reasoning: "OWN-REASONING-gr5" });
+  });
+
   it("an <af-persona> block in it is no proposal: it is stored without the block and changes nothing of the Agent", async () => {
     const { mia, owner, g, agent } = await world();
     await addOwn(owner, g, agent.id);
