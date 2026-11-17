@@ -288,6 +288,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/auth/verify-email` | 10 per client address + the e-mail the link names, and 60 per client address (counters of its own) | address (+ e-mail) |
 | `GET /api/principals/lookup` | 30 | principal |
 | `GET /api/usage` | 60 | principal |
+| `GET /api/models` | 120 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` + `PUT /api/agents/:id/avatar` (yours and your Agents' avatars) | 10 together | principal |
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
@@ -723,6 +724,21 @@ other error status, a network failure, silence, a redirect, an oversized answer,
 without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`. Besides the
 code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent is kept, printed or logged.
 Stopping a call (its abort signal) ends it at once and closes the upstream connection.
+
+#### `GET /api/models`
+
+*Session: required.* What a client's model picker reads: the models the site offers and the defaults a provider model
+gets. → 200 `{"siteModels": [{"id", "label", "tier": "free" | "paid", "vision", "pdf", "reasoning": [levels],
+"contextTokens"}], "providerDefaults": {"contextTokens", "maxOutputTokens"}}`.
+
+- `siteModels`: `SITE_MODELS` in configuration order (`[]` when none is configured). `id` is what an Agent's
+  `{"source": "site", "id"}` names; `reasoning` the levels the model takes besides `none`, which every model takes (an
+  empty list: `none` only). Nothing else of a site model is shown: never where it is called (`baseUrl`, `protocol`), the
+  upstream model name, its key or the name of the variable holding it, or its prices.
+- `providerDefaults`: `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's context when its owner gives none) and
+  `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output limit of every call to a provider model; a provider model's context must
+  be larger).
+- Limit: 120 per minute, a budget of its own.
 
 ### Health
 

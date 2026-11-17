@@ -1,0 +1,54 @@
+import type { FastifyInstance } from "fastify";
+import type { ZodTypeProvider } from "fastify-type-provider-zod";
+import { z } from "zod";
+import { REASONING_LEVELS } from "../config.ts";
+import { perPrincipalLimit } from "../limits.ts";
+import { requirePrincipal } from "../session.ts";
+
+const modelsResponse = z.object({
+  siteModels: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      tier: z.enum(["free", "paid"]),
+      vision: z.boolean(),
+      pdf: z.boolean(),
+      reasoning: z.array(z.enum(REASONING_LEVELS)),
+      contextTokens: z.number(),
+    }),
+  ),
+  providerDefaults: z.object({ contextTokens: z.number(), maxOutputTokens: z.number() }),
+});
+
+/**
+ * `GET /api/models` (README "Calling a model"): what a client's model picker reads. The site models in configuration
+ * order, each with what its owner chooses by — never where it is called (`baseUrl`, `protocol`), by what upstream name,
+ * with which key (`apiKeyEnv`, the key) or at what price — and the defaults a provider model gets.
+ */
+export function registerModelRoutes(app: FastifyInstance): void {
+  const { config } = app.deps;
+  const api = app.withTypeProvider<ZodTypeProvider>();
+  // A budget of its own.
+  const readLimit = perPrincipalLimit(app, 120);
+
+  api.get(
+    "/api/models",
+    { schema: { params: z.object({}), querystring: z.object({}), response: { 200: modelsResponse } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
+      return {
+        siteModels: config.siteModels.map((m) => ({
+          id: m.id,
+          label: m.label,
+          tier: m.tier,
+          vision: m.vision,
+          pdf: m.pdf,
+          reasoning: m.reasoning,
+          contextTokens: m.contextTokens,
+        })),
+        providerDefaults: { contextTokens: config.providerDefaultContextTokens, maxOutputTokens: config.providerDefaultMaxOutputTokens },
+      };
+    },
+  );
+}

@@ -25,6 +25,7 @@ import { registerAgentRoutes } from "./agents/routes.ts";
 import { createAgentWorker, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
+import { registerModelRoutes } from "./models/routes.ts";
 import { guardedFetch } from "./providers/guard.ts";
 import { createProviderProbe, PROBE_GUARD, type ProviderProbe } from "./providers/probe.ts";
 import { registerProviderRoutes } from "./providers/routes.ts";
@@ -319,6 +320,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerAgentRoutes(app, { draftRuns });
   registerRunRoutes(app);
   registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true });
+  registerModelRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
 
