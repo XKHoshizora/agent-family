@@ -84,8 +84,9 @@ function anthropicFrames(model, usage) {
 
 /**
  * The stub's server. Each streaming call takes the next scripted step (or the default reply) when it arrives:
- * `{text, reasoning?, chunkSize? (code points, default 4), delayMs? (before each piece), usage? ({input, output} tokens),
- * status? (answer with this HTTP error instead), hang? (after the text, hold until released or until the caller goes)}`.
+ * `{text, reasoning?, chunkSize? (code points, default 4), delayMs? (before each piece), waitMs? (once, after the stream's
+ * head and before its first piece), usage? ({input, output} tokens), status? (answer with this HTTP error instead), hang?
+ * (after the text, hold until released or until the caller goes)}`.
  * Every request is recorded: method, path, the Authorization / x-api-key it carried, its JSON body, and whether the
  * caller went away before the answer ended.
  */
@@ -109,6 +110,7 @@ export function startModelStub() {
     });
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     res.write(frames.head());
+    if (step.waitMs > 0) await sleep(step.waitMs);
     const emit = async (kind, text) => {
       for (const piece of chunks(text, size)) {
         if (gone) return;

@@ -96,13 +96,12 @@ test("my own provider: added in the form, 同步模型 opens with its model list
   await expect(row).toContainText("2 个模型");
   await expect(row).toContainText(`密钥 …${key.slice(-4)}`);
 
-  // 测试连接: the provider is asked for its model list again, with the key.
+  // 测试连接: one tiny real call to its first saved model, with the key (its model list is not asked for again).
   await row.getByRole("button", { name: "测试连接" }).click();
-  await expect(row.getByRole("status")).toHaveText("连接成功，供应商正常回应。");
-  expect(await listing()).toEqual([
-    ["/v1/models", `Bearer ${key}`],
-    ["/v1/models", `Bearer ${key}`],
-  ]);
+  await expect(row.getByRole("status")).toHaveText(/^用 stub-chat 发了一句话，用时 \d+\.\d 秒$/);
+  const [probe] = await modelStub.waitForCalls(1);
+  expect([probe.path, probe.authorization, probe.body.model]).toEqual(["/v1/chat/completions", `Bearer ${key}`, "stub-chat"]);
+  expect(await listing()).toEqual([["/v1/models", `Bearer ${key}`]]);
 
   // An Agent on one of the two answers through the provider, with that key.
   const agent = `自带模型${uniq(4)}`;
@@ -110,7 +109,7 @@ test("my own provider: added in the form, 同步模型 opens with its model list
   const chat = await createAgentUi(page, { name: agent, model: STUB_MODELS[0], persona: "你是一个用自己供应商的助手。" });
   await sendText(ann.page, agent, `你好 ${uniq(4)}`);
   await expectStored(chat, "这是供应商模型的回答。");
-  const [call] = await modelStub.calls();
+  const [, call] = await modelStub.waitForCalls(2);
   expect([call.path, call.authorization, call.body.model]).toEqual(["/v1/chat/completions", `Bearer ${key}`, STUB_MODELS[0]]);
 
   // The key never came back to the page: not in it, not in its storage, also after a reload.

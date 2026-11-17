@@ -20,3 +20,8 @@ export async function controlCall(path, body) {
 export const stopService = () => controlCall("stop");
 /** Starts it again with the same configuration, database and blobs; resolves once /api/health answers. */
 export const startService = () => controlCall("start");
+/**
+ * Stops it and starts it again with `env` over its configuration (only what system.mjs lets a spec set, e.g.
+ * `{AGENT_CHAIN_LIMIT: "3"}`); `restartService({})` is its own configuration again. Resolves once /api/health answers.
+ */
+export const restartService = (env = {}) => controlCall("restart", { env });

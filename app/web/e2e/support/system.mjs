@@ -136,12 +136,18 @@ async function freshDatabase() {
   }
 }
 
+/** What a spec may set for the next start of the service (`restart(extra)`): small brakes, nothing else. */
+const ADJUSTABLE = new Set(["AGENT_CHAIN_LIMIT"]);
+
 /**
- * The service process. `start()` spawns it (same environment every time) and resolves once `/api/health`
- * answers; `stop()` ends it (a hard stop: on Windows a signal cannot reach Node, so this is how a crash looks).
+ * The service process. `start()` spawns it (same environment every time, plus what the last `restart(extra)` set) and
+ * resolves once `/api/health` answers; `stop()` ends it (a hard stop: on Windows a signal cannot reach Node, so this is
+ * how a crash looks); `restart(extra)` stops it and starts it with `extra` (only the ADJUSTABLE variables, as strings)
+ * over the base environment — `restart({})` is the base environment again.
  */
 function createService(env) {
   let child = null;
+  let extra = {};
 
   async function start() {
     if (child) throw new Error("the service is already running");
@@ -150,7 +156,7 @@ function createService(env) {
     try {
       child = spawn(process.execPath, ["--enable-source-maps", "--import", TSX_LOADER, SERVICE_ENTRY], {
         cwd: RUN_DIR,
-        env,
+        env: { ...env, ...extra },
         stdio: ["ignore", log, log],
         windowsHide: true,
       });
@@ -188,12 +194,24 @@ function createService(env) {
     await waitUntil(async () => !(await portInUse()), 10_000, `port ${PORT} to be released`);
   }
 
-  return { start, stop };
+  async function restart(next) {
+    const chosen = {};
+    for (const [key, value] of Object.entries(next ?? {})) {
+      if (!ADJUSTABLE.has(key) || typeof value !== "string") throw new Error(`the service's ${key} cannot be set by a spec`);
+      chosen[key] = value;
+    }
+    await stop();
+    extra = chosen;
+    await start();
+  }
+
+  return { start, stop, restart };
 }
 
 /**
- * For the workers: POST /stop and POST /start (restart spec), answered once the step is done; POST /stub/<command>
- * with a JSON body, the model stub's `control` (model-stub.mjs), answered with its JSON.
+ * For the workers: POST /stop and POST /start (restart spec), answered once the step is done; POST /restart with a JSON
+ * body `{env}` (the service's `restart`: e.g. a small AGENT_CHAIN_LIMIT for one spec, `{}` for the base again); POST
+ * /stub/<command> with a JSON body, the model stub's `control` (model-stub.mjs), answered with its JSON.
  */
 function startControl(service, stub) {
   const token = randomBytes(24).toString("hex");
@@ -215,6 +233,22 @@ function startControl(service, stub) {
         } catch (err) {
           failed(err);
         }
+      });
+      return;
+    }
+    if (req.url === "/restart") {
+      const parts = [];
+      req.on("data", (c) => parts.push(c));
+      req.on("end", () => {
+        let env;
+        try {
+          const raw = Buffer.concat(parts).toString("utf8");
+          env = (raw ? JSON.parse(raw) : {}).env ?? {};
+        } catch (err) {
+          failed(err);
+          return;
+        }
+        queue = queue.then(() => service.restart(env)).then(() => res.writeHead(204).end(), failed);
       });
       return;
     }

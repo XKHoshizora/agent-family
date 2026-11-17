@@ -350,9 +350,9 @@ test("a model that thinks: the level is chosen in the form, and the thinking is 
   await modelStub.script({ reasoning, text: answer, chunkSize: 3, delayMs: 30, hang: true });
   await sendText(ann.page, name, `宇宙的答案是什么？ ${tag}`);
   await modelStub.holding(1);
-  // While it is written: the thinking so far is there, folded.
+  // While it is written: the thinking so far is there, folded once its text has started, under how long it thought.
   const bubble = streamingBubble(chat);
-  await expect(bubble.locator("details.thinking summary")).toHaveText("思考过程");
+  await expect(bubble.locator("details.thinking summary")).toHaveText(/^思考了 \d+ 秒$/);
   await expect(bubble.locator("details.thinking")).not.toHaveAttribute("open", "");
   await capture(ann.page, "agent-chat-thinking-streaming");
   await modelStub.release("");
