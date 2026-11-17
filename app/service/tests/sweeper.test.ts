@@ -208,8 +208,9 @@ describe("inside the app", () => {
     try {
       await sweeping.ready();
       await vi.waitFor(async () => expect((await db.query("select 1 from attachments")).rowCount).toBe(0), { timeout: 5000 });
-      expect(files()).toEqual([]);
+      // The run's line is written once the whole run is done: the unsent uploads first, the abandoned blobs after them.
       await vi.waitFor(() => expect(lines.some((l) => l.includes('"unsent":1') && l.includes('"abandoned":1'))).toBe(true));
+      expect(files()).toEqual([]);
     } finally {
       await sweeping.close();
     }
