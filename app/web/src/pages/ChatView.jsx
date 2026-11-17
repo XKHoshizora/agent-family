@@ -3,6 +3,7 @@ import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
+import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
 import { MessageItem } from "./Messages.jsx";
 import { AGENT_PAUSED_TEXT, IMAGE_HINT, RunStatusLine, StreamBubble, isReplying, seesImages } from "./AgentChatBits.jsx";
 import { ChatHitRow, SearchFooter } from "./SearchHits.jsx";
@@ -114,6 +115,12 @@ export function ChatView({ conv }) {
   }, [providerNeeded, actions]);
   // The Agent's reply is announced once, when its stored message arrives (never piece by piece while it streams).
   const newestReply = agentChat ? newestFrom(conv.messages, conv.agentId) : null;
+  // The newest Agent texts: rendered first where the browser cannot tell which texts are near the visible part.
+  const agentsHere = state.agents;
+  const newestAgentTexts = useMemo(
+    () => new Set(messages.filter((m) => m.kind === "text" && Boolean(agentsHere[m.from])).slice(-NEWEST_NEAR).map((m) => m.id)),
+    [messages, agentsHere],
+  );
   const [announcement, setAnnouncement] = useState("");
   const announced = useRef({ convId: null, seq: 0 });
 
@@ -166,6 +173,15 @@ export function ChatView({ conv }) {
       atBottom.current = true;
     }
   }, [conv.id, firstId, last?.id, messages.length, detached, tail]);
+
+  // An Agent's text shown rich once its tree has come (or plain again) changes its height: a list that was at the newest
+  // message stays there. (Scrolled up, the browser keeps what is on screen in place.)
+  const keepNewestInView = () => {
+    const list = listRef.current;
+    if (!list || detached || !atBottom.current || showHits) return;
+    list.scrollTop = list.scrollHeight;
+    lastTop.current = list.scrollTop;
+  };
 
   // The results cover the list while there is a query: its scroll position is kept for when they go away.
   useLayoutEffect(() => {
@@ -380,14 +396,16 @@ export function ChatView({ conv }) {
           <SearchFooter search={search} emptyText="没有找到相关消息，请换个关键词" />
         </ul>
       )}
-      <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
-        {messages.map((msg) => (
-          <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
-        ))}
-        {replying && <StreamBubble conv={conv} />}
-        {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
-        <li aria-hidden="true" />
-      </ol>
+      <MarkdownView listRef={listRef} newest={newestAgentTexts} onChange={keepNewestInView}>
+        <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
+          {messages.map((msg) => (
+            <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
+          ))}
+          {replying && <StreamBubble conv={conv} />}
+          {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
+          <li aria-hidden="true" />
+        </ol>
+      </MarkdownView>
 
       {paused && <Notice tone="pause">{AGENT_PAUSED_TEXT}</Notice>}
       <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} sendFiles={sendAndNote} note={imageHint} />

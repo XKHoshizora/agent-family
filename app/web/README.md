@@ -64,9 +64,13 @@ restart spec and the specs that need the model stub (Agents, providers, Markdown
   signed in, stops it on sign-out / 401 / close 4001), the path router (`router.js`), field rules, error-code texts.
 - `src/App.jsx` - the sign-in gate and the lazy application (`src/AppShell.jsx`: rail, lists, chat; its own chunk, so the account screens never download it).
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.
-- `src/ui/Markdown.jsx` - the safe Markdown renderer for Agents' messages only (its own chunk, loaded with the first Agent message;
-  `AgentText` in `src/pages/AgentChatBits.jsx` shows the plain text until then, on any failure, and for a text beyond
-  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched; maths is `$$…$$` only.
-  The work a text causes is bounded by its output and by time (`LIMITS` in `Markdown.jsx`: cells, formulas, maths and
-  highlighting output and time, a final count of the whole tree); a text whose render takes over 400 ms is shown plain
-  with a note and remembered for the tab by a digest (`src/ui/slowTexts.jsx`).
+- Agents' messages (only theirs) as safe Markdown, never parsed on the page's main thread:
+  `src/ui/markdownWorker.js` runs the whole pipeline (`src/ui/markdownPipeline.js` `renderToTree`: the raw-text checks of
+  `src/ui/markdownLimits.js`, micromark/remark, KaTeX, highlighting, the allow-list of `src/ui/markdownRules.js`, caps of
+  600 table cells and 3 000 elements per text) in a module worker; `src/ui/markdownClient.js` sends one text at a time
+  and ends the worker when an answer is 250 ms late (the text is then plain with a note, and remembered for the tab by a
+  digest: `src/ui/slowTexts.jsx`); `src/ui/markdownTree.js` checks every tree that comes back; `src/ui/Markdown.jsx` (its
+  own chunk, with KaTeX's styles) turns it into React elements. `src/ui/AgentText.jsx` shows the plain text until the
+  tree has come; `src/ui/markdownView.jsx` renders only texts near the visible part of a conversation, within 30 000
+  elements per conversation. No raw HTML, http(s) links only, each followed by its real host, images as links, nothing
+  fetched; maths is `$$…$$` only.

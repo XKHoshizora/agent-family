@@ -90,7 +90,7 @@ function Body({ msg, agent }) {
   return (
     <div className="bubble">
       <Quote quote={msg.quote} />
-      {agent ? <AgentText text={msg.text} /> : msg.text}
+      {agent ? <AgentText text={msg.text} id={msg.id} /> : msg.text}
     </div>
   );
 }

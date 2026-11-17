@@ -284,9 +284,9 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dots i { animation: none; } }
 
-/* An Agent's text rendered from Markdown (ui/Markdown.jsx), inside its bubble. Nothing it renders reaches outside the
-   bubble: wide content scrolls sideways, and anything maths moved above or below it is cut off (the padding and the
-   negative margin leave room for focus outlines). */
+/* An Agent's text rendered from Markdown (ui/Markdown.jsx, from the Markdown worker's tree), inside its bubble. Nothing
+   it renders reaches outside the bubble: wide content scrolls sideways, and anything maths moved above or below it is
+   cut off (the padding and the negative margin leave room for focus outlines). */
 .md { white-space: normal; overflow-wrap: break-word; overflow-x: auto; overflow-y: hidden; padding: 4px; margin: -4px; }
 .md :is(p, ul, ol, blockquote, .md-code, .md-table, .katex-display, hr) { margin: 0 0 8px; }
 .md :is(h1, h2, h3, h4, h5, h6) { margin: 12px 0 6px; font-weight: 700; line-height: 1.4; }
@@ -307,6 +307,9 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 }
 .md hr { border: 0; border-top: 1px solid var(--line-strong); }
 .md a { color: var(--purple-dark); text-decoration: underline; text-underline-offset: 2px; }
+/* A link and the real host after it: each isolated, so the text around them cannot reorder them. */
+.md-link, .md-link > a, .md-host { unicode-bidi: isolate; }
+.md-host { color: var(--ink-3); font-size: 0.875em; overflow-wrap: anywhere; }
 .md code { font-family: Consolas, monospace; font-size: 0.875em; padding: 1px 5px; border-radius: 5px; background: rgba(120, 110, 180, 0.12); }
 .md-code { position: relative; }
 .md pre {
