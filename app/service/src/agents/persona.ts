@@ -256,10 +256,21 @@ export function draftData(input: { name: string; intro: string; field: string })
 
 /** Any `<af-…>` or `</af-…>` tag: a draft is returned without them (it is text for the persona box, not a proposal). */
 const AF_TAG = /<\/?af-[^<>]*>/g;
+/** A `<af-…` or `</af-…` the text ends in, never closed (the model stopped inside it). */
+const AF_UNFINISHED = /<\/?af-[^<>]*$/;
 
-/** What a draft returns of the model's text: message-text rules (`stripUnsafeText`), no `<af-…>` tags, trimmed, at most 20 000 characters. */
+/**
+ * What a draft returns of the model's text: message-text rules (`stripUnsafeText`), no `<af-…>` tags — removed again and
+ * again until none is left, so none forms from the pieces of others (`<af-<af-x>persona>`), and an unfinished one at the
+ * end too —, trimmed, at most 20 000 characters.
+ */
 export function draftText(text: string): string {
-  const cleaned = stripUnsafeText(text).replace(AF_TAG, "").trim();
+  let cleaned = stripUnsafeText(text);
+  for (let before = ""; before !== cleaned; ) {
+    before = cleaned;
+    cleaned = cleaned.replace(AF_TAG, "").replace(AF_UNFINISHED, "");
+  }
+  cleaned = cleaned.trim();
   if (characters(cleaned) <= PERSONA_MAX) return cleaned;
   return Array.from(cleaned).slice(0, PERSONA_MAX).join("").trimEnd();
 }
@@ -372,14 +383,20 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
         ? UNAVAILABLE
         : ({ status: "done" } as const);
   const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
-  await db.tx(async (t) => {
-    await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date());
-    await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
-      started.runId,
-      end.status,
-      end.status === "failed" ? end.error : null,
-    ]);
-  });
+  try {
+    await db.tx(async (t) => {
+      await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date());
+      await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
+        started.runId,
+        end.status,
+        end.status === "failed" ? end.error : null,
+      ]);
+    });
+  } catch (err) {
+    // Nothing of it was recorded: the run stays running, its hold counting, until the next start recovers it.
+    log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the next start");
+    throw err;
+  }
   if (end.status === "failed") throw new ModelError(end.error);
   return persona;
 }

@@ -406,7 +406,8 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
 *Session: required.* Spec 6.7 "留空自动起草": the model writes a persona for an Agent you are about to create. Body (no
 other key): `name` (the rule of an Agent's name), optionally `intro` (≤ 40) and `field` (≤ 20) as on creation, and
 `model` (required, not `null`), checked exactly as on creation (a site model that is configured, or a provider of yours
-that lists the model; 400 otherwise). → 200 `{"persona"}`: the model's text with any `<af-…>` tag removed, under the
+that lists the model; 400 otherwise). → 200 `{"persona"}`: the model's text with every `<af-…>` and `</af-…>` tag removed
+— again until none is left, so none forms from the pieces of others, and an unfinished one at the end too —, under the
 rules of message text, trimmed, at most 20 000 characters. It is returned, never stored: put it in the persona box and
 save the Agent to keep it.
 
@@ -427,7 +428,8 @@ save the Agent to keep it.
   reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
   `AGENT_RUN_TIMEOUT_MS` (2 minutes) the call is ended: what it had written is the answer (nothing: 502
   `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the run is released
-  at the next start like a reply's (Agents and runs, Recovery).
+  at the next start like a reply's (Agents and runs, Recovery). When its settlement cannot be stored (500 `internal`),
+  that is logged with the run's id and the run, still `running`, is released the same way.
 - Limit: 5 a minute, a budget of its own.
 
 #### `GET /api/agents`

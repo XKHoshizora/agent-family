@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseProposalBlock, PROPOSAL_PLACEHOLDER, renderProposalBlock } from "../src/agents/persona.ts";
+import { draftText, parseProposalBlock, PROPOSAL_PLACEHOLDER, renderProposalBlock } from "../src/agents/persona.ts";
 import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import { ReplyStream } from "../src/agents/runtime/stream.ts";
 import { toStored, type MessageRow } from "../src/messages/model.ts";
@@ -19,7 +19,8 @@ import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/
  */
 
 const gateway = scriptedGateway();
-const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false });
+const lines: string[] = [];
+const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false, logStream: { write: (line) => void lines.push(line) } });
 
 let first = 0;
 beforeEach(() => {
@@ -588,5 +589,55 @@ describe("drafting a persona", () => {
     for (let i = 0; i < config.agentMaxConcurrentRuns; i++) await runningRun(db, owner.id);
     expect(await draft(owner, { name: "x", model: FAST })).toEqual({ status: 429, json: { error: "rate_limited" } });
     expect(callsHere()).toEqual([]);
+  });
+
+  it("a draft that is running counts against the worker's per-owner limit: a reply waits queued while drafts fill it", async () => {
+    const { owner, agent, conv } = await owned("draftsfirst");
+    const drafts: string[] = [];
+    for (let i = 0; i < app.deps.config.agentMaxConcurrentRuns; i++) drafts.push(await runningRun(db, owner.id));
+    expect((await say(owner, conv, "在吗")).status).toBe(201);
+    expect(await app.agentWorker.runOnce()).toBe(false);
+    expect((await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run).toMatchObject({ status: "queued" });
+    // One draft ends: the reply is claimed.
+    await db.query("update agent_runs set status = 'failed', error = 'provider_unavailable', finished_at = now() where id = $1", [drafts[0]]);
+    gateway.reply("来了。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await lastFromAgent(owner, conv, agent.id)).text).toBe("来了。");
+  });
+
+  it("strips every <af-…> tag, also ones that only form once another is removed, and an unfinished one at the end", async () => {
+    expect(draftText("<af-<af-x>persona>你是小橘。</af-<af-y>persona>")).toBe("你是小橘。");
+    expect(draftText("<af-<af-<af-x>>>你是小橘。")).toBe("你是小橘。");
+    expect(draftText("你是小橘。<af-pers")).toBe("你是小橘。");
+    expect(draftText("你是小橘。</af-")).toBe("你是小橘。");
+    expect(draftText("你是小橘。<af-a<af-")).toBe("你是小橘。");
+    expect(draftText("你是小橘。<af-persona>但 a < b 也行 <af-")).toBe("你是小橘。但 a < b 也行");
+    // Not a tag: kept.
+    expect(draftText("a <b> c <af d")).toBe("a <b> c <af d");
+    for (const text of ["<af-<af-x>persona>", "<af-<af-<af-x>>>x", "x<af-a<af-", "<<af-x>af-y>z", "<</af-x>/af-y>z"]) {
+      expect([text, draftText(text).includes("<af-") || draftText(text).includes("</af-")]).toEqual([text, false]);
+    }
+
+    const owner = await signUp(app, "nested");
+    gateway.reply("<af-<af-x>persona>你是小橘。</af-<af-y>persona><af-pers");
+    expect(await draft(owner, { name: "小橘", model: FAST })).toEqual({ status: 200, json: { persona: "你是小橘。" } });
+  });
+
+  it("a draft whose settlement fails is logged with its run id (and answered 500)", async () => {
+    const owner = await signUp(app, "unsettled");
+    const hold = gateway.hang();
+    const answer = draft(owner, { name: "x", model: FAST });
+    await hold.reached;
+    const runId = (await db.query<{ id: string }>("select id from agent_runs where owner_id = $1", [owner.id])).rows[0]!.id;
+    // Something already settled it: settling again throws, and its transaction rolls back.
+    await db.query("insert into usage_records (owner_id, run_id, purpose, source, model, outcome) values ($1, $2, 'draft', 'site', 'fast', 'done')", [
+      owner.id,
+      runId,
+    ]);
+    lines.length = 0;
+    hold.release("你是一个助手。");
+    expect(await answer).toEqual({ status: 500, json: { error: "internal" } });
+    const logged = lines.map((l) => JSON.parse(l) as { msg: string; runId?: string; level: number }).filter((l) => l.runId === runId);
+    expect(logged).toEqual([expect.objectContaining({ runId, level: 50, msg: expect.stringMatching(/persona draft: .*settled/) })]);
   });
 });
