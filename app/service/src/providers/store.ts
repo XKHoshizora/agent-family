@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { lockAccount } from "../accounts/store.ts";
 import type { Protocol } from "../config.ts";
@@ -109,18 +110,21 @@ export interface NewProvider {
 }
 
 /**
- * Creates a provider with its key sealed under `secret`. The owner's account lock serialises the count, so
- * concurrent creates cannot pass `MAX_PROVIDERS` (400 `provider_limit`). 409 `name_taken`.
+ * Creates a provider with its key sealed under `secret` for the new row (its id is made first: the key is bound to it).
+ * The owner's account lock serialises the count, so concurrent creates cannot pass `MAX_PROVIDERS` (400
+ * `provider_limit`). 409 `name_taken`.
  */
 export async function createProvider(t: Tx, ownerId: string, input: NewProvider, secret: string): Promise<ProviderRow> {
   await lockAccount(t, ownerId);
   const { rows: count } = await t.query<{ n: number }>("select count(*)::int as n from providers where owner_id = $1", [ownerId]);
   if (count[0]!.n >= MAX_PROVIDERS) throw new AppError(400, "provider_limit");
+  const id = randomUUID();
+  const sealed = sealKey(input.apiKey, secret, { ownerId, providerId: id });
   const { rows } = await uniqueName(() =>
     t.query<ProviderDbRow>(
-      `insert into providers (owner_id, name, protocol, base_url, key_cipher, key_last4, models)
-       values ($1, $2, $3, $4, $5, $6, $7::jsonb) returning ${COLUMNS}`,
-      [ownerId, input.name, input.protocol, input.baseUrl, sealKey(input.apiKey, secret), lastFour(input.apiKey), JSON.stringify(input.models)],
+      `insert into providers (id, owner_id, name, protocol, base_url, key_cipher, key_last4, models)
+       values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb) returning ${COLUMNS}`,
+      [id, ownerId, input.name, input.protocol, input.baseUrl, sealed, lastFour(input.apiKey), JSON.stringify(input.models)],
     ),
   );
   return toRow(rows[0]!);
@@ -179,7 +183,7 @@ export async function updateProvider(t: Tx, ownerId: string, id: string, patch: 
         ])
       : t.query<ProviderDbRow>(
           `update providers set name = $2, base_url = $3, models = $4::jsonb, key_cipher = $5, key_last4 = $6 where id = $1 returning ${COLUMNS}`,
-          [id, name, baseUrl, JSON.stringify(models), sealKey(patch.apiKey, secret), lastFour(patch.apiKey)],
+          [id, name, baseUrl, JSON.stringify(models), sealKey(patch.apiKey, secret, { ownerId, providerId: current.id }), lastFour(patch.apiKey)],
         ),
   );
   return toRow(rows[0]!);
@@ -239,7 +243,8 @@ export async function lockProviderModels(q: Queryable, ownerId: string, provider
 /**
  * What calling the owner's provider takes, its key in plaintext; null when there is no such provider of theirs.
  * The one reader of a key outside crypto.ts: it goes straight to the upstream call and nowhere else. A key that
- * cannot be opened (another `PROVIDER_KEY_SECRET`) throws `KeyUnreadableError`.
+ * cannot be opened — another `PROVIDER_KEY_SECRET`, or a value sealed for another row (it is opened as this row's,
+ * by the owner and id stored on it) — throws `KeyUnreadableError`.
  */
 export async function loadProviderForCall(
   q: Queryable,
@@ -247,11 +252,12 @@ export async function loadProviderForCall(
   providerId: string,
   secret: string,
 ): Promise<{ protocol: Protocol; baseUrl: string; apiKey: string; models: ProviderModel[] } | null> {
-  const { rows } = await q.query<{ protocol: Protocol; base_url: string; key_cipher: Buffer; models: unknown }>(
-    "select protocol, base_url, key_cipher, models from providers where id = $1 and owner_id = $2",
+  const { rows } = await q.query<{ id: string; owner_id: string; protocol: Protocol; base_url: string; key_cipher: Buffer; models: unknown }>(
+    "select id, owner_id, protocol, base_url, key_cipher, models from providers where id = $1 and owner_id = $2",
     [providerId, ownerId],
   );
   const r = rows[0];
   if (!r) return null;
-  return { protocol: r.protocol, baseUrl: r.base_url, apiKey: openKey(r.key_cipher, secret), models: parseModels(r.models) };
+  const apiKey = openKey(r.key_cipher, secret, { ownerId: r.owner_id, providerId: r.id });
+  return { protocol: r.protocol, baseUrl: r.base_url, apiKey, models: parseModels(r.models) };
 }

@@ -304,7 +304,8 @@ const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const
  *
  * 1. One transaction: the run is inserted `running`; under the owner's account lock (after the run row: the order
  *    `admitRun` and `settle` keep) the model is checked as on Agent creation (`assertModelChoice`, 400) and resolved
- *    (none to call: 502 `provider_unavailable`); the owner's calls running at once, replies and drafts, must be fewer
+ *    (none to call: 502 `provider_unavailable`; a provider key that cannot be opened: 502 `provider_rejected`); the
+ *    owner's calls running at once, replies and drafts, must be fewer
  *    than `agentMaxConcurrentRuns` (429 `rate_limited`); the model's context, less its output limit and the
  *    instruction, must hold the data (400 `context_too_small`); then admission (402 `no_quota`). Any refusal rolls all
  *    of it back: nothing is recorded, nothing called.
@@ -338,8 +339,9 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
       resolved = await resolveModel(t, config, { model: input.model, ownerId });
     } catch (err) {
       if (!(err instanceof KeyUnreadableError)) throw err;
-      log.error({ err }, "persona draft: the provider's key cannot be opened (PROVIDER_KEY_SECRET changed?)");
-      resolved = null;
+      // As a key the provider refused: its owner must save it again.
+      log.error({ err }, "persona draft: the provider's saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged)");
+      throw new AppError(502, "provider_rejected");
     }
     if (!resolved) throw new AppError(502, "provider_unavailable");
     const running = await t.query<{ n: number }>(

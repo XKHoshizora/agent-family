@@ -7,7 +7,8 @@ import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { normaliseBaseUrl } from "./guard.ts";
-import { toProviderCallError, type ProviderCallCode, type ProviderCallError } from "./probe.ts";
+import { KeyUnreadableError } from "./crypto.ts";
+import { ProviderCallError, toProviderCallError, type ProviderCallCode } from "./probe.ts";
 import {
   CONTEXT_TOKENS,
   MAX_MODELS,
@@ -112,6 +113,24 @@ export function registerProviderRoutes(
   const logFailure = (log: FastifyBaseLogger, providerId: string, protocol: Protocol, err: ProviderCallError) =>
     log.info({ providerId, protocol, error: err.code, upstreamStatus: err.upstreamStatus }, "provider call failed");
 
+  /**
+   * The owner's provider to call, its key opened (404 when it is not theirs). A saved key that cannot be opened —
+   * `PROVIDER_KEY_SECRET` changed, or the value was moved from another row — is logged and answered as a key the provider
+   * refused (`provider_rejected`: its owner must save it again); nothing is sent.
+   */
+  const callTarget = async (log: FastifyBaseLogger, ownerId: string, providerId: string) => {
+    let target;
+    try {
+      target = await loadProviderForCall(db, ownerId, providerId, secret);
+    } catch (err) {
+      if (!(err instanceof KeyUnreadableError)) throw err;
+      log.error({ err, providerId }, "provider: its saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged); its owner must save it again");
+      throw new ProviderCallError("provider_rejected");
+    }
+    if (!target) throw notFound();
+    return target;
+  };
+
   api.post(
     "/api/providers",
     {
@@ -209,8 +228,13 @@ export function registerProviderRoutes(
     async (req) => {
       const me = await requirePrincipal(req);
       await callLimit(req, me.id);
-      const target = await loadProviderForCall(db, me.id, req.params.id, secret);
-      if (!target) throw notFound();
+      let target;
+      try {
+        target = await callTarget(req.log, me.id, req.params.id);
+      } catch (err) {
+        if (err instanceof ProviderCallError) return { ok: false as const, error: err.code as ProviderCallCode };
+        throw err;
+      }
       try {
         await providerProbe.test(target);
         return { ok: true as const };
@@ -237,8 +261,7 @@ export function registerProviderRoutes(
     async (req) => {
       const me = await requirePrincipal(req);
       await callLimit(req, me.id);
-      const target = await loadProviderForCall(db, me.id, req.params.id, secret);
-      if (!target) throw notFound();
+      const target = await callTarget(req.log, me.id, req.params.id);
       let names: string[];
       try {
         names = await providerProbe.listModels(target);

@@ -63,7 +63,8 @@ and every run-time import of `src/` a production dependency.
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
 `PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable:
-a provider's test and refresh then answer 500 and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
+every call with such a key — a reply, a persona draft, a provider's test and refresh — is then `provider_rejected`, as a key
+the provider refused, and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
 `SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
 `openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl` (a provider's `baseUrl` rule, Model providers: `https`, no
 credentials, a plain host name or address, and no query or fragment, else start-up fails naming the model; used as a
@@ -272,7 +273,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits). Also a run's error (not an HTTP answer there): a reply over `AGENT_RUNS_PER_MINUTE`, recorded failed and retryable (Replies) |
 | 500 | `internal` | A bug (also any failure inside Better Auth); logged with the request |
-| 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
+| 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403), or the provider's saved key cannot be opened (Model providers; save it again) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
 | 503 | `busy` | A database statement ran past its timeout (the pool's or a search's), no database connection was free in time (`DB_ACQUIRE_TIMEOUT_MS`), or the site-wide search cap is reached. Nothing was changed; try again later |
 
@@ -409,8 +410,8 @@ save the Agent to keep it.
 - Refused before any call, with nothing recorded: 400 for the model; 402 `no_quota` (as a reply); 400
   `context_too_small` when the model's context, less its output limit and the instruction, cannot hold the data; 429
   `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (2) model calls running (replies and drafts
-  together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset, a
-  provider key that cannot be opened).
+  together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset); 502
+  `provider_rejected` when your provider's saved key cannot be opened (Model providers: save it again).
 - The call failing: 502 `provider_rejected` / `provider_unavailable`, 400 `address_not_allowed`, charged as a failed
   reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
   its deadline — `AGENT_RUN_TIMEOUT_MS`, but at most `HTTP_CONNECTION_TIMEOUT_MS` less 10 s, so it answers before the
@@ -608,7 +609,12 @@ Agent cannot be pointed at their provider (400).
 
 - **The API key** is sealed when saved (AES-256-GCM, a key derived from `PROVIDER_KEY_SECRET` with HKDF-SHA-256,
   `src/providers/crypto.ts`) and never shown again: no answer, push, error or log line carries it; `keyLast4` is its
-  last four characters. It is opened only to make a call to that provider.
+  last four characters. It is opened only to make a call to that provider. The sealed value is bound to its provider
+  row — its owner and its id are authenticated with it (layout version 2) — so a value copied into another provider's
+  row, of the same owner or another, does not open there: a call with a key that cannot be opened (that, or a changed
+  `PROVIDER_KEY_SECRET`) is `provider_rejected`, nothing is sent, and the log says why; the owner saves the key again.
+  No provider keys had been stored anywhere before this layout, so no stored data needed migrating (a value in the
+  earlier layout, version 1, would read as one that cannot be opened).
 - **`baseUrl`** must be `https:`, without credentials (no `@` before the host), with a plain DNS name or an IP address as
   host and any port from 1 to 65535. It is stored without query, fragment or trailing slash (`https://API.example.com:443/v1/?x`
   is `https://api.example.com/v1`). Saving checks only that; the address is checked at every call (below).
@@ -1490,7 +1496,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    in any of them ends the run `failed`, `busy`):
    1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
       `cancelled`, a stop asked for meanwhile `stopped`, a model that no longer resolves `failed`
-      (`provider_unavailable`). The run takes on what was noted meanwhile, and what the model may be shown is read from
+      (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
+      run takes on what was noted meanwhile, and what the model may be shown is read from
       the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
       the owner's in it, no model is called: when everything the run was to answer is before a new topic, it ends
       `cancelled` with no error (the owner started over: nothing failed, nothing to retry); otherwise `failed`, `busy`.

@@ -33,6 +33,8 @@ export interface AgentPortDeps {
 const STARTED_OVER: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
+/** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
+const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
 
 /** What `begin`, `finish` and recovery read of the run, under its row lock. */
 interface RunState {
@@ -219,8 +221,9 @@ export class DbAgentPort implements AgentPort {
         resolved = await resolveModel(t, config, agent);
       } catch (err) {
         if (!(err instanceof KeyUnreadableError)) throw err;
-        log.error({ err, runId: run.id }, "agent run: the provider's key cannot be opened (PROVIDER_KEY_SECRET changed?)");
-        return { end: UNAVAILABLE };
+        // As a key the provider refused: its owner must save it again. Not retryable as it is.
+        log.error({ err, runId: run.id }, "agent run: the provider's saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged)");
+        return { end: KEY_UNREADABLE };
       }
       if (!resolved) return { end: UNAVAILABLE };
 
