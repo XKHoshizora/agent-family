@@ -16,8 +16,9 @@ import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/
 /**
  * An Agent's reply in a group (plan Task 5; design rules 11–14, 18–20; rulings 1, 2 and 10): the worker answers a
  * mention there as the Agent, with a system text of its own for groups and the group's recent history as the Agent may
- * read it, every speaker named; the reply is stored without reasoning and without a persona proposal, nothing of it is
- * streamed, and its owner pays. Driven through the real routes: the owner adds the Agent (`POST …/members`), a member
+ * read it, every speaker named; the reply is stored without a persona proposal and with its reasoning, which only the
+ * Agent's owner is ever sent (the product owner's decision of 2026-11-18, replacing ruling 2's "no reasoning"), nothing
+ * of it is streamed, and its owner pays. Driven through the real routes: the owner adds the Agent (`POST …/members`), a member
  * mentions it, and the worker runs by hand (`runOnce`).
  */
 
@@ -322,29 +323,43 @@ describe("a reply in a group", () => {
     expect(JSON.stringify(gateway.calls.slice(first))).not.toContain("OLD-FILE-gr5");
   });
 
-  it("stores no reasoning, whatever the model returned, and nothing a member reads or is pushed carries the persona", async () => {
+  it("stores its reasoning as its own conversation does — what message text refuses removed, trimmed, at most 32 000 characters — and nothing anyone but its owner reads or is pushed carries the reasoning or the persona", async () => {
     const { mia, owner, ned, g, agent } = await world();
     await addOwn(owner, g, agent.id);
-    const [miaSocket, ownerSocket] = [await connect(app, mia), await connect(app, owner)];
+    const [miaSocket, nedSocket, ownerSocket] = [await connect(app, mia), await connect(app, ned), await connect(app, owner)];
     await say(ned, g, "@helper_bot 你是谁？");
-    await answer("我是小助手。", { reasoning: `${SECRET.reasoning} 我的设定是：${PERSONA}` });
+    // A bidi override and a control character (removed), white space around it (trimmed), and more than 32 000 characters.
+    const thought = `  ‮${SECRET.reasoning}\u0007 我的设定是：${PERSONA}${"想".repeat(40_000)}  `;
+    await answer("我是小助手。", { reasoning: thought, chunkSize: 4096 });
+    const kept = Array.from(`${SECRET.reasoning} 我的设定是：${PERSONA}${"想".repeat(40_000)}`).slice(0, 32_000).join("");
 
-    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "我是小助手。" }]);
-    for (const who of [mia, ned, owner]) {
-      const last = (await messagesOf(who, g)).at(-1);
-      expect([who.handle, last.text, "reasoning" in last]).toEqual([who.handle, "我是小助手。", false]);
-    }
+    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "我是小助手。", reasoning: kept }]);
+    const last = (await messagesOf(owner, g)).at(-1);
+    expect([last.text, last.reasoning]).toEqual(["我是小助手。", kept]);
     for (const who of [mia, ned]) {
+      const theirs = (await messagesOf(who, g)).at(-1);
+      expect([who.handle, theirs.text, "reasoning" in theirs]).toEqual([who.handle, "我是小助手。", false]);
       for (const path of ["/api/sync", `/api/conversations/${g}/messages`, `/api/conversations/${g}/members`, `/api/conversations/${g}/search?q=${encodeURIComponent("小助手")}`]) {
         const body = JSON.stringify((await api(app, who, "GET", path)).json);
         expect([who.handle, path, body.includes(PERSONA), body.includes(SECRET.reasoning)]).toEqual([who.handle, path, false, false]);
       }
     }
-    for (const socket of [miaSocket, ownerSocket]) {
+    for (const socket of [miaSocket, nedSocket]) {
       await socket.waitFor((e) => e.type === "message" && e.message.senderId === agent.id);
       const pushed = JSON.stringify(socket.events);
       expect([pushed.includes(PERSONA), pushed.includes(SECRET.reasoning)]).toEqual([false, false]);
     }
+    const toOwner = await ownerSocket.next((e) => e.type === "message" && e.message.senderId === agent.id);
+    expect(toOwner.message.reasoning).toBe(kept);
+  });
+
+  it("a reply with thinking but no visible text posts nothing in a group (its members would see an empty message): it fails as an answer that said nothing", async () => {
+    const { mia, owner, g, agent } = await world();
+    await addOwn(owner, g, agent.id);
+    await say(mia, g, "@helper_bot 在吗");
+    await answer("", { reasoning: "只想了想，什么也没说。" });
+    expect(await bodiesFrom(g, agent.id)).toEqual([]);
+    expect((await runsOf(agent.id, g)).at(-1)).toMatchObject({ status: "failed", error: "provider_unavailable" });
   });
 
   it("a quote of a message from before it joined: it is shown the speaker and the new text, not the quoted one", async () => {
@@ -391,24 +406,31 @@ describe("a reply in a group", () => {
     }
   });
 
-  it("a message in a group never carries reasoning to anyone, its Agent's owner included, whatever is stored; its own conversation still does, to its owner", async () => {
+  it("who owns its sender is read when a message is read: an Agent's reply there carries its reasoning to whoever owns that Agent then", async () => {
     const { mia, owner, ned, g, agent } = await world();
     await say(owner, agent.conversationId, "你好");
     await answer("你好呀", { reasoning: "OWN-REASONING-gr5" });
     await addOwn(owner, g, agent.id);
     const asked = await say(mia, g, "@helper_bot 在吗");
-    await answer("在。");
-    // As a future write path might store it.
-    await db.query("update messages set body = body || jsonb_build_object('reasoning', 'HAND-REASONING-gr5'::text) where conversation_id = $1 and sender_id = $2", [g, agent.id]);
-    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "在。", reasoning: "HAND-REASONING-gr5" }]);
-
-    for (const who of [mia, ned, owner]) {
-      const last = (await messagesOf(who, g)).at(-1);
-      expect([who.handle, last.text, "reasoning" in last]).toEqual([who.handle, "在。", false]);
-      const one = await api(app, who, "GET", `/api/conversations/${g}/messages/${asked + 1}`);
-      expect([who.handle, one.status, one.json.message.text, "reasoning" in one.json.message]).toEqual([who.handle, 200, "在。", false]);
-      expect([who.handle, JSON.stringify((await api(app, who, "GET", "/api/sync")).json).includes("HAND-REASONING-gr5")]).toEqual([who.handle, false]);
-    }
+    await answer("在。", { reasoning: "GROUP-REASONING-gr5" });
+    const reasoningFor = async (who: Actor) => {
+      const one = (await api(app, who, "GET", `/api/conversations/${g}/messages/${asked + 1}`)).json.message;
+      return [who.handle, "reasoning" in one ? one.reasoning : "absent"];
+    };
+    expect([await reasoningFor(owner), await reasoningFor(ned), await reasoningFor(mia)]).toEqual([
+      [owner.handle, "GROUP-REASONING-gr5"],
+      [ned.handle, "absent"],
+      [mia.handle, "absent"],
+    ]);
+    // No route moves an Agent to another owner; the sender principal's owner is what the read path asks, whatever else says otherwise.
+    await db.query("update principals set owner_id = $2 where id = $1", [agent.id, ned.id]);
+    expect([await reasoningFor(owner), await reasoningFor(ned), await reasoningFor(mia)]).toEqual([
+      [owner.handle, "absent"],
+      [ned.handle, "GROUP-REASONING-gr5"],
+      [mia.handle, "absent"],
+    ]);
+    await db.query("update principals set owner_id = $2 where id = $1", [agent.id, owner.id]);
+    // Its own conversation is as it was: its reasoning, to its owner.
     const own = (await messagesOf(owner, agent.conversationId)).filter((m) => m.senderId === agent.id);
     expect(own.at(-1)).toMatchObject({ text: "你好呀", reasoning: "OWN-REASONING-gr5" });
   });
@@ -454,6 +476,183 @@ describe("a reply in a group", () => {
     await ownerSocket.waitFor((e) => e.type === "run" && e.conversationId === agent.conversationId && e.run.status === "done");
     expect(deltas(ownerSocket, agent.conversationId).map((e) => e.text ?? "").join("")).toBe(story);
     expect(deltas(ownerSocket, g)).toEqual([]);
+  });
+});
+
+// --- a reply's thinking: its Agent's owner only ----------------------------------------------------------------------
+
+describe("a reply's thinking in a group is its Agent's owner's only", () => {
+  /** Each Agent's thinking, distinctive; `only` is a word that is nowhere but in the owner's Agent's thinking. */
+  const THINK = { owner: "THINK-OWNER-gr5 想想周六", ned: "THINK-NED-gr5 想想周日", only: "ONLYINTHOUGHTgr5" };
+  const OWNERS_THOUGHT = `${THINK.owner} ${THINK.only}`;
+  /** The keys of a message no reader is shown anything only its owner may see of. */
+  const PLAIN_KEYS = ["conversationId", "createdAt", "kind", "senderId", "seq", "text"];
+
+  /**
+   * The owner (owen) and ned each have an Agent in mia's group; each answered mia with thinking, and ned quoted the owner's
+   * Agent's reply. Everyone has a socket open from the start.
+   */
+  async function thoughtWorld() {
+    const w = await world();
+    const { mia, owner, ned, g, agent } = w;
+    await addOwn(owner, g, agent.id);
+    const other = await nedsAgent(w);
+    const sockets = new Map<Actor, TestSocket>([
+      [owner, await connect(app, owner)],
+      [ned, await connect(app, ned)],
+      [mia, await connect(app, mia)],
+    ]);
+    const before = await say(mia, g, "@helper_bot 周六几点？");
+    await answer("REPLY-gr5 周六十点。", { reasoning: OWNERS_THOUGHT });
+    await say(mia, g, "@other_bot 周日呢？");
+    await answer("REPLY-gr5 周日也是十点。", { reasoning: THINK.ned });
+    const seqOf = async (sender: string) =>
+      Number((await db.query<{ seq: string }>("select seq from messages where conversation_id = $1 and sender_id = $2", [g, sender])).rows[0]!.seq);
+    const [mine, theirs] = [await seqOf(agent.id), await seqOf(other.id)];
+    const quoted = await api(app, ned, "POST", `/api/conversations/${g}/messages`, { text: "收到", replyToSeq: mine, clientTxn: `gr${++txn}` });
+    expect(quoted.status).toBe(201);
+    const quote = quoted.json.message.seq as number;
+    for (const socket of sockets.values()) await socket.waitFor((e) => e.type === "message" && e.message.conversationId === g && e.message.seq === quote);
+    // As stored: each reply with its thinking.
+    expect([await bodiesFrom(g, agent.id), await bodiesFrom(g, other.id)]).toEqual([
+      [{ text: "REPLY-gr5 周六十点。", reasoning: OWNERS_THOUGHT }],
+      [{ text: "REPLY-gr5 周日也是十点。", reasoning: THINK.ned }],
+    ]);
+    return { ...w, other, sockets, before, mine, theirs, quote };
+  }
+
+  type ThoughtWorld = Awaited<ReturnType<typeof thoughtWorld>>;
+
+  /** What `who` must be shown of the two replies' thinking: their own Agent's, nobody else's. */
+  const expectedFor = (w: ThoughtWorld, who: Actor) => [
+    [w.mine, who === w.owner ? OWNERS_THOUGHT : "absent"],
+    [w.theirs, who === w.ned ? THINK.ned : "absent"],
+  ];
+  /** Of `messages`, the two replies (in seq order), each with its `reasoning` or "absent"; and checks their shape. */
+  function thoughtsIn(w: ThoughtWorld, who: Actor, where: string, messages: any[]) {
+    const replies = messages.filter((m) => m.conversationId === w.g && (m.seq === w.mine || m.seq === w.theirs)).sort((a, b) => a.seq - b.seq);
+    for (const m of replies) {
+      // Absent, not null or empty: the same keys as a message without thinking.
+      const keys = Object.keys(m).sort();
+      const shown = "reasoning" in m;
+      expect([who.handle, where, m.seq, keys]).toEqual([who.handle, where, m.seq, shown ? [...PLAIN_KEYS, "reasoning"].sort() : PLAIN_KEYS]);
+    }
+    return replies.map((m) => [m.seq, "reasoning" in m ? m.reasoning : "absent"]);
+  }
+  const everyone = (w: ThoughtWorld): Actor[] => [w.owner, w.ned, w.mia];
+  /** Neither Agent's thinking anywhere in `body` (any depth, any field). */
+  const noThought = (body: unknown): boolean => {
+    const text = JSON.stringify(body);
+    return !text.includes(THINK.owner) && !text.includes(THINK.ned) && !text.includes(THINK.only);
+  };
+
+  it("history, a single message, sync and catch-up: the owner reads their Agent's thinking and not ned's Agent's, ned the reverse, mia neither", async () => {
+    const w = await thoughtWorld();
+    for (const who of everyone(w)) {
+      const want = expectedFor(w, who);
+      const history = (await api(app, who, "GET", `/api/conversations/${w.g}/messages`)).json.messages;
+      expect([who.handle, "history", thoughtsIn(w, who, "history", history)]).toEqual([who.handle, "history", want]);
+      const singles = [];
+      for (const seq of [w.mine, w.theirs]) singles.push((await api(app, who, "GET", `/api/conversations/${w.g}/messages/${seq}`)).json.message);
+      expect([who.handle, "single", thoughtsIn(w, who, "single", singles)]).toEqual([who.handle, "single", want]);
+      const sync = (await api(app, who, "GET", "/api/sync")).json;
+      expect([who.handle, "sync", thoughtsIn(w, who, "sync", sync.messages)]).toEqual([who.handle, "sync", want]);
+      // The conversation entries (what the chat list is built from) carry no thinking, nor does a refetched entry.
+      expect([who.handle, noThought(sync.conversations), noThought(sync.principals)]).toEqual([who.handle, true, true]);
+      expect([who.handle, noThought((await api(app, who, "GET", `/api/conversations/${w.g}`)).json)]).toEqual([who.handle, true]);
+      for (const from of [0, w.before]) {
+        const caught = (await api(app, who, "POST", "/api/sync/catchup", { positions: { [w.g]: from } })).json.messages;
+        expect([who.handle, `catch-up from ${from}`, thoughtsIn(w, who, "catch-up", caught)]).toEqual([who.handle, `catch-up from ${from}`, want]);
+      }
+    }
+  });
+
+  it("both searches: a hit carries the thinking only to its Agent's owner; the thinking itself is never searched, for anyone, so a word only in it finds nothing and reveals nothing", async () => {
+    const w = await thoughtWorld();
+    for (const who of everyone(w)) {
+      const want = expectedFor(w, who);
+      const here = (await api(app, who, "GET", `/api/conversations/${w.g}/search?q=REPLY-gr5`)).json;
+      expect([who.handle, "search", thoughtsIn(w, who, "search", here.messages)]).toEqual([who.handle, "search", want]);
+      const all = (await api(app, who, "GET", "/api/search?q=REPLY-gr5")).json;
+      expect([who.handle, "global search", thoughtsIn(w, who, "global search", all.messages)]).toEqual([who.handle, "global search", want]);
+      for (const term of [THINK.only, "THINK-OWNER-gr5", "THINK-NED-gr5"]) {
+        const inGroup = await api(app, who, "GET", `/api/conversations/${w.g}/search?q=${encodeURIComponent(term)}`);
+        const global = await api(app, who, "GET", `/api/search?q=${encodeURIComponent(term)}`);
+        expect([who.handle, term, inGroup.status, inGroup.json, global.status, global.json]).toEqual([
+          who.handle,
+          term,
+          200,
+          { messages: [], nextBefore: null, principals: {} },
+          200,
+          { messages: [], nextBefore: null, principals: {} },
+        ]);
+      }
+    }
+  });
+
+  it("the pushes when the replies were posted: each socket got the owner's Agent's thinking only if it is the owner's, ned's Agent's only if it is ned's; no delta, and no run push carries any", async () => {
+    const w = await thoughtWorld();
+    for (const who of everyone(w)) {
+      const events = w.sockets.get(who)!.events;
+      const pushed = events.filter((e) => e.type === "message").map((e) => e.message);
+      expect([who.handle, thoughtsIn(w, who, "push", pushed)]).toEqual([who.handle, expectedFor(w, who)]);
+      // Nothing else that reached this socket carries any: not the quote, not the other reply, not a run push.
+      const elsewhere = events.filter((e) => !(e.type === "message" && (e.message.seq === w.mine || e.message.seq === w.theirs) && e.message.conversationId === w.g));
+      expect([who.handle, noThought(elsewhere)]).toEqual([who.handle, true]);
+      expect([who.handle, events.filter((e) => e.type === "delta")]).toEqual([who.handle, []]);
+      const runs = events.filter((e) => e.type === "run");
+      expect([who.handle, runs.length > 0, noThought(runs)]).toEqual([who.handle, true, true]);
+      // Nobody is pushed the thinking of an Agent that is not theirs, anywhere in any frame.
+      const text = JSON.stringify(events);
+      expect([who.handle, text.includes(THINK.owner), text.includes(THINK.ned)]).toEqual([who.handle, who === w.owner, who === w.ned]);
+    }
+  });
+
+  it("a quote of a reply shows its text to whoever may see it, never its thinking; the member list and the runs carry none; the next call's model is shown none", async () => {
+    const w = await thoughtWorld();
+    for (const who of everyone(w)) {
+      const quoting = (await api(app, who, "GET", `/api/conversations/${w.g}/messages/${w.quote}`)).json.message;
+      expect([who.handle, quoting.replyTo, "reasoning" in quoting]).toEqual([
+        who.handle,
+        { seq: w.mine, visible: true, senderId: w.agent.id, text: "REPLY-gr5 周六十点。", kind: "text" },
+        false,
+      ]);
+      const pushedQuote = w.sockets.get(who)!.events.find((e) => e.type === "message" && e.message.seq === w.quote)!.message;
+      expect([who.handle, pushedQuote]).toEqual([who.handle, quoting]);
+      const history = (await api(app, who, "GET", `/api/conversations/${w.g}/messages`)).json.messages;
+      expect([who.handle, history.find((m: any) => m.seq === w.quote)]).toEqual([who.handle, quoting]);
+      for (const path of [`/api/conversations/${w.g}/members`, `/api/conversations/${w.g}/runs`]) {
+        const res = await api(app, who, "GET", path);
+        expect([who.handle, path, res.status, noThought(res.json)]).toEqual([who.handle, path, 200, true]);
+      }
+    }
+    // Called again, ned's Agent is shown the owner's Agent's reply (as an Agent's) — and no one's thinking.
+    await say(w.mia, w.g, "@other_bot 那周六呢？");
+    await answer("同上。");
+    const call = lastCall();
+    expect(JSON.stringify(call.messages)).toContain("小助手（Agent）：REPLY-gr5 周六十点。");
+    expect([JSON.stringify(call).includes(THINK.owner), JSON.stringify(call).includes(THINK.ned), JSON.stringify(call).includes(THINK.only)]).toEqual([false, false, false]);
+  });
+
+  it("an owner who has left the group reads nothing of it, its thinking included", async () => {
+    const w = await thoughtWorld();
+    expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.g}/members/${w.owner.id}`)).status).toBe(200);
+    expect((await api(app, w.owner, "GET", `/api/conversations/${w.g}/messages`)).status).toBe(404);
+    expect((await api(app, w.owner, "GET", `/api/conversations/${w.g}/messages/${w.mine}`)).status).toBe(404);
+    for (const [method, path, body] of [
+      ["GET", "/api/sync", undefined],
+      ["GET", "/api/search?q=REPLY-gr5", undefined],
+      ["POST", "/api/sync/catchup", { positions: { [w.g]: 0 } }],
+    ] as const) {
+      const res = await api(app, w.owner, method, path, body);
+      expect([path, res.status, noThought(res.json)]).toEqual([path, 200, true]);
+    }
+    // ned still reads their own Agent's, and mia none.
+    const readers = [w.ned, w.mia];
+    for (const who of readers) {
+      const history = (await api(app, who, "GET", `/api/conversations/${w.g}/messages`)).json.messages;
+      expect([who.handle, thoughtsIn(w, who, "history", history)]).toEqual([who.handle, [[w.mine, "absent"], [w.theirs, who === w.ned ? THINK.ned : "absent"]]]);
+    }
   });
 });
 

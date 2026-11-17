@@ -69,13 +69,12 @@ function toWireProposal(r: ProposalRow): WireProposal {
 }
 
 /**
- * Module-private on purpose: it renders whatever quote and proposal it is handed. Every exported path decides per
- * reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether `visibleQuote` is, and shows a proposal
- * to the Agent's owner only. `ownChat`: `msg` is in an Agent's own conversation with its owner (`type = 'agent'`), the
- * only place an Agent's reasoning is ever sent — whatever is stored on a message anywhere else (a group's members all
- * read it), it is not.
+ * Module-private on purpose: it renders whatever quote and proposal it is handed, and the reasoning when told to. Every
+ * exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether `visibleQuote`
+ * is; shows a proposal to the Agent's owner only; and `withReasoning` only when this reader may read the reasoning
+ * (`toWireForReaders`): otherwise the field is absent, so the message is exactly as one stored without any.
  */
-function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal: ProposalRow | null, ownChat: boolean): WireMessage {
+function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal: ProposalRow | null, withReasoning: boolean): WireMessage {
   const wire: WireMessage = {
     conversationId: msg.conversationId,
     seq: msg.seq,
@@ -110,8 +109,8 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal
     wire.system = { ...event, event: msg.body.event };
   }
   if (msg.kind === "text") {
-    // Only an Agent's reply carries these (postAsAgent); nobody can send them. Its reasoning only in its own conversation.
-    if (ownChat && typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
+    // Only an Agent's reply carries these (postAsAgent); nobody can send them. Its reasoning only to whom it is for.
+    if (withReasoning && typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
     if (msg.body.stopped === true) wire.stopped = true;
     if (msg.body.truncated === true) wire.truncated = true;
     if (proposal) wire.proposal = toWireProposal(proposal);
@@ -124,8 +123,11 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal
  * key) the messages that reader can see now, in the given order, each with its quote resolved for that
  * reader — `{visible: true, senderId, text}` only if the quoted message is visible to them, else
  * `{seq, visible: false}` — and, on an Agent's reply that proposed a persona, its `proposal` when the reader is that
- * Agent's owner; an Agent's reasoning only in its own conversation (`toWire`). Both visibility decisions go through
- * VISIBLE_JOIN; at most three queries however many readers and messages there are.
+ * Agent's owner. An Agent's reasoning, per reader in the same query that decides visibility: in an Agent's own
+ * conversation to whoever may see the message (its owner); in a group only when the reader owns the Agent that sent it
+ * (the sender principal's `owner_id` as it is when the message is read); nowhere else (a direct chat has no Agent). For
+ * every other reader the field is absent (`toWire`). Both visibility decisions go through VISIBLE_JOIN, so an owner who
+ * left the group reads nothing of it; at most three queries however many readers and messages there are.
  */
 export async function toWireForReaders(
   q: Queryable,
@@ -136,18 +138,20 @@ export async function toWireForReaders(
   const out = new Map<string, WireMessage[]>(readers.map((r) => [r, []]));
   if (readers.length === 0 || msgs.length === 0) return out;
 
-  const shown = await q.query<{ reader_id: string; id: string; own_chat: boolean }>(
-    `select r.reader_id, m.id, c.type = 'agent' as own_chat
+  const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean }>(
+    `select r.reader_id, m.id,
+            coalesce(c.type = 'agent' or (c.type = 'group' and sender.owner_id = r.reader_id), false) as with_reasoning
        from unnest($1::uuid[]) as r (reader_id)
        cross join messages m ${visibleJoin("r.reader_id")}
        join conversations c on c.id = m.conversation_id
+       left join principals sender on sender.id = m.sender_id
       where m.id = any($2::bigint[])`,
     [readers, msgs.map((m) => m.id)],
   );
   const visible = new Set(shown.rows.map((r) => `${r.reader_id}|${r.id}`));
   const shownToAnyone = new Set(shown.rows.map((r) => r.id));
-  /** The messages in an Agent's own conversation: the only ones whose reasoning is sent. */
-  const inOwnChat = new Set(shown.rows.filter((r) => r.own_chat).map((r) => r.id));
+  /** reader|message pairs whose reasoning this reader is sent. */
+  const reasoningFor = new Set(shown.rows.filter((r) => r.with_reasoning === true).map((r) => `${r.reader_id}|${r.id}`));
 
   const quoting = msgs.filter((m) => typeof m.body.replyToSeq === "number" && shownToAnyone.has(m.id));
   const quotes = new Map<string, StoredMessage>();
@@ -175,7 +179,7 @@ export async function toWireForReaders(
     const list = out.get(reader)!;
     for (const m of msgs) {
       if (!visible.has(`${reader}|${m.id}`)) continue;
-      list.push(toWire(m, quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null, proposalFor(reader, m), inOwnChat.has(m.id)));
+      list.push(toWire(m, quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null, proposalFor(reader, m), reasoningFor.has(`${reader}|${m.id}`)));
     }
   }
   return out;

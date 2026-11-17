@@ -160,12 +160,15 @@ export interface AgentReply {
  * Anywhere else — a group (plan Task 5) — the Agent must be a current member of that conversation, read under its row's
  * lock, which every membership change takes: else 409 `agent_removed`. Its reply is never read for a proposal: whatever
  * follows its first `<af-` is dropped (`withoutUnfinishedBlock`, as for a stopped reply), so no block, whole or not,
- * reaches the group, and nothing of the Agent changes. Nor is any reasoning stored (every member reads the message, and
- * a model's thinking often restates its persona). Then the text is cut at 8 000 characters as above, and the message may
- * call other Agents there, in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row):
- * `triggered` is what to announce and publish after commit (nothing for a repeat, or in the Agent's own conversation).
+ * reaches the group, and nothing of the Agent changes. Its reasoning is kept as in its own conversation (the product
+ * owner's decision of 2026-11-18, replacing plan ruling 2): every member reads the message, but its reasoning is sent
+ * only to the owner of the Agent that sent it (messages/read.ts `toWireForReaders`), since a model's thinking often
+ * restates its persona. Then the text is cut at 8 000 characters as above, and the message may call other Agents there,
+ * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row): `triggered` is what to
+ * announce and publish after commit (nothing for a repeat, or in the Agent's own conversation).
  *
- * Null, storing nothing, when there is nothing to show: no visible text and no reasoning kept.
+ * Null, storing nothing, when there is nothing to show: no visible text and, in its own conversation, no reasoning kept;
+ * in a group no visible text (its members would be shown an empty message), whatever reasoning there is.
  */
 export async function postAsAgent(
   t: Tx,
@@ -209,11 +212,12 @@ export async function postAsAgent(
     truncated = true;
   }
   if (!proposal && (reply.stopped || truncated)) text = withoutUnfinishedBlock(text);
-  // In a group no reasoning is kept.
-  let reasoning = own ? cleanModelText(reply.reasoning) : "";
+  // Kept as in its own conversation; in a group only its owner is ever sent it (messages/read.ts).
+  let reasoning = cleanModelText(reply.reasoning);
   const thought = Array.from(reasoning);
   if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
-  if (!hasVisibleText(text) && !hasVisibleText(reasoning)) return null;
+  // In a group a reply with no visible text shows its members nothing, whatever it thought: nothing is posted.
+  if (!hasVisibleText(text) && (!own || !hasVisibleText(reasoning))) return null;
 
   const body: MessageBody = { text };
   if (reasoning !== "") body.reasoning = reasoning;

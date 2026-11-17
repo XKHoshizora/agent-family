@@ -92,7 +92,7 @@ export interface HubDeps {
  * conversation's events in commit order. Every decision about who receives what is made against the
  * database when the event is delivered, never from a cached member list:
  * - messages: rendered per reader with `toWireForReaders`, which shows a message (and its quote) only to
- *   readers who can see it now;
+ *   readers who can see it now, and an Agent's reasoning in a group only to that Agent's owner;
  * - membership changes: `conversation` to the affected principals who are current members now, `gone`
  *   to those who are not (more than once, when a change announced before they left is delivered after
  *   it) — so after `gone` nothing more of that conversation reaches them until they are added again, except

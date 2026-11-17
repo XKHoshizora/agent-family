@@ -26,6 +26,8 @@ const HIDDEN = {
   persona: "PERSONA-zq7 你是只属于主人的秘密助手。",
   proposed: "PROPOSED-zq7 一个新的秘密人格。",
   reasoning: "REASONING-zq7 private thinking",
+  /** The thinking stored with its message in the group: its owner's to read, nobody else's. */
+  groupReasoning: "GROUPTHINK-zq7 what it thought there",
   privateAsk: "PRIVATE-ASK-zq7",
   privateReply: "PRIVATE-REPLY-zq7",
   providerName: "Vendor zq7",
@@ -75,13 +77,13 @@ async function seat(conv: string, principalId: string): Promise<void> {
   );
 }
 
-/** A text message from `senderId` in `conv`, written straight into the table; returns its seq. */
-async function postAs(conv: string, senderId: string, text: string): Promise<number> {
+/** A text message from `senderId` in `conv` (with `reasoning`, as an Agent's reply stores it), written straight into the table; returns its seq. */
+async function postAs(conv: string, senderId: string, text: string, reasoning?: string): Promise<number> {
   const { rows } = await db.query<{ seq: string }>(
     `with c as (update conversations set seq = seq + 1 where id = $1 returning seq)
      insert into messages (conversation_id, seq, sender_id, kind, body)
-     select $1, c.seq, $2, 'text', jsonb_build_object('text', $3::text) from c returning seq`,
-    [conv, senderId, text],
+     select $1, c.seq, $2, 'text', jsonb_strip_nulls(jsonb_build_object('text', $3::text, 'reasoning', $4::text)) from c returning seq`,
+    [conv, senderId, text, reasoning ?? null],
   );
   return Number(rows[0]!.seq);
 }
@@ -89,7 +91,7 @@ async function postAs(conv: string, senderId: string, text: string): Promise<num
 /**
  * olive's Agent (persona, a private chat with reasoning replies and a persona proposal, then a model of her own provider,
  * answering only when called, an avatar, paused) seated in olive's group with mia and ned, where it has said something
- * and mia quoted it.
+ * (stored with its thinking, as a reply there is) and mia quoted it.
  * sam is mia's friend and in no conversation with the Agent.
  */
 async function world() {
@@ -122,7 +124,7 @@ async function world() {
   const g = await group(app, owner, "team", [mia, ned]);
   await befriend(app, mia, sam);
   await seat(g, agent.id);
-  const agentSeq = await postAs(g, agent.id, "agent says needle-co7");
+  const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
 
   // The owner's view really holds every hidden value (so their absence below means something).
@@ -167,8 +169,10 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
     expect((await api(app, owner, "GET", "/api/sync")).json.principals.filter((p: any) => p.id === agent.id)).toEqual([expected]);
   });
 
-  it("and nothing else: no response a fellow member gets carries its persona, model, provider, settings, pause, proposals, runs or private chat", async () => {
-    const { mia, agent, dedicated, provider, g, agentSeq, quoteSeq } = await world();
+  it("and nothing else: no response a fellow member gets carries its persona, model, provider, settings, pause, proposals, runs, private chat or the thinking of its replies there", async () => {
+    const { owner, mia, agent, dedicated, provider, g, agentSeq, quoteSeq } = await world();
+    // Its owner does read the thinking stored with its message in the group (so its absence below means something).
+    expect((await api(app, owner, "GET", `/api/conversations/${g}/messages/${agentSeq}`)).json.message.reasoning).toBe(HIDDEN.groupReasoning);
     const bodies: Array<[string, unknown]> = [];
     const read = async (label: string, method: "GET" | "POST", url: string, body?: unknown) => {
       const res = await api(app, mia, method, url, body);
