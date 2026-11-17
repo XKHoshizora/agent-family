@@ -223,6 +223,12 @@ const REPLY = {
 export const replyErrorText = (action, error) => pick(REPLY, action, error);
 
 const PROVIDER_NOT_FOUND = "找不到这个供应商。";
+/** A call to my provider: as for any model call, except that a saved key that can no longer be opened reads as refused too. */
+const PROVIDER_CALL = {
+  ...MODEL_FAILED,
+  provider_rejected: "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。",
+  not_found: PROVIDER_NOT_FOUND,
+};
 const PROVIDER = {
   create: {
     provider_limit: "最多只能添加 10 个模型供应商。",
@@ -235,11 +241,14 @@ const PROVIDER = {
     invalid_request: "填写的内容有误。换到另一个地址时，需要同时重新填写密钥。",
   },
   delete: { not_found: PROVIDER_NOT_FOUND },
-  test: { ...MODEL_FAILED, not_found: PROVIDER_NOT_FOUND },
-  refresh: { ...MODEL_FAILED, not_found: PROVIDER_NOT_FOUND },
+  test: PROVIDER_CALL,
+  refresh: PROVIDER_CALL,
 };
 
-/** Why a provider action was refused. action: create | edit | delete | test | refresh */
+/**
+ * Why a provider action was refused. action: create | edit | delete | test | refresh. For `test`, `error.upstreamStatus`
+ * (the provider's HTTP status, a string) is added to the sentence; a 404 or 405 means the provider has no model list there.
+ */
 export function providerErrorText(action, error) {
   if (error?.code === "provider_in_use" && action in PROVIDER) {
     const names = Array.isArray(error.agents) ? error.agents.map((a) => a?.name).filter(Boolean) : [];
@@ -247,7 +256,14 @@ export function providerErrorText(action, error) {
       ? `还有 Agent 在使用这个供应商：${names.join("、")}。请先给它们换一个模型。`
       : "还有 Agent 在使用这个供应商，请先给它们换一个模型。";
   }
-  return pick(PROVIDER, action, error);
+  const text = pick(PROVIDER, action, error);
+  // Only a status number is ever shown, nothing else of the provider's answer.
+  const status = action === "test" && /^\d{3}$/.test(error?.upstreamStatus ?? "") ? error.upstreamStatus : null;
+  if (!status) return text;
+  if (error.code === "provider_unavailable" && (status === "404" || status === "405")) {
+    return `这个供应商没有提供模型列表（状态码 ${status}），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。`;
+  }
+  return `${text}（供应商返回的状态码：${status}）`;
 }
 
 const RUN_FAILED = {

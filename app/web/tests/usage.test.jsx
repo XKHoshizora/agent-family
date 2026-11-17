@@ -1,0 +1,169 @@
+// @vitest-environment jsdom
+// Settings › 用量与余额: today's free allowance and when it resets (local time), the balance (a negative one said
+// plainly), the tier and the number of Agents, the recent usage per Agent and model; points shown as the service gives
+// them; read again when the section opens and after each reply that ends while it is open.
+import React from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { A1, AG1, AG2, A2, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, deferred, runOf, syncOf, usageOf } from "./fixtures.js";
+import { click, flush, inMain, installBrowser, mainText, openApp, push } from "./harness.jsx";
+
+beforeEach(() => installBrowser());
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+const rail = (name) => within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name });
+const settingsRow = (name) => screen.getByText(name, { selector: ".list-col .row-name" });
+/** The value of a row of the page's key-value lists, by its label. */
+const kv = (label) => [...document.querySelectorAll(".main-col .kv-row")].find((row) => row.querySelector("dt").textContent === label)?.querySelector("dd").textContent;
+const recentRows = () =>
+  [...within(inMain().getByRole("list", { name: "最近用量" })).getAllByRole("listitem")].map((li) => [
+    li.querySelector("strong").textContent,
+    li.querySelector(".member-body p").textContent,
+    li.lastElementChild.textContent,
+  ]);
+
+const AGENTS = [agentOf(AG1), agentOf(AG2, { handle: "cook", name: "厨师", conversationId: A2, deleted: true })];
+
+/** The app with my two Agents (one deleted) and their conversations, on Settings › 用量与余额. */
+async function openUsage({ getUsage = vi.fn(async () => usageOf()), open = true } = {}) {
+  const principals = [...PRINCIPALS, agentPrincipal(AG1), agentPrincipal(AG2, "cook", "厨师")];
+  const sync = () => syncOf([agentConv(A1, AG1), agentConv(A2, AG2, { agent: { paused: false, deleted: true } })], [], principals);
+  const app = await openApp({ sync, api: { getUsage }, handlers: { agents: () => ({ agents: AGENTS }), models: () => MODELS } });
+  fireEvent.click(rail(/^设置/));
+  await flush();
+  if (open) await click(settingsRow("用量与余额"));
+  return { ...app, getUsage };
+}
+
+describe("usage and balance", () => {
+  it("shows today's free allowance (used / allowance) and when it resets, in local time", async () => {
+    const resetsAt = new Date(2026, 10, 17, 0, 0).toISOString();
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ free: { allowance: "10", used: "2.5", resetsAt } })) });
+    expect(document.querySelector(".main-col .profile-head h2").textContent).toBe("我的用量");
+    expect(kv("已用 / 每日额度")).toBe("2.5 / 10 点");
+    expect(kv("下次重置")).toBe("11月17日 00:00（本地时间）");
+  });
+
+  it("shows points exactly as the service gives them: the same digits, grouped", async () => {
+    const usage = usageOf({
+      balance: "1234567.000001",
+      free: { allowance: "100", used: "0.000001", resetsAt: new Date(2026, 10, 17).toISOString() },
+      recent: [{ agentId: AG1, model: "free-1", source: "site", points: "3.000001", replies: 4 }],
+    });
+    await openUsage({ getUsage: vi.fn(async () => usage) });
+    expect(kv("当前余额")).toBe("1,234,567.000001 点");
+    expect(kv("已用 / 每日额度")).toBe("0.000001 / 100 点");
+    expect(recentRows()[0][2]).toBe("3.000001 点 · 4 次回复");
+    expect(mainText()).not.toContain("余额为负");
+  });
+
+  it("a negative balance is shown plainly, with one sentence saying why and what happens next", async () => {
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ balance: "-2.5" })) });
+    expect(kv("当前余额")).toBe("-2.5 点");
+    expect(mainText()).toContain("余额为负：上一次回复超出了余额，下次发放时会先补平。");
+  });
+
+  it("shows the tier and how many Agents of the limit I have", async () => {
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ tier: "free", agentCount: 3, agentLimit: 20 })) });
+    expect(kv("档位")).toBe("免费档");
+    expect(kv("Agent 数量")).toBe("3 / 20");
+  });
+
+  it("lists the recent usage per Agent and model; a deleted or unknown Agent, and persona drafts, are named for what they are", async () => {
+    const recent = [
+      { agentId: AG1, model: "paid-1", source: "site", points: "12.5", replies: 7 },
+      { agentId: AG2, model: "gpt-x", source: "provider", points: "0", replies: 2 },
+      { agentId: "00000000-0000-4000-8000-0000000000bf", model: "free-1", source: "site", points: "1", replies: 1 },
+      { agentId: null, model: "free-1", source: "site", points: "0.2", replies: 0 },
+    ];
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ recent })) });
+    expect(recentRows()).toEqual([
+      ["小助手", "大模型（本站）", "12.5 点 · 7 次回复"],
+      ["已删除的 Agent", "gpt-x（我的供应商）", "0 点 · 2 次回复"],
+      ["已删除的 Agent", "小模型（本站）", "1 点 · 1 次回复"],
+      ["起草人格文档", "小模型（本站）", "0.2 点"],
+    ]);
+  });
+
+  it("with no recent usage says so plainly", async () => {
+    await openUsage();
+    expect(inMain().queryByRole("list", { name: "最近用量" })).toBeNull();
+    expect(mainText()).toContain("最近 7 天还没有用量。");
+  });
+
+  it("says when it cannot be read, and reads it again on 重试", async () => {
+    const getUsage = vi.fn(async () => {
+      throw apiError(503, "busy");
+    });
+    await openUsage({ getUsage });
+    expect(mainText()).toContain("没能读取用量");
+    getUsage.mockResolvedValueOnce(usageOf({ balance: "8" }));
+    await click(inMain().getByRole("button", { name: "重试" }));
+    expect(kv("当前余额")).toBe("8 点");
+    expect(mainText()).not.toContain("没能读取用量");
+  });
+
+  it("shows that it is reading until the first answer", async () => {
+    const pending = deferred();
+    await openUsage({ getUsage: vi.fn(() => pending.promise) });
+    expect(mainText()).toContain("正在读取用量…");
+    await act(async () => pending.resolve(usageOf()));
+    await flush();
+    expect(kv("当前余额")).toBe("0 点");
+  });
+});
+
+describe("reading it again", () => {
+  /** A `run` push for my Agent's conversation, then whatever it sets off. */
+  const run = async (transport, id, status) => {
+    await push(transport, { type: "run", conversationId: A1, run: runOf(id, status) });
+    await flush();
+  };
+
+  it("when the section opens, and after every reply that ends while it is open (never while it runs, never when closed)", async () => {
+    const app = await openUsage({ open: false });
+    expect(app.getUsage).not.toHaveBeenCalled();
+    await click(settingsRow("用量与余额"));
+    expect(app.getUsage).toHaveBeenCalledTimes(1);
+
+    await run(app.transport, "r1", "queued");
+    await run(app.transport, "r1", "running");
+    expect(app.getUsage).toHaveBeenCalledTimes(1);
+    await run(app.transport, "r1", "done");
+    expect(app.getUsage).toHaveBeenCalledTimes(2);
+    // The same end pushed again is not another reply.
+    await run(app.transport, "r1", "done");
+    expect(app.getUsage).toHaveBeenCalledTimes(2);
+
+    for (const [id, status, calls] of [
+      ["r2", "failed", 3],
+      ["r3", "stopped", 4],
+      ["r4", "cancelled", 5],
+    ]) {
+      await run(app.transport, id, "running");
+      await run(app.transport, id, status);
+      expect(app.getUsage, status).toHaveBeenCalledTimes(calls);
+    }
+
+    await click(settingsRow("我的资料"));
+    await run(app.transport, "r5", "running");
+    await run(app.transport, "r5", "done");
+    expect(app.getUsage).toHaveBeenCalledTimes(5);
+    await click(settingsRow("用量与余额"));
+    expect(app.getUsage).toHaveBeenCalledTimes(6);
+  });
+
+  it("the newest answer is shown", async () => {
+    const getUsage = vi.fn(async () => usageOf({ balance: "5" }));
+    const app = await openUsage({ getUsage });
+    expect(kv("当前余额")).toBe("5 点");
+    getUsage.mockResolvedValue(usageOf({ balance: "4.75" }));
+    await run(app.transport, "r1", "running");
+    await run(app.transport, "r1", "done");
+    expect(kv("当前余额")).toBe("4.75 点");
+  });
+});

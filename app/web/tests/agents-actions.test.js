@@ -125,7 +125,14 @@ describe("providers: the other actions", () => {
     const { actions, model } = await loaded({ api });
     await expect(actions.loadProviders()).resolves.toMatchObject({ ok: true });
     expect(Object.keys(model().providers)).toEqual([PID]);
-    await expect(actions.testProvider(PID)).resolves.toEqual({ ok: false, error: { code: "provider_rejected", reason: null, status: 200 }, text: "供应商拒绝了这个密钥，请检查密钥是否正确。" });
+    await expect(actions.testProvider(PID)).resolves.toEqual({
+      ok: false,
+      error: { code: "provider_rejected", reason: null, status: 200 },
+      text: "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。",
+    });
+    // The provider's own HTTP status is kept with the code (a 404 or 405: it has no model list).
+    api.testProvider.mockResolvedValueOnce({ ok: false, error: "provider_unavailable", upstreamStatus: "404" });
+    await expect(actions.testProvider(PID)).resolves.toMatchObject({ ok: false, error: { code: "provider_unavailable", status: 200, upstreamStatus: "404" } });
     api.testProvider.mockResolvedValueOnce({ ok: true });
     await expect(actions.testProvider(PID)).resolves.toEqual({ ok: true, value: { ok: true } });
     await expect(actions.refreshProviderModels(PID)).resolves.toEqual({ ok: true, value: { listed: ["gpt-x", "gpt-y"], provider: provider({ models: [] }) } });

@@ -697,11 +697,15 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** Refused with `provider_in_use` while Agents use it: the text names them. */
     deleteProvider: (providerId) =>
       attempt(() => api.deleteProvider(providerId), providerWrite("delete", () => setModel(removeProvider(getModel(), providerId)), forgetProvider(providerId))),
-    /** One call to the provider: {ok: true} or the reason it failed (the service answers 200 either way). */
+    /**
+     * One call to the provider: {ok: true} or the reason it failed (the service answers 200 either way), with the
+     * provider's own HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
+     */
     testProvider: async (providerId) => {
       const result = await attempt(() => api.testProvider(providerId), { text: providerText("test") });
       if (!result.ok || result.value?.ok !== false) return result;
       const error = { code: typeof result.value.error === "string" ? result.value.error : "unknown", reason: null, status: 200 };
+      if (typeof result.value.upstreamStatus === "string") error.upstreamStatus = result.value.upstreamStatus;
       return failure(error, providerErrorText("test", error));
     },
     /** The provider's model list merged in from the provider → value: {listed, provider}. */

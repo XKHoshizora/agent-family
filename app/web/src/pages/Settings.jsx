@@ -8,6 +8,8 @@ import { Avatar, Btn, Field, KV, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
 import { BlockModal } from "./BlockModal.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
+import { ProvidersPage } from "./Providers.jsx";
+import { UsagePage } from "./Usage.jsx";
 import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
 import { useAction } from "./useAction.js";
@@ -31,6 +33,16 @@ export function SettingsList() {
         <li>
           <button type="button" className="row slim" onClick={() => open({ settingsPage: "profile" })}>
             <span className="row-body"><span className="row-name">我的资料</span><span className="row-preview">昵称、头像与账户</span></span>
+          </button>
+        </li>
+        <li>
+          <button type="button" className="row slim" onClick={() => open({ settingsPage: "providers" })}>
+            <span className="row-body"><span className="row-name">模型供应商</span><span className="row-preview">你自己的模型服务账号与密钥</span></span>
+          </button>
+        </li>
+        <li>
+          <button type="button" className="row slim" onClick={() => open({ settingsPage: "usage" })}>
+            <span className="row-body"><span className="row-name">用量与余额</span><span className="row-preview">今日免费额度、余额与最近用量</span></span>
           </button>
         </li>
         <li>
@@ -165,7 +177,17 @@ function BlockedPage() {
   );
 }
 
+/** The settings page `nav.settingsPage` names: "profile" (the default), "providers", "usage" or "blocks". */
 export function SettingsMain() {
   const { state } = useStore();
-  return state.nav.settingsPage === "blocks" ? <BlockedPage /> : <ProfilePage />;
+  switch (state.nav.settingsPage) {
+    case "blocks":
+      return <BlockedPage />;
+    case "providers":
+      return <ProvidersPage back={<BackButton />} />;
+    case "usage":
+      return <UsagePage back={<BackButton />} />;
+    default:
+      return <ProfilePage />;
+  }
 }

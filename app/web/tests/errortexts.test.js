@@ -122,7 +122,9 @@ describe("the sentences batch 2A names", () => {
     expect(providerErrorText("create", err("provider_limit"))).toBe("最多只能添加 10 个模型供应商。");
     expect(providerErrorText("create", err("name_taken"))).toBe("你已经有一个同名的供应商了，请换个名称。");
     expect(providerErrorText("test", err("address_not_allowed"))).toBe("这个接口地址不被允许：需要是 https 开头的公网地址。");
-    expect(providerErrorText("test", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，请检查密钥是否正确。");
+    // A saved key that can no longer be opened is answered provider_rejected too: the sentence asks for the key again.
+    expect(providerErrorText("test", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。");
+    expect(providerErrorText("refresh", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。");
     expect(providerErrorText("test", err("provider_unavailable"))).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
     expect(agentErrorText("draft", err("busy", 503))).toBe("服务现在有点忙，请稍后再试。");
     // A 404 on the reply routes is "not yours / not here", never "it has ended".
@@ -134,6 +136,21 @@ describe("the sentences batch 2A names", () => {
     const inUse = { code: "provider_in_use", status: 409, agents: [{ id: "a", name: "小助手" }, { id: "b", name: "写作助手" }] };
     expect(providerErrorText("delete", inUse)).toBe("还有 Agent 在使用这个供应商：小助手、写作助手。请先给它们换一个模型。");
     expect(providerErrorText("delete", { code: "provider_in_use", status: 409 })).toBe("还有 Agent 在使用这个供应商，请先给它们换一个模型。");
+  });
+
+  it("测试连接: the provider's status is added when there is one; 404 or 405 means it has no model list", () => {
+    const tested = (code, upstreamStatus) => providerErrorText("test", { code, status: 200, reason: null, upstreamStatus });
+    expect(tested("provider_unavailable", "500")).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。（供应商返回的状态码：500）");
+    expect(tested("provider_rejected", "403")).toBe("供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。（供应商返回的状态码：403）");
+    for (const status of ["404", "405"]) {
+      expect(tested("provider_unavailable", status)).toBe(
+        `这个供应商没有提供模型列表（状态码 ${status}），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。`,
+      );
+    }
+    expect(tested("provider_unavailable", undefined)).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
+    // Only a status number is ever added: anything else the answer might carry is not shown.
+    expect(tested("provider_unavailable", "<b>oops</b>")).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
+    expect(tested("address_not_allowed", undefined)).toBe("这个接口地址不被允许：需要是 https 开头的公网地址。");
   });
 
   it("no_quota: the free allowance and the balance are used up (with when it comes back), or the balance alone", () => {
