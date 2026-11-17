@@ -258,6 +258,34 @@ describe("a run left running when the service stopped", () => {
   });
 });
 
+describe("a second instance started while the first still answers (a deploy where old and new overlap)", () => {
+  it("the new one's recovery ends the old one's reply; the old one then posts nothing and records nothing more", async () => {
+    const before = scriptedGateway();
+    const old = await start(before);
+    const { owner, agent, conv } = await owned(old, "overlap");
+    const hold = before.hang();
+    await say(old, owner, conv, "你好");
+    const running = old.agentWorker.runOnce();
+    await hold.reached;
+    const run = await latestRun(old, owner, conv);
+    expect(run).toMatchObject({ status: "running" });
+
+    // The new instance starts: its recovery ends the run as one the previous process left running.
+    const after = scriptedGateway();
+    await start(after);
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(run.id)).toHaveLength(1);
+
+    // The old instance's call finishes after that: it must not post, and must not settle or record the run again.
+    hold.release("旧实例写完了。");
+    await running;
+    expect(await db.query("select 1 from messages where sender_id = $1", [agent.id]).then((r) => r.rowCount)).toBe(0);
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(after.calls).toHaveLength(0);
+  });
+});
+
 describe("the service stopping while a reply reads its attachments", () => {
   it("abandons the read at once, admits nothing and leaves the run running, unadmitted; the next start fails it", async () => {
     let reached!: () => void;

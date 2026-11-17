@@ -105,6 +105,21 @@ export async function createAgent(
   return { agent, change: { messages: greeting, conversations: [{ conversationId, principalIds: [ownerId, id] }] } };
 }
 
+/**
+ * `postAsAgent` refused because the run is no longer `running`: something else ended it meanwhile — another instance's
+ * recovery at start-up, while this one was still answering (a deploy where old and new instances overlap). Nothing was
+ * posted; the run stays as that recovery recorded it.
+ */
+export class RunNotRunning extends Error {
+  constructor(
+    readonly runId: string,
+    readonly status: string | null,
+  ) {
+    super(`postAsAgent: run ${runId} is ${status ?? "gone"}, not running`);
+    this.name = "RunNotRunning";
+  }
+}
+
 /** An Agent's reply as the worker hands it over. */
 export interface AgentReply {
   text: string;
@@ -117,7 +132,8 @@ export interface AgentReply {
  * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` — the
  * conversation row, then the `agents` row, the locks pause and delete take — so once a pause or delete has committed,
  * nothing more is posted: 409 `agent_paused` / `agent_deleted`, also for a run that pause or delete marked
- * `interrupted` after the Agent was resumed. The message is the Agent's, kind `text`, with
+ * `interrupted` after the Agent was resumed. Nor is a run posted that is no longer `running` (`RunNotRunning`: another
+ * instance's recovery ended it, read under the same locks recovery takes). The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
  * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed); a
  * persona proposal in it (`parseProposalBlock`: the reply's text only, never its reasoning) is taken out — the fixed
@@ -143,9 +159,14 @@ export async function postAsAgent(
     [conversationId, agentId, runId],
   );
   if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true };
-  // A run its Agent's pause or delete interrupted is never posted, even once the Agent is resumed (runs.ts).
-  const run = await t.query<{ interrupted: string | null }>("select interrupted from agent_runs where id = $1 and agent_id = $2", [runId, agentId]);
-  const interrupted = run.rows[0]?.interrupted;
+  // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
+  // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts).
+  const run = await t.query<{ status: string; interrupted: string | null }>("select status, interrupted from agent_runs where id = $1 and agent_id = $2", [
+    runId,
+    agentId,
+  ]);
+  if (run.rows[0]?.status !== "running") throw new RunNotRunning(runId, run.rows[0]?.status ?? null);
+  const interrupted = run.rows[0].interrupted;
   if (interrupted) throw new AppError(409, interrupted);
   if (agent.deleted) throw new AppError(409, "agent_deleted");
   if (agent.paused) throw new AppError(409, "agent_paused");

@@ -12,7 +12,7 @@ import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
 import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, type BuiltContext, type LoadedContext } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
-import { postAsAgent } from "./conversation.ts";
+import { postAsAgent, RunNotRunning } from "./conversation.ts";
 import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
 import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
@@ -26,7 +26,7 @@ export interface AgentPortDeps {
   realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged">;
   conversations: ConversationEvents;
   reads: ReadEvents;
-  log: Pick<FastifyBaseLogger, "error">;
+  log: Pick<FastifyBaseLogger, "error" | "warn">;
 }
 
 const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
@@ -301,6 +301,8 @@ export class DbAgentPort implements AgentPort {
   /**
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
    * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`).
+   * "refused" also when the run is no longer `running` (`RunNotRunning`: another instance's recovery ended it while
+   * this one answered); `finish` then finds it ended and leaves it as that recovery recorded it.
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
     try {
@@ -312,6 +314,10 @@ export class DbAgentPort implements AgentPort {
       return "posted";
     } catch (err) {
       if (err instanceof AppError && (err.code === "agent_paused" || err.code === "agent_deleted")) return "refused";
+      if (err instanceof RunNotRunning) {
+        this.deps.log.warn({ runId: run.id, status: err.status }, "agent run: ended elsewhere while it was answered (another instance's recovery); its reply is not posted");
+        return "refused";
+      }
       throw err;
     }
   }

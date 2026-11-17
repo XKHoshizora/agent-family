@@ -1571,6 +1571,11 @@ retry answers everything. Queued runs stay queued and are answered once the work
 can be open yet — so a client learns the state from `GET /api/conversations/:id/run`. The worker's stop and pause flags
 live in the process: a new start has none. A run that cannot be recovered is logged and left for the next start.
 
+A deploy may start the new instance while the old one is still answering (`tests/runs-restart.test.ts`, "a second
+instance"). The new one's recovery then ends the old one's runs as above; when the old one's call finishes, `post` finds
+its run no longer `running` (read under the same locks recovery takes) and stores nothing, and `finish` leaves the run as
+recovery recorded it: no message, no second usage record (logged at warn).
+
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,
 `emit`, `post`, `finish`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`

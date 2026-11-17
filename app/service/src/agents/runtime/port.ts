@@ -83,7 +83,8 @@ export interface AgentPort {
   emit(run: RunTicket, delta: Delta): void;
   /**
    * Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete
-   * interrupted the run; "empty", storing nothing, when nothing of it is left to show (a reply stopped or cut inside a
+   * interrupted the run, or the run is no longer running (another instance's recovery ended it; `finish` then leaves it
+   * as that recorded it); "empty", storing nothing, when nothing of it is left to show (a reply stopped or cut inside a
    * persona block it never finished, with nothing before it).
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
