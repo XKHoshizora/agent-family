@@ -350,7 +350,8 @@ export function registerProviderRoutes(
           reasoning: "none",
           maxOutputTokens: CHAT_TEST.maxOutputTokens,
           thinkingSwitch: saved?.reasoning === true,
-          upstreamId: `provider:${req.params.id}`,
+          // As a reply names it (src/models/resolve.ts): what this upstream refused is remembered for both.
+          upstreamId: `provider:${req.params.id}@${target.baseUrl}`,
           signal,
         });
         for await (const event of events) if (event.type === "finish") break;
