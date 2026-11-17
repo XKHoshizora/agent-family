@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { siteDay } from "../src/accounts/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { grant } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
 import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/ws.ts";
@@ -313,5 +315,115 @@ describe("in the Agent's own conversation", () => {
     await socket.waitFor((e) => e.type === "message" && e.message.conversationId === conv && e.message.seq === 3 && "via" in e.message);
     const frames = socket.events.filter((e) => e.type === "message" && e.message.seq === 3);
     expect(frames.at(-1)!.message.via).toEqual(want);
+  });
+});
+
+/** Frames of `seq` of `g` on `socket`, in arrival order, with where each stands among all the socket's events. */
+const framesOf = (socket: TestSocket, g: string, seq: number) =>
+  socket.events.map((e, at) => ({ e, at })).filter(({ e }) => e.type === "message" && e.message.conversationId === g && e.message.seq === seq);
+
+describe("the second push, on the paths a normal reply does not take", () => {
+  /** A new mention of sol_bot, claimed and posted by hand, not yet ended. */
+  async function postedByHand(w: ViaWorld, text: string) {
+    await say(w.mia, w.g, `@sol_bot ${text}`);
+    const ticket = (await app.agentPort.claimNext())!;
+    const prepared = await app.agentPort.begin(ticket);
+    if ("status" in prepared) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
+    expect(await app.agentPort.post(ticket, { text: `HAND-q9x ${text}`, reasoning: "", stopped: false, truncated: false })).toBe("posted");
+    return { ticket, prepared, seq: await seqFrom(w.g, w.sol.id) };
+  }
+
+  it("in a group, the owner's charged copy arrives before the run's end push", async () => {
+    const w = await viaWorld();
+    const runId = await runOf(w.g, w.sol.id);
+    const owen = w.sockets.get(w.owen)!;
+    const charged = framesOf(owen, w.g, w.mine).filter(({ e }) => "via" in e.message);
+    expect(charged).toHaveLength(1);
+    const ended = owen.events.findIndex((e) => e.type === "run" && e.run.id === runId && e.run.status === "done");
+    expect(ended).toBeGreaterThan(-1);
+    expect(charged[0]!.at).toBeLessThan(ended);
+  });
+
+  it("an owner who left the group with the run in flight gets no second push", async () => {
+    const w = await viaWorld();
+    const { ticket, prepared, seq } = await postedByHand(w, "再来一个");
+    const owen = w.sockets.get(w.owen)!;
+    await owen.waitFor((e) => e.type === "message" && e.message.conversationId === w.g && e.message.seq === seq);
+    expect((await api(app, w.owen, "DELETE", `/api/conversations/${w.g}/members/${w.owen.id}`)).status).toBe(200);
+    const before = owen.events.length;
+    await app.agentPort.finish(ticket, { status: "done" }, { inputTokens: 100, outputTokens: 50 }, { inputChars: prepared.inputChars, outputChars: 5 });
+    // Whatever the hub did for the charge is queued before mia's next message, which every member still in it receives.
+    const marker = await say(w.mia, w.g, "收到");
+    await w.sockets.get(w.mia)!.waitFor((e) => e.type === "message" && e.message.conversationId === w.g && e.message.seq === marker);
+    expect(owen.events.slice(before).filter((e) => e.type === "message" && e.message.seq === seq)).toEqual([]);
+    expect(framesOf(owen, w.g, seq).map(({ e }) => "via" in e.message)).toEqual([false]);
+    expect(keysOf(owen.events.slice(before)).has("via")).toBe(false);
+  });
+
+  it("a run released with its reply posted (ended by the owner's stop, as recovery would end it: the posted reply stands) sends the charged copy to its owner only, before the run's end", async () => {
+    const w = await viaWorld();
+    const { ticket, seq } = await postedByHand(w, "讲一半");
+    for (const who of [w.owen, w.ned, w.mia]) await w.sockets.get(who)!.waitFor((e) => e.type === "message" && e.message.conversationId === w.g && e.message.seq === seq);
+    expect((await api(app, w.owen, "POST", `/api/conversations/${w.g}/runs/${ticket.id}/stop`)).status).toBe(200);
+    const owen = w.sockets.get(w.owen)!;
+    const ended = (e: Push) => e.type === "run" && e.run?.id === ticket.id && e.run?.status === "done";
+    await owen.waitFor(ended);
+    const frames = framesOf(owen, w.g, seq);
+    // The released run was charged nothing: its copy says so.
+    expect(frames.map(({ e }) => ("via" in e.message ? e.message.via : "absent"))).toEqual(["absent", { model: { source: "site", id: SOL.id, label: SOL.label }, reasoning: "medium", points: "0" }]);
+    expect(frames[1]!.at).toBeLessThan(owen.events.findIndex(ended));
+    // Nobody else gets the reply twice or with a via.
+    const marker = await say(w.mia, w.g, "好");
+    for (const who of [w.ned, w.mia]) {
+      const socket = w.sockets.get(who)!;
+      await socket.waitFor((e) => e.type === "message" && e.message.seq === marker);
+      expect([who.handle, framesOf(socket, w.g, seq).map(({ e }) => "via" in e.message)]).toEqual([who.handle, [false]]);
+    }
+  });
+});
+
+describe("points is what was charged, not what the call cost", () => {
+  const config = () => app.deps.config as { freeDailyMicro: bigint };
+  /** A reply of 1.5 points (1 000 + 500 tokens at 1 000 micro-points) on SOL by an owner whose allowance is `allowance` with `used` of it spent today. */
+  async function reply(handle: string, allowance: bigint, used: bigint, balance: bigint) {
+    const kept = config().freeDailyMicro;
+    config().freeDailyMicro = allowance;
+    try {
+      const owner = await signUp(app, handle);
+      const agent = await mustCreateAgent(app, owner, { handle: `${handle}_bot`, name: handle, model: { source: "site", id: SOL.id }, persona: "你好。" });
+      if (used > 0n) await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, $2::date, $3)", [owner.id, siteDay(new Date(), app.deps.config.siteTimezone), used.toString()]);
+      if (balance > 0n) await grant(db, owner.id, balance);
+      await say(owner, agent.conversationId, "你好");
+      await answer("PTS-q9x 你好。", { usage: { inputTokens: 1000, outputTokens: 500 } });
+      const run = await runOf(agent.conversationId, agent.id);
+      const record = (await db.query("select cost_micro::text as cost, free_micro::text as free, balance_micro::text as balance, forgiven_micro::text as forgiven from usage_records where run_id = $1", [run])).rows[0];
+      const seq = await seqFrom(agent.conversationId, agent.id);
+      const via = (await api(app, owner, "GET", `/api/conversations/${agent.conversationId}/messages/${seq}`)).json.message.via;
+      return { record, via, owner, run, conv: agent.conversationId as string, seq };
+    } finally {
+      config().freeDailyMicro = kept;
+    }
+  }
+
+  it("a charge to the balance (the allowance used up): its amount", async () => {
+    const r = await reply("balo", 5_000_000n, 5_000_000n, 10_000_000n);
+    expect(r.record).toEqual({ cost: "1500000", free: "0", balance: "1500000", forgiven: "0" });
+    expect(r.via.points).toBe("1.5");
+  });
+
+  it("an overrun of the allowance is forgiven, not counted: only what the allowance took", async () => {
+    const r = await reply("overo", 5_000_000n, 4_500_000n, 0n);
+    expect(r.record).toEqual({ cost: "1500000", free: "500000", balance: "0", forgiven: "1000000" });
+    expect(r.via.points).toBe("0.5");
+    expect((await api(app, r.owner, "GET", "/api/usage")).json.recent).toMatchObject([{ points: "0.5" }]);
+  });
+
+  it("a record holding both parts (allowance and balance) is their sum, and never the forgiven rest", async () => {
+    // Settlement charges one source per run, so a split is set by hand: this pins the read, which must be the sum
+    // GET /api/usage reports.
+    const r = await reply("splito", 5_000_000n, 0n, 0n);
+    await db.query("update usage_records set free_micro = 400000, balance_micro = 700000, forgiven_micro = 400000 where run_id = $1", [r.run]);
+    const read = (await api(app, r.owner, "GET", `/api/conversations/${r.conv}/messages/${r.seq}`)).json.message.via;
+    expect(read.points).toBe("1.1");
   });
 });
