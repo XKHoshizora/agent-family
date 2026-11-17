@@ -1,19 +1,23 @@
 import type { InjectOptions } from "fastify";
 import { describe, expect, it } from "vitest";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
+import { mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
+import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
+import { providerBody } from "./helpers/providers.ts";
 
 /**
  * Enumeration: for every route that takes a conversation id, a message seq, an attachment id, a
- * friend-request id or a principal id, an id that exists but is not the caller's business gets exactly
- * (status, content type and body, byte for byte) the answer a random id gets. Where the product means to
- * answer differently, the intended difference is asserted instead and named in the test.
+ * friend-request id, a principal id, an Agent, provider, run or persona-proposal id, an id that exists but is not the
+ * caller's business gets exactly (status, content type and body, byte for byte) the answer a random id gets. Where the
+ * product means to answer differently, the intended difference is asserted instead and named in the test.
  */
 
+const gateway = scriptedGateway();
 const { blobs } = useProbeBlobs("af-enum-");
-const { app, db } = useApp({ blobs });
+const { app, db } = useApp({ blobs, env: SITE_ENV, models: gateway, agentWorker: false });
 
 const RANDOM = "6a0d4c2e-1b3f-4a5e-9c7d-8e9f0a1b2c3d";
 
@@ -284,6 +288,114 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     const block = (id: string) => observe(eve, json("PUT", `/api/blocks/${id}`));
     expect((await block(stranger.id)).status).toBe(200);
     expect(await block(RANDOM)).toMatchObject({ status: 404, body: '{"error":"not_found"}' });
+  });
+});
+
+describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
+  const FAST = { source: "site", id: "fast" } as const;
+  const OTHER_RANDOM = "0b6f3d2a-7c1e-4f5a-8d9b-1a2b3c4d5e6f";
+
+  interface Ids {
+    agent: string;
+    conv: string;
+    run: string;
+    proposal: string;
+    provider: string;
+  }
+  /** Every route of this batch that takes one of these ids, as a request built from them. */
+  const routes: Array<[string, (ids: Ids) => InjectOptions]> = [
+    ["agent", ({ agent }) => json("GET", `/api/agents/${agent}`)],
+    ["agent HEAD", ({ agent }) => json("HEAD", `/api/agents/${agent}`)],
+    ["edit", ({ agent }) => json("PATCH", `/api/agents/${agent}`, { intro: "mine now" })],
+    ["edit the model", ({ agent, provider }) => json("PATCH", `/api/agents/${agent}`, { model: { source: "provider", providerId: provider, model: "m" } })],
+    ["pause", ({ agent }) => json("POST", `/api/agents/${agent}/pause`)],
+    ["resume", ({ agent }) => json("POST", `/api/agents/${agent}/resume`)],
+    ["delete", ({ agent }) => json("DELETE", `/api/agents/${agent}`)],
+    ["avatar", ({ agent }) => ({ method: "PUT", url: `/api/agents/${agent}/avatar`, headers: { "content-type": "image/png" }, payload: PNG })],
+    ["confirm", ({ agent, proposal }) => json("POST", `/api/agents/${agent}/proposals/${proposal}/confirm`, {})],
+    ["confirm edited", ({ agent, proposal }) => json("POST", `/api/agents/${agent}/proposals/${proposal}/confirm`, { persona: "我的" })],
+    ["discard", ({ agent, proposal }) => json("POST", `/api/agents/${agent}/proposals/${proposal}/discard`)],
+    ["provider edit", ({ provider }) => json("PATCH", `/api/providers/${provider}`, { name: "mine now" })],
+    ["provider rekey", ({ provider }) => json("PATCH", `/api/providers/${provider}`, { apiKey: "sk-attacker-key-0001" })],
+    ["provider move", ({ provider }) => json("PATCH", `/api/providers/${provider}`, { baseUrl: "https://evil.example.test/v1" })],
+    ["provider delete", ({ provider }) => json("DELETE", `/api/providers/${provider}`)],
+    ["provider test", ({ provider }) => json("POST", `/api/providers/${provider}/test`)],
+    ["provider refresh", ({ provider }) => json("POST", `/api/providers/${provider}/models/refresh`)],
+    ["run", ({ conv }) => json("GET", `/api/conversations/${conv}/run`)],
+    ["stop", ({ conv, run }) => json("POST", `/api/conversations/${conv}/runs/${run}/stop`)],
+    ["retry", ({ conv }) => json("POST", `/api/conversations/${conv}/runs/retry`)],
+    ["dismiss", ({ conv }) => json("POST", `/api/conversations/${conv}/runs/dismiss`)],
+    ["topic", ({ conv }) => json("POST", `/api/conversations/${conv}/topic`)],
+    ["new Agent on the provider", ({ provider }) => json("POST", "/api/agents", { handle: "enum_taker", name: "T", model: { source: "provider", providerId: provider, model: "m" } })],
+    ["draft on the provider", ({ provider }) => json("POST", "/api/agents/draft-persona", { name: "T", model: { source: "provider", providerId: provider, model: "m" } })],
+  ];
+
+  it("a stranger and the owner of a different Agent get exactly a random id's answer, on every route, with every mix of real and random ids", async () => {
+    const [owner, stranger, other] = [await signUp(app, "enum_owner"), await signUp(app, "enum_stranger"), await signUp(app, "enum_other")];
+    // The owner: a provider an Agent uses, an Agent on the site model with a persona proposal, and its latest run failed.
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "m" }] }))).json.id as string;
+    await mustCreateAgent(app, owner, { model: { source: "provider", providerId: provider, model: "m" } });
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: "你是助手。" });
+    const conv = agent.conversationId as string;
+    for (const [i, step] of [() => gateway.reply("<af-persona>你是一个新助手。</af-persona>"), () => gateway.fail("provider_unavailable")].entries()) {
+      step();
+      expect((await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { text: "整理一下", clientTxn: `enum-run-${i}` })).status).toBe(201);
+      expect(await app.agentWorker.runOnce()).toBe(true);
+    }
+    const run = (await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json.run;
+    expect(run).toMatchObject({ status: "failed", retryable: true });
+    const proposal = (await db.query<{ id: string }>("select id from persona_proposals where agent_id = $1", [agent.id])).rows[0]!.id;
+    const real: Ids = { agent: agent.id, conv, run: run.id, proposal, provider };
+    const random: Ids = { agent: RANDOM, conv: RANDOM, run: OTHER_RANDOM, proposal: OTHER_RANDOM, provider: RANDOM };
+    // The other owner: an Agent, its conversation and a provider of their own.
+    const otherProvider = (await api(app, other, "POST", "/api/providers", providerBody({ models: [{ name: "m" }] }))).json.id as string;
+    const otherAgent = await mustCreateAgent(app, other, { model: FAST, persona: "你是助手。" });
+    const own: Ids = { agent: otherAgent.id, conv: otherAgent.conversationId, run: OTHER_RANDOM, proposal: OTHER_RANDOM, provider: otherProvider };
+
+    const before = {
+      agent: (await api(app, owner, "GET", `/api/agents/${agent.id}`)).json,
+      providers: (await api(app, owner, "GET", "/api/providers")).json,
+      run: (await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json,
+      proposal: (await db.query("select status from persona_proposals where id = $1", [proposal])).rows,
+    };
+
+    for (const who of [stranger, other]) {
+      for (const [label, request] of routes) {
+        const reference = await observe(who, request(random));
+        // Every id real, and each id real on its own.
+        const mixes: Array<[string, Ids]> = [
+          ["all real", real],
+          ...(Object.keys(real) as Array<keyof Ids>).map((k): [string, Ids] => [`only ${k} real`, { ...random, [k]: real[k] }]),
+        ];
+        for (const [mix, ids] of mixes) {
+          expect([who.handle, label, mix, await observe(who, request(ids))]).toEqual([who.handle, label, mix, reference]);
+        }
+        if (who === other) {
+          // Their own Agent, conversation and provider, with the owner's proposal, run or provider in the other place —
+          // or a random one there: the same answer. (Only where the route takes that id: else the two are one request.)
+          const ownMix: Array<[string, Ids, Ids]> = [
+            ["own Agent: foreign or random proposal", { ...own, proposal }, { ...own, proposal: OTHER_RANDOM }],
+            ["own conversation: foreign or random run", { ...own, run: run.id }, { ...own, run: OTHER_RANDOM }],
+            ["own Agent: foreign or random provider", { ...own, provider }, { ...own, provider: RANDOM }],
+          ];
+          for (const [mix, foreign, rand] of ownMix) {
+            if (JSON.stringify(request(foreign)) === JSON.stringify(request(rand))) continue;
+            expect([label, mix, await observe(who, request(foreign))]).toEqual([label, mix, await observe(who, request(rand))]);
+          }
+        }
+      }
+    }
+
+    // Nothing anybody tried changed anything of the owner's.
+    expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json).toEqual(before.agent);
+    expect((await api(app, owner, "GET", "/api/providers")).json).toEqual(before.providers);
+    expect((await api(app, owner, "GET", `/api/conversations/${conv}/run`)).json).toEqual(before.run);
+    expect((await db.query("select status from persona_proposals where id = $1", [proposal])).rows).toEqual(before.proposal);
+    expect((await db.query("select 1 from agents a join principals p on p.id = a.principal_id where p.handle = 'enum_taker'")).rowCount).toBe(0);
+    expect(gateway.pending()).toBe(0);
+    // Positive control: the owner's own requests are answered (the ids are real).
+    expect((await observe(owner, routes[0]![1](real))).status).toBe(200);
+    expect((await observe(owner, json("POST", `/api/providers/${provider}/test`))).status).toBe(200);
   });
 });
 
