@@ -142,6 +142,23 @@ describe("agent and metering configuration", () => {
     }
   });
 
+  test("SITE_MODELS: a baseUrl follows a provider's rule (https, no credentials, query or fragment), normalised; else start-up fails naming the model", () => {
+    for (const baseUrl of [
+      "http://api.example.test/v1",
+      "https://user:pw@api.example.test/v1",
+      "https://@api.example.test/v1",
+      "https://api.example.test/v1?key=x",
+      "https://api.example.test/v1?",
+      "https://api.example.test/v1#frag",
+      "https://exa_mple.test/v1",
+      "ftp://api.example.test/v1",
+    ]) {
+      expect(() => loadConfig(withModels([{ ...model, baseUrl }])), baseUrl).toThrow(/SITE_MODELS: model "fast".*baseUrl/);
+    }
+    expect(loadConfig(withModels([{ ...model, baseUrl: "https://API.Example.test:443/v1/" }])).siteModels[0]!.baseUrl).toBe("https://api.example.test/v1");
+    expect(loadConfig(withModels([{ ...model, baseUrl: "https://203.0.113.9:8443/openai/v1" }])).siteModels[0]!.baseUrl).toBe("https://203.0.113.9:8443/openai/v1");
+  });
+
   test("SITE_MODELS: a model's context must be larger than its output limit, or nothing is left for the conversation", () => {
     expect(() => loadConfig(withModels([{ ...model, contextTokens: 2048 }]))).toThrow(/SITE_MODELS: model "fast" has contextTokens 2048, not more than its maxOutputTokens 2048/);
     expect(loadConfig(withModels([{ ...model, contextTokens: 2049 }])).siteModels[0]!.contextTokens).toBe(2049);

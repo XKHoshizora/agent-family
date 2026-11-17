@@ -65,7 +65,10 @@ and every run-time import of `src/` a production dependency.
 `PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable:
 a provider's test and refresh then answer 500 and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
 `SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
-`openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl`, `apiKeyEnv` (the name of another variable that holds the upstream key, so the JSON carries
+`openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl` (a provider's `baseUrl` rule, Model providers: `https`, no
+credentials, a plain host name or address, and no query or fragment, else start-up fails naming the model; used as a
+provider's is stored: lower-case host, no default port, no trailing slash; its address is checked at every call),
+`apiKeyEnv` (the name of another variable that holds the upstream key, so the JSON carries
 no secret; start-up fails naming it if unset, and naming the model if it is one of the service's own `DATABASE_URL`,
 `AUTH_SECRET`, `PROVIDER_KEY_SECRET`, `S3_SECRET_ACCESS_KEY`, `S3_ACCESS_KEY_ID` — case ignored; two models may share
 one), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens` (larger than

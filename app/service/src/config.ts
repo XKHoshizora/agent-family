@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import path from "node:path";
 import { z } from "zod";
+import { normaliseBaseUrl } from "./providers/guard.ts";
 
 /** Which X-Forwarded-For hops Fastify trusts: none, or those that come from these addresses / ranges. */
 export type TrustProxy = false | string[];
@@ -318,6 +319,16 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     );
   }
   for (const m of e.SITE_MODELS) {
+    // A provider's base URL rule (src/providers/guard.ts): https, no credentials, a plain host name or address; and
+    // nothing after the path, which a provider's would silently lose. Stored as a provider's is (lower-case host, no
+    // default port, no trailing slash). Whether its address may be called is decided at every call, as for providers.
+    const normalised = /[?#]/.test(m.baseUrl) ? null : normaliseBaseUrl(m.baseUrl, false);
+    if (normalised === null) {
+      throw new Error(
+        `Invalid configuration: SITE_MODELS: model "${m.id}" has a baseUrl that is not an https URL a provider could have (no credentials, query or fragment)`,
+      );
+    }
+    m.baseUrl = normalised;
     if (m.contextTokens <= m.maxOutputTokens) {
       throw new Error(
         `Invalid configuration: SITE_MODELS: model "${m.id}" has contextTokens ${m.contextTokens}, not more than its maxOutputTokens ${m.maxOutputTokens}: nothing would be left for the conversation`,
