@@ -146,9 +146,26 @@ export interface ProviderPatch {
   models?: ProviderModel[];
 }
 
-/** Edits the owner's provider; the protocol never changes. 404 when it is not theirs, 409 `name_taken`. */
+/** A base URL's origin (scheme, host and port); null when it does not parse (then it counts as another origin). */
+function originOf(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Edits the owner's provider; the protocol never changes. 404 when it is not theirs, 409 `name_taken`. A `baseUrl` on
+ * another origin (scheme, host or port) than the stored one is 400 `invalid_request` unless the same edit carries the
+ * key: the stored key is never sent to an address its owner did not save it for. A path change keeps it.
+ */
 export async function updateProvider(t: Tx, ownerId: string, id: string, patch: ProviderPatch, secret: string): Promise<ProviderRow> {
   const current = await lockOwnedProvider(t, ownerId, id);
+  if (patch.baseUrl !== undefined && patch.apiKey === undefined) {
+    const next = originOf(patch.baseUrl);
+    if (next === null || next !== originOf(current.baseUrl)) throw new AppError(400, "invalid_request");
+  }
   const name = patch.name ?? current.name;
   const baseUrl = patch.baseUrl ?? current.baseUrl;
   const models = patch.models ?? current.models;

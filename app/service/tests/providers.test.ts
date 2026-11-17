@@ -153,8 +153,9 @@ describe("editing", () => {
     const cipherOf = async () => (await db.query("select key_cipher from providers where id = $1", [p.id])).rows[0].key_cipher as Buffer;
     const before = await cipherOf();
 
-    const renamed = await api(app, owner, "PATCH", `/api/providers/${p.id}`, { name: "Renamed", baseUrl: "https://other.example/v2/" });
-    expect(renamed).toEqual({ status: 200, json: { ...p, name: "Renamed", baseUrl: "https://other.example/v2" } });
+    // Another path on the same origin keeps the stored key.
+    const renamed = await api(app, owner, "PATCH", `/api/providers/${p.id}`, { name: "Renamed", baseUrl: "https://API.example.com:443/v2/" });
+    expect(renamed).toEqual({ status: 200, json: { ...p, name: "Renamed", baseUrl: "https://api.example.com/v2" } });
     expect(await keyOf()).toBe("sk-first-key-0000AAAA");
     expect((await cipherOf()).equals(before)).toBe(true);
 
@@ -167,6 +168,27 @@ describe("editing", () => {
     expect(remodelled.json.models).toEqual([model("b", { reasoning: true }), model("c")]);
     expect(await api(app, owner, "PATCH", `/api/providers/${p.id}`, {})).toEqual({ status: 200, json: remodelled.json });
     expect((await api(app, owner, "GET", "/api/providers")).json.providers).toEqual([remodelled.json]);
+  });
+
+  it("a baseUrl on another origin (scheme, host or port) needs the key in the same request: the stored key never follows a new address", async () => {
+    const owner = await signUp(app, "redi");
+    const p = await mustCreate(owner, { apiKey: "sk-first-key-0000AAAA" }); // https://api.example.com/v1
+    const cipherOf = async () => (await db.query("select key_cipher from providers where id = $1", [p.id])).rows[0].key_cipher as Buffer;
+    const before = await cipherOf();
+    for (const baseUrl of ["https://other.example/v1", "https://api.example.com:8443/v1", "https://api.example.com.evil.test/v1", "https://203.0.113.9/v1"]) {
+      for (const body of [{ baseUrl }, { baseUrl, name: "Moved" }, { baseUrl, models: [{ name: "m" }] }]) {
+        expect([body, await api(app, owner, "PATCH", `/api/providers/${p.id}`, body)]).toEqual([body, { status: 400, json: { error: "invalid_request" } }]);
+      }
+    }
+    expect((await api(app, owner, "GET", "/api/providers")).json.providers).toEqual([p]);
+    expect((await cipherOf()).equals(before)).toBe(true);
+
+    // With the key, the provider moves; its new key is sealed.
+    const moved = await api(app, owner, "PATCH", `/api/providers/${p.id}`, { baseUrl: "https://other.example/v1/", apiKey: "sk-other-key-0000CCCC" });
+    expect(moved).toEqual({ status: 200, json: { ...p, baseUrl: "https://other.example/v1", keyLast4: "CCCC" } });
+    expect((await loadProviderForCall(db, owner.id, p.id, secret()))!.apiKey).toBe("sk-other-key-0000CCCC");
+    // Back on that origin, a path change alone is fine.
+    expect((await api(app, owner, "PATCH", `/api/providers/${p.id}`, { baseUrl: "https://OTHER.example:443/v2" })).json.baseUrl).toBe("https://other.example/v2");
   });
 
   it("the protocol cannot change, and other keys are refused (400)", async () => {

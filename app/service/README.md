@@ -634,7 +634,9 @@ call stopped by its caller closes its connection at once.
 
 *Session: required.* Body (no other key; `protocol` cannot change and is 400 too): any of `name`, `baseUrl`, `apiKey` (sealed
 anew; without it the stored key stays), `models` (replaces the list), under the rules of creation. → 200 Provider;
-409 `name_taken`.
+409 `name_taken`; 400 `invalid_request` for a `baseUrl` on another origin — scheme, host or port — than the stored one
+without `apiKey` in the same request: the stored key is never sent to an address it was not saved for (another path on
+the same origin keeps it). 404 comes first: someone else's provider is 404 whatever the body.
 
 #### `DELETE /api/providers/:id`
 
