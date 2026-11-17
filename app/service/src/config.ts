@@ -40,6 +40,9 @@ export type Protocol = (typeof PROTOCOLS)[number];
 export const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
 
+/** The service's own secrets: a site model's `apiKeyEnv` may not name one (its value would be sent upstream as a key). */
+export const SERVICE_SECRET_VARIABLES = ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID"] as const;
+
 /** A model the site itself offers. `apiKeyEnv` names the environment variable holding the upstream key. */
 export interface SiteModel {
   id: string;
@@ -304,6 +307,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     }
   }
   for (const m of e.SITE_MODELS) {
+    // The variable is sent upstream as the model's key: never one of the service's own secrets (compared ignoring case,
+    // as Windows does for variable names).
+    if ((SERVICE_SECRET_VARIABLES as readonly string[]).includes(m.apiKeyEnv.toUpperCase())) {
+      throw new Error(
+        `Invalid configuration: SITE_MODELS: model "${m.id}" names ${m.apiKeyEnv} as its apiKeyEnv, one of the service's own variables; put its key in a variable of its own`,
+      );
+    }
     const key = env[m.apiKeyEnv];
     if (key === undefined || key === "") {
       throw new Error(`Invalid configuration: SITE_MODELS: model "${m.id}" needs the environment variable ${m.apiKeyEnv} (its apiKeyEnv), which is not set`);

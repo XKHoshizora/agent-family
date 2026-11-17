@@ -138,6 +138,25 @@ describe("agent and metering configuration", () => {
     expect(() => loadConfig(withModels([model], { TEST_UPSTREAM_KEY: "" }))).toThrow(/TEST_UPSTREAM_KEY/);
   });
 
+  test("SITE_MODELS: an apiKeyEnv may not name one of the service's own variables: start-up fails naming the model", () => {
+    const s3 = { S3_ENDPOINT: "https://s3.example.test", S3_REGION: "r", S3_BUCKET: "b", S3_ACCESS_KEY_ID: "access-id", S3_SECRET_ACCESS_KEY: "s3-secret" };
+    expect(loadConfig(withModels([model], { TEST_UPSTREAM_KEY: "upstream-key-value", ...s3 })).siteModels).toHaveLength(1);
+    for (const own of ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID", "auth_secret"]) {
+      // Each of them is set (base and s3), as it is in production.
+      expect(() => loadConfig(withModels([{ ...model, apiKeyEnv: own }], s3)), own).toThrow(
+        new RegExp(`SITE_MODELS: model "fast".*${own}`),
+      );
+    }
+  });
+
+  test("SITE_MODELS: two models may share one apiKeyEnv (two models of one upstream account)", () => {
+    const config = loadConfig(withModels([model, { ...model, id: "slow", label: "Slow", model: "slow-1" }]));
+    expect(config.siteModels.map((m) => [m.id, m.apiKeyEnv])).toEqual([
+      ["fast", "TEST_UPSTREAM_KEY"],
+      ["slow", "TEST_UPSTREAM_KEY"],
+    ]);
+  });
+
   test("AGENT_TIERS must contain free and hold whole non-negative limits", () => {
     expect(loadConfig({ ...base, AGENT_TIERS: '{"free":5,"pro":100}' }).agentTiers).toEqual({ free: 5, pro: 100 });
     for (const bad of ['{"pro":100}', "[]", "nope", '{"free":-1}', '{"free":1.5}', '{"free":"3"}']) {
