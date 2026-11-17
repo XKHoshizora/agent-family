@@ -7,6 +7,7 @@ import { buildApp } from "../src/app.ts";
 import { api, befriend, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
+import { grant } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/ws.ts";
 
@@ -151,6 +152,38 @@ describe("a reply", () => {
     const [reply] = await fromAgent(owner, conv, agent.id);
     expect(reply).toMatchObject({ text: "说到一半", truncated: true });
     expect(await usageOf((await latestRun(owner, conv)).id)).toEqual([{ outcome: "done", source: "site", model: "fast", estimated: false }]);
+  });
+
+  it("after the model is changed (PATCH), the next reply calls the new model and is recorded with its source (spec 7.2)", async () => {
+    const { owner, agent, conv } = await owned("switcher");
+    const runModel = async (runId: string) =>
+      (await db.query("select r.source, r.model, u.source as usage_source, u.model as usage_model from agent_runs r join usage_records u on u.run_id = r.id where r.id = $1", [runId])).rows[0];
+    const replyAndRecord = async (text: string) => {
+      gateway.reply(text);
+      await say(owner, conv, "继续");
+      expect(await app.agentWorker.runOnce()).toBe(true);
+      const run = await latestRun(owner, conv);
+      expect(run).toMatchObject({ status: "done" });
+      return { call: callsHere().at(-1)!, recorded: await runModel(run.id) };
+    };
+
+    const onSite = await replyAndRecord("站点模型回答。");
+    expect(onSite.call).toMatchObject({ protocol: "openai_chat", baseUrl: "https://api.example.test/v1", model: "fast-1", apiKey: SITE_ENV.UPSTREAM_TEST_KEY });
+    expect(onSite.recorded).toEqual({ source: "site", model: "fast", usage_source: "site", usage_model: "fast" });
+
+    const provider = (
+      await api(app, owner, "POST", "/api/providers", { name: "Mine", protocol: "gemini", baseUrl: "https://gemini.example.com/v1beta", apiKey: "gm-key-0123456789", models: [{ name: "deep" }] })
+    ).json;
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { model: { source: "provider", providerId: provider.id, model: "deep" } })).status).toBe(200);
+    const onProvider = await replyAndRecord("自己的模型回答。");
+    expect(onProvider.call).toMatchObject({ protocol: "gemini", baseUrl: "https://gemini.example.com/v1beta", model: "deep", apiKey: "gm-key-0123456789" });
+    expect(onProvider.recorded).toEqual({ source: "provider", model: "deep", usage_source: "provider", usage_model: "deep" });
+
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { model: { source: "site", id: "thinker" } })).status).toBe(200);
+    await grant(db, owner.id, 5_000_000n); // a paid-tier model needs a balance
+    const backOnSite = await replyAndRecord("付费模型回答。");
+    expect(backOnSite.call).toMatchObject({ protocol: "anthropic", model: "think-1" });
+    expect(backOnSite.recorded).toEqual({ source: "site", model: "thinker", usage_source: "site", usage_model: "thinker" });
   });
 
   it("pushes about a reply go to its owner only", async () => {
