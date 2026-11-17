@@ -75,7 +75,9 @@ no secret; start-up fails naming it if unset, and naming the model if it is one 
 `AUTH_SECRET`, `PROVIDER_KEY_SECRET`, `S3_SECRET_ACCESS_KEY`, `S3_ACCESS_KEY_ID` — case ignored; two models may share
 one), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points), `maxOutputTokens`, `contextTokens` (larger than
 `maxOutputTokens`, else start-up fails naming the model),
-`vision`, `pdf`, `reasoning` (levels from `low`..`max`)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
+`vision`, `pdf`, `reasoning` (levels from `low`..`max`), and optionally `thinkingSwitch` (`true` for an `openai_chat`
+upstream that thinks unless told not to, such as DeepSeek: it is then sent `thinking: {"type": ...}`, see Calling a
+model; default false)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
 `SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
 contain `free`, default `{"free":20}`),
 the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
@@ -87,8 +89,12 @@ exceed it by one, see Agents and runs; 1–100, default 2),
 for a reply also the reading of its attachments before the call, each in turn: so a reply may take up to about twice it
 in all; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
 context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
-limit of every call to a provider model; 1–1 000 000, default 2 048; it must be less than
-`PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
+limit of every call to a provider model at reasoning `none`, and its reply's limit at any other level; 1–1 000 000,
+default 2 048; it must be less than `PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both),
+`REASONING_ALLOWANCE_TOKENS` (the thinking allowance of each reasoning level, JSON: `low`..`max`, each a whole number
+0–200 000, a level left out keeps its default; default `{"low":2000,"medium":6000,"high":12000,"xhigh":24000,"max":48000}`;
+at any level but `none` a call's output limit is its reply limit plus this, at most half of what the model's context
+leaves beside the reply limit — Calling a model; a site-model call's hold covers it), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
 and site models in flight at once in the whole service, see Model providers; 1–1 000, default 64),
 `AGENT_MAX_RUNS_IN_FLIGHT` (replies the worker runs at once in the whole service, all owners together; further ones wait
 queued; 1–64, default 8 — each holds up to 20 MiB of attachments in memory, see Agents and runs, so the worst case is
@@ -267,7 +273,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 |---|---|---|
 | 400 | `invalid_request` | Malformed or not acceptable input (also 414 for an over-long path parameter, 415 for an unsupported content type) |
 | 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
-| 400 | `context_too_small` | A run's error (not an HTTP answer there): the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context. As an HTTP answer only from `POST /api/agents/draft-persona`, when the model's context cannot hold the draft's instruction and data |
+| 400 | `context_too_small` | A run's error (not an HTTP answer there): the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona, choose a lower reasoning level (at a level the output limit includes its thinking allowance, so a long persona on a small-context model can fail so where `none` works) or a model with a larger context. As an HTTP answer only from `POST /api/agents/draft-persona`, when the model's context cannot hold the draft's instruction and data |
 | 401 | `unauthenticated` | No valid session (or a WebSocket ticket that is unknown, used or expired) |
 | 402 | `no_quota` | A site-model call cannot start: nothing is left to pay for it (see Metering). `reason` `free_and_balance` (a free-tier model: today's free allowance and the balance are both used up; `resetsAt`, the next midnight in `SITE_TIMEZONE`, ISO instant) or `balance` (a paid-tier model: no balance) |
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
@@ -284,6 +290,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 500 | `internal` | A bug (also any failure inside Better Auth); logged with the request |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403), or the provider's saved key cannot be opened (Model providers; save it again) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
+| 502 | `thinking_exhausted` | A run's error (as an HTTP answer only from `POST /api/agents/draft-persona`): the model stopped at its output limit having only thought — no answer, though it reasoned. Retryable; charged what the upstream reported, as a failed answer is |
 | 503 | `busy` | A database statement ran past its timeout (the pool's or a search's), no database connection was free in time (`DB_ACQUIRE_TIMEOUT_MS`), or the site-wide search cap is reached. Nothing was changed; try again later |
 
 Feature codes (`handle_taken`, `invalid_invite`, `already_member`, `request_not_pending`, Better Auth's
@@ -449,8 +456,8 @@ save the Agent to keep it.
   `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (2) model calls running (replies and drafts
   together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset); 502
   `provider_rejected` when your provider's saved key cannot be opened (Model providers: save it again).
-- The call failing: 502 `provider_rejected` / `provider_unavailable`, 400 `address_not_allowed`, charged as a failed
-  reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
+- The call failing: 502 `provider_rejected` / `provider_unavailable` / `thinking_exhausted`, 400
+  `address_not_allowed`, charged as a failed reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
   its deadline — `AGENT_RUN_TIMEOUT_MS`, but at most `HTTP_CONNECTION_TIMEOUT_MS` less 10 s, so it answers before the
   server closes the idle connection (110 s with the defaults) — the call is ended: what it had written is the answer
   (nothing: 502 `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the stopping
@@ -595,7 +602,9 @@ owner learns from the `run` push and from `GET /api/conversations/:id/run` (in a
 
 **Run**: `{"id", "status": "queued" | "running" | "done" | "failed" | "stopped" | "cancelled", "error"?, "retryable",
 "resetsAt"?}`. `error`: for `failed` why (`provider_rejected`, `provider_unavailable`, `address_not_allowed`, `no_quota`,
-`context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona — or
+`context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona —,
+`thinking_exhausted` — the model used its whole output limit thinking and gave no answer; charged what the upstream
+reported; retry, or choose a lower reasoning level — or
 `busy`: the service's own trouble — the reply could not be started or stored, its attachments could not be read, or
 there was nothing to answer — which costs you nothing; `provider_unavailable` is also what a reply that was under way
 when the service restarted ends with, and one the stale-run sweep released; `rate_limited`: you had started
@@ -907,6 +916,15 @@ The gateway uses the Vercel AI SDK 7 (`ai` with `@ai-sdk/openai`, `@ai-sdk/anthr
 only: no hosted gateway, telemetry off, no automatic retry, nothing printed by the SDK), every request through the
 address guard.
 
+The output limit is the call's own: at `none` the model's (`maxOutputTokens`, or `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS`
+for a provider model); at any other level that plus the level's thinking allowance (`REASONING_ALLOWANCE_TOKENS`), at
+most half of what the model's context leaves beside it, since upstreams count thinking inside the output limit
+(`outputLimit`). That one number is what is sent, what admission holds for (Metering), and what the conversation's
+budget leaves room for (so at a level the model is shown less of it). It is sized when the reply begins, for the level
+the Agent has then, and the call is sent that level: a level changed while the reply reads its files applies from the
+next reply. The half is of the context less the reply's limit, the system text not counted: so a long persona on a
+model with a small context may leave too little room at a level (`context_too_small`) where `none` works.
+
 **Where it goes.** The stored `baseUrl` is the SDK's base URL as it is; each protocol appends its own path, so a service
 offering all four under `https://host/v1` is reached with `baseUrl` `https://host/v1` for each:
 
@@ -940,27 +958,43 @@ the system text goes as a `developer` message, and Chat Completions sends the li
 models it recognises by name the SDK adapts further (an Anthropic model that cannot turn thinking off has `thinking`
 dropped).
 
+With `thinkingSwitch` (a site model's configuration, or a provider model its owner marked as one that reasons) an
+`openai_chat` call also carries `thinking: {"type": "disabled"}` at `none` and `thinking: {"type": "enabled"}` at any
+other level, next to `reasoning_effort`: the switch that upstreams thinking by default (DeepSeek and others) read —
+without it `none` does not stop them. An upstream that answers 400 or 422 naming `thinking`, or a Responses upstream
+naming the reasoning summary, before anything streamed, is asked once more without it; once that request is answered,
+that site model's later calls, or that provider's at that address, leave it out until the service restarts (at most
+1 000 upstreams remembered; a provider given a new address is asked with it again). A refusal for another reason fails
+the second request too, and nothing is remembered.
+
 What follows for a person choosing a model and a level:
 
 - Anthropic levels other than `none` ask for adaptive thinking, which Claude models before 4.6 refuse; Gemini levels
   other than `none` ask for a thinking level, which Gemini 2.5 models may refuse. The reply then fails as
   `provider_unavailable`; such a model works at `none`.
-- On `openai_chat` the model's thinking is never shown (the protocol streams none that is read), though it is counted
-  in the usage.
+- On `openai_chat` thinking is shown when the upstream streams it in a delta's `reasoning_content` (or `reasoning` as
+  a string), as most OpenAI-compatible servers that think do, or when the answer opens with `<think>…</think>` and no
+  such field came first (unclosed: all of it is thinking; a `<think>` later in the answer, or after more than 256
+  characters of white space, is text); otherwise it is not shown, though it is counted.
 - A Gemini key that is wrong is answered 400 by Google, so it reads as `provider_unavailable`, not
   `provider_rejected` (the same in the provider test route).
-- A model silent for 60 s (for example one thinking hard over Chat Completions, which streams nothing meanwhile) is
-  given up on (`provider_unavailable`).
+- A model silent for 60 s (for example one thinking hard without streaming its thinking) is given up on
+  (`provider_unavailable`).
 
 **What comes back.** The answer as text and reasoning deltas (Responses reasoning summaries, Anthropic thinking, Gemini
-thought summaries; Chat Completions streams no reasoning the SDK reads, so there it is not shown, though its tokens are
-counted), then one finish: the usage the upstream reported (reasoning tokens count as output; none reported: no usage)
+thought summaries; Chat Completions' `reasoning_content` / `reasoning`, which the SDK drops and the gateway reads off
+the stream, or a leading `<think>` block; reasoning comes out in its place among the text as it arrives, and never
+becomes text. The gateway reads the stream in time proportional to its bytes however they are cut, and stops reading
+it — the SDK still reads all of it, so the answer is whole — at a line, or an event's data, over 1 048 576
+characters), then one finish: the usage the upstream reported (reasoning tokens count as output; none reported: no usage)
 and whether the model stopped for length. An answer may be up to 8 MiB on the wire and is given up after 60 s without a
 byte (before or after the headers); how long it may take in all is the caller's to bound.
 
-**Failures** are a `ModelError` with one of three codes and a fixed sentence: 401 or 403 is `provider_rejected`; any
+**Failures** are a `ModelError` with one of four codes and a fixed sentence: 401 or 403 is `provider_rejected`; any
 other error status, a network failure, silence, a redirect, an oversized answer, and a stream that is malformed or ends
-without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`. Besides the
+without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`; an answer
+cut off at its output limit with no visible text, having reasoned (reasoning came, or the upstream reported reasoning
+tokens), is `thinking_exhausted` and carries the usage the upstream reported, which the call is charged. Besides the
 code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent is kept, printed or logged.
 Stopping a call (its abort signal) ends it at once and closes the upstream connection.
 
@@ -975,8 +1009,8 @@ gets. → 200 `{"siteModels": [{"id", "label", "tier": "free" | "paid", "vision"
   empty list: `none` only). Nothing else of a site model is shown: never where it is called (`baseUrl`, `protocol`), the
   upstream model name, its key or the name of the variable holding it, or its prices.
 - `providerDefaults`: `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's context when its owner gives none) and
-  `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output limit of every call to a provider model; a provider model's context must
-  be larger).
+  `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output limit of every call to a provider model at reasoning `none`, to which
+  a level adds its thinking allowance, Calling a model; a provider model's context must be larger).
 - Limit: 120 per minute, a budget of its own.
 
 ### Health
@@ -1834,8 +1868,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       `cancelled` with no error (the owner started over: nothing failed, nothing to retry); otherwise `failed`, `busy`.
       Nor is it called when the conversation's budget (below) holds neither the owner's newest message whole nor 200
       tokens of it: `failed`, `context_too_small`, not retryable (the persona is too long for the model's context, or the
-      context too small): nothing is admitted or charged. A run in a group is marked here, in this process, as one that
-      streams nothing (step 2).
+      context too small, or at a reasoning level its thinking allowance leaves too little room): nothing is admitted
+      or charged. The model resolved here sizes the call — its level, output limit (Calling a model) and so what is
+      shown and held — and the call is sent that level, whatever the Agent's is by step 3. A run in a group is marked
+      here, in this process, as one that streams nothing (step 2).
    2. No transaction: the attachments' bytes are read and the call is assembled (`buildContext`). A send to the
       conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`). It is interruptible and
       bounded (`tests/runs-faults.test.ts`): once the owner stops the reply or the Agent is paused or deleted, no further
@@ -1933,7 +1969,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   failed and none of this reply's has succeeded (a missing blob counts as an answer of the store) is the store down: the
   run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
   later failure is shown by its name (`tests/runs-faults.test.ts`).
-- The budget: the model's context, less its output limit and the system text, counted as admission counts (a token per
+- The budget: the model's context, less the call's output limit (at a reasoning level, its thinking allowance included)
+  and the system text, counted as admission counts (a token per
   character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
   then its end) when it alone is over the budget (which then holds at least 200 tokens: with less the run fails
@@ -1964,6 +2001,7 @@ all of the above, attachments at their estimate.
 | Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
 | The Agent left the run's group (taken out by the creator or its owner, or along with its owner), or is otherwise no longer a member there when the run begins or posts | queued: none, no call made, no usage record; running and not yet posted (added back since or not): none, what it had said is discarded, what it used is settled | `cancelled`, `agent_removed`; never followed up: a mention noted on it meanwhile is dropped |
 | The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
+| The model stopped at its output limit having only thought (no visible text; reasoning came, or the upstream reported reasoning tokens) | none; the reasoning streamed meanwhile is discarded | `failed`, `thinking_exhausted`, retryable; charged what the upstream reported |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
@@ -2073,7 +2111,8 @@ of points (Usage and points).
 
 **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
 cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500 per image;
-300 per KB of PDF) plus the model's whole output limit, at the model's prices. A free-tier model is charged to today's
+300 per KB of PDF) plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
+model), at the model's prices. A free-tier model is charged to today's
 free allowance while what is left of it, less what your running calls hold against it, is above zero; otherwise to the
 balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
 (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
