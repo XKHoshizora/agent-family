@@ -319,7 +319,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
 | `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429; a draft and a reply starting at the same moment may briefly exceed it by one) | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
-| `POST /api/providers/:id/test` + `POST /api/providers/:id/models/list` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
+| `POST /api/providers/:id/test` + `POST /api/providers/:id/models/list` + `POST /api/providers/:id/models/refresh` (they call the provider; a test with a model calls that model once) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
 | `PUT` + `DELETE /api/blocks/:principalId` | 20 together | principal |
 | `POST /api/conversations` | 10 | principal |
@@ -791,7 +791,15 @@ Agent cannot be pointed at their provider (400).
   earlier layout, version 1, would read as one that cannot be opened).
 - **`baseUrl`** must be `https:`, without credentials (no `@` before the host), with a plain DNS name or an IP address as
   host and any port from 1 to 65535. It is stored without query, fragment or trailing slash (`https://API.example.com:443/v1/?x`
-  is `https://api.example.com/v1`). Saving checks only that; the address is checked at every call (below).
+  is `https://api.example.com/v1`), and with an API version: unless a segment of its path already names one (`/v1`,
+  `/v2`, `/v4`, `/v1beta`…: `v`, digits, then letters, the whole segment, anywhere in the path), the protocol's own is
+  appended — `/v1` for the OpenAI protocols and Anthropic, `/v1beta` for Gemini (`https://api.deepseek.com` is
+  `https://api.deepseek.com/v1`; `https://open.bigmodel.cn/api/paas/v4` stays as it is). An address typed with a
+  trailing `#` is stored as typed instead: the `#` taken off, nothing added (`https://api.longcat.chat/openai#` is
+  `https://api.longcat.chat/openai`). One function makes it (`providerBaseUrl`, `src/providers/base-url.ts`); the web
+  form previews the same rule (`storedBaseUrl`, `app/web/src/pages/Providers.jsx`), and both test files hold one table
+  of cases. A provider saved before this rule keeps its address as it was, until its address is edited. Saving checks
+  only that; the address is checked at every call (below).
 - **Models**: at most 100; `name` 1–100 characters, one line, trimmed, unique within the provider; `vision`, `pdf` and
   `reasoning` default to false and `contextTokens` (1 000–2 000 000) to `PROVIDER_DEFAULT_CONTEXT_TOKENS` (default 16 000).
   `reasoningLevels` (optional, only on a model flagged `reasoning`): the thinking levels it supports, 1–5 distinct ones of
@@ -836,7 +844,8 @@ call stopped by its caller closes its connection at once.
 #### `PATCH /api/providers/:id`
 
 *Session: required.* Body (no other key; `protocol` cannot change and is 400 too): any of `name`, `baseUrl`, `apiKey` (sealed
-anew; without it the stored key stays), `models` (replaces the list), under the rules of creation. → 200 Provider;
+anew; without it the stored key stays), `models` (replaces the list), under the rules of creation (a new `baseUrl` is
+stored for the provider's own protocol). → 200 Provider;
 409 `name_taken`; 400 `invalid_request` for a `baseUrl` on another origin — scheme, host or port — than the stored one
 without `apiKey` in the same request: the stored key is never sent to an address it was not saved for (another path on
 the same origin keeps it). 404 comes first: someone else's provider is 404 whatever the body.
@@ -849,25 +858,55 @@ so no Agent can take it in the meantime.
 
 #### `POST /api/providers/:id/test`
 
-*Session: required.* Body: none or `{}`. One authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header
-(`Authorization: Bearer` for the OpenAI protocols; `x-api-key` and `anthropic-version: 2023-06-01` for Anthropic;
-`x-goog-api-key` for Gemini). → 200 `{"ok": true}`, or `{"ok": false, "error": "provider_rejected" | "provider_unavailable" |
-"address_not_allowed", "upstreamStatus"?: "<HTTP status>"}`: 401 or 403 is `provider_rejected`; anything else that is not
-a 200 with a JSON body `provider_unavailable`. `upstreamStatus` is the provider's HTTP status as a string (`"404"`),
-present when it answered with one (not for a refused address, an unreachable host, a timeout or a redirect): a 404 or 405
-means the provider has no model list there — a client can say so, as chat may still work (only the model list then has to
-be typed in). Only the code and that number are passed on: nothing else of the provider's answer reaches you or the log,
-which records the provider id, protocol, code and the provider's HTTP status.
+*Session: required.* Body: none, `{}` or `{"model"}` (other keys are ignored). Without `model`, the model list is asked
+for: one authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header (`Authorization:
+Bearer` for the OpenAI protocols; `x-api-key` and `anthropic-version: 2023-06-01` for Anthropic; `x-goog-api-key` for
+Gemini) → 200 `{"ok": true, "mode": "list", "latencyMs"}`. With `model` — one of the provider's saved models (another
+name is 400 `invalid_request`, and nothing is sent), or, while it has none, any name a model may have — one tiny real
+call to that model through the gateway, the way a reply goes (Calling a model): no system text, one user message `hi`,
+reasoning `none` (with the thinking switch when the saved model is flagged `reasoning`), an output limit of 16 tokens,
+given up after 15 s → 200 `{"ok": true, "mode": "chat", "latencyMs"}` (a model that spent those 16 tokens thinking did
+answer: that is a success too). `latencyMs`: how long the call took, whole milliseconds. The call costs no points, as
+any provider model's: nothing is admitted, held, metered or recorded (no usage record, no run).
+
+A failure, either way: `{"ok": false, "error": "provider_rejected" | "provider_unavailable" | "address_not_allowed",
+"upstreamStatus"?: "<HTTP status>", "detail"?}`: 401 or 403 is `provider_rejected`; anything else that is not a good
+answer is `provider_unavailable` (for the model list: anything but a 200 with a JSON body). `upstreamStatus` is the
+provider's HTTP status as a string (`"404"`), present when it answered with one (not for a refused address, an
+unreachable host, a timeout or a redirect): without `model`, a 404 or 405 means the provider has no model list there —
+a client can say so, as chat may still work (the model list then has to be typed in, or taken from the catalogue, see
+`…/models/list`). `detail`, present when the provider answered: what it said (below). The log records the provider id,
+protocol, code and the provider's HTTP status, and nothing else.
+
+**What the provider said** (`detail`, `src/providers/upstream-detail.ts`): `{"upstreamStatus", "message"?}`. A
+deliberate, narrow exception to the rule that nothing an upstream sends is passed on: only in the failures of this route
+and of `…/models/list`, which only the provider's owner can call about their own provider; never for a site model, in a
+run, a push, a refresh's error or a log line. `message` is the provider's own error text, read from the first 64 KiB of
+its answer: its JSON `error.message`, `message` or `error` when that is a string (also in a list of one), else the text
+itself; with control and format characters taken out (line breaks and tabs as spaces), white space collapsed, and at
+most 300 characters. When the answer — anywhere in it, not only that text, ignoring case — holds the key or any 6
+characters of it in a row, as an upstream echoing the request's headers does, the text is dropped and the answer says
+so: `{"upstreamStatus", "message": null, "redacted": true}`. A test with a model keeps no text: the gateway keeps
+nothing of an upstream's answer but its status (Calling a model), so there `detail` is `{"upstreamStatus"}`.
 
 #### `POST /api/providers/:id/models/list`
 
 *Session: required.* Body: none or `{}`. The provider's model list for its owner to choose from: the same request as the
-test, and the names in its answer read as refresh reads them (below: the first 1 000 entries; names that would not be
-accepted as a model name — trimmed first —, any containing the key, and repeats skipped). **Nothing is stored.** → 200
-`{"ok": true, "listed": [{"name", "vision", "pdf", "reasoning", "chat", "known", "label"?, "contextTokens"?,
-"reasoningLevels"?, "added"}]}` in the provider's order, at most 500 entries; or a failure exactly as the test answers
-it: `{"ok": false, "error", "upstreamStatus"?}` (a 404 or 405 there: the provider has no model list, its models are typed
-in by hand), with the code refresh would answer. `added`: the provider's saved `models` already has that name.
+test without a model, and the names in its answer read as refresh reads them (below: the first 1 000 entries; names
+that would not be accepted as a model name — trimmed first —, any containing the key, and repeats skipped). **Nothing
+is stored.** → 200 `{"ok": true, "listed": [{"name", "vision", "pdf", "reasoning", "chat", "known", "label"?,
+"contextTokens"?, "reasoningLevels"?, "added"}], "source": "upstream"}` in the provider's order, at most 500 entries;
+or a failure exactly as the test answers it, `detail` included: `{"ok": false, "error", "upstreamStatus"?, "detail"?}`,
+with the code refresh would answer. `added`: the provider's saved `models` already has that name.
+
+**No model list there** (the provider answered 404 or 405): when the provider's host — the exact host name; port and
+path aside — is the API host of a provider in the catalogue (`src/providers/provider-catalog.json`, written with the
+model catalogue below from models.dev's `api.json`: each catalogue provider that names its `api` address, with that
+address's host and its model ids; `catalogueModels`, `src/providers/catalogue.ts`), the answer is `{"ok": true,
+"listed", "source": "catalogue"}`: that provider's model ids, read and hinted as above (several catalogue providers at
+one host: all their ids, each once). They are what the public catalogue says the host offers, not what this key may use,
+and a client says so. At a host the catalogue does not know, the answer is the failure, as before (its models are typed
+in by hand). The test and the refresh never use the catalogue.
 
 The rest are hints (`modelHints`, `src/providers/hints.ts`), for a client to suggest a model's flags when its owner adds
 it — hints, the owner can change them; nothing here checks them. `chat` false: probably not a chat model (an embedding,
@@ -876,7 +915,8 @@ speech, image or video model…).
 - **From the catalogue** (`known: true`): a vendored snapshot of the [models.dev](https://models.dev) catalogue (MIT),
   `src/providers/model-catalog.json`, written by `npm run catalog:update` (`scripts/update-model-catalog.mjs`, run by hand:
   it downloads the catalogue and keeps per model only its id, lab, display name, what it takes and answers, its context and
-  its lab's thinking levels; `model-catalog.README.md` says when). The service never fetches the catalogue. The name is
+  its lab's thinking levels — and, in `provider-catalog.json`, per catalogue provider its API host and model ids;
+  `model-catalog.README.md` says when). The service never fetches the catalogue. The name is
   trimmed and lower-cased and only its last `/` part counts (`openai/gpt-6-sol`); it is looked up as it is, then without a
   trailing `-latest` and date (`-20251101`, `-2025-11-01`; the catalogue's own dated ids are found without their date too),
   then as the longest catalogue id it starts with followed by `-` (`claude-sonnet-5-5-thinking` is `claude-sonnet-5-5`) —
