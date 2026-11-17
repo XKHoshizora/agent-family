@@ -821,6 +821,22 @@ describe("avatar changes are announced with a version", () => {
     expect([got.statusCode, got.headers["cache-control"]]).toEqual([200, "private, max-age=60"]);
   });
 
+  it("a peer who shared only a group with the uploader, and has left it, hears nothing of a later change", async () => {
+    const [a, b, f, c] = await people("alice", "bob", "fay", "carl");
+    const g = await group(app, b, "team", [a, f]); // alice and fay are no friends: they only share this group
+    const sf = await connect(app, f);
+    expect((await putMine(a)).statusCode).toBe(200);
+    await sf.next(isPrincipal(a.id)); // while in the group, fay hears of it
+    expect((await remove(f, g, f)).status).toBe(200);
+    await sf.next((e) => e.type === "gone" && e.id === g);
+
+    expect((await putMine(a)).statusCode).toBe(200);
+    // A sentinel: fay receives something sent after the change, and by then its push would have come.
+    expect((await api(app, c, "POST", "/api/friend-requests", { handle: f.handle })).status).toBe(201);
+    await sf.next((e) => e.type === "social");
+    expect(sf.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1 }]);
+  });
+
   it("a refused upload announces nothing", async () => {
     const [a, b] = await people("alice", "bob");
     await befriend(app, a, b);
