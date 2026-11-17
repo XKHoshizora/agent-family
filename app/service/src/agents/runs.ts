@@ -414,6 +414,16 @@ async function isHalted(t: Tx, conversationId: string, latestHuman: number): Pro
   return halted !== null && latestHuman <= Number(halted);
 }
 
+/**
+ * Whether the group was halted at or after seq `seq` (`agents_halted_seq` ≥ it): a message up to it came before the
+ * latest halt, whether or not a person has written since and so lifted it for what comes next.
+ */
+async function haltedSince(t: Tx, conversationId: string, seq: number): Promise<boolean> {
+  const { rows } = await t.query<{ halted: string | null }>("select agents_halted_seq::text as halted from conversations where id = $1", [conversationId]);
+  const halted = rows[0]?.halted ?? null;
+  return halted !== null && seq <= Number(halted);
+}
+
 /** Whether a notice of `event` (about Agent `agentId`, when given) was appended to the group after seq `since`. */
 async function toldSince(t: Tx, conversationId: string, since: number, event: string, agentId: string | null = null): Promise<boolean> {
   const { rowCount } = await t.query(
@@ -531,12 +541,14 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [] };
  * to `pending`. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
  * replies a minute (it answers what its owner wrote meanwhile; README "Replies started"). In a group it is a person's
  * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it); otherwise only
- * Agents' messages called for it: it is an Agent's, and is not queued at all while the group is halted (ruling 11) —
- * what Agents asked before a halt is not answered after it. A group's follow-up, a person's or an Agent's, is a reply
- * started like any other, so the owner's `agentRunsPerMinute` decides as for a mention (`reachAgents`): counted under
- * the owner's `accounts` row (the lock order's last step; the caller holds the group's row, the Agent's and the run's),
- * and over it the Agent's reusable `rate_limited` run in the group records it instead (`rateLimitedInGroup`), so a member
- * who keeps mentioning an Agent while it replies cannot keep it replying past its owner's limit.
+ * Agents' messages called for it: it is an Agent's, and is not queued at all when the latest of them (`pending`) came
+ * at or before the group's latest halt (`agents_halted_seq`, ruling 11), even if a person has written since: what
+ * Agents asked before a halt is not answered after it (what a person asked is). A group's follow-up, a person's or an
+ * Agent's, is a reply started like any other, so the owner's `agentRunsPerMinute` decides as for a mention
+ * (`reachAgents`): counted under the owner's `accounts` row (the lock order's last step; the caller holds the group's
+ * row, the Agent's and the run's), and over it the Agent's reusable `rate_limited` run in the group records it instead
+ * (`rateLimitedInGroup`), so a member who keeps mentioning an Agent while it replies cannot keep it replying past its
+ * owner's limit.
  */
 export async function followUp(
   t: Tx,
@@ -574,7 +586,7 @@ async function followUpWith(
   );
   const handle = agent.handle.toLowerCase();
   const asked = rows.some((r) => (agent.groupMentions === "members" || r.sender_id === agent.ownerId) && mentionedHandles(r.text ?? "").includes(handle));
-  if (!asked && (await isHalted(t, conversationId, await latestHumanSeq(t, conversationId)))) return NO_FOLLOW_UP;
+  if (!asked && (await haltedSince(t, conversationId, pending))) return NO_FOLLOW_UP;
   const by: TriggeredBy = asked ? "human" : "agent";
   if (config !== null && (await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) {
     return { run: await rateLimitedInGroup(t, agent, conversationId, pending, by), notices: [] };

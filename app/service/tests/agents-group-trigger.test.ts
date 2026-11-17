@@ -803,6 +803,53 @@ describe("follow-ups in a group", () => {
       await capped.close();
     }
   });
+
+  /**
+   * A running reply of `agentId` in the group covering its current seq, called for as `by` says; with `holdMicro`, one
+   * admitted on the site model `fast`, charged to its owner's balance, holding that much.
+   */
+  const runningIn = async (conv: string, agentId: string, ownerId: string, by: "human" | "agent", holdMicro: number | null = null) => {
+    const id = (
+      await db.query<{ id: string }>(
+        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by, started_at, source, model, charge_to, hold_micro)
+         select 'reply', $1, $2, $3, 'running', seq, $4, now(),
+                case when $5::bigint is null then null else 'site' end, case when $5::bigint is null then null else 'fast' end,
+                case when $5::bigint is null then null else 'balance' end, coalesce($5::bigint, 0)
+           from conversations where id = $1 returning id`,
+        [conv, agentId, ownerId, by, holdMicro],
+      )
+    ).rows[0]!.id;
+    return { id, agentId, ownerId, conversationId: conv } satisfies RunTicket;
+  };
+
+  it("an Agent's mention noted before a halt is never followed up, even once a person has written since; a person's mention noted with it still is", async () => {
+    const w = await world();
+    const a = await agentOf(w.owner, "alpha", w.g);
+    const b = await agentOf(w.member, "beta", w.g);
+    const finish = (ticket: RunTicket) => app.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
+    await say(w.owner, w.g, "开始");
+
+    // A person called it; an Agent's mention is noted on it; a member halts; a person writes before the reply ends,
+    // which lifts the halt for what comes next — not for what was asked before it.
+    const one = await runningIn(w.g, b.id, w.member.id, "human");
+    await agentSays(a.id, w.g, "@beta 补充");
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    await say(w.third, w.g, "大家继续");
+    await finish(one);
+    expect(await runsOf(b.id, w.g)).toEqual([expect.objectContaining({ status: "done", by: "human" })]);
+
+    // The same with a person's mention noted on it before the halt too: that person is answered, up to all that was noted.
+    const two = await runningIn(w.g, b.id, w.member.id, "human");
+    await say(w.third, w.g, "@beta 我也问一下");
+    const noted = (await agentSays(a.id, w.g, "@beta 再补充")).message.seq;
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    await say(w.owner, w.g, "好的");
+    await finish(two);
+    expect((await runsOf(b.id, w.g)).slice(1)).toEqual([
+      expect.objectContaining({ status: "done", by: "human" }),
+      { status: "queued", error: null, covers: noted, pending: null, by: "human", interrupted: null },
+    ]);
+  });
 });
 
 // --- chainBudget --------------------------------------------------------------------------------------------------
