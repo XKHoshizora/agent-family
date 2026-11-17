@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { AG1, AG2, MODELS, P1, apiError, deferred, providerOf, syncOf } from "./fixtures.js";
 import { click, dialog, flush, inMain, installBrowser, mainText, openApp, toastText } from "./harness.jsx";
+import { storedBaseUrl } from "../src/pages/Providers.jsx";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -58,7 +59,7 @@ async function openProviders({ providers = [providerOf()], api = {} } = {}) {
       env.providers = env.providers.filter((p) => p.id !== id);
       return { ok: true };
     }),
-    testProvider: vi.fn(async () => ({ ok: true })),
+    testProvider: vi.fn(async (_id, model) => (model === undefined ? { ok: true, mode: "list", latencyMs: 400 } : { ok: true, mode: "chat", latencyMs: 812 })),
     listProviderModels: vi.fn(async () => ({ ok: true, listed: [] })),
     ...api,
   };
@@ -82,6 +83,53 @@ const sentAnywhere = (api) =>
       .flatMap((fn) => fn.mock.calls),
   );
 const occurrences = (text, part) => text.split(part).length - 1;
+
+// [protocol, typed, stored (null: refused)] — copied as it is from app/service/tests/provider-base-url.test.ts, which
+// checks the service's rule (providerBaseUrl) against it: change both together.
+const BASE_URL_CASES = [
+  ["openai_chat", "https://api.deepseek.com", "https://api.deepseek.com/v1"],
+  ["openai_chat", "https://api.deepseek.com/", "https://api.deepseek.com/v1"],
+  ["openai_chat", "  https://api.deepseek.com/v1/  ", "https://api.deepseek.com/v1"],
+  ["openai_responses", "https://api.openai.com", "https://api.openai.com/v1"],
+  ["openai_chat", "https://open.bigmodel.cn/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4"],
+  ["openai_chat", "https://ark.cn-beijing.volces.com/api/v3/", "https://ark.cn-beijing.volces.com/api/v3"],
+  ["openai_chat", "https://dashscope.aliyuncs.com/compatible-mode/v1", "https://dashscope.aliyuncs.com/compatible-mode/v1"],
+  ["openai_chat", "https://example.com/v1/openai", "https://example.com/v1/openai"],
+  ["openai_chat", "https://example.com/openai", "https://example.com/openai/v1"],
+  ["openai_chat", "https://example.com/v1beta", "https://example.com/v1beta"],
+  ["openai_chat", "https://example.com/version1", "https://example.com/version1/v1"],
+  ["openai_chat", "https://example.com/v1x2", "https://example.com/v1x2/v1"],
+  ["openai_chat", "https://example.com/V1", "https://example.com/V1/v1"],
+  ["anthropic", "https://api.anthropic.com", "https://api.anthropic.com/v1"],
+  ["anthropic", "https://api.minimax.io/anthropic", "https://api.minimax.io/anthropic/v1"],
+  ["anthropic", "https://api.minimax.io/anthropic/v1", "https://api.minimax.io/anthropic/v1"],
+  ["gemini", "https://generativelanguage.googleapis.com", "https://generativelanguage.googleapis.com/v1beta"],
+  ["gemini", "https://generativelanguage.googleapis.com/v1", "https://generativelanguage.googleapis.com/v1"],
+  ["gemini", "https://generativelanguage.googleapis.com/v1beta/", "https://generativelanguage.googleapis.com/v1beta"],
+  ["openai_chat", "https://api.longcat.chat/openai#", "https://api.longcat.chat/openai"],
+  ["openai_chat", "https://api.longcat.chat/openai/#", "https://api.longcat.chat/openai"],
+  ["gemini", "https://proxy.example.com/google#", "https://proxy.example.com/google"],
+  ["anthropic", " https://proxy.example.com/claude# ", "https://proxy.example.com/claude"],
+  ["openai_chat", "https://example.com#", "https://example.com"],
+  ["openai_chat", "https://example.com/#", "https://example.com"],
+  ["openai_chat", "https://API.Example.com:443/v1/?x=1#frag", "https://api.example.com/v1"],
+  ["openai_chat", "https://example.com/openai?x=1", "https://example.com/openai/v1"],
+  ["openai_chat", "https://example.com:8443/x", "https://example.com:8443/x/v1"],
+  ["openai_chat", "https://203.0.113.9", "https://203.0.113.9/v1"],
+  ["openai_chat", "http://api.example.com", null],
+  ["openai_chat", "https://user:pw@api.example.com", null],
+  ["openai_chat", "https://@api.example.com/v1", null],
+  ["openai_chat", "https://exa_mple.com/v1", null],
+  ["openai_chat", "not a url", null],
+  ["openai_chat", "#", null],
+  ["openai_chat", "", null],
+];
+
+describe("storedBaseUrl (the service's rule, for the preview)", () => {
+  it("gives what the service stores, for every case of the shared table", () => {
+    for (const [protocol, typed, stored] of BASE_URL_CASES) expect([protocol, typed, storedBaseUrl(protocol, typed)]).toEqual([protocol, typed, stored]);
+  });
+});
 
 describe("the settings entries", () => {
   it("Settings lists 模型供应商 and 用量与余额; each opens its own section", async () => {
@@ -245,6 +293,41 @@ describe("adding a provider", () => {
     expect(app.api.createProvider).not.toHaveBeenCalled();
   });
 
+  it("under the address, live: where a reply will go (the version added as the service will), and how to keep it as typed", async () => {
+    const app = await openProviders({ providers: [] });
+    await click(inMain().getByRole("button", { name: /添加供应商/ }));
+    const preview = () => inMain().queryByText(/^实际请求地址：/)?.textContent ?? null;
+    expect(mainText()).toContain("地址末尾加 # 表示原样使用，不自动补全版本号。");
+    expect(preview()).toBeNull();
+    type("接口地址", "https://api.deepseek.com/");
+    await flush();
+    expect(preview()).toBe("实际请求地址：https://api.deepseek.com/v1/chat/completions");
+    const as = async (protocol, address, expected) => {
+      fireEvent.change(inMain().getByLabelText("接口类型"), { target: { value: protocol } });
+      type("接口地址", address);
+      await flush();
+      expect([protocol, address, preview()]).toEqual([protocol, address, expected]);
+    };
+    await as("openai_responses", "https://api.openai.com", "实际请求地址：https://api.openai.com/v1/responses");
+    await as("anthropic", "https://api.minimax.io/anthropic", "实际请求地址：https://api.minimax.io/anthropic/v1/messages");
+    await as("gemini", "https://generativelanguage.googleapis.com", "实际请求地址：https://generativelanguage.googleapis.com/v1beta/models/<模型>:streamGenerateContent");
+    await as("openai_chat", "https://open.bigmodel.cn/api/paas/v4", "实际请求地址：https://open.bigmodel.cn/api/paas/v4/chat/completions");
+    await as("openai_chat", "https://api.longcat.chat/openai#", "实际请求地址：https://api.longcat.chat/openai/chat/completions");
+    // Not an address the service takes: no line, and saving says the address is wrong.
+    await as("openai_chat", "https://exa_mple.com/v1", null);
+    await as("openai_chat", "http://api.example.com", null);
+    type("名称", "x");
+    fireEvent.change(keyBox(), { target: { value: KEY } });
+    type("接口地址", "https://exa_mple.com/v1");
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    expect(mainText()).toContain("接口地址的格式不对");
+    expect(app.api.createProvider).not.toHaveBeenCalled();
+    // What is sent is what was typed (trimmed): the service applies the rule itself.
+    type("接口地址", " https://api.deepseek.com ");
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    expect(app.api.createProvider.mock.calls[0][0].baseUrl).toBe("https://api.deepseek.com");
+  });
+
   it("create mode is step one: only the connection fields, one line about models, and 保存并选择模型 (no model controls)", async () => {
     await openProviders({ providers: [] });
     await click(inMain().getByRole("button", { name: /添加供应商/ }));
@@ -314,6 +397,15 @@ describe("editing a provider", () => {
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     return app;
   };
+
+  it("the preview shows the saved address as it is stored (never rewritten); an edited one as the service will store it", async () => {
+    await openEdit({ providers: [providerOf(P1, { baseUrl: "https://api.deepseek.com" })] });
+    const preview = () => inMain().queryByText(/^实际请求地址：/)?.textContent ?? null;
+    expect(preview()).toBe("实际请求地址：https://api.deepseek.com/chat/completions");
+    type("接口地址", "https://api.deepseek.com/");
+    await flush();
+    expect(preview()).toBe("实际请求地址：https://api.deepseek.com/v1/chat/completions");
+  });
 
   it("shows the interface type read-only and the saved key as its last four characters, never filled in", async () => {
     await openEdit();
@@ -474,7 +566,7 @@ describe("a connection test result never outlives what it tested", () => {
     await openProviders();
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     await click(inMain().getByRole("button", { name: "测试连接" }));
-    expect(result().textContent).toBe("连接成功，供应商正常回应。");
+    expect(result().textContent).toBe("用 gpt-x 发了一句话，用时 0.8 秒");
   };
 
   it("is cleared when the address is edited", async () => {
@@ -498,7 +590,7 @@ describe("a connection test result never outlives what it tested", () => {
     await openProviders({ api: { patchProvider } });
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     await click(inMain().getByRole("button", { name: "测试连接" }));
-    expect(result().textContent).toBe("连接成功，供应商正常回应。");
+    expect(result().textContent).toBe("用 gpt-x 发了一句话，用时 0.8 秒");
     type("名称", "工作用");
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchProvider).toHaveBeenCalledTimes(1);
@@ -864,9 +956,10 @@ describe("同步模型", () => {
 
   it("says why it has no list: no model list at the provider, a refused key, unreachable, too many tries, an empty list", async () => {
     const listProviderModels = vi.fn();
+    const NO_LIST_HERE = "这个接口没有模型列表，请关闭后在下面手动添加模型名称。";
     const cases = [
-      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "404" }), NO_LIST("404"), "status"],
-      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "405" }), NO_LIST("405"), "status"],
+      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "404" }), NO_LIST_HERE, "status"],
+      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "405" }), NO_LIST_HERE, "status"],
       [async () => ({ ok: false, error: "provider_rejected", upstreamStatus: "401" }), "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。（供应商返回的状态码：401）", "alert"],
       [async () => ({ ok: false, error: "provider_unavailable" }), "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。", "alert"],
       [async () => ({ ok: false, error: "address_not_allowed" }), "这个接口地址不被允许：需要是 https 开头的公网地址。", "alert"],
@@ -890,6 +983,33 @@ describe("同步模型", () => {
     expect(syncRows()).toHaveLength(5);
   });
 
+  it("models from the public catalogue (the address has no list) say so, and are added like any others", async () => {
+    const listProviderModels = vi.fn(async () => ({ ok: true, listed: structuredClone(LISTING.slice(3, 5)), source: "catalogue" }));
+    const app = await openSync({ api: { listProviderModels } });
+    expect(sync().textContent).toContain("这个接口没有模型列表，以下来自公开的模型目录，请只添加你确实能用的模型。");
+    expect(sync().querySelector("p.muted").textContent).toBe("这个接口没有模型列表，以下来自公开的模型目录，请只添加你确实能用的模型。");
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await done();
+    expect(app.api.patchProvider.mock.calls[0][1].models.map((m) => m.name)).toContain("house-blend");
+    // A list the provider gives itself says nothing of the kind.
+    listProviderModels.mockImplementationOnce(listOf(LISTING));
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    expect(sync().textContent).not.toContain("公开的模型目录");
+  });
+
+  it("under a failure, 详情: the provider's status and what it said, as plain text", async () => {
+    const said = '<img src=x onerror="alert(1)"> **Model** `nope` not found';
+    const listProviderModels = vi.fn(async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "500", detail: { upstreamStatus: "500", message: said } }));
+    await openSync({ api: { listProviderModels } });
+    const details = sync().querySelector("details");
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary").textContent).toBe("详情");
+    expect(details.textContent).toContain("状态码：500");
+    expect(details.textContent).toContain(`供应商的回复：${said}`);
+    expect(details.querySelector("img, strong, code")).toBeNull();
+    expect(inSync().getByRole("alert").textContent).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。（供应商返回的状态码：500）");
+  });
+
   it("a refused save on 完成 is said in the dialog, which stays open with the models still in the form", async () => {
     const patchProvider = vi.fn(async () => Promise.reject(apiError(503, "busy")));
     await openSync({ api: { patchProvider } });
@@ -904,28 +1024,70 @@ describe("同步模型", () => {
 
 describe("测试连接", () => {
   const NO_LIST = (status) => `这个供应商没有提供模型列表（状态码 ${status}），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。`;
-  const cases = [
-    [{ ok: true }, "连接成功，供应商正常回应。"],
-    [{ ok: false, error: "provider_rejected", upstreamStatus: "401" }, "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。（供应商返回的状态码：401）"],
-    [{ ok: false, error: "provider_rejected" }, "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。"],
-    [{ ok: false, error: "provider_unavailable", upstreamStatus: "500" }, "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。（供应商返回的状态码：500）"],
-    [{ ok: false, error: "provider_unavailable" }, "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。"],
+  const REJECTED = "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。";
+  const UNAVAILABLE = "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。";
+  const common = [
+    [{ ok: false, error: "provider_rejected", upstreamStatus: "401" }, `${REJECTED}（供应商返回的状态码：401）`],
+    [{ ok: false, error: "provider_rejected" }, REJECTED],
+    [{ ok: false, error: "provider_unavailable", upstreamStatus: "500" }, `${UNAVAILABLE}（供应商返回的状态码：500）`],
+    [{ ok: false, error: "provider_unavailable" }, UNAVAILABLE],
     [{ ok: false, error: "address_not_allowed" }, "这个接口地址不被允许：需要是 https 开头的公网地址。"],
-    [{ ok: false, error: "provider_unavailable", upstreamStatus: "404" }, NO_LIST("404")],
-    [{ ok: false, error: "provider_unavailable", upstreamStatus: "405" }, NO_LIST("405")],
   ];
-
-  it("shows success, or the sentence for the error the service returned (with the provider's status when there is one)", async () => {
+  const run = async (provider, cases, model) => {
     const testProvider = vi.fn();
-    await openProviders({ api: { testProvider } });
+    await openProviders({ providers: [provider], api: { testProvider } });
     for (const [answer, sentence] of cases) {
       testProvider.mockResolvedValueOnce(answer);
-      await click(inRow("我的 OpenAI").getByRole("button", { name: "测试连接" }));
-      const shown = providerRow("我的 OpenAI").querySelector('[role="status"], [role="alert"]');
+      await click(inRow(provider.name).getByRole("button", { name: "测试连接" }));
+      const shown = providerRow(provider.name).querySelector('[role="status"], [role="alert"]');
       expect(shown.textContent, JSON.stringify(answer)).toBe(sentence);
     }
     expect(testProvider).toHaveBeenCalledTimes(cases.length);
-    expect(testProvider).toHaveBeenCalledWith(P1);
+    for (const args of testProvider.mock.calls) expect(args).toEqual([provider.id, model]);
+  };
+
+  it("with saved models: says hi to the first one, and says which and how long it took; a 404 there is no missing list", async () => {
+    await run(providerOf(), [
+      [{ ok: true, mode: "chat", latencyMs: 812 }, "用 gpt-x 发了一句话，用时 0.8 秒"],
+      [{ ok: true, mode: "chat", latencyMs: 12345 }, "用 gpt-x 发了一句话，用时 12.3 秒"],
+      ...common,
+      [{ ok: false, error: "provider_unavailable", upstreamStatus: "404" }, `${UNAVAILABLE}（供应商返回的状态码：404）`],
+      [{ ok: false, error: "provider_unavailable", upstreamStatus: "405" }, `${UNAVAILABLE}（供应商返回的状态码：405）`],
+      [{ ok: false, error: "invalid_request" }, "这个模型已经不在供应商的模型列表里了，请刷新页面后再试。"],
+    ], "gpt-x");
+  });
+
+  it("without a saved model: the model list, as before (a 404 or 405: no model list there)", async () => {
+    await run(providerOf(P2, { name: "空的", models: [] }), [
+      [{ ok: true, mode: "list", latencyMs: 400 }, "连接成功，供应商正常回应。"],
+      [{ ok: true }, "连接成功，供应商正常回应。"],
+      ...common,
+      [{ ok: false, error: "provider_unavailable", upstreamStatus: "404" }, NO_LIST("404")],
+      [{ ok: false, error: "provider_unavailable", upstreamStatus: "405" }, NO_LIST("405")],
+    ], undefined);
+  });
+
+  it("under a failure, a folded 详情 with the provider's status and its own words, as plain text; a reply that held the key says so", async () => {
+    const testProvider = vi.fn();
+    await openProviders({ api: { testProvider } });
+    const said = "Model `gpt-x` does not exist\n<b>or</b> you have no access";
+    testProvider.mockResolvedValueOnce({ ok: false, error: "provider_unavailable", upstreamStatus: "404", detail: { upstreamStatus: "404", message: said, extra: "x" } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "测试连接" }));
+    const details = () => providerRow("我的 OpenAI").querySelector("details");
+    expect(details().open).toBe(false);
+    expect(details().querySelector("summary").textContent).toBe("详情");
+    expect([...details().querySelectorAll("p")].map((p) => p.textContent)).toEqual(["状态码：404", `供应商的回复：${said}`]);
+    expect(details().querySelector("b, code")).toBeNull();
+    fireEvent.click(details().querySelector("summary"));
+    testProvider.mockResolvedValueOnce({ ok: false, error: "provider_rejected", upstreamStatus: "401", detail: { upstreamStatus: "401", message: null, redacted: true } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "测试连接" }));
+    expect([...details().querySelectorAll("p")].map((p) => p.textContent)).toEqual(["状态码：401", "供应商的回复里有密钥的一部分，为了安全没有显示。"]);
+    // Nothing to tell (no detail, or one that is no object): no 详情.
+    for (const answer of [{ ok: false, error: "provider_unavailable" }, { ok: false, error: "provider_unavailable", detail: "text" }, { ok: true, mode: "chat", latencyMs: 5 }]) {
+      testProvider.mockResolvedValueOnce(answer);
+      await click(inRow("我的 OpenAI").getByRole("button", { name: "测试连接" }));
+      expect([answer, details()]).toEqual([answer, null]);
+    }
   });
 
   it("a refused request (not the provider's answer) says why too, and the button shows it is busy meanwhile", async () => {

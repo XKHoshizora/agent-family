@@ -628,7 +628,22 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (!result.ok || result.value?.ok !== false) return result;
     const error = { code: typeof result.value.error === "string" ? result.value.error : "unknown", reason: null, status: 200 };
     if (typeof result.value.upstreamStatus === "string") error.upstreamStatus = result.value.upstreamStatus;
+    const detail = upstreamDetail(result.value.detail);
+    if (detail) error.detail = detail;
     return failure(error, providerErrorText(action, error));
+  };
+  /**
+   * What the provider itself said about a failed call (its owner's only, batch 2C): its status (three digits) and its
+   * own text, at most 300 characters, as plain strings; `redacted` when the service dropped a text that held a piece of
+   * the key. Null when there is nothing of that.
+   */
+  const upstreamDetail = (d) => {
+    if (!d || typeof d !== "object") return null;
+    const out = {};
+    if (typeof d.upstreamStatus === "string" && /^\d{3}$/.test(d.upstreamStatus)) out.upstreamStatus = d.upstreamStatus;
+    if (typeof d.message === "string" && d.message.trim() !== "") out.message = [...d.message].slice(0, 300).join("");
+    if (d.redacted === true) out.redacted = true;
+    return Object.keys(out).length > 0 ? out : null;
   };
 
   const agentActions = {
@@ -774,10 +789,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     deleteProvider: (providerId) =>
       attempt(() => api.deleteProvider(providerId), providerWrite("delete", () => setModel(removeProvider(getModel(), providerId)), forgetProvider(providerId))),
     /**
-     * One call to the provider: {ok: true} or the reason it failed (the service answers 200 either way), with the
-     * provider's own HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
+     * One call to the provider: with `model` one tiny real call to that model, else its model list is asked for →
+     * value {ok: true, mode: "chat" | "list", latencyMs}, or the reason it failed (the service answers 200 either way),
+     * with the provider's own HTTP status as `upstreamStatus` when it answered with one (without a model, a 404 or 405:
+     * it has no model list) and `detail`, what it said (`upstreamDetail`).
      */
-    testProvider: (providerId) => providerCall("test", api.testProvider(providerId)),
+    testProvider: (providerId, model) => providerCall(model === undefined ? "test" : "chat", api.testProvider(providerId, model)),
     /**
      * The provider's own model list, for its owner to choose from (nothing is stored, nothing kept here) → value:
      * {listed: [{name, vision, pdf, reasoning, chat, known, label?, contextTokens?, reasoningLevels?, added}]}: hints,
@@ -788,7 +805,9 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       const result = await providerCall("list", api.listProviderModels(providerId));
       if (!result.ok) return result;
       const listed = Array.isArray(result.value?.listed) ? result.value.listed : [];
-      return { ok: true, value: { listed: listed.filter((m) => typeof m?.name === "string").map(listedModel) } };
+      // `source: "catalogue"`: the provider has no model list there, these are the public catalogue's models at its host.
+      const source = result.value?.source === "catalogue" ? { source: "catalogue" } : {};
+      return { ok: true, value: { listed: listed.filter((m) => typeof m?.name === "string").map(listedModel), ...source } };
     },
 
     loadUsage: () => attempt(() => api.getUsage(), { after: (usage) => setModel(applyUsage(getModel(), usage)), text: commonErrorText }),

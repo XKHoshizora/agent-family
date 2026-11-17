@@ -263,6 +263,11 @@ const PROVIDER = {
 };
 /** The provider calls whose answer can carry the provider's own HTTP status. */
 const WITH_STATUS = new Set(["test", "list"]);
+/** 测试连接 with one of the provider's models (batch 2C): as a call to it, and the model may be gone from its list meanwhile. */
+const PROVIDER_CHAT = {
+  ...PROVIDER_CALL,
+  invalid_request: "这个模型已经不在供应商的模型列表里了，请刷新页面后再试。",
+};
 
 /**
  * Why a provider action was refused. action: create | edit | delete | test | list (同步模型's model list). For `test` and
@@ -270,6 +275,11 @@ const WITH_STATUS = new Set(["test", "list"]);
  * provider has no model list there.
  */
 export function providerErrorText(action, error) {
+  // 测试连接 with a model (`chat`): a real call to it, so a 404 there is no missing model list, only a status.
+  if (action === "chat") {
+    const text = pick({ chat: PROVIDER_CHAT }, "chat", error);
+    return /^\d{3}$/.test(error?.upstreamStatus ?? "") ? `${text}（供应商返回的状态码：${error.upstreamStatus}）` : text;
+  }
   if (error?.code === "provider_in_use" && action in PROVIDER) {
     const names = Array.isArray(error.agents) ? error.agents.map((a) => a?.name).filter(Boolean) : [];
     return names.length > 0

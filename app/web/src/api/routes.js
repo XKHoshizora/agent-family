@@ -113,9 +113,17 @@ export const createProvider = (body) => request("POST", "/api/providers", body);
 /** patch: any of {name, baseUrl, apiKey, models} → Provider */
 export const patchProvider = (providerId, patch) => request("PATCH", `/api/providers/${seg(providerId)}`, patch);
 export const deleteProvider = (providerId) => request("DELETE", `/api/providers/${seg(providerId)}`);
-/** → {ok: true} or {ok: false, error: "provider_rejected" | "provider_unavailable" | "address_not_allowed", upstreamStatus?} (a 200 either way) */
-export const testProvider = (providerId) => request("POST", `/api/providers/${seg(providerId)}/test`);
-/** The provider's model list, nothing stored → {ok: true, listed: [{name, vision, pdf, reasoning, chat, added}]} or a failure as testProvider's */
+/**
+ * With `model`: one tiny real call to that model; without: the model list is asked for. → {ok: true, mode: "chat" |
+ * "list", latencyMs} or {ok: false, error: "provider_rejected" | "provider_unavailable" | "address_not_allowed",
+ * upstreamStatus?, detail?: {upstreamStatus?, message?, redacted?}} (a 200 either way)
+ */
+export const testProvider = (providerId, model) =>
+  request("POST", `/api/providers/${seg(providerId)}/test`, model === undefined ? undefined : { model });
+/**
+ * The provider's model list, nothing stored → {ok: true, listed: [{name, vision, pdf, reasoning, chat, added}], source:
+ * "upstream" | "catalogue"} or a failure as testProvider's
+ */
 export const listProviderModels = (providerId) => request("POST", `/api/providers/${seg(providerId)}/models/list`);
 
 // ───────── usage, points and the site's models

@@ -24,6 +24,47 @@ const EXAMPLE_ADDRESS = {
   gemini: "https://generativelanguage.googleapis.com/v1beta",
 };
 
+/** A path segment that names an API version (`v1`, `v4`, `v1beta`…): the whole segment. */
+const VERSION_SEGMENT = /^v\d+[a-z]*$/;
+/** The version the service appends to an address that names none, per type. */
+const DEFAULT_VERSION = { openai_chat: "v1", openai_responses: "v1", anthropic: "v1", gemini: "v1beta" };
+/** A plain DNS name as the URL parser leaves it (lower case, punycode): the service's rule for a host. */
+const DNS_NAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+/** What each type adds to the stored address for a reply (README "Calling a model", "Where it goes"). */
+const REQUEST_PATH = {
+  openai_chat: "/chat/completions",
+  openai_responses: "/responses",
+  anthropic: "/messages",
+  gemini: "/models/<模型>:streamGenerateContent",
+};
+
+/**
+ * The address the service will store for what was typed (app/service/src/providers/base-url.ts `providerBaseUrl`, the
+ * same rule; both test files share one table of cases), or null when the service would refuse it: trimmed; https, no
+ * user name or password, a plain host; host lower-cased, default port, query, fragment and trailing `/` dropped. Typed
+ * with a trailing `#`, the address is used as typed (no version added); else, unless a segment of its path names a
+ * version, the type's version is appended (`/v1`; `/v1beta` for Gemini).
+ */
+export function storedBaseUrl(protocol, typed) {
+  const raw = String(typed ?? "").trim();
+  const asTyped = raw.endsWith("#");
+  const text = (asTyped ? raw.slice(0, -1) : raw).trim();
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.username || url.password) return null;
+  // `https://@host` parses with empty credentials: an `@` anywhere before the host is refused too.
+  if ((/^[a-z][a-z0-9+.-]*:[\\/]*([^\\/?#]*)/i.exec(text)?.[1] ?? "").includes("@")) return null;
+  if (!url.hostname.startsWith("[") && !DNS_NAME.test(url.hostname)) return null;
+  if (url.port !== "" && Number(url.port) < 1) return null;
+  const base = `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+  if (asTyped) return base;
+  return url.pathname.split("/").some((s) => VERSION_SEGMENT.test(s)) ? base : `${base}/${DEFAULT_VERSION[protocol] ?? "v1"}`;
+}
+
 // The service's limits (app/service/README.md, "Model providers").
 const MAX_PROVIDERS = 10;
 const MAX_MODELS = 100;
@@ -43,6 +84,12 @@ const KEY_KEPT = "没有改动，原来的密钥保持不变";
 const CREATE_MODELS_HINT = "保存后从供应商的模型列表里挑选模型。";
 /** In the 同步模型 dialog, after a list request that failed (the sentence of the edit form's hint). */
 const FAILED_BY_HAND = "有的供应商不提供模型列表。关闭这个窗口后，可以在下面手动添加模型。";
+/** In the 同步模型 dialog: the address has no model list (404, 405) and the public catalogue knows none at its host. */
+const NO_LIST_BY_HAND = "这个接口没有模型列表，请关闭后在下面手动添加模型名称。";
+/** In the 同步模型 dialog: the address has no model list, so these come from the public catalogue (models.dev). */
+const FROM_CATALOGUE = "这个接口没有模型列表，以下来自公开的模型目录，请只添加你确实能用的模型。";
+/** Under the address field. */
+const AS_TYPED_HINT = "地址末尾加 # 表示原样使用，不自动补全版本号。";
 
 const chars = (text) => [...text].length;
 const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -78,6 +125,8 @@ function addressProblem(text) {
   }
   if (url.protocol !== "https:") return "接口地址需要以 https:// 开头";
   if (url.username || url.password) return "接口地址里不能包含用户名或密码";
+  // (Whether the service takes it does not depend on the interface type.)
+  if (storedBaseUrl("openai_chat", value) === null) return "接口地址的格式不对，例如 https://api.openai.com/v1";
   return "";
 }
 
@@ -140,23 +189,57 @@ const syncedModel = (m) => ({
   levels: m.reasoning ? (m.reasoningLevels ?? null) : null,
 });
 
-/** The outcome of 测试连接: success, a 404/405 (no model list: said plainly, not as an error) or the sentence for the error. */
+/**
+ * What the provider itself said about a failed call (its status and its own text), folded under 详情. Only plain text:
+ * React writes it as text, never as Markdown or HTML.
+ */
+function UpstreamDetails({ detail }) {
+  if (!detail) return null;
+  return (
+    <details className="upstream-detail">
+      <summary>详情</summary>
+      {detail.upstreamStatus && <p className="muted">状态码：{detail.upstreamStatus}</p>}
+      {detail.message && (
+        <p className="muted" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+          供应商的回复：{detail.message}
+        </p>
+      )}
+      {detail.redacted && <p className="muted">供应商的回复里有密钥的一部分，为了安全没有显示。</p>}
+    </details>
+  );
+}
+
+/** Seconds, one decimal: 812 → "0.8". */
+const seconds = (ms) => (ms / 1000).toFixed(1);
+
+/**
+ * The outcome of 测试连接: success (with a model: which one, and how long it took), a 404/405 of the model list (no model
+ * list: said plainly, not as an error) or the sentence for the error, and under it what the provider said.
+ */
 function TestResult({ result }) {
   if (!result) return null;
-  if (result.ok) return <p className="field-hint" role="status">连接成功，供应商正常回应。</p>;
-  const noList = result.error?.code === "provider_unavailable" && (result.error.upstreamStatus === "404" || result.error.upstreamStatus === "405");
-  return noList ? (
-    <p className="field-hint" role="status">{result.text}</p>
-  ) : (
-    <p className="field-msg" role="alert">{result.text}</p>
+  if (result.ok) {
+    const text =
+      result.mode === "chat" && result.model
+        ? `用 ${result.model} 发了一句话${Number.isFinite(result.latencyMs) ? `，用时 ${seconds(result.latencyMs)} 秒` : ""}`
+        : "连接成功，供应商正常回应。";
+    return <p className="field-hint" role="status">{text}</p>;
+  }
+  const noList = !result.chat && result.error?.code === "provider_unavailable" && (result.error.upstreamStatus === "404" || result.error.upstreamStatus === "405");
+  return (
+    <>
+      {noList ? <p className="field-hint" role="status">{result.text}</p> : <p className="field-msg" role="alert">{result.text}</p>}
+      <UpstreamDetails detail={result.error?.detail} />
+    </>
   );
 }
 
 /**
- * 测试连接 of a saved provider (its saved address and key), through the caller's `run` so it waits for the other actions.
- * `clear()` drops the result (and the answer of a test still on its way), once it may no longer be about what is shown.
+ * 测试连接 of a saved provider (its saved address and key), through the caller's `run` so it waits for the other actions:
+ * with `model` (its first saved model) one tiny real call to it, else its model list is asked for. `clear()` drops the
+ * result (and the answer of a test still on its way), once it may no longer be about what is shown.
  */
-function useConnectionTest(providerId, run) {
+function useConnectionTest(providerId, model, run) {
   const { actions } = useStore();
   const [result, setResult] = useState(null);
   const generation = useRef(0);
@@ -167,17 +250,18 @@ function useConnectionTest(providerId, run) {
   const test = async () => {
     clear();
     const mine = generation.current;
-    const res = await run("test", () => settled(actions.testProvider(providerId)), () => "");
+    const chat = typeof model === "string" && model !== "";
+    const res = await run("test", () => settled(actions.testProvider(providerId, chat ? model : undefined)), () => "");
     if (generation.current !== mine) return;
-    if (res.ok) setResult({ ok: true });
-    else if (res.error?.code !== "busy_here") setResult({ ok: false, error: res.error?.error ?? null, text: refusalText(res.error) });
+    if (res.ok) setResult({ ok: true, mode: res.value?.mode === "chat" ? "chat" : "list", model: chat ? model : null, latencyMs: res.value?.latencyMs });
+    else if (res.error?.code !== "busy_here") setResult({ ok: false, chat, error: res.error?.error ?? null, text: refusalText(res.error) });
   };
   return { result, test, clear };
 }
 
 function ProviderRow({ provider, onEdit, onDelete }) {
   const { busy, run } = useAction();
-  const { result, test } = useConnectionTest(provider.id, run);
+  const { result, test } = useConnectionTest(provider.id, provider.models[0]?.name, run);
   const count = provider.models.length;
   return (
     <li>
@@ -389,10 +473,11 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
     setLoad({ status: "loading" });
     const res = await actions.listProviderModels(provider.id);
     if (generation.current !== mine) return;
-    if (res.ok) setLoad({ status: "ok", listed: res.value.listed });
+    if (res.ok) setLoad({ status: "ok", listed: res.value.listed, catalogue: res.value.source === "catalogue" });
     else {
       const status = res.error?.upstreamStatus;
-      setLoad({ status: "failed", text: res.text, noList: res.error?.code === "provider_unavailable" && (status === "404" || status === "405") });
+      const noList = res.error?.code === "provider_unavailable" && (status === "404" || status === "405");
+      setLoad({ status: "failed", text: noList ? NO_LIST_BY_HAND : res.text, noList, detail: res.error?.detail ?? null });
     }
   }, [actions, provider.id]);
   useEffect(() => {
@@ -439,10 +524,14 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
       {load.status === "loading" && <p className="muted">正在读取供应商的模型列表…</p>}
       {load.status === "failed" &&
         (load.noList ? (
-          <p className="field-hint" role="status">{load.text}</p>
+          <>
+            <p className="field-hint" role="status">{load.text}</p>
+            <UpstreamDetails detail={load.detail} />
+          </>
         ) : (
           <div className="sync-failed">
             <p className="field-msg" role="alert">{load.text}</p>
+            <UpstreamDetails detail={load.detail} />
             <Btn small onClick={fetchList}>重试</Btn>
             <p className="muted">{FAILED_BY_HAND}</p>
           </div>
@@ -450,6 +539,7 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
       {load.status === "ok" && listed.length === 0 && <p className="field-hint" role="status">供应商没有列出任何模型，可以手动添加。</p>}
       {load.status === "ok" && listed.length > 0 && (
         <>
+          {load.catalogue && <p className="muted">{FROM_CATALOGUE}</p>}
           <div className="sync-tools">
             <label className="search">
               <Search size={18} aria-hidden="true" />
@@ -518,7 +608,8 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
    */
   const [sync, setSync] = useState(() => (created && provider !== null && provider.models.length === 0 ? { dirtyBefore: false } : null));
   const [syncError, setSyncError] = useState(null);
-  const { result: testResult, test, clear: clearTest } = useConnectionTest(provider?.id ?? null, run);
+  // 测试连接 says hi to the first saved model (not one only added in this form: it is not saved yet).
+  const { result: testResult, test, clear: clearTest } = useConnectionTest(provider?.id ?? null, provider?.models[0]?.name, run);
 
   const editing = provider !== null;
   const address = f.baseUrl.trim();
@@ -526,6 +617,11 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
   const originChanged = addressChanged && originOf(address) !== originOf(provider.baseUrl);
   // 测试连接 and 同步模型 use the saved address and key: not while new ones wait to be saved.
   const unsaved = addressChanged || key.given;
+  // Where a reply will go: the saved address as it is stored (never rewritten), or what the service will store for the
+  // one typed, with the type's own path; nothing while it is not an address the service takes.
+  const protocol = editing ? provider.protocol : f.protocol;
+  const base = editing && !addressChanged ? provider.baseUrl : storedBaseUrl(protocol, address);
+  const requestUrl = base ? `${base}${REQUEST_PATH[protocol] ?? ""}` : null;
 
   // Adding needs a key. Editing keeps the saved one, unless the address moved to another origin, or a new key was
   // refused and the owner has not yet said whether to type it again or keep the saved one.
@@ -740,6 +836,14 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
         <Field label="接口地址" hint={`需要以 https:// 开头，例如 ${EXAMPLE_ADDRESS[editing ? provider.protocol : f.protocol] ?? EXAMPLE_ADDRESS.openai_chat}`} error={shown("baseUrl")}>
           <input value={f.baseUrl} onChange={set("baseUrl")} autoComplete="off" autoCapitalize="none" spellCheck={false} inputMode="url" placeholder={EXAMPLE_ADDRESS[f.protocol]} />
         </Field>
+        <div className="address-preview">
+          {requestUrl && (
+            <p className="field-hint" style={{ overflowWrap: "anywhere" }}>
+              实际请求地址：{requestUrl}
+            </p>
+          )}
+          <p className="muted">{AS_TYPED_HINT}</p>
+        </div>
         <Field label="密钥" hint={keyHint} error={shown("key")}>
           <input ref={keyRef} type="password" defaultValue="" onChange={onKey} autoComplete="new-password" autoCapitalize="none" spellCheck={false} />
         </Field>
