@@ -323,12 +323,13 @@ describe("blocked people", () => {
 });
 
 describe("the Agent entry", () => {
-  it("is an empty state in the list and in the main column", async () => {
+  it("opens my Agent list; without any it says how to start", async () => {
     await openApp({ sync: baseSync });
     fireEvent.click(rail(/^Agent/));
     await flush();
-    expect(document.querySelector(".list-col .rows-empty").textContent).toBe("尚未开放");
-    expect(document.querySelector(".main-col .empty-main").textContent).toBe("尚未开放");
+    expect(document.querySelector(".list-col h1").textContent).toBe("我的 Agent");
+    expect(document.querySelector(".list-col .rows-empty").textContent).toBe("还没有 Agent，点右上角的“+”创建一个");
+    expect(document.querySelector(".main-col .empty-main").textContent).toBe("选择一个 Agent");
     expect(document.querySelectorAll(".list-col .row")).toHaveLength(0);
   });
 });

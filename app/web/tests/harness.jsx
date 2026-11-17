@@ -62,8 +62,9 @@ export function installBrowser() {
  * @param {() => object} options.sync the /api/sync answer (called again on every refetch)
  * @param {object} options.social the live /api/social answer; the fake routes change it, tests may too
  * @param {object} options.api route fakes replacing the defaults
+ * @param {object} options.handlers the sync engine's other answers (fakeTransport handlers: agents, agent, run, models…)
  */
-export async function openApp({ sync, social = emptySocial(), api = {} } = {}) {
+export async function openApp({ sync, social = emptySocial(), api = {}, handlers = {} } = {}) {
   const env = { social, sync: sync ?? (() => syncOf([])) };
   const transport = fakeTransport({
     sync: () => env.sync(),
@@ -73,6 +74,7 @@ export async function openApp({ sync, social = emptySocial(), api = {} } = {}) {
       if (!found) throw apiError(404, "not_found");
       return structuredClone(found);
     },
+    ...handlers,
   });
   const calls = {
     markRead: vi.fn(async (_id, seq) => ({ readSeq: seq })),

@@ -125,6 +125,41 @@ export function agentOf(id = AG1, fields = {}) {
 
 export const runOf = (id, status, fields = {}) => ({ id, status, retryable: false, ...fields });
 
+/** `GET /api/models` with a free model without reasoning and a paid one with two levels. */
+export const SITE_MODELS = [
+  { id: "free-1", label: "小模型", tier: "free", vision: false, pdf: false, reasoning: [], contextTokens: 32000 },
+  { id: "paid-1", label: "大模型", tier: "paid", vision: true, pdf: true, reasoning: ["low", "high"], contextTokens: 128000 },
+];
+export const MODELS = { siteModels: SITE_MODELS, providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 } };
+
+export const P1 = "00000000-0000-4000-8000-0000000000e1";
+/** A provider of mine as `GET /api/providers` lists it: a model that reasons, one that does not, one too small to use. */
+export const providerOf = (id = P1, fields = {}) => ({
+  id,
+  name: "我的 OpenAI",
+  protocol: "openai_chat",
+  baseUrl: "https://api.example.com/v1",
+  keyLast4: "abcd",
+  models: [
+    { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+    { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000 },
+    { name: "tiny", vision: false, pdf: false, reasoning: false, contextTokens: 1000 },
+  ],
+  ...fields,
+});
+
+/** `GET /api/usage` of a free-tier account with no balance. */
+export const usageOf = (fields = {}) => ({
+  tier: "free",
+  agentLimit: 20,
+  agentCount: 1,
+  balance: "0",
+  free: { allowance: "10", used: "0", resetsAt: "2026-11-16T16:00:00.000Z" },
+  canStartFreeReply: true,
+  recent: [],
+  ...fields,
+});
+
 export function syncOf(conversations, messages = [], principals = PRINCIPALS) {
   return { me: ME, conversations, principals, messages };
 }

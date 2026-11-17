@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { profileErrorText } from "../data/errorTexts.js";
@@ -7,21 +7,10 @@ import { entity, nameOf } from "../state/selectors.js";
 import { Avatar, Btn, Field, KV, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
 import { BlockModal } from "./BlockModal.jsx";
+import { AvatarEditor } from "./AvatarEditor.jsx";
 import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
 import { useAction } from "./useAction.js";
-
-/** What the service accepts as an avatar (it decides by the bytes; the client only spares an upload that cannot work). */
-export const AVATAR_TYPES = ["image/png", "image/jpeg", "image/webp"];
-export const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
-
-/** The reason a picked file cannot be my avatar, or "" when it may be tried. */
-export function avatarFileProblem(file) {
-  const typeKnown = AVATAR_TYPES.includes(file.type) || (file.type === "" && /\.(png|jpe?g|webp)$/i.test(file.name));
-  if (!typeKnown) return "头像需要是 PNG、JPEG 或 WebP 格式的图片。";
-  if (file.size > MAX_AVATAR_BYTES) return "头像不能超过 2 MB。";
-  return "";
-}
 
 export function SettingsList() {
   const { state, dispatch } = useStore();
@@ -68,76 +57,6 @@ function BackButton() {
   );
 }
 
-/** Pick an image, see it, then save it (or drop it). The preview URL is revoked as soon as it is not shown any more. */
-function AvatarEditor() {
-  const { dispatch, actions } = useStore();
-  const { busy, run } = useAction();
-  const [picked, setPicked] = useState(null);
-  const [error, setError] = useState("");
-  const urlRef = useRef(null);
-  const inputRef = useRef(null);
-
-  const discard = () => {
-    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-    urlRef.current = null;
-    setPicked(null);
-  };
-  useEffect(
-    () => () => {
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
-    },
-    [],
-  );
-
-  const choose = (event) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    discard();
-    const problem = avatarFileProblem(file);
-    setError(problem);
-    if (problem) return;
-    urlRef.current = URL.createObjectURL(file);
-    setPicked({ file, url: urlRef.current });
-  };
-
-  const save = async () => {
-    const res = await run("avatar", () => actions.uploadAvatar(picked.file), (e) => profileErrorText("avatar", e));
-    if (!res.ok) return;
-    discard();
-    setError("");
-    dispatch({ type: "toast", text: "头像已更新" });
-  };
-
-  return (
-    <div className="avatar-editor">
-      {picked ? (
-        <span className="avatar avatar-preview" style={{ width: 84, height: 84 }}>
-          <span className="avatar-img avatar-fallback" style={{ width: 84, height: 84 }}>
-            <img src={picked.url} alt="新头像预览" />
-          </span>
-        </span>
-      ) : (
-        <Avatar id={ME} size={84} />
-      )}
-      <div className="stack-actions row-actions">
-        <input ref={inputRef} type="file" accept={AVATAR_TYPES.join(",")} hidden aria-label="选择头像图片" onChange={choose} />
-        {picked ? (
-          <>
-            <Btn variant="primary" disabled={busy !== null} onClick={save}>{busy === "avatar" ? "保存中…" : "保存头像"}</Btn>
-            <Btn disabled={busy !== null} onClick={discard}>取消</Btn>
-          </>
-        ) : (
-          <Btn onClick={() => inputRef.current?.click()}>更换头像</Btn>
-        )}
-      </div>
-      <p className={error ? "field-msg" : "field-hint"} role={error ? "alert" : undefined}>
-        {error || "支持 PNG、JPEG、WebP，不超过 2 MB。"}
-      </p>
-    </div>
-  );
-}
-
 function NameForm({ account }) {
   const { dispatch, actions } = useStore();
   const { busy, run } = useAction();
@@ -169,7 +88,7 @@ function NameForm({ account }) {
 }
 
 function ProfilePage() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, actions } = useStore();
   const session = useSession();
   // (Before the first load there is no account yet: the page shows what the people table knows.)
   const self = entity(state, ME);
@@ -190,7 +109,7 @@ function ProfilePage() {
       </header>
       <div className="page-body">
         <h3>头像</h3>
-        <AvatarEditor />
+        <AvatarEditor upload={actions.uploadAvatar} errorText={(e) => profileErrorText("avatar", e)} />
         <h3>昵称</h3>
         <NameForm account={account} />
         <h3>账户</h3>

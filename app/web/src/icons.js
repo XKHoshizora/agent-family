@@ -44,6 +44,7 @@ export {
   Sparkles,
   Square,
   Target,
+  Trash2,
   User,
   UserPlus,
   Users,

@@ -55,6 +55,16 @@ export function displayName(value) {
   return "";
 }
 
+/** An Agent's name as the service counts it: the display-name rule with 1-20 code points. */
+export function agentName(value) {
+  if (!value.trim()) return "请填写名称";
+  const v = value.replace(STRIPPED_FORMAT, "").trim();
+  if (LINE_BREAKING.test(v)) return "名称只能是一行";
+  if (!VISIBLE_CHARACTER.test(v)) return "名称需要包含看得见的文字";
+  if ([...v].length > 20) return "名称不超过 20 个字";
+  return "";
+}
+
 export function handle(value) {
   if (!value) return "请输入账号名";
   if (!HANDLE_PATTERN.test(value)) return "账号名为 3 到 24 位小写字母、数字或下划线";

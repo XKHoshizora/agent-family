@@ -20,6 +20,8 @@ import { ListHeader, SearchBox } from "./ChatList.jsx";
 import { BlockModal } from "./BlockModal.jsx";
 import { AddFriendModal } from "./AddFriendModal.jsx";
 import { useAction, useNow } from "./useAction.js";
+import { openAgentChat } from "./AgentForm.jsx";
+import { myAgents } from "./Agents.jsx";
 import { ChevronLeft, UserPlus } from "../icons.js";
 
 const REL = {
@@ -29,7 +31,7 @@ const REL = {
 };
 
 export function ContactsList() {
-  const { state, dispatch } = useStore();
+  const { state, dispatch, actions } = useStore();
   const [query, setQuery] = useState("");
   const now = useNow();
   const open = (id) => dispatch({ type: "nav", patch: { contactId: id, pane: "main" } });
@@ -40,7 +42,10 @@ export function ContactsList() {
   const requests = [...incoming.map((r) => ({ ...r, kind: "incoming" })), ...outgoing.map((r) => ({ ...r, kind: "outgoing" }))].filter((r) => visible(r.id));
   const allFriends = friendIds(state);
   const friends = allFriends.filter(visible);
-  const nothing = allFriends.length === 0 && incoming.length === 0 && outgoing.length === 0;
+  // My own Agents (only mine exist here), below my friends as in the prototype; a deleted one is not a contact.
+  const allAgents = myAgents(state).filter((a) => !a.deleted);
+  const agents = allAgents.filter((a) => matchesPerson(a, query));
+  const nothing = allFriends.length === 0 && incoming.length === 0 && outgoing.length === 0 && allAgents.length === 0;
 
   return (
     <>
@@ -93,7 +98,27 @@ export function ContactsList() {
             </button>
           </li>
         ))}
-        {requests.length === 0 && friends.length === 0 && (
+        {agents.length > 0 && <li className="rows-label">我的 Agent</li>}
+        {agents.map((a) => (
+          <li key={a.id}>
+            <button type="button" className="row" onClick={() => openAgentChat(state, dispatch, actions, a.conversationId)}>
+              <Avatar id={a.id} size={48} />
+              <span className="row-body">
+                <span className="row-top">
+                  <span className="row-name">{a.name}</span>
+                  <Tag>Agent</Tag>
+                </span>
+                <span className="row-sub">
+                  <span className="row-preview">
+                    {a.handle}
+                    {a.paused ? " · 已暂停" : ""}
+                  </span>
+                </span>
+              </span>
+            </button>
+          </li>
+        ))}
+        {requests.length === 0 && friends.length === 0 && agents.length === 0 && (
           <li className="rows-empty">{nothing && !query.trim() ? "还没有联系人，点右上角的按钮添加好友" : "没有找到匹配的联系人"}</li>
         )}
       </ul>
