@@ -243,6 +243,24 @@ describe("model and reasoning", () => {
     expect((await createAgent(app, owner, { model: choose(mine, "tiny") })).status).toBe(400);
     expect(await api(app, owner, "PATCH", `/api/agents/${plain.json.id}`, { model: choose(mine, "tiny") })).toEqual({ status: 400, json: { error: "invalid_request" } });
   });
+
+  it("a provider model that lists its reasoningLevels allows none and those only, on create and on edit", async () => {
+    const owner = await signUp(app, "lev");
+    const mine = await providerWith(owner.id, [
+      { name: "some", vision: false, pdf: false, reasoning: true, contextTokens: 4000, reasoningLevels: ["low", "high"] },
+      { name: "all", vision: false, pdf: false, reasoning: true, contextTokens: 4000 },
+    ]);
+    const some = { source: "provider", providerId: mine, model: "some" };
+    for (const reasoning of ["medium", "xhigh", "max"]) expect([reasoning, (await createAgent(app, owner, { model: some, reasoning })).status]).toEqual([reasoning, 400]);
+    for (const reasoning of ["none", "low", "high"]) expect([reasoning, (await createAgent(app, owner, { model: some, reasoning })).status]).toEqual([reasoning, 201]);
+    const onAll = await createAgent(app, owner, { model: { source: "provider", providerId: mine, model: "all" }, reasoning: "max" });
+    expect(onAll.status).toBe(201);
+    const id = onAll.json.id;
+    expect(await api(app, owner, "PATCH", `/api/agents/${id}`, { model: some })).toEqual({ status: 400, json: { error: "invalid_request" } });
+    expect((await api(app, owner, "PATCH", `/api/agents/${id}`, { model: some, reasoning: "high" })).json).toMatchObject({ model: some, reasoning: "high" });
+    expect(await api(app, owner, "PATCH", `/api/agents/${id}`, { reasoning: "medium" })).toEqual({ status: 400, json: { error: "invalid_request" } });
+    expect((await api(app, owner, "PATCH", `/api/agents/${id}`, { reasoning: "low" })).json.reasoning).toBe("low");
+  });
 });
 
 describe("pause, resume, delete", () => {

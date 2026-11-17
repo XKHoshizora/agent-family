@@ -3,6 +3,7 @@ import http from "node:http";
 import type net from "node:net";
 import { describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.ts";
+import { modelHints } from "../src/providers/hints.ts";
 import { loadProviderForCall } from "../src/providers/store.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { createAgent, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -94,6 +95,16 @@ describe("creating and reading providers", () => {
       { models: [{ name: "m", vision: "yes" }] },
       { models: [{ name: "m", extra: 1 }] },
       { models: "m1,m2" },
+      // reasoningLevels: distinct levels above none, in order, only on a model that reasons.
+      { models: [{ name: "m", reasoning: true, reasoningLevels: ["high", "low"] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: ["low", "low"] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: ["none", "low"] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: ["minimal"] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: ["turbo"] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: [] }] },
+      { models: [{ name: "m", reasoning: true, reasoningLevels: "low" }] },
+      { models: [{ name: "m", reasoning: false, reasoningLevels: ["low"] }] },
+      { models: [{ name: "m", reasoningLevels: ["low"] }] },
       { keyLast4: "1234" },
       { ownerId: owner.id },
     ];
@@ -191,6 +202,22 @@ describe("editing", () => {
     expect((await api(app, owner, "PATCH", `/api/providers/${p.id}`, { baseUrl: "https://OTHER.example:443/v2" })).json.baseUrl).toBe("https://other.example/v2");
   });
 
+  it("a model's reasoningLevels are kept and shown, on creation and edit; refresh keeps them; without them, every level", async () => {
+    const owner = await signUp(app, "levi");
+    const created = await mustCreate(owner, {
+      baseUrl: stub.baseUrl(),
+      models: [{ name: "some", reasoning: true, reasoningLevels: ["low", "high", "max"] }, { name: "all", reasoning: true }],
+    });
+    expect(created.models).toEqual([model("some", { reasoning: true, reasoningLevels: ["low", "high", "max"] }), model("all", { reasoning: true })]);
+    const all5 = ["low", "medium", "high", "xhigh", "max"];
+    const edited = await api(app, owner, "PATCH", `/api/providers/${created.id}`, { models: [{ name: "some", reasoning: true, reasoningLevels: all5 }, { name: "all", reasoning: true }] });
+    expect(edited.json.models[0]).toEqual(model("some", { reasoning: true, reasoningLevels: all5 }));
+    stub.answer(() => ({ status: 200, body: JSON.stringify({ data: [{ id: "some" }, { id: "new" }] }) }));
+    const refreshed = await api(app, owner, "POST", `/api/providers/${created.id}/models/refresh`);
+    expect(refreshed.json.provider.models).toEqual([model("some", { reasoning: true, reasoningLevels: all5 }), model("all", { reasoning: true }), model("new")]);
+    expect((await api(app, owner, "GET", "/api/providers")).json.providers[0].models).toEqual(refreshed.json.provider.models);
+  });
+
   it("the protocol cannot change, and other keys are refused (400)", async () => {
     const owner = await signUp(app, "pete");
     const p = await mustCreate(owner);
@@ -251,6 +278,7 @@ describe("another person's provider", () => {
       { method: "PATCH", url: `/api/providers/${id}`, payload: { apiKey: "sk-attacker-key-0001" } },
       { method: "DELETE", url: `/api/providers/${id}` },
       { method: "POST", url: `/api/providers/${id}/test` },
+      { method: "POST", url: `/api/providers/${id}/models/list` },
       { method: "POST", url: `/api/providers/${id}/models/refresh` },
     ];
     const observe = async (req: InjectOptions) => {
@@ -435,6 +463,123 @@ describe("refreshing the model list", () => {
     expect(await refresh(p.id)).toEqual({ status: 502, json: { error: "provider_unavailable" } });
     const q = await mustCreate(owner, { name: "private", baseUrl: "https://192.168.0.10/v1" });
     expect(await refresh(q.id)).toEqual({ status: 400, json: { error: "address_not_allowed" } });
+    expect((await api(app, owner, "GET", "/api/providers")).json.providers.map((x: any) => x.models.map((m: any) => m.name))).toEqual([["kept"], []]);
+  });
+});
+
+describe("listing the provider's models", () => {
+  const listed = (name: string, added = false) => ({ ...modelHints(name), name, added });
+
+  it("answers the names the provider lists, in its order, with hints for each and whether it is already added; stores nothing", async () => {
+    const owner = await signUp(app, "lily");
+    const p = await mustCreate(owner, { baseUrl: stub.baseUrl(), models: [{ name: "gpt-4o", reasoning: true, contextTokens: 50000 }] });
+    stub.answer(() => ({
+      status: 200,
+      body: JSON.stringify({
+        data: [
+          { id: "o3-mini" },
+          { id: "gpt-4o" },
+          { id: "  claude-sonnet-5-5  " },
+          { id: "text-embedding-3-small" },
+          { id: "house-blend-v2" },
+          { id: 42 },
+          { id: "x".repeat(101) },
+          { id: "" },
+          { id: "bad\nname" },
+          { id: "o3-mini" },
+          {},
+          "loose",
+        ],
+      }),
+    }));
+    const before = await api(app, owner, "GET", "/api/providers");
+    const res = await api(app, owner, "POST", `/api/providers/${p.id}/models/list`);
+    expect(res).toEqual({
+      status: 200,
+      json: { ok: true, listed: [listed("o3-mini"), listed("gpt-4o", true), listed("claude-sonnet-5-5"), listed("text-embedding-3-small"), listed("house-blend-v2")] },
+    });
+    // Known to the catalogue: its display name, context and (from the lab) thinking levels; else guesses from the name.
+    expect(res.json.listed[2]).toEqual({
+      name: "claude-sonnet-5-5",
+      vision: true,
+      pdf: true,
+      reasoning: true,
+      chat: true,
+      known: true,
+      label: "Claude Sonnet 5.5",
+      contextTokens: 1000000,
+      reasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+      added: false,
+    });
+    expect(res.json.listed.map((m: any) => [m.name, m.known, m.chat])).toEqual([
+      ["o3-mini", true, true],
+      ["gpt-4o", true, true],
+      ["claude-sonnet-5-5", true, true],
+      ["text-embedding-3-small", false, false],
+      ["house-blend-v2", false, true],
+    ]);
+    expect(res.json.listed[4]).toEqual({ name: "house-blend-v2", vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false });
+    expect(stub.requests.map((r) => `${r.method} ${r.path}`)).toEqual(["GET /v1/models"]);
+    // Nothing was stored: the provider is as it was.
+    expect(await api(app, owner, "GET", "/api/providers")).toEqual(before);
+    expect((await api(app, owner, "POST", `/api/providers/${p.id}/models/list`, {})).json.listed).toHaveLength(5);
+    expect(await api(app, owner, "GET", "/api/providers")).toEqual(before);
+  });
+
+  it("added follows the saved models; a body that is no object is 400", async () => {
+    const owner = await signUp(app, "addy");
+    const p = await mustCreate(owner, { baseUrl: stub.baseUrl() });
+    stub.answer(() => ({ status: 200, body: JSON.stringify({ data: [{ id: "a" }, { id: "b" }] }) }));
+    const added = async () => (await api(app, owner, "POST", `/api/providers/${p.id}/models/list`)).json.listed.map((m: any) => [m.name, m.added]);
+    expect(await added()).toEqual([["a", false], ["b", false]]);
+    expect((await api(app, owner, "PATCH", `/api/providers/${p.id}`, { models: [{ name: "b" }, { name: "c" }] })).status).toBe(200);
+    expect(await added()).toEqual([["a", false], ["b", true]]);
+    for (const body of [[], [1]]) expect([body, (await api(app, owner, "POST", `/api/providers/${p.id}/models/list`, body)).status]).toEqual([body, 400]);
+  });
+
+  it("at most 500 entries, from the first 1 000 the provider lists; a huge list is answered quickly", async () => {
+    const owner = await signUp(app, "many");
+    const p = await mustCreate(owner, { baseUrl: stub.baseUrl() });
+    const ids = Array.from({ length: 149_000 }, (_, i) => i.toString(36).padStart(4, "0"));
+    const body = JSON.stringify({ data: ids.map((id) => ({ id })) });
+    expect(body.length).toBeLessThan(2 * 1024 * 1024);
+    stub.answer(() => ({ status: 200, body }));
+    const started = Date.now();
+    const res = await api(app, owner, "POST", `/api/providers/${p.id}/models/list`);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(res.json.listed.map((m: any) => m.name)).toEqual(ids.slice(0, 500));
+    // Past the first 1 000 entries nothing is looked at, even when none of those is a usable name.
+    stub.answer(() => ({ status: 200, body: JSON.stringify({ data: [...Array.from({ length: 1000 }, () => ({ id: "" })), { id: "late" }] }) }));
+    expect(await api(app, owner, "POST", `/api/providers/${p.id}/models/list`)).toEqual({ status: 200, json: { ok: true, listed: [] } });
+  });
+
+  it("a failure is answered as 测试连接 answers it (a 200, ok false, the code and the provider's status), with the code refresh would give", async () => {
+    const owner = await signUp(app, "lars");
+    const p = await mustCreate(owner, { baseUrl: stub.baseUrl(), models: [{ name: "kept" }] });
+    const call = (route: string, id = p.id) => api(app, owner, "POST", `/api/providers/${id}/${route}`);
+    const cases: Array<[number, string, Record<string, string>]> = [
+      [401, '{"error":"bad key"}', {}],
+      [403, '{"error":"forbidden"}', {}],
+      [404, '{"error":"no such path"}', {}],
+      [405, '{"error":"method not allowed"}', {}],
+      [429, '{"error":"slow down"}', {}],
+      [500, '{"error":"oops"}', {}],
+      [200, "<html>not json</html>", { "content-type": "text/html" }],
+      [302, "", { location: "https://127.0.0.1/" }],
+    ];
+    for (const [status, body, headers] of cases) {
+      stub.answer(() => ({ status, body, headers }));
+      const [list, test, refresh] = [await call("models/list"), await call("test"), await call("models/refresh")];
+      expect([status, list]).toEqual([status, test]);
+      expect([status, list.status, list.json.ok, list.json.error]).toEqual([status, 200, false, refresh.json.error]);
+      expect(Object.keys(list.json).sort()).toEqual(status === 302 ? ["error", "ok"] : ["error", "ok", "upstreamStatus"]);
+    }
+    stub.answer(() => ({ status: 404, body: "{}" }));
+    expect(await call("models/list")).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "404" } });
+    const q = await mustCreate(owner, { name: "private", baseUrl: "https://192.168.0.10/v1" });
+    expect(await call("models/list", q.id)).toEqual({ status: 200, json: { ok: false, error: "address_not_allowed" } });
+    expect((await call("models/refresh", q.id)).json.error).toBe("address_not_allowed");
+    // Nothing changed.
     expect((await api(app, owner, "GET", "/api/providers")).json.providers.map((x: any) => x.models.map((m: any) => m.name))).toEqual([["kept"], []]);
   });
 });

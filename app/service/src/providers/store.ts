@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { lockAccount } from "../accounts/store.ts";
-import type { Protocol } from "../config.ts";
+import type { Protocol, ReasoningLevel } from "../config.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { userText } from "../schemas.ts";
@@ -16,6 +16,16 @@ export const MAX_MODELS = 100;
 export const modelName = userText(1, 100, { singleLine: true });
 export const CONTEXT_TOKENS = { min: 1_000, max: 2_000_000 } as const;
 
+/** The thinking levels a model may list as the ones it supports: every level above `none`, in this order. */
+export const MODEL_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly ReasoningLevel[];
+export type ModelLevel = (typeof MODEL_LEVELS)[number];
+/** A model's supported levels: 1–5 distinct ones, in `MODEL_LEVELS` order. */
+export const modelLevels = z
+  .array(z.enum(MODEL_LEVELS))
+  .min(1)
+  .max(MODEL_LEVELS.length)
+  .refine((list) => list.every((level, i) => i === 0 || MODEL_LEVELS.indexOf(level) > MODEL_LEVELS.indexOf(list[i - 1]!)), "distinct levels, in order");
+
 /** What a provider's model can do. Stored as this JSON in `providers.models`, and shown as it is. */
 export interface ProviderModel {
   name: string;
@@ -23,15 +33,20 @@ export interface ProviderModel {
   pdf: boolean;
   reasoning: boolean;
   contextTokens: number;
+  /** The thinking levels it supports (only with `reasoning`); absent: every level. */
+  reasoningLevels?: ModelLevel[];
 }
 
-const storedModel = z.strictObject({
-  name: modelName,
-  vision: z.boolean(),
-  pdf: z.boolean(),
-  reasoning: z.boolean(),
-  contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max),
-});
+const storedModel = z
+  .strictObject({
+    name: modelName,
+    vision: z.boolean(),
+    pdf: z.boolean(),
+    reasoning: z.boolean(),
+    contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max),
+    reasoningLevels: modelLevels.optional(),
+  })
+  .refine((m) => m.reasoning || m.reasoningLevels === undefined);
 
 /**
  * The stored `models` value as a list. Something malformed reads as no models: a value that is not an array is

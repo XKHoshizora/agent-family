@@ -10,6 +10,7 @@
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
     "types": ["node"],
     "noEmit": true
   },

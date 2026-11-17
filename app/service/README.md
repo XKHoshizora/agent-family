@@ -40,6 +40,7 @@ npm run credits:grant -- --handle <h> --points <n> [--note <text>]   # n: decima
 npm run credits:show -- --handle <h>                # a person's tier and points balance (an Agent's handle is refused)
 npm run tier:set -- --handle <h> --tier <name>      # a tier named in AGENT_TIERS
 npm run models:list                                 # the site models: id, label, tier, protocol, prices (never the key)
+npm run catalog:update [-- <models.json> <api.json>] # downloads models.dev (or reads saved copies) into src/providers/model-catalog.json; commit it
 ```
 
 Production: build once with the dev dependencies installed, then run plain Node on the build (no `tsx`,
@@ -63,7 +64,7 @@ and every run-time import of `src/` a production dependency.
 
 `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET` (>= 32 chars), `BLOB_DIR`, `PORT`,
 `PROVIDER_KEY_SECRET` (**required**, >= 32 chars: encrypts users' provider API keys at rest; the service refuses to start without it, and changing it makes stored keys unreadable:
-every call with such a key — a reply, a persona draft, a provider's test and refresh — is then `provider_rejected`, as a key
+every call with such a key — a reply, a persona draft, a provider's test, model list and refresh — is then `provider_rejected`, as a key
 the provider refused, and the log says why, until its owner saves the key again with `PATCH`; keep the secret with the database backups),
 `SITE_MODELS` (the models the site offers: a JSON array, default none; each entry has `id`, `label`, `tier` `free`|`paid`, `protocol`
 `openai_chat`|`openai_responses`|`anthropic`|`gemini`, `baseUrl` (a provider's `baseUrl` rule, Model providers: `https`, no
@@ -129,7 +130,7 @@ on `TEST_DATABASE_URL`. `answerFloor` (`{ ms, jitterMs }`, default 400 ms + up t
 registration's and a reset request's success answer takes at least (see those routes); it is a build option, not
 configuration, and only tests change it. So is `allowInsecureLocal` (default off; no variable can turn it on): with it,
 providers may also be reached at loopback addresses, and over plain `http:` there, so tests can stand up a local stub.
-`Deps.providerProbe` is how the provider test and refresh routes reach a provider (default: through the address guard).
+`Deps.providerProbe` is how the provider test, model list and refresh routes reach a provider (default: through the address guard).
 `Deps.models` is how the service talks to a language model (default: the model gateway, see Calling a model); tests
 inject a scripted one (`scriptedGateway()` in `tests/helpers/models.ts`). `agentWorker: false` (tests only) turns the
 reply worker's background loop off: replies then run only when the test calls `app.agentWorker.runOnce()` (claims the
@@ -303,7 +304,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
 | `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429; a draft and a reply starting at the same moment may briefly exceed it by one) | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
-| `POST /api/providers/:id/test` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
+| `POST /api/providers/:id/test` + `POST /api/providers/:id/models/list` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
 | `PUT` + `DELETE /api/blocks/:principalId` | 20 together | principal |
 | `POST /api/conversations` | 10 | principal |
@@ -383,8 +384,8 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
   account lock, so concurrent creates cannot pass it); 400 for a site `model` id that is not configured, a provider
   that is not yours or does not list that model name, a provider model whose `contextTokens` is not larger than the
   output limit its calls get (`PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS`, default 2 048: nothing would be left for the conversation), or a `reasoning` the model does not
-  allow (a site model: `none` and its own levels; a provider model: `none` only unless it is flagged `reasoning`; with
-  no model any level).
+  allow (a site model: `none` and its own levels; a provider model: `none` only unless it is flagged `reasoning`, then
+  `none` and its `reasoningLevels`, every level when it lists none; with no model any level).
 - The conversation is created with the Agent: without a `persona` it holds one message from the Agent, the fixed
   greeting, which is unread for you like any message from someone else. `personaVersion` is 1 when a persona was given.
   Such an Agent interviews you about who it should be and proposes a persona (Persona proposals, below).
@@ -605,7 +606,7 @@ A provider is a person's own account at a model service, which their Agents can 
 Agent cannot be pointed at their provider (400).
 
 **Provider** (owner only): `{"id", "name", "protocol": "openai_chat" | "openai_responses" | "anthropic" | "gemini",
-"baseUrl", "keyLast4", "models": [{"name", "vision", "pdf", "reasoning", "contextTokens"}]}`.
+"baseUrl", "keyLast4", "models": [{"name", "vision", "pdf", "reasoning", "contextTokens", "reasoningLevels"?}]}`.
 
 - **The API key** is sealed when saved (AES-256-GCM, a key derived from `PROVIDER_KEY_SECRET` with HKDF-SHA-256,
   `src/providers/crypto.ts`) and never shown again: no answer, push, error or log line carries it; `keyLast4` is its
@@ -619,9 +620,13 @@ Agent cannot be pointed at their provider (400).
   host and any port from 1 to 65535. It is stored without query, fragment or trailing slash (`https://API.example.com:443/v1/?x`
   is `https://api.example.com/v1`). Saving checks only that; the address is checked at every call (below).
 - **Models**: at most 100; `name` 1–100 characters, one line, trimmed, unique within the provider; `vision`, `pdf` and
-  `reasoning` default to false and `contextTokens` (1 000–2 000 000) to `PROVIDER_DEFAULT_CONTEXT_TOKENS` (default 16 000). An Agent may use only a listed model, and a
-  reasoning level other than `none` only on a model flagged `reasoning`. Removing a model from the list does not change
-  the Agents that use it.
+  `reasoning` default to false and `contextTokens` (1 000–2 000 000) to `PROVIDER_DEFAULT_CONTEXT_TOKENS` (default 16 000).
+  `reasoningLevels` (optional, only on a model flagged `reasoning`): the thinking levels it supports, 1–5 distinct ones of
+  `low`, `medium`, `high`, `xhigh`, `max`, in that order; without it the model takes every level. (Stored with the
+  models, in the provider's `models` JSON: nothing to migrate.) An Agent may use only a listed model, and a
+  reasoning level other than `none` only on a model flagged `reasoning`, and one of its `reasoningLevels` when it lists
+  them (checked when the Agent is created or edited; a run sends the saved level, see Replies). Removing a model from the
+  list, or narrowing its levels, does not change the Agents that use it.
 
 **The address guard** (`src/providers/guard.ts`), at every call to a provider, before any connection: the URL must pass
 the `baseUrl` rules; the host name is looked up once, and the call is refused with `address_not_allowed` if any address
@@ -634,7 +639,7 @@ benchmarking `2001:2::/48`; so NAT64, IPv4-translated, IPv4-compatible and disca
 address that was checked (the name stays the Host header and the TLS server name), so a name that resolves differently
 a moment later changes nothing. Redirects are never followed (any 3xx is `provider_unavailable`), and a call is given up
 (`provider_unavailable`) after a set time without progress (until the headers, from the headers to the first byte of
-the body, then between body chunks) or once its answer passes a set size: for test and refresh below, 15 s (and 30 s
+the body, then between body chunks) or once its answer passes a set size: for test, model list and refresh below, 15 s (and 30 s
 in all) and 2 MiB; for a model's answer, see Calling a model. At most `PROVIDER_MAX_CONCURRENT_CALLS` (default 64) calls
 to providers and site models are in flight at once in the whole service — one count for these routes and every model
 call — from before the name lookup until the answer is read or abandoned; one more is `provider_unavailable` at once. A
@@ -644,7 +649,7 @@ call stopped by its caller closes its connection at once.
 
 *Session: required.* Body (no other key): `name` (1–40 characters, one line, trimmed), `protocol`, `baseUrl` (at most
 1000 characters), `apiKey` (trimmed, then 8–1000 printable ASCII characters without spaces), and optionally `models`
-(`[{"name", "vision"?, "pdf"?, "reasoning"?, "contextTokens"?}]`). → 201 Provider.
+(`[{"name", "vision"?, "pdf"?, "reasoning"?, "contextTokens"?, "reasoningLevels"?}]`). → 201 Provider.
 
 - 400 `provider_limit` when you already have 10 providers (counted under the account lock, so concurrent creates
   cannot pass it); 409 `name_taken` when one of yours has that name.
@@ -680,11 +685,47 @@ means the provider has no model list there — a client can say so, as chat may 
 be typed in). Only the code and that number are passed on: nothing else of the provider's answer reaches you or the log,
 which records the provider id, protocol, code and the provider's HTTP status.
 
+#### `POST /api/providers/:id/models/list`
+
+*Session: required.* Body: none or `{}`. The provider's model list for its owner to choose from: the same request as the
+test, and the names in its answer read as refresh reads them (below: the first 1 000 entries; names that would not be
+accepted as a model name — trimmed first —, any containing the key, and repeats skipped). **Nothing is stored.** → 200
+`{"ok": true, "listed": [{"name", "vision", "pdf", "reasoning", "chat", "known", "label"?, "contextTokens"?,
+"reasoningLevels"?, "added"}]}` in the provider's order, at most 500 entries; or a failure exactly as the test answers
+it: `{"ok": false, "error", "upstreamStatus"?}` (a 404 or 405 there: the provider has no model list, its models are typed
+in by hand), with the code refresh would answer. `added`: the provider's saved `models` already has that name.
+
+The rest are hints (`modelHints`, `src/providers/hints.ts`), for a client to suggest a model's flags when its owner adds
+it — hints, the owner can change them; nothing here checks them. `chat` false: probably not a chat model (an embedding,
+speech, image or video model…).
+
+- **From the catalogue** (`known: true`): a vendored snapshot of the [models.dev](https://models.dev) catalogue (MIT),
+  `src/providers/model-catalog.json`, written by `npm run catalog:update` (`scripts/update-model-catalog.mjs`, run by hand:
+  it downloads the catalogue and keeps per model only its id, lab, display name, what it takes and answers, its context and
+  its lab's thinking levels; `model-catalog.README.md` says when). The service never fetches the catalogue. The name is
+  trimmed and lower-cased and only its last `/` part counts (`openai/gpt-6-sol`); it is looked up as it is, then without a
+  trailing `-latest` and date (`-20251101`, `-2025-11-01`; the catalogue's own dated ids are found without their date too),
+  then as the longest catalogue id it starts with followed by `-` (`claude-sonnet-5-5-thinking` is `claude-sonnet-5-5`) —
+  but not when the name rules below call the name no chat model (`gpt-4o-mini-tts` is not `gpt-4o-mini`). Then `vision`
+  (it takes images), `pdf` (PDFs), `reasoning`, `chat` (it takes and answers text and is not an embedding, reranking,
+  speech, transcription, image, video or realtime model) are the catalogue's; `label` is its display name;
+  `contextTokens` its context when it gives one (it may lie outside what a model can be saved with, 1 000–2 000 000);
+  `reasoningLevels` the levels of the model's `effort` option in its lab's own entry, among ours (absent when the lab
+  turns thinking on and off or sets a token budget instead: then every level is right).
+- **From the name** (`known: false`, no `label`, `contextTokens` or `reasoningLevels`): ignoring case, by substrings:
+
+| Hint | `true` when the name contains |
+|---|---|
+| `chat` | none of `embed`, `rerank`, `bge-`, `tts`, `whisper`, `speech`, `audio`, `voice`, `transcribe`, `realtime`, `image`, `dall-e`, `flux`, `stable-diffusion`, `sd-`, `imagen`, `midjourney`, `video`, `sora`, `veo`, `hailuo`, `kling`, `moderation`, `music`; when `chat` is false, so are the other three |
+| `vision` | `gpt-4o`, `gpt-4.1`, `gpt-5`, `gpt-6`, `claude`, `gemini`, `vision`, `-vl`, `llava`, `pixtral`, `glm-4v` or `qvq` |
+| `pdf` | `gpt-4o`, `gpt-4.1`, `gpt-5`, `gpt-6`, `claude` or `gemini` |
+| `reasoning` | `gpt-5`, `gpt-6`, `gemini-2.5`, `gemini-3`, `thinking`, `reason`, `deepseek-r`, `qwq`, `-m2` or `-m3` (MiniMax's M series); or it starts with `o1`, `o3` or `o4` (so does its last `/` part: `openai/o3`); or `claude`, except `claude-2`, `claude-3-haiku`, `claude-3-opus`, `claude-3-sonnet`, `claude-3-5`, `claude-3.5` and `claude-instant` |
+
 #### `POST /api/providers/:id/models/refresh`
 
 *Session: required.* Body: none or `{}`. The same request; the model names in its answer (`data[].id`, or `models[].name` without the
 `models/` prefix for Gemini; the one page the endpoint returns) are merged into `models`: models already there keep
-their flags, new names get the defaults, up to 100 in all. Only the first 1 000 entries of the list are looked at, so
+their flags and levels, new names get the defaults, up to 100 in all. Only the first 1 000 entries of the list are looked at, so
 `listed` holds at most 1 000 names; among them, names that would not be accepted as a model name, any containing the
 key, and repeats are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
 or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
@@ -1590,7 +1631,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   fits; then older messages by name only, newest first, while they fit (nothing older than one that does not); then
   their attachment contents, newest first, each if it fits. So an older message's attachment goes (leaving its name)
   before older messages do, and what the owner has just sent is the last to go.
-- The reasoning level is the Agent's when the model allows it, else `none`.
+- The reasoning level is the Agent's when the model allows it, else `none`. A provider model flagged `reasoning`
+  allows every level here, whatever its `reasoningLevels`: an Agent saved with a level its model has since stopped
+  listing keeps answering with that level (the run is not failed) until the Agent is edited, when the level is checked
+  again.
 
 A reply's input estimate (what admission holds) and what settlement falls back on when no usage is reported both count
 all of the above, attachments at their estimate.

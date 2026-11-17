@@ -92,6 +92,11 @@ describe("resolveModel", () => {
     const plain = await agentWith(owner, { model: { source: "provider", providerId: provider.id, model: "plain" } });
     expect(await resolveModel(db, config(), plain)).toMatchObject({ contextTokens: 8000, vision: false, pdf: true, reasoningAllowed: ["none"] });
 
+    // Its levels narrowed after the Agent chose one: the run is not failed, the saved level is still sent (until the
+    // Agent is edited, when it must be one of them).
+    await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { models: [{ ...models[0], reasoningLevels: ["low"] }, models[1]] });
+    expect(await resolveModel(db, config(), deep)).toMatchObject({ name: "deep", reasoningAllowed: REASONING_LEVELS });
+
     // The model taken off the provider's list: nothing to call.
     await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { models: [models[1]] });
     expect(await resolveModel(db, config(), deep)).toBeNull();

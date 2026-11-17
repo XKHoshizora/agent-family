@@ -409,9 +409,9 @@ function plausibleBody(route: RouteEntry, fx: Fixture): Record<string, unknown> 
     case "POST /api/agents/draft-persona":
       return { name: "Fuzz", model: FAST };
     case "POST /api/providers":
-      return providerBody({ name: `fz${n}` });
+      return providerBody({ name: `fz${n}`, models: [{ name: "m", reasoning: true, reasoningLevels: ["low", "high"] }] });
     case "PATCH /api/providers/:id":
-      return { name: `fz${n}` };
+      return { name: `fz${n}`, models: [{ name: "m", reasoning: true, reasoningLevels: ["low", "high"] }] };
     default:
       return {};
   }
@@ -520,7 +520,15 @@ describe("fuzz", () => {
     // This batch's routes, each one of them: a malformed path parameter is always a 4xx, never a success; and the real
     // ids took at least one probe past the checks of shape, session, rate and existence (a status none of those gives).
     const agentRoutes = routes.filter((r) => isAgentRoute(r.url));
-    for (const known of ["GET /api/usage", "POST /api/agents/draft-persona", "POST /api/agents/:id/proposals/:proposalId/confirm", "DELETE /api/providers/:id", "POST /api/conversations/:id/runs/:runId/stop", "POST /api/conversations/:id/topic"]) {
+    for (const known of [
+      "GET /api/usage",
+      "POST /api/agents/draft-persona",
+      "POST /api/agents/:id/proposals/:proposalId/confirm",
+      "DELETE /api/providers/:id",
+      "POST /api/providers/:id/models/list",
+      "POST /api/conversations/:id/runs/:runId/stop",
+      "POST /api/conversations/:id/topic",
+    ]) {
       expect(agentRoutes.map((r) => `${r.method} ${r.url}`)).toContain(known);
     }
     const SHALLOW = new Set([400, 401, 404, 405, 413, 414, 415, 429]);

@@ -152,8 +152,9 @@ export async function countLiveAgents(q: Queryable, ownerId: string): Promise<nu
  * must be in `config.siteModels` and allows `none` plus its own `reasoning` levels; a provider model must be
  * listed by a provider of this owner (providers/store.ts; a malformed `models` value lists nothing), with a context
  * larger than the output limit its calls get (`providerDefaultMaxOutputTokens`; a site model's is checked when the
- * configuration loads), and allows `none` only, unless its `reasoning` flag is set. With no model chosen yet any level
- * is accepted (it is checked when a model is chosen).
+ * configuration loads), and allows `none` only, unless its `reasoning` flag is set: then `none` and its
+ * `reasoningLevels` (every level when it lists none). With no model chosen yet any level is accepted (it is checked when
+ * a model is chosen). A run does not check again (models/resolve.ts): a level its model no longer lists is still sent.
  */
 export async function assertModelChoice(
   q: Queryable,
@@ -173,7 +174,7 @@ export async function assertModelChoice(
     const models = await lockProviderModels(q, ownerId, model.providerId);
     const listed = models?.find((m) => m.name === model.model);
     if (!listed || listed.contextTokens <= config.providerDefaultMaxOutputTokens) throw new AppError(400, "invalid_request");
-    allowed = listed.reasoning ? REASONING_LEVELS : [];
+    allowed = listed.reasoning ? (listed.reasoningLevels ?? REASONING_LEVELS) : [];
   }
   if (reasoning !== "none" && !allowed.includes(reasoning)) throw new AppError(400, "invalid_request");
 }

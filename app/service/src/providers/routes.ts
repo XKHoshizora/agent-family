@@ -8,10 +8,13 @@ import { uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { normaliseBaseUrl } from "./guard.ts";
 import { KeyUnreadableError } from "./crypto.ts";
+import { modelHints } from "./hints.ts";
 import { ProviderCallError, toProviderCallError, type ProviderCallCode } from "./probe.ts";
 import {
   CONTEXT_TOKENS,
   MAX_MODELS,
+  MODEL_LEVELS,
+  modelLevels,
   createProvider,
   deleteProvider,
   listProviders,
@@ -23,8 +26,24 @@ import {
   type ProviderRow,
 } from "./store.ts";
 
-/** How many entries of a provider's model list a refresh looks at (and so at most returns as `listed`). */
+/** How many entries of a provider's model list a refresh or a listing looks at (a refresh's `listed` holds at most these). */
 export const MAX_LISTED_NAMES = 1_000;
+/** How many models `POST /api/providers/:id/models/list` answers at most. */
+export const MAX_LISTED_MODELS = 500;
+
+/**
+ * The names of a provider's model list worth showing: of its first MAX_LISTED_NAMES entries (the list is the upstream's,
+ * of any length within the guard's size limit), names a person could have typed (trimmed), each once, in its order, and
+ * never one that holds the key.
+ */
+function usableNames(names: string[], apiKey: string): string[] {
+  const seen = new Set<string>();
+  for (const raw of names.slice(0, MAX_LISTED_NAMES)) {
+    const parsed = modelName.safeParse(raw);
+    if (parsed.success && !parsed.data.includes(apiKey)) seen.add(parsed.data);
+  }
+  return [...seen];
+}
 
 // --- the routes ---------------------------------------------------------------------------------------------------
 
@@ -39,19 +58,30 @@ const apiKey = z
   .string()
   .trim()
   .regex(/^[\x21-\x7e]{8,1000}$/);
-const modelInput = z.strictObject({
-  name: modelName,
-  vision: z.boolean().optional(),
-  pdf: z.boolean().optional(),
-  reasoning: z.boolean().optional(),
-  contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max).optional(),
-});
+const modelInput = z
+  .strictObject({
+    name: modelName,
+    vision: z.boolean().optional(),
+    pdf: z.boolean().optional(),
+    reasoning: z.boolean().optional(),
+    contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max).optional(),
+    reasoningLevels: modelLevels.optional(),
+  })
+  .refine((m) => m.reasoningLevels === undefined || m.reasoning === true, "reasoningLevels only for a model that reasons");
 const modelList = z
   .array(modelInput)
   .max(MAX_MODELS)
   .refine((list) => new Set(list.map((m) => m.name)).size === list.length, "model names must be unique");
 
-const modelView = z.object({ name: z.string(), vision: z.boolean(), pdf: z.boolean(), reasoning: z.boolean(), contextTokens: z.number() });
+const levelsView = z.array(z.enum(MODEL_LEVELS));
+const modelView = z.object({
+  name: z.string(),
+  vision: z.boolean(),
+  pdf: z.boolean(),
+  reasoning: z.boolean(),
+  contextTokens: z.number(),
+  reasoningLevels: levelsView.optional(),
+});
 const providerView = z.object({
   id: z.string(),
   name: z.string(),
@@ -61,6 +91,31 @@ const providerView = z.object({
   models: z.array(modelView),
 });
 
+/** A call to the provider that failed, as `/test` and `/models/list` answer it (a 200). */
+const callFailure = z.object({
+  ok: z.literal(false),
+  error: z.enum(["provider_rejected", "provider_unavailable", "address_not_allowed"]),
+  upstreamStatus: z.string().optional(),
+});
+/** That answer: the code and, when the provider answered with one, its HTTP status, the number only (a 404 or 405: it has no model list). */
+const failed = (failure: ProviderCallError): z.infer<typeof callFailure> => ({
+  ok: false,
+  error: failure.code as ProviderCallCode,
+  ...(failure.upstreamStatus === undefined ? {} : { upstreamStatus: String(failure.upstreamStatus) }),
+});
+const listedModel = z.object({
+  name: z.string(),
+  vision: z.boolean(),
+  pdf: z.boolean(),
+  reasoning: z.boolean(),
+  chat: z.boolean(),
+  known: z.boolean(),
+  label: z.string().optional(),
+  contextTokens: z.number().optional(),
+  reasoningLevels: levelsView.optional(),
+  added: z.boolean(),
+});
+
 /** A provider as its owner sees it. */
 const toView = (p: ProviderRow): z.infer<typeof providerView> => ({
   id: p.id,
@@ -68,7 +123,14 @@ const toView = (p: ProviderRow): z.infer<typeof providerView> => ({
   protocol: p.protocol,
   baseUrl: p.baseUrl,
   keyLast4: p.keyLast4,
-  models: p.models.map((m) => ({ name: m.name, vision: m.vision, pdf: m.pdf, reasoning: m.reasoning, contextTokens: m.contextTokens })),
+  models: p.models.map((m) => ({
+    name: m.name,
+    vision: m.vision,
+    pdf: m.pdf,
+    reasoning: m.reasoning,
+    contextTokens: m.contextTokens,
+    ...(m.reasoningLevels === undefined ? {} : { reasoningLevels: m.reasoningLevels }),
+  })),
 });
 
 /**
@@ -84,7 +146,7 @@ export function registerProviderRoutes(
   const api = app.withTypeProvider<ZodTypeProvider>();
   const secret = config.providerKeySecret;
 
-  // Create, edit and delete share one budget; the two routes that call the provider share another.
+  // Create, edit and delete share one budget; the three routes that call the provider share another.
   const writeLimit = perPrincipalLimit(app, 20);
   const callLimit = perPrincipalLimit(app, 10);
 
@@ -107,6 +169,7 @@ export function registerProviderRoutes(
       pdf: m.pdf ?? false,
       reasoning: m.reasoning ?? false,
       contextTokens: m.contextTokens ?? config.providerDefaultContextTokens,
+      ...(m.reasoningLevels === undefined ? {} : { reasoningLevels: m.reasoningLevels }),
     }));
 
   /** Logs a failed provider call with what may be logged: never the key, the upstream's body or its headers. */
@@ -213,16 +276,7 @@ export function registerProviderRoutes(
         params: idParams,
         querystring: empty,
         body: noBody,
-        response: {
-          200: z.union([
-            z.object({ ok: z.literal(true) }),
-            z.object({
-              ok: z.literal(false),
-              error: z.enum(["provider_rejected", "provider_unavailable", "address_not_allowed"]),
-              upstreamStatus: z.string().optional(),
-            }),
-          ]),
-        },
+        response: { 200: z.union([z.object({ ok: z.literal(true) }), callFailure]) },
       },
     },
     async (req) => {
@@ -232,7 +286,7 @@ export function registerProviderRoutes(
       try {
         target = await callTarget(req.log, me.id, req.params.id);
       } catch (err) {
-        if (err instanceof ProviderCallError) return { ok: false as const, error: err.code as ProviderCallCode };
+        if (err instanceof ProviderCallError) return failed(err);
         throw err;
       }
       try {
@@ -241,10 +295,45 @@ export function registerProviderRoutes(
       } catch (err) {
         const failure = toProviderCallError(err);
         logFailure(req.log, req.params.id, target.protocol, failure);
-        // The provider's HTTP status, the number only (a 404 or 405: it has no model list, though chat may work).
-        const status = failure.upstreamStatus === undefined ? {} : { upstreamStatus: String(failure.upstreamStatus) };
-        return { ok: false as const, error: failure.code as ProviderCallCode, ...status };
+        return failed(failure);
       }
+    },
+  );
+
+  // The provider's model list for its owner to choose from: the same request as the test, nothing stored.
+  api.post(
+    "/api/providers/:id/models/list",
+    {
+      schema: {
+        params: idParams,
+        querystring: empty,
+        body: noBody,
+        response: { 200: z.union([z.object({ ok: z.literal(true), listed: z.array(listedModel) }), callFailure]) },
+      },
+    },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await callLimit(req, me.id);
+      let target;
+      try {
+        target = await callTarget(req.log, me.id, req.params.id);
+      } catch (err) {
+        if (err instanceof ProviderCallError) return failed(err);
+        throw err;
+      }
+      let names: string[];
+      try {
+        names = await providerProbe.listModels(target);
+      } catch (err) {
+        const failure = toProviderCallError(err);
+        logFailure(req.log, req.params.id, target.protocol, failure);
+        return failed(failure);
+      }
+      const saved = new Set(target.models.map((m) => m.name));
+      const listed = usableNames(names, target.apiKey)
+        .slice(0, MAX_LISTED_MODELS)
+        .map((name) => ({ name, ...modelHints(name), added: saved.has(name) }));
+      return { ok: true as const, listed };
     },
   );
 
@@ -270,14 +359,7 @@ export function registerProviderRoutes(
         logFailure(req.log, req.params.id, target.protocol, failure);
         throw failure;
       }
-      // Only the first MAX_LISTED_NAMES entries are looked at (the list is the upstream's, of any length within the
-      // guard's size limit); of those, names a person could have typed, each once, and never one that holds the key.
-      const seen = new Set<string>();
-      for (const raw of names.slice(0, MAX_LISTED_NAMES)) {
-        const parsed = modelName.safeParse(raw);
-        if (parsed.success && !parsed.data.includes(target.apiKey)) seen.add(parsed.data);
-      }
-      const listed = [...seen];
+      const listed = usableNames(names, target.apiKey);
       const provider = await db.tx((t) => mergeListedModels(t, me.id, req.params.id, listed, config.providerDefaultContextTokens));
       return { listed, provider: toView(provider) };
     },

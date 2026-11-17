@@ -61,4 +61,20 @@ describe("production build", () => {
     expect(packages.length).toBeGreaterThan(5);
     for (const p of new Set(packages)) expect([p, p in pkg.dependencies]).toEqual([p, true]);
   });
+
+  it("a JSON file src/ imports (the model catalogue) is inside src/, imported as JSON, so the build copies it to dist/", () => {
+    const tsconfig = JSON.parse(readFileSync(path.join(root, "tsconfig.json"), "utf8")) as { compilerOptions: Record<string, unknown> };
+    expect(tsconfig.compilerOptions.resolveJsonModule).toBe(true);
+    const imports: string[] = [];
+    for (const file of sourceFiles(path.join(root, "src"))) {
+      for (const m of readFileSync(file, "utf8").matchAll(/^import\s+[^;]*?\s+from\s+"([^"]+\.json)"([^;\n]*);/gm)) {
+        const target = path.resolve(path.dirname(file), m[1]!);
+        // Node loads JSON only with the import attribute; tsc copies it to dist/ only from under rootDir (src/).
+        expect([m[1], m[2]!.trim()]).toEqual([m[1], 'with { type: "json" }']);
+        expect([m[1], path.relative(path.join(root, "src"), target).startsWith("..")]).toEqual([m[1], false]);
+        imports.push(path.relative(root, target).split(path.sep).join("/"));
+      }
+    }
+    expect(imports).toEqual(["src/providers/model-catalog.json"]);
+  });
 });

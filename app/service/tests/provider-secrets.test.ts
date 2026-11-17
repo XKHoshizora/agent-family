@@ -95,6 +95,7 @@ describe("a saved key moved to another provider's row", () => {
     expect(await api(app, owner, "POST", `/api/providers/${mine}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
     expect(await api(app, other, "POST", `/api/providers/${theirs}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
     expect(await api(app, owner, "POST", `/api/providers/${mine}/models/refresh`)).toEqual({ status: 502, json: { error: "provider_rejected" } });
+    expect(await api(app, owner, "POST", `/api/providers/${mine}/models/list`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
     const onMine = { source: "provider", providerId: mine, model: "m" };
     expect(await api(app, owner, "POST", "/api/agents/draft-persona", { name: "x", model: onMine })).toEqual({ status: 502, json: { error: "provider_rejected" } });
     const agent = await mustCreateAgent(app, owner, { model: onMine, persona: "简短。" });
@@ -199,6 +200,49 @@ describe("a provider's key never comes back", () => {
         "upstreamStatus",
       ]);
     }
+  });
+
+  it("the model list (models/list) answers names and hints only: never the key, the base URL or the upstream's text", async () => {
+    const owner = await signUp(app, "lister");
+    const seen: string[] = [];
+    const list = async (id: string) => {
+      const res = await app.inject({ method: "POST", url: `/api/providers/${id}/models/list`, headers: { cookie: owner.cookie } });
+      seen.push(JSON.stringify(res.headers), res.body);
+      return { status: res.statusCode, json: JSON.parse(res.body) };
+    };
+    // The upstream echoes the Authorization it got, and its own address, in its answers: as model names, in error bodies.
+    let mode: "ok" | "reject" | "html" = "ok";
+    stub.answer((req): StubReply => {
+      const auth = String(req.headers.authorization ?? "");
+      if (mode === "reject") return { status: 401, headers: { "x-echo": auth }, body: JSON.stringify({ error: { message: `Incorrect API key provided: ${auth}` } }) };
+      if (mode === "html") return { status: 500, headers: { "content-type": "text/html" }, body: `<html><body>${auth} at ${stub.baseUrl()}</body></html>` };
+      return { status: 200, headers: { "x-echo": auth }, body: JSON.stringify({ data: [{ id: "model-a" }, { id: auth }, { id: KEY }, { id: `x-${KEY}-y` }], echo: auth, at: stub.baseUrl() }) };
+    });
+    const created = await api(app, owner, "POST", "/api/providers", providerBody({ apiKey: KEY, baseUrl: stub.baseUrl() }));
+    const id = created.json.id as string;
+
+    // A name that holds the key is never answered.
+    expect(await list(id)).toEqual({ status: 200, json: { ok: true, listed: [{ name: "model-a", vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false }] } });
+    mode = "reject";
+    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401" } });
+    mode = "html";
+    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500" } });
+    for (const r of stub.requests) expect(r.headers.authorization).toBe(`Bearer ${KEY}`);
+    expect(stub.requests).toHaveLength(3);
+
+    for (const text of seen) {
+      expect(text).not.toContain(NEEDLE);
+      expect(text).not.toContain("Incorrect API key");
+      expect(text).not.toContain("<html>");
+      expect(text).not.toContain("x-echo");
+      expect(text).not.toContain(stub.baseUrl());
+    }
+    expect(lines.join("")).not.toContain(NEEDLE);
+    const failures = lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => e.msg === "provider call failed" && e.providerId === id);
+    expect(failures.map((e) => [e.protocol, e.error, e.upstreamStatus])).toEqual([
+      ["openai_chat", "provider_rejected", 401],
+      ["openai_chat", "provider_unavailable", 500],
+    ]);
   });
 
   it("loadProviderForCall is the only place outside crypto.ts that opens a key", () => {

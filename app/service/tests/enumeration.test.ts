@@ -320,6 +320,7 @@ describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
     ["provider move", ({ provider }) => json("PATCH", `/api/providers/${provider}`, { baseUrl: "https://evil.example.test/v1" })],
     ["provider delete", ({ provider }) => json("DELETE", `/api/providers/${provider}`)],
     ["provider test", ({ provider }) => json("POST", `/api/providers/${provider}/test`)],
+    ["provider model list", ({ provider }) => json("POST", `/api/providers/${provider}/models/list`)],
     ["provider refresh", ({ provider }) => json("POST", `/api/providers/${provider}/models/refresh`)],
     ["run", ({ conv }) => json("GET", `/api/conversations/${conv}/run`)],
     ["stop", ({ conv, run }) => json("POST", `/api/conversations/${conv}/runs/${run}/stop`)],
@@ -396,6 +397,7 @@ describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
     // Positive control: the owner's own requests are answered (the ids are real).
     expect((await observe(owner, routes[0]![1](real))).status).toBe(200);
     expect((await observe(owner, json("POST", `/api/providers/${provider}/test`))).status).toBe(200);
+    expect((await observe(owner, json("POST", `/api/providers/${provider}/models/list`))).status).toBe(200);
   });
 });
 
