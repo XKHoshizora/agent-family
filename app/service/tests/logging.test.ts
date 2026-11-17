@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { redactQuery } from "../src/app.ts";
 import { api, befriend, signUp } from "./helpers/actors.ts";
+import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
-import { closeAllSockets, issueTicket, tryConnect } from "./helpers/ws.ts";
+import { scriptedGateway } from "./helpers/models.ts";
+import { providerBody } from "./helpers/providers.ts";
+import { closeAllSockets, connect, issueTicket, tryConnect } from "./helpers/ws.ts";
 
 // The real logger, at info level, writing into this array instead of stdout.
 const lines: string[] = [];
-const { app, db } = useApp({ logStream: { write: (line) => void lines.push(line) } });
+const gateway = scriptedGateway();
+const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false, logStream: { write: (line) => void lines.push(line) } });
 afterEach(closeAllSockets);
 
 describe("request logging", () => {
@@ -38,6 +42,49 @@ describe("request logging", () => {
     expect(urls).toContain("/api/search?[redacted]");
     expect(urls.some((u) => u.startsWith("/api/auth/verify-email?[redacted]"))).toBe(true);
     expect(urls.filter((u) => u.includes("?")).every((u) => u.endsWith("?[redacted]"))).toBe(true);
+  });
+
+  it("a whole reply logs no persona, no message or reply text and no provider key, at any level", async () => {
+    const KEY = "sk-live-LOGGING-secret-key-9f8e7d6c";
+    const PERSONA = "PERSONA-SECRET-你是只在这里出现的设定";
+    const MESSAGE = "MESSAGE-SECRET-主人的一句私话";
+    const REPLY = "REPLY-SECRET-Agent 的回答";
+    const REASONING = "REASONING-SECRET-模型的思考";
+    const PROPOSED = "PROPOSAL-SECRET-新的设定";
+    const owner = await signUp(app, "logger");
+    const provider = await api(app, owner, "POST", "/api/providers", providerBody({ apiKey: KEY, models: [{ name: "m", reasoning: true }] }));
+    expect(provider.status).toBe(201);
+    const agent = await mustCreateAgent(app, owner, {
+      persona: PERSONA,
+      reasoning: "low",
+      model: { source: "provider", providerId: provider.json.id, model: "m" },
+    });
+    const socket = await connect(app, owner);
+    lines.length = 0;
+
+    // Owner's message → model call (the key handed to the gateway) → the Agent's message, a proposal in it.
+    gateway.reply(`${REPLY}\n<af-persona>${PROPOSED}</af-persona>`, { reasoning: REASONING, usage: { inputTokens: 10, outputTokens: 5 } });
+    expect((await api(app, owner, "POST", `/api/conversations/${agent.conversationId}/messages`, { text: MESSAGE, clientTxn: "log-1" })).status).toBe(201);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const call = gateway.calls.at(-1)!;
+    expect([call.apiKey, call.system.includes(PERSONA)]).toEqual([KEY, true]);
+    await socket.next((e) => e.type === "run" && e.run.status === "done");
+    const messages = (await api(app, owner, "GET", `/api/conversations/${agent.conversationId}/messages`)).json.messages;
+    expect(messages.at(-1)).toMatchObject({ text: REPLY, reasoning: REASONING, proposal: { persona: PROPOSED } });
+
+    // And a reply that fails at the provider, and a provider test that fails: their log lines too.
+    gateway.fail("provider_rejected", { afterText: REPLY });
+    expect((await api(app, owner, "POST", `/api/conversations/${agent.conversationId}/messages`, { text: MESSAGE, clientTxn: "log-2" })).status).toBe(201);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await api(app, owner, "GET", `/api/conversations/${agent.conversationId}/run`)).json.run).toMatchObject({ status: "failed", error: "provider_rejected" });
+
+    expect(lines.length).toBeGreaterThan(0); // the requests themselves were logged
+    const log = lines.join("");
+    for (const secret of [KEY, KEY.slice(0, 16), KEY.slice(-12), PERSONA, MESSAGE, REPLY, REASONING, PROPOSED]) {
+      expect([secret, log.includes(secret)]).toEqual([secret, false]);
+    }
+    // Nor anything of them in another encoding a log line could carry them in.
+    for (const secret of [PERSONA, MESSAGE, REPLY]) expect(log).not.toContain(JSON.stringify(secret).slice(1, -1).slice(0, 20));
   });
 
   it("redactQuery keeps the path and drops everything after the first ?", () => {
