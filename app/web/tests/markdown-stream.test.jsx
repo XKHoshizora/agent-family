@@ -193,7 +193,7 @@ describe("a reply being written", () => {
     expect(container.textContent).toBe("一 二 三");
   });
 
-  it("a tree is shown at an animation frame, and only if the text is still the one it was made for then", async () => {
+  it("a tree is shown at an animation frame; what came between its arrival and the frame is shown after it, plain", async () => {
     const frames = [];
     setFrameClock((run) => frames.push(run));
     try {
@@ -206,17 +206,26 @@ describe("a reply being written", () => {
       await act(async () => frames.shift()());
       await settle();
       expect(container.querySelector(".md strong").textContent).toBe("一");
-      // The next tree arrives, and the text changes before its frame: that tree is dropped.
+      // The next tree arrives for the text as it is, and more text comes before its frame.
       rerender(bubble("**一** *二*"));
       await advance(STREAM_EVERY_MS);
       workers[0].answer(1);
       await settle();
       rerender(bubble("**一** *二* 三"));
       await settle();
+      expect(container.textContent).toBe("一 *二* 三");
       while (frames.length > 0) await act(async () => frames.shift()());
       await settle();
-      expect(container.querySelector(".md em")).toBeNull();
-      expect(container.textContent).toBe("一 *二* 三");
+      expect(container.querySelector(".md em").textContent).toBe("二");
+      expect(container.textContent).toBe("一 二 三");
+      // A tree that arrives for a text that has changed meanwhile is dropped, as before: no frame is asked for it.
+      await advance(STREAM_EVERY_MS);
+      rerender(bubble("**一** *二* 三 `四`"));
+      await settle();
+      workers[0].answer(2);
+      await settle();
+      expect(frames).toHaveLength(0);
+      expect(container.querySelector(".md code")).toBeNull();
     } finally {
       setFrameClock((run) => queueMicrotask(run));
     }

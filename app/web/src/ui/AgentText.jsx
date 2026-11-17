@@ -177,10 +177,9 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
 /**
  * The text of a reply being written. Every piece is shown at once; the tree is asked for at most every
  * STREAM_EVERY_MS, one request at a time, and a tree is taken only if the text has not changed while it was made (a
- * stale one is dropped), at an animation frame like every tree. Until the next tree, the text that came after the taken
- * one is shown after it, plain. After
- * STREAM_LATE_MAX late answers in a row the rest of the reply is plain (with the note). The stored message that
- * replaces this is rendered on its own.
+ * stale one is dropped) and is shown at an animation frame, like every tree. Until the next tree, the text that came
+ * after the taken one is shown after it, plain. After STREAM_LATE_MAX late answers in a row the rest of the reply is
+ * plain (with the note). The stored message that replaces this is rendered on its own.
  */
 export function StreamingAgentText({ text }) {
   const shown = useMemo(() => withoutBidiControls(text), [text]);
@@ -237,14 +236,15 @@ export function StreamingAgentText({ text }) {
           }
         } else {
           r.late = 0;
-          // Taken only if the text is still the one it was made for (a stale tree is dropped): a tree at a frame.
+          // Taken only if the text is still the one it was made for (a stale tree is dropped). A tree is shown at a
+          // frame; what has come by then is shown after it, plain, like everything that comes after a taken tree.
           r.leave?.();
           r.leave = null;
           const take = () => {
-            if (r.mounted && latest.current === asked) setTaken({ text: asked, result: answer });
+            if (r.mounted && latest.current.startsWith(asked)) setTaken({ text: asked, result: answer });
           };
-          if (!answer.tree) take();
-          else if (latest.current === asked) r.leave = inFrame(answer.elements, () => view.distance(host.current), take);
+          if (latest.current === asked && answer.tree) r.leave = inFrame(answer.elements, () => view.distance(host.current), take);
+          else if (latest.current === asked) take();
         }
         if (r.again && !r.cooling) ask();
       });
