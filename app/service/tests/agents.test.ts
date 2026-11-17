@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { agentLimit, countLiveAgents } from "../src/agents/store.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { createAgent, mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
@@ -127,6 +128,23 @@ describe("the Agent limit", () => {
     await db.query("insert into accounts (principal_id, tier) values ($1, 'gone')", [owner.id]);
     for (let i = 0; i < 20; i++) await mustCreateAgent(app, owner);
     expect((await createAgent(app, owner)).status).toBe(403);
+  });
+
+  it("has one definition: agentLimit and countLiveAgents decide creation and GET /api/usage alike, for any tier name", async () => {
+    const config = app.deps.config;
+    expect([agentLimit(config, "free"), agentLimit(config, "plus"), agentLimit(config, "gone")]).toEqual([20, 25, 20]);
+    // A tier named like something every object has is still a tier the configuration does not name.
+    for (const odd of ["constructor", "__proto__", "toString", "hasOwnProperty"]) expect([odd, agentLimit(config, odd)]).toEqual([odd, 20]);
+
+    const owner = await signUp(app, "uma");
+    await db.query("insert into accounts (principal_id, tier) values ($1, 'constructor')", [owner.id]);
+    for (let i = 0; i < 20; i++) await mustCreateAgent(app, owner);
+    expect(await createAgent(app, owner)).toMatchObject({ status: 403, json: { error: "agent_limit" } });
+    const deleted = (await api(app, owner, "GET", "/api/agents")).json.agents[0];
+    expect((await api(app, owner, "DELETE", `/api/agents/${deleted.id}`)).status).toBe(200);
+    // Outside a transaction too (the usage route reads with the pool).
+    expect(await countLiveAgents(db, owner.id)).toBe(19);
+    expect((await api(app, owner, "GET", "/api/usage")).json).toMatchObject({ tier: "constructor", agentLimit: 20, agentCount: 19 });
   });
 
   it("eight concurrent creates at 19 Agents yield exactly one 201", async () => {

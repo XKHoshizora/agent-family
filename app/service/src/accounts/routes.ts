@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { agentLimit, countLiveAgents } from "../agents/store.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { chargeSource, headroom, readHolds } from "../metering/admit.ts";
 import { requirePrincipal } from "../session.ts";
@@ -48,14 +49,9 @@ export function registerAccountRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
       const now = new Date();
-      const [account, agents, used, holds, recent] = await Promise.all([
+      const [account, agentCount, used, holds, recent] = await Promise.all([
         db.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]),
-        db.query<{ n: number }>(
-          `select count(*)::int as n
-             from principals p join agents a on a.principal_id = p.id
-            where p.kind = 'agent' and p.owner_id = $1 and a.deleted_at is null`,
-          [me.id],
-        ),
+        countLiveAgents(db, me.id),
         freeUsedToday(db, me.id, now, config.siteTimezone),
         readHolds(db, me.id),
         db.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
@@ -76,9 +72,9 @@ export function registerAccountRoutes(app: FastifyInstance): void {
       const balanceMicro = BigInt(account.rows[0]?.balance_micro ?? "0");
       return {
         tier,
-        // A tier the configuration no longer names gets the free limit.
-        agentLimit: config.agentTiers[tier] ?? config.agentTiers.free!,
-        agentCount: agents.rows[0]!.n,
+        // Creation's own rule (a tier the configuration no longer names gets the free limit).
+        agentLimit: agentLimit(config, tier),
+        agentCount,
         balance: formatPoints(balanceMicro),
         free: {
           allowance: formatPoints(config.freeDailyMicro),

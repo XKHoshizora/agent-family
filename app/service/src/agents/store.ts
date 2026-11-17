@@ -126,9 +126,21 @@ export async function listOwnedAgents(q: Queryable, ownerId: string): Promise<Ag
   return rows.map(toAgent);
 }
 
-/** How many Agents the owner has that are not deleted: what counts against the tier's limit. */
-export async function countLiveAgents(t: Tx, ownerId: string): Promise<number> {
-  const { rows } = await t.query<{ n: number }>(
+/**
+ * How many Agents an account of `tier` may have that are not deleted: what `AGENT_TIERS` gives it, and for a tier the
+ * configuration does not name (an own key of it, so no name an object inherits counts) the `free` number. The one
+ * definition: Agent creation and `GET /api/usage` both use it.
+ */
+export function agentLimit(config: Pick<Config, "agentTiers">, tier: string): number {
+  return Object.hasOwn(config.agentTiers, tier) ? config.agentTiers[tier]! : config.agentTiers.free!;
+}
+
+/**
+ * How many Agents the owner has that are not deleted: what counts against `agentLimit`. In a transaction (creation
+ * counts under the owner's account lock) or on the pool (`GET /api/usage`).
+ */
+export async function countLiveAgents(q: Queryable, ownerId: string): Promise<number> {
+  const { rows } = await q.query<{ n: number }>(
     `select count(*)::int as n from agents a join principals p on p.id = a.principal_id where p.owner_id = $1 and a.deleted_at is null`,
     [ownerId],
   );

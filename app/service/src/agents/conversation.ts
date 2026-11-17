@@ -9,7 +9,7 @@ import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type Messag
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { ownedAgentOf } from "./runs.ts";
-import { assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
+import { agentLimit, assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
 
 /** The longest text a message holds (people's messages are refused above it; an Agent's reply is cut there). */
@@ -48,8 +48,7 @@ export async function createAgent(
   config: Pick<Config, "agentTiers" | "siteModels" | "providerDefaultMaxOutputTokens">,
 ): Promise<{ agent: AgentRow; change: Change }> {
   const account = await lockAccount(t, ownerId);
-  const limit = config.agentTiers[account.tier] ?? config.agentTiers.free!;
-  if ((await countLiveAgents(t, ownerId)) >= limit) throw new AppError(403, "agent_limit");
+  if ((await countLiveAgents(t, ownerId)) >= agentLimit(config, account.tier)) throw new AppError(403, "agent_limit");
   await assertModelChoice(t, ownerId, input.model, input.reasoning, config);
 
   let id: string;
