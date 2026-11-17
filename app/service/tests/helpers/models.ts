@@ -208,7 +208,8 @@ function openaiChatStream(kind: CannedKind): string {
   const reasoning = kind === "reasoning";
   return sse([
     chunk({ role: "assistant", content: "" }),
-    // The OpenAI-compatible way some servers stream reasoning; the SDK's Chat Completions model does not read it.
+    // The OpenAI-compatible way some servers stream reasoning: the SDK's Chat Completions model does not read it, the
+    // gateway does (src/models/chat-reasoning.ts).
     ...(reasoning ? CANNED_REASONING_DELTAS.map((d) => chunk({ reasoning_content: d })) : []),
     ...CANNED_TEXT_DELTAS.map((d) => chunk({ content: d })),
     chunk({}, kind === "length" ? "length" : "stop"),

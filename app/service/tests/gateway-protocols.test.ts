@@ -5,6 +5,7 @@ import { createSlots } from "../src/slots.ts";
 import { PNG } from "./helpers/agents.ts";
 import {
   answerCanned,
+  cannedStream,
   CANNED_REASONING,
   CANNED_REASONING_USAGE,
   CANNED_TEXT,
@@ -202,26 +203,144 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_USAGE, truncated: true });
   });
 
-  if (protocol === "openai_chat") {
-    it("fallback: Chat Completions has no reasoning stream the SDK reads; its reasoning is dropped but counted as output", async () => {
-      stub.answer((req, res) => answerCanned(req, res, "reasoning"));
-      const events = await collect(gateway.stream(call(protocol, { reasoning: "high" })));
-      expect(deltas(events, "reasoning")).toEqual([]);
-      expect(deltas(events, "text").join("")).toBe(CANNED_TEXT);
-      expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_REASONING_USAGE, truncated: false });
-    });
-  } else {
-    it("a reasoning stream arrives as reasoning deltas before the text; reasoning tokens count as output", async () => {
-      stub.answer((req, res) => answerCanned(req, res, "reasoning"));
-      const events = await collect(gateway.stream(call(protocol, { reasoning: "high" })));
-      expect(deltas(events, "reasoning").join("")).toBe(CANNED_REASONING);
-      expect(deltas(events, "text").join("")).toBe(CANNED_TEXT);
-      const firstText = events.findIndex((e) => e.type === "text");
-      const lastReasoning = events.findLastIndex((e) => e.type === "reasoning");
-      expect(lastReasoning).toBeLessThan(firstText);
-      expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_REASONING_USAGE, truncated: false });
-    });
+  // Chat Completions: its `reasoning_content`, which the SDK does not read, is read off the stream by the gateway.
+  it("a reasoning stream arrives as reasoning deltas before the text; reasoning tokens count as output", async () => {
+    stub.answer((req, res) => answerCanned(req, res, "reasoning"));
+    const events = await collect(gateway.stream(call(protocol, { reasoning: "high" })));
+    expect(deltas(events, "reasoning").join("")).toBe(CANNED_REASONING);
+    expect(deltas(events, "text").join("")).toBe(CANNED_TEXT);
+    const firstText = events.findIndex((e) => e.type === "text");
+    const lastReasoning = events.findLastIndex((e) => e.type === "reasoning");
+    expect(lastReasoning).toBeLessThan(firstText);
+    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_REASONING_USAGE, truncated: false });
+  });
+});
+
+// --- Chat Completions reasoning: a delta's own field, or <think> at the start of the answer --------------------------
+
+/** One Chat Completions chunk event carrying `delta` (and a finish reason). */
+const chatChunk = (delta: object, finish: string | null = null) =>
+  `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: STUB_MODEL, choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
+/** A Chat Completions event stream: an opening chunk, `deltas`, the finish, the usage. */
+function chatEvents(deltas: object[], finish = "stop", usage: object = { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 }): string {
+  const tail = `data: ${JSON.stringify({ id: "chatcmpl-x", object: "chat.completion.chunk", created: 1, model: STUB_MODEL, choices: [], usage })}\n\n`;
+  return [chatChunk({ role: "assistant", content: "" }), ...deltas.map((d) => chatChunk(d)), chatChunk({}, finish), tail, "data: [DONE]\n\n"].join("");
+}
+const streaming = (body: string) => (_req: unknown, res: import("node:http").ServerResponse) => {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.end(body);
+};
+/** The events but the finish, consecutive deltas of one type joined: what a reader sees, however it was cut. */
+function runs(events: ModelEvent[]): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  for (const e of events) {
+    if (e.type === "finish") continue;
+    const last = out.at(-1);
+    if (last && last[0] === e.type) last[1] += e.delta;
+    else out.push([e.type, e.delta]);
   }
+  return out;
+}
+const chatRuns = async (deltas: object[]) => {
+  stub.answer(streaming(chatEvents(deltas)));
+  return runs(await collect(gateway.stream(call("openai_chat", { reasoning: "high" }))));
+};
+const text = (content: string) => ({ content });
+
+describe("Chat Completions reasoning", () => {
+  it("reasoning_content, or reasoning as a string, becomes reasoning, in its place among the text and never in it", async () => {
+    expect(await chatRuns([{ reasoning_content: "A" }, text("X"), { reasoning_content: "B" }, text("Y")])).toEqual([
+      ["reasoning", "A"],
+      ["text", "X"],
+      ["reasoning", "B"],
+      ["text", "Y"],
+    ]);
+    expect(await chatRuns([{ reasoning: "via reasoning" }, { reasoning: { not: "a string" } }, text("Done.")])).toEqual([
+      ["reasoning", "via reasoning"],
+      ["text", "Done."],
+    ]);
+    // One delta with both: the reasoning first; with both fields, reasoning_content only.
+    expect(await chatRuns([{ reasoning_content: "R", reasoning: "R", content: "C" }])).toEqual([
+      ["reasoning", "R"],
+      ["text", "C"],
+    ]);
+  });
+
+  it("reasoning shows while the model still thinks: before any of the answer was sent", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    stub.answer(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(chatChunk({ role: "assistant", content: "" }) + chatChunk({ reasoning_content: "Let me think" }));
+      await gate;
+      res.end(chatEvents([text("Answer.")]).split("\n\n").slice(1).join("\n\n"));
+    });
+    const iterator = gateway.stream(call("openai_chat", { reasoning: "high" }))[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toEqual({ type: "reasoning", delta: "Let me think" });
+    release();
+    const rest: ModelEvent[] = [];
+    for (let r = await iterator.next(); !r.done; r = await iterator.next()) rest.push(r.value);
+    expect(runs(rest)).toEqual([["text", "Answer."]]);
+    expect(rest.at(-1)).toMatchObject({ type: "finish", truncated: false });
+  });
+
+  it("a stream with CRLF line ends, arriving a few bytes at a time, is read the same", async () => {
+    const body = cannedStream("openai_chat", "reasoning").replaceAll("\n", "\r\n");
+    stub.answer(async (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      for (let i = 0; i < body.length; i += 5) {
+        res.write(body.slice(i, i + 5));
+        await new Promise((r) => setImmediate(r));
+      }
+      res.end();
+    });
+    const events = await collect(gateway.stream(call("openai_chat", { reasoning: "high" })));
+    expect(runs(events)).toEqual([
+      ["reasoning", CANNED_REASONING],
+      ["text", CANNED_TEXT],
+    ]);
+  });
+
+  it("an answer that opens with <think> has the block taken out as reasoning, the tags cut anywhere between deltas", async () => {
+    expect(await chatRuns([text("  <thi"), text("nk>Pondering"), text(" deeply</th"), text("ink>\n\nThe answer"), text(" is 42.")])).toEqual([
+      ["reasoning", "Pondering deeply"],
+      ["text", "The answer is 42."],
+    ]);
+    expect(await chatRuns([text("<"), text("t"), text("hink>a<"), text("/thinking about it</think>"), text("ok")])).toEqual([
+      ["reasoning", "a</thinking about it"],
+      ["text", "ok"],
+    ]);
+  });
+
+  it("an unclosed <think>: everything after it is reasoning", async () => {
+    expect(await chatRuns([text("<think>still"), text(" going </thi")])).toEqual([["reasoning", "still going </thi"]]);
+  });
+
+  it("an empty <think></think> block leaves the answer alone", async () => {
+    expect(await chatRuns([text("<think></think>"), text("Answer")])).toEqual([["text", "Answer"]]);
+  });
+
+  it("a <think> anywhere but at the start is text, and so is a start that only looks like one", async () => {
+    expect(await chatRuns([text("Use <think>"), text("tags</think> like this")])).toEqual([["text", "Use <think>tags</think> like this"]]);
+    expect(await chatRuns([text("<thi"), text("s is text")])).toEqual([["text", "<this is text"]]);
+    expect(await chatRuns([text("\n"), text("Hello")])).toEqual([["text", "\nHello"]]);
+  });
+
+  it("with reasoning in the protocol's own field first, <think> in the text is left as text", async () => {
+    expect(await chatRuns([{ reasoning_content: "real thought" }, text("<think>x</think>y")])).toEqual([
+      ["reasoning", "real thought"],
+      ["text", "<think>x</think>y"],
+    ]);
+  });
+
+  it("other protocols' text is never looked at for <think>", async () => {
+    stub.answer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.end(cannedStream("anthropic", "text").replace('"text":"Hello"', '"text":"<think>Hello</think>"'));
+    });
+    const events = await collect(gateway.stream(call("anthropic")));
+    expect(runs(events)).toEqual([["text", `<think>Hello</think>${CANNED_TEXT.slice("Hello".length)}`]]);
+  });
 });
 
 describe("nothing is kept at OpenAI", () => {

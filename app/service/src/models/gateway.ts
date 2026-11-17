@@ -1,12 +1,13 @@
 import { createAnthropic, type AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
 import { createGoogle, type GoogleLanguageModelOptions } from "@ai-sdk/google";
 import { createOpenAI, type OpenAILanguageModelChatOptions, type OpenAILanguageModelResponsesOptions } from "@ai-sdk/openai";
-import { APICallError, streamText, type LanguageModel, type LanguageModelUsage, type ModelMessage } from "ai";
+import { APICallError, streamText, type LanguageModel, type LanguageModelUsage, type ModelMessage, type TextStreamPart, type ToolSet } from "ai";
 import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
 import { guardedFetch } from "../providers/guard.ts";
 import { createProviderProbe, PROBE_GUARD, ProviderCallError, type ProviderCallCode } from "../providers/probe.ts";
 import type { Slots } from "../slots.ts";
+import { ChatReasoningTap, ThinkTags } from "./chat-reasoning.ts";
 
 /**
  * The model gateway: the one place the service talks to a language model. Every call goes out through the address
@@ -92,6 +93,7 @@ export class ModelError extends AppError {
 }
 
 type ProviderOptions = NonNullable<Parameters<typeof streamText>[0]["providerOptions"]>;
+type StreamPart = TextStreamPart<ToolSet>;
 
 const openaiChat = (effort: "low" | "medium" | "high" | "xhigh") => ({
   openai: { reasoningEffort: effort, forceReasoning: true } satisfies OpenAILanguageModelChatOptions,
@@ -271,13 +273,34 @@ function toModelError(err: unknown): ModelError {
   return new ModelError("provider_unavailable");
 }
 
+/** `fetch` with every successful response's body read by `tap` on its way to the SDK (Chat Completions). */
+function tapped(fetch: typeof globalThis.fetch, tap: ChatReasoningTap): typeof globalThis.fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const res = await fetch(input, init);
+    if (!res.ok || res.body === null) return res;
+    return new Response(res.body.pipeThrough(tap.transform()), { status: res.status, statusText: res.statusText, headers: res.headers });
+  }) as typeof globalThis.fetch;
+}
+
+/**
+ * The call as events. On Chat Completions (where the SDK reads no reasoning) a delta's own reasoning field is read off
+ * the stream (`ChatReasoningTap`) and comes out in its place among the text, as soon as it arrives; an answer that
+ * streamed none of it before its first text and opens with `<think>` has that block taken out as reasoning
+ * (`ThinkTags`). Reasoning never becomes text.
+ */
 async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): AsyncGenerator<ModelEvent> {
   call.signal.throwIfAborted();
   // Ends the upstream request however this iterator ends: finished, failed, stopped, or left early by its reader.
   const own = new AbortController();
+  const tap = call.protocol === "openai_chat" ? new ChatReasoningTap() : null;
+  /** Chat Completions: undecided until the first text, then whether the answer is looked at for `<think>`. */
+  let tags: ThinkTags | null | undefined = tap ? undefined : null;
+  /** Reasoning arrived in the protocol's own field. */
+  let structured = false;
+  let parts: AsyncIterator<StreamPart> | undefined;
   try {
     const result = streamText({
-      model: languageModel(call, fetch),
+      model: languageModel(call, tap ? tapped(fetch, tap) : fetch),
       ...(call.system === "" ? {} : { instructions: call.system }),
       messages: toModelMessages(call.messages),
       maxOutputTokens: call.maxOutputTokens,
@@ -288,11 +311,35 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
       // Failures arrive below as `error` parts; the default handler would print them, upstream text and all.
       onError: () => {},
     });
-    for await (const part of result.stream) {
+    parts = result.stream[Symbol.asyncIterator]();
+    let next: Promise<IteratorResult<StreamPart>> | null = null;
+    while (true) {
+      if (tap) {
+        // Reasoning ahead of every text still to come is due now, whatever the SDK is waiting for.
+        const due = tap.leading();
+        for (const delta of due) {
+          structured = true;
+          yield { type: "reasoning", delta };
+        }
+        if (due.length > 0) continue;
+      }
+      next ??= parts.next();
+      const got = tap ? await Promise.race([next, tap.changed().then(() => null)]) : await next;
       call.signal.throwIfAborted();
+      if (got === null) continue;
+      next = null;
+      if (got.done) break;
+      const part = got.value;
       switch (part.type) {
         case "text-delta":
-          if (part.text !== "") yield { type: "text", delta: part.text };
+          if (part.text === "") break;
+          for (const delta of tap?.beforeText() ?? []) {
+            structured = true;
+            yield { type: "reasoning", delta };
+          }
+          if (tags === undefined) tags = structured ? null : new ThinkTags();
+          if (tags) for (const split of tags.push(part.text)) yield split;
+          else yield { type: "text", delta: part.text };
           break;
         case "reasoning-delta":
           if (part.text !== "") yield { type: "reasoning", delta: part.text };
@@ -302,6 +349,8 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
         case "abort":
           throw new ModelError("provider_unavailable");
         case "finish":
+          for (const delta of tap?.rest() ?? []) yield { type: "reasoning", delta };
+          if (tags) for (const split of tags.end()) yield split;
           // "interrupted": the stream ended without the protocol's completion; "error": the upstream reported one.
           if (part.finishReason === "interrupted" || part.finishReason === "error") throw new ModelError("provider_unavailable");
           yield { type: "finish", usage: usageOf(part.totalUsage), truncated: part.finishReason === "length" };
@@ -314,5 +363,7 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch): Asy
     throw toModelError(err);
   } finally {
     own.abort();
+    // Not awaited: a read still pending ends with the abort.
+    void parts?.return?.()?.catch(() => {});
   }
 }
