@@ -3,7 +3,7 @@
 // steered by anything in the conversation, and it is shown in the reader's signed-in page. Raw HTML is text, a URL is a
 // link only when it is http(s), an image is never fetched, nothing gets an id, a handler or a style of its own, and a
 // text too big (or too deep) to render safely is shown as plain text. A person's message is never Markdown.
-import "./markdown-ready.js";
+import { useTimeLimits } from "./markdown-ready.js";
 import React from "react";
 import { readFileSync } from "node:fs";
 import katex from "katex";
@@ -211,7 +211,6 @@ describe("what an Agent's Markdown renders to", () => {
     ["c", "int main() {}"],
     ["cpp", "int main() {}"],
     ["yaml", "a: 1"],
-    ["markdown", "# x"],
     ["diff", "+ a\n- b"],
   ])("highlights %s", (lang, source) => {
     const bubble = show(`\`\`\`${lang}\n${source}\n\`\`\``);
@@ -219,7 +218,7 @@ describe("what an Agent's Markdown renders to", () => {
     expect(bubble.querySelector("pre > code span[class^='hljs-']"), lang).not.toBeNull();
   });
 
-  it.each(["mermaid", "plantuml", "kotlin", ""])("renders a %s fence (unknown, a diagram, or none) as plain code", (lang) => {
+  it.each(["mermaid", "plantuml", "kotlin", "markdown", "md", ""])("renders a %s fence (unknown, a diagram, Markdown, or none) as plain code", (lang) => {
     const source = "graph TD\n  A-->B";
     const bubble = show(`\`\`\`${lang}\n${source}\n\`\`\``);
     const code = bubble.querySelector("pre > code");
@@ -248,6 +247,41 @@ describe("what an Agent's Markdown renders to", () => {
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "复制" })));
     expect(screen.getByRole("button", { name: "复制" })).toBeTruthy();
     expect(errors).not.toHaveBeenCalled();
+  });
+
+  // The note cannot be dodged: invisible characters, words around the address, no scheme, `//`, look-alike letters.
+  it.each([
+    ["a zero-width space before the scheme", "[​https://bank.example/](https://evil.example/)", "evil.example"],
+    ["a word joiner before the scheme", "[⁠https://bank.example/](https://evil.example/)", "evil.example"],
+    ["a left-to-right mark before the scheme", "[‎https://bank.example/](https://evil.example/)", "evil.example"],
+    ["a zero-width space inside the host", "[https://bank​.example/](https://evil.example/)", "evil.example"],
+    ["a soft hyphen inside the host", "[https://bank­.example/](https://evil.example/)", "evil.example"],
+    ["a fullwidth colon", "[https：//bank.example/](https://evil.example/)", "evil.example"],
+    ["words before the address", "[登录 https://bank.example/](https://evil.example/)", "evil.example"],
+    ["a protocol-relative address", "[//bank.example/](https://evil.example/)", "evil.example"],
+    ["a bare domain", "[bank.example](https://evil.example/)", "evil.example"],
+    ["the address in a code span", "[`https://bank.example/`](https://evil.example/)", "evil.example"],
+    ["the address in emphasis", "[*https://bank.example/*](https://evil.example/)", "evil.example"],
+    ["a user name that looks like the host", "[https://bank.example@evil.example/](https://evil.example/)", "evil.example"],
+    ["an ideographic full stop for a dot", "[bank。example](https://evil.example/)", "evil.example"],
+    ["an IPv4 address", "[http://10.0.0.1/](https://evil.example/)", "evil.example"],
+    ["an IDN look-alike target", "[https://apple.com/](https://аррӏе.com/)", "xn--80ak6aa92e.com"],
+  ])("a link whose text shows another host gets the note: %s", (_, text, host) => {
+    const bubble = show(text);
+    expect(bubble.querySelector("a").nextSibling?.textContent).toBe(` （实际指向 ${host}）`);
+    expectSafe(bubble);
+  });
+
+  it.each([
+    ["plain words", "[文档](https://example.com/docs)"],
+    ["an autolink", "https://example.com/docs"],
+    ["the text equal to the target", "[https://example.com/a](https://example.com/a)"],
+    ["the same host, other path", "[example.com/a](https://example.com/b)"],
+    ["www. on one side only", "[https://www.example.com/](https://example.com/b)"],
+    ["the same IDN host on both sides", "[https://аррӏе.com/](https://аррӏе.com/)"],
+    ["a version number, not a host", "[v1.2](https://example.com/releases)"],
+  ])("an ordinary link gets no note: %s", (_, text) => {
+    expect(show(text).textContent).not.toContain("实际指向");
   });
 
   it("maths is $$…$$ only: a single $ is text (`$5 和 $10` stays a sentence)", () => {
@@ -459,10 +493,17 @@ describe("what is shown as plain text without trying", () => {
     expect(fitsMarkdown(`${"x".repeat(9999)}\n`.repeat(6))).toBe(false); // 60 000 characters
     expect(fitsMarkdown("y".repeat(10000))).toBe(true);
     expect(fitsMarkdown("y".repeat(10001))).toBe(false);
-    expect(fitsMarkdown("| a |\n".repeat(2000))).toBe(true);
-    expect(fitsMarkdown("| a |\n".repeat(2001))).toBe(false);
-    // Table rows inside a code fence are code, not a table.
-    expect(fitsMarkdown(`\`\`\`\n${"| a |\n".repeat(2001)}\`\`\``)).toBe(true);
+    // Lines starting with |, | characters, code fences and $$: each counted in the same single pass.
+    expect(fitsMarkdown("| a |\n".repeat(400))).toBe(true);
+    expect(fitsMarkdown("| a |\n".repeat(401))).toBe(false);
+    expect(fitsMarkdown("a | b\n".repeat(2000))).toBe(true);
+    expect(fitsMarkdown("a | b\n".repeat(2001))).toBe(false);
+    expect(fitsMarkdown("```\nx\n```\n".repeat(300))).toBe(true);
+    expect(fitsMarkdown("```\nx\n```\n".repeat(301))).toBe(false);
+    expect(fitsMarkdown("$$x$$\n\n".repeat(1000))).toBe(true);
+    expect(fitsMarkdown("$$x$$\n\n".repeat(1001))).toBe(false);
+    // Table rows and $$ inside a code fence are code: not counted.
+    expect(fitsMarkdown(`\`\`\`\n${"| a | $$ |\n".repeat(2001)}\`\`\``)).toBe(true);
     expect(fitsMarkdown(`${"- ".repeat(30)}x`)).toBe(true);
     expect(fitsMarkdown(`${"- ".repeat(31)}x`)).toBe(false);
     expect(fitsMarkdown(`${"> ".repeat(31)}x`)).toBe(false);
@@ -476,7 +517,7 @@ describe("what is shown as plain text without trying", () => {
     expect(fitsMarkdown(Array.from({ length: 5 }, () => "a_ ".repeat(3000)).join("\n"))).toBe(false);
     expect(fitsMarkdown(`${"[a](b) ".repeat(1200)}`)).toBe(false);
     expect(fitsMarkdown(Array.from({ length: 1500 }, (_, i) => `- **项${i}**：说明`).join("\n"))).toBe(true);
-    expect(fitsMarkdown(`| a | b |\n|---|---|\n${Array.from({ length: 1500 }, (_, i) => `| **${i}** | _x_ |`).join("\n")}`)).toBe(true);
+    expect(fitsMarkdown(`| a | b |\n|---|---|\n${Array.from({ length: 300 }, (_, i) => `| **${i}** | _x_ |`).join("\n")}`)).toBe(true);
     expect(fitsMarkdown(Array.from({ length: 40 }, () => "这是**一句**话，含 `snake_case` 和 [链接](https://a.example/)。".repeat(20)).join("\n\n"))).toBe(true);
     // Indented lines inside a fence are code.
     expect(fitsMarkdown(`\`\`\`\n${" ".repeat(200)}x\n\`\`\``)).toBe(true);
@@ -615,8 +656,19 @@ describe("the work a text can cause is bounded", () => {
   const wideTable = (cols, rows, row = "x") => `${"|a".repeat(cols)}|\n${"|-".repeat(cols)}|\n${`${row}\n`.repeat(rows)}`;
   const cells = (bubble) => bubble.querySelectorAll("td, th").length;
 
+  it("a table with more | than a text may have is shown plain without being parsed", () => {
+    for (const text of [wideTable(2000, 20000), wideTable(100, 60, `${"|b".repeat(100)}|`), Array.from({ length: 1200 }, () => "|a|b|\n|-|-|\n|c|d|").join("\n\n")]) {
+      expect(fitsMarkdown(text)).toBe(false);
+      const { bubble, ms } = timed(text);
+      expect(md(bubble)).toBeNull();
+      expect(elementsIn(bubble)).toBe(0);
+      expect(ms).toBeLessThan(WALL_MS);
+      cleanup();
+    }
+  });
+
   it("a table that would have more than 5 000 cells (rows padded to a wide header, pipes or none) is shown as plain text", () => {
-    for (const text of [wideTable(300, 2000), wideTable(2000, 20000), wideTable(100, 60, `${"|b".repeat(100)}|`)]) {
+    for (const text of [wideTable(300, 2000), wideTable(60, 100), wideTable(100, 300, "|b|")]) {
       expect(fitsMarkdown(text)).toBe(true);
       const { bubble, ms } = timed(text);
       expect(cells(bubble)).toBe(0);
@@ -627,9 +679,9 @@ describe("the work a text can cause is bounded", () => {
   });
 
   it("a wide table within the cap is rendered, padded as GFM pads it", () => {
-    const bubble = show(wideTable(100, 40, `${"|b".repeat(100)}|`));
-    expect(bubble.querySelectorAll("th")).toHaveLength(100);
-    expect(bubble.querySelectorAll("td")).toHaveLength(4000);
+    const bubble = show(wideTable(20, 40, `${"|b".repeat(20)}|`));
+    expect(bubble.querySelectorAll("th")).toHaveLength(20);
+    expect(bubble.querySelectorAll("td")).toHaveLength(800);
     expect(show(wideTable(5, 3)).querySelectorAll("td")).toHaveLength(15);
   });
 
@@ -670,6 +722,9 @@ describe("the work a text can cause is bounded", () => {
     });
   }
 
+  describe("within the app's time limits", () => {
+  useTimeLimits();
+
   it("past 150 ms of KaTeX in one text the remaining formulas are code; the next pieces typeset the rest", () => {
     const typesets = slowKatex(() => 40);
     const formulas = Array.from({ length: 8 }, (_, i) => `$$b_{${i}}^{budget}$$`).join(" ");
@@ -684,7 +739,7 @@ describe("the work a text can cause is bounded", () => {
   });
 
   it("a formula that alone takes too long spends the text's budget, and is never typeset again", () => {
-    const typesets = slowKatex((tex) => (tex.includes("slow") ? 400 : 1));
+    const typesets = slowKatex((tex) => (tex.includes("slow") ? 300 : 1));
     const text = "$$\\text{slow}^{once}$$ 和 $$q^{fast}$$";
     const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
     expect(typesets).toHaveBeenCalledTimes(1); // the slow one spent the budget: the other is code this time
@@ -693,6 +748,7 @@ describe("the work a text can cause is bounded", () => {
     for (const tail of [" 。", " 。。", " 。。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
     expect(typesets).toHaveBeenCalledTimes(2); // the fast one, once; the slow one never again (shown while kept)
     expect(container.querySelectorAll(".katex")).toHaveLength(2);
+  });
   });
 
   it("typeset formulas and highlighted code are used again unchanged, in every bubble and on every piece", () => {
@@ -703,7 +759,7 @@ describe("the work a text can cause is bounded", () => {
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(second.innerHTML).toBe(first.innerHTML);
     const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
-    for (const tail of [" ", " 。", " 。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
+    for (const tail of ["\n\n。", "\n\n。。", "\n\n。。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".katex")).not.toBeNull();
     expect(container.querySelector(".hljs-keyword").textContent).toBe("const");
@@ -717,7 +773,7 @@ describe("the work a text can cause is bounded", () => {
   const mixed = Array.from({ length: 49999 }, (_, i) => MIX[(i * 7 + Math.floor(i / 13)) % MIX.length]).join("");
   it.each([
     ["a wide header over pipe-less rows", wideTable(300, 2000)],
-    ["a wide header over piped rows", wideTable(100, 400, `${"|b".repeat(100)}|`)],
+    ["a wide header over piped rows", wideTable(100, 300, "|b|")],
     ["nested macros", `$$\n\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(400)}}}}\n$$`],
     ["many small formulas", Array.from({ length: 40 }, (_, i) => Array.from({ length: 10 }, (_, j) => `$$s_{${i}}^{${j}}$$`).join(" ")).join("\n\n")],
     ["deeply nested emphasis", "*a _b ".repeat(400) + "x" + " b_ a*".repeat(400)],

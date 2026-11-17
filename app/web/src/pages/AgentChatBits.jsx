@@ -8,6 +8,7 @@ import { runFailureText } from "../data/errorTexts.js";
 import { nameOf, publishBlock } from "../state/selectors.js";
 import { ChunkBoundary } from "../ui/ChunkBoundary.jsx";
 import { fitsMarkdown } from "../ui/markdownLimits.js";
+import { PlainWithNote, isSlowText } from "../ui/slowTexts.jsx";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { refusalText, settled } from "./AgentForm.jsx";
 import { useAction, useNow } from "./useAction.js";
@@ -57,23 +58,26 @@ export function loadMarkdown(load = () => import("../ui/Markdown.jsx")) {
 }
 
 /** The renderer, once its chunk is here (suspends until then). */
-function LoadedMarkdown({ text }) {
+function LoadedMarkdown({ text, stream }) {
   const { Markdown } = use(loadMarkdown());
-  return <Markdown text={text} />;
+  return <Markdown text={text} stream={stream} />;
 }
 
 /**
  * The text of an Agent's message, stored or streaming, as safe Markdown (ui/Markdown.jsx). Shown plain, as a person's
  * message is, while the renderer loads, when it could not be loaded, when it fails on this text (the next text is
  * tried again), and for a text too big or too deep to render (ui/markdownLimits.js). Nothing else is ever Markdown.
+ * A text that took too long to render before (ui/slowTexts.jsx), or the rest of a reply being written that did
+ * (`stream.plain`), is shown plain with a note, without being parsed.
  */
-export const AgentText = memo(function AgentText({ text }) {
+export const AgentText = memo(function AgentText({ text, stream }) {
   const plain = <>{text}</>;
   if (!fitsMarkdown(text) || markdownChunk?.status === "rejected") return plain;
+  if (stream?.plain || isSlowText(text)) return <PlainWithNote text={text} />;
   return (
     <ChunkBoundary fallback={plain} resetKey={text}>
       <Suspense fallback={plain}>
-        <LoadedMarkdown text={text} />
+        <LoadedMarkdown text={text} stream={stream} />
       </Suspense>
     </ChunkBoundary>
   );
@@ -81,10 +85,12 @@ export const AgentText = memo(function AgentText({ text }) {
 
 /**
  * The text of a reply being written, rendered at a lower priority than typing and scrolling: pieces arriving faster than
- * it renders are taken together (useDeferredValue).
+ * it renders are taken together (useDeferredValue). Once one piece has taken too long to render, the rest of this reply
+ * is plain (`stream.plain`, set by the renderer); the stored message that replaces it is judged on its own.
  */
 export function StreamingAgentText({ text }) {
-  return <AgentText text={useDeferredValue(text)} />;
+  const [stream] = useState(() => ({ plain: false }));
+  return <AgentText text={useDeferredValue(text)} stream={stream} />;
 }
 
 /** The model's thinking: folded above the answer, opened only by the reader. */

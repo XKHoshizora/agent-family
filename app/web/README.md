@@ -59,5 +59,7 @@ restart spec skips itself.
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.
 - `src/ui/Markdown.jsx` - the safe Markdown renderer for Agents' messages only (its own chunk, loaded with the first Agent message;
   `AgentText` in `src/pages/AgentChatBits.jsx` shows the plain text until then, on any failure, and for a text beyond
-  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched; maths is `$$…$$` only;
-  table cells, formulas, maths output and maths time per text are capped.
+  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched; maths is `$$…$$` only.
+  The work a text causes is bounded by its output and by time (`LIMITS` in `Markdown.jsx`: cells, formulas, maths and
+  highlighting output and time, a final count of the whole tree); a text whose render takes over 400 ms is shown plain
+  with a note and remembered for the tab by a digest (`src/ui/slowTexts.jsx`).

@@ -9,9 +9,11 @@
 //   5. Every link opens a new tab, with rel="noopener noreferrer nofollow", its real address as its tooltip.
 //   6. The caller wraps this in an error boundary that shows the plain text instead, and shows a text too big or too
 //      deep (markdownLimits.js) plain without trying.
-// And the work a text can cause is bounded: table cells, formulas, maths output and maths time (below).
-import React, { memo, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+// And the work a text can cause is bounded by what it produces and by time, whatever the input: table cells, formulas
+// and their output, highlighted code and its output, a final count of the whole tree before React sees it, and a time
+// limit on the whole render (a text found too slow is plain from then on, in this tab: slowTexts.jsx).
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
+import renderMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import katex from "katex";
@@ -26,7 +28,6 @@ import go from "highlight.js/lib/languages/go";
 import java from "highlight.js/lib/languages/java";
 import javascript from "highlight.js/lib/languages/javascript";
 import json from "highlight.js/lib/languages/json";
-import markdown from "highlight.js/lib/languages/markdown";
 import python from "highlight.js/lib/languages/python";
 import rust from "highlight.js/lib/languages/rust";
 import shell from "highlight.js/lib/languages/shell";
@@ -34,6 +35,7 @@ import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
+import { PlainWithNote, SLOW_PASS_MS, rememberSlowText } from "./slowTexts.jsx";
 import "katex/dist/katex.min.css";
 
 /** An absolute http(s) URL without a user name or password as the link's href, or null: the link is then its text. */
@@ -48,6 +50,38 @@ export function safeHref(value) {
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   return url.username || url.password ? null : url.href;
 }
+
+/**
+ * The limits on what one text may produce. (One object, so that a test can lift the earlier ones and show that the
+ * final count of the tree holds on its own.)
+ */
+export const LIMITS = {
+  /** Table cells, counted as rendered: every row padded to the delimiter row's width. */
+  cells: 5000,
+  /** One formula's source, in characters; formulas typeset per text. */
+  mathLength: 2000,
+  mathCount: 500,
+  /** One formula's KaTeX output (HTML characters), and all of a text's (kept results included). */
+  katexOutput: 100000,
+  katexTextOutput: 200000,
+  /** KaTeX time per text, and for one formula (beyond: never typeset again), in milliseconds. */
+  katexBudgetMs: 150,
+  katexSlowMs: 50,
+  /** Code highlighted only when every line and the whole block are within these (characters). */
+  highlightLine: 500,
+  highlightCode: 10000,
+  /** A highlighted block's output beyond these (elements, nesting) is discarded: plain code. */
+  highlightElements: 3000,
+  highlightDepth: 30,
+  /** Highlighting time per text, and for one block (beyond: never highlighted again), in milliseconds. */
+  highlightBudgetMs: 100,
+  highlightSlowMs: 50,
+  /** The final count: the whole tree of a text, before React sees it (beyond: the text is plain). */
+  treeElements: 15000,
+  treeDepth: 60,
+  /** One whole render of a text, in milliseconds: beyond, it is shown plain and remembered (slowTexts.jsx). */
+  passMs: SLOW_PASS_MS,
+};
 
 const classesOf = (node) => (Array.isArray(node?.properties?.className) ? node.properties.className.map(String) : []);
 const textOf = (node) => (node.children ?? []).map((child) => (child.type === "text" ? child.value : textOf(child))).join("");
@@ -70,17 +104,28 @@ function frozen(value) {
   }
   return value;
 }
+/** Elements in a (hast) tree and its deepest element's depth, counted without recursion; stops past the limits. */
+function sizeOf(tree, maxElements = Infinity, maxDepth = Infinity) {
+  let elements = 0;
+  let depth = 0;
+  const stack = [[tree, 0]];
+  while (stack.length > 0) {
+    const [node, level] = stack.pop();
+    if (node.type === "element") {
+      elements += 1;
+      if (level > depth) depth = level;
+      if (elements > maxElements || depth > maxDepth) break;
+    }
+    for (const child of node.children ?? []) stack.push([child, level + 1]);
+  }
+  return { elements, depth };
+}
+const plainElement = (text) => ({ type: "element", tagName: "p", properties: { className: ["md-plain"] }, children: [{ type: "text", value: text }] });
 
 // ───────── after parsing: limits on the tree
 
 /** How deeply the parsed text may nest (emphasis in emphasis…, which markdownLimits.js cannot see in the raw text). */
-const TREE_DEPTH_MAX = 100;
-/** Table cells in one text, counted as the rendered table has them: every row padded to the delimiter row's width. */
-export const CELLS_MAX = 5000;
-/** A formula or maths block longer than this is shown as code, not typeset. */
-const MATH_MAX = 2000;
-/** Formulas typeset in one text; the ones after are shown as code (KaTeX's output is large). */
-const MATH_COUNT_MAX = 500;
+const PARSED_DEPTH_MAX = 100;
 /** A formula that defines macros (or uses a macro parameter) is shown as code: a macro can multiply its output. */
 const MACRO_DEFINITION = /\\(?:def|gdef|edef|xdef|let|futurelet|newcommand|renewcommand|providecommand|global)(?![A-Za-z@])|#/;
 /** A fence line's marker: `$$`, ``` or ~~~ (after any quote markers and indentation). */
@@ -91,7 +136,7 @@ function tooDeep(tree) {
   const stack = [[tree, 0]];
   while (stack.length > 0) {
     const [node, depth] = stack.pop();
-    if (depth > TREE_DEPTH_MAX) return true;
+    if (depth > PARSED_DEPTH_MAX) return true;
     for (const child of node.children ?? []) stack.push([child, depth + 1]);
   }
   return false;
@@ -112,14 +157,15 @@ function cellsIn(tree) {
   return cells;
 }
 
-/** Whether a maths block or ```math fence has its closing fence (one still open at the end of the text has not). */
+/** Whether a maths block or code fence has its closing fence (one still open at the end of the text has not). */
 function closed(node, source) {
   const start = node.position?.start?.offset;
   const end = node.position?.end?.offset;
   if (start === undefined || end === undefined) return true;
   const lines = source.slice(start, end).split("\n");
   const fence = FENCE.exec(lines[0].replace(CONTAINER_PREFIX, ""))?.[1];
-  if (!fence || lines.length < 2) return false;
+  if (!fence) return true; // an indented code block has no fence to close
+  if (lines.length < 2) return false;
   const last = lines.at(-1).replace(CONTAINER_PREFIX, "").trim();
   return last.length >= fence.length && [...last].every((ch) => ch === fence[0]);
 }
@@ -133,14 +179,15 @@ function withBreaks(text) {
 }
 
 /**
- * The first step after parsing. A text that nests too deeply, or whose tables would have more than CELLS_MAX cells, is
- * shown as its plain text. A maths block still open at the end (a reply being written) is shown as its plain text until
- * it closes. Maths that is too long, beyond the count, or that defines macros becomes code before KaTeX sees it.
+ * The first step after parsing. A text that nests too deeply, or whose tables would have more than LIMITS.cells cells,
+ * is shown as its plain text. A maths block still open at the end (a reply being written) is its plain text until it
+ * closes, and a code fence still open is not highlighted. Maths that is too long, beyond the count, or that defines
+ * macros becomes code before KaTeX sees it.
  */
 function remarkLimits() {
   return (tree, file) => {
     const source = String(file.value);
-    if (tooDeep(tree) || cellsIn(tree) > CELLS_MAX) {
+    if (tooDeep(tree) || cellsIn(tree) > LIMITS.cells) {
       tree.children = [plainParagraph(source)];
       return;
     }
@@ -150,13 +197,14 @@ function remarkLimits() {
       node.children = node.children.flatMap((child) => {
         if (child.type === "text") return withBreaks(child);
         const block = child.type === "math" || (child.type === "code" && child.lang === "math");
+        if (child.type === "code" && !block) return [closed(child, source) ? child : { ...child, lang: null, meta: null }];
         if (!block && child.type !== "inlineMath") {
           walk(child);
           return [child];
         }
         if (block && !closed(child, source)) return [plainParagraph(source.slice(child.position.start.offset, child.position.end.offset))];
         formulas += 1;
-        if (child.value.length <= MATH_MAX && formulas <= MATH_COUNT_MAX && !MACRO_DEFINITION.test(child.value)) return [child];
+        if (child.value.length <= LIMITS.mathLength && formulas <= LIMITS.mathCount && !MACRO_DEFINITION.test(child.value)) return [child];
         return [block ? { type: "code", lang: null, meta: null, value: child.value } : { type: "inlineCode", value: child.value }];
       });
     };
@@ -168,16 +216,10 @@ function remarkLimits() {
 
 /** (Maths KaTeX cannot read is shown as its source, in the muted text colour rather than an alarming red.) */
 const KATEX = { throwOnError: false, strict: false, trust: false, maxExpand: 300, maxSize: 50, errorColor: "var(--ink-2)" };
-/** KaTeX output longer than this (as HTML) is discarded: the formula is shown as code. */
-export const KATEX_OUTPUT_MAX = 100000;
-/** KaTeX time for one text, in milliseconds: past it, the text's remaining formulas are shown as code (this time). */
-const KATEX_BUDGET_MS = 150;
-/** A formula that alone takes longer than this is never typeset again: shown while its result is kept, else as code. */
-const KATEX_SLOW_MS = 50;
-/** Typeset formulas by display mode and source; formulas not to typeset again (failed, too big, too slow). */
+/** Typeset formulas ({ nodes, size }) by display mode and source; formulas not to typeset again. */
 const typeset = new Map();
-const refused = new Map();
-const KATEX_KEPT = MATH_COUNT_MAX;
+const refusedFormulas = new Map();
+const KATEX_KEPT = 500;
 
 /** A formula in the tree: inline `<code class="math-inline">`, or a block's `<pre>` around `<code class="language-math">`. */
 function formulaOf(node) {
@@ -190,7 +232,7 @@ function formulaOf(node) {
 const codeElement = (text) => ({ type: "element", tagName: "code", properties: {}, children: [{ type: "text", value: text }] });
 const formulaAsCode = ({ tex, display }) => (display ? { type: "element", tagName: "pre", properties: {}, children: [codeElement(tex)] } : codeElement(tex));
 
-/** One formula typeset, as a tree; null when KaTeX failed or its output is over KATEX_OUTPUT_MAX. */
+/** One formula typeset: its tree and the size of KaTeX's HTML; null when KaTeX failed or the HTML is too long. */
 function typesetOne({ tex, display }) {
   let html;
   try {
@@ -198,23 +240,24 @@ function typesetOne({ tex, display }) {
   } catch {
     return null;
   }
-  if (html.length > KATEX_OUTPUT_MAX) return null;
-  return fromHtmlIsomorphic(html, { fragment: true }).children;
+  if (html.length > LIMITS.katexOutput) return null;
+  return { nodes: fromHtmlIsomorphic(html, { fragment: true }).children, size: html.length };
 }
 
 // KaTeX's first typeset sets itself up (font metrics and more): done as this chunk loads, not charged to a reply.
 typesetOne({ tex: "x", display: false });
 
 /**
- * Typesets every formula with KaTeX, within a time budget per text. A typeset runs to its end once started (it cannot be
- * interrupted): the static rules (length, count, no macro definitions, maxExpand) and the output cap are what protect a
- * formula's first typeset; the budget protects everything after it (the text's other formulas, and the next pieces of
- * a reply being written: a typeset formula is kept and used again, one that failed, was too big or too slow is never
- * typeset again).
+ * Typesets every formula with KaTeX, within a time budget and an output budget per text. A typeset runs to its end once
+ * started (it cannot be interrupted): the static rules (length, count, no macro definitions, maxExpand) and the output
+ * cap are what protect a formula's first typeset; the budgets protect everything after it (the text's other formulas,
+ * and the next pieces of a reply being written: a typeset formula is kept and used again, one that failed, was too big
+ * or too slow is never typeset again). Kept results count towards a text's output like new ones.
  */
 function rehypeKatexBudgeted() {
   return (tree) => {
     let spent = 0;
+    let output = 0;
     const walk = (parent) => {
       parent.children = parent.children.flatMap((node) => {
         if (node.type !== "element") return [node];
@@ -224,17 +267,20 @@ function rehypeKatexBudgeted() {
           return [node];
         }
         const key = `${formula.display ? "block" : "inline"}\n${formula.tex}`;
-        const known = typeset.get(key);
-        if (known) return known;
-        if (refused.has(key) || spent > KATEX_BUDGET_MS) return [formulaAsCode(formula)];
-        const started = performance.now();
-        const result = typesetOne(formula);
-        const took = performance.now() - started;
-        spent += took;
-        if (!result || took > KATEX_SLOW_MS) remember(refused, key, true, KATEX_KEPT);
-        if (!result) return [formulaAsCode(formula)];
-        remember(typeset, key, frozen(result), KATEX_KEPT);
-        return result;
+        let result = typeset.get(key);
+        if (!result) {
+          if (refusedFormulas.has(key) || spent > LIMITS.katexBudgetMs || output >= LIMITS.katexTextOutput) return [formulaAsCode(formula)];
+          const started = performance.now();
+          result = typesetOne(formula);
+          const took = performance.now() - started;
+          spent += took;
+          if (!result || took > LIMITS.katexSlowMs) remember(refusedFormulas, key, true, KATEX_KEPT);
+          if (!result) return [formulaAsCode(formula)];
+          remember(typeset, key, frozen(result), KATEX_KEPT);
+        }
+        if (output + result.size > LIMITS.katexTextOutput) return [formulaAsCode(formula)];
+        output += result.size;
+        return result.nodes;
       });
     };
     walk(tree);
@@ -243,39 +289,84 @@ function rehypeKatexBudgeted() {
 
 // ───────── code
 
-/** The languages highlighted; any other (or none, or a diagram such as mermaid) is plain code. */
-const lowlight = createLowlight({ bash, c, cpp, css, diff, go, java, javascript, json, markdown, python, rust, shell, sql, typescript, xml, yaml });
-/** Code longer than this is not highlighted. */
-const CODE_MAX = 20000;
+/**
+ * The languages highlighted; any other (or none, or a diagram such as mermaid) is plain code. Not Markdown: its grammar
+ * takes seconds on a long line of links (a Markdown fence is shown as plain code).
+ */
+export const highlighter = createLowlight({ bash, c, cpp, css, diff, go, java, javascript, json, python, rust, shell, sql, typescript, xml, yaml });
 const highlighted = new Map();
-const HIGHLIGHTED_MAX = 100;
+const refusedBlocks = new Map();
+const HIGHLIGHTED_KEPT = 100;
 
-/** Highlights every `<pre><code class="language-…">` of a known language, from the cache when it was highlighted before. */
-function rehypeHighlightCached() {
-  const walk = (parent) => {
-    for (const node of parent.children) {
-      if (node.type !== "element") continue;
-      if (node.tagName === "pre") highlightBlock(node);
-      else walk(node);
-    }
-  };
-  return walk;
+/** Whether a block is short enough, line by line and in all, to be given to a grammar (one pass over it). */
+function highlightable(source) {
+  if (source.length > LIMITS.highlightCode) return false;
+  for (let start = 0; start <= source.length; ) {
+    const end = source.indexOf("\n", start);
+    const stop = end === -1 ? source.length : end;
+    if (stop - start > LIMITS.highlightLine) return false;
+    start = stop + 1;
+  }
+  return true;
 }
 
-function highlightBlock(pre) {
+/**
+ * Highlights every `<pre><code class="language-…">` of a known language that is short enough, within a time budget
+ * per text; the result is discarded (plain code) when it has too many elements or nests too deeply. Highlighted blocks
+ * are kept and used again; a block discarded or too slow is never highlighted again.
+ */
+function rehypeHighlightBudgeted() {
+  return (tree) => {
+    let spent = 0;
+    const walk = (parent) => {
+      for (const node of parent.children) {
+        if (node.type !== "element") continue;
+        if (node.tagName === "pre") spent += highlightBlock(node, spent);
+        else walk(node);
+      }
+    };
+    walk(tree);
+  };
+}
+
+/** Highlights one block in place when it may be; returns the milliseconds spent. */
+function highlightBlock(pre, spent) {
   const code = codeIn(pre);
   const language = classesOf(code).find((name) => name.startsWith("language-"))?.slice("language-".length);
-  if (!language || !lowlight.registered(language)) return;
+  if (!language || !highlighter.registered(language)) return 0;
   const source = textOf(code);
-  if (source.length > CODE_MAX) return;
+  if (!highlightable(source)) return 0;
   const key = `${language}\n${source}`;
   let done = highlighted.get(key);
+  let took = 0;
   if (!done) {
-    const { children } = lowlight.highlight(language, source, { prefix: "hljs-" });
-    done = frozen({ type: "element", tagName: "code", properties: { className: ["hljs", ...classesOf(code)] }, children });
-    remember(highlighted, key, done, HIGHLIGHTED_MAX);
+    if (refusedBlocks.has(key) || spent > LIMITS.highlightBudgetMs) return 0;
+    const started = performance.now();
+    const { children } = highlighter.highlight(language, source, { prefix: "hljs-" });
+    took = performance.now() - started;
+    done = { type: "element", tagName: "code", properties: { className: ["hljs", ...classesOf(code)] }, children };
+    const { elements, depth } = sizeOf(done, LIMITS.highlightElements, LIMITS.highlightDepth);
+    const tooBig = elements > LIMITS.highlightElements || depth > LIMITS.highlightDepth;
+    if (tooBig || took > LIMITS.highlightSlowMs) remember(refusedBlocks, key, true, HIGHLIGHTED_KEPT);
+    if (tooBig) return took;
+    remember(highlighted, key, frozen(done), HIGHLIGHTED_KEPT);
   }
   pre.children = pre.children.map((child) => (child === code ? done : child));
+  return took;
+}
+
+// ───────── the final count
+
+/**
+ * The last word on size, after maths and highlighting and before anything else walks the tree: a text whose tree has
+ * more than LIMITS.treeElements elements, or nests deeper than LIMITS.treeDepth, is shown as its plain text, whatever
+ * produced it (kept results count like new ones). Counted without recursion.
+ */
+function rehypeFinalCount() {
+  return (tree, file) => {
+    const { elements, depth } = sizeOf(tree, LIMITS.treeElements, LIMITS.treeDepth);
+    if (elements > LIMITS.treeElements || depth > LIMITS.treeDepth) tree.children = [plainElement(String(file.value))];
+  };
 }
 
 // ───────── the allow-list (rules 2–5)
@@ -317,7 +408,7 @@ export const APP_CLASSES = new Set(
   document-tools done dots dropping emoji-grid emoji-heading emoji-picker emoji-tabs empty-main exp-block exp-candidate
   exp-footer exp-meta exp-new eyebrow failed field field-error field-hint field-label field-msg file-card flash footnotes
   form-actions group-avatar grow head-actions human-input icon-btn identity-line info-lines inline kv kv-row lead
-  list-col list-head list-note list-title main-col md md-code md-copy md-plain md-table member-actions member-body
+  list-col list-head list-note list-title main-col md md-code md-copy md-note md-plain md-table member-actions member-body
   member-rows mention-empty mention-heading mention-picker menu menu-anchor messages mine mini-kv modal modal-backdrop
   modal-body modal-foot modal-head msg msg-action msg-divider msg-foot msg-main msg-meta msg-system muted n2 n3 n4 notice
   notice-actions notice-body notice-ok notice-pause notice-sub notice-warn only-mobile order-list owner pad page page-body
@@ -375,20 +466,55 @@ function cleanElement(node, within) {
   return [{ type: "element", tagName: tag, properties, children: cleanChildren(node.children, within) }];
 }
 
-/** The host a link's text claims when the text is itself an http(s) URL (or a www. address), else null. */
-function claimedHost(text) {
-  const shown = text.trim();
+/** Characters that do not show as themselves: format and control characters, spaces and separators, ignorables. */
+const UNSEEN = /[\p{Cf}\p{Cc}\p{Zs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu;
+/** What a host name can be made of, as shown: letters, marks, digits, `-`, and the dots browsers accept. */
+const HOST_PART = /[\p{L}\p{M}\p{N}\-.。｡．]/u;
+const TOP_LABEL = /^(?:\p{L}{2,63}|xn--[a-z0-9-]{1,59})$/iu;
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+/** A host as the browser goes to it (lower case, Punycode), without a leading `www.`; null if it is not one. */
+function hostKey(name) {
   try {
-    const url = new URL(/^www\./i.test(shown) ? `http://${shown}` : shown);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.host : null;
+    return new URL(`http://${name}/`).hostname.replace(/^www\./, "");
   } catch {
     return null;
   }
 }
 
 /**
+ * The hosts a link's text shows: the text without the characters that do not show (then NFKC), cut into runs of host
+ * characters, each run that looks like a domain (labels ending in a top label of 2+ letters, or Punycode) or an IPv4
+ * address. One pass over the text.
+ */
+function hostsShown(text) {
+  const shown = text.replace(UNSEEN, "").normalize("NFKC").replace(UNSEEN, "");
+  const hosts = [];
+  let run = "";
+  const take = () => {
+    const dotted = run.replace(/[。｡．]/g, ".");
+    run = "";
+    let from = 0;
+    let to = dotted.length;
+    while (from < to && (dotted[from] === "." || dotted[from] === "-")) from += 1;
+    while (to > from && (dotted[to - 1] === "." || dotted[to - 1] === "-")) to -= 1;
+    const name = dotted.slice(from, to);
+    const labels = name.split(".");
+    if (labels.length < 2 || labels.some((label) => label === "" || label.length > 63)) return;
+    if (!TOP_LABEL.test(labels.at(-1)) && !IPV4.test(name)) return;
+    const key = hostKey(name);
+    if (key) hosts.push(key);
+  };
+  for (const ch of shown) {
+    if (HOST_PART.test(ch)) run += ch;
+    else if (run) take();
+  }
+  if (run) take();
+  return hosts;
+}
+
+/**
  * A link with a safe href, or its text alone (also inside another link, and for a footnote's in-page links). The text's
- * own title is dropped (the tooltip is the real address, Link). A text that is itself an address on another host is
+ * own title is dropped (the tooltip is the real address, Link). A text that shows any host other than the real one is
  * followed by the real host, which touch screens show too.
  */
 function link(node, within) {
@@ -397,9 +523,10 @@ function link(node, within) {
   const href = within.link ? null : safeHref(node.properties?.href);
   if (!href) return children;
   const a = { type: "element", tagName: "a", properties: { href }, children };
-  const claimed = claimedHost(textOf(a));
-  const host = new URL(href).host;
-  return claimed && claimed !== host ? [a, { type: "text", value: ` （实际指向 ${host}）` }] : [a];
+  const target = new URL(href);
+  const real = hostKey(target.host);
+  const misleading = hostsShown(textOf(a)).some((host) => host !== real);
+  return misleading ? [a, { type: "text", value: ` （实际指向 ${target.host}）` }] : [a];
 }
 
 /** An image is its alt text (or its URL when there is none), as a link to it: never an <img>, never fetched. */
@@ -483,23 +610,38 @@ function CodeBlock({ children }) {
 const COMPONENTS = { a: Link, pre: CodeBlock, table: Table };
 /** Maths is `$$…$$` only (inline or as a block): a single `$` is text, so `$5 和 $10` stays a sentence. */
 const REMARK = [remarkGfm, [remarkMath, { singleDollarTextMath: false }], remarkLimits];
-const REHYPE = [rehypeKatexBudgeted, rehypeHighlightCached, rehypeAllowList];
+const REHYPE = [rehypeKatexBudgeted, rehypeHighlightBudgeted, rehypeFinalCount, rehypeAllowList];
 const REMARK_REHYPE = { footnoteLabel: "脚注" };
 
-/** An Agent's text, rendered. Re-renders only when the text changes. */
-export const Markdown = memo(function Markdown({ text }) {
-  return (
-    <div className="md">
-      <ReactMarkdown
-        remarkPlugins={REMARK}
-        rehypePlugins={REHYPE}
-        remarkRehypeOptions={REMARK_REHYPE}
-        allowedElements={ALLOWED_ELEMENTS}
-        urlTransform={urlTransform}
-        components={COMPONENTS}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
-  );
+/** The whole pipeline for one text (react-markdown called as a function: synchronous, so it can be timed). */
+function renderText(text) {
+  return renderMarkdown({
+    children: text,
+    remarkPlugins: REMARK,
+    rehypePlugins: REHYPE,
+    remarkRehypeOptions: REMARK_REHYPE,
+    allowedElements: ALLOWED_ELEMENTS,
+    urlTransform,
+    components: COMPONENTS,
+  });
+}
+
+/**
+ * An Agent's text, rendered. Re-renders only when the text changes. A text whose render took longer than LIMITS.passMs
+ * is shown as its plain text with a note instead, and remembered (slowTexts.jsx) so it is not rendered again; in a
+ * reply being written (`stream`), the rest of the reply is plain from then on.
+ */
+export const Markdown = memo(function Markdown({ text, stream }) {
+  const pass = useMemo(() => {
+    const started = performance.now();
+    const content = renderText(text);
+    return { content, slow: performance.now() - started > LIMITS.passMs };
+  }, [text]);
+  useEffect(() => {
+    if (!pass.slow) return;
+    if (stream) stream.plain = true;
+    else rememberSlowText(text);
+  }, [pass, stream, text]);
+  if (pass.slow) return <PlainWithNote text={text} />;
+  return <div className="md">{pass.content}</div>;
 });

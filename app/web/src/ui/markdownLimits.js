@@ -1,13 +1,21 @@
 // What an Agent's text may be and still be rendered as Markdown. Checked on the raw text before anything parses it
 // (and before the renderer's chunk is even asked for): a text beyond any limit is shown as plain text, as a person's is.
-// Every count here errs on the side of plain text.
+// Every count here errs on the side of plain text. The cost is one pass over the text: it is split into lines once, and
+// each line is looked at a constant number of times (patterns anchored at the line's start and without nested
+// repetition, and character counts), so the check is linear in the text's length.
 
 /** The whole text, in characters. */
 export const MAX_CHARS = 50000;
 /** Any one line, in characters. */
 export const MAX_LINE = 10000;
-/** Lines that may be table rows (any line with a `|` outside a code fence). */
-export const MAX_TABLE_ROWS = 2000;
+/** Lines starting (after spaces) with `|`, outside code fences: table rows the parser would have to read. */
+export const MAX_PIPE_LINES = 400;
+/** `|` characters outside code fences. */
+export const MAX_PIPES = 2000;
+/** Code fences opened. */
+export const MAX_FENCES = 300;
+/** `$$` outside code fences. */
+export const MAX_DOUBLE_DOLLARS = 2000;
 /** Nested lists and quotes: the markers that open a level, plus every two columns of indentation. */
 export const MAX_DEPTH = 30;
 /**
@@ -35,6 +43,12 @@ function cellsOf(row) {
   return pipes + 1;
 }
 const ends = (line, i) => i >= line.length || line[i] === " " || line[i] === "\t";
+/** How many times `needle` occurs in `line`, not overlapping (one left-to-right pass). */
+function occurrences(line, needle) {
+  let count = 0;
+  for (let i = line.indexOf(needle); i !== -1; i = line.indexOf(needle, i + needle.length)) count += 1;
+  return count;
+}
 
 /**
  * How deeply the line may nest: the `>` and list markers it starts with, and its indentation (a level per two
@@ -72,7 +86,10 @@ function depthOf(line) {
 /** Whether `text` is small and shallow enough to be rendered as Markdown. */
 export function fitsMarkdown(text) {
   if (typeof text !== "string" || text.length > MAX_CHARS) return false;
-  let tableRows = 0;
+  let pipeLines = 0;
+  let pipes = 0;
+  let fences = 0;
+  let doubleDollars = 0;
   /** The open code fence's marker (``` or ~~~, at least as long), or null outside one. */
   let fence = null;
   /** The current block's length and its emphasis and link characters; whether it is a table (each row a block). */
@@ -90,13 +107,18 @@ export function fitsMarkdown(text) {
     const before = previous;
     previous = line;
     if (marker) {
+      if (++fences > MAX_FENCES) return false;
       fence = marker;
       blockLength = 0;
       blockDelimiters = 0;
       table = false;
       continue;
     }
-    if (line.includes("|") && ++tableRows > MAX_TABLE_ROWS) return false;
+    pipes += occurrences(line, "|");
+    if (pipes > MAX_PIPES) return false;
+    if (line.trimStart().startsWith("|") && ++pipeLines > MAX_PIPE_LINES) return false;
+    doubleDollars += occurrences(line, "$$");
+    if (doubleDollars > MAX_DOUBLE_DOLLARS) return false;
     if (depthOf(line) > MAX_DEPTH) return false;
     // Blocks, roughly as the parser cuts them; where unsure, two blocks are counted as one (more work, not less).
     const content = line.replace(QUOTE_MARKERS, "");

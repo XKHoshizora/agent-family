@@ -1,0 +1,118 @@
+// Hostile texts the reviews constructed (all under 50 000 characters): round 1's dos-check inputs and round 2's
+// rr2-cases, as they were measured. Each is rendered by tests/markdown-hostile.test.jsx and must cause bounded work.
+const block = (tex) => `$$\n${tex}\n$$`;
+const wideTable = (cols, rows, row = "x") => `${"|a".repeat(cols)}|\n${"|-".repeat(cols)}|\n${`${row}\n`.repeat(rows)}`;
+const nest = (open, mid, close, n) => open.repeat(n) + mid + close.repeat(n);
+const fitTo = (unit, max) => unit.repeat(Math.floor(max / unit.length));
+// distinct formulas so the cache does not collapse them
+const distinct = (make, count, sep = "\n\n") => Array.from({ length: count }, (_, i) => make(i)).join(sep);
+const wrapLines = (body, n) => Array.from({ length: Math.ceil(body.length / n) }, (_, i) => body.slice(i * n, (i + 1) * n)).join("\n");
+
+export const CASES = {
+  // Round 1
+  r1_table_5x3: () => wideTable(5, 3),
+  r1_table_2000x20000: () => wideTable(2000, 20000),
+  r1_macro400: () => block(`\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(400)}}}}`),
+  // Round 2
+  // C1
+  c1_300x2000: () => wideTable(300, 2000),
+  c1_2000x20000: () => wideTable(2000, 20000),
+  c1_100x60_piped: () => wideTable(100, 60, `${"|b".repeat(100)}|`),
+  c1_just_under: () => wideTable(100, 49, `${"|b".repeat(100)}|`),
+  // C2
+  c2_macro100: () => block(`\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(100)}}}}`),
+  // single formulas without macro definitions, under 2 000 characters
+  one_sup_cap: () => block(fitTo("x^{1}", 1995)),
+  one_sqrt_nest: () => block(nest("\\sqrt{", "x", "}", 284)),
+  one_frac_nest: () => block(nest("\\frac{1}{", "x", "}", 199)),
+  one_leftright_nest: () => block(nest("\\left(", "x", "\\right)", 150)),
+  one_underbrace_nest: () => block(nest("\\underbrace{", "x", "}", 150)),
+  one_overbrace_nest: () => block(nest("\\overbrace{", "x", "}^{a}", 120)),
+  one_sup_nest: () => block(nest("x^{", "x", "}", 660)),
+  one_sub_sup_nest: () => block(nest("x_{x^{", "x", "}}", 320)),
+  one_array_cols: () => block(`\\begin{array}{${"c".repeat(400)}}${fitTo("x&", 1500)}\\end{array}`),
+  one_matrix_cells: () => block(`\\begin{matrix}${fitTo("x&x\\\\", 1960)}\\end{matrix}`),
+  one_matrix_cols: () => block(`\\begin{matrix}${fitTo("x&", 1960)}\\end{matrix}`),
+  one_aligned_rows: () => block(`\\begin{aligned}${fitTo("x&=1\\\\", 1960)}\\end{aligned}`),
+  one_xarrow_nest: () => block(nest("\\xrightarrow{", "x", "}", 140)),
+  one_boxed_nest: () => block(nest("\\boxed{", "x", "}", 240)),
+  one_cancel_nest: () => block(nest("\\cancel{", "x", "}", 220)),
+  one_overset_chain: () => block(nest("\\overset{a}{", "x", "}", 150)),
+  one_stackrel: () => block(fitTo("\\stackrel{a}{=}", 1990)),
+  one_middle: () => block(`\\left(${fitTo("x\\middle|", 1950)}\\right)`),
+  one_big_delims: () => block(`\\begin{matrix}${fitTo("x\\\\", 600)}\\end{matrix}\\left(${fitTo("\\Bigg(", 1300)}\\right)`),
+  one_sqrt_flat: () => block(fitTo("\\sqrt{x}", 1995)),
+  one_rule: () => block(fitTo("\\rule{50em}{50em}", 1995)),
+  one_cd: () => block(`\\begin{CD}${fitTo("A @>a>> B @>b>> C\\\\ @VVV @VVV @VVV\\\\", 1950)}\\end{CD}`),
+  one_braket: () => block(`\\Braket{${fitTo("a|", 1980)}}`),
+  one_set: () => block(`\\Set{${fitTo("a|", 1980)}}`),
+  one_text_nest: () => block(nest("\\text{$", "x", "$}", 280)),
+  one_mathchoice: () => block(nest("\\mathchoice{", "x", "}{a}{b}{c}", 120)),
+  one_color_nest: () => block(nest("\\color{red}{", "x", "}", 150)),
+  one_operatorname: () => block(fitTo("\\operatorname*{argmax}_{x}", 1990)),
+  one_substack: () => block(`\\sum_{\\substack{${fitTo("a\\\\", 1960)}}}`),
+  one_dots: () => block(fitTo("\\dots", 1990)),
+  one_KaTeX: () => block(fitTo("\\KaTeX", 1990)),
+  one_phantom_nest: () => block(nest("\\phantom{", "x", "}", 180)),
+  one_smash_nest: () => block(nest("\\smash{", "x", "}", 230)),
+  one_sizing: () => block(fitTo("\\Huge x\\tiny x", 1990)),
+  one_tags: () => block(`\\begin{gather}${fitTo("x\\tag{1}\\\\", 1960)}\\end{gather}`),
+  one_bigops: () => block(fitTo("\\sum\\limits_{i}^{n}", 1990)),
+  one_accents: () => block(nest("\\widehat{", "x", "}", 180)),
+  one_overline_nest: () => block(nest("\\overline{", "x", "}", 180)),
+  one_xleftrightarrow_long: () => block(`\\xleftrightarrow[${"x".repeat(990)}]{${"x".repeat(990)}}`),
+  one_widehat_wide: () => block(`\\widehat{${"x".repeat(1985)}}`),
+  one_hline_array: () => block(`\\begin{array}{|c|}${fitTo("\\hline x\\\\", 1960)}\\end{array}`),
+  // aggregate: many formulas, each under the output cap
+  agg_sup50: () => distinct((i) => block(`${i}+${fitTo("x^{1}", 940)}`), 50),
+  agg_sup500: () => distinct((i) => `$$${i}+${fitTo("x^{1}", 85)}$$`, 500, " "),
+  agg_sqrt500: () => distinct((i) => `$$${i}+${fitTo("\\sqrt{x}", 82)}$$`, 500, " "),
+  agg_frac500: () => distinct((i) => `$$${i}+${fitTo("\\frac{a}{b}", 82)}$$`, 500, " "),
+  agg_sqrt50: () => distinct((i) => block(`${i}+${fitTo("\\sqrt{x}", 940)}`), 50),
+  // under the 100 000-character output cap each: x^{1} x 200 is ~95 000 characters of HTML
+  agg_sup_cap48: () => distinct((i) => block(`${i}+${fitTo("x^{1}", 990)}`), 48),
+  agg_sup_p500: () => distinct((i) => `$$${i}+${fitTo("x^{1}", 85)}$$`, 500, "\n\n"),
+  agg_frac_p500: () => distinct((i) => `$$${i}+${fitTo("\\frac{a}{b}", 82)}$$`, 500, "\n\n"),
+  agg_mix_p300: () => distinct((i) => `$$${i}+${fitTo("\\overline{x}^{1}", 145)}$$`, 300, "\n\n"),
+  // markdown without maths
+  md_soft_breaks: () => fitTo("a\n", 49990),
+  md_em: () => Array.from({ length: 16 }, () => fitTo("*a* ", 3000)).join("\n\n"),
+  md_links: () => fitTo("[a](https://a.example/) ", 49990),
+  md_footnote_refs: () => Array.from({ length: 15 }, () => fitTo("[^1]", 3100)).join("\n\n") + "\n\n[^1]: n",
+  md_footnote_defs: () => Array.from({ length: 1500 }, (_, i) => `x[^${i}]\n\n[^${i}]: y`).join("\n\n"),
+  md_ref_defs: () => Array.from({ length: 2000 }, (_, i) => `[l${i}]: https://a.example/${i}\n`).join("") + "\n" + Array.from({ length: 1000 }, (_, i) => `[l${i}]`).join(" "),
+  md_autolink_dots: () => Array.from({ length: 5 }, () => fitTo("a.", 9990)).join("\n"),
+  md_autolink_dots_para: () => Array.from({ length: 5 }, () => fitTo("a.", 9990)).join("\n\n"),
+  md_autolink_dash: () => Array.from({ length: 5 }, () => fitTo("a-", 9990)).join("\n"),
+  md_autolink_www: () => Array.from({ length: 5 }, () => fitTo("www.", 9990)).join("\n"),
+  md_autolink_wwwa: () => Array.from({ length: 5 }, () => fitTo("www.a", 9990)).join("\n"),
+  md_autolink_at: () => Array.from({ length: 5 }, () => fitTo("a@", 9990)).join("\n"),
+  md_autolink_atdot: () => Array.from({ length: 5 }, () => fitTo("a@a.", 9990)).join("\n"),
+  md_autolink_http: () => Array.from({ length: 5 }, () => fitTo("http://", 9990)).join("\n"),
+  md_autolink_plus: () => Array.from({ length: 5 }, () => fitTo("a+", 9990)).join("\n"),
+  md_autolink_word: () => Array.from({ length: 5 }, () => "a".repeat(9999)).join("\n"),
+  md_autolink_dot_at_end: () => Array.from({ length: 5 }, () => fitTo("a.", 9980) + "@b").join("\n"),
+  md_table_heavy: () => wideTable(50, 99, `${"|**a** ".repeat(50)}|`),
+  md_table_links: () => wideTable(25, 120, `${"|[a](https://a.example/)".repeat(25)}|`).slice(0, 49990),
+  md_quotes_list: () => Array.from({ length: 1600 }, () => `${"> ".repeat(14)}- x`).join("\n"),
+  // highlighted code nests: `${ in JavaScript opens a template substitution that contains another template
+  code_js_tpl_2k: () => "```js\n" + fitTo("`${", 1998) + "\n```",
+  code_js_tpl_4k: () => "```js\n" + fitTo("`${", 3999) + "\n```",
+  code_js_tpl_6k: () => "```js\n" + fitTo("`${", 5999) + "\n```",
+  code_js_tpl_9k: () => "```js\n" + fitTo("`${", 9999) + "\n```",
+  code_js_tpl_20k: () => "```js\n" + [fitTo("`${", 9999), fitTo("`${", 9999)].join("\n") + "\n```",
+  code_rust_cmt_9k: () => "```rust\n" + fitTo("/*", 9998) + "\n```",
+  code_bash_9k: () => "```bash\n" + fitTo("${", 9998) + "\n```",
+  code_js_tpl_x5_4k: () => Array.from({ length: 5 }, (_, i) => "```js\n" + i + fitTo("`${", 3999) + "\n```").join("\n\n"),
+  code_shell_1: () => "```shell\n" + wrapLines(fitTo("`${", 9000), 80) + "\n```",
+  code_shell_4: () => Array.from({ length: 4 }, (_, i) => "```shell\n" + i + wrapLines(fitTo("`${", 11500), 80) + "\n```").join("\n\n"),
+  code_shell_8: () => Array.from({ length: 8 }, (_, i) => "```shell\n" + i + wrapLines(fitTo("`${", 5900), 80) + "\n```").join("\n\n"),
+  // highlight.js's markdown grammar on long lines of `[a](`
+  code_mdlink_1: () => "```markdown\n" + fitTo("[a](", 9996) + "\n```",
+  code_mdlink_line5k: () => "```markdown\n" + fitTo("[a](", 5000) + "\n```",
+  code_mdlink_5: () => Array.from({ length: 5 }, (_, i) => "```markdown\n" + i + fitTo("[a](", 9960) + "\n```").join("\n\n"),
+  code_mdimg_1: () => "```md\n" + fitTo("![a](", 9995) + "\n```",
+  code_c_dyn_1: () => "```c\n" + fitTo("dyn ", 9996) + "\n```",
+  code_shell_dollar: () => "```shell\n" + wrapLines(fitTo("${", 19000), 80) + "\n```",
+  md_tables_many: () => Array.from({ length: 1200 }, () => "|a|b|\n|-|-|\n|c|d|").join("\n\n"),
+};

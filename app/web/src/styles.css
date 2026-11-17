@@ -328,6 +328,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .md .katex-display > .katex > .katex-html > .katex-tag { position: static; margin-left: 1.5em; }
 .md .katex-error { color: var(--ink-2); }
 .md .md-plain { white-space: pre-wrap; }
+/* Under an Agent's text shown plain because it was too complex to render */
+.md-note { display: block; margin-top: 6px; font-size: 12.5px; color: var(--ink-3); white-space: normal; }
 /* Highlighted code: a few colours of the palette */
 .md :is(.hljs-keyword, .hljs-built_in, .hljs-selector-tag, .hljs-type) { color: var(--purple-dark); }
 .md :is(.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class) { color: var(--pending); }
