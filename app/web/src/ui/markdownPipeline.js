@@ -38,7 +38,7 @@ import yaml from "highlight.js/lib/languages/yaml";
 import { fitsMarkdown } from "./markdownLimits.js";
 import {
   ALIGN, APP_CLASSES, CLASS, ELEMENTS, KATEX_CLASS, KATEX_ELEMENTS, KATEX_PROPS, TREE_DEPTH, TREE_ELEMENTS, isKatexRootClass,
-  safeHref, styleAllowed, withoutBidiControls,
+  linkTextShown, safeHref, styleAllowed, withoutBidiControls,
 } from "./markdownRules.js";
 
 /** The limits on what one text may produce. `renderToTree`'s `limits` option replaces any of them (tests). */
@@ -410,19 +410,15 @@ function cleanElement(node, within) {
   return [element(tag, props, cleanChildren(node.children, within, tag))];
 }
 
-/** The most characters of a link's text that are shown; a longer one ends with an ellipsis. */
-const LINK_TEXT_MAX = 200;
-/** White space and separators of every kind (no-break and wide spaces, line and paragraph separators, line ends). */
-const SPACES = /[\s\p{Z}]+/gu;
 /** A text that shows nothing: only format characters, controls, separators, marks and ignorables. */
 const SHOWS_NOTHING = /^[\p{Cf}\p{Cc}\p{Z}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*$/u;
 
 /**
  * A link's content as one plain text on one line: the text of whatever is in it (emphasis and code give theirs, a
  * formula its source, an image its alt text, a line break a space), without bidirectional controls, every run of
- * white space and separators as one space, trimmed, cut at LINK_TEXT_MAX characters. A text that shows nothing is the
- * address itself. So what a link shows is a string the main thread can compare with its address, and nothing in it
- * can hide, stack, split or reorder what is read.
+ * white space and separators as one space, trimmed, cut at LINK_TEXT_MAX characters (markdownRules.js
+ * `linkTextShown`). A text that shows nothing is the address itself. So what a link shows is one short line, and
+ * nothing in it can hide, stack, split or reorder what is read, or push its host note away.
  */
 function linkText(node, href) {
   let text = "";
@@ -435,11 +431,8 @@ function linkText(node, href) {
     else if (item.tagName === "img") text += typeof item.properties?.alt === "string" ? item.properties.alt : "";
     else for (let i = (item.children ?? []).length - 1; i >= 0; i -= 1) stack.push(item.children[i]);
   }
-  text = withoutBidiControls(text).replace(SPACES, " ").trim();
-  if (SHOWS_NOTHING.test(text)) return href;
-  if (text.length <= LINK_TEXT_MAX) return text;
-  const characters = Array.from(text);
-  return characters.length > LINK_TEXT_MAX ? `${characters.slice(0, LINK_TEXT_MAX).join("")}…` : text;
+  text = linkTextShown(text);
+  return SHOWS_NOTHING.test(text) ? href : text;
 }
 
 /**

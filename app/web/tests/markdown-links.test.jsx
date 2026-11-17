@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-// Where a link goes is always shown. Every link is followed by its real host (taken from the parsed target only) — with
-// one exception: its text is one run of printable ASCII exactly equal to its address (or to it without its final `/`).
-// Nothing is normalised, decoded or detected, so nothing can be forged: the third review's forgeries (hostile-links.js
-// LINK_CASES) and the fourth's (R4_LINK_CASES). A link's content is one plain text (no maths, no element, no line
+// Where a link goes is always shown. Every link is followed by its real host (taken from the parsed target only), with
+// no exception: not even a link whose text is exactly its address (two such links glued together read as one trusted
+// address). Nothing is compared, normalised, decoded or detected, so nothing can be forged: the third review's
+// forgeries (hostile-links.js LINK_CASES), the fourth's (R4_LINK_CASES) and the fifth's glued links. A link's content is one plain text (no maths, no element, no line
 // break, at most 200 characters), and bidirectional controls are gone from everything shown, however they were written.
 import "./markdown-ready.js";
 import React from "react";
@@ -11,9 +11,9 @@ import { cleanup, render } from "@testing-library/react";
 import { AgentText } from "../src/pages/AgentChatBits.jsx";
 import { RichTree } from "../src/ui/Markdown.jsx";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
-import { linkNote, shownHost, validateTree } from "../src/ui/markdownTree.js";
+import { shownHost, validateTree } from "../src/ui/markdownTree.js";
 import { SLOW_TEXT_NOTE } from "../src/ui/slowTexts.jsx";
-import { LINK_CASES, R4_LINK_CASES } from "./hostile-links.js";
+import { LINK_CASES, R4_LINK_CASES, R5_LINK_CASES } from "./hostile-links.js";
 import { SilentWorker, settle, useWorkers } from "./markdown-worker.js";
 
 afterEach(() => {
@@ -53,14 +53,8 @@ function partsOf(tree) {
   return { links, strings };
 }
 
-/**
- * Two of the fourth review's cases, once their override is gone, show exactly the address they go to (the text read
- * left to right is the address): nothing is left to warn about, so no host follows them.
- */
-const NOW_THE_ADDRESS = new Set(["(i) a bidi override as a character reference", "(i) the same, decimal"]);
-
 describe("every link shows its real host, whatever its text says", () => {
-  it.each([...LINK_CASES, ...R4_LINK_CASES])("%s", async (label, text) => {
+  it.each([...LINK_CASES, ...R4_LINK_CASES, ...R5_LINK_CASES])("%s", async (label, text) => {
     const errors = vi.spyOn(console, "error");
     const bubble = await show(text);
     const links = [...bubble.querySelectorAll("a")];
@@ -68,14 +62,11 @@ describe("every link shows its real host, whatever its text says", () => {
     for (const a of links) {
       const href = a.getAttribute("href");
       const host = a.nextElementSibling?.matches(".md-host") ? a.nextElementSibling.textContent : null;
-      if (NOW_THE_ADDRESS.has(label)) {
-        expect(a.textContent).toBe(href);
-        expect(host).toBeNull();
-      } else {
-        expect(host, `${a.textContent} → ${href}`).toBe(`（${shownHost(href)}）`);
-        // The host shown is the parsed target's, Punycode, never more than 40 characters.
-        expect(host.length).toBeLessThanOrEqual(42);
-      }
+      // (The review's 1 (i), its override gone, shows exactly the address it opens: it has its note like any link.)
+      if (label.startsWith("(i) a bidi override as a character reference")) expect(a.textContent).toBe(href);
+      expect(host, `${a.textContent} → ${href}`).toBe(`（${shownHost(href)}）`);
+      // The host shown is the parsed target's, Punycode, never more than 40 characters.
+      expect(host.length).toBeLessThanOrEqual(42);
       expect(a.getAttribute("title")).toBe(href);
       expect(a.closest(".md-link").getAttribute("dir")).toBe("auto");
       // The link's content is one plain text on one line: no element, no line break, no run of spaces.
@@ -102,40 +93,34 @@ describe("every link shows its real host, whatever its text says", () => {
   });
 });
 
-describe("the one exception: the text is exactly the address", () => {
+describe("no exception: a link whose text is exactly its address has its host after it too", () => {
   it.each([
     ["a bare autolink", "看 https://example.com/a/b?c=1#d 吧", "https://example.com/a/b?c=1#d"],
     ["the address without its final slash", "[https://example.com](https://example.com/)", "https://example.com"],
     ["the address itself", "[https://example.com/a](https://example.com/a)", "https://example.com/a"],
-  ])("%s: no host after it", async (_label, text, shown) => {
+    ["the host alone", "[example.com](https://example.com)", "example.com"],
+    ["a text in another script", "[文档](https://example.com/a)", "文档"],
+    ["www. before the host", "[www.example.com](https://example.com/a)", "www.example.com"],
+    ["an autolink the browser writes differently", "http://EXAMPLE.com/a", "http://EXAMPLE.com/a"],
+  ])("%s", async (_label, text, shown) => {
     const bubble = await show(text);
     expect(bubble.querySelector("a").textContent).toBe(shown);
-    expect(bubble.querySelector(".md-host")).toBeNull();
+    expect(bubble.querySelector(".md-host").textContent).toBe("（example.com）");
   });
 
-  it.each([
-    ["the host alone", "[example.com](https://example.com)", "example.com"],
-    ["a text in another script", "[文档](https://example.com/a)", "example.com"],
-    ["www. before the host", "[www.example.com](https://example.com/a)", "example.com"],
-    ["the address in other letters' case", "[HTTPS://EXAMPLE.COM/a](https://example.com/a)", "example.com"],
-    ["the decoded form of the address", "[https://example.com/文档](https://example.com/%E6%96%87%E6%A1%A3)", "example.com"],
-    ["an autolink the browser writes differently", "http://EXAMPLE.com/a", "example.com"],
-  ])("%s: its host is shown", async (_label, text, host) => {
-    const bubble = await show(text);
-    expect(bubble.querySelector(".md-host").textContent).toBe(`（${host}）`);
+  it("two exact links glued together: each is followed by its own host, so the run cannot read as one address", async () => {
+    const bubble = await show("https://accounts.google.com/signin?continue=<https://evil.example/>");
+    expect(bubble.textContent).toBe("https://accounts.google.com/signin?continue=（accounts.google.com）https://evil.example/（evil.example）");
+    expect([...bubble.querySelectorAll("a")].map((a) => a.getAttribute("href"))).toEqual(["https://accounts.google.com/signin?continue=", "https://evil.example/"]);
   });
 
-  it("linkNote compares the strings as they are", () => {
-    expect(linkNote("https://example.com/a", "https://example.com/a")).toBeNull();
-    expect(linkNote("https://example.com", "https://example.com/")).toBeNull();
-    expect(linkNote("https://example.com/a", "https://example.com/a/")).toBeNull();
-    expect(linkNote("https://example.com/a", "https://example.com/a//")).toBe("example.com");
-    expect(linkNote("example.com", "https://example.com/")).toBe("example.com");
-    expect(linkNote("https://example.com/ a", "https://example.com/%20a")).toBe("example.com");
-    expect(linkNote("https://example.com/\u200B", "https://example.com/")).toBe("example.com");
-    expect(linkNote("https://example.com/é", "https://example.com/é")).toBe("example.com");
-    expect(linkNote("文档", "https://www.docs.example:8443/a")).toBe("docs.example:8443");
-    expect(linkNote("https://apple.com/", "https://xn--80ak6aa92e.com/")).toBe("xn--80ak6aa92e.com");
+  it("plain text or a code span directly in front of an exact link: the link's host follows it", async () => {
+    const plain = await show("accounts.google.com/signin?continue=https://evil.example/");
+    expect(plain.textContent).toBe("accounts.google.com/signin?continue=https://evil.example/（evil.example）");
+    cleanup();
+    const code = await show("`https://accounts.google.com/`https://evil.example/");
+    expect(code.textContent).toBe("https://accounts.google.com/https://evil.example/（evil.example）");
+    expect(code.querySelectorAll("a")).toHaveLength(1);
   });
 });
 
@@ -234,8 +219,27 @@ describe("the main thread's check of a link", () => {
     const { container } = render(<RichTree tree={tree} />);
     expect(container.innerHTML).not.toMatch(BIDI);
     expect(container.querySelector("a").textContent).toBe("https://evil.example/moc.elgoog");
-    // (Its text is its address once cleaned, exactly: this link really goes where it says.)
-    expect(container.querySelector(".md-host")).toBeNull();
+    expect(container.querySelector(".md-host").textContent).toBe("（evil.example）");
+  });
+
+  it("repeats the worker's rule on a link's text: separators collapsed, trimmed, cut at 200 characters", () => {
+    const nbsp = String.fromCharCode(0xa0);
+    const wide = String.fromCharCode(0x2003);
+    const lineSeparator = String.fromCharCode(0x2028);
+    const spaced = a(` https://accounts.google.com${nbsp.repeat(300)}${wide}${lineSeparator}\n\t.evil.example/ `);
+    expect(validateTree(spaced).ok).toBe(true);
+    expect(spaced[0].children[0].children).toEqual(["https://accounts.google.com .evil.example/"]);
+    const long = a(`https://accounts.google.com/${"长".repeat(5000)}`);
+    expect(validateTree(long).ok).toBe(true);
+    expect([...long[0].children[0].children[0]]).toHaveLength(201);
+    expect(long[0].children[0].children[0].endsWith("…")).toBe(true);
+    const exact = a("字".repeat(200));
+    expect(validateTree(exact).ok).toBe(true);
+    expect(exact[0].children[0].children).toEqual(["字".repeat(200)]);
+    // Shown the same way even from a tree that was never checked.
+    const { container } = render(<RichTree tree={a(`甲${nbsp.repeat(300)}乙${"丙".repeat(400)}`)} />);
+    expect(container.querySelector("a").textContent).toBe(`甲 乙${"丙".repeat(197)}…`);
+    expect(container.querySelector(".md-host").textContent).toBe("（a.example）");
   });
 
   it("a worker's tree with a link holding elements is shown plain with the note, none of it rendered", async () => {

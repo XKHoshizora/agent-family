@@ -3,11 +3,12 @@
 // one iterative walk over a capped size (so its cost is bounded however the tree is made): tags from a fixed set,
 // props from a fixed set with typed values, every href re-checked by `safeHref`, class names from the fixed patterns,
 // a link's content exactly one text, at most TREE_ELEMENTS elements, nothing deeper than TREE_DEPTH. Any failure: the
-// whole text is shown plain. A string holding a bidirectional control is not trusted either: it is cleaned, in place.
-// And where a link goes: the host shown after its text (`linkNote`).
+// whole text is shown plain. A string holding a bidirectional control is not trusted either: it is cleaned, in place,
+// and a link's text is put through the worker's own rule again (one line, 200 characters). And where a link goes:
+// the host shown after every link's text (`shownHost`).
 import {
   ALIGN, APP_CLASSES, CLASS, ELEMENTS, KATEX_CLASS, KATEX_ELEMENTS, KATEX_REACT_PROPS, TREE_DEPTH, TREE_ELEMENTS, hasBidiControls,
-  isKatexRootClass, safeHref, styleAllowed, withoutBidiControls,
+  isKatexRootClass, linkTextShown, safeHref, styleAllowed, withoutBidiControls,
 } from "./markdownRules.js";
 
 /** All nodes (elements and texts), and all their characters (texts and prop values), that one tree may have. */
@@ -121,6 +122,12 @@ function checkTree(tree, { maxElements = TREE_ELEMENTS, maxDepth = TREE_DEPTH } 
     rendered += 1 + (katex ? 0 : ADDED[tag] ?? 0);
     // A link's content is exactly one text: no element (so no maths, no line break, no link) can be inside one.
     if (tag === "a" && (katex || !Array.isArray(children) || children.length !== 1 || typeof children[0] !== "string")) return { ok: false };
+    // …and that text is one short line, by the worker's rule applied again here (a text that is too long is cut
+    // before it is counted or shown).
+    if (tag === "a") {
+      const shown = linkTextShown(children[0].slice(0, MAX_CHARS));
+      if (shown !== children[0]) children[0] = shown;
+    }
     if (children === undefined) continue;
     if (!Array.isArray(children) || children.length === 0 || nodes + stack.length + children.length > MAX_NODES) return { ok: false };
     cleanTexts(children);
@@ -134,21 +141,12 @@ function checkTree(tree, { maxElements = TREE_ELEMENTS, maxDepth = TREE_DEPTH } 
 /** The longest host shown after a link; a longer one is cut at its start (its registrable end is what matters). */
 const HOST_SHOWN_MAX = 40;
 
-/** The host a link's note shows: the parsed target's (Punycode, port kept), without a leading `www.`, its end kept. */
+/**
+ * The host shown after every link's text — every link, also one whose text is exactly its address: such links glued
+ * to one another, or to text before them, would read as one address that starts at a trusted host. The parsed
+ * target's host (Punycode, port kept), without a leading `www.`, its end kept.
+ */
 export function shownHost(href) {
   const host = new URL(href).host.replace(/^www\./, "");
   return host.length > HOST_SHOWN_MAX ? `…${host.slice(-(HOST_SHOWN_MAX - 1))}` : host;
-}
-
-/** Printable ASCII only, no space: what a text that is exactly an address is made of. */
-const PRINTABLE_ASCII = /^[!-~]+$/;
-
-/**
- * The host shown after a link's text, or null for the one link that needs none: its text is printable ASCII and is
- * exactly its address, or its address without its one final `/`. The strings are compared as they are: nothing is
- * trimmed, folded, decoded or normalised, so no text can be made to "equal" an address it does not show.
- */
-export function linkNote(text, href) {
-  if (PRINTABLE_ASCII.test(text) && (text === href || (href.endsWith("/") && text === href.slice(0, -1)))) return null;
-  return shownHost(href);
 }

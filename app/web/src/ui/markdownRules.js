@@ -27,6 +27,23 @@ export const withoutBidiControls = (text) => (typeof text === "string" ? text.re
 const BIDI_CONTROL = new RegExp(BIDI_CONTROLS.source);
 export const hasBidiControls = (text) => BIDI_CONTROL.test(text);
 
+/** The most characters of a link's text that are shown; a longer one ends with an ellipsis. */
+export const LINK_TEXT_MAX = 200;
+/** White space and separators of every kind (no-break and wide spaces, line and paragraph separators, line ends). */
+const SPACES = /[\s\p{Z}]+/gu;
+/**
+ * A link's text as it is shown, whoever made it: on one line, without bidirectional controls, every run of white
+ * space and separators as one space, trimmed, at most LINK_TEXT_MAX characters (then an ellipsis). Applied by the
+ * worker to what it flattens out of a link, and again by the main thread to the text it is given: nothing in a link's
+ * text can push its host note away from it. Doing it twice changes nothing.
+ */
+export function linkTextShown(text) {
+  const line = withoutBidiControls(text).replace(SPACES, " ").trim();
+  if (line.length <= LINK_TEXT_MAX) return line;
+  const characters = Array.from(line.slice(0, 2 * LINK_TEXT_MAX + 2));
+  return characters.length > LINK_TEXT_MAX ? `${characters.slice(0, LINK_TEXT_MAX).join("")}…` : line;
+}
+
 /** The most one text's tree may have: elements and their depth (beyond: the text is shown plain, with the note). */
 export const TREE_ELEMENTS = 3000;
 export const TREE_DEPTH = 60;

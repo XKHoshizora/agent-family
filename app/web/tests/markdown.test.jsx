@@ -196,10 +196,10 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("autolinked www. and bare URLs are links like any other; only a text that is exactly the address has no host after it", async () => {
+  it("autolinked www. and bare URLs are links like any other, each with its host after it", async () => {
     const bubble = await show("见 www.example.com 和 https://bare.example/path 以及 <https://angle.example>");
     expect(hrefs(bubble)).toEqual(["http://www.example.com/", "https://bare.example/path", "https://angle.example/"]);
-    expect([...bubble.querySelectorAll("a")].map(hostAfter)).toEqual(["（example.com）", null, null]);
+    expect([...bubble.querySelectorAll("a")].map(hostAfter)).toEqual(["（example.com）", "（bare.example）", "（angle.example）"]);
     expectSafe(bubble);
   });
 
@@ -332,12 +332,12 @@ describe("every link shows where it goes", () => {
     ["the address itself", "[https://example.com/docs](https://example.com/docs)"],
     ["the address without its final slash", "[https://example.com](https://example.com/)"],
     ["a bare autolink", "https://example.com/docs"],
-  ])("a link whose text is exactly its address shows no duplicate: %s", async (_, text) => {
+  ])("a link whose text is exactly its address has its host after it all the same: %s", async (_, text) => {
     const bubble = await show(text);
-    expect(hostAfter(bubble.querySelector("a"))).toBeNull();
+    expect(hostAfter(bubble.querySelector("a"))).toBe("（example.com）");
   });
 
-  // (Round 4: nothing but the exact address is exempt; these showed no host before.)
+  // (Round 4: these showed no host before. Round 5: no link is exempt.)
   it.each([
     ["the host", "[example.com](https://example.com/b)"],
     ["the host with www.", "[www.example.com](https://example.com/b)"],
@@ -354,7 +354,7 @@ describe("every link shows where it goes", () => {
     const [a, b] = bubble.querySelectorAll("a");
     expect(a.textContent).toBe("https://evil.example/x");
     expect(b.textContent).toBe("https://evil.example/y");
-    expect(hostAfter(a)).toBeNull();
+    expect(hostAfter(a)).toBe("（evil.example）");
     expectSafe(bubble);
   });
 
@@ -449,7 +449,7 @@ describe("what an Agent's Markdown never renders", () => {
     const bubble = await show("![一张图](https://evil.example/p.png) ![](https://evil.example/q.png)");
     expect([...bubble.querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href"), hostAfter(a)])).toEqual([
       ["一张图", "https://evil.example/p.png", "（evil.example）"],
-      ["https://evil.example/q.png", "https://evil.example/q.png", null],
+      ["https://evil.example/q.png", "https://evil.example/q.png", "（evil.example）"],
     ]);
     expect(bubble.querySelector("img")).toBeNull();
   });

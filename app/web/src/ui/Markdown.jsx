@@ -3,33 +3,29 @@
 // been checked on this thread (markdownTree.js) before it gets here; this only turns it into React elements — a walk
 // as deep as the tree, which is at most TREE_DEPTH — with the app's own parts:
 //   - every link opens a new tab, with rel="noopener noreferrer nofollow", its real address as its tooltip, and its real
-//     host after its text (unless the text is exactly that address), both isolated from the text around them;
+//     host after its text (always: also when the text is that address), both isolated from the text around them;
 //   - a code block has 复制, a table scrolls sideways inside the bubble.
 import React, { createElement, memo, useEffect, useRef, useState } from "react";
-import { safeHref, withoutBidiControls } from "./markdownRules.js";
-import { linkNote } from "./markdownTree.js";
+import { linkTextShown, safeHref, withoutBidiControls } from "./markdownRules.js";
+import { shownHost } from "./markdownTree.js";
 import "katex/dist/katex.min.css";
 
 /**
- * A link: its text (one plain text, by the tree's check), then where it really goes — unless that text is exactly its
- * address (markdownTree.js `linkNote`). Without a safe address it is its text alone.
+ * A link: its text (one plain text, by the tree's check; put on one short line once more here), then where it really
+ * goes, always. Without a safe address it is its text alone.
  */
 function Link({ href, text }) {
   const safe = safeHref(href);
-  const cleaned = withoutBidiControls(text);
+  const cleaned = linkTextShown(text);
   if (!safe) return cleaned;
-  const shown = cleaned || safe;
-  const host = linkNote(shown, safe);
   return (
     <span className="md-link" dir="auto">
       <a href={safe} title={safe} target="_blank" rel="noopener noreferrer nofollow" dir="auto">
-        {shown}
+        {cleaned || safe}
       </a>
-      {host !== null && (
-        <span className="md-host" dir="auto">
-          （{withoutBidiControls(host)}）
-        </span>
-      )}
+      <span className="md-host" dir="auto">
+        （{withoutBidiControls(shownHost(safe))}）
+      </span>
     </span>
   );
 }

@@ -68,3 +68,11 @@ export const R4_LINK_CASES = [
   ["a zero-width space in the host", "[goo\u200bgle.com](https://google.com/)"],
   ["full-width address", "[ｈｔｔｐｓ://ｅｖｉｌ.ｅｘａｍｐｌｅ](https://evil.example/)"],
 ];
+
+// The fifth review (task-5-round4-review.md, Important 1), verbatim: links that are exactly their address, glued to a
+// link, to plain text or to a code span before them, read as one trusted address when such links had no host note.
+export const R5_LINK_CASES = [
+  ["two exact links glued together", "https://accounts.google.com/signin?continue=<https://evil.example/>"],
+  ["plain text directly in front of an exact link", "accounts.google.com/signin?continue=https://evil.example/"],
+  ["a code span directly in front of an exact link", "`https://accounts.google.com/`https://evil.example/"],
+];
