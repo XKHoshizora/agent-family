@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { Btn, Field, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
-import { ChevronLeft, Lock, Plus } from "../icons.js";
+import { modelLevels } from "../data/model.js";
+import { Btn, Field, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
+import { ChevronLeft, Lock, Plus, Search } from "../icons.js";
 import { useAction } from "./useAction.js";
 import { refusalText, settled } from "./AgentForm.jsx";
+import { levelLabel } from "./ModelPicker.jsx";
 
 /** The four interface types (the service's `protocol`), by the names people know them by. Fixed once created. */
 export const PROTOCOLS = [
@@ -97,20 +99,41 @@ const contextProblem = (text) => {
   return n !== null && n >= CONTEXT_MIN && n <= CONTEXT_MAX ? "" : `上下文容量需要是 ${CONTEXT_MIN} 到 ${CONTEXT_MAX} 之间的整数`;
 };
 
-/** A model of the provider as the form holds it: the context as text ("" means the service's default). */
+/**
+ * A model of the provider as the form holds it: the context as text ("" means the service's default), and `levels` the
+ * thinking levels it lists (null: every level).
+ */
 const formModel = (m) => ({
   name: m.name,
   vision: Boolean(m.vision),
   pdf: Boolean(m.pdf),
   reasoning: Boolean(m.reasoning),
   context: Number.isFinite(m.contextTokens) ? String(m.contextTokens) : "",
+  levels: m.reasoning ? modelLevels(m.reasoningLevels) : null,
 });
-/** As it is sent: the flags always, the context only when one is given. */
+/** As it is sent: the flags always, the context only when one is given, the levels only on a model that reasons. */
 const wireModel = (m) => {
   const n = contextNumber(m.context);
-  return { name: m.name, vision: m.vision, pdf: m.pdf, reasoning: m.reasoning, ...(n === null ? {} : { contextTokens: n }) };
+  return {
+    name: m.name,
+    vision: m.vision,
+    pdf: m.pdf,
+    reasoning: m.reasoning,
+    ...(n === null ? {} : { contextTokens: n }),
+    ...(m.reasoning && m.levels ? { reasoningLevels: m.levels } : {}),
+  };
 };
-const modelsKey = (list) => JSON.stringify(list.map((m) => [m.name, m.vision, m.pdf, m.reasoning, m.contextTokens ?? null]));
+const modelsKey = (list) => JSON.stringify(list.map((m) => [m.name, m.vision, m.pdf, m.reasoning, m.contextTokens ?? null, m.reasoningLevels ?? null]));
+/** A model from the provider's own list (同步模型) as the form adds it: its hints as flags, a known model's context and levels. */
+const syncedModel = (m) => ({
+  name: m.name,
+  vision: m.vision,
+  pdf: m.pdf,
+  reasoning: m.reasoning,
+  // The catalogue's context, within what the form accepts for it.
+  context: Number.isInteger(m.contextTokens) ? String(Math.min(CONTEXT_MAX, Math.max(CONTEXT_MIN, m.contextTokens))) : "",
+  levels: m.reasoning ? (m.reasoningLevels ?? null) : null,
+});
 
 /** The outcome of 测试连接: success, a 404/405 (no model list: said plainly, not as an error) or the sentence for the error. */
 function TestResult({ result }) {
@@ -229,20 +252,39 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
   const shownContext = context ?? defaults?.contextTokens ?? null;
   const limit = defaults?.maxOutputTokens ?? null;
   const tooSmall = shownContext !== null && limit !== null && shownContext <= limit;
-  const summary = [model.vision && "能看图片", model.pdf && "能直接读 PDF", model.reasoning && "支持思考"].filter(Boolean);
-  if (shownContext !== null) summary.push(`上下文 ${grouped(shownContext)}${context === null ? "（默认）" : ""}`);
+  const summary = [model.vision && "能看图片", model.pdf && "能直接读 PDF"].filter(Boolean);
+  const after = shownContext !== null ? [`上下文 ${grouped(shownContext)}${context === null ? "（默认）" : ""}`] : [];
+  // A model that reasons and lists its levels: the levels, small, beside 支持思考, and the way back to every level.
+  const thinking = model.reasoning ? (
+    <>
+      支持思考
+      {model.levels && (
+        <>
+          <small className="muted">（{model.levels.map(levelLabel).join("、")}）</small>{" "}
+          <Btn small variant="text" onClick={() => onChange({ ...model, levels: null })}>改为全部档位</Btn>
+        </>
+      )}
+    </>
+  ) : null;
+  const parts = [...summary, thinking, ...after].filter(Boolean);
   const contextHint = [
     `模型一次能读的内容，以 token 计，${grouped(CONTEXT_MIN)} 到 ${grouped(CONTEXT_MAX)}。`,
     defaults ? `留空时用默认的 ${grouped(defaults.contextTokens)}。` : "留空时用默认值。",
     limit !== null ? `需要大于每次回复的输出上限 ${grouped(limit)}，Agent 才能使用这个模型。` : "需要大于每次回复的输出上限，Agent 才能使用这个模型。",
   ].join("");
-  const flag = (key) => (event) => onChange({ ...model, [key]: event.target.checked });
+  // Not reasoning any more: the levels it listed go too.
+  const flag = (key) => (event) => onChange({ ...model, [key]: event.target.checked, ...(key === "reasoning" && !event.target.checked ? { levels: null } : {}) });
   return (
     <li>
       <div className="member-body">
         <strong>{model.name}</strong>
         <p>
-          {summary.join(" · ")}
+          {parts.map((part, i) => (
+            <React.Fragment key={i}>
+              {i > 0 && " · "}
+              {part}
+            </React.Fragment>
+          ))}
           {tooSmall && " · 上下文太小，Agent 不能使用"}
         </p>
         {open && (
@@ -284,6 +326,153 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
   );
 }
 
+/** At most this many rows of the provider's list are drawn at a time: past them the owner searches. */
+const SHOWN_ROWS = 200;
+const ADDED_AT_LIMIT = (n) => `已添加 ${n} 个模型。每个供应商最多 ${MAX_MODELS} 个模型，其余的没有添加。`;
+
+/** One model of the provider's own list: its name (and the catalogue's), its hints as tags, and 添加 or 已添加 · 移除. */
+function SyncRow({ model, added, full, onAdd, onRemove }) {
+  const label = model.label && model.label.toLowerCase() !== model.name.toLowerCase() ? model.label : null;
+  const tags = [model.vision && "看图", model.reasoning && "思考", model.pdf && "PDF", !model.known && "未收录"].filter(Boolean);
+  return (
+    <li>
+      <div className="member-body">
+        <span className="sync-name">
+          <strong>{model.name}</strong>
+          {label && <span className="muted"> · {label}</span>}
+        </span>
+        {tags.length > 0 && (
+          <span className="sync-tags">
+            {tags.map((t) => (
+              <Tag key={t} tone="muted">{t}</Tag>
+            ))}
+          </span>
+        )}
+      </div>
+      <div className="member-actions">
+        {added ? (
+          <>
+            <span className="muted sync-added">已添加</span>
+            <Btn small aria-label={`移除：${model.name}`} onClick={() => onRemove(model.name)}>移除</Btn>
+          </>
+        ) : (
+          <Btn small aria-label={`添加：${model.name}`} disabled={full} reason={`最多 ${MAX_MODELS} 个模型`} onClick={() => onAdd([model])}>添加</Btn>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * 同步模型: the provider's own model list (`listProviderModels`, its saved address and key), to search and add from.
+ * Adding and removing edit the form's list (`models`, through `onAdd` / `onRemove`); `onDone` is 完成 (the form decides
+ * whether that saves), `onClose` closes it as it is. `saving` and `saveError` are 完成's.
+ */
+function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving, saveError }) {
+  const { actions } = useStore();
+  /** {status: "loading"} | {status: "ok", listed} | {status: "failed", text, noList} */
+  const [load, setLoad] = useState({ status: "loading" });
+  const [query, setQuery] = useState("");
+  const [othersOpen, setOthersOpen] = useState(false);
+  const [note, setNote] = useState(null);
+  const generation = useRef(0);
+
+  const fetchList = useCallback(async () => {
+    generation.current += 1;
+    const mine = generation.current;
+    setLoad({ status: "loading" });
+    const res = await actions.listProviderModels(provider.id);
+    if (generation.current !== mine) return;
+    if (res.ok) setLoad({ status: "ok", listed: res.value.listed });
+    else {
+      const status = res.error?.upstreamStatus;
+      setLoad({ status: "failed", text: res.text, noList: res.error?.code === "provider_unavailable" && (status === "404" || status === "405") });
+    }
+  }, [actions, provider.id]);
+  useEffect(() => {
+    fetchList();
+    return () => {
+      generation.current += 1;
+    };
+  }, [fetchList]);
+
+  const have = new Set(models.map((m) => m.name));
+  const full = models.length >= MAX_MODELS;
+  const listed = load.status === "ok" ? load.listed : [];
+  const needle = query.trim().toLowerCase();
+  const matches = (m) => !needle || m.name.toLowerCase().includes(needle) || (m.label ?? "").toLowerCase().includes(needle);
+  const chat = listed.filter((m) => m.chat && matches(m));
+  const others = listed.filter((m) => !m.chat && matches(m));
+  // One budget of rows for both groups, the chat models first.
+  const chatShown = chat.slice(0, SHOWN_ROWS);
+  const othersShown = othersOpen ? others.slice(0, SHOWN_ROWS - chatShown.length) : [];
+  const toAdd = listed.filter((m) => m.chat && !have.has(m.name));
+
+  const addAll = () => {
+    const room = MAX_MODELS - models.length;
+    const taken = toAdd.slice(0, Math.max(0, room));
+    onAdd(taken);
+    setNote(taken.length < toAdd.length ? ADDED_AT_LIMIT(taken.length) : null);
+  };
+  const rows = (list) =>
+    list.map((m) => <SyncRow key={m.name} model={m} added={have.has(m.name)} full={full} onAdd={onAdd} onRemove={onRemove} />);
+  const more = (n) => n > 0 && <p className="muted">还有 {n} 个，请用搜索缩小范围</p>;
+
+  return (
+    <Modal
+      wide
+      title={`${provider.name} 的模型${load.status === "ok" ? `（${listed.length}）` : ""}`}
+      onClose={onClose}
+      footer={
+        <Btn variant="primary" disabled={saving} onClick={onDone}>
+          {saving ? "保存中…" : "完成"}
+        </Btn>
+      }
+    >
+      {load.status === "loading" && <p className="muted">正在读取供应商的模型列表…</p>}
+      {load.status === "failed" &&
+        (load.noList ? (
+          <p className="field-hint" role="status">{load.text}</p>
+        ) : (
+          <div className="sync-failed">
+            <p className="field-msg" role="alert">{load.text}</p>
+            <Btn small onClick={fetchList}>重试</Btn>
+          </div>
+        ))}
+      {load.status === "ok" && listed.length === 0 && <p className="field-hint" role="status">供应商没有列出任何模型，可以手动添加。</p>}
+      {load.status === "ok" && listed.length > 0 && (
+        <>
+          <div className="sync-tools">
+            <label className="search">
+              <Search size={18} aria-hidden="true" />
+              <input type="search" maxLength={100} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型" aria-label="搜索模型" />
+            </label>
+            <Btn small disabled={full || toAdd.length === 0} onClick={addAll}>添加全部</Btn>
+          </div>
+          {note && <p className="field-hint" role="status">{note}</p>}
+          <ul className="member-rows sync-rows" aria-label="供应商的模型">{rows(chatShown)}</ul>
+          {more(chat.length - chatShown.length)}
+          {chat.length === 0 && <p className="muted">{needle ? "没有找到匹配的对话模型。" : "供应商列出的都可能不是对话模型。"}</p>}
+          {others.length > 0 && (
+            <div className="sync-others">
+              <Btn small variant="text" aria-expanded={othersOpen} onClick={() => setOthersOpen(!othersOpen)}>
+                可能不是对话模型（{others.length}）
+              </Btn>
+              {othersOpen && (
+                <>
+                  <ul className="member-rows sync-rows" aria-label="可能不是对话模型">{rows(othersShown)}</ul>
+                  {more(others.length - othersShown.length)}
+                </>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {saveError && <p className="field-msg" role="alert">{saveError}</p>}
+    </Modal>
+  );
+}
+
 /**
  * Add (no `provider`) or edit one of my providers. The key is typed into an uncontrolled password field: it is never
  * held in React state, never written back into the page, read once when the request is built, and the field is emptied
@@ -315,14 +504,19 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
   const [newModelError, setNewModelError] = useState("");
   /** Names of the models whose 高级 is open. */
   const [open, setOpen] = useState(() => new Set());
-  const [refreshNote, setRefreshNote] = useState(null);
+  /**
+   * The 同步模型 dialog while open: `{dirtyBefore}`, whether the model list already differed from the saved one when it
+   * opened. A provider just added without models opens it at once (this form is new for it, so only once).
+   */
+  const [sync, setSync] = useState(() => (created && provider !== null && provider.models.length === 0 ? { dirtyBefore: false } : null));
+  const [syncError, setSyncError] = useState(null);
   const { result: testResult, test, clear: clearTest } = useConnectionTest(provider?.id ?? null, run);
 
   const editing = provider !== null;
   const address = f.baseUrl.trim();
   const addressChanged = editing && address !== provider.baseUrl;
   const originChanged = addressChanged && originOf(address) !== originOf(provider.baseUrl);
-  // 测试连接 and 从供应商读取 use the saved address and key: not while new ones wait to be saved.
+  // 测试连接 and 同步模型 use the saved address and key: not while new ones wait to be saved.
   const unsaved = addressChanged || key.given;
 
   // Adding needs a key. Editing keeps the saved one, unless the address moved to another origin, or a new key was
@@ -383,9 +577,16 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     const problem = modelNameProblem(name, models);
     setNewModelError(problem);
     if (problem) return;
-    setModels((cur) => [...cur, { name, vision: false, pdf: false, reasoning: false, context: "" }]);
+    setModels((cur) => [...cur, { name, vision: false, pdf: false, reasoning: false, context: "", levels: null }]);
     setNewModel("");
   };
+  /** 同步模型's 添加 and 添加全部: the models not in the list yet, as far as there is room. */
+  const addSynced = (list) =>
+    setModels((cur) => {
+      const have = new Set(cur.map((m) => m.name));
+      const fresh = list.filter((m) => !have.has(m.name)).slice(0, Math.max(0, MAX_MODELS - cur.length));
+      return [...cur, ...fresh.map(syncedModel)];
+    });
   const changeModel = (name, next) => setModels((cur) => cur.map((m) => (m.name === name ? next : m)));
   const removeModel = (name) => {
     setModels((cur) => cur.filter((m) => m.name !== name));
@@ -456,35 +657,36 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     else await create();
   };
 
-  /** The provider's own model list, merged in: the names it listed that the list here does not have yet. */
-  const refresh = async () => {
-    setRefreshNote(null);
-    const res = await run("refresh", () => settled(actions.refreshProviderModels(provider.id)), () => "");
+  const openSync = () => {
+    setSyncError(null);
+    setSync({ dirtyBefore: modelsKey(latestModels.current.map(wireModel)) !== modelsKey(provider.models) });
+  };
+  const closeSync = () => {
+    setSync(null);
+    setSyncError(null);
+  };
+  /**
+   * 完成: what the dialog changed is in the form's list. With nothing else unsaved in the form (name, address, key, a
+   * model list already changed before the dialog opened), that list is saved at once; otherwise it waits for 保存.
+   */
+  const finishSync = async () => {
+    const list = latestModels.current.map(wireModel);
+    const changed = modelsKey(list) !== modelsKey(provider.models);
+    const otherChanges = sync.dirtyBefore || f.name.trim() !== provider.name || unsaved || keyCleared;
+    if (!changed || otherChanges) return closeSync();
+    setSyncError(null);
+    const res = await run("sync", () => settled(actions.patchProvider(provider.id, { models: list })), () => "");
     if (!res.ok) {
-      if (res.error?.code !== "busy_here") setRefreshNote({ ok: false, text: refusalText(res.error) });
+      if (res.error?.code === "busy_here") return;
+      // Gone meanwhile: the page goes back to the list; the reason is said there.
+      if (res.error?.error?.code === "not_found") return dispatch({ type: "toast", text: refusalText(res.error) });
+      setSyncError(refusalText(res.error));
       return;
     }
-    const listed = Array.isArray(res.value?.listed) ? res.value.listed : [];
-    const names = new Set(listed);
-    const current = latestModels.current;
-    const next = [...current];
-    const have = new Set(current.map((m) => m.name));
-    for (const m of res.value?.provider?.models ?? []) {
-      if (next.length >= MAX_MODELS) break;
-      if (names.has(m.name) && !have.has(m.name)) {
-        next.push(formModel(m));
-        have.add(m.name);
-      }
-    }
-    const added = next.length - current.length;
-    setModels(next);
-    setRefreshNote({
-      ok: true,
-      text:
-        listed.length === 0
-          ? "供应商没有列出任何模型，可以手动添加。"
-          : `找到 ${listed.length} 个模型，${added > 0 ? `已把其中 ${added} 个新的加入列表。` : "列表里都已经有了。"}`,
-    });
+    // The form holds the list as saved now (a model without a context has the default one there).
+    if (Array.isArray(res.value?.models)) setModels(res.value.models.map(formModel));
+    dispatch({ type: "toast", text: `已保存 ${res.value?.models?.length ?? list.length} 个模型` });
+    closeSync();
   };
 
   const onNewModelKey = (event) => {
@@ -505,7 +707,7 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
         </div>
       </header>
       <form ref={formRef} className="page-body form" onSubmit={submit} noValidate>
-        {created && <Notice tone="ok">已添加。现在可以测试连接，或从供应商读取它的模型列表。</Notice>}
+        {created && <Notice tone="ok">已添加。现在可以测试连接，或点“同步模型”从供应商的模型列表里挑选。</Notice>}
         <Field label="名称" hint="只给你自己看，用来区分不同的供应商。" error={nameError}>
           <input value={f.name} onChange={set("name")} autoComplete="off" placeholder="例如：我的 OpenAI" />
         </Field>
@@ -571,16 +773,15 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
         <div className="member-actions">
           <Btn small onClick={addModel}>添加模型</Btn>
           {editing && (
-            <Btn small disabled={busy !== null || unsaved} reason="新的接口地址或密钥还没保存" onClick={refresh}>
-              {busy === "refresh" ? "读取中…" : "从供应商读取"}
+            <Btn small disabled={busy !== null || unsaved} reason="新的接口地址或密钥还没保存" onClick={openSync}>
+              同步模型
             </Btn>
           )}
         </div>
-        {refreshNote && (refreshNote.ok ? <p className="field-hint" role="status">{refreshNote.text}</p> : <p className="field-msg" role="alert">{refreshNote.text}</p>)}
         <p className="field-hint">
-          {editing ? "从供应商读取会用已保存的地址和密钥。有的供应商不提供模型列表，这时请手动添加。" : "保存后可以从供应商读取它的模型列表；也可以在这里手动添加。"}
+          {editing ? "同步模型会用已保存的地址和密钥。有的供应商不提供模型列表，这时请手动添加。" : "保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。"}
         </p>
-        {editing && unsaved && <Reason>请先保存新的接口地址或密钥，再测试连接或从供应商读取。</Reason>}
+        {editing && unsaved && <Reason>请先保存新的接口地址或密钥，再测试连接或同步模型。</Reason>}
 
         <Notice tone="info">{PRIVACY_TEXT}</Notice>
         {refusal && refusal.code !== "name_taken" && <Notice tone="warn">{refusal.text}</Notice>}
@@ -591,6 +792,18 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
           </Btn>
         </div>
       </form>
+      {editing && sync && (
+        <SyncDialog
+          provider={provider}
+          models={models}
+          onAdd={addSynced}
+          onRemove={removeModel}
+          onDone={finishSync}
+          onClose={closeSync}
+          saving={busy === "sync"}
+          saveError={syncError}
+        />
+      )}
     </section>
   );
 }

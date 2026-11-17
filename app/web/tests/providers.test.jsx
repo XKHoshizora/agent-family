@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // Settings › 模型供应商: the list, adding and editing a provider (the key sent once and never kept or shown), its
-// models with the 高级 disclosure, 从供应商读取, 测试连接 and deleting one that Agents use. Over the real data layer.
+// models with the 高级 disclosure, 同步模型 (choosing from the provider's own list), 测试连接 and deleting one that
+// Agents use. Over the real data layer.
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
@@ -58,7 +59,7 @@ async function openProviders({ providers = [providerOf()], api = {} } = {}) {
       return { ok: true };
     }),
     testProvider: vi.fn(async () => ({ ok: true })),
-    refreshProviderModels: vi.fn(),
+    listProviderModels: vi.fn(async () => ({ ok: true, listed: [] })),
     ...api,
   };
   const app = await openApp({ sync: () => syncOf([]), api: routes, handlers: { models: () => MODELS } });
@@ -487,33 +488,296 @@ describe("the models of a provider", () => {
     });
   });
 
-  it("从供应商读取 says how many it found and adds the new ones to the list", async () => {
-    const refreshProviderModels = vi.fn(async () => ({
-      listed: ["gpt-x", "gpt-y", "gpt-z"],
-      provider: providerOf(P1, {
-        models: [
-          ...providerOf().models,
-          { name: "gpt-y", vision: false, pdf: false, reasoning: false, contextTokens: 16000 },
-          { name: "gpt-z", vision: false, pdf: false, reasoning: false, contextTokens: 16000 },
-        ],
-      }),
-    }));
-    await openProviders({ api: { refreshProviderModels } });
-    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
-    await click(inMain().getByRole("button", { name: "从供应商读取" }));
-    expect(refreshProviderModels).toHaveBeenCalledWith(P1);
-    expect(mainText()).toContain("找到 3 个模型");
-    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "gpt-y", "gpt-z"]);
-  });
-
-  it("从供应商读取 and 测试连接 wait until a new address or key is saved", async () => {
+  it("同步模型 and 测试连接 wait until a new address or key is saved", async () => {
     await openProviders();
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    expect(inMain().queryByRole("button", { name: "从供应商读取" })).toBeNull();
     fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
     await flush();
-    expect(inMain().getByRole("button", { name: "从供应商读取" }).disabled).toBe(true);
+    expect(inMain().getByRole("button", { name: "同步模型" }).disabled).toBe(true);
     expect(inMain().getByRole("button", { name: "测试连接" }).disabled).toBe(true);
-    expect(mainText()).toContain("请先保存");
+    expect(mainText()).toContain("请先保存新的接口地址或密钥，再测试连接或同步模型。");
+  });
+
+  it("添加模型 with the name box empty says 请填写模型名称, and that does not stop 保存", async () => {
+    const app = await openProviders();
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(inMain().getByRole("button", { name: "添加模型" }));
+    expect(mainText()).toContain("请填写模型名称");
+    type("名称", "工作用");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, { name: "工作用" });
+    expect(toastText()).toBe("供应商已保存");
+  });
+
+  it("a model's listed thinking levels show beside 支持思考; 改为全部档位 clears them, and so does unticking 支持思考", async () => {
+    const levels = providerOf(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000, reasoningLevels: ["low", "high"] },
+        { name: "deep", vision: false, pdf: false, reasoning: true, contextTokens: 64000, reasoningLevels: ["max"] },
+      ],
+    });
+    const app = await openProviders({ providers: [levels] });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    expect(modelRow("gpt-x").textContent).toContain("支持思考（低、高）");
+    await click(within(modelRow("gpt-x")).getByRole("button", { name: "改为全部档位" }));
+    expect(modelRow("gpt-x").textContent).not.toContain("（低、高）");
+    expect(within(modelRow("gpt-x")).queryByRole("button", { name: "改为全部档位" })).toBeNull();
+    await click(within(modelRow("deep")).getByRole("button", { name: /高级/ }));
+    fireEvent.click(within(modelRow("deep")).getByLabelText(/支持思考/));
+    await flush();
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "deep", vision: false, pdf: false, reasoning: false, contextTokens: 64000 },
+      ],
+    });
+  });
+});
+
+describe("同步模型", () => {
+  const NO_LIST = (status) => `这个供应商没有提供模型列表（状态码 ${status}），所以没能确认密钥是否可用。对话可能仍然可以使用，模型名称需要手动添加。`;
+  const entry = (name, fields = {}) => ({ name, vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false, ...fields });
+  const ALL = ["low", "medium", "high", "xhigh", "max"];
+  const LISTING = [
+    entry("gpt-x", { known: true, label: "GPT X", reasoning: true, added: true }),
+    entry("gpt-6-sol", { known: true, label: "GPT-6 Sol", vision: true, pdf: true, reasoning: true, contextTokens: 1050000, reasoningLevels: ALL }),
+    entry("claude-long", { known: true, label: "Claude Long", vision: true, pdf: true, reasoning: true, contextTokens: 10000000, reasoningLevels: ["low", "high"] }),
+    entry("house-blend"),
+    entry("o3-mini", { known: true, label: "o3-mini", reasoning: true, contextTokens: 200000, reasoningLevels: ["low", "medium", "high"] }),
+    entry("text-embedding-3-small", { chat: false }),
+    entry("tts-1", { chat: false }),
+  ];
+  const listOf = (listed) => vi.fn(async () => ({ ok: true, listed: structuredClone(listed) }));
+  const sync = () => dialog();
+  const inSync = () => within(sync());
+  const syncRows = (label = "供应商的模型") => [...within(inSync().getByRole("list", { name: label })).queryAllByRole("listitem")];
+  const rowOf = (name) => syncRows().find((li) => li.querySelector("strong").textContent === name) ?? null;
+  const openSync = async (options = {}) => {
+    const app = await openProviders({ ...options, api: { listProviderModels: listOf(LISTING), ...options.api } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    return app;
+  };
+  const done = () => click(inSync().getByRole("button", { name: "完成" }));
+
+  it("lists the provider's chat models with the hints as tags, the catalogue's name, 未收录 for a guess; the others folded away", async () => {
+    const app = await openSync();
+    expect(app.api.listProviderModels).toHaveBeenCalledWith(P1);
+    expect(sync().querySelector(".modal-head h2").textContent).toBe("我的 OpenAI 的模型（7）");
+    expect(syncRows().map((li) => li.querySelector("strong").textContent)).toEqual(["gpt-x", "gpt-6-sol", "claude-long", "house-blend", "o3-mini"]);
+    const sol = rowOf("gpt-6-sol");
+    expect(sol.textContent).toContain("GPT-6 Sol");
+    expect([...sol.querySelectorAll(".tag")].map((t) => t.textContent)).toEqual(["看图", "思考", "PDF"]);
+    expect([...rowOf("house-blend").querySelectorAll(".tag")].map((t) => t.textContent)).toEqual(["未收录"]);
+    // The display name is not repeated when it is the id itself.
+    expect(rowOf("o3-mini").querySelector(".member-body").textContent).not.toContain("o3-mini · o3-mini");
+    // gpt-x is in the provider's list already: 已添加, with 移除.
+    expect(rowOf("gpt-x").textContent).toContain("已添加");
+    expect(within(rowOf("gpt-x")).getByRole("button", { name: "移除：gpt-x" })).toBeTruthy();
+    expect(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" })).toBeTruthy();
+
+    const others = inSync().getByRole("button", { name: /可能不是对话模型/ });
+    expect(others.getAttribute("aria-expanded")).toBe("false");
+    expect(inSync().queryByRole("list", { name: "可能不是对话模型" })).toBeNull();
+    await click(others);
+    expect(syncRows("可能不是对话模型").map((li) => li.querySelector("strong").textContent)).toEqual(["text-embedding-3-small", "tts-1"]);
+  });
+
+  it("the search box keeps the names (or display names) holding what is typed, ignoring case", async () => {
+    await openSync();
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "SOL" } });
+    await flush();
+    expect(syncRows().map((li) => li.querySelector("strong").textContent)).toEqual(["gpt-6-sol"]);
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "claude l" } });
+    await flush();
+    expect(syncRows().map((li) => li.querySelector("strong").textContent)).toEqual(["claude-long"]);
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "embed" } });
+    await flush();
+    expect(syncRows()).toEqual([]);
+    expect(inSync().getByRole("button", { name: /可能不是对话模型/ }).textContent).toContain("1");
+  });
+
+  it("添加 puts the model in the form's list with its hints as flags, a known model's context (within 1,000–2,000,000) and levels; 完成 saves it when nothing else waits", async () => {
+    const app = await openSync();
+    await click(within(rowOf("gpt-6-sol")).getByRole("button", { name: "添加：gpt-6-sol" }));
+    expect(rowOf("gpt-6-sol").textContent).toContain("已添加");
+    await click(within(rowOf("claude-long")).getByRole("button", { name: "添加：claude-long" }));
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    // The form's own list, behind the dialog, already has them; nothing was sent yet.
+    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "gpt-6-sol", "claude-long", "house-blend"]);
+    expect(app.api.patchProvider).not.toHaveBeenCalled();
+    await done();
+    expect(app.api.patchProvider).toHaveBeenCalledTimes(1);
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000 },
+        { name: "tiny", vision: false, pdf: false, reasoning: false, contextTokens: 1000 },
+        { name: "gpt-6-sol", vision: true, pdf: true, reasoning: true, contextTokens: 1050000, reasoningLevels: ALL },
+        { name: "claude-long", vision: true, pdf: true, reasoning: true, contextTokens: 2000000, reasoningLevels: ["low", "high"] },
+        { name: "house-blend", vision: false, pdf: false, reasoning: false },
+      ],
+    });
+    expect(dialog()).toBeNull();
+    expect(toastText()).toBe("已保存 6 个模型");
+    // Still in the form, which now matches what is saved: 保存 has nothing to send.
+    expect(modelRow("claude-long").textContent).toContain("支持思考（低、高）");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("移除 takes a model off the form's list, a saved one too; with nothing changed 完成 only closes", async () => {
+    const app = await openSync();
+    await click(within(rowOf("gpt-x")).getByRole("button", { name: "移除：gpt-x" }));
+    expect(within(rowOf("gpt-x")).getByRole("button", { name: "添加：gpt-x" })).toBeTruthy();
+    expect(modelNames()).toEqual(["plain", "tiny"]);
+    await click(within(rowOf("gpt-x")).getByRole("button", { name: "添加：gpt-x" }));
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "移除：house-blend" }));
+    // gpt-x came back with its hints as flags (reasoning, the context left to the default): a change, saved.
+    await done();
+    expect(app.api.patchProvider.mock.calls[0][1].models.map((m) => m.name)).toEqual(["plain", "tiny", "gpt-x"]);
+
+    app.api.patchProvider.mockClear();
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    await done();
+    expect(app.api.patchProvider).not.toHaveBeenCalled();
+    expect(dialog()).toBeNull();
+  });
+
+  it("完成 does not save while the form has another unsaved change: the models wait for the form's 保存", async () => {
+    const app = await openProviders({ api: { listProviderModels: listOf(LISTING) } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    type("名称", "工作用");
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await done();
+    expect(app.api.patchProvider).not.toHaveBeenCalled();
+    expect(dialog()).toBeNull();
+    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "house-blend"]);
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, { name: "工作用", models: expect.arrayContaining([{ name: "house-blend", vision: false, pdf: false, reasoning: false }]) });
+  });
+
+  it("a model added by hand before opening it counts as another unsaved change too", async () => {
+    const app = await openProviders({ api: { listProviderModels: listOf(LISTING) } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    type("模型名称", "typed-by-hand");
+    await click(inMain().getByRole("button", { name: "添加模型" }));
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await done();
+    expect(app.api.patchProvider).not.toHaveBeenCalled();
+    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "typed-by-hand", "house-blend"]);
+  });
+
+  it("添加全部 adds every chat model not yet added; at the limit of 100 it says how many were added", async () => {
+    const many = providerOf(P1, { models: Array.from({ length: 97 }, (_, i) => ({ name: `m${i}`, vision: false, pdf: false, reasoning: false, contextTokens: 16000 })) });
+    const app = await openSync({ providers: [many] });
+    await click(inSync().getByRole("button", { name: "添加全部" }));
+    // Three places were left: gpt-x, gpt-6-sol, claude-long; never the models that may not chat.
+    expect(modelNames().slice(97)).toEqual(["gpt-x", "gpt-6-sol", "claude-long"]);
+    expect(inSync().getByRole("status").textContent).toBe("已添加 3 个模型。每个供应商最多 100 个模型，其余的没有添加。");
+    expect(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }).disabled).toBe(true);
+    expect(inSync().getByRole("button", { name: "添加全部" }).disabled).toBe(true);
+    await done();
+    expect(app.api.patchProvider.mock.calls[0][1].models).toHaveLength(100);
+    expect(toastText()).toBe("已保存 100 个模型");
+  });
+
+  it("添加全部 with room for all: they are added, the non-chat ones left out, and nothing is said", async () => {
+    await openSync();
+    await click(inSync().getByRole("button", { name: "添加全部" }));
+    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "gpt-6-sol", "claude-long", "house-blend", "o3-mini"]);
+    expect(inSync().queryByRole("status")).toBeNull();
+    expect(inSync().getByRole("button", { name: "添加全部" }).disabled).toBe(true);
+  });
+
+  it("shows at most 200 rows at a time; past them it asks to narrow down by searching", async () => {
+    const long = Array.from({ length: 260 }, (_, i) => entry(`model-${String(i).padStart(3, "0")}`));
+    await openSync({ api: { listProviderModels: listOf(long) } });
+    expect(syncRows()).toHaveLength(200);
+    expect(sync().textContent).toContain("还有 60 个，请用搜索缩小范围");
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "model-25" } });
+    await flush();
+    expect(syncRows()).toHaveLength(10);
+    expect(sync().textContent).not.toContain("请用搜索缩小范围");
+  });
+
+  it("after a provider is added without models, it opens by itself, once", async () => {
+    const listProviderModels = listOf(LISTING);
+    await openProviders({ providers: [], api: { listProviderModels } });
+    await click(inMain().getByRole("button", { name: /添加供应商/ }));
+    expect(mainText()).toContain("保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。");
+    type("名称", "新的");
+    type("接口地址", "https://api.example.com/v1");
+    fireEvent.change(keyBox(), { target: { value: KEY } });
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(mainText()).toContain("已添加");
+    expect(sync().querySelector(".modal-head h2").textContent).toBe("新的 的模型（7）");
+    expect(listProviderModels).toHaveBeenCalledWith(P2);
+    await click(inSync().getByRole("button", { name: "关闭" }));
+    expect(dialog()).toBeNull();
+    await click(inMain().getByRole("button", { name: /返回/ }));
+    await click(inRow("新的").getByRole("button", { name: "编辑" }));
+    expect(dialog()).toBeNull();
+    expect(listProviderModels).toHaveBeenCalledTimes(1);
+  });
+
+  it("a provider added with models of its own does not open it", async () => {
+    const listProviderModels = listOf(LISTING);
+    await openProviders({ providers: [], api: { listProviderModels } });
+    await click(inMain().getByRole("button", { name: /添加供应商/ }));
+    type("名称", "新的");
+    type("接口地址", "https://api.example.com/v1");
+    fireEvent.change(keyBox(), { target: { value: KEY } });
+    type("模型名称", "mine");
+    await click(inMain().getByRole("button", { name: "添加模型" }));
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(mainText()).toContain("已添加。现在可以测试连接，或点“同步模型”从供应商的模型列表里挑选。");
+    expect(dialog()).toBeNull();
+    expect(listProviderModels).not.toHaveBeenCalled();
+  });
+
+  it("says why it has no list: no model list at the provider, a refused key, unreachable, too many tries, an empty list", async () => {
+    const listProviderModels = vi.fn();
+    const cases = [
+      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "404" }), NO_LIST("404"), "status"],
+      [async () => ({ ok: false, error: "provider_unavailable", upstreamStatus: "405" }), NO_LIST("405"), "status"],
+      [async () => ({ ok: false, error: "provider_rejected", upstreamStatus: "401" }), "供应商拒绝了这个密钥，或已保存的密钥无法再使用。请重新填写密钥并保存，然后再试。（供应商返回的状态码：401）", "alert"],
+      [async () => ({ ok: false, error: "provider_unavailable" }), "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。", "alert"],
+      [async () => ({ ok: false, error: "address_not_allowed" }), "这个接口地址不被允许：需要是 https 开头的公网地址。", "alert"],
+      [async () => Promise.reject(apiError(429, "rate_limited")), "操作太频繁了，请稍等一分钟再试。", "alert"],
+      [async () => ({ ok: true, listed: [] }), "供应商没有列出任何模型，可以手动添加。", "status"],
+    ];
+    await openProviders({ api: { listProviderModels } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    for (const [answer, sentence, role] of cases) {
+      listProviderModels.mockImplementationOnce(answer);
+      await click(inMain().getByRole("button", { name: "同步模型" }));
+      expect([sentence, inSync().getByRole(role).textContent]).toEqual([sentence, sentence]);
+      expect(inSync().queryByRole("searchbox")).toBeNull();
+      await done();
+    }
+    // An error that may pass can be tried again from the dialog.
+    listProviderModels.mockImplementationOnce(async () => ({ ok: false, error: "provider_unavailable" }));
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    listProviderModels.mockImplementationOnce(listOf(LISTING));
+    await click(inSync().getByRole("button", { name: "重试" }));
+    expect(syncRows()).toHaveLength(5);
+  });
+
+  it("a refused save on 完成 is said in the dialog, which stays open with the models still in the form", async () => {
+    const patchProvider = vi.fn(async () => Promise.reject(apiError(503, "busy")));
+    await openSync({ api: { patchProvider } });
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await done();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(sync()).not.toBeNull();
+    expect(inSync().getByRole("alert").textContent).toBe("服务现在有点忙，请稍后再试。");
+    expect(modelNames()).toContain("house-blend");
   });
 });
 
