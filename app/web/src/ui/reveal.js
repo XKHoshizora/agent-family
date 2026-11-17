@@ -2,89 +2,155 @@
 // millisecond, then nothing for half a second; with thinking on, sometimes the whole reply at once after a long
 // silence), but a prefix of what has arrived that grows at every animation frame. The text received is the truth
 // (data/model.js keeps it as it comes); this only decides how much of it is shown.
-//   - Pace: at least REVEAL_FLOOR_CPS characters a second, and faster the more is waiting (the backlog over
-//     REVEAL_PACE_MS), so a burst flows out quickly at first and settles to the pace of what keeps coming.
-//   - Bound: no character is shown later than REVEAL_MAX_LAG_MS after it arrived (each arrival is a deadline, drained
-//     evenly), so a burst of thousands of characters takes about a second, never minutes.
+//   - Pace: the sustained pace of what comes — the characters received so far over the time since the first of them
+//     (at least a second) — with a correction that keeps a small cushion waiting: the backlog is pulled toward that
+//     pace times REVEAL_CUSHION_MIN_MS over REVEAL_PULL_MS (never below half the pace). After a stall — a gap between
+//     pieces over REVEAL_STALL_FACTOR times the recent median gap — the cushion grows (up to REVEAL_CUSHION_MAX_MS), so
+//     the next silence is played through instead of stopping; it decays back over a few seconds. The fraction of a
+//     character a frame earns is carried to the next (a slow stream is not one character a frame). A backlog over
+//     REVEAL_BACKLOG_MAX characters is drained faster (its excess over REVEAL_EXCESS_MS).
+//   - Frames: a frame counts as at most REVEAL_MAX_FRAME_MS (a late frame resumes, it does not dump), the first after a
+//     pause as one frame.
+//   - Bound: no character is shown later than REVEAL_MAX_LAG_MS of that playing time after it arrived (each arrival is
+//     a deadline, drained evenly) — a safety net the pace rarely reaches.
 //   - End: once nothing more will come, what is left is shown within REVEAL_END_MS.
-//   - Where it stops: never inside a surrogate pair, before a combining mark, emoji modifier or joiner (or right after
-//     a joiner or virama, before what it joins), or inside a `<…>` token (a tag or an autolink: shown whole, or held
-//     back until its `>` has come — unless it grows longer than REVEAL_TOKEN_MAX, or a deadline is due).
+//   - Where it stops: at a grapheme boundary (Intl.Segmenter; where there is none: never inside a surrogate pair,
+//     before a combining mark, emoji modifier or joiner, or right after a joiner or virama, before what it joins), and
+//     never inside a `<…>` token (a tag or an autolink: shown whole, or held back until its `>` has come — unless it
+//     grows longer than REVEAL_TOKEN_MAX, or a deadline is due).
 // The frames are asked only while something is waiting; nothing runs once all of it is shown. Under
 // `prefers-reduced-motion: reduce` and in a hidden tab everything received is shown at once (no frames at all).
 import { useEffect, useLayoutEffect, useMemo, useReducer, useRef } from "react";
 
-/** The slowest pace, in characters a second: a trickle is shown as it comes. */
-export const REVEAL_FLOOR_CPS = 40;
-/** Above the floor the pace is the backlog over this many milliseconds (a bigger backlog, a faster pace). */
-export const REVEAL_PACE_MS = 400;
-/** No character is shown later than this many milliseconds after it was received. */
+/** The pace is measured over at least this long from the first piece (the first pieces do not set a wild pace). */
+export const REVEAL_RATE_MIN_MS = 1000;
+/** The cushion kept waiting, as time at the pace: at least this, ... */
+export const REVEAL_CUSHION_MIN_MS = 80;
+/** ... at most this (after stalls). */
+export const REVEAL_CUSHION_MAX_MS = 800;
+/** A raised cushion decays back toward its least with this time constant. */
+export const REVEAL_CUSHION_DECAY_MS = 2000;
+/** A gap between pieces over this many times the recent median gap (and over REVEAL_STALL_MIN_MS) is a stall... */
+export const REVEAL_STALL_FACTOR = 3;
+export const REVEAL_STALL_MIN_MS = 200;
+/** ... and raises the cushion to this share of it. */
+const STALL_SHARE = 0.5;
+/** The gaps the median is taken over. */
+const GAPS_KEPT = 8;
+/**
+ * The backlog is pulled toward the cushion over this long. (Shorter: closer behind, but a burst is drained before the
+ * next one comes more often, and the reveal pauses in the gap; longer: smoother, further behind.)
+ */
+export const REVEAL_PULL_MS = 500;
+/** A backlog over this many characters has its excess drained over REVEAL_EXCESS_MS. */
+export const REVEAL_BACKLOG_MAX = 300;
+export const REVEAL_EXCESS_MS = 400;
+/** No character is shown later than this many milliseconds (of playing time) after it was received. */
 export const REVEAL_MAX_LAG_MS = 1200;
 /** Once nothing more will come, what is left is shown within this many milliseconds. */
 export const REVEAL_END_MS = 300;
 /** The first frame after a pause counts as this long; a longer frame counts as REVEAL_MAX_FRAME_MS. */
 export const REVEAL_FRAME_MS = 16;
-export const REVEAL_MAX_FRAME_MS = 250;
+export const REVEAL_MAX_FRAME_MS = 100;
 /** A `<…>` token longer than this (from its `<`) is not held back whole. */
 export const REVEAL_TOKEN_MAX = 128;
 /** Arrivals remembered as deadlines (more: the two oldest become one, keeping the earlier deadline). */
 const MARKS_MAX = 64;
 
 /**
- * The pacing state: `clock` (ms, advanced by the frames that reveal), `credit` (the fraction of a character carried to
- * the next frame), `received` (the length last seen), `marks` (`{end, by}`: what had arrived by then must be shown by
- * `by`), `ended` (nothing more will come) and `endBy` (when all of it must be shown, once ended).
+ * The pacing state: `clock` (ms: the time passed, as the calls said it), `play` (ms: the time played, each frame at
+ * most REVEAL_MAX_FRAME_MS), `credit` (the fraction of a character carried to the next frame), `received` (the length
+ * last seen), `firstAt` / `lastAt` (clock times of the first and the latest piece), `gaps` (the latest gaps between
+ * pieces), `cushion` (ms), `caughtUp` (all of it was shown at the last call), `marks` (`{end, by}`: what had arrived by
+ * then must be shown by play time `by`), `ended` (nothing more will come) and `endBy` (play time by which all of it
+ * must be shown, once ended).
  */
-export const revealStart = () => ({ clock: 0, credit: 0, received: 0, marks: [], ended: false, endBy: null });
+export const revealStart = () => ({
+  clock: 0,
+  play: 0,
+  credit: 0,
+  received: 0,
+  firstAt: null,
+  lastAt: null,
+  gaps: [],
+  cushion: REVEAL_CUSHION_MIN_MS,
+  caughtUp: true,
+  marks: [],
+  ended: false,
+  endBy: null,
+});
 /** The same state, told that nothing more will come. */
 export const endReveal = (state) => (state.ended ? state : { ...state, ended: true });
 
 const isHigh = (c) => c >= 0xd800 && c <= 0xdbff;
 const isLow = (c) => c >= 0xdc00 && c <= 0xdfff;
 
+const median = (values) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+};
+
 /**
- * One frame: how far the shown prefix goes after `dtMs`. `revealedLen` of `receivedLen` characters are shown; `text`
- * (the received text, optional) moves the end to a safe boundary. Returns `{ revealed, state }`; with nothing new to
- * show it returns the same state object and does nothing else.
+ * One frame: how far the shown prefix goes, `dtMs` after the previous call. `revealedLen` of `receivedLen` characters
+ * are shown; `text` (the received text, optional) moves the end to a safe boundary. Returns `{ revealed, state }`; with
+ * nothing new to show it returns the same state object and does nothing else (the next call's `dtMs` then counts from
+ * the call before).
  */
 export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart(), text = null) {
-  let { clock, credit, received, marks, endBy } = state;
+  const dt = Math.max(Number(dtMs) || 0, 0);
+  const now = state.clock + dt;
+  let { credit, received, firstAt, lastAt, gaps, marks, endBy } = state;
+  // (A raised cushion decays with the time passed — before a stall seen now raises it again.)
+  let cushion = REVEAL_CUSHION_MIN_MS + (state.cushion - REVEAL_CUSHION_MIN_MS) * Math.exp(-dt / REVEAL_CUSHION_DECAY_MS);
   let changed = false;
   if (receivedLen !== received) {
     if (receivedLen < received) {
-      // (Not the same text any more: its deadlines go with it.)
-      marks = [];
-      credit = 0;
+      // (Not the same text any more: its pace and deadlines go with it.)
+      ({ credit, firstAt, lastAt, gaps, cushion, marks } = revealStart());
     } else {
-      marks = [...marks, { end: receivedLen, by: clock + REVEAL_MAX_LAG_MS }];
+      if (firstAt === null) firstAt = now;
+      else {
+        const gap = now - lastAt;
+        if (gaps.length >= 3 && gap > REVEAL_STALL_MIN_MS && gap > REVEAL_STALL_FACTOR * median(gaps)) {
+          cushion = Math.min(REVEAL_CUSHION_MAX_MS, Math.max(cushion, gap * STALL_SHARE));
+        }
+        gaps = [...gaps.slice(1 - GAPS_KEPT), gap];
+      }
+      lastAt = now;
+      marks = [...marks, { end: receivedLen, by: state.play + REVEAL_MAX_LAG_MS }];
       if (marks.length > MARKS_MAX) marks = [{ end: marks[1].end, by: marks[0].by }, ...marks.slice(2)];
     }
     received = receivedLen;
     changed = true;
   }
   if (state.ended && endBy === null) {
-    endBy = clock + REVEAL_END_MS;
+    endBy = state.play + REVEAL_END_MS;
     changed = true;
   }
   const from = Math.max(0, Math.min(revealedLen, receivedLen));
   const backlog = receivedLen - from;
+  if (backlog <= 0 && !changed && from === revealedLen) return { revealed: revealedLen, state };
   if (backlog <= 0) {
-    if (!changed && from === revealedLen) return { revealed: revealedLen, state };
-    return { revealed: from, state: { ...state, received, marks: [], credit: 0, endBy } };
+    return { revealed: from, state: { ...state, clock: now, credit: 0, received, firstAt, lastAt, gaps, cushion, caughtUp: true, marks: [], endBy } };
   }
-  const dt = Math.min(Math.max(Number(dtMs) || 0, 0), REVEAL_MAX_FRAME_MS);
-  const pace = credit + dt * Math.max(REVEAL_FLOOR_CPS / 1000, backlog / REVEAL_PACE_MS);
-  // Each deadline is drained evenly over the time it has left; one that falls due in this frame is met in full.
+  // A frame plays at most REVEAL_MAX_FRAME_MS; the first after everything was shown, one frame.
+  const step = Math.min(dt, state.caughtUp ? REVEAL_FRAME_MS : REVEAL_MAX_FRAME_MS);
+  // Characters a millisecond: the sustained pace, the backlog pulled toward its cushion, its excess drained.
+  const pace = received / Math.max(now - firstAt, REVEAL_RATE_MIN_MS);
+  let rate = Math.max(pace / 2, pace + (backlog - pace * cushion) / REVEAL_PULL_MS);
+  if (backlog > REVEAL_BACKLOG_MAX) rate += (backlog - REVEAL_BACKLOG_MAX) / REVEAL_EXCESS_MS;
+  const paced = credit + rate * step;
+  // Each deadline is drained evenly over the play time it has left; one that falls due in this frame is met in full.
   let due = from;
   let drain = 0;
   const meet = (end, by) => {
-    const left = by - clock;
-    if (left <= dt) due = Math.max(due, end);
-    else drain = Math.max(drain, ((end - from) * dt) / left);
+    const left = by - state.play;
+    if (left <= step) due = Math.max(due, end);
+    else drain = Math.max(drain, ((end - from) * step) / left);
   };
   for (const mark of marks) if (mark.end > from) meet(mark.end, mark.by);
   if (endBy !== null) meet(receivedLen, endBy);
-  const want = Math.max(pace, drain);
+  const want = Math.max(paced, drain);
   let to = Math.min(receivedLen, from + Math.floor(want));
   if (text !== null && to > from) to = revealBoundary(text, from, to, receivedLen);
   if (due > to) {
@@ -93,13 +159,14 @@ export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart()
   }
   credit = to >= receivedLen ? 0 : Math.min(Math.max(want - (to - from), -REVEAL_TOKEN_MAX), 1);
   if (marks.some((mark) => mark.end <= to)) marks = marks.filter((mark) => mark.end > to);
-  return { revealed: to, state: { clock: clock + dt, credit, received, marks, ended: state.ended, endBy } };
+  const next = { clock: now, play: state.play + step, credit, received, firstAt, lastAt, gaps, cushion, caughtUp: to >= receivedLen, marks, ended: state.ended, endBy };
+  return { revealed: to, state: next };
 }
 
 // ───────── where a prefix may end
 
 /** Joins the character before it: a combining mark, a joiner, an emoji modifier, a tag, a Hangul vowel or final jamo. */
-const JOINS_PREVIOUS = /[\p{M}‍ᅠ-ᇿힰ-퟿\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]/uy;
+const JOINS_PREVIOUS = /[\p{M}\u200D\u1160-\u11FF\uD7B0-\uD7FF\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]/uy;
 /** Joins the character after it: the zero width joiner and the common viramas (a conjunct). */
 const JOINS_NEXT = new Set([0x200d, 0x094d, 0x09cd, 0x0a4d, 0x0acd, 0x0b4d, 0x0bcd, 0x0c4d, 0x0ccd, 0x0d4d, 0x0dca, 0x1039, 0x17d2]);
 const isRegional = (cp) => cp >= 0x1f1e6 && cp <= 0x1f1ff;
@@ -126,7 +193,41 @@ function secondOfPair(text, i) {
   return run % 2 === 1;
 }
 
-/** `end`, moved on past whatever joins the character before it (bounded by `limit`). */
+/** The grapheme segmenter: made once where there is one (null where there is none); `setRevealGraphemes`: tests. */
+let graphemes;
+function segmenter() {
+  if (graphemes === undefined) {
+    try {
+      graphemes = typeof Intl === "object" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+    } catch {
+      graphemes = null;
+    }
+  }
+  return graphemes;
+}
+/** Replaces the grapheme segmenter (tests): one, null (the rules below), or undefined (the platform's again). */
+export function setRevealGraphemes(value) {
+  graphemes = value;
+}
+
+/**
+ * `end`, moved on to the end of the grapheme it falls in. `from` is a boundary already (shown), so only what lies
+ * between it and a little past `end` is segmented: work for the characters added, not for the text.
+ */
+function graphemeEnd(text, from, end, limit) {
+  const segments = segmenter();
+  if (!segments) return clusterEnd(text, end, limit);
+  for (let ahead = 32; ; ahead *= 4) {
+    const stop = Math.min(limit, end + ahead);
+    const hit = segments.segment(text.slice(from, stop)).containing(end - from);
+    if (!hit || hit.index === end - from) return end;
+    const after = from + hit.index + hit.segment.length;
+    // (A grapheme that reaches the end of the piece may go on past it: look further, up to a bound.)
+    if (after < stop || stop === limit || ahead >= 512) return after;
+  }
+}
+
+/** `end`, moved on past whatever joins the character before it (bounded by `limit`), where there is no segmenter. */
 function clusterEnd(text, end, limit) {
   let i = end;
   while (i < limit && i > 0) {
@@ -181,7 +282,7 @@ export function revealBoundary(text, from, to, limit = text.length) {
   let end = Math.min(to, limit);
   if (end <= from) return from;
   end = tokenEnd(text, from, end, limit);
-  if (end > from) end = clusterEnd(text, end, limit);
+  if (end > from) end = graphemeEnd(text, from, end, limit);
   // At the end of what has come: never half a pair, and a joiner waits for what it joins.
   if (end > from && isHigh(text.charCodeAt(end - 1))) end -= 1;
   if (end === limit && end > from && text.charCodeAt(end - 1) === 0x200d) end -= 1;
@@ -280,6 +381,10 @@ function stop(s) {
   s.last = null;
 }
 
+/**
+ * Asks for the next frame. Its time since the previous call (`s.last`, kept while nothing waits) is the time that
+ * passed: the pace is measured on it; nextReveal plays at most a frame of it after a pause.
+ */
 function ask(s) {
   s.frame = frames.request((now) => {
     s.frame = null;
@@ -293,6 +398,5 @@ function ask(s) {
       s.shown();
     }
     if (s.upTo < s.text.length) ask(s);
-    else s.last = null;
   });
 }

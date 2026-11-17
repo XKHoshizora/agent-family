@@ -9,8 +9,10 @@ import { act, cleanup, render } from "@testing-library/react";
 import { StreamingAgentText, loadMarkdown } from "../src/ui/AgentText.jsx";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
 import {
+  REVEAL_BACKLOG_MAX,
+  REVEAL_CUSHION_MAX_MS,
+  REVEAL_CUSHION_MIN_MS,
   REVEAL_END_MS,
-  REVEAL_FLOOR_CPS,
   REVEAL_MAX_LAG_MS,
   REVEAL_TOKEN_MAX,
   endReveal,
@@ -18,6 +20,7 @@ import {
   revealBoundary,
   revealStart,
   setRevealFrames,
+  setRevealGraphemes,
 } from "../src/ui/reveal.js";
 import { SilentWorker, settle, useWorkers } from "./markdown-worker.js";
 
@@ -26,51 +29,108 @@ await loadMarkdown();
 const FRAME = 16;
 
 /**
- * Frames at FRAME ms. `arrivals`: [[atMs, receivedLength]] in order; `endAt`: when nothing more will come; `text`: the
- * received text (boundaries). Returns every frame's `{ t, received, revealed }`.
+ * Frames at FRAME ms, called as the hook calls: only while something waits or has just come (or the end is told), with
+ * the time since the previous call. `arrivals`: [[atMs, receivedLength]] in order; `endAt`: when nothing more will
+ * come; `text`: the received text (boundaries). Returns every frame's `{ t, received, revealed, state }`.
  */
 function simulate({ arrivals, until, endAt = Infinity, text = null }) {
   let state = revealStart();
   let revealed = 0;
+  let last = null;
   const out = [];
   for (let t = FRAME; t <= until; t += FRAME) {
     let received = 0;
     for (const [at, length] of arrivals) if (at < t) received = length;
-    if (t > endAt) state = endReveal(state);
-    ({ revealed, state } = nextReveal(revealed, received, FRAME, state, text));
-    out.push({ t, received, revealed });
+    const ending = t > endAt && !state.ended;
+    if (ending) state = endReveal(state);
+    if (revealed < received || received !== state.received || ending) {
+      ({ revealed, state } = nextReveal(revealed, received, last === null ? FRAME : t - last, state, text));
+      last = t;
+    }
+    out.push({ t, received, revealed, state });
   }
   return out;
 }
 /** When each arrival was all shown (the first frame at which it was), or null. */
 const shownAt = (frames, length) => frames.find((f) => f.revealed >= length)?.t ?? null;
+/** `count` pieces of `size` characters, one every `every` ms from `start` (lengths go on from `base`). */
+const steady = ({ start = 0, every, size, count, base = 0 }) => Array.from({ length: count }, (_, i) => [start + i * every, base + (i + 1) * size]);
 
 describe("the pace (nextReveal)", () => {
-  it(`a small backlog goes at the floor, ${REVEAL_FLOOR_CPS} characters a second`, () => {
-    const frames = simulate({ arrivals: [[0, 10]], until: 400 });
-    const at = (ms) => frames.find((f) => f.t >= ms).revealed;
-    expect(at(128)).toBeGreaterThanOrEqual(4);
-    expect(at(128)).toBeLessThanOrEqual(6);
-    expect(shownAt(frames, 10)).toBeLessThanOrEqual(250 + FRAME);
-    // Never more than what has come, never back.
+  it("follows the sustained pace of what comes, carrying fractions: a slow stream is not one character a frame", () => {
+    // 10 characters a second, one every 100 ms.
+    const arrivals = steady({ every: 100, size: 1, count: 30 });
+    const frames = simulate({ arrivals, until: 3200 });
     for (let i = 1; i < frames.length; i += 1) {
       expect(frames[i].revealed).toBeGreaterThanOrEqual(frames[i - 1].revealed);
       expect(frames[i].revealed).toBeLessThanOrEqual(frames[i].received);
+      expect(frames[i].revealed - frames[i - 1].revealed).toBeLessThanOrEqual(1);
     }
+    const late = frames.filter((f) => f.t > 1000);
+    const adding = late.filter((f, i) => i > 0 && f.revealed > late[i - 1].revealed).length;
+    expect(adding).toBeLessThan(late.length / 3); // most frames add nothing: the pace is a character every 100 ms
+    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length}`).toBeLessThanOrEqual(300);
+
+    // 200 characters a second, in pieces of 10 every 50 ms: about 3 a frame, never far behind.
+    const fast = simulate({ arrivals: steady({ every: 50, size: 10, count: 60 }), until: 3200 });
+    const middle = fast.filter((f) => f.t > 1000 && f.t < 3000);
+    const added = middle[middle.length - 1].revealed - middle[0].revealed;
+    expect(added / middle.length).toBeGreaterThan(2.5);
+    expect(added / middle.length).toBeLessThan(4);
+    for (const f of middle) expect(f.received - f.revealed).toBeLessThanOrEqual(50);
   });
 
-  it("a trickle is shown as it comes: each piece within the gap before the next", () => {
-    const arrivals = Array.from({ length: 20 }, (_, i) => [i * 100, (i + 1) * 3]);
-    const frames = simulate({ arrivals, until: 2100 });
-    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at).toBeLessThanOrEqual(100);
+  it("a trickle is shown as it comes: a few frames behind once its pace is known, a little more in its first second", () => {
+    // (In the first second the pace is taken over a whole second: a little slower than the trickle's.)
+    const arrivals = steady({ every: 100, size: 3, count: 30 });
+    const frames = simulate({ arrivals, until: 3500 });
+    for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length} at ${at}`).toBeLessThanOrEqual(at < 1000 ? 400 : 200);
   });
 
-  it(`a burst of 6 000 characters flows out over frames and is all shown within ${REVEAL_MAX_LAG_MS} ms`, () => {
+  it("a stall grows the cushion (up to its most); it decays back over a few seconds", () => {
+    // 100 characters a second for 2 s, nothing for 2 s, then on again.
+    const arrivals = [...steady({ every: 50, size: 5, count: 40 }), ...steady({ start: 4000, every: 50, size: 5, count: 160, base: 200 })];
+    const frames = simulate({ arrivals, until: 12000 });
+    const cushionAt = (ms) => frames.find((f) => f.t >= ms).state.cushion;
+    expect(cushionAt(1900)).toBeCloseTo(REVEAL_CUSHION_MIN_MS, 0);
+    expect(cushionAt(4040)).toBeGreaterThan(REVEAL_CUSHION_MAX_MS * 0.95);
+    expect(cushionAt(6000)).toBeLessThan(REVEAL_CUSHION_MAX_MS * 0.5);
+    expect(cushionAt(10000)).toBeLessThan(REVEAL_CUSHION_MIN_MS + 50);
+    // Regular gaps are no stall.
+    const regular = simulate({ arrivals: steady({ every: 500, size: 60, count: 12 }), until: 6500 });
+    for (const f of regular) expect(f.state.cushion).toBeCloseTo(REVEAL_CUSHION_MIN_MS, 0);
+  });
+
+  it(`a burst of 6 000 characters flows out over frames, not at once, and is all shown within ${REVEAL_MAX_LAG_MS} ms`, () => {
     const frames = simulate({ arrivals: [[0, 6000]], until: 2000 });
     expect(frames[0].revealed).toBeGreaterThan(0);
-    expect(frames[0].revealed).toBeLessThan(600);
-    expect(frames.find((f) => f.t >= 600).revealed).toBeLessThan(6000);
+    expect(frames[0].revealed).toBeLessThan(1500);
+    expect(frames.find((f) => f.t >= 200).revealed).toBeLessThan(6000);
     expect(shownAt(frames, 6000)).toBeLessThanOrEqual(REVEAL_MAX_LAG_MS + FRAME);
+  });
+
+  it(`a backlog over ${REVEAL_BACKLOG_MAX} characters is drained faster: a slow stream's sudden burst is soon close behind`, () => {
+    const arrivals = [...steady({ every: 100, size: 5, count: 20 }), [2000, 2100]];
+    const frames = simulate({ arrivals, until: 3500 });
+    const at = frames.find((f) => f.t >= 2600);
+    expect(at.received - at.revealed).toBeLessThanOrEqual(REVEAL_BACKLOG_MAX);
+  });
+
+  it("a late frame plays at most 100 ms (it does not dump); the first frame after a pause plays one frame", () => {
+    let state = revealStart();
+    let revealed = 0;
+    ({ revealed, state } = nextReveal(revealed, 3000, FRAME, state));
+    ({ revealed, state } = nextReveal(revealed, 3000, FRAME, state));
+    const late = nextReveal(revealed, 3000, 2000, state);
+    const capped = nextReveal(revealed, 3000, 100, state);
+    expect(late.revealed).toBeLessThanOrEqual(capped.revealed);
+    expect(late.revealed).toBeLessThan(3000);
+    // All shown, a long pause, then a piece: its first frame plays a frame's worth, not the pause's.
+    while (revealed < 3000) ({ revealed, state } = nextReveal(revealed, 3000, FRAME, state));
+    const resumed = nextReveal(revealed, 3300, 5000, state);
+    const oneFrame = nextReveal(revealed, 3300, FRAME, state);
+    expect(resumed.revealed).toBeLessThanOrEqual(oneFrame.revealed);
+    expect(resumed.revealed).toBeLessThan(3300);
   });
 
   it(`bursts and gaps: every character is shown within ${REVEAL_MAX_LAG_MS} ms of arriving, and the reveal never stalls while something waits`, () => {
@@ -115,7 +175,13 @@ describe("the pace (nextReveal)", () => {
   });
 });
 
-describe("where a prefix may end", () => {
+describe.each([
+  ["by Intl.Segmenter's graphemes", undefined],
+  ["by the rules, where there is no Intl.Segmenter", null],
+])("where a prefix may end, %s", (_how, graphemes) => {
+  beforeEach(() => setRevealGraphemes(graphemes));
+  afterEach(() => setRevealGraphemes(undefined));
+
   /** Every prefix end the frames choose for this text arriving whole. */
   const ends = (text) => [...new Set(simulate({ arrivals: [[0, text.length]], until: 1500, text }).map((f) => f.revealed))];
 
@@ -127,7 +193,7 @@ describe("where a prefix may end", () => {
   });
 
   it("never before a combining mark, an emoji modifier or a joiner, nor right after a joiner", () => {
-    const pieces = ["é", "ạ̈", "👍🏽", "👨‍👩‍👧", "1️⃣", "🇨🇳", "क्ष", "한", "字"];
+    const pieces = ["e\u0301", "a\u0308\u0323", "👍🏽", "👨\u200D👩\u200D👧", "1\uFE0F\u20E3", "🇨🇳", "क\u094Dष", "\u1112\u1161\u11AB", "字"];
     const text = pieces.join("").repeat(40);
     const starts = new Set([text.length]);
     let at = 0;
@@ -242,15 +308,19 @@ describe("a reply being revealed", () => {
     expect(frames.pending).toBe(0);
   });
 
-  it("a trickle appears as it comes", async () => {
+  it("a trickle appears as it comes, a piece or so behind; once it is all shown no frame is asked", async () => {
     const text = sample(60);
     const { container, rerender } = render(bubble(text.slice(0, 3)));
     for (let i = 1; i <= 20; i += 1) {
       rerender(bubble(text.slice(0, 3 * i)));
-      for (let ms = 0; ms < 100; ms += FRAME) frames.step();
-      expect(shownText(container)).toBe(text.slice(0, 3 * i));
-      expect(frames.pending).toBe(0);
+      for (let ms = 0; ms < 96; ms += FRAME) frames.step(); // (six frames: 96 ms)
+      const shown = container.querySelector(".wait") ? "" : shownText(container);
+      expect(text.startsWith(shown)).toBe(true);
+      expect(shown.length).toBeGreaterThanOrEqual(3 * (i - 2));
     }
+    for (let i = 0; i < 100 && frames.pending > 0; i += 1) frames.step();
+    expect(shownText(container)).toBe(text);
+    expect(frames.pending).toBe(0);
   });
 
   it(`the end: what is left is shown within ${REVEAL_END_MS} ms`, async () => {
