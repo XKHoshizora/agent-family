@@ -29,6 +29,7 @@
 7. **Over the per-minute limit in a group: one reusable `rate_limited` failed row per Agent per conversation**, not one per mention — members could otherwise pile up rows — repeated over-limit mentions show one line.
 8. **Per-Agent setting `groupMentions`: `members` (default) or `owner`** (user's request) — who may trigger it in groups — one column, one check.
 9. **Group creator hand-over skips Agents**; a group with no human left closes.
+10. **USER DECISION (replaces design rule 8 as first written): an Agent's message may trigger another Agent it @-mentions.** Brake: when the last 6 messages of the group that are not system notices were all sent by Agents, an Agent-sent message triggers nobody until a human sends a message; an Agent never triggers itself; `groupMentions = owner` Agents are not triggered by Agents. The group system prompt lists the other Agents in the group (name, handle, intro) and says they can be addressed with `@handle`, and that it should do so only when it needs them.
 
 ## Key facts about the current code (verify line numbers yourself)
 
@@ -58,7 +59,7 @@ Migration 016: the one-active-run unique index becomes per (agent_id, conversati
 `listMembers`, `readPrincipals` (sync, history, search) and `GET …/members` gain `ownerId`, `intro`, `field` for Agents (left joins). Avatar: also when the viewer currently shares a conversation with the Agent. Nothing else of the Agent. **Produces:** the wire fields the client needs.
 
 ### Task 4 — trigger (service)
-`mentionedHandles(text)` (pure; token-boundary regex without backtracking risk). Group branch of `maybeTrigger`: no handles → no query; else current Agent members of G with those handles; per Agent in id order: lock, skip paused/deleted/no model, honour `groupMentions`, ignore `replyMode`; fold per (agent, conversation), else rate limit (reusable row), else queue. A sender that is an Agent never triggers. Returns a list; the route announces each. **Produces:** queued group runs.
+`mentionedHandles(text)` (pure; token-boundary regex without backtracking risk). Group branch of `maybeTrigger`: no handles → no query; else current Agent members of G with those handles; per Agent in id order: lock, skip paused/deleted/no model, honour `groupMentions`, ignore `replyMode`; fold per (agent, conversation), else rate limit (reusable row), else queue. A sender that is an Agent triggers only under ruling 10 (the 6-consecutive-Agent-messages brake, never itself, never an Agent whose `groupMentions` is `owner`); this means `postAsAgent` in a group calls the trigger for the Agent's own posted message inside the same transaction (lock order unchanged: G is already held). Returns a list; the route announces each. **Produces:** queued group runs.
 
 ### Task 5 — execution (service)
 Group mode of the system prompt (names the group, speakers are labelled, answer whoever mentioned you, no proposal instructions, do not quote the persona or private chats). Context: everyone but this Agent is `user`, each entry prefixed with the speaker's name (other Agents marked); the dedicated conversation unchanged. `postAsAgent` in a group: membership checked under G (gone → `agent_removed`), no proposal parsing, no reasoning stored. No deltas for group runs. Charge to the owner (test: a stranger's mention leaves the stranger's account untouched). **Produces:** replies in groups.
