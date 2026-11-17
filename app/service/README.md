@@ -1573,7 +1573,9 @@ live in the process: a new start has none. A run that cannot be recovered is log
 A deploy may start the new instance while the old one is still answering (`tests/runs-restart.test.ts`, "a second
 instance"). The new one's recovery then ends the old one's runs as above; when the old one's call finishes, `post` finds
 its run no longer `running` (read under the same locks recovery takes) and stores nothing, and `finish` leaves the run as
-recovery recorded it: no message, no second usage record (logged at warn).
+recovery recorded it: no message, no second usage record (logged at warn). Not covered: a reply the old instance claims
+after the new one has started (both workers take queued runs while they overlap) and is stopped in the middle of stays
+`running` — its Agent answers nothing more — until the service next starts, whose recovery ends it as above.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,

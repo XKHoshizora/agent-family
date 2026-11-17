@@ -77,10 +77,12 @@ start-up with a message naming the variable. Values in the right column are for 
 
 - **One replica.** Realtime delivery and several limits live in one process's memory; a second instance
   would not see the first one's sockets (see `app/service/README.md`, Sync and realtime). No cluster mode.
-  A deploy that starts the new container while the old one still runs is safe: the new one's start-up ends the old
-  one's Agent replies in progress (they fail retryable), and when the old one's model call finishes it posts and
-  charges nothing more (`app/service/README.md`, Agents and runs, Recovery). Replies under way at that moment are lost
-  and must be retried; queued ones are answered by the new container.
+  A deploy that starts the new container while the old one still runs posts and charges nothing twice: the new one's
+  start-up ends the old one's Agent replies in progress (they fail retryable, the owner retries), and when the old
+  one's model call finishes it posts and charges nothing more (`app/service/README.md`, Agents and runs, Recovery).
+  One gap remains: while both run, the old container's worker may still take up a queued reply; if it is stopped in
+  the middle of that one, the reply shows "replying" and its Agent answers nothing more until the service next starts
+  (a restart ends it as above). Keep the overlap short.
 - **TLS terminates at the proxy** in front; the service speaks plain HTTP on `PORT` and must be reachable
   only through that proxy (otherwise a client could forge `CLIENT_IP_HEADER`). The proxy must pass WebSocket
   upgrades on `/api/ws`.
