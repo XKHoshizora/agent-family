@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { nextSiteMidnight, siteDay } from "../src/accounts/store.ts";
+import type { AgentPort, RunTicket } from "../src/agents/runtime/port.ts";
+import { createAgentWorker } from "../src/agents/runtime/worker.ts";
 import { buildApp } from "../src/app.ts";
 import { api, befriend, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -301,6 +303,54 @@ describe("stopping, pausing, failing", () => {
     expect((await api(app, other.owner, "POST", `/api/conversations/${other.conv}/runs/${posted.id}/stop`)).status).toBe(200);
     expect(await latestRun(other.owner, other.conv)).toEqual({ id: posted.id, status: "stopped", retryable: false });
     expect(await fromAgent(other.owner, other.conv, other.agent.id)).toMatchObject([{ text: "讲到一半", stopped: true }]);
+  });
+
+  it("a stop or pause landing between begin and the call: no call is made and nothing is charged, not even the input", async () => {
+    /** The app's own port, with `act` run right after `begin` has admitted the call and before the worker calls. */
+    const landingAfterBegin = (act: (run: RunTicket) => Promise<void>): AgentPort => {
+      const port = app.agentPort;
+      return {
+        claimNext: () => port.claimNext(),
+        begin: async (run, closing) => {
+          const prepared = await port.begin(run, closing);
+          await act(run);
+          return prepared;
+        },
+        emit: (run, delta) => port.emit(run, delta),
+        post: (run, reply) => port.post(run, reply),
+        finish: (run, end, usage, fallback) => port.finish(run, end, usage, fallback),
+        release: (run) => port.release(run),
+        shouldStop: (run) => port.shouldStop(run),
+      };
+    };
+    const charged = async (runId: string) =>
+      (
+        await db.query(
+          "select outcome, input_tokens::int, output_tokens::int, cost_micro::text as cost, free_micro::text as free from usage_records where run_id = $1",
+          [runId],
+        )
+      ).rows;
+    const workerOn = (port: AgentPort) => createAgentWorker({ port, models: gateway, runTimeoutMs: 120_000, background: false, log: app.log });
+
+    // The owner's stop (as the stop route flags a run its worker is working on).
+    const stopped = await owned("between");
+    await say(stopped.owner, stopped.conv, "算了");
+    expect(await workerOn(landingAfterBegin(async (run) => app.agentPort.requestStop(run.id))).runOnce()).toBe(true);
+    const stoppedRun = await latestRun(stopped.owner, stopped.conv);
+    expect(stoppedRun).toMatchObject({ status: "stopped" });
+    expect(await charged(stoppedRun.id)).toEqual([{ outcome: "stopped", input_tokens: 0, output_tokens: 0, cost: "0", free: "0" }]);
+
+    // A pause.
+    const paused = await owned("between2");
+    await say(paused.owner, paused.conv, "你好");
+    const pause = async () => void (await api(app, paused.owner, "POST", `/api/agents/${paused.agent.id}/pause`));
+    expect(await workerOn(landingAfterBegin(pause)).runOnce()).toBe(true);
+    const pausedRun = await latestRun(paused.owner, paused.conv);
+    expect(pausedRun).toMatchObject({ status: "cancelled", error: "agent_paused" });
+    expect(await charged(pausedRun.id)).toEqual([{ outcome: "cancelled", input_tokens: 0, output_tokens: 0, cost: "0", free: "0" }]);
+
+    expect(callsHere()).toHaveLength(0);
+    expect(await holds()).toBe("0");
   });
 
   it("pause mid-run: the call is abandoned, nothing is posted, the run is cancelled", async () => {

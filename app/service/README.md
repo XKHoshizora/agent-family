@@ -1673,7 +1673,8 @@ ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, n
 (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
 with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
 before it failed is discarded and not counted, so with no usage reported it costs nothing. A run that never reached
-admission costs nothing either. The charge goes to the source admission chose, never more than the call held: a call on
+admission costs nothing either, and nor does one admitted whose model was never called (a stop, pause or delete that
+landed between its admission and the call: settled on no tokens at all, not on its input estimate; `tests/runs.test.ts`). The charge goes to the source admission chose, never more than the call held: a call on
 the allowance uses the allowance of the site day it ends in (one that starts before midnight and ends after it uses
 the new day's); a call on the balance is charged in full (up to its hold) and may take the balance below zero; at or
 below zero nothing more starts on the balance until the operator's grants bring it above zero. Settlement releases the

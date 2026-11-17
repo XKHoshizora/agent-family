@@ -136,8 +136,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const out = new ReplyStream((delta) => port.emit(run, delta));
     let finished: { usage: Usage | null; truncated: boolean } | null = null;
     let failure: RunErrorCode | null = null;
+    /** Whether the model was called at all: a stop, pause or close before it means no call was made. */
+    let opened = false;
     try {
       if (why === null) {
+        opened = true;
         for await (const event of models.stream({ ...prepared.call, signal: controller.signal })) {
           if (event.type === "finish") {
             finished = { usage: event.usage, truncated: event.truncated };
@@ -160,7 +163,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       clearTimeout(deadline);
       shutdown.removeEventListener("abort", onShutdown);
     }
-    return { out, finished, failure, why: why as Interruption | null };
+    return { out, finished, failure, why: why as Interruption | null, opened };
   }
 
   async function execute(run: RunTicket): Promise<void> {
@@ -189,7 +192,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
     if (isRunEnd(prepared)) return finish(run, prepared, null, NOTHING);
 
-    const { out, finished, failure, why } = await call(run, prepared, shutdown);
+    const { out, finished, failure, why, opened } = await call(run, prepared, shutdown);
     // The service is closing: nothing is posted, and the run is ended here as recovery would end it (no charge).
     if (finished === null && why === "shutdown") {
       out.discard();
@@ -198,7 +201,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     out.end();
 
     const usage = finished?.usage ?? null;
-    const fallback = { inputChars: prepared.inputChars, outputChars: out.outputChars() };
+    // A call never made (a stop or pause landed between `begin` and it) costs nothing, not even its input.
+    const fallback = opened ? { inputChars: prepared.inputChars, outputChars: out.outputChars() } : NOTHING;
     // A failed call is charged only what the upstream reported: what it said is discarded and not counted.
     const failed = (end: RunEnd) => finish(run, end, usage, { ...fallback, outputChars: 0 });
     if (failure !== null) return failed({ status: "failed", error: failure });
