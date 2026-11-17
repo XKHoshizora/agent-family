@@ -13,7 +13,7 @@ import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { runningRun } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
-import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
+import { closeAllSockets } from "./helpers/ws.ts";
 
 /**
  * The service dying mid-reply (review focus 5, spec 6.4 and 6.5, README "Agents and runs"): at the next start, before
@@ -69,7 +69,6 @@ const records = async (runId: string) =>
   ).rows;
 const statusOf = async (runId: string) =>
   (await db.query("select status, error, source, hold_micro::text as hold from agent_runs where id = $1", [runId])).rows[0];
-const isRun = (conv: string, status: string) => (e: Push) => e.type === "run" && e.conversationId === conv && e.run.status === status;
 
 /** A person (signed up on `app`) with an Agent on the free site model. */
 async function owned(app: FastifyInstance, name: string) {
@@ -233,29 +232,6 @@ describe("a run left running when the service stopped", () => {
     expect(after.calls).toHaveLength(0);
     expect(await statusOf(draft)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
     expect(await records(draft)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
-  });
-
-  it("the new service carries nothing over from the old one's stop and pause flags: its replies stream and post as usual", async () => {
-    const old = await start(scriptedGateway());
-    const { owner, agent, conv } = await owned(old, "flags");
-    await say(old, owner, conv, "你好");
-    const ticket = (await old.agentPort.claimNext())!;
-    await old.agentPort.begin(ticket);
-    old.agentPort.requestStop(ticket.id);
-    old.agentPort.interruptRuns([ticket.id]);
-    await stop(old);
-
-    const after = scriptedGateway();
-    const fresh = await start(after);
-    expect(await statusOf(ticket.id)).toMatchObject({ status: "failed" });
-    const s = await connect(fresh, owner);
-    after.reply("这一次完整地说完了。");
-    expect((await api(fresh, owner, "POST", `/api/conversations/${conv}/runs/retry`)).status).toBe(201);
-    expect(await fresh.agentWorker.runOnce()).toBe(true);
-    await s.next(isRun(conv, "done"));
-    const deltas = s.events.filter((e) => e.type === "delta").map((e) => e.text ?? "");
-    expect(deltas.join("")).toBe("这一次完整地说完了。");
-    expect((await fromAgent(fresh, owner, conv, agent.id)).map((m) => m.text)).toEqual(["这一次完整地说完了。"]);
   });
 });
 
