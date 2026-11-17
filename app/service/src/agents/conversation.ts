@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lockAccount } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Change } from "../conversations/events.ts";
+import { currentMembership } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
@@ -141,21 +142,30 @@ export interface AgentReply {
  * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` on the
  * run's conversation — its row, then the `agents` row, which pause and delete lock too — so once a pause or delete has
  * committed, nothing more is posted: 409 `agent_paused` / `agent_deleted`, also for a run that pause or delete marked
- * `interrupted` after the Agent was resumed. Nor is a run posted that is no longer `running` (`RunNotRunning`: another
- * instance's recovery ended it, read under the same locks recovery takes). The message is the Agent's, kind `text`, with
+ * `interrupted` after the Agent was resumed (and so for the other marks: `agent_removed`, `halted`). Nor is a run posted
+ * that is no longer `running`, or is not a run of this Agent in this conversation (`RunNotRunning`: another instance's
+ * recovery ended it, read under the same locks recovery takes). The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
- * nothing. The text follows the rules of message text (`cleanModelText`: what a send would refuse is removed); a
- * persona proposal in it (`parseProposalBlock`: the reply's text only, never its reasoning) is taken out — the fixed
- * `PROPOSAL_PLACEHOLDER` stands in when nothing visible is left — and stored in this same transaction
- * (`storeProposal`, against the persona version read under this lock), the message's body naming it (`proposalId`).
- * The text is then cut at 8 000 characters, which marks it `truncated`. Without a proposal, a reply that was stopped or
- * cut (`truncated`) loses everything from its first `<af-` on (`withoutUnfinishedBlock`: it ended inside a block it
- * never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules of message
- * text, is cut at 32 000 characters (no mark) and is stored only when there is some. Null, storing nothing, when there
- * is nothing to show: no visible text and no reasoning. Any conversation but the Agent's dedicated one is refused (it
- * throws): the only one an Agent posts in so far. In a group, the message may call other Agents there, in this same
- * transaction (runs.ts `triggerFromAgent`): `triggered` is what to announce and publish after commit (nothing for a
- * repeat, or in the dedicated conversation).
+ * nothing.
+ *
+ * In the Agent's own conversation: the text follows the rules of message text (`cleanModelText`: what a send would
+ * refuse is removed); a persona proposal in it (`parseProposalBlock`: the reply's text only, never its reasoning) is
+ * taken out — the fixed `PROPOSAL_PLACEHOLDER` stands in when nothing visible is left — and stored in this same
+ * transaction (`storeProposal`, against the persona version read under this lock), the message's body naming it
+ * (`proposalId`). The text is then cut at 8 000 characters, which marks it `truncated`. Without a proposal, a reply that
+ * was stopped or cut (`truncated`) loses everything from its first `<af-` on (`withoutUnfinishedBlock`: it ended inside
+ * a block it never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules
+ * of message text, is cut at 32 000 characters (no mark) and is stored only when there is some.
+ *
+ * Anywhere else — a group (plan Task 5) — the Agent must be a current member of that conversation, read under its row's
+ * lock, which every membership change takes: else 409 `agent_removed`. Its reply is never read for a proposal: whatever
+ * follows its first `<af-` is dropped (`withoutUnfinishedBlock`, as for a stopped reply), so no block, whole or not,
+ * reaches the group, and nothing of the Agent changes. Nor is any reasoning stored (every member reads the message, and
+ * a model's thinking often restates its persona). Then the text is cut at 8 000 characters as above, and the message may
+ * call other Agents there, in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row):
+ * `triggered` is what to announce and publish after commit (nothing for a repeat, or in the Agent's own conversation).
+ *
+ * Null, storing nothing, when there is nothing to show: no visible text and no reasoning kept.
  */
 export async function postAsAgent(
   t: Tx,
@@ -166,26 +176,30 @@ export async function postAsAgent(
   config: Pick<Config, "agentRunsPerMinute" | "agentChainLimit">,
 ): Promise<{ message: StoredMessage; duplicate: boolean; triggered: AgentTriggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
-  if (agent.conversationId !== conversationId) throw new Error(`postAsAgent: ${conversationId} is not the conversation of Agent ${agentId}`);
+  const own = conversationId === agent.conversationId;
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
     [conversationId, agentId, runId],
   );
   if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: { runs: [], notices: [] } };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
-  // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts).
-  const run = await t.query<{ status: string; interrupted: string | null }>("select status, interrupted from agent_runs where id = $1 and agent_id = $2", [
-    runId,
-    agentId,
-  ]);
+  // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts); nor a run of another
+  // conversation's, here.
+  const run = await t.query<{ status: string; interrupted: string | null }>(
+    "select status, interrupted from agent_runs where id = $1 and agent_id = $2 and conversation_id = $3",
+    [runId, agentId, conversationId],
+  );
   if (run.rows[0]?.status !== "running") throw new RunNotRunning(runId, run.rows[0]?.status ?? null);
   const interrupted = run.rows[0].interrupted;
   if (interrupted) throw new AppError(409, interrupted);
   if (agent.deleted) throw new AppError(409, "agent_deleted");
   if (agent.paused) throw new AppError(409, "agent_paused");
+  if (!own && !(await currentMembership(t, conversationId, agentId))) throw new AppError(409, "agent_removed");
 
   let text = cleanModelText(reply.text);
-  const proposal = parseProposalBlock(text);
+  // In a group nothing is a proposal, and no block of one is shown.
+  const proposal = own ? parseProposalBlock(text) : null;
+  if (!own) text = withoutUnfinishedBlock(text);
   const proposalId = proposal ? randomUUID() : null;
   if (proposal) text = hasVisibleText(proposal.visible) ? proposal.visible : PROPOSAL_PLACEHOLDER;
   let truncated = reply.truncated;
@@ -195,7 +209,8 @@ export async function postAsAgent(
     truncated = true;
   }
   if (!proposal && (reply.stopped || truncated)) text = withoutUnfinishedBlock(text);
-  let reasoning = cleanModelText(reply.reasoning);
+  // In a group no reasoning is kept.
+  let reasoning = own ? cleanModelText(reply.reasoning) : "";
   const thought = Array.from(reasoning);
   if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
   if (!hasVisibleText(text) && !hasVisibleText(reasoning)) return null;
@@ -208,7 +223,7 @@ export async function postAsAgent(
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group.
-  const triggered = conversationId === agent.conversationId ? { runs: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
+  const triggered = own ? { runs: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
   return { message, duplicate: false, triggered };
 }
 

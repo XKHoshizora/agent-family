@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { leaveGroupsOfDeleted } from "../src/agents/group-leave.ts";
-import { isRunEnd, type Reply, type RunTicket } from "../src/agents/runtime/port.ts";
+import { isRunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
 import { buildApp } from "../src/app.ts";
 import { VISIBLE_JOIN } from "../src/conversations/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -105,21 +105,6 @@ const runOf = async (runId: string) =>
 const ticketOf = (runId: string, agent: Agent, owner: Actor, conv: string): RunTicket => ({ id: runId, agentId: agent.id, ownerId: owner.id, conversationId: conv });
 const fromAgent = async (agent: Agent, conv: string) =>
   (await db.query("select seq from messages where conversation_id = $1 and sender_id = $2", [conv, agent.id])).rows;
-
-/**
- * The port's `post` for a run in a group. Until an Agent's replies in groups land (plan Task 5), `postAsAgent` refuses,
- * before anything else, every conversation but the Agent's dedicated one with a plain error; Task 5 replaces that guard
- * with the membership check under the group's lock, and an interrupted run (or a deleted Agent's) is then `refused` by
- * the checks after it. Either way nothing is posted; any other error fails the test.
- */
-async function postInGroup(ticket: RunTicket, reply: Reply): Promise<"posted" | "refused" | "empty"> {
-  try {
-    return await app.agentPort.post(ticket, reply);
-  } catch (err) {
-    if (err instanceof Error && /^postAsAgent: \S+ is not the conversation of Agent \S+$/.test(err.message)) return "refused";
-    throw err;
-  }
-}
 
 /** `promise`, or a rejection naming `label` after `ms`: a wait that never ends (a deadlock) fails instead of hanging. */
 async function bounded<T>(label: string, promise: Promise<T>, ms = 10_000): Promise<T> {
@@ -355,7 +340,7 @@ describe("taking an Agent out of a group", () => {
     expect(await runOf(ownChat)).toEqual({ status: "queued", error: null, interrupted: null, pending: null });
   });
 
-  it("a fellow member's socket gets no run push for the cancelled runs: no run frame, nothing of their details", async () => {
+  it("a fellow member's socket gets only the Agent's state for the cancelled runs (null): nothing of their details", async () => {
     const { creator, owner, mia, g } = await world();
     const x = await agentOf(owner);
     await addOwn(owner, g, x);
@@ -363,12 +348,14 @@ describe("taking an Agent out of a group", () => {
     const [ownerSocket, miaSocket] = [await connect(app, owner), await connect(app, mia)];
 
     expect((await remove(creator, g, x.id)).status).toBe(200);
-    // The owner is told (the control: the push does happen), and mia has had the group's change by the time we look.
-    await ownerSocket.next((e) => e.type === "run" && e.run.id === queued);
+    // The owner is told the run (the control: the push does happen); mia only that the Agent shows nothing now (wire
+    // contract "Run state": a member who does not own the Agent gets its state, never its run).
+    await ownerSocket.next((e) => e.type === "run" && e.run?.id === queued);
     await miaSocket.next((e) => e.type === "conversation" && e.id === g);
+    await miaSocket.next((e) => e.type === "run" && e.conversationId === g);
     const frames = miaSocket.events.map((e) => JSON.stringify(e));
-    expect(miaSocket.events.filter((e) => e.type === "run")).toEqual([]);
-    expect(frames.filter((f) => f.includes(queued) || f.includes("retryable") || f.includes("agent_removed"))).toEqual([]);
+    expect(miaSocket.events.filter((e) => e.type === "run")).toEqual([{ type: "run", conversationId: g, agentId: x.id, state: null }]);
+    expect(frames.filter((f) => f.includes(queued) || f.includes("retryable") || f.includes("agent_removed") || f.includes('"error"'))).toEqual([]);
   });
 });
 
@@ -599,7 +586,7 @@ describe("deleting an Agent", () => {
     // happened yet: the Agent is deleted and still a member.
     await db.query("update agents set deleted_at = now() where principal_id = $1", [x.id]);
 
-    expect(await postInGroup(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false })).toBe("refused");
+    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false })).toBe("refused");
     await app.agentPort.finish(ticket, { status: "cancelled" }, CANNED_USAGE, { inputChars: 10, outputChars: 2 });
     expect(await runOf(runId)).toMatchObject({ status: "cancelled", error: "agent_deleted" });
     // A reply queued for it there meanwhile ends before any call.
@@ -683,7 +670,7 @@ describe("races", () => {
       const holderPid = (await holder.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
       removal = remove(owner, g, x.id);
       const removalPid = await blockedBy(holderPid);
-      posting = postInGroup(ticket, { text: "总结如下：……", reasoning: "", stopped: false, truncated: false });
+      posting = app.agentPort.post(ticket, { text: "总结如下：……", reasoning: "", stopped: false, truncated: false });
       await blockedBy(removalPid);
       await holder.query("rollback");
     } finally {

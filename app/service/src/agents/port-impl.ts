@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { BlobStore } from "../attachments/blob.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
+import { currentMembership } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
@@ -10,11 +11,11 @@ import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
-import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, type BuiltContext, type LoadedContext } from "./context.ts";
+import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, loadGroupScene, type BuiltContext, type LoadedContext } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
-import { systemPrompt } from "./runtime/prompt.ts";
+import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
 import { queueFollowUp, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
@@ -35,6 +36,8 @@ const STARTED_OVER: RunEnd = { status: "cancelled" };
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 /** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
 const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
+/** The Agent is no longer a member of the run's group: nothing is called or posted there. */
+const REMOVED: RunEnd = { status: "cancelled", error: "agent_removed" };
 
 /** Why `postAsAgent` refuses a run's reply (409): the Agent's state, or what interrupted the run. */
 const REFUSED: ReadonlySet<string> = new Set(["agent_paused", "agent_deleted", "agent_removed", "halted"]);
@@ -73,6 +76,11 @@ interface RunFlags {
   stop: boolean;
   /** Its Agent's pause, delete or leaving the run's group interrupted it: nothing more of it is pushed. */
   silenced: boolean;
+  /**
+   * Its conversation is a group (decided at `begin`, from the run's conversation and its Agent's own): none of it is
+   * streamed (plan ruling 2) — its reply arrives whole, with its message.
+   */
+  group: boolean;
 }
 
 /**
@@ -80,13 +88,16 @@ interface RunFlags {
  * and a pause look alike to it): a reply that was posted stands — `done`, or `stopped` by its owner — whatever happened
  * to the Agent after; a run its Agent's pause, delete or leaving the run's group (`agent_removed`) interrupted, and that
  * posted nothing, is `cancelled` with that
- * reason (also when the Agent was resumed meanwhile); a refused post is `cancelled` for the Agent's state.
+ * reason (also when the Agent was resumed meanwhile); a refused post is `cancelled` for the Agent's state — deleted,
+ * paused, or no longer a member of the run's group (`removed`).
  */
-function recorded(end: RunEnd, s: { posted: boolean; interrupted: Interruption | null; agent: AgentRow }): RunEnd {
+function recorded(end: RunEnd, s: { posted: boolean; interrupted: Interruption | null; agent: AgentRow; removed: boolean }): RunEnd {
   if (s.posted) return end.status === "stopped" ? end : { status: "done" };
   if (s.interrupted) return { status: "cancelled", error: s.interrupted };
   if (end.status === "cancelled" && end.error === undefined) {
-    return s.agent.deleted ? { status: "cancelled", error: "agent_deleted" } : s.agent.paused ? { status: "cancelled", error: "agent_paused" } : end;
+    if (s.agent.deleted) return { status: "cancelled", error: "agent_deleted" };
+    if (s.agent.paused) return { status: "cancelled", error: "agent_paused" };
+    if (s.removed) return REMOVED;
   }
   return end;
 }
@@ -110,7 +121,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false };
+      flags = { stop: false, silenced: false, group: false };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -197,12 +208,15 @@ export class DbAgentPort implements AgentPort {
   /**
    * Three steps, so that no transaction is open while attachments are read:
    *
-   * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one whose model does not
-   *    resolve (`failed`, `provider_unavailable`). Otherwise the run takes on what came meanwhile (`covers_seq` =
-   *    max(covers, pending)), and what the model may be shown is read (`loadContext`, SQL only). With no owner's message
-   *    in it the run ends without a call: `cancelled` with no error when everything it was to answer is before a new
-   *    topic (its owner started over), else `failed` `busy`; and so does one whose model's context cannot hold the
-   *    owner's newest message, or 200 tokens of it (`failed`, `context_too_small`).
+   * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one in a group its Agent is no
+   *    longer a member of (`cancelled`, `agent_removed`) and one whose model does not resolve (`failed`,
+   *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). Otherwise the run
+   *    takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be shown is read: the
+   *    system text — its own conversation's (`systemPrompt`), or the group's (`groupSystemPrompt`, with the group's
+   *    title and other Agents, `loadGroupScene`) — and the conversation (`loadContext`, SQL only). With no owner's
+   *    message in it (in a group: nobody else's) the run ends without a call: `cancelled` with no error when everything
+   *    it was to answer is before a new topic (its owner started over), else `failed` `busy`; and so does one whose
+   *    model's context cannot hold the newest such message, or 200 tokens of it (`failed`, `context_too_small`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
@@ -221,8 +235,14 @@ export class DbAgentPort implements AgentPort {
     const now = new Date();
     const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number }> => {
       const { agent, state } = await this.lockRun(t, run);
+      // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
+      const group = run.conversationId !== agent.conversationId;
+      if (group) this.flagsOf(run.id).group = true;
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
+      // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
+      const scene = group ? await loadGroupScene(t, agent.id, run.conversationId) : null;
+      if (group && scene === null) return { end: REMOVED };
 
       let resolved;
       try {
@@ -238,16 +258,13 @@ export class DbAgentPort implements AgentPort {
       const covers = Math.max(Number(state.covers_seq ?? 0), Number(state.pending_seq ?? 0));
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
-      const system = systemPrompt(
-        agent,
-        { displayName: owner.rows[0]!.display_name },
-        now,
-        agent.persona === "" ? "onboarding" : "normal",
-        config.siteTimezone,
-      );
+      const displayName = owner.rows[0]!.display_name;
+      const system = scene
+        ? groupSystemPrompt(agent, { displayName }, scene, now, config.siteTimezone)
+        : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
       const loaded = await loadContext(
         t,
-        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers },
+        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group },
         resolved,
         system,
       );
@@ -302,17 +319,19 @@ export class DbAgentPort implements AgentPort {
   emit(run: RunTicket, delta: Delta): void {
     // Checked now and again when the hub delivers it, against the flags it was emitted under: once the pause, delete or
     // removal from the run's group has answered, no delta goes out, however late it is delivered. A run that has
-    // finished emits nothing.
+    // finished emits nothing, and a run in a group never does (to nobody, its owner included).
     const flags = this.flags.get(run.id);
-    if (!flags || flags.silenced) return;
+    if (!flags || flags.silenced || flags.group) return;
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
 
   /**
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
-   * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`).
-   * "refused" also when the run is no longer `running` (`RunNotRunning`: another instance's recovery ended it while
-   * this one answered); `finish` then finds it ended and leaves it as that recovery recorded it.
+   * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`;
+   * never in a group, where nothing proposes). "refused" for the Agent's state or a mark on the run — paused, deleted,
+   * out of the run's group (`agent_removed`), halted — and also when the run is no longer `running` (`RunNotRunning`:
+   * another instance's recovery ended it while this one answered); `finish` then finds it ended and leaves it as that
+   * recovery recorded it.
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
     try {
@@ -375,7 +394,11 @@ export class DbAgentPort implements AgentPort {
         run.agentId,
         run.id,
       ]);
-      const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent });
+      // A refused post of a run in a group whose Agent is no longer a member there ends `agent_removed` (looked up only
+      // for a refusal nothing else explains).
+      const refused = posted.rowCount === 0 && state.rows[0].interrupted === null && end.status === "cancelled" && end.error === undefined;
+      const removed = refused && run.conversationId !== agent.conversationId && !(await currentMembership(t, run.conversationId, agent.id));
+      const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent, removed });
       const ours = final.status === "failed" && final.error === "busy";
       await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours, log: this.deps.log });
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;

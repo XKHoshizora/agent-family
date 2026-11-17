@@ -2,13 +2,14 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Readable } from "node:stream";
 import { isMissingBlob, type BlobStore } from "../attachments/blob.ts";
 import { findDownloadable, type Downloadable } from "../attachments/store.ts";
-import { VISIBLE_JOIN } from "../conversations/store.ts";
+import { currentMembership, VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
 import type { AttachmentRef } from "../messages/model.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
+import { GROUP_AGENTS_NAMED, type GroupScene } from "./runtime/prompt.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -51,12 +52,17 @@ export class BlobStoreDown extends Error {
   }
 }
 
-/** The run a context is built for: it answers the owner up to `coversSeq`. */
+/**
+ * The run a context is built for: it answers up to `coversSeq` — its owner, in the Agent's own conversation, or, in a
+ * group (`group`), whoever called it there.
+ */
 export interface ContextRun {
   agentId: string;
   ownerId: string;
   conversationId: string;
   coversSeq: number;
+  /** The run's conversation is a group, not the Agent's own conversation with its owner. */
+  group: boolean;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
@@ -177,6 +183,9 @@ interface Loaded {
 interface MessageRow {
   seq: string;
   sender_id: string;
+  /** The sender's display name and kind (`principals`), for the speaker's label in a group. */
+  sender_name: string;
+  sender_kind: "human" | "agent";
   text: string | null;
   attachment: AttachmentRef | null;
   reply_to: unknown;
@@ -189,15 +198,21 @@ interface MessageRow {
 
 const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
 
+/** Who said a message of someone else's in a group, before its text: `名字：` for a person, `名字（Agent）：` for an Agent. */
+export const speakerLabel = (name: string, kind: "human" | "agent"): string => (kind === "agent" ? `${name}（Agent）：` : `${name}：`);
+
 /**
  * Up to `PAGE` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
- * not the fixed greeting) that belong after the topic start `from` — the owner's, and the Agent's replies to what is
- * covered up to `coversSeq`. A reply belongs where it was answered: right after the owner's message its run covered
- * when it began (the run is the one named by the message's `client_txn`). Only the text, the attachment and the quote
- * are read of a message — never its stored reasoning. A quote shows what the Agent can see of the quoted message: its
- * text, or its attachment's name. A reply of the Agent's that proposed a persona is its text followed by the proposal
- * as the block it was written in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed;
- * it counts toward the budget like any text and is never read for a block again.
+ * not the fixed greeting) that belong after the topic start `from` — in its own conversation the owner's, in a group
+ * everyone's but its own — and the Agent's replies to what is covered up to `coversSeq`. A reply belongs where it was
+ * answered: right after the message its run covered when it began (the run is the one named by the message's
+ * `client_txn`). Only the text, the attachment and the quote are read of a message — never its stored reasoning. A quote
+ * shows what the Agent can see of the quoted message: its text, or its attachment's name. In its own conversation the
+ * owner's messages are `user` and anyone else's are left out (there is nobody else); in a group every message of
+ * someone else's is `user`, starting with who said it (`speakerLabel`, their current name; a quote goes on the next
+ * line). A reply of the Agent's that proposed a persona is its text followed by the proposal as the block it was written
+ * in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed; it counts toward the budget like
+ * any text and is never read for a block again. (A reply in a group never proposes: nothing is looked up there.)
  */
 async function loadPage(
   q: Queryable,
@@ -206,21 +221,23 @@ async function loadPage(
   before: number | null,
 ): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
   const { rows } = await q.query<MessageRow>(
-    `select m.seq::text as seq, m.sender_id, m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
+    `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.kind as sender_kind,
+            m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
             m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
        from messages m ${VISIBLE_JOIN}
+       join principals sp on sp.id = m.sender_id
        left join agent_runs r
          on r.agent_id = $1
         and r.id = (case when m.sender_id = $1 and m.client_txn ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' then m.client_txn end)::uuid
-       left join persona_proposals pp on pp.message_id = m.id and pp.agent_id = $1 and m.sender_id = $1
+       left join persona_proposals pp on pp.message_id = m.id and pp.agent_id = $1 and m.sender_id = $1 and not $8::boolean
       where m.conversation_id = $2 and m.seq > $3 and ($4::bigint is null or m.seq < $4::bigint)
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
         and coalesce(r.covers_seq, m.seq) > $3
-        and (m.sender_id = $6 or coalesce(r.covers_seq, m.seq) <= $5)
+        and (m.sender_id = $6 or ($8::boolean and m.sender_id <> $1) or coalesce(r.covers_seq, m.seq) <= $5)
       order by m.seq desc
       limit $7`,
-    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, PAGE],
+    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, PAGE, run.group],
   );
   const quotedSeqs = [...new Set(rows.flatMap((r) => (typeof r.reply_to === "number" && Number.isSafeInteger(r.reply_to) ? [r.reply_to] : [])))];
   const quotes = new Map<number, string>();
@@ -237,11 +254,12 @@ async function loadPage(
     }
   }
   const loaded = rows.flatMap((r): Loaded[] => {
-    const role = r.sender_id === run.ownerId ? "user" : r.sender_id === run.agentId ? "assistant" : null;
+    const role = r.sender_id === run.agentId ? "assistant" : run.group || r.sender_id === run.ownerId ? "user" : null;
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
     let text = entryText(r.text ?? "", quoted);
+    if (run.group && role === "user") text = `${speakerLabel(r.sender_name, r.sender_kind)}${quoted === null ? "" : "\n"}${text}`;
     if (role === "assistant" && r.proposal_persona !== null) {
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
@@ -299,8 +317,30 @@ export async function loadContext(
   return { system, budget, entries, attachments, topicStart: from };
 }
 
-/** Whether there is anything to answer: an owner's message among what may be shown. */
+/** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */
 export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.some((e) => e.role === "user");
+
+/**
+ * The group a run of Agent `agentId` answers in, for its system text (`groupSystemPrompt`): its title and the other
+ * Agents that are current members of it now — not deleted (a deleted one is leaving), in the order they joined, at most
+ * `GROUP_AGENTS_NAMED` named — or null when `agentId` itself is not a current member there. Plain reads, under the
+ * caller's lock on the group's row (which every membership change takes).
+ */
+export async function loadGroupScene(q: Queryable, agentId: string, conversationId: string): Promise<GroupScene | null> {
+  if (!(await currentMembership(q, conversationId, agentId))) return null;
+  const title = await q.query<{ title: string | null }>("select title from conversations where id = $1", [conversationId]);
+  const { rows } = await q.query<{ name: string; handle: string; intro: string }>(
+    `select p.display_name as name, p.handle::text as handle, a.intro
+       from memberships m
+       join principals p on p.id = m.principal_id
+       join agents a on a.principal_id = p.id
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id <> $2 and a.deleted_at is null
+      order by m.joined_seq, p.id
+      limit $3`,
+    [conversationId, agentId, GROUP_AGENTS_NAMED + 1],
+  );
+  return { title: title.rows[0]?.title ?? null, agents: rows.slice(0, GROUP_AGENTS_NAMED), more: rows.length > GROUP_AGENTS_NAMED };
+}
 
 /**
  * Step two, with no transaction open: the call's turns, chosen by `ContextPlan` from `loaded`, with the contents of
