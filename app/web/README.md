@@ -74,6 +74,7 @@ restart spec and the specs that need the model stub (Agents, providers, Markdown
   tree has come; `src/ui/markdownView.jsx` renders only texts near the visible part of a conversation, within 30 000
   elements per conversation, and turns texts rich at most 3 000 elements per animation frame (also when the tree was
   already kept: a conversation opened again). No raw HTML, http(s) links only, images as links, nothing fetched; maths
-  is `$$…$$` only. A link's content is one plain text, followed by its real host unless that text is exactly its
-  address; bidirectional controls are removed from everything shown. A reply being written keeps and shows its first
-  20 000 characters (`src/data/model.js` `STREAM_CHARS`).
+  is `$$…$$` only. A link's content is one plain text, always followed by its real host; bidirectional controls are
+  removed from everything shown. A reply being written keeps and shows its first 20 000 characters
+  (`src/data/model.js` `STREAM_CHARS`). The chat list's preview of an Agent's message has its Markdown markers taken
+  out by `src/ui/markdownPreview.js` (no library).
