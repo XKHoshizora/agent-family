@@ -4,21 +4,43 @@ import type { InjectOptions, LightMyRequestResponse } from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import type { RouteEntry } from "../src/app.ts";
 import { createInvite } from "../src/auth/invites.ts";
+import type { ModelEvent, ModelGateway } from "../src/models/gateway.ts";
+import type { ProviderProbe } from "../src/providers/probe.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
+import { mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { BOUNDARY, CLOSING, MULTIPART, multipart, partHead } from "./helpers/multipart.ts";
+import { providerBody } from "./helpers/providers.ts";
 import { APP_ORIGIN, issueTicket, listen, tryConnect } from "./helpers/ws.ts";
 
 /**
  * Robustness: every route the app registers (read from `app.routeList`, so a route added later is fuzzed
  * without touching this file) gets malformed paths, queries, bodies and content types, signed in and
  * signed out. Every answer must be < 500; every 4xx must be a well-formed `{"error": "<snake_case>"}`
- * JSON body; and the process must still serve `/api/health` afterwards.
+ * JSON body whose other fields are strings (one documented exception: `provider_in_use` names the Agents in its
+ * `agents` list); and the process must still serve `/api/health` afterwards. The routes of Agents, providers, usage and
+ * replies (`isAgentRoute`) are reached with real ids of the fixture's Agent, run, proposal and provider, so malformed
+ * bodies get as deep as they can; a malformed path parameter there is always a 4xx, and each of them answers at least one
+ * probe from beyond its checks of shape, session and existence.
  */
 
+/** What the fixture's model answers (at once, every call): drafts and replies run to their end without a network. */
+const answer = { text: "好的。" };
+const models: ModelGateway = {
+  async *stream(): AsyncGenerator<ModelEvent> {
+    if (answer.text !== "") yield { type: "text", delta: answer.text };
+    yield { type: "finish", usage: null, truncated: false };
+  },
+  async listModels() {
+    return ["fuzz-model"];
+  },
+};
+/** A provider that takes every key and lists one model: the provider routes answer without a network. */
+const providerProbe: ProviderProbe = { test: async () => {}, listModels: async () => ["fuzz-model"] };
+
 const { blobs } = useProbeBlobs("af-fuzz-");
-const { app } = useApp({ blobs });
+const { app } = useApp({ blobs, env: SITE_ENV, models, providerProbe, agentWorker: false });
 
 const FUZZ_TIMEOUT = 120_000;
 const UUID = "3f1c2a4e-9b7d-4c1e-8a2f-5d6e7f809a1b";
@@ -35,8 +57,21 @@ interface Finding {
 
 const SNAKE = /^[a-z][a-z0-9_]*$/;
 
+/**
+ * The one 4xx whose details are not all strings (README "Errors"): 409 `provider_in_use` names the Agents that still use
+ * the provider, `agents: [{"id", "name"}]`, both strings. Nothing else may carry a non-string detail.
+ */
+function isProviderInUseList(error: string, key: string, value: unknown): boolean {
+  return (
+    error === "provider_in_use" &&
+    key === "agents" &&
+    Array.isArray(value) &&
+    value.every((a) => a && typeof a === "object" && Object.keys(a).sort().join() === "id,name" && typeof a.id === "string" && typeof a.name === "string")
+  );
+}
+
 /** Why `res` is not an acceptable answer, or null. */
-function verdict(method: string, res: LightMyRequestResponse): string | null {
+function verdict(method: string, res: Pick<LightMyRequestResponse, "statusCode" | "headers" | "body">): string | null {
   if (res.statusCode >= 500) return `status ${res.statusCode}`;
   if (method === "HEAD" || res.statusCode < 400) return null;
   if (!String(res.headers["content-type"] ?? "").startsWith("application/json")) return "4xx without a JSON content type";
@@ -49,20 +84,26 @@ function verdict(method: string, res: LightMyRequestResponse): string | null {
   if (!json || typeof json !== "object" || Array.isArray(json)) return "4xx body is not an object";
   const { error, ...rest } = json as Record<string, unknown>;
   if (typeof error !== "string" || !SNAKE.test(error)) return "4xx body has no snake_case error";
-  if (Object.values(rest).some((v) => typeof v !== "string")) return "4xx body has a non-string extra field";
+  if (Object.entries(rest).some(([k, v]) => typeof v !== "string" && !isProviderInUseList(error, k, v))) return "4xx body has a non-string extra field";
   return null;
 }
 
-/** Sends probes in order, recording every bad answer; returns every status. */
-async function probeAll(probes: Array<InjectOptions & { label: string }>, findings: Finding[]): Promise<number[]> {
-  const statuses: number[] = [];
+/** One probe's answer. */
+interface Sent {
+  label: string;
+  status: number;
+}
+
+/** Sends probes in order, recording every bad answer; returns every answer's status. */
+async function probeAll(probes: Array<InjectOptions & { label: string }>, findings: Finding[]): Promise<Sent[]> {
+  const sent: Sent[] = [];
   for (const { label, ...opts } of probes) {
     const res = await app.inject(opts);
-    statuses.push(res.statusCode);
+    sent.push({ label, status: res.statusCode });
     const why = verdict(String(opts.method), res);
     if (why) findings.push({ probe: label, status: res.statusCode, why, body: res.body.slice(0, 300) });
   }
-  return statuses;
+  return sent;
 }
 
 async function stillHealthy(): Promise<void> {
@@ -224,7 +265,18 @@ interface Fixture {
   attachment: string;
   request: string;
   invite: string;
+  /** `me`'s Agent on the site model, its conversation, a run of it that failed, and a persona proposal it made. */
+  agent: string;
+  agentConv: string;
+  run: string;
+  proposal: string;
+  /** Another Agent of `me`'s, the one `DELETE /api/agents/:id` deletes. */
+  victimAgent: string;
+  /** `me`'s provider; an Agent uses it, so deleting it is 409 `provider_in_use` every time. */
+  provider: string;
 }
+
+const FAST = { source: "site", id: "fast" } as const;
 
 async function fixture(): Promise<Fixture> {
   const [me, peer, victim, stranger] = [
@@ -248,6 +300,26 @@ async function fixture(): Promise<Fixture> {
   await api(app, me, "POST", `/api/conversations/${g}/messages`, { attachmentId: attachment, clientTxn: "fx2" });
   const req = await api(app, stranger, "POST", "/api/friend-requests", { handle: me.handle });
   if (req.status !== 201) throw new Error(`fixture request ${req.status}`);
+
+  const agent = await mustCreateAgent(app, me, { model: FAST, persona: "你是测试助手。" });
+  const victimAgent = await mustCreateAgent(app, me);
+  const provider = await api(app, me, "POST", "/api/providers", providerBody({ models: [{ name: "m" }] }));
+  if (provider.status !== 201) throw new Error(`fixture provider ${provider.status}`);
+  await mustCreateAgent(app, me, { model: { source: "provider", providerId: provider.json.id, model: "m" } });
+  // A reply that proposes a persona, then one that fails (an empty answer): the run routes find a run to stop, and a
+  // failed latest run to retry.
+  const reply = async (text: string, clientTxn: string) => {
+    answer.text = text;
+    const said = await api(app, me, "POST", `/api/conversations/${agent.conversationId}/messages`, { text: "整理一下", clientTxn });
+    if (said.status !== 201 || !(await app.agentWorker.runOnce())) throw new Error(`fixture reply ${said.status}`);
+  };
+  await reply("<af-persona>你是一个测试助手。</af-persona>", "fx3");
+  await reply("", "fx4");
+  answer.text = "好的。";
+  const db = app.deps.db;
+  const runs = await db.query<{ id: string; status: string }>("select id, status from agent_runs where agent_id = $1 order by created_at", [agent.id]);
+  if (runs.rows.map((r) => r.status).join() !== "done,failed") throw new Error(`fixture runs ${JSON.stringify(runs.rows)}`);
+  const proposal = await db.query<{ id: string }>("select id from persona_proposals where agent_id = $1", [agent.id]);
   return {
     me,
     peer,
@@ -258,27 +330,49 @@ async function fixture(): Promise<Fixture> {
     attachment,
     request: req.json.id,
     invite: await createInvite(app.deps.db, { ttlHours: 1 }),
+    agent: agent.id,
+    agentConv: agent.conversationId,
+    run: runs.rows[0]!.id,
+    proposal: proposal.rows[0]!.id,
+    victimAgent: victimAgent.id,
+    provider: provider.json.id,
   };
 }
 
+/** The routes of an Agent's conversation that only its owner has: its run, replies and new topics. */
+const AGENT_CONVERSATION = /^\/api\/conversations\/:id\/(run|runs|topic)(\/|$)/;
+/** The routes of Agents, providers, usage and replies (this batch's): checked more strictly below. */
+const isAgentRoute = (url: string) => /^\/api\/(agents|providers|usage)(\/|$)/.test(url) || AGENT_CONVERSATION.test(url);
+
 /** A real id for each path parameter, so malformed bodies and queries reach as deep as they can. */
-function validParams(url: string, fx: Fixture): Record<string, string> {
+function validParams(route: Pick<RouteEntry, "method" | "url">, fx: Fixture): Record<string, string> {
+  const { method, url } = route;
   const out: Record<string, string> = {};
   for (const name of params(url)) {
     if (name === "seq") out[name] = "2";
     else if (name === "principalId") out[name] = fx.victim.id; // the one whose removal, unfriending or blocking costs nothing
+    else if (name === "runId") out[name] = fx.run;
+    else if (name === "proposalId") out[name] = fx.proposal;
     else {
       const collection = url.split(`/:${name}`)[0]!.split("/").pop();
       out[name] =
         collection === "conversations"
-          ? fx.group
+          ? AGENT_CONVERSATION.test(url)
+            ? fx.agentConv
+            : fx.group
           : collection === "attachments"
             ? fx.attachment
             : collection === "friend-requests"
               ? fx.request
               : collection === "principals"
                 ? fx.peer.id
-                : randomUUID(); // a route added later: still fuzzed, with an id nobody has
+                : collection === "agents"
+                  ? method === "DELETE" && url === "/api/agents/:id"
+                    ? fx.victimAgent // deleting it costs nothing
+                    : fx.agent
+                  : collection === "providers"
+                    ? fx.provider
+                    : randomUUID(); // a route added later: still fuzzed, with an id nobody has
     }
   }
   return out;
@@ -308,6 +402,16 @@ function plausibleBody(route: RouteEntry, fx: Fixture): Record<string, unknown> 
       return { seq: 1 };
     case "POST /api/sync/catchup":
       return { positions: { [fx.group]: 0 } };
+    case "POST /api/agents":
+      return { handle: `fz_${n}`, name: "Fuzz" };
+    case "PATCH /api/agents/:id":
+      return { intro: "fuzz" };
+    case "POST /api/agents/draft-persona":
+      return { name: "Fuzz", model: FAST };
+    case "POST /api/providers":
+      return providerBody({ name: `fz${n}` });
+    case "PATCH /api/providers/:id":
+      return { name: `fz${n}` };
     default:
       return {};
   }
@@ -334,7 +438,7 @@ const HAS_BODY = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 /** Every probe for one route, each to be sent signed in and signed out. */
 function probesFor(route: RouteEntry, fx: Fixture): Array<InjectOptions & { label: string }> {
   const { method, url } = route;
-  const good = validParams(url, fx);
+  const good = validParams(route, fx);
   const queryKeys = shapeKeys(route.schema?.querystring);
   const baseQuery = plausibleQuery(queryKeys, fx);
   const at = (values: Record<string, string>, query = baseQuery) => fill(url, values) + qs(query);
@@ -352,6 +456,8 @@ function probesFor(route: RouteEntry, fx: Fixture): Array<InjectOptions & { labe
     out.push({ label: `query ${key}[a]`, url: fill(url, good) + `?${key}[a]=1&${key}[]=2` });
   }
   out.push({ label: "query unknown key", url: at(good, { ...baseQuery, zzz: "1", __proto__x: "1" }) });
+  // The request as a client would send it (a body-less method; the others get "no body" below).
+  if (!HAS_BODY.has(method)) out.push({ label: "plain", url: at(good) });
 
   // Bodies.
   if (HAS_BODY.has(method)) {
@@ -410,7 +516,42 @@ describe("fuzz", () => {
     const sent = await Promise.all(routes.map((r) => probeAll(signedInAndOut(probesFor(r, fx), fx.me.cookie), findings)));
     expect(findings).toEqual([]);
     expect(sent.flat().length).toBeGreaterThan(4000);
+
+    // This batch's routes, each one of them: a malformed path parameter is always a 4xx, never a success; and the real
+    // ids took at least one probe past the checks of shape, session, rate and existence (a status none of those gives).
+    const agentRoutes = routes.filter((r) => isAgentRoute(r.url));
+    for (const known of ["GET /api/usage", "POST /api/agents/draft-persona", "POST /api/agents/:id/proposals/:proposalId/confirm", "DELETE /api/providers/:id", "POST /api/conversations/:id/runs/:runId/stop", "POST /api/conversations/:id/topic"]) {
+      expect(agentRoutes.map((r) => `${r.method} ${r.url}`)).toContain(known);
+    }
+    const SHALLOW = new Set([400, 401, 404, 405, 413, 414, 415, 429]);
+    for (const [i, route] of routes.entries()) {
+      if (!isAgentRoute(route.url)) continue;
+      const name = `${route.method} ${route.url}`;
+      const malformedPath = sent[i]!.filter((x) => x.label.startsWith("path "));
+      expect([name, malformedPath.filter((x) => x.status < 400 || x.status >= 500)]).toEqual([name, []]);
+      // The avatar takes image bytes, not JSON: the avatar test below reaches it.
+      if (route.url === "/api/agents/:id/avatar") continue;
+      const deep = sent[i]!.filter((x) => x.label.endsWith("[signed in]") && !SHALLOW.has(x.status));
+      expect([name, deep.length > 0]).toEqual([name, true]);
+    }
     await stillHealthy();
+  });
+
+  it("the 4xx rule's one exception is provider_in_use's list of Agents, and nothing else", () => {
+    const json = (status: number, body: unknown) => ({ statusCode: status, headers: { "content-type": "application/json; charset=utf-8" }, body: JSON.stringify(body) });
+    const inUse = { error: "provider_in_use", agents: [{ id: UUID, name: "Bot" }] };
+    expect(verdict("DELETE", json(409, inUse))).toBeNull();
+    expect(verdict("DELETE", json(409, { error: "provider_in_use", agents: [] }))).toBeNull();
+    for (const bad of [
+      { error: "not_found", agents: [{ id: UUID, name: "Bot" }] },
+      { error: "provider_in_use", agents: [{ id: UUID, name: 1 }] },
+      { error: "provider_in_use", agents: [{ id: UUID, name: "Bot", key: "x" }] },
+      { error: "provider_in_use", agents: { id: UUID, name: "Bot" } },
+      { error: "provider_in_use", others: [{ id: UUID, name: "Bot" }] },
+      { error: "no_quota", reason: 1 },
+    ]) {
+      expect([bad, verdict("POST", json(409, bad))]).toEqual([bad, "4xx body has a non-string extra field"]);
+    }
   });
 
   it("the Better Auth mount answers every path and malformed body with < 500 and a well-formed error", { timeout: FUZZ_TIMEOUT }, async () => {
@@ -516,7 +657,7 @@ describe("fuzz", () => {
     ];
     const findings: Finding[] = [];
     const probes = cases.map((c) => ({ label: c.label, method: "POST" as const, url, headers: { "content-type": c.contentType }, payload: c.payload }));
-    const statuses = await probeAll(signedInAndOut(probes, fx.me.cookie), findings);
+    const statuses = (await probeAll(signedInAndOut(probes, fx.me.cookie), findings)).map((x) => x.status);
     // The same against a conversation id that is not one.
     await probeAll(signedInAndOut(probes.map((p) => ({ ...p, url: "/api/conversations/abc/attachments", label: `${p.label} (bad id)` })), fx.me.cookie), findings);
     expect(findings).toEqual([]);
@@ -532,7 +673,7 @@ describe("fuzz", () => {
     await stillHealthy();
   });
 
-  it("the avatar routes answer malformed bodies and ids with < 500", { timeout: FUZZ_TIMEOUT }, async () => {
+  it("the avatar routes, yours and your Agent's, answer malformed bodies and ids with < 500", { timeout: FUZZ_TIMEOUT }, async () => {
     const fx = await fixture();
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5d7e2d10000000049454e44ae426082", "hex");
     const cases: Array<{ label: string; contentType?: string; payload?: string | Buffer }> = [
@@ -558,7 +699,19 @@ describe("fuzz", () => {
       ...(c.payload === undefined ? {} : { payload: c.payload }),
     }));
     await probeAll(signedInAndOut(puts, fx.me.cookie), findings);
-    const gets = [fx.peer.id, fx.me.id, randomUUID(), ...BAD_PATH].map((id) => ({
+    // The Agent's: the same bodies against the fixture's Agent, and a good body against malformed and foreign ids.
+    const agentPuts = await probeAll(signedInAndOut(puts.map((p) => ({ ...p, url: `/api/agents/${fx.agent}/avatar`, label: `agent ${p.label}` })), fx.me.cookie), findings);
+    expect(agentPuts.filter((x) => x.label.endsWith("[signed in]") && x.status === 200).length).toBeGreaterThan(0);
+    const badIds = [fx.victimAgent, fx.peer.id, randomUUID(), ...BAD_PATH].map((id) => ({
+      label: `agent avatar of ${id.slice(0, 40)}`,
+      method: "PUT" as const,
+      url: `/api/agents/${id}/avatar`,
+      headers: { "content-type": "image/png" },
+      payload: PNG,
+    }));
+    const byId = await probeAll(signedInAndOut(badIds, fx.me.cookie), findings);
+    expect(byId.filter((x) => x.label.startsWith("agent avatar of ") && !x.label.startsWith(`agent avatar of ${fx.victimAgent.slice(0, 40)}`)).every((x) => x.status >= 400)).toBe(true);
+    const gets = [fx.peer.id, fx.me.id, fx.agent, randomUUID(), ...BAD_PATH].map((id) => ({
       label: `avatar of ${id.slice(0, 40)}`,
       method: "GET" as const,
       url: `/api/principals/${id}/avatar`,
