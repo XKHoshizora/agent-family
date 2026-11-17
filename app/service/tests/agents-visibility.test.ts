@@ -80,6 +80,29 @@ describe("an Agent is invisible to everyone but its owner", () => {
     expect(JSON.parse((await catchUp(real)).body)).toEqual({ messages: [], gone: [real], more: false });
   });
 
+  it("its owner cannot add a member to, rename, or leave the Agent's conversation, nor remove the Agent: 404 as for a conversation that is no group", async () => {
+    const [owner, friend] = [await signUp(app, "olaf"), await signUp(app, "fern")];
+    const { conversationId: direct } = await befriend(app, owner, friend);
+    const agent = await mustCreateAgent(app, owner);
+    const conv = agent.conversationId;
+    const routes: Array<[string, (id: string) => string, unknown?]> = [
+      ["POST", (id) => `/api/conversations/${id}/members`, { principalId: friend.id }],
+      ["PATCH", (id) => `/api/conversations/${id}`, { title: "renamed" }],
+      ["DELETE", (id) => `/api/conversations/${id}/members/${owner.id}`],
+      ["DELETE", (id) => `/api/conversations/${id}/members/${agent.id}`],
+    ];
+    for (const [method, url, body] of routes) {
+      const mine = await observe(owner, method as "GET", url(conv), body);
+      expect([method, url(conv), mine]).toEqual([method, url(conv), await observe(owner, method as "GET", url(randomUUID()), body)]);
+      // Exactly what a direct chat answers, the other conversation that is no group.
+      expect([method, mine]).toEqual([method, await observe(owner, method as "GET", url(direct), body)]);
+      expect([method, mine.status, mine.body]).toEqual([method, 404, '{"error":"not_found"}']);
+    }
+    const members = await api(app, owner, "GET", `/api/conversations/${conv}/members`);
+    expect(members.json.members.map((m: any) => m.id).sort()).toEqual([owner.id, agent.id].sort());
+    expect((await api(app, owner, "GET", `/api/conversations/${conv}`)).json.title).toBeNull();
+  });
+
   it("the stranger's sync and the owner's friends never mention the Agent", async () => {
     const [owner, stranger, friend] = [await signUp(app, "olga"), await signUp(app, "sid"), await signUp(app, "fay")];
     const agent = await mustCreateAgent(app, owner);
@@ -166,10 +189,12 @@ describe("an Agent is invisible to everyone but its owner", () => {
     );
     await step(() => api(app, owner, "DELETE", `/api/agents/${agent.id}`));
     expect(mine.events.filter(isAgent)).toHaveLength(5);
-    // The stranger's own traffic arrives; the Agent's never does.
+    // The stranger's own traffic arrives; the Agent's never does. A push of their own, sent after everything above, is
+    // awaited first: by the time it is there, an `agent` push meant for them would have come too.
     await api(app, stranger, "PATCH", `/api/agents/${agent.id}`, { intro: "mine" });
-    await api(app, stranger, "POST", "/api/ws-ticket");
-    await new Promise((r) => setTimeout(r, 300));
+    const own = await app.inject({ method: "PUT", url: "/api/me/avatar", headers: { cookie: stranger.cookie, "content-type": "image/png" }, payload: PNG });
+    expect(own.statusCode).toBe(200);
+    await theirs.next((e) => e.type === "principal" && e.id === stranger.id);
     expect(theirs.events.filter((e) => e.type === "agent")).toEqual([]);
   });
 
