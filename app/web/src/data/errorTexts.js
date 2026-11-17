@@ -183,6 +183,7 @@ const AGENT = {
     ...MODEL_FAILED,
     invalid_request: "所选模型不可用，请换一个模型。",
     context_too_small: "所选模型的上下文太小，放不下起草所需的内容，请换一个模型。",
+    thinking_exhausted: "模型把输出额度都用在了思考上，没有写出内容。可以再试一次，或把思考程度调低。",
     rate_limited: "起草太频繁，或正在进行的回复太多，请稍后再试。",
   },
   confirm: {
@@ -290,6 +291,7 @@ const RUN_FAILED = {
   provider_unavailable: "暂时连不上模型服务，这次没有回复。可以重试。",
   address_not_allowed: "模型的接口地址不被允许，这次没有回复。请到设置里检查地址。",
   context_too_small: "人格文档太长或模型的上下文太小，放不下你的消息。请缩短人格文档或换一个模型。",
+  thinking_exhausted: "模型把这次的输出额度都用在了思考上，没有写出回答。可以重试，或把思考程度调低。",
   busy: "服务出了点问题，这次没有回复，也没有扣费。可以重试。",
   rate_limited: "发得太快了，请稍后重试。",
   agent_paused: "它已暂停，这次没有回复。",

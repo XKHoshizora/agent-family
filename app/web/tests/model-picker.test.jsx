@@ -2,6 +2,8 @@
 // The model picker of the Agent form: site models (免费 / 需余额) and my providers' models, what it says when there is
 // nothing to choose, the privacy notice beside it, and how it loads.
 import React from "react";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { AG1, MODELS, P1, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, deferred, providerOf, syncOf, usageOf } from "./fixtures.js";
@@ -131,6 +133,18 @@ describe("the model picker", () => {
     await openForm();
     const field = modelBox().closest(".field");
     expect(field.parentElement.textContent).toContain(PRIVACY);
+  });
+
+  it("every notice in the form sits inside form.page-body, whose notices stop at the fields' width (same token)", async () => {
+    await openForm();
+    const form = modelBox().closest("form");
+    expect(form.classList.contains("page-body")).toBe(true);
+    const privacy = [...form.querySelectorAll(".notice")].find((n) => n.textContent.includes(PRIVACY));
+    expect(privacy).toBeTruthy();
+    for (const n of form.querySelectorAll(".notice")) expect(n.closest("form.page-body")).toBe(form);
+    const css = readFileSync(resolve(__dirname, "../src/styles.css"), "utf8");
+    expect(css).toMatch(/form.page-body .notice\s*\{[^}]*max-width:\s*var\(--field-w\)/);
+    expect(css).toMatch(/\.field\s*\{[^}]*max-width:\s*var\(--field-w\)/);
   });
 
   it("while it loads it says so (not that nothing is available), and creating waits", async () => {

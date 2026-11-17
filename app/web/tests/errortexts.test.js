@@ -82,7 +82,7 @@ const AGENT_ROUTES = {
   resume: ["agent_deleted", "not_found", "rate_limited"],
   delete: ["not_found", "rate_limited"],
   avatar: ["invalid_request", "too_large", "agent_deleted", "not_found", "rate_limited"],
-  draft: ["invalid_request", "no_quota", "context_too_small", "rate_limited", "provider_rejected", "provider_unavailable", "address_not_allowed", "busy"],
+  draft: ["invalid_request", "no_quota", "context_too_small", "thinking_exhausted", "rate_limited", "provider_rejected", "provider_unavailable", "address_not_allowed", "busy"],
   confirm: ["not_found", "agent_deleted", "stale_proposal", "invalid_request", "rate_limited"],
   discard: ["not_found", "agent_deleted", "stale_proposal", "rate_limited"],
 };
@@ -216,13 +216,20 @@ describe("the sentences batch 2A names", () => {
 
   it("every error a failed run can carry has its own sentence (none falls back to the generic one)", () => {
     const failed = (error) => ({ id: "r", status: "failed", error, retryable: true });
-    const codes = ["no_quota", "provider_rejected", "provider_unavailable", "address_not_allowed", "context_too_small", "busy", "rate_limited", "agent_paused", "agent_deleted"];
+    const codes = ["no_quota", "provider_rejected", "provider_unavailable", "address_not_allowed", "context_too_small", "thinking_exhausted", "busy", "rate_limited", "agent_paused", "agent_deleted"];
     const texts = codes.map((code) => runFailureText(failed(code), NOW));
     for (const [i, text] of texts.entries()) expect(text, codes[i]).not.toBe("这次没有回复成功。");
     expect(new Set(texts).size).toBe(codes.length);
     expect(runFailureText(failed("rate_limited"), NOW)).toBe("发得太快了，请稍后重试。");
     expect(runFailureText(failed("agent_paused"), NOW)).toBe("它已暂停，这次没有回复。");
     expect(runFailureText(failed("agent_deleted"), NOW)).toBe("它已删除，这次没有回复。");
+  });
+
+  it("thinking_exhausted: its own sentences for a reply and for a draft", () => {
+    const run = { id: "r", status: "failed", error: "thinking_exhausted", retryable: true };
+    expect(runFailureText(run, NOW)).toBe("模型把这次的输出额度都用在了思考上，没有写出回答。可以重试，或把思考程度调低。");
+    expect(runFailureText(run, NOW, "site")).toBe(runFailureText(run, NOW, "provider"));
+    expect(agentErrorText("draft", { code: "thinking_exhausted", status: 502 })).toBe("模型把输出额度都用在了思考上，没有写出内容。可以再试一次，或把思考程度调低。");
   });
 
   it("a site model's key or address is not the owner's to check: its own sentence; a provider's (or unknown) as before", () => {

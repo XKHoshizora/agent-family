@@ -169,6 +169,15 @@ describe("adding a provider", () => {
     expect(mainText()).toContain("https://");
   });
 
+  it("the privacy notice is inside form.page-body, so it stops at the fields' width", async () => {
+    await openProviders({ providers: [] });
+    await click(inMain().getByRole("button", { name: /添加供应商/ }));
+    const form = inMain().getByLabelText("接口类型").closest("form");
+    expect(form.classList.contains("page-body")).toBe(true);
+    const notice = [...form.querySelectorAll(".notice")].find((n) => n.textContent.includes("会发送给这个供应商"));
+    expect(notice.closest("form.page-body")).toBe(form);
+  });
+
   it("sends the key once, empties the field as soon as the request is sent, and never shows it again", async () => {
     const pending = deferred();
     const createProvider = vi.fn(() => pending.promise);
