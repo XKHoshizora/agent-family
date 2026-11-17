@@ -159,7 +159,8 @@ describe("agent and metering configuration", () => {
 
   test("AGENT_TIERS must contain free and hold whole non-negative limits", () => {
     expect(loadConfig({ ...base, AGENT_TIERS: '{"free":5,"pro":100}' }).agentTiers).toEqual({ free: 5, pro: 100 });
-    for (const bad of ['{"pro":100}', "[]", "nope", '{"free":-1}', '{"free":1.5}', '{"free":"3"}']) {
+    // `free` must be a tier of its own: not one an object inherits.
+    for (const bad of ['{"pro":100}', "[]", "nope", '{"free":-1}', '{"free":1.5}', '{"free":"3"}', '{"__proto__":{"free":5}}', '{"constructor":3}']) {
       expect(() => loadConfig({ ...base, AGENT_TIERS: bad }), bad).toThrow(/AGENT_TIERS/);
     }
   });

@@ -13,7 +13,7 @@ import type { Hub } from "../sync/hub.ts";
 import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, type BuiltContext, type LoadedContext } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent, RunNotRunning } from "./conversation.ts";
-import type { AgentPort, Delta, Prepared, Reply, RunEnd, RunTicket, Usage } from "./runtime/port.ts";
+import { BUSY, NOTHING, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
 import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
@@ -29,14 +29,6 @@ export interface AgentPortDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn">;
 }
 
-const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
-/**
- * The service's own trouble; here: a reply with nothing to answer and no reason why, or whose attachments could not be
- * read (the store is down, or reading took longer than the run may), which never reaches a model.
- */
-const BUSY: RunEnd = { status: "failed", error: "busy" };
-/** No tokens at all: what a run recovered at start-up is settled on. */
-const NOTHING = { inputChars: 0, outputChars: 0 };
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */

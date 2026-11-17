@@ -5,7 +5,7 @@ import { APICallError, streamText, type LanguageModel, type LanguageModelUsage, 
 import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
 import { guardedFetch } from "../providers/guard.ts";
-import { createProviderProbe, PROBE_GUARD, ProviderCallError } from "../providers/probe.ts";
+import { createProviderProbe, PROBE_GUARD, ProviderCallError, type ProviderCallCode } from "../providers/probe.ts";
 import type { Slots } from "../slots.ts";
 
 /**
@@ -52,7 +52,8 @@ export interface ModelGateway {
   listModels(p: Pick<ModelCall, "protocol" | "baseUrl" | "apiKey">): Promise<string[]>;
 }
 
-export type ModelErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed";
+/** The codes a model call fails with: exactly those of a provider call (the address guard's, the provider's refusal, the rest). */
+export type ModelErrorCode = ProviderCallCode;
 
 /** One fixed sentence per code: nothing the upstream said is ever kept. */
 const MESSAGES: Readonly<Record<ModelErrorCode, string>> = {

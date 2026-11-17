@@ -46,6 +46,13 @@ export type RunEnd =
   | { readonly status: "cancelled"; readonly error?: "agent_paused" | "agent_deleted" }
   | { readonly status: "failed"; readonly error: RunErrorCode; readonly resetsAt?: string };
 
+/** The provider could not be reached or gave nothing usable (also how a run the previous process left running ends). */
+export const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
+/** The service's own trouble: the reply could not be started or stored, or had nothing to answer. Charged nothing. */
+export const BUSY: RunEnd = { status: "failed", error: "busy" };
+/** No tokens at all: what a run that never called a model, or one recovered at start-up, is settled on. */
+export const NOTHING: Readonly<{ inputChars: number; outputChars: number }> = { inputChars: 0, outputChars: 0 };
+
 /** A piece of the reply on its way to the owner's sockets. */
 export interface Delta {
   text?: string;

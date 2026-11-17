@@ -6,14 +6,13 @@ import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
+import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { ownedAgentOf } from "./runs.ts";
 import { agentLimit, assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
 
-/** The longest text a message holds (people's messages are refused above it; an Agent's reply is cut there). */
-export const MESSAGE_TEXT_MAX = 8000;
 /** The most of a reply's reasoning that is stored; the rest is cut (it is never shown to a model again). */
 export const REASONING_MAX = 32_000;
 

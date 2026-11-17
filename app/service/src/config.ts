@@ -140,7 +140,7 @@ const envSchema = z.object({
     }, "SITE_TIMEZONE must be an IANA time zone name such as Asia/Shanghai"),
   /** JSON object: how many Agents each account tier may own. Must contain `free`. */
   AGENT_TIERS: jsonVariable(
-    z.record(z.string().min(1), z.number().int().min(0)).refine((t) => "free" in t, "must contain a \"free\" tier"),
+    z.record(z.string().min(1), z.number().int().min(0)).refine((t) => Object.hasOwn(t, "free"), "must contain a \"free\" tier"),
     { free: 20 } as Record<string, number>,
   ),
   /** Replies one owner may have running at once; further ones wait queued. */

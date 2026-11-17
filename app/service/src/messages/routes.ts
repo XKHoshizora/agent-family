@@ -12,7 +12,7 @@ import { wireMessageSchema } from "./model.ts";
 import { principalMapSchema, principalsOf } from "./principals.ts";
 import { getMessage, listMessages, markRead, toWireFor } from "./read.ts";
 import { decodeSearchCursor, inSearchBudget, searchAll, searchConversation } from "./search.ts";
-import { sendMessage } from "./send.ts";
+import { MESSAGE_TEXT_MAX, sendMessage } from "./send.ts";
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
@@ -21,7 +21,7 @@ const sendResult = z.object({ message: wireMessageSchema, duplicate: z.boolean()
 const sendBody = z
   .object({
     // A caption may be empty or invisible; a text message must show something (the refinement below).
-    text: messageText(0, 8000).optional(),
+    text: messageText(0, MESSAGE_TEXT_MAX).optional(),
     attachmentId: uuidParam.optional(),
     replyToSeq: positiveInt.optional(),
     clientTxn: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),

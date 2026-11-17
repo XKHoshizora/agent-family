@@ -4,8 +4,12 @@ import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "./model.ts";
 
+/** The longest text a message holds, in characters: the send schema's limit (people's messages are refused above it; an
+ * Agent's reply is cut there). */
+export const MESSAGE_TEXT_MAX = 8000;
+
 export interface SendInput {
-  /** Already trimmed and validated: 0–8000 characters, and not empty unless `attachmentId` is given. */
+  /** Already trimmed and validated: 0–`MESSAGE_TEXT_MAX` characters, and not empty unless `attachmentId` is given. */
   text?: string;
   /** The sender's own unsent upload in this conversation; makes a `file` message with `text` as caption. */
   attachmentId?: string;

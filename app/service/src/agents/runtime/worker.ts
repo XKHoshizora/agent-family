@@ -1,6 +1,6 @@
 import { ModelError, type ModelGateway } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
-import { isRunEnd, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
+import { BUSY, isRunEnd, NOTHING, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
 import { ReplyStream } from "./stream.ts";
 
 /**
@@ -49,10 +49,6 @@ export interface AgentWorker {
 
 type Interruption = "stop" | "timeout" | "shutdown";
 
-const NO_OUTPUT = { inputChars: 0, outputChars: 0 };
-const UNAVAILABLE: RunEnd = { status: "failed", error: "provider_unavailable" };
-/** The service's own trouble: the reply could not be started or stored. Charged nothing (port-impl `finish`). */
-const BUSY: RunEnd = { status: "failed", error: "busy" };
 
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const { port, models, log } = opts;
@@ -153,9 +149,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       // The service is closing before the call was admitted: the run stays running, to be recovered at the next start.
       if (shutdown.aborted) return;
       log.error({ err, runId: run.id }, "agent run: could not start");
-      return finish(run, BUSY, null, NO_OUTPUT);
+      return finish(run, BUSY, null, NOTHING);
     }
-    if (isRunEnd(prepared)) return finish(run, prepared, null, NO_OUTPUT);
+    if (isRunEnd(prepared)) return finish(run, prepared, null, NOTHING);
 
     const { out, finished, failure, why } = await call(run, prepared, shutdown);
     // The service is closing: nothing is posted and the run stays running, to be recovered at the next start.
