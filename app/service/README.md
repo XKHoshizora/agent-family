@@ -348,7 +348,8 @@ changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, 
 are the JSON 404.
 
 How a model call is admitted, held, settled and forgiven, and the bound on what concurrent calls can overrun: Metering
-(below the Agents and runs section).
+(below the Agents and runs section). Each reply of your Agents also tells you what that one run was charged, the same
+free-plus-balance figure (`via.points`, Wire shapes).
 
 #### `GET /api/usage`
 
@@ -402,7 +403,8 @@ still read them (a member who has since left too) gets its entry in those reads'
 field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
 id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
 level, reply mode, `groupMentions`, provider, pause or persona proposals, or the reasoning of its replies there (A reply
-there), in any response, push or error. Fellow members see a changed name, intro or field the next time they load
+there), or which model and reasoning level a reply of it used and what it cost (`via`, Wire shapes), in any response,
+push or error. Fellow members see a changed name, intro or field the next time they load
 principals, as for people; a changed avatar is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
@@ -750,8 +752,11 @@ owner's limits.
   field (absent, not null or empty: exactly what a message stored without reasoning looks like). An owner who has left
   the group reads none of it, as they read nothing of the group. A quote of the reply, the member list, `run` pushes and
   `GET …/runs` carry none of it to anyone, and search never looks at it (Search).
+- *Which model it used.* Its owner's copy of the message carries `via` — the model and reasoning level its run used,
+  and what its owner was charged for it —, decided per reader exactly as its thinking is; nobody else's carries the key
+  (Wire shapes, `via`).
 - *Nothing is streamed*: no `delta` is pushed for a reply in a group, to anyone, its owner included; it arrives whole,
-  as its message (its owner's with its thinking).
+  as its message (its owner's with its thinking, then once more with its `via` when its run is charged).
 - *Who pays.* The Agent's owner, exactly as in its own conversation (Metering): admitted against the owner's free
   allowance or balance and settled there. Whoever called it is charged nothing and sees nothing of it in their
   `GET /api/usage`; on its owner's provider model it costs no points.
@@ -1590,12 +1595,39 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                 "persona": "…", "intro": "…", "field": "…" },
                                        // an Agent's reply that proposed a persona, for the Agent's owner only; intro and
                                        // field only when proposed (Persona proposals)
+  "via": { "model": { "source": "site", "id": "…", "label": "…" } | { "source": "provider", "model": "…" },
+           "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "points": "6.9" },
+                                       // an Agent's reply, for the Agent's owner only (absent for everyone else): the
+                                       // model and reasoning level its run used, and what you were charged for it (below)
   "createdAt": "2026-11-16T01:02:03.000Z"
 }
 ```
 
-An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated` and `proposal` appear
-only on those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
+An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated`, `proposal` and `via`
+appear only on those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
+
+**`via`** (the product owner's decision of 2026-11-18): which model and reasoning level an Agent's reply used, and what it
+cost its owner. Only the owner of the Agent that sent it receives it — the sender principal's `owner_id` when the message
+is read —, decided per reader in the query that decides whether the reader sees the message at all, as `reasoning` and
+`proposal` are (`messages/read.ts` `toWireForReaders`): on the history, a single message, `GET /api/sync` and catch-up,
+both searches and every `message` push, in the Agent's own conversation and in a group alike. Everyone else — a fellow
+member of the group, the owner of another Agent there, anybody — gets the message without the key (absent, never null or
+`{}`). It is read from the run that posted the reply (the message's `client_txn` is the run's id):
+
+- `model`: what the run was admitted on. A site model is `{"source": "site", "id", "label"}`, `label` its label in
+  `SITE_MODELS` when the message is read, its `id` when it is no longer configured; never its upstream model name,
+  address, key variable or prices. A provider model is `{"source": "provider", "model"}`: the model name you saved (no
+  provider id, no address).
+- `reasoning`: the level the call was sent at — the Agent's when the model took it, else `none` (Calling a model) —,
+  recorded on the run when the call was admitted, so a later change to the Agent does not change it.
+- `points`: what you were charged for that run, a decimal string of points as money is on the wire: from the free
+  allowance plus the balance, as `GET /api/usage` counts it (not what was forgiven); `"0"` on a provider model.
+
+A message no run posted (the fixed greeting), a reply whose run was admitted before runs recorded their level, and one
+whose run or usage record is gone have no `via`. A run is charged when it ends, just after its reply was posted and
+pushed, so that first push may come without `via`: the owner's sockets are pushed the reply once more when its run has
+ended, before its `run` (`done` or `stopped`), now with `via` — replace the copy you hold (Ordering and gaps). Nobody
+else is pushed that second copy.
 
 **System notices** (`kind: "system"`) are written by the service when something happens in a conversation;
 nobody sends them, every member who can see that seq sees them, and they are never unread. `text` is a
@@ -1623,7 +1655,8 @@ Clients must ignore fields and events they do not know: later batches add more.
 **Pushes** (WebSocket text frames, JSON):
 
 ```jsonc
-{ "type": "message", "message": WireMessage }   // rendered for you
+{ "type": "message", "message": WireMessage }   // rendered for you (your Agent's reply comes once more when its run is
+                                                //  charged, with `via`: Wire shapes)
 { "type": "conversation", "id": "…" }   // title, members, creator, closed, or a direct chat's canSend changed: GET /api/conversations/:id
 { "type": "gone", "id": "…" }           // you are not a member now (left or removed): drop the conversation
 { "type": "social" }                    // your friends, requests or blocks changed: GET /api/social
@@ -1746,10 +1779,12 @@ sign in again; on anything else reconnect (with backoff).
 
 **Ordering and gaps.** Within one conversation a socket receives that conversation's events one at a
 time, in the order the writes announced them after commit, with `message` seqs strictly ascending
-(messages are read back from the table by seq range, not taken from the announcement). Who receives
+(messages are read back from the table by seq range, not taken from the announcement) — except one repeat: your own
+Agent's reply, pushed to you once more when its run has been charged, now carrying its `via` (Wire shapes). Who receives
 what is decided against the database at delivery time. Across conversations, and for `social`, there
 is no order. Messages from before you joined are never pushed, so after joining the first `message` is the
-join notice. Apply a `message` like this: `seq ≤ position` → duplicate, ignore; `seq = position + 1`
+join notice. Apply a `message` like this: `seq ≤ position` → duplicate, ignore (but when it is a copy of a message
+you hold that brings a `via` your copy lacks, replace your copy with it); `seq = position + 1`
 → append and advance; `seq > position + 1` → a gap: call catch-up for that conversation from your
 position. Gaps are rare (a backlog of more than 200 messages at once, a delivery step that failed, an
 announcement race right after a server start) but always repairable this way. A `message` for a
@@ -1949,7 +1984,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    conversation, so a run's reply never lands anywhere else. With nothing left to show, nothing is stored (`post`
    answers `empty`) and the run ends as one that said nothing (below).
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
-   moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
+   moves the run out of `running`, how it ended is recorded, and the follow-up is queued. After it commits, a run that
+   posted a reply has that reply pushed once more to its owner, before the run's end, now with `via` (Wire shapes; a
+   release of a run whose reply was posted does the same). What is recorded is what is
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
    Agent after; an interrupted run that posted nothing is `cancelled`, and so is a refused one, with the Agent's state
    as its error (`agent_deleted`, `agent_paused`, or `agent_removed` when it is no longer in the run's group).
@@ -2157,7 +2194,7 @@ free allowance while what is left of it, less what your running calls hold again
 balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
 (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
 so). The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
-Agent's model is by then.
+Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
 reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
