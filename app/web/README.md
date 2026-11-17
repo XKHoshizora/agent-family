@@ -78,3 +78,5 @@ restart spec and the specs that need the model stub (Agents, providers, Markdown
   removed from everything shown. A reply being written keeps and shows its first 20 000 characters
   (`src/data/model.js` `STREAM_CHARS`). The chat list's preview of an Agent's message has its Markdown markers taken
   out by `src/ui/markdownPreview.js` (no library).
+
+- Lab logos (`public/logos/labs/*.svg`, shown only through `<img>` by `src/ui/LabLogo.jsx`): where they come from and their licence are in `public/logos/README.md`; `node scripts/check-logos.mjs` re-checks every file.
