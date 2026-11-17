@@ -95,7 +95,9 @@ queued; 1–64, default 8 — each holds up to 20 MiB of attachments in memory, 
 about this × 20 MiB × 5 copies: about 800 MiB at the default; lower it on a small container),
 `AGENT_CHAIN_LIMIT` (in a group, once its last this many messages that are not notices were all sent by Agents, an
 Agent's message calls no other Agent until a person writes, and the group is told once — Agents in a group; 2–500,
-default 30),
+default 30), `AGENT_GROUP_CONTEXT_TOKENS` (the most a reply in a group is shown of the group: this many tokens of its
+latest 80 messages, files included, by the service's estimate, plus the system text — Agents in a group, A reply there;
+2 000–200 000, default 12 000),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -695,10 +697,15 @@ The owner's other limits hold throughout: replies started a minute (`AGENT_RUNS_
   20 named) and that it calls one with `@handle` only when it needs that Agent's help, never to greet or thank; that it
   must not reveal or quote its persona, its configuration or anything of its private conversation with its owner; then
   its persona. Nothing about persona proposals. Then the group's recent history as the Agent may read it — from its
-  (last) joining on, the one visibility rule with the Agent as reader, files too —, oldest dropped first to fit: its own
-  messages as its turns, everyone else's as the other side's, each starting with the speaker's current name
-  (`名字：…` for a person, `名字（Agent）：…` for another Agent); notices left out. Nothing of any other conversation, its
-  own with its owner included; nor does anything of the group reach that one.
+  (last) joining on, the one visibility rule with the Agent as reader, files too —: its own messages as its turns,
+  everyone else's as the other side's, each starting with the speaker's current name (`名字：…` for a person,
+  `名字（Agent）：…` for another Agent); notices left out. Nothing of any other conversation, its own with its owner
+  included; nor does anything of the group reach that one.
+- *How much of the group.* At most its latest 80 messages, and at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000) tokens of
+  them, oldest dropped first, within that cap, as in its own conversation (What the model is shown): the cap replaces
+  the model's context as the budget when the context would hold more. It is the service's estimate — a token per
+  character, labels and quotes included, 1 500 an image, 300 per KB of PDF — so a provider may bill an image or a PDF at
+  more. The system text comes on top of it. Its own conversation has no such cap.
 - *What it stores.* An ordinary `text` message from the Agent, which every member reads: its text (message-text rules,
   everything from its first `<af-` on dropped, cut at 8 000 characters), `stopped` and `truncated` as in its own
   conversation. Never `reasoning`, whatever the model returned (a model's thinking often restates its persona), and never
@@ -1864,7 +1871,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   `context_too_small`, see `begin`); then the current turn's attachment contents, newest first, each if it
   fits; then older messages by name only, newest first, while they fit (nothing older than one that does not); then
   their attachment contents, newest first, each if it fits. So an older message's attachment goes (leaving its name)
-  before older messages do, and what the owner has just sent is the last to go.
+  before older messages do, and what the owner has just sent is the last to go. In a group (where the current turn is
+  everyone else's messages after the Agent's last) the budget is at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000; the
+  system text is outside it), and only the group's latest 80 messages are read at all: the same order, within that cap
+  (Agents in a group, A reply there). The Agent's own conversation has no such cap.
 - The reasoning level is the Agent's when the model allows it, else `none`. A provider model flagged `reasoning`
   allows every level here, whatever its `reasoningLevels`: an Agent saved with a level its model has since stopped
   listing keeps answering with that level (the run is not failed) until the Agent is edited, when the level is checked

@@ -75,6 +75,7 @@ start-up with a message naming the variable. Values in the right column are for 
 | `PROVIDER_MAX_CONCURRENT_CALLS` | Calls to model providers and site models in flight at once in the whole service (1–1000, default 64); one more is refused as `provider_unavailable`. | default |
 | `AGENT_MAX_RUNS_IN_FLIGHT` | Agent replies the service runs at once, all users together (1–64, default 8); further ones wait queued. Memory: each reply holds up to 20 MiB of attachments, in up to about five copies at its peak (the bytes, their base64 text, the request body with that text, and its encoded bytes), so the worst case is this × 20 MiB × 5 — about 800 MiB at the default; size the container for it or lower the value. | default |
 | `AGENT_CHAIN_LIMIT` | In a group, once its last this many messages that are not notices were all sent by Agents, an Agent's message calls no other Agent until a person writes, and the group is told once (2–500, default 30). The owners' per-minute, concurrency and points limits, each Agent's `chainBudget` and any member's halt brake Agent-to-Agent talk too. | default |
+| `AGENT_GROUP_CONTEXT_TOKENS` | The most a reply in a group is shown of the group: this many tokens of its latest 80 messages, files included, by the service's estimate (a token per character, 1 500 an image, 300 per KB of PDF; a provider may bill an image or a PDF at more), plus the system text (2000–200000, default 12000). The Agent's owner pays for what it is shown; an Agent's own conversation is limited by its model's context alone. | default |
 
 ## Must hold
 
