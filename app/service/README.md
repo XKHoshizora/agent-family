@@ -75,10 +75,12 @@ one), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points),
 contain `free`, default `{"free":20}`),
 the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
 `AGENT_MAX_CONCURRENT_RUNS` (model calls one person may have running at once, replies and persona drafts together;
-further replies wait queued, a further draft is refused; 1–100, default 2),
+further replies wait queued, a further draft is refused; a draft and a reply that start at the same moment may briefly
+exceed it by one, see Agents and runs; 1–100, default 2),
 `AGENT_RUNS_PER_MINUTE` (replies one person may start a minute, counted from the stored runs and not scaled by
 `RATE_LIMIT_SCALE`; 1–10 000, default 20), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
-for a reply also the reading of its attachments before the call; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
+for a reply also the reading of its attachments before the call, each in turn: so a reply may take up to about twice it
+in all; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
 context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
 limit of every call to a provider model; 1–1 000 000, default 2 048; it must be less than
 `PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
@@ -236,30 +238,30 @@ files that insert queued runs themselves use it too, so no background worker pic
 ### Errors
 
 Every error body is `{"error": "<snake_case_code>"}`, sometimes with details next to it: strings (`reason`,
-`resetsAt`), or for `provider_in_use` the list `agents`. Shared codes:
+`resetsAt`), or — the one exception — for `provider_in_use` the list `agents`. Shared codes, by status:
 
 | Status | `error` | Meaning |
 |---|---|---|
 | 400 | `invalid_request` | Malformed or not acceptable input (also 414 for an over-long path parameter, 415 for an unsupported content type) |
+| 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
+| 400 | `context_too_small` | A run's error (not an HTTP answer there): the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context. As an HTTP answer only from `POST /api/agents/draft-persona`, when the model's context cannot hold the draft's instruction and data |
 | 401 | `unauthenticated` | No valid session (or a WebSocket ticket that is unknown, used or expired) |
-| 402 | `no_quota` | A site-model call cannot start: nothing is left to pay for it (see Usage and points). `reason` `free_and_balance` (a free-tier model: today's free allowance and the balance are both used up; `resetsAt`, the next midnight in `SITE_TIMEZONE`, ISO instant) or `balance` (a paid-tier model: no balance) |
+| 402 | `no_quota` | A site-model call cannot start: nothing is left to pay for it (see Metering). `reason` `free_and_balance` (a free-tier model: today's free allowance and the balance are both used up; `resetsAt`, the next midnight in `SITE_TIMEZONE`, ISO instant) or `balance` (a paid-tier model: no balance) |
 | 403 | `forbidden` | Cross-site request, or not allowed by the route's rule (e.g. only the creator renames) |
 | 403 | `cannot_send` | With `reason`: `blocked` or `not_friends` (a direct chat whose pair cannot write to each other), or `agent_deleted` (an Agent's conversation after the Agent was deleted: sending, uploading, starting a new topic) |
 | 403 | `agent_limit` | Creating an Agent with as many undeleted Agents as the account's tier allows |
+| 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, retrying its reply, or confirming or discarding its persona proposals |
 | 409 | `agent_paused` | Retrying the reply of a paused Agent |
 | 409 | `busy_run` | Retrying while a reply of that Agent is already queued or running |
 | 409 | `stale_proposal` | Confirming or discarding a persona proposal that can no longer be acted on: confirmed already, discarded (confirming), superseded by a newer one, or made against a persona that has changed since (see Persona proposals) |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
-| 400 | `address_not_allowed` | A call to a provider refused by the address guard: not `https`, credentials in the URL, or an address that is not public (see Model providers) |
-| 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
-| 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
-| 400 | `context_too_small` | A run's error (not an HTTP answer there): the model's context, less its output limit and the system text (the persona), cannot hold your newest message, or 200 tokens of it; no call was made. Not retryable: shorten the persona or choose a model with a larger context. As an HTTP answer only from `POST /api/agents/draft-persona`, when the model's context cannot hold the draft's instruction and data |
-| 404 | `not_found` | Does not exist, or is not yours to see (identical answers) |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
 | 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
-| 503 | `busy` | A database statement ran past its timeout (the pool's or a search's), no database connection was free in time (`DB_ACQUIRE_TIMEOUT_MS`), or the site-wide search cap is reached. Nothing was changed; try again later |
 | 500 | `internal` | A bug (also any failure inside Better Auth); logged with the request |
+| 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
+| 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
+| 503 | `busy` | A database statement ran past its timeout (the pool's or a search's), no database connection was free in time (`DB_ACQUIRE_TIMEOUT_MS`), or the site-wide search cap is reached. Nothing was changed; try again later |
 
 Feature codes (`handle_taken`, `invalid_invite`, `already_member`, `request_not_pending`, Better Auth's
 `invalid_email_or_password`, …) are listed with their routes. Every route can also answer 400, 403 (cross-site),
@@ -284,7 +286,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` + `PUT /api/agents/:id/avatar` (yours and your Agents' avatars) | 10 together | principal |
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
-| `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429) | principal |
+| `POST /api/agents/draft-persona` | 5 (a budget of its own); besides, it is one of the model calls you may have running at once (`AGENT_MAX_CONCURRENT_RUNS`, replies and drafts together: over it 429; a draft and a reply starting at the same moment may briefly exceed it by one) | principal |
 | `POST /api/providers`, `PATCH` + `DELETE /api/providers/:id` | 20 together | principal |
 | `POST /api/providers/:id/test` + `POST /api/providers/:id/models/refresh` (they call the provider) | 10 together | principal |
 | `POST /api/friend-requests` | 20 | principal |
@@ -308,47 +310,13 @@ Everything else is not rate limited.
 ### Usage and points
 
 Money is whole micro-points inside (1 point = 1 000 000) and a decimal string of points on the wire: `"12.5"`,
-`"0.000001"`, `"-2"` (a balance may go below zero by one reply's cost). No floats. Points are given only by the
+`"0.000001"`, `"-2"` (a balance may go below zero, by less than one call's maximum cost). No floats. Points are given only by the
 operator (`npm run credits:grant`, to a person's handle; an Agent's handle is refused): there is no route that
 changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, `/api/credits` and `/api/accounts`
 are the JSON 404.
 
-**What a model call costs** (`src/metering/`). A model call is a reply of an Agent or a persona draft
-(`POST /api/agents/draft-persona`): both are runs, admitted, held and settled alike. A call on a provider model costs
-nothing and needs no points (it is still recorded). A call on a site model is admitted before it starts and settled when
-it ends:
-
-- **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call
-  can cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500
-  per image; 300 per KB of PDF) plus the model's whole output limit, at the model's prices. A free-tier model is
-  charged to today's free allowance while what is left of it, less what your running calls hold against it, is above
-  zero; otherwise to the balance, by the same rule; a paid-tier model only to the balance. With neither, the call does
-  not start: `no_quota` (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance`. The run records
-  the model it was admitted on with its source and hold, and settlement goes by that, whatever the Agent's model is by
-  then.
-- **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
-  it reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
-  `estimated`, at the model's price — unless the operator has removed that site model from `SITE_MODELS` while the call
-  ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
-  (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
-  with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
-  before it failed is discarded and not counted, so with no usage reported it costs nothing. So does a reply that could not be stored for the service's own reasons (run
-  error `busy`): its record keeps the true cost, all of it forgiven; and a run recovered at start-up (Agents and runs),
-  settled on no tokens at all. It charges that cost, but never more than the call held at admission: whatever is
-  above the hold (an estimate that turned out low) is forgiven, charged to no one — neither the balance nor any day's
-  allowance. A call on the allowance uses the allowance of the site day it ends in (one that starts before midnight and
-  ends after it uses the new day's); whatever of its charge exceeds what is left of that day's allowance is forgiven
-  too: charged neither to the balance nor to the next day. A call on the balance is charged in full (up to its hold)
-  and may take the balance below zero; at or below zero nothing more starts on the balance until the operator's grants
-  bring it above zero.
-- So however many replies you start at once, the free overrun forgiven in a day and the debt on the balance are each
-  less than one call's maximum cost (`tests/metering-concurrency.test.ts`, also with every call costing far more than it
-  held).
-- Every call appends one usage record (who, which Agent, which source and model, tokens, the true cost, and how much of
-  it the allowance, the balance and forgiveness took, outcome; a run that ended before it was admitted leaves a record
-  with neither source nor model, costing nothing); every change of a balance one ledger entry: `grant` and
-  `adjust` (the operator giving points, or taking them back with a negative `credits:grant`) and `usage` (a call, linked
-  to its record). A balance always equals the sum of its ledger.
+How a model call is admitted, held, settled and forgiven, and the bound on what concurrent calls can overrun: Metering
+(below the Agents and runs section).
 
 #### `GET /api/usage`
 
@@ -378,9 +346,9 @@ whose members are exactly the owner and the Agent. Everything here is the owner'
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
 `POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
-Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner, and to `PUT`/`DELETE
-/api/blocks/:principalId` for everyone, its owner included (an Agent cannot be blocked): the answer of an id that does
-not exist, byte for byte (`tests/enumeration.test.ts`).
+Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner, and to
+`PUT`/`DELETE /api/blocks/:principalId` for everyone, its owner included (an Agent cannot be blocked): the answer of an
+id that does not exist, byte for byte (`tests/enumeration.test.ts`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
@@ -414,7 +382,7 @@ rules of message text, trimmed, at most 20 000 characters. It is returned, never
 save the Agent to keep it.
 
 - One model call (`src/agents/persona.ts` `draftPersona`), recorded as a run of purpose `draft` (no Agent, no
-  conversation) and metered like a reply (Usage and points): admitted before the call, its maximum cost held, settled
+  conversation) and metered like a reply (Metering): admitted before the call, its maximum cost held, settled
   after; one usage record of purpose `draft` (`GET /api/usage` lists it with `agentId: null`). No transaction is open
   during the call.
 - What the model is given: a fixed instruction in Chinese (write a persona in the second person: who it is, what it
@@ -447,11 +415,12 @@ save the Agent to keep it.
 *Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
 `persona`, `replyMode`, `reasoning`, `model` (`null` clears it), under the rules of creation; the model and the
 reasoning level are checked together when either is sent. A `persona` that differs from the stored one raises
-`personaVersion` by one. → 200 Agent; 409 `agent_deleted`.
+`personaVersion` by one. → 200 Agent; 400 `invalid_request` for a value, model or reasoning level that does not fit;
+409 `agent_deleted`; 404 `not_found` unless yours.
 
 #### `POST /api/agents/:id/pause`
 
-*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`. You can still write to a paused Agent;
+*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours. You can still write to a paused Agent;
 it does not reply. Its reply in progress ends for good, decided in the pause's own transaction: a queued one is
 `cancelled` at once (`run` pushed), a running one is never posted — also if you resume before the model has finished —
 and ends `cancelled`; once this answers, nothing more from the Agent is posted and no further `delta` of that reply
@@ -460,18 +429,19 @@ message is, with everything before it in what the Agent is shown.
 
 #### `POST /api/agents/:id/resume`
 
-*Session: required.* Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`.
+*Session: required.* Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours.
 
 #### `DELETE /api/agents/:id`
 
 *Session: required.* Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
 conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; its reply in
-progress ends as on a pause, with `agent_deleted`). → 200 Agent.
+progress ends as on a pause, with `agent_deleted`). → 200 Agent; 404 `not_found` unless yours.
 
 #### `PUT /api/agents/:id/avatar`
 
 *Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent: it counts against the same 10 uploads a
-minute as your own avatar, and also against the 30 Agent writes. → 200 `{"ok": true}`; 409 `agent_deleted`.
+minute as your own avatar, and also against the 30 Agent writes. → 200 `{"ok": true}`; 400, 413 and 415 as there;
+409 `agent_deleted`; 404 `not_found` unless yours.
 Every avatar change (people's too) raises `principals.avatar_version`.
 
 ### Persona proposals
@@ -1457,8 +1427,11 @@ during the pause is answered only as part of the next reply a later message of t
 after the resume while the interrupted reply is still ending is noted on it, and its follow-up answers it.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
-(2) runs running, replies and persona drafts together (further replies wait queued), at most 8 at once in the service. It is woken after a trigger commits
-and also looks every 2 s. Per run:
+(2) runs running, replies and persona drafts together (further replies wait queued), at most 8 at once in the service.
+A draft counts the owner's running calls under the account's lock, the worker's claim does not take that lock: so a
+draft and a reply that start at the same moment may briefly run one over the limit (never more: the worker claims one
+run at a time, and drafts wait for each other on the lock). It is woken after a trigger commits and also looks every
+2 s. Per run:
 
 1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
    in any of them ends the run `failed`, `busy`):
@@ -1480,7 +1453,7 @@ and also looks every 2 s. Per run:
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
       the first step, with no call; when the service has started closing by the time the locks are held, the
       transaction rolls back and nothing is admitted (the run stays `running`, for recovery at the next start;
-      `tests/runs-restart.test.ts`); otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
+      `tests/runs-restart.test.ts`); otherwise the call is admitted on its input estimate (Metering; `no_quota`
       ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
       `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`).
@@ -1557,6 +1530,9 @@ and also looks every 2 s. Per run:
 A reply's input estimate (what admission holds) and what settlement falls back on when no usage is reported both count
 all of the above, attachments at their estimate.
 
+**Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
+(Metering):
+
 | How a run ends | Message | Run |
 |---|---|---|
 | The model answered | the answer (`truncated` when the model stopped at its output limit or it was cut at 8 000 characters; then without what follows an unfinished proposal block's `<af-`, and with nothing left: `failed`, `provider_unavailable`, no message) | `done` |
@@ -1605,7 +1581,66 @@ recovery recorded it: no message, no second usage record (logged at warn).
 fails when a file there imports `db.ts`, `pg` or any `store.ts`. It is the shape an external Agent's connection would have.
 
 Lock order of every write here: the conversation row → the `agents` row → the run row → the `accounts` row. Like the
-hub, the worker and its stop flags live in this process (single instance only).
+hub, the worker and its stop flags live in this process: run one instance. Two overlap only during a deploy, which is
+safe (Recovery, above).
+
+## Metering (`src/metering/`)
+
+Spec 6.3 and 6.4. A model call is a reply of an Agent or a persona draft (`POST /api/agents/draft-persona`): both are
+runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices and estimates in `prices.ts`). A call on a
+provider model costs nothing and needs no points (it is still recorded). A call on a site model is admitted before it
+starts and settled when it ends, each in one transaction under the owner's `accounts` row lock (after the run's row), and
+never with a transaction open across the call.
+
+**Units.** Money is whole micro-points (`bigint`, 1 point = 1 000 000 micro-points); no floats in storage or arithmetic.
+Prices are micro-points per token (`inputMicroPerToken`, `outputMicroPerToken` of `SITE_MODELS`), the daily allowance
+`FREE_DAILY_POINTS` whole points, a day the calendar day of `SITE_TIMEZONE`. On the wire every amount is a decimal string
+of points (Usage and points).
+
+**Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
+cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500 per image;
+300 per KB of PDF) plus the model's whole output limit, at the model's prices. A free-tier model is charged to today's
+free allowance while what is left of it, less what your running calls hold against it, is above zero; otherwise to the
+balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
+(402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
+so). The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
+Agent's model is by then.
+
+**Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
+reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
+`estimated`, at the model's price — unless the operator has removed that site model from `SITE_MODELS` while the call
+ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
+(warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
+with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
+before it failed is discarded and not counted, so with no usage reported it costs nothing. A run that never reached
+admission costs nothing either. The charge goes to the source admission chose, never more than the call held: a call on
+the allowance uses the allowance of the site day it ends in (one that starts before midnight and ends after it uses
+the new day's); a call on the balance is charged in full (up to its hold) and may take the balance below zero; at or
+below zero nothing more starts on the balance until the operator's grants bring it above zero. Settlement releases the
+hold in the transaction that moves the run out of `running` (Agents and runs, `finish`), so a hold never stops counting
+before its cost lands.
+
+**Forgiveness.** What is not charged of the true cost is forgiven, charged to no one — neither the balance nor any day's
+allowance — and recorded as such (`forgiven_micro`):
+
+- whatever is above the call's hold (an estimate that turned out low);
+- whatever of an allowance charge exceeds what is left of that day's allowance (not moved to the balance, nor to the
+  next day);
+- all of it when the reply could not be stored for the service's own reasons (run error `busy`: the record keeps the
+  true cost), and for a run recovered at start-up (settled on no tokens at all: whatever the upstream reported died with
+  the process).
+
+**The debt bound.** However many replies and drafts you start at once, the free overrun forgiven in a day and the debt on
+the balance are each less than one call's maximum cost: admission holds a call's maximum cost against its source
+before the call, under the account lock, and admits only while what is left after the holds is above zero
+(`tests/metering-concurrency.test.ts`: twenty at once, also with every call costing far more than it held).
+
+**Records.** Every call appends one usage record (who, which Agent, which source and model, tokens, whether
+`estimated`, the true cost, and how much of it the allowance, the balance and forgiveness took — the three always add up
+to the cost —, outcome; a run that ended before it was admitted leaves a record with neither source nor model, costing
+nothing); the database holds at most one per run. Every change of a balance is one ledger entry: `grant` and `adjust`
+(the operator giving points, or taking them back with a negative `credits:grant`) and `usage` (a call, linked to its
+record). A balance always equals the sum of its ledger. `GET /api/usage` shows what you were charged, not the true cost.
 
 ## Attachments (`src/attachments/`)
 
@@ -1699,9 +1734,13 @@ across the site. Accepted for now; the limits above bound how much can be learnt
 
 - `tests/fuzz.test.ts` walks `app.routeList` (filled by an `onRoute` hook, so a route added later is fuzzed
   without touching the test) and sends every route malformed path ids, query values, bodies and content
-  types, signed in and signed out; plus the Better Auth mount, malformed multipart, the avatar routes and
-  WebSocket handshakes. Every answer must be < 500, every 4xx a `{"error": "<snake_case>"}` JSON body, and
-  `/api/health` must answer afterwards.
+  types, signed in and signed out; plus the Better Auth mount, malformed multipart, the avatar routes (yours and your
+  Agent's) and WebSocket handshakes. Every answer must be < 500, every 4xx a `{"error": "<snake_case>"}` JSON body whose
+  other fields are strings (the one exception, `provider_in_use`'s `agents` list, is named in the test), and
+  `/api/health` must answer afterwards. The routes of Agents, providers, usage and replies are walked with the real ids
+  of an Agent with a run and a persona proposal and of a provider in use (a local model and provider answer without a
+  network): a malformed path parameter there is always a 4xx, and every one of them answers a probe beyond its checks of
+  shape, session and existence.
 - `tests/concurrency.test.ts` races real HTTP requests on the 10-connection pool (sends against an unfriend,
   a block and a removal; 20 adds of one person; two senders; accept against withdraw; a block against a
   group add; the last two members leaving; read markers; uploads at the quota; a request against a block)
@@ -1709,11 +1748,16 @@ across the site. Accepted for now; the limits above bound how much can be learnt
   eight registrations on one invite (whatever their e-mails, exactly one uses it) and two registrations of one
   e-mail (one account remains).
 - `tests/enumeration.test.ts`: on every route taking a conversation id, a seq, an attachment, request or
-  principal id, an id that exists but is not yours gets byte for byte the answer a random id gets; the two
+  principal id, an id that exists but is not yours gets byte for byte the answer a random id gets — and on every route
+  taking an Agent, provider, run or persona-proposal id (or naming a provider in a body), for a stranger and for the
+  owner of a different Agent, with every mix of real and random ids; the two
   intended differences (any existing person can be blocked and has an avatar) are asserted, and that an Agent's id
   has neither (as a random id: its avatar for anybody but its owner, blocking and unblocking it for everyone). Catch-up
   and downloads also take about as long for both (medians within a factor of 2).
 - `tests/readme.test.ts`: the route headings of this README are exactly the routes the app serves.
+- `tests/logging.test.ts`: no log line holds a WebSocket ticket, a verification token or a search term (the query
+  string is never logged), nor — over a whole reply through a provider, and one the provider refuses — the persona, the
+  owner's message, the reply, its reasoning, a proposed persona or the provider's key.
 
 ### The prototype's defects (`spikes/base-gate/README.md`, candidate C) and what now covers them
 
