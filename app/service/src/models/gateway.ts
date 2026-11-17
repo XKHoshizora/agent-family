@@ -4,6 +4,7 @@ import { createOpenAI, type OpenAILanguageModelChatOptions, type OpenAILanguageM
 import { APICallError, streamText, type LanguageModel, type LanguageModelUsage, type ModelMessage, type TextStreamPart, type ToolSet } from "ai";
 import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
+import { hasVisibleText } from "../schemas.ts";
 import { guardedFetch } from "../providers/guard.ts";
 import { createProviderProbe, PROBE_GUARD, ProviderCallError, type ProviderCallCode } from "../providers/probe.ts";
 import type { Slots } from "../slots.ts";
@@ -57,27 +58,35 @@ export interface ModelGateway {
   /**
    * The answer as `text` / `reasoning` deltas, then exactly one `finish` (reasoning tokens are part of `outputTokens`;
    * `usage` is null when the upstream reported none; `truncated` when the model stopped for length). A failure is a
-   * thrown `ModelError`. When `call.signal` aborts, the iterator stops at once by throwing `call.signal.reason`.
+   * thrown `ModelError` — also an answer cut off at the output limit before any text, having only thought
+   * (`thinking_exhausted`, carrying the reported usage). When `call.signal` aborts, the iterator stops at once by
+   * throwing `call.signal.reason`.
    */
   stream(call: ModelCall): AsyncIterable<ModelEvent>;
   /** The provider's model list (the provider probe's `GET {baseUrl}/models`); a failure is a thrown `ModelError`. */
   listModels(p: Pick<ModelCall, "protocol" | "baseUrl" | "apiKey">): Promise<string[]>;
 }
 
-/** The codes a model call fails with: exactly those of a provider call (the address guard's, the provider's refusal, the rest). */
-export type ModelErrorCode = ProviderCallCode;
+/**
+ * The codes a model call fails with: those of a provider call (the address guard's, the provider's refusal, the rest),
+ * and `thinking_exhausted`: the model stopped at its output limit having only thought — no answer, though reasoning
+ * came or reasoning tokens were reported.
+ */
+export type ModelErrorCode = ProviderCallCode | "thinking_exhausted";
 
 /** One fixed sentence per code: nothing the upstream said is ever kept. */
 const MESSAGES: Readonly<Record<ModelErrorCode, string>> = {
   provider_rejected: "The model provider refused the API key.",
   provider_unavailable: "The model provider could not be reached or did not answer properly.",
   address_not_allowed: "The model provider's address is not allowed.",
+  thinking_exhausted: "The model used its whole output limit thinking and gave no answer.",
 };
 
 /**
- * A failed model call: the code, and for the log only the upstream's HTTP status (when it answered with an error
- * status). It never carries the upstream's body, headers or a cause. As an `AppError` it answers 502 (400 for
- * `address_not_allowed`) if it reaches a route.
+ * A failed model call: the code, for the log only the upstream's HTTP status (when it answered with an error status),
+ * and the usage the upstream reported for it, when it did (`thinking_exhausted`: what the call is charged). It never
+ * carries the upstream's body, headers or a cause. As an `AppError` it answers 502 (400 for `address_not_allowed`) if it
+ * reaches a route.
  */
 export class ModelError extends AppError {
   declare readonly code: ModelErrorCode;
@@ -85,6 +94,7 @@ export class ModelError extends AppError {
   constructor(
     code: ModelErrorCode,
     readonly upstreamStatus?: number,
+    readonly usage?: { inputTokens: number; outputTokens: number },
   ) {
     super(code === "address_not_allowed" ? 400 : 502, code);
     this.name = "ModelError";
@@ -349,9 +359,14 @@ function chatFetch(fetch: typeof globalThis.fetch, tap: ChatReasoningTap, thinki
   }) as typeof globalThis.fetch;
 }
 
+/** `attempt`'s events: its finish also says how many reasoning tokens the upstream reported (0: none). */
+type AttemptEvent = Exclude<ModelEvent, { type: "finish" }> | (Extract<ModelEvent, { type: "finish" }> & { reasoningTokens: number });
+
 /**
  * The call as events: one attempt (`attempt`), and when the upstream refused an optional field it sent
  * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream.
+ * A model that stopped for length with no answer (no text that shows anything), having reasoned — reasoning came, or
+ * the upstream reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported, instead of finishing.
  */
 async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refusals: Refusals): AsyncGenerator<ModelEvent> {
   try {
@@ -360,9 +375,19 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
     for (let retry = false; ; retry = true) {
       const sent = optionalFields(call, left);
       let started = false;
+      let answered = false;
+      let thought = false;
       try {
         for await (const event of attempt(call, fetch, left)) {
           started = true;
+          if (event.type === "finish") {
+            const { usage, truncated, reasoningTokens } = event;
+            if (truncated && !answered && (thought || reasoningTokens > 0)) throw new ModelError("thinking_exhausted", undefined, usage ?? undefined);
+            yield { type: "finish", usage, truncated };
+            return;
+          }
+          if (event.type === "text") answered ||= hasVisibleText(event.delta);
+          else thought = true;
           yield event;
         }
         return;
@@ -386,7 +411,7 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
  * of it before its first text and opens with `<think>` has that block taken out as reasoning (`ThinkTags`). Reasoning
  * never becomes text.
  */
-async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: ReadonlySet<OptionalField>): AsyncGenerator<ModelEvent> {
+async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: ReadonlySet<OptionalField>): AsyncGenerator<AttemptEvent> {
   // Ends the upstream request however this iterator ends: finished, failed, stopped, or left early by its reader.
   const own = new AbortController();
   const tap = call.protocol === "openai_chat" ? new ChatReasoningTap() : null;
@@ -451,7 +476,12 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
           if (tags) for (const split of tags.end()) yield split;
           // "interrupted": the stream ended without the protocol's completion; "error": the upstream reported one.
           if (part.finishReason === "interrupted" || part.finishReason === "error") throw new ModelError("provider_unavailable");
-          yield { type: "finish", usage: usageOf(part.totalUsage), truncated: part.finishReason === "length" };
+          yield {
+            type: "finish",
+            usage: usageOf(part.totalUsage),
+            truncated: part.finishReason === "length",
+            reasoningTokens: part.totalUsage.outputTokenDetails?.reasoningTokens ?? 0,
+          };
           return;
       }
     }

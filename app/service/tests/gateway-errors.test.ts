@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { PROTOCOLS, type Protocol } from "../src/config.ts";
 import { createModelGateway, ModelError, type ModelCall, type ModelErrorCode, type ModelEvent } from "../src/models/gateway.ts";
 import { createSlots } from "../src/slots.ts";
-import { cannedKeyError, cannedStream, protocolStub, STUB_MODEL, type ProtocolStub } from "./helpers/models.ts";
+import { answerCanned, cannedKeyError, cannedStream, protocolStub, STUB_MODEL, type ProtocolStub } from "./helpers/models.ts";
 
 /**
  * How the gateway fails: every upstream failure becomes a `ModelError` whose code is all that is kept (its message is a
@@ -197,10 +197,120 @@ describe("upstream refusals and failures become ModelError codes", () => {
   });
 
   it("ModelError's message is one fixed sentence per code", () => {
-    const codes: ModelErrorCode[] = ["provider_rejected", "provider_unavailable", "address_not_allowed"];
+    const codes: ModelErrorCode[] = ["provider_rejected", "provider_unavailable", "address_not_allowed", "thinking_exhausted"];
     const messages = codes.map(sentence);
-    expect(new Set(messages).size).toBe(3);
+    expect(new Set(messages).size).toBe(4);
     for (const [i, code] of codes.entries()) expect(new ModelError(code, 418).message).toBe(messages[i]);
+  });
+});
+
+// --- an answer the model only thought: thinking_exhausted -----------------------------------------------------------
+
+type SseEvent = { event?: string; data: any };
+const parseSse = (body: string): SseEvent[] =>
+  body
+    .split("\n\n")
+    .filter((block) => block.trim() !== "")
+    .map((block) => {
+      const lines = block.split("\n");
+      const event = lines.find((l) => l.startsWith("event: "))?.slice(7);
+      const raw = lines.find((l) => l.startsWith("data: "))!.slice(6);
+      return { ...(event ? { event } : {}), data: raw === "[DONE]" ? raw : JSON.parse(raw) };
+    });
+const writeSse = (events: SseEvent[]) =>
+  events.map((e) => `${e.event ? `event: ${e.event}\n` : ""}data: ${typeof e.data === "string" ? e.data : JSON.stringify(e.data)}\n\n`).join("");
+
+/**
+ * The protocol's canned reasoning stream with no answer in it, stopped for length (the usage still reports 12
+ * reasoning tokens of 19); `withReasoning: false` leaves the reasoning text out too (only the usage tells).
+ */
+function thoughtOnly(protocol: Protocol, { withReasoning = true } = {}): string {
+  const events = parseSse(cannedStream(protocol, "reasoning"));
+  switch (protocol) {
+    case "openai_chat":
+      return writeSse(
+        events
+          .filter((e) => !e.data.choices?.[0]?.delta?.content && (withReasoning || !e.data.choices?.[0]?.delta?.reasoning_content))
+          .map((e) => (e.data.choices?.[0]?.finish_reason ? { data: { ...e.data, choices: [{ ...e.data.choices[0], finish_reason: "length" }] } } : e)),
+      );
+    case "openai_responses": {
+      const answerEvent = (e: SseEvent) => e.data.item?.type === "message" || /output_text|content_part/.test(e.event ?? "");
+      const reasoningEvent = (e: SseEvent) => e.data.item?.type === "reasoning" || /reasoning_summary/.test(e.event ?? "");
+      return writeSse(
+        events
+          .filter((e) => !answerEvent(e) && (withReasoning || !reasoningEvent(e)))
+          .map((e) =>
+            e.event === "response.completed"
+              ? {
+                  event: "response.incomplete",
+                  data: { ...e.data, type: "response.incomplete", response: { ...e.data.response, status: "incomplete", incomplete_details: { reason: "max_output_tokens" } } },
+                }
+              : e,
+          ),
+      );
+    }
+    case "anthropic":
+      return writeSse(
+        events
+          .filter((e) => e.data.index !== 1 && e.event !== "ping")
+          .map((e) => (e.event === "message_delta" ? { ...e, data: { ...e.data, delta: { ...e.data.delta, stop_reason: "max_tokens" } } } : e)),
+      );
+    case "gemini": {
+      const thoughts = events.filter((e) => e.data.candidates[0].content.parts.some((p: any) => p.thought));
+      const last = events.at(-1)!;
+      const end = { data: { ...last.data, candidates: [{ ...last.data.candidates[0], content: { parts: [], role: "model" }, finishReason: "MAX_TOKENS" }] } };
+      return writeSse([...(withReasoning ? thoughts : []), end]);
+    }
+  }
+}
+const stream = (body: string) => (_req: unknown, res: http.ServerResponse) => {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.end(body);
+};
+
+describe("an answer cut off at the output limit having only thought: thinking_exhausted", () => {
+  it.each(PROTOCOLS)("%s: the reasoning came, then the error, carrying the reported usage (what the call is charged)", async (protocol) => {
+    stub.answer(stream(thoughtOnly(protocol)));
+    const { events, error } = await run(gateway.stream(call(protocol, { reasoning: "high" })));
+    expect(events.map((e) => e.type)).toEqual(["reasoning", "reasoning"]);
+    expectModelError(error, "thinking_exhausted");
+    expect((error as ModelError).usage).toEqual({ inputTokens: 11, outputTokens: 19 });
+    expect((error as ModelError).status).toBe(502);
+  });
+
+  it.each(PROTOCOLS.filter((p) => p !== "anthropic"))("%s: no reasoning text, but the usage reports reasoning tokens: thinking_exhausted too", async (protocol) => {
+    stub.answer(stream(thoughtOnly(protocol, { withReasoning: false })));
+    const { events, error } = await run(gateway.stream(call(protocol, { reasoning: "high" })));
+    expect(events).toEqual([]);
+    expectModelError(error, "thinking_exhausted");
+    expect((error as ModelError).usage).toEqual({ inputTokens: 11, outputTokens: 19 });
+  });
+
+  it("an answer whose only text shows nothing counts as none; an unclosed <think> is reasoning", async () => {
+    const chunk = (delta: object, finish: string | null = null) => ({
+      data: { id: "c", object: "chat.completion.chunk", created: 1, model: STUB_MODEL, choices: [{ index: 0, delta, finish_reason: finish }] },
+    });
+    const usage = { data: { id: "c", object: "chat.completion.chunk", created: 1, model: STUB_MODEL, choices: [], usage: { prompt_tokens: 5, completion_tokens: 9 } } };
+    for (const deltas of [[{ reasoning_content: "hmm" }, { content: " \n​" }], [{ content: "<think>still thinking" }]]) {
+      stub.answer(stream(writeSse([...deltas.map((d) => chunk(d)), chunk({}, "length"), usage, { data: "[DONE]" }])));
+      expectModelError((await run(gateway.stream(call("openai_chat")))).error, "thinking_exhausted");
+    }
+  });
+
+  it("not thinking_exhausted: cut off after some answer, cut off with no reasoning at all, or a complete answer that only thought", async () => {
+    // Some answer before the limit: a truncated finish (the existing rule).
+    stub.answer((req, res) => answerCanned(req, res, "length"));
+    expect((await run(gateway.stream(call("anthropic")))).events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true });
+    // No answer and no sign of thinking: a truncated finish with nothing said (the reply fails as unavailable).
+    const nothing = parseSse(cannedStream("openai_chat", "length")).filter((e) => !e.data.choices?.[0]?.delta?.content);
+    stub.answer(stream(writeSse(nothing)));
+    expect((await run(gateway.stream(call("openai_chat")))).events).toEqual([{ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true }]);
+    // Only thought, but not stopped for length: an ordinary finish.
+    const stopped = parseSse(thoughtOnly("anthropic")).map((e) => (e.event === "message_delta" ? { ...e, data: { ...e.data, delta: { ...e.data.delta, stop_reason: "end_turn" } } } : e));
+    stub.answer(stream(writeSse(stopped)));
+    const { events, error } = await run(gateway.stream(call("anthropic", { reasoning: "high" })));
+    expect(error).toBeNull();
+    expect(events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 19 }, truncated: false });
   });
 });
 

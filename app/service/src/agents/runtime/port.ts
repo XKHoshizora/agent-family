@@ -33,8 +33,18 @@ export interface Prepared {
  * `context_too_small`: the model's context, less its output limit and the system text, cannot hold the owner's newest
  * message (or 200 tokens of it); no call is made. `rate_limited`: the owner had started `agentRunsPerMinute` replies in
  * the last minute; the run was recorded failed by the trigger (runs.ts), never by the worker, and nothing was called.
+ * `thinking_exhausted`: the model stopped at its output limit having only thought, no answer (charged what the
+ * upstream reported).
  */
-export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed" | "no_quota" | "busy" | "context_too_small" | "rate_limited";
+export type RunErrorCode =
+  | "provider_rejected"
+  | "provider_unavailable"
+  | "address_not_allowed"
+  | "no_quota"
+  | "busy"
+  | "context_too_small"
+  | "rate_limited"
+  | "thinking_exhausted";
 
 /**
  * How a run ends, as the worker saw it. `finish` records what is true under the Agent's lock: a reply that was posted

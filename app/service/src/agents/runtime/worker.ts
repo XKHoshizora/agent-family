@@ -159,6 +159,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     } catch (err) {
       if (why === null) {
         failure = err instanceof ModelError ? err.code : "provider_unavailable";
+        // A failure the upstream reported usage for (`thinking_exhausted`: the model did finish) is charged that usage.
+        if (err instanceof ModelError && err.usage) finished = { usage: err.usage, truncated: true };
         if (!(err instanceof ModelError)) log.error({ err, runId: run.id }, "agent run: the model call failed unexpectedly");
       }
     } finally {

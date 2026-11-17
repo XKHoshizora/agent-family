@@ -390,6 +390,8 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
       }
       if (!deadline.aborted) {
         failure = err instanceof ModelError ? err.code : "provider_unavailable";
+        // A failure the upstream reported usage for (`thinking_exhausted`) is charged that usage.
+        if (err instanceof ModelError && err.usage) finished = { usage: err.usage };
         if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "persona draft: the model call failed unexpectedly");
       }
     }

@@ -21,6 +21,7 @@ export type ErrorCode =
   | "provider_rejected"
   | "provider_unavailable"
   | "context_too_small"
+  | "thinking_exhausted"
   | "stale_proposal"
   | (string & {});
 
