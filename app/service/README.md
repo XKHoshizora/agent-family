@@ -278,6 +278,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/auth/request-password-reset` | 10 per client address + e-mail, and 60 per client address (counters of its own) | address (+ e-mail) |
 | `GET /api/auth/verify-email` | 10 per client address + the e-mail the link names, and 60 per client address (counters of its own) | address (+ e-mail) |
 | `GET /api/principals/lookup` | 30 | principal |
+| `GET /api/usage` | 60 | principal |
 | `PATCH /api/me` | 10 | principal |
 | `PUT /api/me/avatar` | 10 | principal |
 | `POST /api/agents`, `PATCH`, `DELETE` + `POST …/pause`, `…/resume` + `PUT …/avatar` + `POST …/proposals/:proposalId/confirm`, `…/discard` of `/api/agents/:id`, `POST /api/conversations/:id/topic` | 30 together | principal |
@@ -359,9 +360,11 @@ it ends:
   allowance, or of the balance, after what your running calls hold against it, is above zero (admission's own rule,
   read at that moment).
 - `recent`: the last 7 site-days (today included) summed per Agent, model and source: `model` is the site model's `id`
-  or the provider model's name, `points` what the calls cost (`"0"` for `provider`), `replies` how many were replies;
-  `agentId` is `null` for persona drafts. Largest first. Runs that never reached a model (no model recorded) are not
-  listed.
+  or the provider model's name, `points` what you were charged for those calls — taken from the free allowance and the
+  balance; what was forgiven is not in it, so it is not the true cost (`"0"` for `provider`) —, `replies` how many were
+  replies; `agentId` is `null` for persona drafts. Largest first. Runs that never reached a model (no model recorded)
+  are not listed.
+- Limit: 60 per minute.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
 
 ### Agents

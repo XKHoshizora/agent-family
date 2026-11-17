@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { perPrincipalLimit } from "../limits.ts";
 import { chargeSource, headroom, readHolds } from "../metering/admit.ts";
 import { requirePrincipal } from "../session.ts";
 import { formatPoints, freeUsedToday, nextSiteMidnight, siteDayStart } from "./store.ts";
@@ -30,6 +31,8 @@ const usageResponse = z.object({
 export function registerAccountRoutes(app: FastifyInstance): void {
   const { db, config } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
+  // A read of several tables per call: 60 a minute each.
+  const readLimit = perPrincipalLimit(app, 60);
 
   api.get(
     "/api/usage",
@@ -43,6 +46,7 @@ export function registerAccountRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
       const now = new Date();
       const [account, agents, used, holds, recent] = await Promise.all([
         db.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]),
@@ -55,13 +59,15 @@ export function registerAccountRoutes(app: FastifyInstance): void {
         freeUsedToday(db, me.id, now, config.siteTimezone),
         readHolds(db, me.id),
         db.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
-          `select agent_id, model, source, sum(cost_micro)::text as points,
+          // What the person was charged (the allowance and the balance), not the true cost: what was forgiven is not
+          // theirs to see as spent.
+          `select agent_id, model, source, sum(free_micro + balance_micro)::text as points,
                   (count(*) filter (where purpose = 'reply'))::int as replies
              from usage_records
             -- A run settled without reaching a model has no model to list (and cost nothing).
             where owner_id = $1 and created_at >= $2 and source is not null
             group by agent_id, model, source
-            order by sum(cost_micro) desc, model, source, agent_id`,
+            order by sum(free_micro + balance_micro) desc, model, source, agent_id`,
           [me.id, siteDayStart(now, config.siteTimezone, RECENT_DAYS - 1)],
         ),
       ]);

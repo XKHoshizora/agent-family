@@ -16,12 +16,14 @@ async function insertAgent(ownerId: string, handle: string, deleted = false): Pr
   return id;
 }
 
+/** A usage record; unless `over` splits it otherwise, its whole cost was charged to the free allowance. */
 async function insertUsage(ownerId: string, agentId: string | null, over: Record<string, unknown> = {}): Promise<void> {
-  const r = { purpose: "reply", source: "site", model: "fast", cost_micro: 1_500_000, outcome: "done", created_at: new Date(), ...over };
+  const cost = (over.cost_micro as number | undefined) ?? 1_500_000;
+  const r = { purpose: "reply", source: "site", model: "fast", cost_micro: cost, free_micro: cost, balance_micro: 0, forgiven_micro: 0, outcome: "done", created_at: new Date(), ...over };
   await db.query(
-    `insert into usage_records (owner_id, agent_id, purpose, source, model, cost_micro, outcome, created_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [ownerId, agentId, r.purpose, r.source, r.model, r.cost_micro, r.outcome, r.created_at],
+    `insert into usage_records (owner_id, agent_id, purpose, source, model, cost_micro, free_micro, balance_micro, forgiven_micro, outcome, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [ownerId, agentId, r.purpose, r.source, r.model, r.cost_micro, r.free_micro, r.balance_micro, r.forgiven_micro, r.outcome, r.created_at],
   );
 }
 
@@ -204,6 +206,21 @@ describe("GET /api/usage", () => {
       { agentId: x, model: "big", source: "site", points: "3", replies: 1 },
       { agentId: null, model: "fast", source: "site", points: "0.25", replies: 0 },
       { agentId: y, model: "my-model", source: "provider", points: "0", replies: 1 },
+    ]);
+  });
+
+  it("recent.points is what you were charged (allowance and balance), not the true cost: what was forgiven is left out", async () => {
+    const a = await signUp(app, "usagecharged");
+    const x = await insertAgent(a.id, "charged_bot");
+    // Cost 10 points: 1 taken from the allowance, 0.5 from the balance, 8.5 forgiven (above the hold, or past the allowance).
+    await insertUsage(a.id, x, { cost_micro: 10_000_000, free_micro: 1_000_000, balance_micro: 500_000, forgiven_micro: 8_500_000 });
+    // Cost 2 points, all forgiven (the reply could not be stored: the service's own trouble).
+    await insertUsage(a.id, x, { cost_micro: 2_000_000, free_micro: 0, balance_micro: 0, forgiven_micro: 2_000_000 });
+    // Cost 3 points on another model, charged in full to the balance: it is listed first.
+    await insertUsage(a.id, x, { model: "big", cost_micro: 3_000_000, free_micro: 0, balance_micro: 3_000_000 });
+    expect((await api(app, a, "GET", "/api/usage")).json.recent).toEqual([
+      { agentId: x, model: "big", source: "site", points: "3", replies: 1 },
+      { agentId: x, model: "fast", source: "site", points: "1.5", replies: 2 },
     ]);
   });
 
