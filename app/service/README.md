@@ -262,7 +262,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 409 | `stale_proposal` | Confirming or discarding a persona proposal that can no longer be acted on: confirmed already, discarded (confirming), superseded by a newer one, or made against a persona that has changed since (see Persona proposals) |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
-| 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits) |
+| 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits). Also a run's error (not an HTTP answer there): a reply over `AGENT_RUNS_PER_MINUTE`, recorded failed and retryable (Replies) |
 | 500 | `internal` | A bug (also any failure inside Better Auth); logged with the request |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
@@ -300,7 +300,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
-| Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message queues no reply (the message is still sent) and a retry is 429 | owner |
+| Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`) and can retry — it started nothing and is not counted; a retry over it is 429 | owner |
 | `GET /api/conversations/:id/run` | 120 | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
@@ -533,10 +533,13 @@ Failures are never messages: they live on the run, which the owner learns from t
 `context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona — or
 `busy`: the service's own trouble — the reply could not be started or stored, its attachments could not be read, or
 there was nothing to answer — which costs you nothing; `provider_unavailable` is also what a reply that was under way
-when the service restarted ends with, and one the stale-run sweep released), for
+when the service restarted ends with, and one the stale-run sweep released; `rate_limited`: you had started
+`AGENT_RUNS_PER_MINUTE` (20) replies in the last minute, so this one was not started — no call, nothing held or charged;
+retry once the minute has passed), for
 `cancelled` `agent_paused` or `agent_deleted`, or none (everything it was to answer is before a new topic you started).
 `retryable`: it failed and trying again as it is may work (false
-after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail). `resetsAt` (ISO instant): for
+after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail; true
+after `rate_limited`, which a retry within the same minute meets again as 429). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
 
 #### `GET /api/conversations/:id/run`
@@ -1433,11 +1436,14 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
 or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
-ignored). Otherwise a `queued` run is inserted covering the message (`covers_seq`), unless the owner has started
-`AGENT_RUNS_PER_MINUTE` (20) replies in the last minute (then no run; the message is still sent). That count is taken
-under the owner's `accounts` row lock, the last of the lock order, so two messages to two of the owner's Agents at the
-same moment are counted one after the other and the limit is exact. The `run` push and the worker's wake-up follow the
-commit.
+ignored). A message that comes while a run is active is folded into it (Coalescing, below). Otherwise a `queued` run is
+inserted covering the message (`covers_seq`), unless the owner has started `AGENT_RUNS_PER_MINUTE` (20) replies in the
+last minute: then the run is inserted already `failed`, error `rate_limited` (retryable), covering the message — the
+message is still sent, nothing is called, held or charged (no usage record), the run is never active (it takes no
+concurrency slot and leaves the Agent free for the next message) and, having started nothing, it is not counted
+toward the limit itself. That count is taken under the owner's `accounts` row lock, the last of the lock order, so two
+messages to two of the owner's Agents at the same moment are counted one after the other and the limit is exact. The
+`run` push and (for a queued run) the worker's wake-up follow the commit.
 
 **Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
 queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
@@ -1572,6 +1578,7 @@ all of the above, attachments at their estimate.
 | The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
+| The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |

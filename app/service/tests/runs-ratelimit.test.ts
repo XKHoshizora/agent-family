@@ -3,6 +3,7 @@ import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
+import { closeAllSockets, connect } from "./helpers/ws.ts";
 
 /**
  * The limits on replies (spec 6.4 "保护性上限", README "Agents and runs"): an owner starts at most
@@ -13,7 +14,8 @@ import { scriptedGateway } from "./helpers/models.ts";
 const gateway = scriptedGateway();
 const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false });
 
-afterEach(() => {
+afterEach(async () => {
+  await closeAllSockets();
   expect(gateway.pending()).toBe(0);
 });
 
@@ -37,7 +39,7 @@ const answeredMinuteAgo = (ownerId: string, agent: { id: string; conversationId:
   );
 
 describe("replies started a minute", () => {
-  it("the 21st trigger within a minute creates no run, while the message itself is stored; a retry is 429", async () => {
+  it("the 21st trigger within a minute records a failed run, rate_limited and retryable — no call, no hold, no usage record; the message is stored", async () => {
     const owner = await signUp(app, "twenty");
     const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
     const conv = agent.conversationId as string;
@@ -49,18 +51,70 @@ describe("replies started a minute", () => {
     }
     expect(await runCount(owner.id)).toBe(20);
 
+    const s = await connect(app, owner);
+    const calls = gateway.calls.length;
     const sent = await say(owner, conv, "第 21 句");
     expect(sent.status).toBe(201);
+    const limited = await latestRun(owner, conv);
+    expect(limited).toEqual({ id: limited.id, status: "failed", error: "rate_limited", retryable: true });
+    // The owner is told, as of any run.
+    expect((await s.next((e) => e.type === "run" && e.run.id === limited.id)).run).toEqual(limited);
     expect(await app.agentWorker.runOnce()).toBe(false);
-    expect(await runCount(owner.id)).toBe(20);
+    expect(gateway.calls.length).toBe(calls);
+    expect(await runCount(owner.id)).toBe(21);
+    expect((await db.query("select hold_micro::text as hold, source from agent_runs where id = $1", [limited.id])).rows).toEqual([{ hold: "0", source: null }]);
+    expect((await db.query("select 1 from usage_records where run_id = $1", [limited.id])).rowCount).toBe(0);
     const history = (await api(app, owner, "GET", `/api/conversations/${conv}/messages`)).json.messages;
     expect(history.at(-1)).toMatchObject({ seq: sent.json.message.seq, senderId: owner.id, text: "第 21 句" });
-    expect(await latestRun(owner, conv)).toMatchObject({ status: "done" });
 
-    // Retrying counts too: make the last run a failure, then retry.
-    await db.query("update agent_runs set status = 'failed', error = 'provider_unavailable' where id = (select id from agent_runs where owner_id = $1 order by created_at desc limit 1)", [owner.id]);
+    // Retrying counts too: still over the limit, 429, and nothing more is recorded.
     expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/retry`)).toEqual({ status: 429, json: { error: "rate_limited" } });
+    expect(await runCount(owner.id)).toBe(21);
+    // Once the minute has passed, the retry answers everything up to the last message.
+    await db.query("update agent_runs set created_at = created_at - interval '2 minutes' where owner_id = $1 and status = 'done'", [owner.id]);
+    const retried = await api(app, owner, "POST", `/api/conversations/${conv}/runs/retry`);
+    expect(retried).toMatchObject({ status: 201, json: { run: { status: "queued" } } });
+    gateway.reply("现在回复。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await latestRun(owner, conv)).toMatchObject({ id: retried.json.run.id, status: "done" });
+  });
+
+  it("a rate-limited run started nothing: it does not count toward the replies started a minute", async () => {
+    const owner = await signUp(app, "limited");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await db.query(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, created_at, finished_at)
+       select 'reply', $1, $2, $3, 'failed', 'rate_limited', 0, now() - interval '30 seconds', now() - interval '30 seconds'
+         from generate_series(1, 25)`,
+      [agent.conversationId, agent.id, owner.id],
+    );
+    await say(owner, agent.conversationId, "现在可以了吗");
+    expect(await latestRun(owner, agent.conversationId)).toMatchObject({ status: "queued" });
+    gateway.reply("可以。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+  });
+
+  it("over the limit while a reply is already running: the message is noted on it as usual, and no failed run is recorded", async () => {
+    const owner = await signUp(app, "foldin");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    const conv = agent.conversationId as string;
+    await answeredMinuteAgo(owner.id, agent, 19);
+    const hold = gateway.hang();
+    await say(owner, conv, "第二十句");
+    const running = app.agentWorker.runOnce();
+    await hold.reached;
+    await say(owner, conv, "又一句");
     expect(await runCount(owner.id)).toBe(20);
+    expect((await db.query("select 1 from agent_runs where owner_id = $1 and status = 'failed'", [owner.id])).rowCount).toBe(0);
+    hold.release("回第二十句。");
+    await running;
+    // The follow-up answering what was noted (a follow-up is not a new start).
+    gateway.reply("回又一句。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await db.query("select status from agent_runs where owner_id = $1 and created_at > now() - interval '10 seconds' order by created_at", [owner.id])).rows).toEqual([
+      { status: "done" },
+      { status: "done" },
+    ]);
   });
 
   it("exact under concurrency: at 19, two messages to two Agents at the same instant start exactly one reply", { timeout: 60_000 }, async () => {
@@ -71,7 +125,10 @@ describe("replies started a minute", () => {
       const [ra, rb] = await Promise.all([say(owner, a.conversationId, "同时一"), say(owner, b.conversationId, "同时二")]);
       expect([round, ra.status, rb.status]).toEqual([round, 201, 201]);
       const queued = await db.query("select agent_id from agent_runs where owner_id = $1 and status = 'queued'", [owner.id]);
-      expect([round, queued.rows.length, await runCount(owner.id)]).toEqual([round, 1, 20]);
+      const limited = await db.query("select agent_id from agent_runs where owner_id = $1 and error = 'rate_limited'", [owner.id]);
+      // Exactly one started; the other is the refusal the owner sees, on the other Agent.
+      expect([round, queued.rows.length, limited.rows.length, await runCount(owner.id)]).toEqual([round, 1, 1, 21]);
+      expect(limited.rows[0]!.agent_id).not.toBe(queued.rows[0]!.agent_id);
       // Leave nothing queued for the next round's owner.
       await db.query("update agent_runs set status = 'cancelled' where owner_id = $1 and status = 'queued'", [owner.id]);
     }

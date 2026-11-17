@@ -92,11 +92,14 @@ export async function latestRun(q: Queryable, conversationId: string): Promise<R
  * Replies `ownerId` has started in the last minute (`agentRunsPerMinute`), counted under the owner's `accounts` row
  * lock — the last lock of the order, taken here before counting and held until the caller's transaction (which inserts
  * the run) ends — so that two replies started at once, to two of the owner's Agents, are counted one after the other.
+ * A run refused by this limit (`rate_limited`) started nothing and is not counted.
  */
 async function startedLastMinute(t: Tx, ownerId: string): Promise<number> {
   await lockAccount(t, ownerId);
   const { rows } = await t.query<{ n: number }>(
-    "select count(*)::int as n from agent_runs where owner_id = $1 and purpose = 'reply' and created_at > now() - interval '1 minute'",
+    `select count(*)::int as n from agent_runs
+      where owner_id = $1 and purpose = 'reply' and created_at > now() - interval '1 minute'
+        and error is distinct from 'rate_limited'`,
     [ownerId],
   );
   return rows[0]!.n;
@@ -141,13 +144,27 @@ export async function queueRun(t: Tx, agent: AgentRow, coversSeq: number): Promi
 }
 
 /**
+ * A reply the owner's `agentRunsPerMinute` refused: recorded `failed`, `rate_limited` (retryable), covering
+ * `coversSeq`, so the owner sees it and can retry. It never reached a model: no hold, no usage record, and it is not
+ * active (it takes no concurrency slot, and the Agent's one active run stays free).
+ */
+async function recordRateLimited(t: Tx, agent: AgentRow, coversSeq: number): Promise<Announced> {
+  const { rows } = await t.query<RunRow>(
+    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at)
+     values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now()) returning ${RUN_COLUMNS}`,
+    [agent.conversationId, agent.id, agent.ownerId, coversSeq],
+  );
+  return { ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(rows[0]!) };
+}
+
+/**
  * The trigger (spec 6.5): in the send transaction, after `message` was stored (not a repeat), under the send's locks.
  * Only a message from the owner in an Agent conversation counts, and nothing happens when the Agent is paused, deleted
  * or has no model, or answers only when called (`replyMode` `mention`) and the text calls it neither by `@handle` nor
  * by `@name`. With a reply already active the message is folded into it: a queued one now covers it, a running one
- * notes it in `pending_seq` (one follow-up answers everything that came meanwhile). Otherwise a reply is queued,
- * unless the owner has started `agentRunsPerMinute` in the last minute (then none; the message stays sent). Returns the
- * queued run to announce after commit, or null.
+ * notes it in `pending_seq` (one follow-up answers everything that came meanwhile). Otherwise a reply is queued —
+ * unless the owner has started `agentRunsPerMinute` in the last minute: then a `failed` run, `rate_limited`, is recorded
+ * instead (`recordRateLimited`; the message stays sent). Returns the run to announce after commit, or null.
  */
 export async function maybeTrigger(
   t: Tx,
@@ -171,7 +188,7 @@ export async function maybeTrigger(
     [agent.id, message.seq],
   );
   if (folded.rowCount) return null;
-  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return null;
+  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return recordRateLimited(t, agent, message.seq);
   return queueRun(t, agent, message.seq);
 }
 

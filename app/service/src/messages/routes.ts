@@ -57,16 +57,17 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       await sendLimit(req, me.id);
 
       // Rendered inside the transaction, under the locks that just proved the sender may read it. An owner's
-      // message to their Agent queues its reply in the same transaction (agents/runs.ts `maybeTrigger`).
-      const { message, duplicate, wire, queued } = await db.tx(async (t) => {
+      // message to their Agent queues its reply in the same transaction (agents/runs.ts `maybeTrigger`; over the
+      // owner's replies a minute, a failed `rate_limited` run instead).
+      const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
         const [rendered] = await toWireFor(t, me.id, [sent.message]);
         if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
-        const queued = sent.duplicate ? null : await maybeTrigger(t, sent.lock, sent.message, config);
-        return { ...sent, wire: rendered, queued };
+        const triggered = sent.duplicate ? null : await maybeTrigger(t, sent.lock, sent.message, config);
+        return { ...sent, wire: rendered, triggered };
       });
       if (!duplicate) conversations.publish({ messages: [message], conversations: [] }, req.log);
-      if (queued) app.agentPort.announce(queued);
+      if (triggered) app.agentPort.announce(triggered);
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
     },
   );
