@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readOwnedAgent } from "../src/agents/store.ts";
-import { REASONING_LEVELS } from "../src/config.ts";
+import { REASONING_LEVELS, type ReasoningLevel } from "../src/config.ts";
 import type { ModelEvent } from "../src/models/gateway.ts";
-import { resolveModel } from "../src/models/resolve.ts";
+import { callLevel, outputLimit, resolveModel } from "../src/models/resolve.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -42,11 +42,21 @@ describe("resolveModel", () => {
     expect(await resolveModel(db, config(), agent)).toEqual({
       source: "site",
       name: "thinker",
-      call: { protocol: "anthropic", baseUrl: "https://api.example.test/v1", apiKey: SITE_ENV.UPSTREAM_TEST_KEY, model: "think-1", maxOutputTokens: 8192 },
+      // At medium the output limit is the model's 8192 and medium's thinking allowance (6000 by default).
+      call: {
+        protocol: "anthropic",
+        baseUrl: "https://api.example.test/v1",
+        apiKey: SITE_ENV.UPSTREAM_TEST_KEY,
+        model: "think-1",
+        maxOutputTokens: 8192 + 6000,
+        thinkingSwitch: false,
+        upstreamId: "site:thinker",
+      },
       contextTokens: 200000,
       vision: true,
       pdf: true,
       reasoningAllowed: ["none", "low", "medium"],
+      reasoning: "medium",
       price: { inputMicroPerToken: 3, outputMicroPerToken: 6 },
       tier: "paid",
     });
@@ -83,14 +93,33 @@ describe("resolveModel", () => {
     expect(await resolveModel(db, config(), deep)).toEqual({
       source: "provider",
       name: "deep",
-      call: { protocol: "gemini", baseUrl: "https://api.example.com/v1", apiKey: "gm-key-0123456789", model: "deep", maxOutputTokens: config().providerDefaultMaxOutputTokens },
+      // At xhigh: the default output limit and xhigh's allowance (24 000), which half of what the context leaves beside
+      // the limit (50 000 − 2 048) / 2 = 23 976 caps.
+      call: {
+        protocol: "gemini",
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "gm-key-0123456789",
+        model: "deep",
+        maxOutputTokens: config().providerDefaultMaxOutputTokens + 23_976,
+        thinkingSwitch: true,
+        upstreamId: `provider:${provider.id}`,
+      },
       contextTokens: 50000,
       vision: true,
       pdf: false,
       reasoningAllowed: REASONING_LEVELS,
+      reasoning: "xhigh",
     });
     const plain = await agentWith(owner, { model: { source: "provider", providerId: provider.id, model: "plain" } });
-    expect(await resolveModel(db, config(), plain)).toMatchObject({ contextTokens: 8000, vision: false, pdf: true, reasoningAllowed: ["none"] });
+    // Not marked as one that reasons: none only, the default output limit, no thinking switch.
+    expect(await resolveModel(db, config(), plain)).toMatchObject({
+      contextTokens: 8000,
+      vision: false,
+      pdf: true,
+      reasoningAllowed: ["none"],
+      reasoning: "none",
+      call: { maxOutputTokens: config().providerDefaultMaxOutputTokens, thinkingSwitch: false },
+    });
 
     // Its levels narrowed after the Agent chose one: the run is not failed, the saved level is still sent (until the
     // Agent is edited, when it must be one of them).
@@ -121,6 +150,47 @@ describe("resolveModel", () => {
     for await (const e of app.deps.models.stream(call)) events.push(e);
     expect(events.flatMap((e) => (e.type === "text" ? [e.delta] : [])).join("")).toBe(CANNED_TEXT);
     expect(stub.requests.map((r) => [r.path, r.headers["x-api-key"]])).toEqual([["/v1/messages", providerBody().apiKey]]);
+  });
+
+  it("the output limit is the reply's limit at none, and the level's thinking allowance on top at any other level", async () => {
+    const owner = await signUp(app, "yuki");
+    const at = (reasoning?: ReasoningLevel) => resolveModel(db, config(), { model: { source: "site", id: "thinker" }, ownerId: owner.id, ...(reasoning ? { reasoning } : {}) });
+    expect(await at()).toMatchObject({ reasoning: "none", call: { maxOutputTokens: 8192 } }); // a persona draft names no level
+    expect(await at("none")).toMatchObject({ reasoning: "none", call: { maxOutputTokens: 8192 } });
+    expect(await at("low")).toMatchObject({ reasoning: "low", call: { maxOutputTokens: 8192 + 2000 } });
+    // A level the model does not take is called (and sized) as none.
+    expect(await at("high")).toMatchObject({ reasoning: "none", call: { maxOutputTokens: 8192 } });
+    // REASONING_ALLOWANCE_TOKENS is what is added.
+    const custom = { ...config(), reasoningAllowanceTokens: { ...config().reasoningAllowanceTokens, low: 0, medium: 100_000 } };
+    const thinker = (reasoning: ReasoningLevel) => resolveModel(db, custom, { model: { source: "site", id: "thinker" }, ownerId: owner.id, reasoning });
+    expect((await thinker("low"))?.call.maxOutputTokens).toBe(8192);
+    expect((await thinker("medium"))?.call.maxOutputTokens).toBe(8192 + 95_904); // (200 000 − 8 192) / 2
+    // A site model sends the thinking switch only when its configuration says so.
+    const switched = { ...config(), siteModels: config().siteModels.map((m) => (m.id === "fast" ? { ...m, thinkingSwitch: true } : m)) };
+    expect((await resolveModel(db, switched, { model: { source: "site", id: "fast" }, ownerId: owner.id }))?.call.thinkingSwitch).toBe(true);
+    expect((await resolveModel(db, config(), { model: { source: "site", id: "fast" }, ownerId: owner.id }))?.call.thinkingSwitch).toBe(false);
+  });
+
+  it("outputLimit: the allowance is at most half of what the context leaves beside the reply's limit, never below the reply's limit", () => {
+    const allowance = { low: 2000, medium: 6000, high: 12000, xhigh: 24000, max: 48000 };
+    expect(outputLimit(2048, 16_000, "none", allowance)).toBe(2048);
+    expect(outputLimit(2048, 16_000, "low", allowance)).toBe(4048);
+    expect(outputLimit(2048, 16_000, "high", allowance)).toBe(2048 + 6976);
+    expect(outputLimit(2048, 1_000_000, "max", allowance)).toBe(2048 + 48_000);
+    for (const level of REASONING_LEVELS) {
+      for (const [reply, context] of [[2048, 2049], [2048, 2050], [1, 2], [4096, 100_000], [2048, 1000]] as const) {
+        const limit = outputLimit(reply, context, level, allowance);
+        expect(limit).toBeGreaterThanOrEqual(reply);
+        if (context > reply) {
+          expect(limit).toBeLessThanOrEqual(context - 1);
+          expect(context - limit).toBeGreaterThanOrEqual(Math.floor((context - reply) / 2));
+        } else {
+          expect(limit).toBe(reply); // no room: no allowance
+        }
+      }
+    }
+    expect(callLevel(["none", "low"], "low")).toBe("low");
+    expect(callLevel(["none", "low"], "max")).toBe("none");
   });
 
   it("is null when the provider is not the Agent owner's (or gone)", async () => {

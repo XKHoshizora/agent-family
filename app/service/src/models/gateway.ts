@@ -31,7 +31,18 @@ export interface ModelCall {
   system: string;
   messages: Array<{ role: "user" | "assistant"; parts: Part[] }>;
   reasoning: ReasoningLevel;
+  /** Sent as it is: the reply's limit and, at a level, its thinking allowance (src/models/resolve.ts `outputLimit`). */
   maxOutputTokens: number;
+  /**
+   * Chat Completions only: the upstream thinks unless told not to and takes the common switch for it, `thinking:
+   * {type: "disabled"}` at `none`, `{type: "enabled"}` at any other level. Absent or false: not sent.
+   */
+  thinkingSwitch?: boolean;
+  /**
+   * Who the upstream is (`site:<id>`, `provider:<id>`): an optional field it refused is remembered under it, in this
+   * process, and left out of its later calls. Absent: nothing is remembered.
+   */
+  upstreamId?: string;
   /** Bounds the call: aborting it ends the stream at once and closes the upstream connection. */
   signal: AbortSignal;
 }

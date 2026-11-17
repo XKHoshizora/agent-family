@@ -1,5 +1,5 @@
 import type { AgentRow } from "../agents/store.ts";
-import { REASONING_LEVELS, type Config, type ReasoningLevel } from "../config.ts";
+import { REASONING_LEVELS, type Config, type ReasoningAllowance, type ReasoningLevel } from "../config.ts";
 import type { Queryable } from "../db.ts";
 import { loadProviderForCall } from "../providers/store.ts";
 import type { ModelCall } from "./gateway.ts";
@@ -9,16 +9,40 @@ export interface Resolved {
   source: "site" | "provider";
   /** What usage records (and `GET /api/usage`) call the model: a site model's id, a provider model's name. */
   name: string;
-  /** Everything of a `ModelCall` that comes from the model, the key in plaintext included: hand it to the gateway only. */
+  /**
+   * Everything of a `ModelCall` that comes from the model, the key in plaintext included: hand it to the gateway only.
+   * Its `maxOutputTokens` is `outputLimit` at `reasoning`: what the call is sent, and what admission holds for.
+   */
   call: Omit<ModelCall, "system" | "messages" | "signal" | "reasoning">;
   contextTokens: number;
   vision: boolean;
   pdf: boolean;
   /** The levels the model takes, `none` always among them; the call is sent `none` for any other. */
   reasoningAllowed: readonly ReasoningLevel[];
+  /** The level the call's output limit is sized for: the Agent's when the model takes it, else `none` (`callLevel`). */
+  reasoning: ReasoningLevel;
   /** Site models only. */
   price?: { inputMicroPerToken: number; outputMicroPerToken: number };
   tier?: "free" | "paid";
+}
+
+/** The level a call is made at: `wanted` when the model takes it, else `none`. */
+export function callLevel(allowed: readonly ReasoningLevel[], wanted: ReasoningLevel): ReasoningLevel {
+  return allowed.includes(wanted) ? wanted : "none";
+}
+
+/**
+ * The output limit a call at `level` is sent and held for: the reply's own limit (`replyLimit`: a site model's
+ * `maxOutputTokens`, `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` for a provider model), and at any level but `none` the
+ * level's thinking allowance on top (`REASONING_ALLOWANCE_TOKENS`) — upstreams count thinking inside the output limit.
+ * The allowance is at most half of what the context leaves beside the reply's limit, so the sum stays below the
+ * context (`contextTokens − 1` at most) and the conversation, which gets the context less this limit, keeps at least
+ * half of the room it has at `none`. A context no larger than the reply's limit gets no allowance.
+ */
+export function outputLimit(replyLimit: number, contextTokens: number, level: ReasoningLevel, allowance: ReasoningAllowance): number {
+  if (level === "none") return replyLimit;
+  const room = Math.max(0, Math.floor((contextTokens - replyLimit) / 2));
+  return replyLimit + Math.min(allowance[level], room);
 }
 
 /**
@@ -28,27 +52,44 @@ export interface Resolved {
  * no longer on its list. A site model's upstream key is read from `process.env[apiKeyEnv]` now (configuration never
  * holds it); a provider's key is opened from the database (`loadProviderForCall`, which throws `KeyUnreadableError`
  * when `PROVIDER_KEY_SECRET` changed). Site and provider models share everything after this.
+ *
+ * The call is sized for the Agent's `reasoning` level (absent, as for a persona draft: `none`): its output limit is
+ * `outputLimit` at `callLevel`. It sends the thinking switch (Chat Completions only, src/models/gateway.ts) for a site
+ * model whose configuration sets `thinkingSwitch`, and for a provider model its owner marked as one that reasons; and it
+ * names its upstream (`site:<id>`, `provider:<id>`), under which the gateway remembers what that upstream refused.
  */
 export async function resolveModel(
   q: Queryable,
-  config: Pick<Config, "siteModels" | "providerKeySecret" | "providerDefaultMaxOutputTokens">,
-  agent: Pick<AgentRow, "model" | "ownerId">,
+  config: Pick<Config, "siteModels" | "providerKeySecret" | "providerDefaultMaxOutputTokens" | "reasoningAllowanceTokens">,
+  agent: Pick<AgentRow, "model" | "ownerId"> & { reasoning?: ReasoningLevel },
 ): Promise<Resolved | null> {
   const choice = agent.model;
   if (choice === null) return null;
+  const wanted = agent.reasoning ?? "none";
 
   if (choice.source === "site") {
     const site = config.siteModels.find((m) => m.id === choice.id);
     const apiKey = site ? process.env[site.apiKeyEnv] : undefined;
     if (!site || apiKey === undefined || apiKey === "") return null;
+    const reasoningAllowed = REASONING_LEVELS.filter((level) => level === "none" || site.reasoning.includes(level));
+    const reasoning = callLevel(reasoningAllowed, wanted);
     return {
       source: "site",
       name: site.id,
-      call: { protocol: site.protocol, baseUrl: site.baseUrl, apiKey, model: site.model, maxOutputTokens: site.maxOutputTokens },
+      call: {
+        protocol: site.protocol,
+        baseUrl: site.baseUrl,
+        apiKey,
+        model: site.model,
+        maxOutputTokens: outputLimit(site.maxOutputTokens, site.contextTokens, reasoning, config.reasoningAllowanceTokens),
+        thinkingSwitch: site.thinkingSwitch === true,
+        upstreamId: `site:${site.id}`,
+      },
       contextTokens: site.contextTokens,
       vision: site.vision,
       pdf: site.pdf,
-      reasoningAllowed: REASONING_LEVELS.filter((level) => level === "none" || site.reasoning.includes(level)),
+      reasoningAllowed,
+      reasoning,
       price: { inputMicroPerToken: site.inputMicroPerToken, outputMicroPerToken: site.outputMicroPerToken },
       tier: site.tier,
     };
@@ -57,13 +98,24 @@ export async function resolveModel(
   const provider = await loadProviderForCall(q, agent.ownerId, choice.providerId, config.providerKeySecret);
   const listed = provider?.models.find((m) => m.name === choice.model);
   if (!provider || !listed) return null;
+  const reasoningAllowed: readonly ReasoningLevel[] = listed.reasoning ? [...REASONING_LEVELS] : ["none"];
+  const reasoning = callLevel(reasoningAllowed, wanted);
   return {
     source: "provider",
     name: listed.name,
-    call: { protocol: provider.protocol, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: listed.name, maxOutputTokens: config.providerDefaultMaxOutputTokens },
+    call: {
+      protocol: provider.protocol,
+      baseUrl: provider.baseUrl,
+      apiKey: provider.apiKey,
+      model: listed.name,
+      maxOutputTokens: outputLimit(config.providerDefaultMaxOutputTokens, listed.contextTokens, reasoning, config.reasoningAllowanceTokens),
+      thinkingSwitch: listed.reasoning,
+      upstreamId: `provider:${choice.providerId}`,
+    },
     contextTokens: listed.contextTokens,
     vision: listed.vision,
     pdf: listed.pdf,
-    reasoningAllowed: listed.reasoning ? [...REASONING_LEVELS] : ["none"],
+    reasoningAllowed,
+    reasoning,
   };
 }

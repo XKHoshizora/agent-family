@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { freeUsedToday, nextSiteMidnight, siteDay } from "../src/accounts/store.ts";
-import type { Config } from "../src/config.ts";
+import type { Config, ReasoningLevel } from "../src/config.ts";
 import { AppError } from "../src/errors.ts";
 import { admit, admitRun } from "../src/metering/admit.ts";
 import { estimateTokens, IMAGE_TOKENS, maxCostMicro, PDF_TOKENS_PER_KB, pdfTokens } from "../src/metering/prices.ts";
 import { settle, type Outcome, type SettleLog } from "../src/metering/settle.ts";
-import type { Resolved } from "../src/models/resolve.ts";
+import { resolveModel, type Resolved } from "../src/models/resolve.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 import { costOf, ESTIMATE, FULL_USAGE, grant, MAX_COST, METER_ENV, meteredAgent, OVER_USAGE, runningRun, type MeteredAgent } from "./helpers/metering.ts";
@@ -133,6 +133,30 @@ describe("prices", () => {
     expect(pdfTokens(1001)).toBe(301);
     expect(pdfTokens(10 * 1024 * 1024)).toBe(3_145_728);
     expect(pdfTokens(10 * 1024 * 1024 + 1)).toBe(3_145_729);
+  });
+});
+
+describe("a call's hold covers its thinking allowance", () => {
+  it("a site model at level high holds the input and its reply limit plus high's allowance at the output price; at none exactly today's hold", async () => {
+    const owner = await signUp(app, "thinkhold");
+    const meterFree = config().siteModels.find((m) => m.id === "meter_free")!;
+    const cfg = { ...config(), siteModels: [...config().siteModels, { ...meterFree, id: "meter_think", reasoning: ["high"] as ReasoningLevel[] }] };
+    const at = async (reasoning: ReasoningLevel) => (await resolveModel(db, cfg, { model: { source: "site", id: "meter_think" }, ownerId: owner.id, reasoning }))!;
+    const none = await at("none");
+    const high = await at("high");
+    // What the gateway is sent as the output limit: the model's 1 000 at none, and high's 12 000 on top at high.
+    expect([none.reasoning, none.call.maxOutputTokens]).toEqual(["none", 1000]);
+    expect([high.reasoning, high.call.maxOutputTokens]).toEqual(["high", 1000 + 12_000]);
+
+    const noneRun = await runningRun(db, owner.id);
+    expect(await db.tx((t) => admitRun(t, cfg, noneRun, owner.id, none, ESTIMATE, NOON))).toEqual({ chargeTo: "free", holdMicro: MAX_COST });
+    const highRun = await runningRun(db, owner.id);
+    const held = costOf({ inputTokens: ESTIMATE, outputTokens: 1000 + 12_000 });
+    expect(held).toBe(14_000_000n);
+    expect(await db.tx((t) => admitRun(t, cfg, highRun, owner.id, high, ESTIMATE, NOON))).toEqual({ chargeTo: "free", holdMicro: held });
+    expect(maxCostMicro(high, ESTIMATE)).toBe(held);
+    const { rows } = await db.query<{ id: string; hold_micro: string }>("select id, hold_micro::text from agent_runs where id = any($1)", [[noneRun, highRun]]);
+    expect(Object.fromEntries(rows.map((r) => [r.id, BigInt(r.hold_micro)]))).toEqual({ [noneRun]: MAX_COST, [highRun]: held });
   });
 });
 

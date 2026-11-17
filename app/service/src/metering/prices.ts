@@ -42,9 +42,10 @@ export function costMicro(price: Price, input: number, output: number): bigint {
 }
 
 /**
- * The most one call can cost: the input estimate and the model's whole output limit, at its prices (0 for a
- * provider model). What admission holds against the owner's quota while the call runs. The estimate must be a count
- * (`assertCount`), whatever the model.
+ * The most one call can cost: the input estimate and the call's whole output limit — `resolved.call.maxOutputTokens`,
+ * the number the gateway sends, thinking allowance included (src/models/resolve.ts `outputLimit`) — at its prices (0
+ * for a provider model). What admission holds against the owner's quota while the call runs. The estimate must be a
+ * count (`assertCount`), whatever the model.
  */
 export function maxCostMicro(resolved: Pick<Resolved, "price" | "call">, inputTokensEstimate: number): bigint {
   assertCount("the input token estimate", inputTokensEstimate);
