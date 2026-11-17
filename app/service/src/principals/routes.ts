@@ -99,14 +99,15 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
   /**
    * What `GET`/`HEAD /api/principals/:id/avatar` answer with: the stored image (its type from the bytes,
    * only when browsers may show it) or the generated SVG. `whole: false` reads no more than the sniffing
-   * prefix of a stored image, so a HEAD does not drain the blob.
+   * prefix of a stored image, so a HEAD does not drain the blob. Any person's; an Agent's for its owner only
+   * (anybody else: the 404 of an id that is no principal).
    */
   async function avatarOf(
     req: FastifyRequest<{ Params: { id: string } }>,
     whole: boolean,
   ): Promise<{ type: string; body: Buffer | string; complete: boolean }> {
-    await requirePrincipal(req);
-    const subject = await findAvatarSubject(db, req.params.id);
+    const me = await requirePrincipal(req);
+    const subject = await findAvatarSubject(db, req.params.id, me.id);
     if (!subject) throw new AppError(404, "not_found");
     if (subject.avatarKey) {
       try {

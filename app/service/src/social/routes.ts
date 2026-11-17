@@ -187,7 +187,9 @@ export function registerSocialRoutes(app: FastifyInstance): void {
       const other = req.params.principalId;
       if (other === me.id) throw new AppError(400, "invalid_request");
       const result = await db.tx(async (t): Promise<Outcome<BlockResult>> => {
-        const exists = await t.query("select 1 from principals where id = $1", [other]);
+        // Only a person can be blocked: an Agent's id is answered as an id that is no principal, for everyone (its
+        // owner included). So no block of an Agent exists, and unblocking one is the no-op a random id gets.
+        const exists = await t.query("select 1 from principals where id = $1 and kind = 'human'", [other]);
         if (exists.rowCount === 0) return { ok: false, code: "not_found" };
         return { ok: true, ...(await blockPrincipal(t, me.id, other)) };
       });

@@ -239,7 +239,41 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     expect((await unblock(RANDOM)).status).toBe(200);
   });
 
-  it("intended differences: any existing principal can be blocked and has an avatar; a random id is 404", async () => {
+  it("an Agent's id: its avatar is as a random id's for everyone but its owner, and blocking or unblocking it is as a random id's for everyone", async () => {
+    const [owner, stranger, other] = [await signUp(app, "agentowner"), await signUp(app, "agentstranger"), await signUp(app, "otherowner")];
+    const agent = (await api(app, owner, "POST", "/api/agents", { handle: "enum_bot", name: "Enum" })).json;
+    const otherAgent = (await api(app, other, "POST", "/api/agents", { handle: "enum_other", name: "Other" })).json;
+    expect([agent.id, otherAgent.id].every((id) => typeof id === "string")).toBe(true);
+    const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5d7e2d10000000049454e44ae426082", "hex");
+    const put = await app.inject({ method: "PUT", url: `/api/agents/${agent.id}/avatar`, headers: { cookie: owner.cookie, "content-type": "image/png" }, payload: png });
+    expect(put.statusCode).toBe(200);
+
+    // A stranger, and the owner of a different Agent: GET and HEAD of the avatar as for a random id.
+    for (const who of [stranger, other]) {
+      for (const method of ["GET", "HEAD"] as const) {
+        const answer = await indistinguishable(who, `${who.handle} ${method} avatar`, (id) => json(method, `/api/principals/${id}/avatar`), { agent: agent.id, upperCase: agent.id.toUpperCase() });
+        expect(answer.status).toBe(404);
+      }
+    }
+    // Its owner still loads it.
+    const mine = await observe(owner, json("GET", `/api/principals/${agent.id}/avatar`));
+    expect([mine.status, mine.type]).toEqual([200, "image/png"]);
+    expect((await observe(owner, json("HEAD", `/api/principals/${agent.id}/avatar`))).status).toBe(200);
+
+    // Blocks: an Agent cannot be blocked, by anybody, its owner included; unblocking it is the no-op a random id gets.
+    for (const who of [stranger, other, owner]) {
+      const block = await indistinguishable(who, `${who.handle} block`, (id) => json("PUT", `/api/blocks/${id}`), { agent: agent.id });
+      expect(block).toMatchObject({ status: 404, body: '{"error":"not_found"}' });
+      const unblock = async (id: string) => observe(who, json("DELETE", `/api/blocks/${id}`));
+      expect([who.handle, await unblock(agent.id)]).toEqual([who.handle, await unblock(RANDOM)]);
+    }
+    expect((await db.query("select 1 from blocks")).rowCount).toBe(0);
+    // People are unaffected: the stranger still sees the owner's avatar and can block them.
+    expect((await observe(stranger, json("GET", `/api/principals/${owner.id}/avatar`))).status).toBe(200);
+    expect((await observe(stranger, json("PUT", `/api/blocks/${owner.id}`))).status).toBe(200);
+  });
+
+  it("intended differences: any existing person can be blocked and has an avatar; a random id is 404", async () => {
 
     // Principal ids are learnt from handles (lookup, rate-limited) and from shared conversations; ids
     // themselves are random UUIDs, so answering by existence here reveals nothing guessable.

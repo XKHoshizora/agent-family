@@ -21,13 +21,18 @@ export async function findByHandle(db: Queryable, handle: string): Promise<Publi
   return r ? { id: r.id, handle: r.handle, displayName: r.display_name, avatarVersion: r.avatar_version } : null;
 }
 
+/**
+ * Whose avatar `viewerId` may load by id: any person's, and an Agent's only when the viewer owns it. For anybody else an
+ * Agent's id finds nothing, exactly as an id that is no principal (Agents are invisible to everyone but their owner).
+ */
 export async function findAvatarSubject(
   db: Queryable,
   id: string,
+  viewerId: string,
 ): Promise<{ id: string; displayName: string; avatarKey: string | null } | null> {
   const { rows } = await db.query<{ id: string; display_name: string; avatar_key: string | null }>(
-    "select id, display_name, avatar_key from principals where id = $1",
-    [id],
+    "select id, display_name, avatar_key from principals where id = $1 and (kind = 'human' or owner_id = $2)",
+    [id, viewerId],
   );
   const r = rows[0];
   return r ? { id: r.id, displayName: r.display_name, avatarKey: r.avatar_key } : null;

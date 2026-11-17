@@ -222,7 +222,9 @@ files that insert queued runs themselves use it too, so no background worker pic
   refuses a missing `Origin`.
 - **Not found means not yours.** A conversation, message, attachment or friend request you may not see
   answers exactly like one that does not exist (`tests/enumeration.test.ts`): 404 `{"error":"not_found"}`,
-  byte for byte. Two intended exceptions: any existing principal has an avatar and can be blocked.
+  byte for byte. Two intended exceptions, for people only: any person has an avatar and can be blocked. An Agent
+  has neither for anybody else: its id on the avatar route (unless it is your Agent) and on the block routes (also
+  your own Agent's) is answered exactly as an id that does not exist.
 - **HEAD.** Every `GET` route also answers `HEAD` with the same status and headers and no body (Fastify
   runs the `GET` handler). `HEAD /api/attachments/:id` and `HEAD /api/principals/:id/avatar` are their own routes (below): they do not read the whole file.
 - **Order of checks.** Cross-site `Origin` (403) → shape of path, query and body (400) → session (401) →
@@ -369,6 +371,9 @@ whose members are exactly the owner and the Agent. Everything here is the owner'
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
 `POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
+Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner, and to `PUT`/`DELETE
+/api/blocks/:principalId` for everyone, its owner included (an Agent cannot be blocked): the answer of an id that does
+not exist, byte for byte (`tests/enumeration.test.ts`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
@@ -901,10 +906,11 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/principals/:id/avatar`
 
-*Session: required.* Any existing principal's avatar: their image (`image/png`, `image/jpeg` or
+*Session: required.* Any person's avatar, and your own Agents': their image (`image/png`, `image/jpeg` or
 `image/webp`), or a generated `image/svg+xml` with their initial when they have none. Headers:
 `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=60`,
-`Content-Security-Policy: default-src 'none'; sandbox`. 404 `not_found` for an id that is no principal.
+`Content-Security-Policy: default-src 'none'; sandbox`. 404 `not_found` for an id that is no principal, and exactly
+the same for someone else's Agent.
 
 #### `HEAD /api/principals/:id/avatar`
 
@@ -995,8 +1001,9 @@ you had blocked them already (then nothing changes and nothing is pushed).
 - A new block cancels the live requests between you (yours withdrawn, theirs rejected; a lapsed one is
   recorded as expired), leaves the friendship as it is, appends a `blocked` notice to your direct chat if
   you have one, and stops both of you from sending there.
-- Errors: 400 `invalid_request` (yourself), 404 `not_found` (no such principal; any existing principal can
-  be blocked).
+- Errors: 400 `invalid_request` (yourself), 404 `not_found` (no such person: any existing person can be
+  blocked; an Agent's id, also your own Agent's, is answered exactly as an id that does not exist — an Agent cannot be
+  blocked).
 - Limit: 20 per minute together with unblocking. Pushes: `social` to both; `conversation` and the notice
   when you have a direct chat.
 
@@ -1689,7 +1696,8 @@ across the site. Accepted for now; the limits above bound how much can be learnt
   e-mail (one account remains).
 - `tests/enumeration.test.ts`: on every route taking a conversation id, a seq, an attachment, request or
   principal id, an id that exists but is not yours gets byte for byte the answer a random id gets; the two
-  intended differences (any existing principal can be blocked and has an avatar) are asserted. Catch-up
+  intended differences (any existing person can be blocked and has an avatar) are asserted, and that an Agent's id
+  has neither (as a random id: its avatar for anybody but its owner, blocking and unblocking it for everyone). Catch-up
   and downloads also take about as long for both (medians within a factor of 2).
 - `tests/readme.test.ts`: the route headings of this README are exactly the routes the app serves.
 
