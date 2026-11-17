@@ -850,6 +850,30 @@ describe("follow-ups in a group", () => {
       { status: "queued", error: null, covers: noted, pending: null, by: "human", interrupted: null },
     ]);
   });
+
+  it("an Agent's follow-up is not queued once the reply under way has spent its Agent's chain budget; the group is told once", async () => {
+    const w = await world();
+    const a = await agentOf(w.owner, "alpha", w.g);
+    const b = await agentOf(w.member, "beta", w.g);
+    expect((await api(app, w.member, "PATCH", `/api/agents/${b.id}`, { chainBudget: "1" })).json.chainBudget).toBe("1");
+    await say(w.owner, w.g, "开始");
+    await agentSays(a.id, w.g, "我先说两句");
+    // A reply of beta's an Agent called for, covering that message, admitted on `fast` and holding a point.
+    const one = await runningIn(w.g, b.id, w.member.id, "agent", 1_000_000);
+    // Nothing of the chain is charged yet: another Agent's mention of it is noted.
+    expect((await agentSays(a.id, w.g, "@beta 继续")).notices).toEqual([]);
+    expect((await runsOf(b.id, w.g))[0]?.pending).not.toBeNull();
+
+    // It ends having cost a point (600 000 input and 200 000 output tokens on `fast`): the budget is spent, and what was
+    // noted on it is not answered.
+    await app.agentPort.finish(one, { status: "done" }, { inputTokens: 600_000, outputTokens: 200_000 }, NOTHING);
+    expect((await db.query("select balance_micro::int as b from usage_records where run_id = $1", [one.id])).rows).toEqual([{ b: 1_000_000 }]);
+    expect(await runsOf(b.id, w.g)).toEqual([expect.objectContaining({ status: "done", by: "agent" })]);
+    expect((await noticesOf(w.g, "agent_budget_reached")).map((n) => [n.body.actorId, n.body.agentId])).toEqual([[b.id, b.id]]);
+    // Told once for this chain: the next Agent's mention is refused without a second notice.
+    expect(await agentSays(a.id, w.g, "@beta 还有")).toMatchObject({ runs: [], notices: [] });
+    expect((await noticesOf(w.g, "agent_budget_reached")).length).toBe(1);
+  });
 });
 
 // --- chainBudget --------------------------------------------------------------------------------------------------

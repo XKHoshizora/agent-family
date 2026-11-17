@@ -446,6 +446,24 @@ async function chargedSince(t: Tx, agentId: string, conversationId: string, sinc
   return BigInt(rows[0]!.charged);
 }
 
+/**
+ * The chain budget (ruling 12) of Agent `agentId` in the group whose latest message from a person is at seq `human`:
+ * null while what its owner was charged for its replies there covering messages after it is under `budgetMicro`; once
+ * it has reached it, the `agent_budget_reached` notice about the Agent — appended now, unless one was since that
+ * message: then null in its place.
+ */
+async function chainBudgetSpent(
+  t: Tx,
+  conversationId: string,
+  agentId: string,
+  budgetMicro: bigint,
+  human: number,
+): Promise<{ notice: StoredMessage | null } | null> {
+  if ((await chargedSince(t, agentId, conversationId, human)) < budgetMicro) return null;
+  if (await toldSince(t, conversationId, human, "agent_budget_reached", agentId)) return { notice: null };
+  return { notice: await appendSystem(t, conversationId, { event: "agent_budget_reached", actorId: agentId, agentId }) };
+}
+
 /** What an Agent's own message in a group called for: runs to announce and notices to publish, after commit. */
 export interface AgentTriggered {
   runs: Announced[];
@@ -514,10 +532,9 @@ export async function triggerFromAgent(
   const notices: StoredMessage[] = [];
   const called: RunAgent[] = [];
   for (const target of targets) {
-    if ((await chargedSince(t, target.id, conversationId, human)) >= BigInt(target.budget)) {
-      if (!(await toldSince(t, conversationId, human, "agent_budget_reached", target.id))) {
-        notices.push(await appendSystem(t, conversationId, { event: "agent_budget_reached", actorId: target.id, agentId: target.id }));
-      }
+    const spent = await chainBudgetSpent(t, conversationId, target.id, BigInt(target.budget), human);
+    if (spent) {
+      if (spent.notice) notices.push(spent.notice);
       continue;
     }
     called.push({ id: target.id, ownerId: target.owner_id });
@@ -543,12 +560,14 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [] };
  * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it); otherwise only
  * Agents' messages called for it: it is an Agent's, and is not queued at all when the latest of them (`pending`) came
  * at or before the group's latest halt (`agents_halted_seq`, ruling 11), even if a person has written since: what
- * Agents asked before a halt is not answered after it (what a person asked is). A group's follow-up, a person's or an
- * Agent's, is a reply started like any other, so the owner's `agentRunsPerMinute` decides as for a mention
- * (`reachAgents`): counted under the owner's `accounts` row (the lock order's last step; the caller holds the group's
- * row, the Agent's and the run's), and over it the Agent's reusable `rate_limited` run in the group records it instead
- * (`rateLimitedInGroup`), so a member who keeps mentioning an Agent while it replies cannot keep it replying past its
- * owner's limit.
+ * Agents asked before a halt is not answered after it (what a person asked is); nor once the Agent's chain budget is
+ * spent (ruling 12, the same rule and notice as for an Agent's mention, `chainBudgetSpent`) — checked again here
+ * because the reply that just ended was settled after it was called, so a chain overshoots its budget by at most the
+ * one reply that was under way. A group's follow-up, a person's or an Agent's, is a reply started like any other, so
+ * the owner's `agentRunsPerMinute` decides as for a mention (`reachAgents`): counted under the owner's `accounts` row
+ * (the lock order's last step; the caller holds the group's row, the Agent's and the run's), and over it the Agent's
+ * reusable `rate_limited` run in the group records it instead (`rateLimitedInGroup`), so a member who keeps mentioning
+ * an Agent while it replies cannot keep it replying past its owner's limit.
  */
 export async function followUp(
   t: Tx,
@@ -586,7 +605,12 @@ async function followUpWith(
   );
   const handle = agent.handle.toLowerCase();
   const asked = rows.some((r) => (agent.groupMentions === "members" || r.sender_id === agent.ownerId) && mentionedHandles(r.text ?? "").includes(handle));
-  if (!asked && (await haltedSince(t, conversationId, pending))) return NO_FOLLOW_UP;
+  if (!asked) {
+    if (await haltedSince(t, conversationId, pending)) return NO_FOLLOW_UP;
+    // The chain budget again, now that the reply that just ended is settled: it may have spent it.
+    const spent = await chainBudgetSpent(t, conversationId, agent.id, agent.chainBudgetMicro, await latestHumanSeq(t, conversationId));
+    if (spent) return { run: null, notices: spent.notice ? [spent.notice] : [] };
+  }
   const by: TriggeredBy = asked ? "human" : "agent";
   if (config !== null && (await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) {
     return { run: await rateLimitedInGroup(t, agent, conversationId, pending, by), notices: [] };
