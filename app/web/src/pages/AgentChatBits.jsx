@@ -7,7 +7,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
-import { nameOf, publishBlock } from "../state/selectors.js";
+import { nameOf, ownerOf, publishBlock } from "../state/selectors.js";
 import { GrowingText, StreamingAgentText } from "../ui/AgentText.jsx";
 import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
@@ -285,7 +285,8 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
 }
 
 /**
- * An Agent's reply being written in a group (`row` of `conv.agentRuns`): 正在回复… only — nothing streams in a group, nor
+ * An Agent's reply being written in a group (`row` of `conv.agentRuns`): its identity line as a finished Agent message has it
+ * (name, Agent tag, 主人：<name>), then 正在回复… only — nothing streams in a group, nor
  * is any thinking shown. Its owner may stop it; nobody else has a control.
  */
 export function GroupReplying({ conv, row }) {
@@ -297,6 +298,7 @@ export function GroupReplying({ conv, row }) {
         <div className="msg-meta">
           <strong>{nameOf(state, row.agentId)}</strong>
           <Tag>Agent</Tag>
+          <span className="owner">主人：{nameOf(state, ownerOf(state, row.agentId))}</span>
         </div>
         <div className="bubble">
           <Writing />

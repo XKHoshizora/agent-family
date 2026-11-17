@@ -590,6 +590,31 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     expect(rows(answered)).toEqual([{ agentId: OAG, mine: false, kind: "unavailable" }]);
   });
 
+  it("the store never keeps someone else's Agent's thinking in a group; mine keeps it; it stays while the sender is unknown", () => {
+    const base = inGroup();
+    const think = (seq, sender) => wire(G1, seq, sender, "答", { reasoning: "想" });
+    const s = M.applyMessage(M.applyMessage(base, think(3, OAG)).state, think(4, AG1)).state;
+    expect(s.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("reasoning");
+    expect(s.messages[G1].find((m) => m.seq === 4).reasoning).toBe("想");
+    // History pages and a window: the same rule.
+    const older = M.applyOlder(base, G1, { messages: [think(0, OAG), think(-1, AG1)], nextBefore: null });
+    expect(older.messages[G1].find((m) => m.seq === 0)).not.toHaveProperty("reasoning");
+    expect(older.messages[G1].find((m) => m.seq === -1).reasoning).toBe("想");
+    // A sender whose principal has not arrived: kept (the view hides it).
+    const LATE = "00000000-0000-4000-8000-0000000000b8";
+    const unknown = M.applyMessage(base, think(3, LATE)).state;
+    expect(unknown.messages[G1].find((m) => m.seq === 3).reasoning).toBe("想");
+    // A sync carrying it: dropped the same way.
+    const sync = syncOf([groupWith([ME_ID, ANN, AG1, OAG], { lastSeq: 4, readSeq: 4 })], [...BASE, think(3, OAG), think(4, AG1)], [
+      ...PRINCIPALS,
+      { ...agentPrincipal(), ownerId: ME_ID },
+      annBot,
+    ]);
+    const synced = M.applySync(M.initial(), sync);
+    expect(synced.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("reasoning");
+    expect(synced.messages[G1].find((m) => m.seq === 4).reasoning).toBe("想");
+  });
+
   it("an Agent's slot clears when its reply arrives; someone else's message does not clear it; a new run shows again", () => {
     let s = put(put(inGroup(), ownerPush(runOf(R1, "running"))), memberPush("replying"));
     s = M.applyMessage(s, wire(G1, 3, ANN, "还有我")).state;
@@ -722,6 +747,10 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     expect(talking([wire(G1, 3, OAG, "写信到 me@helper")])).toBe(false);
     expect(talking([wire(G1, 3, ANN, "@helper 你好")])).toBe(false);
     expect(talking([wire(G1, 3, OAG, "@helper"), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })])).toBe(false);
+    // A system notice as the newest message hides the button even while a row is replying.
+    const noticeLast = inGroup({ messages: [...BASE, wire(G1, 3, OAG, "@helper"), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })] });
+    expect(view(put(noticeLast, memberPush("replying"))).convs[G1].agentsTalking).toBe(false);
+    expect(view(put(put(noticeLast, memberPush("replying")), ownerPush(runOf(R1, "running")))).convs[G1].agentsTalking).toBe(false);
     // An Agent that is not (or no longer) in the group is nobody to call.
     expect(view(inGroup({ ids: [ME_ID, ANN, OAG], messages: [...BASE, wire(G1, 3, OAG, "@helper")] })).convs[G1].agentsTalking).toBe(false);
     // Only a group has it.

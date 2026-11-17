@@ -147,6 +147,16 @@ describe("the model picker", () => {
     expect(css).toMatch(/\.field\s*\{[^}]*max-width:\s*var\(--field-w\)/);
   });
 
+  it("the model rows and the opened 高级 panel stop at the fields' width (the same token); on a phone the open panel takes the row's full width", () => {
+    const css = readFileSync(resolve(__dirname, "../src/styles.css"), "utf8");
+    expect(css).toMatch(/form\.page-body \.member-rows\s*\{[^}]*max-width:\s*var\(--field-w\)/);
+    expect(css).toMatch(/\.model-panel\s*\{[^}]*max-width:\s*var\(--field-w\)/);
+    const phone = css.slice(css.indexOf("@media (max-width: 480px)"));
+    expect(phone).toMatch(/li:has\(\.model-panel\)\s*\{[^}]*flex-wrap:\s*wrap/);
+    expect(phone).toMatch(/li:has\(\.model-panel\) > \.member-body\s*\{[^}]*flex:\s*1 1 100%/);
+    expect(css).toMatch(/\.model-panel \.checks label span\s*\{[^}]*min-width:\s*0/);
+  });
+
   it("while it loads it says so (not that nothing is available), and creating waits", async () => {
     const pending = deferred();
     await openForm({ api: { listProviders: vi.fn(() => pending.promise) } });

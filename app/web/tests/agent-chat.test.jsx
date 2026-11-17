@@ -371,7 +371,7 @@ describe("the streaming bubble", () => {
     let waited = 0;
     while (bubbleLi() !== null && waited <= REVEAL_FINISH_MS + 32) {
       expect(storedLi(3)).toBeNull();
-      expect(BURST.startsWith(bubbleText())).toBe(true);
+      expect(BURST.startsWith(bubbleText().replace(/^\s*正在回复…$/, ""))).toBe(true);
       expect(bubbleText().length).toBeGreaterThanOrEqual(shown);
       shown = bubbleText().length;
       await elapse(16);
@@ -388,6 +388,8 @@ describe("the streaming bubble", () => {
   it.each([
     ["is the stream's text", BURST, BURST],
     ["begins with the stream's text (a piece was still on its way)", BURST, `${BURST}。`],
+    ["is the stream's text but for the white space it ended with (the service trims what it stores)", `${BURST}
+`, BURST],
     ["is the stream's text but for the white space it began with (the service trims what it stores)", `\n\n${BURST}`, BURST],
   ])("a stored reply that %s: the bubble finishes first, then the stored reply takes its place", async (_how, streamed, stored) => {
     const { transport } = await openAgentChat();
@@ -401,6 +403,22 @@ describe("the streaming bubble", () => {
     expect(bubbleLi()).toBeNull();
     expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
     expect(storedLi(3).querySelector(".bubble").textContent).toBe(stored);
+  });
+
+  it("a stream ending in a line break whose stored reply is the trimmed text finishes, and shows nothing beyond the stored text", async () => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { text: `${BURST}
+` });
+    await elapse(50);
+    await messagePush(transport, wire(A1, 3, AG1, BURST));
+    expect(bubbleLi()).not.toBeNull();
+    expect(BURST.startsWith(bubbleText().replace(/^\s*正在回复…$/, ""))).toBe(true);
+    await elapse(REVEAL_FINISH_MS / 2);
+    expect(BURST.startsWith(bubbleText().replace(/^\s*正在回复…$/, ""))).toBe(true);
+    await elapse(REVEAL_FINISH_MS + 32);
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(BURST);
   });
 
   it.each([
@@ -453,7 +471,7 @@ describe("the streaming bubble", () => {
     await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
     // At once what was shown when it was left (not the placeholder, not from its start)...
     expect(bubbleText().length).toBeGreaterThanOrEqual(part.length);
-    expect(BURST.startsWith(bubbleText())).toBe(true);
+    expect(BURST.startsWith(bubbleText().replace(/^\s*正在回复…$/, ""))).toBe(true);
     // ... and the rest revealed from there.
     await revealed();
     expect(bubbleText()).toBe(BURST);
@@ -1556,6 +1574,9 @@ describe("Agents in a group (batch 2C)", () => {
       expect(li.querySelector(".bubble").textContent).toContain("正在回复…");
       expect(within(li).getByText("Agent", { selector: ".tag" })).toBeTruthy();
     }
+    // The identity line is a finished message's: name, Agent tag, 主人：<name> — mine and someone else's.
+    expect(rows[0].querySelector(".msg-meta .owner").textContent).toBe("主人：你");
+    expect(rows[1].querySelector(".msg-meta .owner").textContent).toBe("主人：小安");
     expect(timeline().textContent).not.toContain("不该出现");
     expect(timeline().querySelector(".thinking")).toBeNull();
     expect(within(rows[1]).queryByRole("button")).toBeNull();

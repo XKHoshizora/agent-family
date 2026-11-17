@@ -39,7 +39,7 @@ port and token). Teardown stops the service and the stub and deletes the tempora
 crashed run is stopped by the next run. `E2E_SHOTS=1` also saves the acceptance screenshots
 (`docs/acceptance/batch2a/shots/`, 1440×900 and 390×844) of this run's own seeded data. The service log is
 `e2e/test-results/service.log`; failures keep traces and screenshots in `e2e/test-results/`, the HTML report is in
-`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored.
+`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored. `e2e/agents-group.spec.mjs` covers an owner's Agent in a group (add, @-call, one whole reply charged to its owner, what other members never receive), Agents calling each other with 让 Agent 停下 and the chain limit, a failed reply, leaving, removal and deletion, then message times, the two-step provider form, a model's 高级 panel and the paced reveal; with `E2E_SHOTS=1` its screenshots go to `docs/acceptance/batch2c/shots/`. Its chain-limit test restarts the service with `AGENT_CHAIN_LIMIT=3` through the runner's control endpoint (`restartService({…})` in `e2e/support/control.mjs`, and `restartService({})` back to the normal configuration; only the local suite can). `e2e/support/db.mjs` is the local suite's direct database helper (refused unless the database is `af_e2e`): `backdateMessage(conversationId, seq, days)` moves a message into the past, for what no person can do in the app.
 
 **Remote mode.** `E2E_BASE_URL=https://… E2E_INVITE_CMD="…" E2E_INBOX_CMD="… {email}" npm run e2e` starts nothing
 and talks to that origin. The invite code is the last line of `E2E_INVITE_CMD`'s output that is a 20-character code;

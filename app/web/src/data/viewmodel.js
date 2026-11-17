@@ -234,7 +234,7 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     system,
     // An Agent's reply: its reasoning (shown folded; only when it is mine to read: `keepsThinking`), whether it was
     // stopped or cut, and the persona it proposes.
-    reasoning: keepsThinking(m.senderId) && typeof m.reasoning === "string" && m.reasoning ? m.reasoning : null,
+    reasoning: typeof m.reasoning === "string" && m.reasoning && keepsThinking(m.senderId) ? m.reasoning : null,
     stopped: Boolean(m.stopped),
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,

@@ -448,6 +448,15 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .member-actions > .btn[aria-expanded="true"] { background: var(--purple-soft); color: var(--purple-dark); }
 .member-actions > .btn[aria-expanded] svg { vertical-align: -2px; margin-left: 3px; }
 .member-rows .member-body > .model-panel { margin-top: 8px; padding: 8px 12px 10px; background: var(--purple-tint); border-radius: 10px; }
+/* The provider form's model rows and an opened 高级 panel stop at the fields' width (the same token). */
+form.page-body .member-rows { max-width: var(--field-w); }
+.member-rows .member-body > .model-panel { max-width: var(--field-w); box-sizing: border-box; }
+.model-panel .checks label span { min-width: 0; flex: 1; }
+/* A phone: an open panel takes the row's full width (the buttons go under it), so its hints wrap there, not in a narrow column. */
+@media (max-width: 480px) {
+  .member-rows li:has(.model-panel) { flex-wrap: wrap; }
+  .member-rows li:has(.model-panel) > .member-body { flex: 1 1 100%; }
+}
 /* A row of actions under a field (帮我起草 and the persona's count, 测试连接): what sits beside a button is centred on it. */
 .field > .member-actions { align-items: center; }
 .kv { border-top: 1px solid var(--line); margin: 8px 0; }

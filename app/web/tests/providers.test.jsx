@@ -659,6 +659,7 @@ describe("the models of a provider", () => {
     const button = row().getByRole("button", { name: /高级/ });
     expect(button.textContent).toBe("高级");
     expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(button.hasAttribute("aria-controls")).toBe(false);
     expect(row().queryByLabelText("上下文容量")).toBeNull();
     await click(button);
     const open = row().getByRole("button", { name: /收起/ });

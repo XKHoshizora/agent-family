@@ -64,14 +64,14 @@ const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBou
  * stored reply has every character the bubble would show, in the same order — so the finish never shows anything the
  * stored reply then takes away. Not when the service cut it (已截断: it streams on past what it keeps) or stopped it,
  * took a persona proposal out of it, or the stream was cut here; and its text must be the stream's, or begin with it (a
- * piece still on its way), both as the bubble shows text (bidi controls taken out) — white space the stream began with
- * aside, as the service trims what it stores. Marks and lengths first, then one comparison of the two texts: this is
+ * piece still on its way), both as the bubble shows text (bidi controls taken out), the stream trimmed at both ends as the service trims what it
+ * stores. Marks and lengths first, then one comparison of the two texts: this is
  * asked once, when the stored reply comes, never at a frame.
  */
 function finishable(reply, stream) {
   if (reply.truncated || reply.stopped || reply.proposal || stream.cut) return false;
   const stored = withoutBidiControls(reply.text);
-  const streamed = withoutBidiControls(stream.text).trimStart();
+  const streamed = withoutBidiControls(stream.text).trim();
   return stored.length >= streamed.length && stored.startsWith(streamed);
 }
 
@@ -139,7 +139,7 @@ export function ChatView({ conv }) {
     const held = revealedAll.current;
     const posted = !detached && seen.convId === conv.id && conv.run?.id === seen.runId && conv.run.posted;
     if (posted && reply && last?.id === reply.id && held.runId === seen.runId && !held.done && finishable(reply, seen.stream)) {
-      setFinish({ convId: conv.id, runId: seen.runId, stream: seen.stream, run: conv.run, messageId: reply.id });
+      setFinish({ convId: conv.id, runId: seen.runId, stream: { ...seen.stream, text: seen.stream.text.trimEnd() }, run: conv.run, messageId: reply.id });
     }
   }
   const finishing = finish && finish.convId === conv.id && !replying && !detached && last?.id === finish.messageId ? finish : null;

@@ -154,6 +154,25 @@ function mergeBySeq(held, incoming) {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/**
+ * `wires` as this reader may keep them: in a group, a message of someone else's Agent (its owner is known and is not me)
+ * loses its `reasoning` — the service sends it only to the owner, and the store never holds more. While the sender's
+ * principal has not arrived the field stays (the view hides it), so my own Agent's thinking is not lost when principals
+ * come late. `state` supplies `me`, `principals`, `agents` and `conversations`.
+ */
+function withoutOthersThinking(state, type, wires) {
+  if (type !== "group" || !Array.isArray(wires)) return wires;
+  let out = wires;
+  wires.forEach((m, i) => {
+    if (!m || m.reasoning === undefined || typeof m.senderId !== "string") return;
+    if (typeof state.principals[m.senderId]?.ownerId !== "string" || ownsAgent(state, m.senderId)) return;
+    if (out === wires) out = [...wires];
+    const { reasoning: _dropped, ...rest } = m;
+    out[i] = rest;
+  });
+  return out;
+}
+
 /** The highest seq reachable from `seq` through consecutive held messages. */
 function advance(list, seq) {
   let position = seq;
@@ -318,12 +337,21 @@ export function applySync(state, sync) {
     windows.set(m.conversationId, list);
   }
 
+  const principals = { ...state.principals };
+  const avatarVersions = { ...state.avatarVersions };
+  for (const p of sync.principals) {
+    principals[p.id] = withOwner(principals[p.id], p);
+    if (isVersion(p.avatarVersion)) avatarVersions[p.id] = p.avatarVersion;
+  }
+  if (isVersion(sync.me.avatarVersion)) avatarVersions[meId] = sync.me.avatarVersion;
+  const viewer = { ...state, me: sync.me, principals };
+
   const conversations = {};
   const messages = {};
   sync.conversations.forEach((entry, index) => {
     const prev = state.conversations[entry.id];
     const held = prev ? state.messages[entry.id] ?? [] : [];
-    const incoming = (windows.get(entry.id) ?? []).sort((a, b) => a.seq - b.seq);
+    const incoming = withoutOthersThinking(viewer, entry.type, (windows.get(entry.id) ?? []).sort((a, b) => a.seq - b.seq));
     const inWindow = new Set(incoming.map((m) => m.seq));
     const complete = incoming.length < SYNC_WINDOW;
     const joins = Boolean(prev) && !complete && incoming[0].seq <= prev.position + 1;
@@ -357,14 +385,6 @@ export function applySync(state, sync) {
     conversations[entry.id] = conv;
     messages[entry.id] = list;
   });
-
-  const principals = { ...state.principals };
-  const avatarVersions = { ...state.avatarVersions };
-  for (const p of sync.principals) {
-    principals[p.id] = withOwner(principals[p.id], p);
-    if (isVersion(p.avatarVersion)) avatarVersions[p.id] = p.avatarVersion;
-  }
-  if (isVersion(sync.me.avatarVersion)) avatarVersions[meId] = sync.me.avatarVersion;
 
   const dropped = Object.keys(state.conversations).filter((id) => !(id in conversations));
   const pending = sameOwner ? filterValues(state.pending, (p) => p.conversationId in conversations) : {};
@@ -412,7 +432,7 @@ export function applyMessage(state, wire, { pushed = true } = {}) {
   if (!conv) return { state, unknown: id };
   if (wire.seq <= conv.position) return { state: pushed ? notePosted(state, id, [wire], true) : state };
   if (wire.seq > conv.position + 1) return { state, gap: { conversationId: id, from: conv.position } };
-  const list = mergeBySeq(state.messages[id] ?? [], [wire]);
+  const list = mergeBySeq(state.messages[id] ?? [], withoutOthersThinking(state, conv.type, [wire]));
   const position = advance(list, wire.seq);
   const unread = conv.unread + (wire.seq > conv.readSeq && countsAsUnread(wire, state.me?.id) ? 1 : 0);
   const next = notePosted(putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list), id, [wire], pushed);
@@ -517,8 +537,8 @@ export function applyPrincipals(state, principals) {
 export function applyOlder(state, conversationId, page) {
   const conv = state.conversations[conversationId];
   if (!conv) return state;
-  const list = mergeBySeq(state.messages[conversationId] ?? [], page.messages ?? []);
   const named = applyPrincipals(state, page.principals);
+  const list = mergeBySeq(state.messages[conversationId] ?? [], withoutOthersThinking(named, conv.type, page.messages ?? []));
   const next = putConversation(named, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
   return notePosted(next, conversationId, page.messages ?? [], false);
 }
@@ -561,7 +581,7 @@ export function openWindow(state, conversationId, page, { focusSeq, n }) {
   const conv = state.conversations[conversationId];
   if (!conv) return state;
   const named = applyPrincipals(state, page.principals);
-  const messages = mergeBySeq([], page.messages ?? []);
+  const messages = mergeBySeq([], withoutOthersThinking(named, conv.type, page.messages ?? []));
   const next = settleWindow(named, conv, { n, messages, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined, focusSeq });
   return notePosted(next, conversationId, messages, false);
 }
@@ -571,7 +591,7 @@ export function applyOlderInWindow(state, conversationId, page, n) {
   const win = state.windows[conversationId];
   if (!win || win.n !== n) return state;
   const named = applyPrincipals(state, page.principals);
-  const messages = mergeBySeq(win.messages, page.messages ?? []);
+  const messages = mergeBySeq(win.messages, withoutOthersThinking(named, state.conversations[conversationId]?.type, page.messages ?? []));
   const hasOlder = page.nextBefore !== null && page.nextBefore !== undefined;
   const next = { ...named, windows: { ...named.windows, [conversationId]: { ...win, messages, hasOlder } } };
   return notePosted(next, conversationId, page.messages ?? [], false);
@@ -586,7 +606,7 @@ export function applyNewerInWindow(state, conversationId, page, n) {
   const conv = state.conversations[conversationId];
   if (!win || !conv || win.n !== n) return state;
   const named = applyPrincipals(state, page.principals);
-  const messages = mergeBySeq(win.messages, page.messages ?? []);
+  const messages = mergeBySeq(win.messages, withoutOthersThinking(named, conv.type, page.messages ?? []));
   const next = { ...win, messages };
   const settled = messages.length > win.messages.length ? settleWindow(named, conv, next) : attachWindow(named, conv, next);
   return notePosted(settled, conversationId, page.messages ?? [], false);
@@ -628,7 +648,7 @@ export function markSent(state, clientTxn, wire) {
 export function applyPosted(state, wire) {
   const conv = state.conversations[wire.conversationId];
   if (!conv) return state;
-  const list = mergeBySeq(state.messages[wire.conversationId] ?? [], [wire]);
+  const list = mergeBySeq(state.messages[wire.conversationId] ?? [], withoutOthersThinking(state, conv.type, [wire]));
   const position = wire.seq === conv.position + 1 ? advance(list, wire.seq) : conv.position;
   return putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, wire.seq) }, list);
 }
@@ -834,9 +854,10 @@ export function applyMessageUpdate(state, wire) {
   const id = wire?.conversationId;
   if (!state.conversations[id] || !Number.isSafeInteger(wire.seq)) return state;
   const held = state.messages[id] ?? [];
-  const list = replaceBySeq(held, wire);
+  const [kept] = withoutOthersThinking(state, state.conversations[id].type, [wire]);
+  const list = replaceBySeq(held, kept);
   const win = state.windows[id];
-  const shown = win ? replaceBySeq(win.messages, wire) : null;
+  const shown = win ? replaceBySeq(win.messages, kept) : null;
   let next = state;
   if (list !== held) next = { ...next, messages: { ...next.messages, [id]: list } };
   if (win && shown !== win.messages) next = { ...next, windows: { ...next.windows, [id]: { ...win, messages: shown } } };
