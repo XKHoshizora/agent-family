@@ -438,6 +438,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .device-rows svg { flex: none; }
 .member-body small, .member-body p { font-size: 13px; color: var(--ink-2); }
 .member-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+/* A row of actions under a field (帮我起草 and the persona's count, 测试连接): what sits beside a button is centred on it. */
+.field > .member-actions { align-items: center; }
 .kv { border-top: 1px solid var(--line); margin: 8px 0; }
 .kv-row { display: flex; gap: 16px; padding: 9px 4px; border-bottom: 1px solid var(--line); font-size: 15px; }
 .kv-row dt { flex: none; width: 190px; font-weight: 600; }

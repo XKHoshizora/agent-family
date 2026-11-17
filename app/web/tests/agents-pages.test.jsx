@@ -2,6 +2,7 @@
 // The Agent pages (list, create, edit, detail, pause, delete) and the "我的 Agent" group of the contacts, over the real
 // data layer with the fake transport and fake routes.
 import "./markdown-ready.js";
+import { readFileSync } from "node:fs";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
@@ -361,6 +362,17 @@ describe("帮我起草", () => {
     expect(mainText()).toContain("已填入起草的内容，创建后才会生效。");
     expect(createAgent).not.toHaveBeenCalled();
     expect(createButton().disabled).toBe(false);
+  });
+
+  it("sits in one row with the persona's character count, the count centred on the button", async () => {
+    await ready();
+    const row = inMain().getByRole("button", { name: "帮我起草" }).parentElement;
+    expect(row.matches(".field > .member-actions")).toBe(true);
+    expect(row.textContent).toContain("0 / 20000");
+    // jsdom has no layout (e2e/agents.spec.mjs measures it): here, the rule the row relies on.
+    const css = readFileSync("src/styles.css", "utf8");
+    const rule = css.split("\n").find((line) => line.startsWith(".field > .member-actions {")) ?? "";
+    expect(rule).toMatch(/align-items:\s*center/);
   });
 
   it("asks before replacing text I wrote; cancelling keeps it and sends nothing", async () => {

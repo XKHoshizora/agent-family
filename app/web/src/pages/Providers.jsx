@@ -34,6 +34,8 @@ const KEY_AGAIN = "接口地址换了域名，需要重新填写密钥。";
 const KEY_CLEARED = "为了安全，刚才填写的密钥已经清空，请重新填写。";
 /** Editing, after a refused save that carried a new key: saving again must not quietly keep the old one. */
 const KEY_NOT_SAVED = "上次填写的密钥没有保存，请重新填写；如果不想更换，点“保留原密钥”。";
+/** Saving after 保留原密钥 with nothing else changed: nothing is sent, and the owner is told the key stayed. */
+const KEY_KEPT = "没有改动，原来的密钥保持不变";
 
 const chars = (text) => [...text].length;
 const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -305,6 +307,8 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
    * saving stays blocked until a key is typed or the owner chooses 保留原密钥 (never a silent "saved" without the key).
    */
   const [keyCleared, setKeyCleared] = useState(false);
+  /** The owner chose 保留原密钥 (and has not typed a key since): a save that then changes nothing says the key was kept. */
+  const keptKey = useRef(false);
   const [touched, setTouched] = useState(false);
   const [refusal, setRefusal] = useState(null);
   const [newModel, setNewModel] = useState("");
@@ -359,11 +363,13 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     const value = event.target.value;
     setKey({ given: value.trim() !== "", problem: value.trim() ? keyFormatProblem(value) : "" });
     setKeyCleared(false);
+    keptKey.current = false;
     clearTest();
   };
   /** The owner does not want to change the key after all: the saved one stays, and saving is possible again. */
   const keepSavedKey = () => {
     setKeyCleared(false);
+    keptKey.current = true;
     keyRef.current?.focus();
   };
   /** The key leaves the page: the field is emptied (the request already holds it). */
@@ -420,6 +426,8 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     const apiKey = keyRef.current.value.trim();
     if (apiKey) patch.apiKey = apiKey;
     if (Object.keys(patch).length === 0) {
+      // (After 保留原密钥 the owner made a choice: it is confirmed, quietly, rather than met with nothing.)
+      if (keptKey.current) dispatch({ type: "toast", text: KEY_KEPT });
       onBack();
       return;
     }

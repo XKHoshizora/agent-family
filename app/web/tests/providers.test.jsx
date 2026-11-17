@@ -364,6 +364,26 @@ describe("a refused save that carried a new key", () => {
     expect(providerRow("工作用").textContent).toContain("…abcd");
   });
 
+  it("保留原密钥 with nothing else changed sends nothing, goes back and says the saved key was kept", async () => {
+    const patchProvider = await openRefusingOnce();
+    fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    await click(inMain().getByRole("button", { name: "保留原密钥" }));
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(toastText()).toBe("没有改动，原来的密钥保持不变");
+    expect(providerRow("我的 OpenAI").textContent).toContain("…abcd");
+  });
+
+  it("a form with nothing changed (no key refused) still goes back quietly", async () => {
+    const patchProvider = await openRefusingOnce();
+    await save();
+    expect(patchProvider).not.toHaveBeenCalled();
+    expect(toastText()).toBeNull();
+    expect(providerRow("我的 OpenAI").textContent).toContain("…abcd");
+  });
+
   it("an address on another origin still needs the key: 保留原密钥 is not offered", async () => {
     const patchProvider = await openRefusingOnce();
     type("接口地址", "https://other.example.com/v1");
