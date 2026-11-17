@@ -180,16 +180,13 @@ describe("adding a provider", () => {
     // Typed, it lives only in the input: never in an attribute or anywhere else on the page.
     expect(box.value).toBe(KEY);
     expect(document.documentElement.outerHTML).not.toContain(KEY);
-    type("模型名称", "claude-x");
-    await click(inMain().getByRole("button", { name: "添加模型" }));
-    await click(inMain().getByRole("button", { name: "保存" }));
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
     expect(createProvider).toHaveBeenCalledTimes(1);
     expect(createProvider).toHaveBeenCalledWith({
       name: "我的 Claude",
       protocol: "anthropic",
       baseUrl: "https://api.anthropic.com/v1",
       apiKey: KEY,
-      models: [{ name: "claude-x", vision: false, pdf: false, reasoning: false }],
     });
     // Sent: the field is empty before the answer comes.
     expect(keyBox().value).toBe("");
@@ -202,6 +199,7 @@ describe("adding a provider", () => {
     expect(mainText()).toContain("…6789");
     expect(document.documentElement.outerHTML).not.toContain(KEY);
     expect(occurrences(sentAnywhere(app.api), KEY)).toBe(1);
+    await click(within(dialog()).getByRole("button", { name: "关闭" }));
     await click(inMain().getByRole("button", { name: /返回/ }));
     expect(providerRow("我的 Claude").textContent).toContain("…6789");
     expect(document.documentElement.outerHTML).not.toContain(KEY);
@@ -213,7 +211,7 @@ describe("adding a provider", () => {
     });
     await openProviders({ providers: [], api: { createProvider } });
     await fillNew();
-    await click(inMain().getByRole("button", { name: "保存" }));
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
     expect(createProvider).toHaveBeenCalledTimes(1);
     expect(screen.getByText("你已经有一个同名的供应商了，请换个名称。")).toBeTruthy();
     expect(inMain().getByLabelText("名称").value).toBe(" 我的 Claude ");
@@ -226,16 +224,78 @@ describe("adding a provider", () => {
     const app = await openProviders({ providers: [] });
     await fillNew({ baseUrl: "http://api.example.com/v1", key: "" });
     type("名称", "");
-    await click(inMain().getByRole("button", { name: "保存" }));
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
     expect(mainText()).toContain("请填写名称");
     expect(mainText()).toContain("接口地址需要以 https:// 开头");
     expect(mainText()).toContain("请填写密钥");
     type("接口地址", "https://user:pw@api.example.com/v1");
     fireEvent.change(keyBox(), { target: { value: "short" } });
-    await click(inMain().getByRole("button", { name: "保存" }));
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
     expect(mainText()).toContain("接口地址里不能包含用户名或密码");
     expect(mainText()).toContain("密钥需要是 8 到 1000 个字符");
     expect(app.api.createProvider).not.toHaveBeenCalled();
+  });
+
+  it("create mode is step one: only the connection fields, one line about models, and 保存并选择模型 (no model controls)", async () => {
+    await openProviders({ providers: [] });
+    await click(inMain().getByRole("button", { name: /添加供应商/ }));
+    for (const label of ["名称", "接口类型", "接口地址", "密钥"]) expect(inMain().getByLabelText(label)).toBeTruthy();
+    expect(mainText()).toContain("保存后从供应商的模型列表里挑选模型。");
+    expect(mainText()).toContain("你与它的对话内容");
+    expect(inMain().getByRole("button", { name: "取消" })).toBeTruthy();
+    expect(inMain().getByRole("button", { name: "保存并选择模型" })).toBeTruthy();
+    expect(inMain().queryByRole("button", { name: "保存" })).toBeNull();
+    expect(inMain().queryByRole("button", { name: "添加模型" })).toBeNull();
+    expect(inMain().queryByRole("button", { name: "同步模型" })).toBeNull();
+    expect(inMain().queryByLabelText("模型名称")).toBeNull();
+    expect(inMain().queryByRole("heading", { name: "模型" })).toBeNull();
+    expect(mainText()).not.toContain("还没有模型");
+    expect(mainText()).not.toContain("手动添加");
+  });
+
+  it("a successful create lands in edit mode with the notice and the 同步模型 dialog open", async () => {
+    const listProviderModels = vi.fn(async () => ({ ok: true, listed: [{ name: "m-1", vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false }] }));
+    const app = await openProviders({ providers: [], api: { listProviderModels } });
+    await fillNew();
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    expect(app.api.createProvider.mock.calls[0][0]).not.toHaveProperty("models");
+    expect(document.querySelector(".main-col .profile-head h2").textContent).toBe("编辑 我的 Claude");
+    expect(mainText()).toContain("已添加。请选择要使用的模型。");
+    expect(dialog().querySelector(".modal-head h2").textContent).toBe("我的 Claude 的模型（1）");
+    expect(listProviderModels).toHaveBeenCalledWith(P2);
+  });
+
+  it("a create followed by a failing list request: the failure and the by-hand sentence are in the dialog, and adding by hand works", async () => {
+    const listProviderModels = vi.fn(async () => ({ ok: false, error: "provider_unavailable" }));
+    const app = await openProviders({ providers: [], api: { listProviderModels } });
+    await fillNew();
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    expect(mainText()).toContain("已添加。请选择要使用的模型。");
+    expect(within(dialog()).getByRole("alert").textContent).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
+    expect(dialog().textContent).toContain("有的供应商不提供模型列表，这时请手动添加。");
+    await click(within(dialog()).getByRole("button", { name: "完成" }));
+    expect(dialog()).toBeNull();
+    // Edit mode: the manual path (moved here from the old create form) saves the model.
+    type("模型名称", "claude-x");
+    await click(inMain().getByRole("button", { name: "添加模型" }));
+    expect(modelNames()).toEqual(["claude-x"]);
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P2, { models: [{ name: "claude-x", vision: false, pdf: false, reasoning: false }] });
+    expect(toastText()).toBe("供应商已保存");
+  });
+
+  it("closing the dialog with no model chosen leaves the edit page saying there is no model yet, with 同步模型 beside it", async () => {
+    const listProviderModels = vi.fn(async () => ({ ok: true, listed: [] }));
+    await openProviders({ providers: [], api: { listProviderModels } });
+    await fillNew();
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    await click(within(dialog()).getByRole("button", { name: "关闭" }));
+    expect(dialog()).toBeNull();
+    expect(mainText()).toContain("还没有模型。Agent 需要至少一个模型才能使用这个供应商。");
+    expect(inMain().getAllByRole("button", { name: "同步模型" })).toHaveLength(1);
+    await click(inMain().getByRole("button", { name: "同步模型" }));
+    expect(dialog()).not.toBeNull();
+    expect(listProviderModels).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -489,6 +549,26 @@ describe("the models of a provider", () => {
         { name: "vision-1", vision: true, pdf: true, reasoning: false, contextTokens: 128000 },
       ],
     });
+  });
+
+  it("a model's 高级 button says whether its panel is open: 高级 closed, 收起 open, with aria-expanded and its panel", async () => {
+    await openProviders();
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    const row = () => within(modelRow("plain"));
+    const button = row().getByRole("button", { name: /高级/ });
+    expect(button.textContent).toBe("高级");
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+    expect(row().queryByLabelText("上下文容量")).toBeNull();
+    await click(button);
+    const open = row().getByRole("button", { name: /收起/ });
+    expect(open.textContent).toBe("收起");
+    expect(open.getAttribute("aria-expanded")).toBe("true");
+    expect(document.getElementById(open.getAttribute("aria-controls"))).toBe(row().getByLabelText("上下文容量").closest("div[id]"));
+    await click(open);
+    const closed = row().getByRole("button", { name: /高级/ });
+    expect(closed.textContent).toBe("高级");
+    expect(closed.getAttribute("aria-expanded")).toBe("false");
+    expect(row().queryByLabelText("上下文容量")).toBeNull();
   });
 
   it("同步模型 and 测试连接 wait until a new address or key is saved", async () => {
@@ -745,16 +825,16 @@ describe("同步模型", () => {
     expect(sync().textContent).not.toContain("请用搜索缩小范围");
   });
 
-  it("after a provider is added without models, it opens by itself, once", async () => {
+  it("after a provider is added, it opens by itself, once", async () => {
     const listProviderModels = listOf(LISTING);
     await openProviders({ providers: [], api: { listProviderModels } });
     await click(inMain().getByRole("button", { name: /添加供应商/ }));
-    expect(mainText()).toContain("保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。");
+    expect(mainText()).toContain("保存后从供应商的模型列表里挑选模型。");
     type("名称", "新的");
     type("接口地址", "https://api.example.com/v1");
     fireEvent.change(keyBox(), { target: { value: KEY } });
-    await click(inMain().getByRole("button", { name: "保存" }));
-    expect(mainText()).toContain("已添加");
+    await click(inMain().getByRole("button", { name: "保存并选择模型" }));
+    expect(mainText()).toContain("已添加。请选择要使用的模型。");
     expect(sync().querySelector(".modal-head h2").textContent).toBe("新的 的模型（7）");
     expect(listProviderModels).toHaveBeenCalledWith(P2);
     await click(inSync().getByRole("button", { name: "关闭" }));
@@ -765,17 +845,10 @@ describe("同步模型", () => {
     expect(listProviderModels).toHaveBeenCalledTimes(1);
   });
 
-  it("a provider added with models of its own does not open it", async () => {
+  it("a provider that already has models, opened for editing, does not open it", async () => {
     const listProviderModels = listOf(LISTING);
-    await openProviders({ providers: [], api: { listProviderModels } });
-    await click(inMain().getByRole("button", { name: /添加供应商/ }));
-    type("名称", "新的");
-    type("接口地址", "https://api.example.com/v1");
-    fireEvent.change(keyBox(), { target: { value: KEY } });
-    type("模型名称", "mine");
-    await click(inMain().getByRole("button", { name: "添加模型" }));
-    await click(inMain().getByRole("button", { name: "保存" }));
-    expect(mainText()).toContain("已添加。现在可以测试连接，或点“同步模型”从供应商的模型列表里挑选。");
+    await openProviders({ api: { listProviderModels } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     expect(dialog()).toBeNull();
     expect(listProviderModels).not.toHaveBeenCalled();
   });

@@ -59,11 +59,13 @@ test("my own provider: added in the form, 同步模型 opens with its model list
   const section = await openProviders(page);
   await section.getByRole("button", { name: "添加供应商" }).click();
   const add = page.getByRole("region", { name: "添加模型供应商" });
-  await expect(add).toContainText("保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。");
+  await expect(add).toContainText("保存后从供应商的模型列表里挑选模型。");
+  await expect(add.getByRole("button", { name: "添加模型" })).toHaveCount(0);
   await add.getByLabel("名称", { exact: true }).fill(name);
   await add.getByLabel("接口地址", { exact: true }).fill(NEVER_CALLED);
   await add.getByLabel("密钥", { exact: true }).fill(key);
-  await add.getByRole("button", { name: "保存", exact: true }).click();
+  await add.getByRole("button", { name: "保存并选择模型", exact: true }).click();
+  await expect(editForm(page).getByRole("status").filter({ hasText: "已添加。请选择要使用的模型。" })).toBeVisible();
 
   // Added without models: 同步模型 opens by itself with the provider's own list, asked for with the key.
   const sync = page.getByRole("dialog", { name: `${name} 的模型（${STUB_MODELS.length}）` });
@@ -133,14 +135,21 @@ test("keys typed into the form are sent once and kept nowhere; a save refused wi
     await add.getByLabel("名称", { exact: true }).fill(name);
     await add.getByLabel("接口地址", { exact: true }).fill(NEVER_CALLED);
     await add.getByLabel("密钥", { exact: true }).fill(keys[i]);
-    await add.getByLabel("模型名称", { exact: true }).fill("demo-model");
-    await add.getByRole("button", { name: "添加模型" }).click();
-    await add.getByRole("button", { name: "保存", exact: true }).click();
+    await add.getByRole("button", { name: "保存并选择模型", exact: true }).click();
     const added = editForm(ann.page);
-    await expect(added.getByRole("status").filter({ hasText: "已添加。" })).toBeVisible();
+    await expect(added.getByRole("status").filter({ hasText: "已添加。请选择要使用的模型。" })).toBeVisible();
+    // The address is never called, so the model list opened by itself fails: close it and add the model by hand.
+    const listing = ann.page.getByRole("dialog");
+    await expect(listing).toBeVisible();
+    await listing.getByRole("button", { name: "关闭" }).click();
+    await expect(listing).toBeHidden();
     await expect(added.getByLabel("密钥", { exact: true })).toHaveValue("");
+    await expect(added).toContainText("还没有模型。Agent 需要至少一个模型才能使用这个供应商。");
+    await added.getByLabel("模型名称", { exact: true }).fill("demo-model");
+    await added.getByRole("button", { name: "添加模型" }).click();
     if (i === 0) await capture(ann.page, "settings-providers-form");
-    await added.getByRole("button", { name: "返回" }).click();
+    await added.getByRole("button", { name: "保存", exact: true }).click();
+    await expect(toast(ann.page, "供应商已保存")).toBeVisible();
     await expect(providerRow(section, name)).toContainText(`密钥 …${keys[i].slice(-4)}`);
   }
   await capture(ann.page, "settings-providers-list");

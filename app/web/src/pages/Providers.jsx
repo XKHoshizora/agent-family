@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { modelLevels } from "../data/model.js";
 import { Btn, Field, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
-import { ChevronLeft, Lock, Plus, Search } from "../icons.js";
+import { ChevronDown, ChevronLeft, Lock, Plus, Search } from "../icons.js";
 import { useAction } from "./useAction.js";
 import { refusalText, settled } from "./AgentForm.jsx";
 import { levelLabel } from "./ModelPicker.jsx";
@@ -39,6 +39,10 @@ const KEY_CLEARED = "为了安全，刚才填写的密钥已经清空，请重�
 const KEY_NOT_SAVED = "上次填写的密钥没有保存，请重新填写；如果不想更换，点“保留原密钥”。";
 /** Saving after 保留原密钥 with nothing else changed: nothing is sent, and the owner is told the key stayed. */
 const KEY_KEPT = "没有改动，原来的密钥保持不变";
+/** Create mode shows no model section: this one line says what comes next. */
+const CREATE_MODELS_HINT = "保存后从供应商的模型列表里挑选模型。";
+/** In the 同步模型 dialog, after a list request that failed (the sentence of the edit form's hint). */
+const FAILED_BY_HAND = "有的供应商不提供模型列表，这时请手动添加。";
 
 const chars = (text) => [...text].length;
 const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -318,8 +322,9 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
         )}
       </div>
       <div className="member-actions">
-        <Btn small aria-label={`高级设置：${model.name}`} aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={onToggle}>
-          高级
+        <Btn small aria-label={open ? `收起：${model.name}` : `高级设置：${model.name}`} aria-expanded={open} aria-controls={panelId} onClick={onToggle}>
+          {open ? "收起" : "高级"}
+          <ChevronDown size={14} aria-hidden="true" style={open ? { transform: "rotate(180deg)" } : undefined} />
         </Btn>
         <Btn small aria-label={`移除：${model.name}`} onClick={onRemove}>移除</Btn>
       </div>
@@ -439,6 +444,7 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
           <div className="sync-failed">
             <p className="field-msg" role="alert">{load.text}</p>
             <Btn small onClick={fetchList}>重试</Btn>
+            <p className="muted">{FAILED_BY_HAND}</p>
           </div>
         ))}
       {load.status === "ok" && listed.length === 0 && <p className="field-hint" role="status">供应商没有列出任何模型，可以手动添加。</p>}
@@ -609,8 +615,6 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
 
   const create = async () => {
     const body = { name: f.name.trim(), protocol: f.protocol, baseUrl: address, apiKey: keyRef.current.value.trim() };
-    const list = models.map(wireModel);
-    if (list.length > 0) body.models = list;
     const pending = run("save", () => settled(actions.createProvider(body)), () => "");
     dropKey();
     const res = await pending;
@@ -691,6 +695,12 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     closeSync();
   };
 
+  const syncButton = (
+    <Btn small disabled={busy !== null || unsaved} reason="新的接口地址或密钥还没保存" onClick={openSync}>
+      同步模型
+    </Btn>
+  );
+
   const onNewModelKey = (event) => {
     if (event.key !== "Enter") return;
     event.preventDefault();
@@ -709,7 +719,7 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
         </div>
       </header>
       <form ref={formRef} className="page-body form" onSubmit={submit} noValidate>
-        {created && <Notice tone="ok">已添加。现在可以测试连接，或点“同步模型”从供应商的模型列表里挑选。</Notice>}
+        {created && <Notice tone="ok">已添加。请选择要使用的模型。</Notice>}
         <Field label="名称" hint="只给你自己看，用来区分不同的供应商。" error={nameError}>
           <input value={f.name} onChange={set("name")} autoComplete="off" placeholder="例如：我的 OpenAI" />
         </Field>
@@ -749,48 +759,50 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
           </div>
         )}
 
-        <h3>模型</h3>
-        <p className="muted">Agent 只能使用列在这里的模型。名称要和供应商那边的模型名完全一致。</p>
-        {models.length === 0 ? (
-          <p className="muted">还没有模型。</p>
-        ) : (
-          <ul className="member-rows" aria-label="模型列表">
-            {models.map((m) => (
-              <ModelRow
-                key={m.name}
-                model={m}
-                open={open.has(m.name)}
-                error={touched ? contextErrors[m.name] : ""}
-                defaults={defaults}
-                onToggle={() => toggle(m.name)}
-                onChange={(next) => changeModel(m.name, next)}
-                onRemove={() => removeModel(m.name)}
-              />
-            ))}
-          </ul>
+        {!editing && <p className="muted">{CREATE_MODELS_HINT}</p>}
+        {editing && (
+          <>
+            <h3>模型</h3>
+            <p className="muted">Agent 只能使用列在这里的模型。名称要和供应商那边的模型名完全一致。</p>
+            {models.length === 0 ? (
+              <div className="member-actions">
+                <p className="muted">还没有模型。Agent 需要至少一个模型才能使用这个供应商。</p>
+                {syncButton}
+              </div>
+            ) : (
+              <ul className="member-rows" aria-label="模型列表">
+                {models.map((m) => (
+                  <ModelRow
+                    key={m.name}
+                    model={m}
+                    open={open.has(m.name)}
+                    error={touched ? contextErrors[m.name] : ""}
+                    defaults={defaults}
+                    onToggle={() => toggle(m.name)}
+                    onChange={(next) => changeModel(m.name, next)}
+                    onRemove={() => removeModel(m.name)}
+                  />
+                ))}
+              </ul>
+            )}
+            <Field label="模型名称" hint={`最多 ${MAX_MODELS} 个模型。`} error={newModelError}>
+              <input value={newModel} onChange={(e) => setNewModel(e.target.value)} onKeyDown={onNewModelKey} autoComplete="off" autoCapitalize="none" spellCheck={false} />
+            </Field>
+            <div className="member-actions">
+              <Btn small onClick={addModel}>添加模型</Btn>
+              {models.length > 0 && syncButton}
+            </div>
+            <p className="field-hint">同步模型会用已保存的地址和密钥。有的供应商不提供模型列表，这时请手动添加。</p>
+            {unsaved && <Reason>请先保存新的接口地址或密钥，再测试连接或同步模型。</Reason>}
+          </>
         )}
-        <Field label="模型名称" hint={`最多 ${MAX_MODELS} 个模型。`} error={newModelError}>
-          <input value={newModel} onChange={(e) => setNewModel(e.target.value)} onKeyDown={onNewModelKey} autoComplete="off" autoCapitalize="none" spellCheck={false} />
-        </Field>
-        <div className="member-actions">
-          <Btn small onClick={addModel}>添加模型</Btn>
-          {editing && (
-            <Btn small disabled={busy !== null || unsaved} reason="新的接口地址或密钥还没保存" onClick={openSync}>
-              同步模型
-            </Btn>
-          )}
-        </div>
-        <p className="field-hint">
-          {editing ? "同步模型会用已保存的地址和密钥。有的供应商不提供模型列表，这时请手动添加。" : "保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。"}
-        </p>
-        {editing && unsaved && <Reason>请先保存新的接口地址或密钥，再测试连接或同步模型。</Reason>}
 
         <Notice tone="info">{PRIVACY_TEXT}</Notice>
         {refusal && refusal.code !== "name_taken" && <Notice tone="warn">{refusal.text}</Notice>}
         <div className="form-actions">
           <Btn onClick={onBack}>取消</Btn>
           <Btn variant="primary" type="submit" disabled={busy !== null}>
-            {busy === "save" ? "保存中…" : "保存"}
+            {busy === "save" ? "保存中…" : editing ? "保存" : "保存并选择模型"}
           </Btn>
         </div>
       </form>
