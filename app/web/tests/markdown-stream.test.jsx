@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { AgentText, StreamingAgentText, STREAM_EVERY_MS, loadMarkdown } from "../src/ui/AgentText.jsx";
 import { DEADLINE_MS, markdownClient } from "../src/ui/markdownClient.js";
+import { setFrameClock } from "../src/ui/markdownView.jsx";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
 import { SLOW_TEXT_NOTE, isSlowText } from "../src/ui/slowTexts.jsx";
 import { SilentWorker, settle, useWorkers } from "./markdown-worker.js";
@@ -190,5 +191,34 @@ describe("a reply being written", () => {
     await advance(DEADLINE_MS); // late again: one in a row
     expect(container.querySelector(".md-note")).toBeNull();
     expect(container.textContent).toBe("一 二 三");
+  });
+
+  it("a tree is shown at an animation frame, and only if the text is still the one it was made for then", async () => {
+    const frames = [];
+    setFrameClock((run) => frames.push(run));
+    try {
+      const { container, rerender } = render(bubble("**一**"));
+      await settle();
+      workers[0].answer(0);
+      await settle();
+      expect(frames).toHaveLength(1);
+      expect(container.querySelector(".md")).toBeNull(); // not before the frame
+      await act(async () => frames.shift()());
+      await settle();
+      expect(container.querySelector(".md strong").textContent).toBe("一");
+      // The next tree arrives, and the text changes before its frame: that tree is dropped.
+      rerender(bubble("**一** *二*"));
+      await advance(STREAM_EVERY_MS);
+      workers[0].answer(1);
+      await settle();
+      rerender(bubble("**一** *二* 三"));
+      await settle();
+      while (frames.length > 0) await act(async () => frames.shift()());
+      await settle();
+      expect(container.querySelector(".md em")).toBeNull();
+      expect(container.textContent).toBe("一 *二* 三");
+    } finally {
+      setFrameClock((run) => queueMicrotask(run));
+    }
   });
 });

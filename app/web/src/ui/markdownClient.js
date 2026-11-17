@@ -5,9 +5,12 @@
 //     the text is shown plain, and it is remembered as slow (slowTexts.jsx) so that it is never sent again.
 //   - One text at a time, the most needed first (the caller says how much); a text no one wants any more by the time
 //     it would be sent is dropped. Texts asked for twice share one answer.
-//   - Answers are kept by the text's digest (CACHE_ENTRIES of them, CACHE_ELEMENTS elements in all, oldest out first).
-//   - No worker (none can be made, or it fails to load): every Agent text is shown plain, with no note. The main
-//     thread never runs the pipeline itself.
+//   - Answers for stored messages are kept, by the text's digest and with the text itself (a kept answer is used only
+//     for the very text it was made for): CACHE_ENTRIES of them, CACHE_ELEMENTS elements and CACHE_CHARS characters
+//     (texts and trees) in all, oldest out first. Answers for the pieces of a reply being written are not kept.
+//   - No worker (none can be made, or it fails to load): every Agent text is shown plain, with no note, and a worker
+//     is tried again RETRY_MS later (once: a try that fails waits as long again). The main thread never runs the
+//     pipeline itself.
 import { digestOf, isSlowText, rememberSlowText } from "./slowTexts.jsx";
 import { validateTree } from "./markdownTree.js";
 import { MAX_CHARS } from "./markdownLimits.js";
@@ -18,8 +21,12 @@ export const DEADLINE_MS = 250;
 export const STARTUP_MS = 15000;
 /** Workers that fail one after another (crash, not late) before workers count as unavailable. */
 const FAILURES_MAX = 3;
+/** How long workers count as unavailable before one is tried again, in milliseconds. */
+export const RETRY_MS = 60000;
 export const CACHE_ENTRIES = 200;
 export const CACHE_ELEMENTS = 60000;
+/** The characters of all kept answers: their texts and the strings of their trees. */
+export const CACHE_CHARS = 2000000;
 
 /** What a text is shown as when no tree comes: plain, with the note (`complex`, `slow`) or without (`unavailable`, `error`). */
 const COMPLEX = Object.freeze({ plain: true, reason: "complex" });
@@ -34,45 +41,61 @@ export const withNote = (result) => result?.plain === true && (result.reason ===
 const newWorker = () => new Worker(new URL("./markdownWorker.js", import.meta.url), { type: "module" });
 
 /**
- * A client. `createWorker`, `deadlineMs`, `startupMs`: tests. `request(text, { wanted, priority, remember })` resolves
- * with `{ tree, elements, rendered }`, a plain result, or DROPPED; `peek(text)` is what is known now (or null).
+ * A client. `createWorker`, `deadlineMs`, `startupMs`, `retryMs`: tests. `request(text, { wanted, priority, remember })`
+ * resolves with `{ tree, elements, rendered }`, a plain result, or DROPPED; `peek(text)` is what is known now (or null).
  */
-export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DEADLINE_MS, startupMs = STARTUP_MS } = {}) {
+export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DEADLINE_MS, startupMs = STARTUP_MS, retryMs = RETRY_MS } = {}) {
   /** The worker: `{ worker, ready, startTimer }`, or null (none yet, or ended). */
   let live = null;
-  let unavailable = false;
+  /** When a worker may be tried again (a time, by Date.now()), or null while workers are not known to fail. */
+  let unavailableUntil = null;
   let failures = 0;
-  /** Texts waiting, by digest: `{ text, digest, waiters: [{ resolve, wanted, priority, remember }] }`. */
+  /** Texts waiting, by their text: `{ text, digest, waiters: [{ resolve, wanted, priority, remember }] }`. */
   const queue = new Map();
   /** The text sent and not answered yet: `{ job, id, timer }`. */
   let inFlight = null;
   let nextId = 1;
+  /** Answers kept, by digest: `{ text, result, elements, chars }` (the oldest first). */
   const cache = new Map();
   let cachedElements = 0;
+  let cachedChars = 0;
 
-  function keep(digest, result) {
+  function forget(digest) {
     const old = cache.get(digest);
-    if (old) {
-      cachedElements -= old.elements ?? 0;
-      cache.delete(digest);
-    }
-    cache.set(digest, result);
-    cachedElements += result.elements ?? 0;
-    while (cache.size > CACHE_ENTRIES || cachedElements > CACHE_ELEMENTS) {
-      const [oldest, value] = cache.entries().next().value;
-      cache.delete(oldest);
-      cachedElements -= value.elements ?? 0;
-    }
+    if (!old) return;
+    cache.delete(digest);
+    cachedElements -= old.elements;
+    cachedChars -= old.chars;
+  }
+
+  /** Keeps the answer for `text` (`treeChars`: the characters of its tree's strings), the oldest out past a bound. */
+  function keep(text, digest, result, treeChars = 0) {
+    forget(digest);
+    const entry = { text, result, elements: result.elements ?? 0, chars: text.length + treeChars };
+    cache.set(digest, entry);
+    cachedElements += entry.elements;
+    cachedChars += entry.chars;
+    while (cache.size > CACHE_ENTRIES || cachedElements > CACHE_ELEMENTS || cachedChars > CACHE_CHARS) forget(cache.keys().next().value);
+  }
+
+  /** Whether workers count as unavailable now; once RETRY_MS have passed since they failed, one may be tried again. */
+  function unavailable() {
+    if (unavailableUntil === null) return false;
+    if (Date.now() < unavailableUntil) return true;
+    unavailableUntil = null;
+    failures = 0;
+    return false;
   }
 
   function known(text, digest) {
-    if (unavailable) return UNAVAILABLE;
+    if (unavailable()) return UNAVAILABLE;
     if (typeof text !== "string" || text.length > MAX_CHARS) return COMPLEX;
     const hit = cache.get(digest);
-    if (hit) {
+    // (The digest is where to look; the text is what was answered: another text with this digest is a miss.)
+    if (hit && hit.text === text) {
       cache.delete(digest);
       cache.set(digest, hit);
-      return hit;
+      return hit.result;
     }
     return isSlowText(text) ? SLOW : null;
   }
@@ -96,7 +119,7 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
   }
 
   function becomeUnavailable() {
-    unavailable = true;
+    unavailableUntil = Date.now() + retryMs;
     endWorker();
     if (inFlight) {
       clearTimeout(inFlight.timer);
@@ -107,7 +130,10 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
     queue.clear();
   }
 
-  /** The worker crashed or sent something unreadable: this text is plain; after FAILURES_MAX in a row, no workers. */
+  /**
+   * The worker crashed or sent something unreadable: this text is plain; a worker that had not loaded, or
+   * FAILURES_MAX in a row: no workers (until one is tried again).
+   */
   function failed(entry) {
     if (live !== entry) return;
     const loaded = entry.ready;
@@ -165,13 +191,16 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
     inFlight = null;
     failures = 0;
     let result;
+    let treeChars = 0;
     if (data.plain === true) {
       result = data.reason === "complex" ? COMPLEX : FAILED;
     } else {
       const checked = validateTree(data.tree);
       result = checked.ok ? Object.freeze({ tree: data.tree, elements: checked.elements, rendered: checked.rendered }) : COMPLEX;
+      if (checked.ok) treeChars = checked.chars;
     }
-    if (result !== FAILED) keep(job.digest, result);
+    // (Kept for a stored message's text only: the pieces of a reply being written would push other answers out.)
+    if (result !== FAILED && job.waiters.some((waiter) => waiter.remember)) keep(job.text, job.digest, result, treeChars);
     settle(job, result);
     pump();
   }
@@ -183,7 +212,7 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
     endWorker();
     if (job.waiters.some((waiter) => waiter.remember)) {
       rememberSlowText(job.text);
-      keep(job.digest, SLOW);
+      keep(job.text, job.digest, SLOW);
     }
     settle(job, SLOW);
     pump();
@@ -191,14 +220,14 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
 
   /** Sends the most needed text still wanted, when the worker is free and ready. */
   function pump() {
-    if (unavailable || inFlight) return;
-    for (const [digest, job] of queue) {
+    if (inFlight || unavailable()) return;
+    for (const [text, job] of queue) {
       job.waiters = job.waiters.filter((waiter) => {
         if (waiter.wanted()) return true;
         waiter.resolve(DROPPED);
         return false;
       });
-      if (job.waiters.length === 0) queue.delete(digest);
+      if (job.waiters.length === 0) queue.delete(text);
     }
     if (queue.size === 0) return;
     const entry = workerNow();
@@ -220,7 +249,7 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
         }
       }
     }
-    queue.delete(next.digest);
+    queue.delete(next.text);
     const id = nextId;
     nextId += 1;
     inFlight = { job: next, id, timer: setTimeout(() => late(id), deadlineMs) };
@@ -246,19 +275,23 @@ export function createMarkdownClient({ createWorker = newWorker, deadlineMs = DE
       if (now) return Promise.resolve(now);
       return new Promise((resolve) => {
         const waiter = { resolve, wanted, priority, remember };
-        if (inFlight?.job.digest === digest) {
+        if (inFlight?.job.text === text) {
           inFlight.job.waiters.push(waiter);
           return;
         }
-        const job = queue.get(digest) ?? { text, digest, waiters: [] };
+        const job = queue.get(text) ?? { text, digest, waiters: [] };
         job.waiters.push(waiter);
-        queue.set(digest, job);
+        queue.set(text, job);
         pump();
       });
     },
-    /** Whether Agent texts can be rendered at all here (false once workers have failed). */
+    /** Whether Agent texts can be rendered here now (false for RETRY_MS after workers have failed). */
     get available() {
-      return !unavailable;
+      return !unavailable();
+    },
+    /** What is kept now: `{ entries, elements, chars }` (tests). */
+    get kept() {
+      return { entries: cache.size, elements: cachedElements, chars: cachedChars };
     },
   };
 }
