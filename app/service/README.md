@@ -242,8 +242,9 @@ stale-run sweep timer unless asked (`staleRunSweep`); tests sweep with `app.stal
 - **Not found means not yours.** A conversation, message, attachment or friend request you may not see
   answers exactly like one that does not exist (`tests/enumeration.test.ts`): 404 `{"error":"not_found"}`,
   byte for byte. Two intended exceptions, for people only: any person has an avatar and can be blocked. An Agent
-  has neither for anybody else: its id on the avatar route (unless it is your Agent) and on the block routes (also
-  your own Agent's) is answered exactly as an id that does not exist.
+  has neither for anybody else: its id on the avatar route (unless it is your Agent, or you and it are both current
+  members of one conversation) and on the block routes (also your own Agent's) is answered exactly as an id that does
+  not exist.
 - **HEAD.** Every `GET` route also answers `HEAD` with the same status and headers and no body (Fastify
   runs the `GET` handler). `HEAD /api/attachments/:id` and `HEAD /api/principals/:id/avatar` are their own routes (below): they do not read the whole file.
 - **Order of checks.** Cross-site `Origin` (403) → shape of path, query and body (400) → session (401) →
@@ -365,9 +366,19 @@ whose members are exactly the owner and the Agent. Everything here is the owner'
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
 `POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
-Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner, and to
-`PUT`/`DELETE /api/blocks/:principalId` for everyone, its owner included (an Agent cannot be blocked): the answer of an
-id that does not exist, byte for byte (`tests/enumeration.test.ts`).
+Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner and whoever shares a
+conversation with it now (see below), and to `PUT`/`DELETE /api/blocks/:principalId` for everyone, its owner included
+(an Agent cannot be blocked): the answer of an id that does not exist, byte for byte (`tests/enumeration.test.ts`).
+
+An Agent is invisible to everyone but its owner and, while they share a group, to its fellow members: name, avatar,
+handle, intro, field, owner — nothing else. A member of a conversation the Agent is in finds it on the member list
+(`GET /api/conversations/:id/members`) and in the `principals` of `/api/sync`, message reads and searches with
+`ownerId`, `intro` and `field` (Wire shapes, Principal), and loads its avatar while both are current members of that
+conversation; once either membership ends, the avatar route answers as for an id that does not exist (old messages
+then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
+level, reply mode, `groupMentions`, provider, pause or persona proposals, in any response, push or error. Fellow members
+see a changed name, intro or field the next time they load principals, as for people; a changed avatar is pushed to
+them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "groupMentions": "members" | "owner", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max",
@@ -988,11 +999,12 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/principals/:id/avatar`
 
-*Session: required.* Any person's avatar, and your own Agents': their image (`image/png`, `image/jpeg` or
+*Session: required.* Any person's avatar, your own Agents', and an Agent's that is a current member of a conversation
+you are a current member of (a group you share with it now): their image (`image/png`, `image/jpeg` or
 `image/webp`), or a generated `image/svg+xml` with their initial when they have none. Headers:
 `X-Content-Type-Options: nosniff`, `Cache-Control: private, max-age=60`,
 `Content-Security-Policy: default-src 'none'; sandbox`. 404 `not_found` for an id that is no principal, and exactly
-the same for someone else's Agent.
+the same for any other Agent — one you share no conversation with, or no longer (you left, or it did).
 
 #### `HEAD /api/principals/:id/avatar`
 
@@ -1136,9 +1148,10 @@ id that does not exist. Fetch it on a `conversation` push instead of a full sync
 
 #### `GET /api/conversations/:id/members`
 
-*Session: required.* → 200 `{"members": [{"id", "handle", "displayName", "avatarVersion", "kind", "role", "isCreator"}]}`:
-current members in join order; `kind` `human` | `agent`; `isCreator` only ever true in groups. 404
-`not_found` unless you are a current member.
+*Session: required.* → 200 `{"members": [{"id", "handle", "displayName", "avatarVersion", "kind", "role", "isCreator",
+"ownerId"?, "intro"?, "field"?}]}`: current members in join order; `kind` `human` | `agent`; `isCreator` only ever true
+in groups; an Agent also carries `ownerId`, `intro` and `field` as in the Principal shape (Wire shapes), a person none
+of them. 404 `not_found` unless you are a current member.
 
 #### `POST /api/conversations/:id/members`
 
@@ -1200,7 +1213,7 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 *Session: required.* History, a page at a time.
 
 - Query: `before` (optional positive integer: only seqs below it), `limit` (1–100, default 50).
-- 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}`: up to `limit` messages you
+- 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": Principal }}`: up to `limit` messages you
   can see, the newest page first, each page ascending by seq; pass `nextBefore` as `before` for the next
   older page (`null`: nothing older you can see). `principals` names everyone these messages name — senders
   (also members who have since left), a visible quote's sender, the people in system notices — as
@@ -1209,7 +1222,7 @@ current members in join order; `kind` `human` | `agent`; `isCreator` only ever t
 
 #### `GET /api/conversations/:id/messages/:seq`
 
-*Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
+*Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": Principal }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
 you joined, not a member, no such seq — identical).
 
 #### `POST /api/conversations/:id/read`
@@ -1229,7 +1242,7 @@ The rules (matching, order, limits, timing) are under Search below.
 #### `GET /api/conversations/:id/search`
 
 *Session: required.* Query: `q` (1–100 characters, one line; see Search), `before` (optional positive integer),
-`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }}`,
+`limit` (1–50, default 20). → 200 `{"messages": WireMessage[], "nextBefore": number | null, "principals": { "<id>": Principal }}`,
 newest first (`principals` as under message history); 404 `not_found` unless you are a current member; 429 / 503 `busy` as under Search.
 
 #### `GET /api/search`
@@ -1290,7 +1303,11 @@ while the session that asked for it lasts. Limit: 30 per minute.
 
 ## Wire shapes
 
-**Principal** (in `/api/sync`'s `principals`, and the `principals` of message reads and searches): `{"id", "handle", "displayName", "avatarVersion", "kind": "human" | "agent"}`.
+**Principal** (in `/api/sync`'s `principals`, and the `principals` of message reads and searches): `{"id", "handle", "displayName", "avatarVersion", "kind": "human" | "agent", "ownerId"?, "intro"?, "field"?}`.
+`ownerId`, `intro` and `field` are an Agent's, and every Agent entry has all three (a person's has none): `ownerId` is
+its owner's principal id, `intro` and `field` its public profile as its owner set it, strings, `""` when not set. They
+come to whoever the entry is listed for (its owner, and the members of a conversation it is in, see Agents); nothing
+else of the Agent ever does. The member list (`GET /api/conversations/:id/members`) carries the same three.
 `avatarVersion` counts the principal's avatar changes (0 until the first). A client puts it in the avatar URL, `GET /api/principals/:id/avatar?v=<avatarVersion>`, so a changed avatar is a new URL and is fetched again at once (the route ignores `v`, and still answers `Cache-Control: private, max-age=60`); on a `principal` push it updates the version it shows. The smaller shapes that name a principal (`me`, the lookup, `friends` and the other `/api/social` lists, members) carry `avatarVersion` too.
 
 **Conversation** (an element of `/api/sync`'s `conversations`, and `GET /api/conversations/:id`):
@@ -1423,7 +1440,7 @@ downloads.
 {
   "me": { "id": "…", "handle": "alice", "displayName": "Alice", "avatarVersion": 0, "email": "alice@example.test" },
   "conversations": [ /* Conversation, see Wire shapes; the ones you are a current member of */ ],
-  "principals": [{ "id": "…", "handle": "bob", "displayName": "Bob", "avatarVersion": 0, "kind": "human" | "agent" }],   // by handle
+  "principals": [{ "id": "…", "handle": "bob", "displayName": "Bob", "avatarVersion": 0, "kind": "human" | "agent" }],   // Principal, by handle; an Agent adds "ownerId", "intro", "field"
   "messages": [ /* WireMessage: per conversation its newest 30 visible messages, ascending by seq */ ]
 }
 ```
@@ -1435,7 +1452,7 @@ Older history: `GET /api/conversations/:id/messages?before=`.
 
 **Principals of a read.** A message can be sent by someone your client never saw (a member who left before
 your first sync). So `GET /api/conversations/:id/messages`, `GET /api/conversations/:id/messages/:seq`
-and both search routes add `"principals": { "<id>": { "id", "handle", "displayName", "avatarVersion", "kind" } }`: the same
+and both search routes add `"principals": { "<id>": Principal }`: the same
 entries as `/api/sync`'s `principals`, keyed by id, for everyone the returned messages name (sender, a
 visible quote's sender, a system notice's participants). It is computed from the messages as rendered for
 you, so a message you cannot see, or a quote shown as `{"visible": false}`, names nobody. An empty page has
@@ -1910,7 +1927,8 @@ across the site. Accepted for now; the limits above bound how much can be learnt
   taking an Agent, provider, run or persona-proposal id (or naming a provider in a body), for a stranger and for the
   owner of a different Agent, with every mix of real and random ids; the two
   intended differences (any existing person can be blocked and has an avatar) are asserted, and that an Agent's id
-  has neither (as a random id: its avatar for anybody but its owner, blocking and unblocking it for everyone). Catch-up
+  has neither (as a random id: its avatar for anybody but its owner and whoever shares a conversation with it now — so
+  also for a member who left, or once the Agent left — blocking and unblocking it for everyone). Catch-up
   and downloads also take about as long for both (medians within a factor of 2).
 - `tests/readme.test.ts`: the route headings of this README are exactly the routes the app serves.
 - `tests/logging.test.ts`: no log line holds a WebSocket ticket, a verification token or a search term (the query

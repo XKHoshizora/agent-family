@@ -1,6 +1,7 @@
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import type { PairEvent, StoredMessage } from "../messages/model.ts";
+import { AGENT_PROFILE_COLUMNS, AGENT_PROFILE_JOIN, agentProfile, type AgentProfile, type AgentProfileRow } from "../messages/principals.ts";
 import { lockPair, orderedPair } from "../social/pair.ts";
 import { canDirectSend } from "../social/relations.ts";
 import { appendSystem } from "./system.ts";
@@ -262,7 +263,7 @@ export async function appendDirectNotice(t: Tx, e: PairEvent): Promise<StoredMes
   return appendSystem(t, id, e);
 }
 
-export interface MemberView {
+export interface MemberView extends Partial<AgentProfile> {
   id: string;
   handle: string;
   displayName: string;
@@ -276,24 +277,27 @@ export interface MemberView {
 /**
  * The current members, as `readerId` may see them: null unless the reader is a current member. One
  * statement, so the membership check and the list come from the same snapshot (a member removed
- * concurrently never receives the list as it is after their removal).
+ * concurrently never receives the list as it is after their removal). An Agent comes with its `AgentProfile` (its owner,
+ * intro and field) and nothing else of it.
  */
 export async function listMembers(q: Queryable, readerId: string, conversationId: string): Promise<MemberView[] | null> {
-  const { rows } = await q.query<{
-    id: string;
-    handle: string;
-    display_name: string;
-    avatar_version: number;
-    kind: "human" | "agent";
-    role: "speaker" | "observer";
-    is_creator: boolean;
-  }>(
+  const { rows } = await q.query<
+    {
+      id: string;
+      handle: string;
+      display_name: string;
+      avatar_version: number;
+      role: "speaker" | "observer";
+      is_creator: boolean;
+    } & AgentProfileRow
+  >(
     `select p.id, p.handle::text as handle, p.display_name, p.avatar_version, p.kind, ms.role,
-            (c.type = 'group' and c.creator_id = p.id) as is_creator
+            (c.type = 'group' and c.creator_id = p.id) as is_creator, ${AGENT_PROFILE_COLUMNS}
        from memberships me
        join conversations c on c.id = me.conversation_id
        join memberships ms on ms.conversation_id = me.conversation_id and ms.left_seq is null
        join principals p on p.id = ms.principal_id
+       ${AGENT_PROFILE_JOIN}
       where me.conversation_id = $1 and me.principal_id = $2 and me.left_seq is null
       order by ms.joined_seq, ms.id`,
     [conversationId, readerId],
@@ -308,5 +312,6 @@ export async function listMembers(q: Queryable, readerId: string, conversationId
     kind: r.kind,
     role: r.role,
     isCreator: r.is_creator,
+    ...agentProfile(r),
   }));
 }

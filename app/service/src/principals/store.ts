@@ -22,8 +22,11 @@ export async function findByHandle(db: Queryable, handle: string): Promise<Publi
 }
 
 /**
- * Whose avatar `viewerId` may load by id: any person's, and an Agent's only when the viewer owns it. For anybody else an
- * Agent's id finds nothing, exactly as an id that is no principal (Agents are invisible to everyone but their owner).
+ * Whose avatar `viewerId` may load by id: any person's, and an Agent's only when the viewer owns it or shares a
+ * conversation with it now (both are current members of it: `left_seq is null` for both). For anybody else — a
+ * stranger, or someone whose shared membership (theirs or the Agent's) has ended — an Agent's id finds nothing, exactly
+ * as an id that is no principal (an Agent is invisible to everyone but its owner and, while they share a group, its
+ * fellow members).
  */
 export async function findAvatarSubject(
   db: Queryable,
@@ -31,7 +34,13 @@ export async function findAvatarSubject(
   viewerId: string,
 ): Promise<{ id: string; displayName: string; avatarKey: string | null } | null> {
   const { rows } = await db.query<{ id: string; display_name: string; avatar_key: string | null }>(
-    "select id, display_name, avatar_key from principals where id = $1 and (kind = 'human' or owner_id = $2)",
+    `select p.id, p.display_name, p.avatar_key from principals p
+      where p.id = $1
+        and (p.kind = 'human' or p.owner_id = $2
+             or exists (select 1 from memberships them
+                          join memberships me on me.conversation_id = them.conversation_id
+                                             and me.principal_id = $2 and me.left_seq is null
+                         where them.principal_id = p.id and them.left_seq is null))`,
     [id, viewerId],
   );
   const r = rows[0];

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { onSessionEnded } from "../auth/auth.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
+import { syncPrincipalSchema } from "../messages/principals.ts";
 import { requirePrincipal } from "../session.ts";
 import { Hub } from "./hub.ts";
 import { notFound } from "../errors.ts";
@@ -38,9 +39,7 @@ const conversationEntry = z.object({
 const syncResponse = z.object({
   me: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), email: z.string() }),
   conversations: z.array(conversationEntry),
-  principals: z.array(
-    z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), kind: z.enum(["human", "agent"]) }),
-  ),
+  principals: z.array(syncPrincipalSchema),
   messages: z.array(wireMessageSchema),
 });
 

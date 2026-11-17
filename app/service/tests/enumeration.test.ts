@@ -243,7 +243,7 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     expect((await unblock(RANDOM)).status).toBe(200);
   });
 
-  it("an Agent's id: its avatar is as a random id's for everyone but its owner, and blocking or unblocking it is as a random id's for everyone", async () => {
+  it("an Agent's id: its avatar is as a random id's for everyone but its owner and whoever shares a conversation with it now, and blocking or unblocking it is as a random id's for everyone", async () => {
     const [owner, stranger, other] = [await signUp(app, "agentowner"), await signUp(app, "agentstranger"), await signUp(app, "otherowner")];
     const agent = (await api(app, owner, "POST", "/api/agents", { handle: "enum_bot", name: "Enum" })).json;
     const otherAgent = (await api(app, other, "POST", "/api/agents", { handle: "enum_other", name: "Other" })).json;
@@ -263,6 +263,35 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     const mine = await observe(owner, json("GET", `/api/principals/${agent.id}/avatar`));
     expect([mine.status, mine.type]).toEqual([200, "image/png"]);
     expect((await observe(owner, json("HEAD", `/api/principals/${agent.id}/avatar`))).status).toBe(200);
+
+    // The members of a group it is in load it too, while both of them are members. (The membership routes do not take
+    // Agents yet: it is seated directly.) Once either membership ends, its id is a random id's again for that member.
+    const [mate, leaver] = [await signUp(app, "agentmate"), await signUp(app, "agentleaver")];
+    const g = await group(app, owner, "with a bot", [mate, leaver]);
+    await db.query(
+      "insert into memberships (conversation_id, principal_id, role, joined_seq) select id, $2, 'speaker', seq from conversations where id = $1",
+      [g, agent.id],
+    );
+    const avatarOf = (method: "GET" | "HEAD") => (id: string) => json(method, `/api/principals/${id}/avatar`);
+    for (const who of [mate, leaver]) {
+      const seen = await observe(who, avatarOf("GET")(agent.id));
+      expect([who.handle, seen.status, seen.type, seen.body]).toEqual([who.handle, 200, "image/png", mine.body]);
+      expect((await observe(who, avatarOf("HEAD")(agent.id))).status).toBe(200);
+    }
+    for (const who of [stranger, other]) expect((await observe(who, avatarOf("GET")(agent.id))).status).toBe(404);
+    expect((await remove(leaver, g, leaver)).status).toBe(200);
+    for (const method of ["GET", "HEAD"] as const) {
+      expect((await indistinguishable(leaver, `left the group: ${method} avatar`, avatarOf(method), { agent: agent.id })).status).toBe(404);
+    }
+    expect((await observe(mate, avatarOf("GET")(agent.id))).status).toBe(200);
+    await db.query(
+      "update memberships set left_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2 and left_seq is null",
+      [g, agent.id],
+    );
+    for (const method of ["GET", "HEAD"] as const) {
+      expect((await indistinguishable(mate, `the Agent left: ${method} avatar`, avatarOf(method), { agent: agent.id })).status).toBe(404);
+    }
+    expect((await observe(owner, avatarOf("GET")(agent.id))).status).toBe(200);
 
     // Blocks: an Agent cannot be blocked, by anybody, its owner included; unblocking it is the no-op a random id gets.
     for (const who of [stranger, other, owner]) {

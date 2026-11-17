@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
+import { agentProfileShape } from "../messages/principals.ts";
 import { groupTitle, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { addMember, createGroup, removeMember, renameGroup } from "./groups.ts";
@@ -80,6 +81,7 @@ export function registerConversationRoutes(app: FastifyInstance): void {
                 kind: z.enum(["human", "agent"]),
                 role: z.enum(["speaker", "observer"]),
                 isCreator: z.boolean(),
+                ...agentProfileShape,
               }),
             ),
           }),
