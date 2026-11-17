@@ -66,7 +66,7 @@
 | 21 | 畸形输入不返回 5xx；新接口有限速 | `fuzz.test.ts`、各 `*-ratelimit.test.ts`、`readme.test.ts` | 通过 |
 | 22 | Agent 输出里的 HTML、脚本、远程图片、伪造链接不执行、不加载 | `markdown.spec.mjs`（真实浏览器、真实安全策略）、`markdown-hostile.test.jsx`、`markdown-links.test.jsx`、`markdown-tree.test.jsx` | 通过 |
 
-服务端全套测试最近一次完整运行是 890 项通过（服务端代码此后没有改动）；网页端单元测试 1 368 项通过；浏览器测试 33 项通过。
+服务端全套测试 923 项通过；网页端单元测试 1 368 项通过；浏览器测试 33 项通过。
 
 ### 独立核对（第 23 项）
 
