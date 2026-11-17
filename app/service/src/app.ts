@@ -176,8 +176,11 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // client that has no fields to send may well say "JSON" and send nothing. An empty body is "no body" (what a
   // request without a content type already is); anything else parses exactly as before, and a route that needs
   // fields still fails its own schema. Routes that declare their own parsers (avatar upload) are unaffected.
+  // JSON is UTF-8 (RFC 8259): a body that says it is in another charset is refused (415) rather than read as UTF-8.
   const parseJson = app.getDefaultJsonParser("error", "error");
   app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+    const charset = /;\s*charset\s*=\s*"?([^";\s]*)"?/i.exec(req.headers["content-type"] ?? "")?.[1]?.toLowerCase();
+    if (charset !== undefined && charset !== "utf-8" && charset !== "utf8") return done(new AppError(415, "invalid_request"), undefined);
     if (body === "") return done(null, undefined);
     parseJson(req, body as string, done);
   });

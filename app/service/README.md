@@ -209,7 +209,9 @@ files that insert queued runs themselves use it too, so no background worker pic
   `conversationId` + `seq` (no global message id exists).
 - **Bodies.** JSON (`Content-Type: application/json`), at most 1 MiB (413 `too_large`), except the avatar
   upload (raw image bytes) and attachment uploads (`multipart/form-data`). Another content type is 415
-  `invalid_request`, malformed JSON 400 `invalid_request`. Unknown body fields and unknown query parameters
+  `invalid_request`, and so is JSON that names a `charset` other than `utf-8`; malformed JSON is 400 `invalid_request`.
+  A route that takes no fields and says "Body: none or `{}`" also takes `null`; any other body (an array, a string,
+  text) is 400. Unknown body fields and unknown query parameters
   are ignored (dropped before the handler), except on the Better Auth endpoints, where an undeclared query
   parameter is 400. Every declared field is validated before any handler code runs: a request that does not
   fit is 400 `invalid_request`, never a 5xx. "Characters" below are Unicode code points (an emoji is one)
@@ -420,7 +422,7 @@ reasoning level are checked together when either is sent. A `persona` that diffe
 
 #### `POST /api/agents/:id/pause`
 
-*Session: required.* Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours. You can still write to a paused Agent;
+*Session: required.* Body: none or `{}`. Pauses the Agent (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours. You can still write to a paused Agent;
 it does not reply. Its reply in progress ends for good, decided in the pause's own transaction: a queued one is
 `cancelled` at once (`run` pushed), a running one is never posted — also if you resume before the model has finished —
 and ends `cancelled`; once this answers, nothing more from the Agent is posted and no further `delta` of that reply
@@ -429,11 +431,11 @@ message is, with everything before it in what the Agent is shown.
 
 #### `POST /api/agents/:id/resume`
 
-*Session: required.* Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours.
+*Session: required.* Body: none or `{}`. Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours.
 
 #### `DELETE /api/agents/:id`
 
-*Session: required.* Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
+*Session: required.* Body: none or `{}`. Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
 conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; its reply in
 progress ends as on a pause, with `agent_deleted`). → 200 Agent; 404 `not_found` unless yours.
 
@@ -625,13 +627,13 @@ the same origin keeps it). 404 comes first: someone else's provider is 404 whate
 
 #### `DELETE /api/providers/:id`
 
-*Session: required.* → 200 `{"ok": true}`; 409 `{"error": "provider_in_use", "agents": [{"id", "name"}]}` while Agents
+*Session: required.* Body: none or `{}`. → 200 `{"ok": true}`; 409 `{"error": "provider_in_use", "agents": [{"id", "name"}]}` while Agents
 of yours that are not deleted use it (deleted Agents that still name it lose their model). It is locked while checked,
 so no Agent can take it in the meantime.
 
 #### `POST /api/providers/:id/test`
 
-*Session: required.* One authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header
+*Session: required.* Body: none or `{}`. One authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header
 (`Authorization: Bearer` for the OpenAI protocols; `x-api-key` and `anthropic-version: 2023-06-01` for Anthropic;
 `x-goog-api-key` for Gemini). → 200 `{"ok": true}`, or `{"ok": false, "error": "provider_rejected" | "provider_unavailable" |
 "address_not_allowed"}`: 401 or 403 is `provider_rejected`; anything else that is not a 200 with a JSON body
@@ -640,7 +642,7 @@ records the provider id, protocol, code and the provider's HTTP status.
 
 #### `POST /api/providers/:id/models/refresh`
 
-*Session: required.* The same request; the model names in its answer (`data[].id`, or `models[].name` without the
+*Session: required.* Body: none or `{}`. The same request; the model names in its answer (`data[].id`, or `models[].name` without the
 `models/` prefix for Gemini; the one page the endpoint returns) are merged into `models`: models already there keep
 their flags, new names get the defaults, up to 100 in all. Only the first 1 000 entries of the list are looked at, so
 `listed` holds at most 1 000 names; among them, names that would not be accepted as a model name, any containing the

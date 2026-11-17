@@ -524,16 +524,21 @@ describe("fuzz", () => {
       expect(agentRoutes.map((r) => `${r.method} ${r.url}`)).toContain(known);
     }
     const SHALLOW = new Set([400, 401, 404, 405, 413, 414, 415, 429]);
+    const wrongBodies: string[] = [];
     for (const [i, route] of routes.entries()) {
       if (!isAgentRoute(route.url)) continue;
       const name = `${route.method} ${route.url}`;
       const malformedPath = sent[i]!.filter((x) => x.label.startsWith("path "));
       expect([name, malformedPath.filter((x) => x.status < 400 || x.status >= 500)]).toEqual([name, []]);
+      // So is a raw body that is no JSON object (`null` aside: "none"), and a body in a content type that is not JSON.
+      const malformedBody = sent[i]!.filter((x) => (x.label.startsWith("body ") && !x.label.startsWith("body null ")) || x.label.startsWith("content-type "));
+      wrongBodies.push(...malformedBody.filter((x) => x.status < 400 || x.status >= 500).map((x) => `${name}: ${x.label} → ${x.status}`));
       // The avatar takes image bytes, not JSON: the avatar test below reaches it.
       if (route.url === "/api/agents/:id/avatar") continue;
       const deep = sent[i]!.filter((x) => x.label.endsWith("[signed in]") && !SHALLOW.has(x.status));
       expect([name, deep.length > 0]).toEqual([name, true]);
     }
+    expect(wrongBodies).toEqual([]);
     await stillHealthy();
   });
 

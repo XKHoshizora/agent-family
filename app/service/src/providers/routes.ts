@@ -28,6 +28,8 @@ export const MAX_LISTED_NAMES = 1_000;
 // --- the routes ---------------------------------------------------------------------------------------------------
 
 const empty = z.object({});
+/** A route without fields takes no body, `{}` or `null`; anything else (an array, a string, text) is a 400. */
+const noBody = empty.nullish();
 const idParams = z.object({ id: uuidParam });
 
 const providerName = userText(1, 40, { singleLine: true });
@@ -171,7 +173,7 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
 
   api.delete(
     "/api/providers/:id",
-    { schema: { params: idParams, querystring: empty, response: { 200: z.object({ ok: z.literal(true) }) } } },
+    { schema: { params: idParams, querystring: empty, body: noBody, response: { 200: z.object({ ok: z.literal(true) }) } } },
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
@@ -186,6 +188,7 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
       schema: {
         params: idParams,
         querystring: empty,
+        body: noBody,
         response: {
           200: z.union([
             z.object({ ok: z.literal(true) }),
@@ -216,6 +219,7 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
       schema: {
         params: idParams,
         querystring: empty,
+        body: noBody,
         response: { 200: z.object({ listed: z.array(z.string()), provider: providerView }) },
       },
     },

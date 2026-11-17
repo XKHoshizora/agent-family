@@ -231,7 +231,8 @@ export function registerAgentRoutes(app: FastifyInstance): void {
   const stateRoute = (method: "post" | "delete", url: string, change: { paused: boolean } | { deleted: true }) =>
     api[method](
       url,
-      { schema: { params: idParams, querystring: empty, response: { 200: agentView } } },
+      // No fields: none, `{}`, or `null`; anything else (an array, a string, text) is a 400.
+      { schema: { params: idParams, querystring: empty, body: empty.nullish(), response: { 200: agentView } } },
       async (req) => {
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
