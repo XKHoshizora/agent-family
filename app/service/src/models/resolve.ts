@@ -56,7 +56,8 @@ export function outputLimit(replyLimit: number, contextTokens: number, level: Re
  * The call is sized for the Agent's `reasoning` level (absent, as for a persona draft: `none`): its output limit is
  * `outputLimit` at `callLevel`. It sends the thinking switch (Chat Completions only, src/models/gateway.ts) for a site
  * model whose configuration sets `thinkingSwitch`, and for a provider model its owner marked as one that reasons; and it
- * names its upstream (`site:<id>`, `provider:<id>`), under which the gateway remembers what that upstream refused.
+ * names its upstream (`site:<id>`; `provider:<id>@<baseUrl>`, so a provider's new address is a new upstream), under
+ * which the gateway remembers what that upstream refused.
  */
 export async function resolveModel(
   q: Queryable,
@@ -110,7 +111,8 @@ export async function resolveModel(
       model: listed.name,
       maxOutputTokens: outputLimit(config.providerDefaultMaxOutputTokens, listed.contextTokens, reasoning, config.reasoningAllowanceTokens),
       thinkingSwitch: listed.reasoning,
-      upstreamId: `provider:${choice.providerId}`,
+      // Its address too: what an upstream refused is forgotten when the provider is pointed elsewhere.
+      upstreamId: `provider:${choice.providerId}@${provider.baseUrl}`,
     },
     contextTokens: listed.contextTokens,
     vision: listed.vision,

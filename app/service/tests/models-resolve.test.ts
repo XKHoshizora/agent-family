@@ -102,7 +102,7 @@ describe("resolveModel", () => {
         model: "deep",
         maxOutputTokens: config().providerDefaultMaxOutputTokens + 23_976,
         thinkingSwitch: true,
-        upstreamId: `provider:${provider.id}`,
+        upstreamId: `provider:${provider.id}@https://api.example.com/v1`,
       },
       contextTokens: 50000,
       vision: true,
@@ -125,6 +125,14 @@ describe("resolveModel", () => {
     // Agent is edited, when it must be one of them).
     await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { models: [{ ...models[0], reasoningLevels: ["low"] }, models[1]] });
     expect(await resolveModel(db, config(), deep)).toMatchObject({ name: "deep", reasoningAllowed: REASONING_LEVELS });
+
+    // Its address changed: another upstream, so what the old one refused (src/models/gateway.ts `Refusals`) is not
+    // carried over to it.
+    expect((await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { baseUrl: "https://api.example.com/v2beta" })).status).toBe(200);
+    expect((await resolveModel(db, config(), deep))?.call).toMatchObject({
+      baseUrl: "https://api.example.com/v2beta",
+      upstreamId: `provider:${provider.id}@https://api.example.com/v2beta`,
+    });
 
     // The model taken off the provider's list: nothing to call.
     await api(app, owner, "PATCH", `/api/providers/${provider.id}`, { models: [models[1]] });

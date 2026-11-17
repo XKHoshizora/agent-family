@@ -41,8 +41,9 @@ export interface ModelCall {
    */
   thinkingSwitch?: boolean;
   /**
-   * Who the upstream is (`site:<id>`, `provider:<id>`): an optional field it refused is remembered under it, in this
-   * process, and left out of its later calls. Absent: nothing is remembered.
+   * Who the upstream is (`site:<id>`, `provider:<id>@<baseUrl>`: a provider whose address changed is another): an
+   * optional field it refused is remembered under it, in this process, and left out of its later calls. Absent:
+   * nothing is remembered.
    */
   upstreamId?: string;
   /** Bounds the call: aborting it ends the stream at once and closes the upstream connection. */
@@ -177,10 +178,11 @@ const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
  * a Chat Completions call with `thinkingSwitch` (body field `thinking: {type: "disabled"}` at `none`, `{type:
  * "enabled"}` at any other level, next to the level's `reasoning_effort`); `summary`, the reasoning summary a
  * Responses call asks for at any level but `none` (`reasoning.summary: "auto"`). An upstream that refuses one — a 400
- * whose body names it — is asked once more without it, and its later calls leave it out (`Refusals`).
+ * or 422 whose body names it — is asked once more without it, and once that is answered its later calls leave it out
+ * (`Refusals`).
  */
 export type OptionalField = "thinking" | "summary";
-/** How a refusal names each field: what a 400's body is looked through for (its first `REFUSAL_CHARS`). */
+/** How a refusal names each field: what a 400's or 422's body is looked through for (its first `REFUSAL_CHARS`). */
 const NAMES: Readonly<Record<OptionalField, RegExp>> = { thinking: /thinking/i, summary: /summary/i };
 const REFUSAL_CHARS = 4096;
 /** Upstreams whose refusals are remembered at most; the one used longest ago is forgotten first. */
@@ -216,12 +218,14 @@ export class Refusals {
   }
 }
 
-/** Whether `err` is the upstream refusing `field`: a 400 whose body names it. Only read here; never kept. */
+/** Whether `err` is the upstream refusing `field`: a 400 or 422 whose body names it. Only read here; never kept. */
 function refuses(err: unknown, field: OptionalField): boolean {
   const seen = new Set<unknown>();
   for (let e: unknown = err; e != null && !seen.has(e); e = (e as { cause?: unknown }).cause) {
     seen.add(e);
-    if (APICallError.isInstance(e)) return e.statusCode === 400 && NAMES[field].test((e.responseBody ?? "").slice(0, REFUSAL_CHARS));
+    if (APICallError.isInstance(e)) {
+      return (e.statusCode === 400 || e.statusCode === 422) && NAMES[field].test((e.responseBody ?? "").slice(0, REFUSAL_CHARS));
+    }
   }
   return false;
 }
@@ -364,14 +368,18 @@ type AttemptEvent = Exclude<ModelEvent, { type: "finish" }> | (Extract<ModelEven
 
 /**
  * The call as events: one attempt (`attempt`), and when the upstream refused an optional field it sent
- * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream.
- * A model that stopped for length with no answer (no text that shows anything), having reasoned — reasoning came, or
- * the upstream reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported, instead of finishing.
+ * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream
+ * once that one shows leaving it out helped (its first event came), so a refusal for some other reason, which fails
+ * the retry too, is not. A model that stopped for length with no answer (no text that shows anything), having reasoned
+ * — reasoning came, or the upstream reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported,
+ * instead of finishing.
  */
 async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refusals: Refusals): AsyncGenerator<ModelEvent> {
   try {
     call.signal.throwIfAborted();
     const left = refusals.of(call.upstreamId);
+    /** The field the first attempt was refused, left out of the retry. */
+    let refused: OptionalField | undefined;
     for (let retry = false; ; retry = true) {
       const sent = optionalFields(call, left);
       let started = false;
@@ -379,6 +387,7 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
       let thought = false;
       try {
         for await (const event of attempt(call, fetch, left)) {
+          if (!started && refused !== undefined) refusals.add(call.upstreamId, refused);
           started = true;
           if (event.type === "finish") {
             const { usage, truncated, reasoningTokens } = event;
@@ -392,10 +401,9 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
         }
         return;
       } catch (err) {
-        const refused = started || retry || call.signal.aborted ? undefined : sent.find((field) => refuses(err, field));
+        refused = started || retry || call.signal.aborted ? undefined : sent.find((field) => refuses(err, field));
         if (refused === undefined) throw err;
         left.add(refused);
-        refusals.add(call.upstreamId, refused);
       }
     }
   } catch (err) {

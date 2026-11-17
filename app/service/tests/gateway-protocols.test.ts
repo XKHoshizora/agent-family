@@ -432,10 +432,23 @@ describe("an optional field the upstream refuses (the thinking switch, the reaso
     expect(stub.requests.map((r) => r.body.reasoning)).toEqual([{ effort: "low" }]);
   });
 
-  it("a 400 that does not name the field, another status, or a field the call did not send: answered once, not retried", async () => {
+  it("a 422 naming the field is taken as a 400 is: asked once more without it, then left out", async () => {
+    stub.answer((req, res) => {
+      if (!("thinking" in req.body)) return answerCanned(req, res);
+      res.writeHead(422, { "content-type": "application/json" });
+      res.end(JSON.stringify({ detail: [{ loc: ["body", "thinking"], msg: "Extra inputs are not permitted", type: "extra_forbidden" }] }));
+    });
+    const upstreamId = "provider:strict@https://strict.example.test/v1";
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))))).toBe(true);
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null, null]);
+  });
+
+  it("a 400 or 422 that does not name the field, another status, or a field the call did not send: answered once, not retried", async () => {
     for (const [status, message, over] of [
       [400, "max_tokens is too large", { thinkingSwitch: true }],
-      [422, "Unrecognized request argument supplied: thinking", { thinkingSwitch: true }],
+      [422, "max_tokens is too large", { thinkingSwitch: true }],
+      [500, "Unrecognized request argument supplied: thinking", { thinkingSwitch: true }],
       [400, "Unrecognized request argument supplied: thinking", {}],
     ] as const) {
       stub.reset();
@@ -452,18 +465,43 @@ describe("an optional field the upstream refuses (the thinking switch, the reaso
     }
   });
 
-  it("asked once more at most: a refusal of the retry too is the call's failure", async () => {
+  it("asked once more at most: a refusal of the retry too is the call's failure, and nothing is remembered", async () => {
     stub.answer((_req, res) => {
       res.writeHead(400, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "thinking is not supported here" } }));
     });
-    const error = await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId: "provider:refuses-all" }))).then(
-      () => null,
-      (e: unknown) => e,
-    );
+    const failed = (over: Partial<ModelCall>) =>
+      collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, ...over }))).then(
+        () => null,
+        (e: unknown) => e,
+      );
+    const error = await failed({ upstreamId: "provider:refuses-all" });
     expect(error).toBeInstanceOf(ModelError);
     expect(error).toMatchObject({ code: "provider_unavailable", upstreamStatus: 400 });
     expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null]);
+    // Leaving the field out did not help: it is still sent on the upstream's next call.
+    expect(await failed({ upstreamId: "provider:refuses-all" })).toMatchObject({ upstreamStatus: 400 });
+    expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null, "disabled", null]);
+  });
+
+  it("remembered only once the retry is answered: a retry that fails for another reason leaves the field in the next call", async () => {
+    const statuses = [400, 503, 400, 200, 200];
+    stub.answer((req, res) => {
+      const status = statuses.shift()!;
+      if (status === 200) return answerCanned(req, res);
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: status === 400 ? "Unrecognized request argument supplied: thinking" : "overloaded" } }));
+    });
+    const upstreamId = "provider:flaky@https://flaky.example.test/v1";
+    const first = await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(first).toMatchObject({ code: "provider_unavailable", upstreamStatus: 503 });
+    // Asked with it again: refused, the retry answered — and from then on it is left out.
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))))).toBe(true);
+    expect(answered(await collect(gateway.stream(call("openai_chat", { thinkingSwitch: true, upstreamId }))))).toBe(true);
+    expect(stub.requests.map((r) => r.body.thinking?.type ?? null)).toEqual(["disabled", null, "disabled", null, null]);
   });
 
   it("what upstreams refused is remembered for at most MAX_REMEMBERED_UPSTREAMS of them, the one used longest ago forgotten first", () => {
