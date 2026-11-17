@@ -1,4 +1,5 @@
 import { ME } from "../data/identities.js";
+import { previewOfMarkdown } from "../ui/markdownPreview.js";
 
 export const entity = (state, id) => state.people[id] || state.agents[id] || null;
 export const isAgent = (state, id) => Boolean(state.agents[id]);
@@ -36,10 +37,14 @@ export function publishBlock(state, conv) {
   return conv.hold ?? null;
 }
 
+/**
+ * The chat list's one line for a conversation: its newest message. An Agent's text is Markdown: its markers are taken
+ * out (ui/markdownPreview.js); a person's text is shown as written.
+ */
 export function lastPreview(state, conv) {
   const last = [...conv.messages].reverse().find((x) => x.kind !== "system") || conv.messages[conv.messages.length - 1];
   if (!last) return "暂无消息";
-  let body = last.text;
+  let body = last.kind !== "system" && isAgent(state, last.from) && typeof last.text === "string" ? previewOfMarkdown(last.text) : last.text;
   if (last.kind === "image") body = "[图片]";
   if (last.kind === "file") body = "[文件]";
   const group = conv.type === "group";

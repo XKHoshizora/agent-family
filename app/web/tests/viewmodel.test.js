@@ -355,6 +355,14 @@ describe("Agents (batch 2A)", () => {
     expect(lastPreview(v, v.convs[A1])).toBe("我整理了一份设定，请查看并确认。");
   });
 
+  it("the list's preview of an Agent's message is without its Markdown markers; a person's message is as written", () => {
+    const reply = "## 三日行程\n\n- **第一天**：看 [西湖](https://example.com/west-lake)，带 `伞`";
+    const agentLast = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 2, readSeq: 2 })], messages: [wire(A1, 1, ME_ID, "排一下"), wire(A1, 2, AG1, reply)] }), { now: NOW });
+    expect(lastPreview(agentLast, agentLast.convs[A1])).toBe("三日行程 第一天：看 西湖，带 伞");
+    const mineLast = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 2, readSeq: 2 })], messages: [wire(A1, 1, AG1, "好"), wire(A1, 2, ME_ID, reply)] }), { now: NOW });
+    expect(lastPreview(mineLast, mineLast.convs[A1])).toBe(reply);
+  });
+
   it("the run and the stream bubble of the conversation", () => {
     let m = agentModel();
     m = M.applyRun(m, A1, runOf("r1", "running"));
