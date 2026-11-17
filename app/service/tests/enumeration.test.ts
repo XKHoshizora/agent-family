@@ -327,6 +327,32 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     expect((await observe(stranger, json("PUT", `/api/blocks/${owner.id}`))).status).toBe(200);
   });
 
+  it("the halt: a group you were never in, one you left, a closed one, an Agent's own conversation (yours or another's) and a direct chat (yours or others') are a random id's", async () => {
+    const [eve, alice, bob, carol] = [await signUp(app, "eve"), await signUp(app, "alice"), await signUp(app, "bob"), await signUp(app, "carol")];
+    await befriend(app, alice, eve);
+    const { conversationId: ownDirect } = await befriend(app, eve, carol);
+    const { conversationId: othersDirect } = await befriend(app, alice, bob);
+    const neverIn = await group(app, alice, "never", [bob, carol]);
+    const left = await group(app, alice, "left", [eve, bob]);
+    const closed = await group(app, alice, "closed", [eve, bob]);
+    const ownAgent = (await mustCreateAgent(app, eve)).conversationId as string;
+    const othersAgent = (await mustCreateAgent(app, alice)).conversationId as string;
+    expect((await remove(eve, left, eve)).status).toBe(200);
+    // She is the last to leave: the group closes behind her.
+    for (const who of [alice, bob, eve]) expect((await remove(who, closed, who)).status).toBe(200);
+    expect((await db.query("select closed_at is not null as closed from conversations where id = $1", [closed])).rows).toEqual([{ closed: true }]);
+
+    const halt = (id: string) => json("POST", `/api/conversations/${id}/agents/halt`);
+    const answer = await indistinguishable(eve, "halt", halt, { neverIn, left, closed, ownAgent, othersAgent, ownDirect, othersDirect, upperCase: closed.toUpperCase() });
+    expect(answer).toMatchObject({ status: 404, body: '{"error":"not_found"}' });
+    // Nothing was halted, and nobody was told anything.
+    expect((await db.query("select count(*)::int as n from conversations where agents_halted_seq is not null")).rows).toEqual([{ n: 0 }]);
+    expect((await db.query("select count(*)::int as n from messages where body ->> 'event' = 'agents_halted'")).rows).toEqual([{ n: 0 }]);
+    // Positive control: in a group she is in, she may.
+    const hers = await group(app, eve, "hers", [alice, carol]);
+    expect(await api(app, eve, "POST", `/api/conversations/${hers}/agents/halt`)).toEqual({ status: 200, json: { ok: true } });
+  });
+
   it("intended differences: any existing person can be blocked and has an avatar; a random id is 404", async () => {
 
     // Principal ids are learnt from handles (lookup, rate-limited) and from shared conversations; ids
