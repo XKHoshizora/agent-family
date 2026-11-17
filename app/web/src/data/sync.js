@@ -5,11 +5,15 @@
 // buffered pushes. While live, a gap, an unknown conversation, a `conversation` or `social` push starts
 // the same kind of repair, and pushes are buffered again until it is done.
 //
-// Agents (README "Agents and runs", "Replies"): every connection drops what was streamed before it (deltas are not
-// sent again), loads my Agents and, after its /api/sync, the run of every Agent conversation (`GET .../run`). A
-// reconnect also fetches the proposal cards still open again (`agent` pushes are not replayed either); the first
-// connection after start loads the site's models. An `agent` push fetches that Agent and its open cards; `principal`,
-// `run` and `delta` pushes are applied as they come.
+// Agents (README "Agents and runs", "Replies"). Nothing about Agents delays or breaks the connection: its critical
+// path (above) and the moment it goes live are batch 1's. Every connection drops what was streamed before it (deltas
+// are not sent again) as the socket opens. Once live it loads, in the background and each on its own: my Agents (then
+// single Agents after `agent` pushes, and the proposal cards still open — on a reconnect all of them, since `agent`
+// pushes are not replayed either), the run of every Agent conversation (`GET .../run`, a few at a time; one that
+// fails is tried once more, then shown as unknown), and on the first connection that manages it the site's models.
+// A failure there is isolated: what it was to load is loaded again by the next connection. These answers arrive while
+// pushes are applied live, so they are applied by the rules that make a late answer harmless (model.js `applyRun`).
+// `principal`, `run` and `delta` pushes are applied as they come.
 import * as routes from "../api/routes.js";
 import { openSocket } from "../api/socket.js";
 import {
@@ -28,6 +32,7 @@ import {
   applySync,
   clearStreams,
   dropAgent,
+  markRunUnknown,
   openProposals,
   positionsOf,
   setAvatarVersion,
@@ -49,6 +54,10 @@ export const CLOSE_REPLACED = 4002;
 /** After CLOSE_REPLACED wait this long (plus up to REPLACED_JITTER_MS) so tabs do not keep displacing each other. */
 export const REPLACED_DELAY_MS = 60_000;
 export const REPLACED_JITTER_MS = 30_000;
+/** At most this many `GET .../run` requests of one connection in flight at once. */
+export const RUN_FETCHES = 3;
+/** A run that could not be fetched is tried once more after this long. */
+export const RUN_RETRY_MS = 3000;
 
 const defaultTimers = {
   setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
@@ -56,6 +65,11 @@ const defaultTimers = {
   setInterval: (fn, ms) => globalThis.setInterval(fn, ms),
   clearInterval: (id) => globalThis.clearInterval(id),
 };
+
+/** conversation id → its lastSeq, for the conversations held. */
+function lastSeqsOf(model) {
+  return new Map(Object.values(model.conversations).map((c) => [c.id, c.lastSeq]));
+}
 
 /** Delay before reconnect attempt `attempt` (0-based): between 1 s and 30 s, doubling, with jitter. */
 export function backoffDelay(attempt, random = Math.random) {
@@ -112,40 +126,42 @@ export function start(
   let liveSince = null;
   let buffering = true;
   let buffer = [];
+  /**
+   * Each held conversation's lastSeq when buffering began: a buffered push may be older than the snapshot or catch-up
+   * applied before it, and a run it names may have its reply in that snapshot already (`applyRun`'s `since`).
+   */
+  let floors = new Map();
   let working = false;
   let need = freshNeeds();
   let status = null;
+  /** The Agent work of the current connection (`freshAgentNeeds`), and its background loaders (`lanes`). */
+  let agentNeed = freshAgentNeeds();
+  let lanes = null;
+  /** The site's models were loaded since start(). */
+  let modelsLoaded = false;
+  /** Pending retries of a failed run fetch. */
+  const runRetries = new Set();
 
   function freshNeeds() {
+    return { catchupAll: false, catchup: new Set(), sync: false, convs: new Set(), social: false };
+  }
+  function freshAgentNeeds() {
     return {
-      catchupAll: false,
-      catchup: new Set(),
-      sync: false,
-      convs: new Set(),
-      social: false,
       // My Agents: the whole list, single Agents (by id), and the open proposal cards of an Agent (by Agent id).
       agents: false,
       agentIds: new Set(),
       cards: new Set(),
       // Once this connection's /api/sync is in: the run of every Agent conversation (`runAll`), and on a reconnect
-      // the open cards of every Agent (`cardsAll`). `runs`: the conversations whose run to fetch.
+      // the open cards of every Agent (`cardsAll`). `runs`: the conversations whose run to fetch; `runTries`: how
+      // often a conversation's run fetch failed on this connection.
       runAll: false,
       cardsAll: false,
       runs: new Set(),
+      runTries: new Map(),
       models: false,
     };
   }
-  const hasNeeds = () =>
-    need.catchupAll ||
-    need.catchup.size > 0 ||
-    need.sync ||
-    need.convs.size > 0 ||
-    need.social ||
-    need.agents ||
-    need.agentIds.size > 0 ||
-    need.cards.size > 0 ||
-    need.runs.size > 0 ||
-    need.models;
+  const hasNeeds = () => need.catchupAll || need.catchup.size > 0 || need.sync || need.convs.size > 0 || need.social;
   const setStatus = (s) => {
     if (s === status) return;
     status = s;
@@ -159,18 +175,22 @@ export function start(
     working = false;
     buffering = true;
     buffer = [];
+    floors = lastSeqsOf(getModel());
     need = freshNeeds();
     const fresh = !getModel().synced;
     // Reconnect: catch up what is held first; sync and social are refetched every time (their pushes are not replayed).
     need.catchupAll = !fresh;
     need.sync = true;
     need.social = true;
-    // Nor are `agent`, `run` and `delta`: the Agents, every run and (on a reconnect) the open cards are fetched again,
-    // and nothing streamed before this connection is shown any more.
-    need.agents = true;
-    need.runAll = true;
-    need.cardsAll = !fresh;
-    need.models = fresh;
+    // Nor are `agent`, `run` and `delta`: once live, the Agents, every run and (on a reconnect) the open cards are
+    // fetched again, and nothing streamed before this connection is shown any more.
+    clearRunRetries();
+    agentNeed = freshAgentNeeds();
+    agentNeed.agents = true;
+    agentNeed.runAll = true;
+    agentNeed.cardsAll = !fresh;
+    agentNeed.models = !modelsLoaded;
+    lanes = { conn: my, live: false, agents: false, runs: 0, models: false };
     setModel(clearStreams(getModel()));
     setStatus(fresh ? "connecting" : "reconnecting");
     let s;
@@ -202,6 +222,7 @@ export function start(
     if (working || !alive || !socket) return;
     const my = conn;
     working = true;
+    if (!buffering) floors = lastSeqsOf(getModel());
     buffering = true;
     try {
       for (;;) {
@@ -210,17 +231,14 @@ export function start(
         else if (need.sync) await sync(my);
         else if (need.convs.size > 0) await refreshConversation(my);
         else if (need.social) await social(my);
-        else if (need.agents) await agents(my);
-        else if (need.agentIds.size > 0) await refreshAgent(my);
-        else if (need.cards.size > 0) await refreshCards(my);
-        else if (need.runs.size > 0) await refreshRun(my);
-        else if (need.models) await models(my);
         else if (buffer.length > 0) flush();
         else break;
       }
       buffering = false;
       if (liveSince === null) liveSince = now();
       setStatus("live");
+      if (lanes?.conn === my) lanes.live = true;
+      pumpAgents();
     } catch (err) {
       if (my !== conn || !alive) return;
       if (isSignedOut(err)) signedOut();
@@ -257,15 +275,16 @@ export function start(
     setModel(applySync(before, res));
     // Agent conversations: the run of each new one (of every one, the first time on this connection), the Agent of
     // one not known yet (made in another tab), and on a reconnect the cards still open.
+    // (Only noted here; they are loaded once the connection is live, see `pumpAgents`.)
     const after = getModel();
     for (const conv of Object.values(after.conversations)) {
       if (conv.type !== "agent") continue;
-      if (need.runAll || !before.conversations[conv.id]) need.runs.add(conv.id);
-      if (conv.agentId && need.cardsAll) need.cards.add(conv.agentId);
-      if (conv.agentId && !after.agents[conv.agentId]) need.agents = true;
+      if (agentNeed.runAll || !before.conversations[conv.id]) agentNeed.runs.add(conv.id);
+      if (conv.agentId && agentNeed.cardsAll) agentNeed.cards.add(conv.agentId);
+      if (conv.agentId && !after.agents[conv.agentId]) agentNeed.agents = true;
     }
-    need.runAll = false;
-    need.cardsAll = false;
+    agentNeed.runAll = false;
+    agentNeed.cardsAll = false;
   }
 
   /**
@@ -303,10 +322,80 @@ export function start(
     setModel(applySocial(getModel(), res));
   }
 
-  /** `GET /api/agents`: the whole list (it also answers every single Agent asked for meanwhile). */
+  // ───────── Agent work, in the background once the connection is live (see the header)
+
+  /**
+   * Starts the loaders that have work and are idle: one for my Agents and their cards, up to RUN_FETCHES for runs, one
+   * for the site's models. Nothing before the connection first went live.
+   */
+  function pumpAgents() {
+    const lane = lanes;
+    if (!alive || !lane || !lane.live || lane.conn !== conn) return;
+    const n = agentNeed;
+    if (!lane.agents && (n.agents || n.agentIds.size > 0 || n.cards.size > 0)) agentLane(lane);
+    while (lane.runs < RUN_FETCHES && n.runs.size > 0) runLane(lane);
+    if (!lane.models && n.models) modelsLane(lane);
+  }
+
+  /** A 401 in a loader ends the session; any other failure stays in that loader. */
+  function laneFailed(lane, err) {
+    if (lane.conn === conn && alive && isSignedOut(err)) signedOut();
+  }
+
+  async function agentLane(lane) {
+    lane.agents = true;
+    const my = lane.conn;
+    try {
+      for (;;) {
+        if (my !== conn) return;
+        if (agentNeed.agents) await agents(my);
+        else if (agentNeed.agentIds.size > 0) await refreshAgent(my);
+        else if (agentNeed.cards.size > 0) await refreshCards(my);
+        else return;
+      }
+    } catch (err) {
+      // The list could not be loaded: the next connection loads it again (single Agents and cards asked for meanwhile
+      // wait for the next push or request that wakes this loader).
+      laneFailed(lane, err);
+    } finally {
+      lane.agents = false;
+    }
+  }
+
+  async function runLane(lane) {
+    const [id] = agentNeed.runs;
+    agentNeed.runs.delete(id);
+    lane.runs += 1;
+    try {
+      await refreshRun(lane.conn, id);
+    } catch (err) {
+      laneFailed(lane, err);
+    } finally {
+      lane.runs -= 1;
+      pumpAgents();
+    }
+  }
+
+  async function modelsLane(lane) {
+    lane.models = true;
+    agentNeed.models = false;
+    try {
+      const res = await transport.getModels();
+      if (lane.conn !== conn) return;
+      setModel(applyModels(getModel(), res));
+      modelsLoaded = true;
+    } catch (err) {
+      // The list stays as it is; the next connection (and Settings, the Agent form) ask again.
+      laneFailed(lane, err);
+    } finally {
+      lane.models = false;
+    }
+  }
+
+  /** `GET /api/agents`: the whole list. A single Agent asked for while it is on its way is fetched after it. */
   async function agents(my) {
-    need.agents = false;
-    need.agentIds.clear();
+    agentNeed.agents = false;
+    agentNeed.agentIds.clear();
     const res = await transport.listAgents();
     if (my !== conn) return;
     setModel(applyAgents(getModel(), res?.agents));
@@ -314,8 +403,8 @@ export function start(
 
   /** One Agent after an `agent` push. 404: not mine any more (dropped); another failure: the whole list instead. */
   async function refreshAgent(my) {
-    const [id] = need.agentIds;
-    need.agentIds.delete(id);
+    const [id] = agentNeed.agentIds;
+    agentNeed.agentIds.delete(id);
     let agent;
     try {
       agent = await transport.getAgent(id);
@@ -323,7 +412,7 @@ export function start(
       if (my !== conn) return;
       if (isSignedOut(err)) throw err;
       if (err?.status === 404) setModel(dropAgent(getModel(), id));
-      else need.agents = true;
+      else agentNeed.agents = true;
       return;
     }
     if (my !== conn) return;
@@ -336,8 +425,8 @@ export function start(
    * cannot be fetched now keeps what it shows (confirming or discarding it fetches it again).
    */
   async function refreshCards(my) {
-    const [agentId] = need.cards;
-    need.cards.delete(agentId);
+    const [agentId] = agentNeed.cards;
+    agentNeed.cards.delete(agentId);
     const { conversationId, seqs } = openProposals(getModel(), agentId);
     for (const seq of seqs) {
       let res;
@@ -354,12 +443,11 @@ export function start(
   }
 
   /**
-   * The latest run of an Agent conversation (`GET /api/conversations/:id/run`). 404: not a member now (the
-   * conversation is checked). Another failure leaves what is held: the next `run` push brings the truth.
+   * The latest run of an Agent conversation (`GET /api/conversations/:id/run`), an answer that may be older than the
+   * pushes applied meanwhile (`applyRun`, not ordered). 404: not a member now (the conversation is checked). Another
+   * failure: tried once more after RUN_RETRY_MS; failing again, a run held as queued or running is shown as unknown.
    */
-  async function refreshRun(my) {
-    const [id] = need.runs;
-    need.runs.delete(id);
+  async function refreshRun(my, id) {
     if (!getModel().conversations[id]) return;
     let res;
     try {
@@ -367,31 +455,41 @@ export function start(
     } catch (err) {
       if (my !== conn) return;
       if (isSignedOut(err)) throw err;
-      if (err?.status === 404) need.convs.add(id);
+      if (err?.status === 404) {
+        need.convs.add(id);
+        work();
+        return;
+      }
+      const tries = (agentNeed.runTries.get(id) ?? 0) + 1;
+      agentNeed.runTries.set(id, tries);
+      if (tries < 2) retryRunLater(my, id);
+      else setModel(markRunUnknown(getModel(), id));
       return;
     }
     if (my !== conn) return;
-    if (res && "run" in res) setModel(applyRun(getModel(), id, res.run));
+    agentNeed.runTries.delete(id);
+    if (res && "run" in res) setModel(applyRun(getModel(), id, res.run, { ordered: false }));
   }
 
-  /** The site's models (`GET /api/models`). On failure the list stays as it is; Settings and the Agent form ask again. */
-  async function models(my) {
-    need.models = false;
-    let res;
-    try {
-      res = await transport.getModels();
-    } catch (err) {
-      if (my === conn && isSignedOut(err)) throw err;
-      return;
-    }
-    if (my !== conn) return;
-    setModel(applyModels(getModel(), res));
+  function retryRunLater(my, id) {
+    const timer = timers.setTimeout(() => {
+      runRetries.delete(timer);
+      if (my !== conn || !alive) return;
+      agentNeed.runs.add(id);
+      pumpAgents();
+    }, RUN_RETRY_MS);
+    runRetries.add(timer);
+  }
+
+  function clearRunRetries() {
+    for (const timer of runRetries) timers.clearTimeout(timer);
+    runRetries.clear();
   }
 
   function flush() {
     const events = buffer;
     buffer = [];
-    for (const event of events) handle(event);
+    for (const event of events) handle(event, floors);
   }
 
   function onEvent(event) {
@@ -401,9 +499,11 @@ export function start(
     }
     handle(event);
     if (hasNeeds()) work();
+    pumpAgents();
   }
 
-  function handle(event) {
+  /** Applies one push; `buffered`: the floors of the buffering it waited through (see `floors`), else null. */
+  function handle(event, buffered = null) {
     const model = getModel();
     switch (event.type) {
       case "message": {
@@ -424,7 +524,7 @@ export function start(
         setModel(applyGone(model, event.id));
         need.catchup.delete(event.id);
         need.convs.delete(event.id);
-        need.runs.delete(event.id);
+        agentNeed.runs.delete(event.id);
         return;
       case "social":
         need.social = true;
@@ -439,15 +539,19 @@ export function start(
       case "agent":
         // One of my Agents changed, or one of its proposals was made, confirmed or discarded.
         if (typeof event.id !== "string") return;
-        need.agentIds.add(event.id);
-        need.cards.add(event.id);
+        agentNeed.agentIds.add(event.id);
+        agentNeed.cards.add(event.id);
         return;
       case "principal":
         setModel(setAvatarVersion(model, event.id, event.avatarVersion));
         return;
-      case "run":
-        if (typeof event.conversationId === "string" && event.run) setModel(applyRun(model, event.conversationId, event.run));
+      case "run": {
+        if (typeof event.conversationId !== "string" || !event.run) return;
+        // A conversation not held when buffering began has no floor: anything of the Agent held counts (no bubble).
+        const since = buffered ? buffered.get(event.conversationId) ?? 0 : undefined;
+        setModel(applyRun(model, event.conversationId, event.run, { since }));
         return;
+      }
       case "delta":
         setModel(applyDelta(model, event));
         return;
@@ -493,6 +597,9 @@ export function start(
     socket = null;
     buffer = [];
     need = freshNeeds();
+    agentNeed = freshAgentNeeds();
+    lanes = null;
+    clearRunRetries();
     working = false;
   }
 
@@ -513,7 +620,8 @@ export function start(
     },
     /**
      * Asks for fresh state after an action; done right away when live, else on the next connection. `agents`: my
-     * Agents again; `agent`: one Agent and its open proposal cards (as an `agent` push does); `run`: a conversation's run.
+     * Agents again; `agent`: one Agent and its open proposal cards (as an `agent` push does); `run`: a conversation's
+     * run (these three in the background, see the header).
      */
     request({ sync = false, social = false, conversation = null, agents = false, agent = null, run = null } = {}) {
       if (!alive) return;
@@ -523,13 +631,14 @@ export function start(
         if (getModel().conversations[conversation]) need.convs.add(conversation);
         else need.sync = true;
       }
-      if (agents) need.agents = true;
+      if (agents) agentNeed.agents = true;
       if (agent) {
-        need.agentIds.add(agent);
-        need.cards.add(agent);
+        agentNeed.agentIds.add(agent);
+        agentNeed.cards.add(agent);
       }
-      if (run) need.runs.add(run);
+      if (run) agentNeed.runs.add(run);
       if (!buffering) work();
+      pumpAgents();
     },
     /** Called when a request of the data layer got a 401. */
     signedOut,

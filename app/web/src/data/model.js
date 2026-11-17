@@ -15,12 +15,20 @@
 // It is dropped when the person goes back to the newest messages, and absorbed into the held list as soon as it
 // reaches it (see `settleWindow`).
 //
-// Agents (batch 2A). `runs[conversationId]` is the latest reply of the Agent of that conversation (the service's Run,
-// plus `posted: true` once the reply's message is held). `streams[runId]` is the text and reasoning streamed so far
-// (`delta` pushes) of a run that is running and not posted yet: transient, never a message, never in search, unread or
-// the preview, and gone when the message, a terminal `run`, a `gone` or a reconnect arrives. `avatarVersions[id]` is
-// the version put in a principal's avatar URL: set by /api/sync and `principal` pushes, raised by every other answer that
-// names one, and for my own avatar also a newer cache-buster the moment I change it (`bumpAvatar`).
+// Agents (batch 2A). `runs[conversationId]` is the latest reply of the Agent of that conversation: the service's Run plus
+// what the client knows of it —
+//   `since`   the conversation's lastSeq when a push of this connection first named the run: its reply is the first
+//             message of the Agent after it (pushes are in order with the conversation's messages);
+//   `joined`  known only from an answer (`GET .../run`) or from before this connection, not in order with the pushes: it
+//             is never streamed (its text so far is not sent again, and its reply may already be held);
+//   `posted`  its reply (the stored message) is held;
+//   `unknown` its state could not be fetched (a queued or running run that may long have ended): not shown.
+// `streams[runId]` is the text and reasoning streamed so far (`delta` pushes) of a run that is running, in order and not
+// posted: transient, never a message, never in search, unread or the preview, and gone when the message, a terminal
+// `run`, a `gone` or a reconnect arrives. `dismissed[conversationId]` is the failed run I closed: an answer that still
+// carries it does not bring it back. `avatarVersions[id]` is the version put in a principal's avatar URL: set by
+// /api/sync and `principal` pushes, raised by every other answer that names one, and for my own avatar also a newer
+// cache-buster the moment I change it (`bumpAvatar`).
 
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
@@ -61,6 +69,8 @@ export function initial() {
     providerDefaults: null,
     /** conversation id → its latest run (see the header), or null when there is none to show. */
     runs: {},
+    /** conversation id → the id of the failed run I dismissed (see the header). */
+    dismissed: {},
     /** run id → {text, reasoning} streamed so far (see the header). */
     streams: {},
   };
@@ -194,13 +204,19 @@ export function setAvatarVersion(state, principalId, version) {
 const fromAgent = (conv, m) => conv.type === "agent" && Boolean(conv.agentId) && m.senderId === conv.agentId && m.kind !== "system";
 
 /**
- * Messages of the Agent arrived while its run is running: that is the run's reply (one run at a time, and the service
- * posts it before the run ends). Its stream is dropped and the run is marked posted, so no later delta brings it back.
+ * Messages arrived while the conversation's run is running; is one of them its reply (one run at a time, posted before
+ * the run ends)? Then its stream is dropped and the run is marked posted, so no later delta brings the bubble back.
+ * A pushed message (`pushed`: a push, also a duplicate of one already held) is in order with the run's push: any
+ * message of the Agent after it is the reply. Messages from a snapshot or a page (sync, catch-up, history) are not in
+ * that order: there the reply is a message of the Agent after the run's `since`.
  */
-function notePosted(state, conversationId, arrived) {
+function notePosted(state, conversationId, arrived, pushed) {
   const conv = state.conversations[conversationId];
   const run = state.runs[conversationId];
-  if (!conv || !run || run.status !== "running" || run.posted || !arrived.some((m) => fromAgent(conv, m))) return state;
+  if (!conv || !run || run.status !== "running" || run.posted) return state;
+  const replies = arrived.filter((m) => fromAgent(conv, m));
+  const isReply = pushed ? replies.length > 0 : typeof run.since === "number" && replies.some((m) => m.seq > run.since);
+  if (!isReply) return state;
   return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
 }
 
@@ -283,7 +299,7 @@ export function applySync(state, sync) {
   const pending = sameOwner ? filterValues(state.pending, (p) => p.conversationId in conversations) : {};
   const drafts = sameOwner ? filterValues(state.drafts, (_text, id) => id in conversations) : {};
   const detached = filterValues(state.windows, (_w, id) => id in conversations);
-  // A conversation that is gone takes its run and stream with it.
+  // A conversation that is gone takes its run, stream and dismissed run with it.
   const runs = filterValues(state.runs, (_run, id) => id in conversations);
   const runIds = new Set(Object.values(runs).map((r) => r?.id));
   const streams = filterValues(state.streams, (_s, runId) => runIds.has(runId));
@@ -302,31 +318,31 @@ export function applySync(state, sync) {
     stays: bumpStays(state.stays, dropped),
     runs,
     streams,
+    dismissed: filterValues(state.dismissed, (_runId, id) => id in conversations),
   };
   // The Agent's reply may have come with this snapshot (its push then reads as a duplicate).
-  for (const id of Object.keys(runs)) {
-    const prev = state.conversations[id];
-    if (prev) next = notePosted(next, id, (windows.get(id) ?? []).filter((m) => m.seq > prev.position));
-  }
+  for (const id of Object.keys(runs)) next = notePosted(next, id, windows.get(id) ?? [], false);
   return next;
 }
 
 /**
  * Applies one pushed message by the seq rule: `seq <= position` is a duplicate; `position + 1` is
  * appended; beyond that is a gap to repair with catch-up from the position (nothing is appended).
+ * A duplicate still counts as the Agent's reply in push order (its copy came with a snapshot first).
+ * `pushed: false` for a message of a catch-up page (not in push order).
  * @returns {{state, gap?: {conversationId: string, from: number}, unknown?: string}}
  */
-export function applyMessage(state, wire) {
+export function applyMessage(state, wire, { pushed = true } = {}) {
   const id = wire.conversationId;
   const conv = state.conversations[id];
   if (!conv) return { state, unknown: id };
-  if (wire.seq <= conv.position) return { state };
+  if (wire.seq <= conv.position) return { state: pushed ? notePosted(state, id, [wire], true) : state };
   if (wire.seq > conv.position + 1) return { state, gap: { conversationId: id, from: conv.position } };
   const list = mergeBySeq(state.messages[id] ?? [], [wire]);
   const position = advance(list, wire.seq);
   const unread = conv.unread + (wire.seq > conv.readSeq && countsAsUnread(wire, state.me?.id) ? 1 : 0);
   const next = putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list);
-  return { state: notePosted(next, id, [wire]) };
+  return { state: notePosted(next, id, [wire], pushed) };
 }
 
 /**
@@ -345,7 +361,7 @@ export function applyCatchup(state, response) {
       const later = (next.messages[conv.id] ?? []).filter((m) => m.seq >= wire.seq);
       next = startNewStay(putConversation(next, { ...conv, position: wire.seq - 1, hasOlder: false }, later), conv.id);
     }
-    next = applyMessage(next, wire).state;
+    next = applyMessage(next, wire, { pushed: false }).state;
   }
   return { state: next };
 }
@@ -367,6 +383,7 @@ export function applyGone(state, conversationId) {
     stays: bumpStays(state.stays, [conversationId]),
     runs: without(state.runs, conversationId),
     streams: run ? without(state.streams, run.id) : state.streams,
+    dismissed: without(state.dismissed, conversationId),
   };
 }
 
@@ -423,7 +440,8 @@ export function applyOlder(state, conversationId, page) {
   if (!conv) return state;
   const list = mergeBySeq(state.messages[conversationId] ?? [], page.messages ?? []);
   const named = applyPrincipals(state, page.principals);
-  return putConversation(named, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
+  const next = putConversation(named, { ...conv, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined }, list);
+  return notePosted(next, conversationId, page.messages ?? [], false);
 }
 
 // ───────── the detached window around a search hit
@@ -465,7 +483,8 @@ export function openWindow(state, conversationId, page, { focusSeq, n }) {
   if (!conv) return state;
   const named = applyPrincipals(state, page.principals);
   const messages = mergeBySeq([], page.messages ?? []);
-  return settleWindow(named, conv, { n, messages, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined, focusSeq });
+  const next = settleWindow(named, conv, { n, messages, hasOlder: page.nextBefore !== null && page.nextBefore !== undefined, focusSeq });
+  return notePosted(next, conversationId, messages, false);
 }
 
 /** An older page for window `n`: prepended to it. An answer for another window, or none, changes nothing. */
@@ -475,7 +494,8 @@ export function applyOlderInWindow(state, conversationId, page, n) {
   const named = applyPrincipals(state, page.principals);
   const messages = mergeBySeq(win.messages, page.messages ?? []);
   const hasOlder = page.nextBefore !== null && page.nextBefore !== undefined;
-  return { ...named, windows: { ...named.windows, [conversationId]: { ...win, messages, hasOlder } } };
+  const next = { ...named, windows: { ...named.windows, [conversationId]: { ...win, messages, hasOlder } } };
+  return notePosted(next, conversationId, page.messages ?? [], false);
 }
 
 /**
@@ -489,7 +509,8 @@ export function applyNewerInWindow(state, conversationId, page, n) {
   const named = applyPrincipals(state, page.principals);
   const messages = mergeBySeq(win.messages, page.messages ?? []);
   const next = { ...win, messages };
-  return messages.length > win.messages.length ? settleWindow(named, conv, next) : attachWindow(named, conv, next);
+  const settled = messages.length > win.messages.length ? settleWindow(named, conv, next) : attachWindow(named, conv, next);
+  return notePosted(settled, conversationId, page.messages ?? [], false);
 }
 
 /** Back to the newest messages: the window is dropped. */
@@ -767,33 +788,67 @@ function wireRun(run) {
   return out;
 }
 
+const isActive = (status) => status === "queued" || status === "running";
+
+/** Whether a message of the conversation's Agent after `since` is held (or shown in a detached window). */
+function heldReplyAfter(state, conversationId, since) {
+  const conv = state.conversations[conversationId];
+  const shown = [...(state.messages[conversationId] ?? []), ...(state.windows[conversationId]?.messages ?? [])];
+  return shown.some((m) => m.seq > since && fromAgent(conv, m));
+}
+
 /**
- * The latest run of a held conversation (a `run` push, `GET .../run`, a retry's answer), or null for none. The same
- * run's status only moves forward (an answer may overtake a push) and stays posted; a run that is not running has no
- * stream; a newer run ends the older one's stream.
+ * The latest run of a held conversation, or null for none. `ordered`: it comes in order with this connection's pushes
+ * (a `run` push; the answer of my own retry that replaces the failed run it retried). Otherwise it is an answer
+ * (`GET .../run`) that may be older than the pushes already applied, so:
+ * - it never replaces a run named by a push of this connection with another run or with none (a `null` read before
+ *   that run existed would hide it; a failure dismissed in another tab stays here until dismissed here or reconnected);
+ * - the run it brings is `joined` (never streamed: its text so far is not sent again, its reply may already be held).
+ * An ordered run gets its `since`: the conversation's lastSeq now, or for a push that waited while a snapshot was
+ * fetched (`since` given) the lastSeq from before that snapshot; a message of the Agent already held after it is the
+ * run's reply (the snapshot brought it), so the run is posted at once.
+ * Either way the same run's status only moves forward and it keeps what is known of it (`posted`, `since`); a failed
+ * run I dismissed does not come back; a run that is not running, or not in order, has no stream; a newer run ends the
+ * older one's stream.
  */
-export function applyRun(state, conversationId, run) {
-  if (!state.conversations[conversationId]) return state;
+export function applyRun(state, conversationId, run, { ordered = true, since } = {}) {
+  const conv = state.conversations[conversationId];
+  if (!conv) return state;
   if (run !== null && !(run && typeof run.id === "string" && typeof run.status === "string")) return state;
   const prev = state.runs[conversationId] ?? null;
   let next = run === null ? null : wireRun(run);
+  if (next && next.status === "failed" && state.dismissed[conversationId] === next.id) next = null;
+  if (!ordered && prev && !prev.joined && (next === null || next.id !== prev.id)) return state;
+  const from = typeof since === "number" ? since : conv.lastSeq;
+  let placed = false;
   if (next && prev && prev.id === next.id) {
     if (runRank(next.status) < runRank(prev.status)) return state;
-    if (prev.posted) next = { ...next, posted: true };
+    if (prev.posted) next.posted = true;
+    if (ordered && prev.joined) placed = true; // from now on in order with the pushes
+    else if (prev.joined) next.joined = true;
+    else next.since = prev.since;
+  } else if (next) {
+    if (ordered) placed = true;
+    else next.joined = true;
+  }
+  if (placed) {
+    next.since = from;
+    if (!next.posted && heldReplyAfter(state, conversationId, from)) next.posted = true;
   }
   let streams = state.streams;
   if (prev && prev.id !== next?.id) streams = without(streams, prev.id);
-  if (next && next.status !== "running") streams = without(streams, next.id);
+  if (next && (next.status !== "running" || next.joined)) streams = without(streams, next.id);
   return { ...state, runs: { ...state.runs, [conversationId]: next }, streams };
 }
 
 /**
- * A `delta` push: appended to the stream of the conversation's run only while that run is running and its message has
- * not arrived; anything else (an unknown or finished run, another conversation's) is ignored.
+ * A `delta` push: appended to the stream of the conversation's run only while that run is running, in order with this
+ * connection's pushes, and its message has not arrived; anything else (an unknown, joined or finished run, another
+ * conversation's) is ignored.
  */
 export function applyDelta(state, { conversationId, runId, text, reasoning } = {}) {
   const run = state.runs[conversationId];
-  if (!run || run.id !== runId || run.status !== "running" || run.posted) return state;
+  if (!run || run.id !== runId || run.status !== "running" || run.posted || run.joined || run.unknown) return state;
   const addText = typeof text === "string" ? text : "";
   const addReasoning = typeof reasoning === "string" ? reasoning : "";
   if (!addText && !addReasoning) return state;
@@ -801,9 +856,43 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
   return { ...state, streams: { ...state.streams, [runId]: { text: prev.text + addText, reasoning: prev.reasoning + addReasoning } } };
 }
 
-/** A new connection: what was streamed before it is not sent again, so every stream goes. */
+/**
+ * A new connection: what was streamed before it is not sent again, so every stream goes; and every run held is known
+ * only from before it (`joined`) until a push of this connection names it again.
+ */
 export function clearStreams(state) {
-  return Object.keys(state.streams).length === 0 ? state : { ...state, streams: {} };
+  const settled = Object.values(state.runs).every((r) => !r || r.joined);
+  if (settled && Object.keys(state.streams).length === 0) return state;
+  const runs = {};
+  for (const [id, r] of Object.entries(state.runs)) {
+    if (!r || r.joined) runs[id] = r;
+    else {
+      const { since: _since, ...rest } = r;
+      runs[id] = { ...rest, joined: true };
+    }
+  }
+  return { ...state, runs, streams: {} };
+}
+
+/**
+ * The run of a conversation could not be fetched: a queued or running run held from before may long have ended, so
+ * it is not shown as replying any more (`unknown`) until a push or an answer says what it is.
+ */
+export function markRunUnknown(state, conversationId) {
+  const run = state.runs[conversationId];
+  if (!run || !isActive(run.status) || run.unknown) return state;
+  return { ...state, runs: { ...state.runs, [conversationId]: { ...run, unknown: true } }, streams: without(state.streams, run.id) };
+}
+
+/** I closed the failure notice of `runId`: it is not shown again, also when a late answer still carries it. */
+export function dismissRunOf(state, conversationId, runId) {
+  if (!state.conversations[conversationId] || typeof runId !== "string") return state;
+  const held = state.runs[conversationId];
+  return {
+    ...state,
+    dismissed: { ...state.dismissed, [conversationId]: runId },
+    runs: held?.id === runId ? { ...state.runs, [conversationId]: null } : state.runs,
+  };
 }
 
 // ───────── providers, usage, the site's models

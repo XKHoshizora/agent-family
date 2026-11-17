@@ -50,6 +50,7 @@ function orders(items) {
 /** The reply's stored message (seq 3) and the stream bubble are never both shown. */
 function checkAtMostOne(state, label) {
   const conv = view(state).convs[A1];
+  if (!conv) return;
   const stored = conv.messages.filter((m) => m.seq === 3).length;
   if (conv.stream) expect(stored, `${label}: bubble and message at once`).toBe(0);
   expect(conv.stream?.text ?? "", label).not.toContain("鬼");
@@ -144,6 +145,213 @@ describe("a reply's stream (Review Focus 1 and 2)", () => {
     const resynced = M.applySync(streaming, syncOf([direct(D1, ANN)], [], PRINCIPALS));
     expect(resynced.runs).toEqual({});
     expect(resynced.streams).toEqual({});
+  });
+});
+
+describe("a reply's stream across reconnects, duplicates, a follow-up run and gone", () => {
+  const R1_TEXT = "你好";
+  const R2_TEXT = "嗯";
+  // The service's own order for A1 (it holds the greeting, seq 1, and my message, seq 2): R1 runs, I write once more
+  // while it does (seq 3), R1 posts its reply (seq 4) and ends, and the follow-up R2 answers seq 3 (its reply: seq 5).
+  // The old reply (seq 4) lies after what R2 covers: the case a "newer than what was read" rule gets wrong.
+  const T = [
+    { run: runOf(R1, "running") },
+    { delta: { runId: R1, text: "你" } },
+    { message: wire(A1, 3, ME_ID, "还有") },
+    { delta: { runId: R1, text: "好" } },
+    { message: wire(A1, 4, AG1, R1_TEXT) },
+    { run: runOf(R1, "done") },
+    { run: runOf(R2, "running") },
+    { delta: { runId: R2, text: R2_TEXT } },
+    { message: wire(A1, 5, AG1, R2_TEXT) },
+    { run: runOf(R2, "done") },
+  ];
+  const REPLY_SEQ = { [R1]: 4, [R2]: 5 };
+  const FULL = { [R1]: R1_TEXT, [R2]: R2_TEXT };
+  const BASE = [wire(A1, 1, AG1, "你好，我是小助手"), wire(A1, 2, ME_ID, "在吗")];
+
+  /** What the service holds after the first `k` events: the messages, and the run `GET .../run` answers. */
+  function serverAfter(k) {
+    const messages = [...BASE, ...T.slice(0, k).filter((e) => e.message).map((e) => e.message)];
+    const runs = T.slice(0, k).filter((e) => e.run);
+    return { messages, run: runs.length ? runs.at(-1).run : null };
+  }
+
+  function push(state, e, since) {
+    if (e.run) return M.applyRun(state, A1, e.run, { since });
+    if (e.delta) return M.applyDelta(state, { conversationId: A1, ...e.delta });
+    return M.applyMessage(state, e.message).state;
+  }
+
+  /** Never the bubble and the stored reply of one run at once; a bubble never starts mid-reply or mixes replies. */
+  function check(state, label) {
+    const conv = view(state).convs[A1];
+    if (!conv?.stream) return;
+    const { runId, text } = conv.stream;
+    expect(conv.messages.some((m) => m.seq === REPLY_SEQ[runId]), `${label}: bubble and message of ${runId}`).toBe(false);
+    expect(FULL[runId].startsWith(text), `${label}: bubble "${text}" of ${runId}`).toBe(true);
+  }
+
+  it("live on one connection with a reconnect anywhere: buffered duplicates, a late GET .../run answer, the follow-up run", () => {
+    let cases = 0;
+    const n = T.length;
+    for (let L = 0; L <= n; L += 1) {
+      // Pushes L..o-1 are lost while disconnected; the snapshot is read after s events; pushes o..b-1 wait in the buffer
+      // (since: the lastSeq before the snapshot); GET .../run is read after g events and answered after `a` of the pushes
+      // from o (never before the buffer is applied: it is asked for once the connection is live).
+      for (let o = L; o <= Math.min(L + 2, n); o += 1) {
+        for (let s = o; s <= Math.min(o + 2, n); s += 1) {
+          for (let b = s; b <= Math.min(s + 2, n); b += 1) {
+            for (const g of new Set([b, n])) {
+              for (let a = b - o; a <= n - o; a += 1) {
+                const label = `L${L} o${o} s${s} b${b} g${g} a${a}`;
+                let state = loaded();
+                for (const e of T.slice(0, L)) {
+                  state = push(state, e);
+                  check(state, `${label} old`);
+                }
+                state = M.clearStreams(state);
+                check(state, `${label} reconnect`);
+                const floor = state.conversations[A1].lastSeq;
+                const snap = serverAfter(s);
+                state = M.applySync(state, syncOf([agentConv(A1, AG1, { lastSeq: snap.messages.at(-1).seq }), direct(D1, ANN)], snap.messages, [...PRINCIPALS, agentPrincipal()]));
+                check(state, `${label} snapshot`);
+                const rest = T.slice(o);
+                for (let i = 0; i <= rest.length; i += 1) {
+                  if (i === a) {
+                    state = M.applyRun(state, A1, serverAfter(g).run, { ordered: false });
+                    check(state, `${label} answer`);
+                  }
+                  if (i === rest.length) break;
+                  state = push(state, rest[i], o + i < b ? floor : undefined);
+                  check(state, `${label} push ${o + i}`);
+                }
+                const conv = view(state).convs[A1];
+                for (const seq of [3, 4, 5]) expect(conv.messages.filter((m) => m.seq === seq), `${label} seq ${seq}`).toHaveLength(1);
+                expect(state.streams, label).toEqual({});
+                expect(conv.stream, label).toBeNull();
+                expect(conv.run, label).toMatchObject({ id: R2, status: "done" });
+                cases += 1;
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(cases).toBeGreaterThan(1000);
+  });
+
+  it("a duplicate push of an earlier reply, at any point, never brings a bubble back or doubles a message", () => {
+    for (let at = 5; at <= T.length; at += 1) {
+      let state = loaded();
+      const steps = [...T.slice(0, at), { message: T[4].message }, ...T.slice(at)];
+      for (const e of steps) {
+        state = push(state, e);
+        check(state, `duplicate after ${at}`);
+      }
+      expect(view(state).convs[A1].messages.filter((m) => m.seq === 4)).toHaveLength(1);
+      expect(state.streams).toEqual({});
+    }
+  });
+
+  it("gone at any point of every order clears the run and its stream, and nothing after it comes back", () => {
+    for (const tail of orders(["d1", "d2", "d3", "message", "done"])) {
+      for (let at = 0; at <= tail.length + 1; at += 1) {
+        const steps = ["running", ...tail];
+        let state = loaded();
+        for (let i = 0; i <= steps.length; i += 1) {
+          if (i === at) state = M.applyGone(state, A1);
+          if (i === steps.length) break;
+          state = STEPS[steps[i]](state);
+          checkAtMostOne(state, `${steps.join(" → ")} gone@${at}`);
+          if (i >= at) {
+            expect(state.conversations[A1]).toBeUndefined();
+            expect(state.runs[A1]).toBeUndefined();
+            expect(state.streams).toEqual({});
+          }
+        }
+      }
+    }
+  });
+});
+
+describe("the rules for runs known from an answer", () => {
+  it("an answer brings a joined run: shown, never streamed; a push of the same run puts it in order with the pushes", () => {
+    let s = M.applyRun(loaded(), A1, runOf(R1, "running"), { ordered: false });
+    expect(s.runs[A1]).toMatchObject({ id: R1, status: "running", joined: true });
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "x" })).toBe(s);
+    expect(view(s).convs[A1]).toMatchObject({ run: { id: R1, status: "running" }, stream: null });
+    s = M.applyRun(s, A1, runOf(R1, "running"));
+    expect(s.runs[A1].joined).toBeUndefined();
+    expect(s.runs[A1].since).toBe(2);
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "你" });
+    expect(view(s).convs[A1].stream).toEqual({ runId: R1, text: "你", reasoning: "" });
+  });
+
+  it("an answer never replaces a run named by a push of this connection with another one, or with none", () => {
+    const pushed = M.applyRun(loaded(), A1, runOf(R2, "running"));
+    expect(M.applyRun(pushed, A1, runOf(R1, "done"), { ordered: false })).toBe(pushed);
+    expect(M.applyRun(pushed, A1, null, { ordered: false })).toBe(pushed);
+    // The same run, further on: taken.
+    expect(M.applyRun(pushed, A1, runOf(R2, "done"), { ordered: false }).runs[A1]).toMatchObject({ id: R2, status: "done" });
+    // A pushed failure is not hidden by a `null` that may have been read before it.
+    const failed = M.applyRun(loaded(), A1, runOf(R1, "failed", { error: "busy", retryable: true }));
+    expect(M.applyRun(failed, A1, null, { ordered: false })).toBe(failed);
+    // Known only from before (a reconnect): `null` (dismissed in another tab meanwhile) is taken.
+    expect(M.applyRun(M.clearStreams(failed), A1, null, { ordered: false }).runs[A1]).toBeNull();
+  });
+
+  it("a reconnect makes every held run joined and drops its since", () => {
+    const s = M.clearStreams(M.applyRun(loaded(), A1, runOf(R1, "running")));
+    expect(s.runs[A1]).toEqual({ ...runOf(R1, "running"), joined: true });
+  });
+
+  it("a dismissed failed run does not come back with a late answer", () => {
+    const failed = runOf(R1, "failed", { error: "provider_unavailable", retryable: true });
+    let s = M.dismissRunOf(M.applyRun(loaded(), A1, failed, { ordered: false }), A1, R1);
+    expect(s.runs[A1]).toBeNull();
+    s = M.applyRun(s, A1, failed, { ordered: false });
+    expect(s.runs[A1]).toBeNull();
+    expect(M.applyRun(s, A1, runOf(R2, "queued")).runs[A1]).toMatchObject({ id: R2 });
+  });
+
+  it("markRunUnknown hides a queued or running run (no replying shown), and the next push or answer clears it", () => {
+    let s = M.applyRun(loaded(), A1, runOf(R1, "running"), { ordered: false });
+    s = M.markRunUnknown(s, A1);
+    expect(view(s).convs[A1].run).toBeNull();
+    expect(M.markRunUnknown(s, A1)).toBe(s);
+    const finished = M.applyRun(loaded(), A1, runOf(R1, "done"));
+    expect(M.markRunUnknown(finished, A1)).toBe(finished);
+    expect(view(M.applyRun(s, A1, runOf(R1, "done"))).convs[A1].run).toMatchObject({ id: R1, status: "done" });
+  });
+
+  it("a buffered run push whose reply the snapshot already holds is posted at once (its since is the lastSeq before)", () => {
+    const sync = syncOf([agentConv(A1, AG1, { lastSeq: 3 }), direct(D1, ANN)], [...[wire(A1, 1, AG1, "你好"), wire(A1, 2, ME_ID, "在吗")], wire(A1, 3, AG1, "好的")], [...PRINCIPALS, agentPrincipal()]);
+    const s = M.applyRun(M.applySync(loaded(), sync), A1, runOf(R1, "running"), { since: 2 });
+    expect(s.runs[A1]).toMatchObject({ posted: true, since: 2 });
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "好" })).toBe(s);
+  });
+
+  it("a run push that arrives late (after a snapshot that holds its reply): the reply's duplicate push ends the bubble", () => {
+    const sync = syncOf([agentConv(A1, AG1, { lastSeq: 3 }), direct(D1, ANN)], [wire(A1, 1, AG1, "你好"), wire(A1, 2, ME_ID, "在吗"), wire(A1, 3, AG1, "好的")], [...PRINCIPALS, agentPrincipal()]);
+    let s = M.applySync(loaded(), sync);
+    // Live (no floor): in order with the pushes, after the snapshot.
+    s = M.applyRun(s, A1, runOf(R1, "running"));
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "好" });
+    s = M.applyMessage(s, wire(A1, 3, AG1, "好的")).state;
+    expect(s.runs[A1].posted).toBe(true);
+    expect(s.streams).toEqual({});
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "的" })).toBe(s);
+    // A duplicate that is not of the Agent changes nothing.
+    const mine = M.applyMessage(STEPS.d1(STEPS.running(loaded())), wire(A1, 2, ME_ID, "在吗")).state;
+    expect(mine.runs[A1].posted).toBeUndefined();
+  });
+
+  it("a history page or window that holds the running run's reply marks it posted", () => {
+    let s = STEPS.d1(STEPS.running(loaded()));
+    s = M.applyOlder(s, A1, { messages: [wire(A1, 3, AG1, "你好呀")], nextBefore: null });
+    expect(s.runs[A1].posted).toBe(true);
+    expect(s.streams).toEqual({});
   });
 });
 

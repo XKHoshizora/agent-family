@@ -294,8 +294,33 @@ describe("replies", () => {
     expect(api.stopRun).toHaveBeenCalledWith(A1, R2);
     // Nothing to stop: no request.
     transport.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "stopped") });
-    await expect(actions.stopRun(A1)).resolves.toMatchObject({ ok: false, error: { code: "not_found" } });
+    await expect(actions.stopRun(A1)).resolves.toMatchObject({ ok: false, error: { code: "no_run" }, text: "现在没有正在进行的回复。" });
     expect(api.stopRun).toHaveBeenCalledTimes(1);
+    // A 404 there is not "it has ended": the conversation or the run is not mine to act on.
+    transport.socket.emit({ type: "run", conversationId: A1, run: runOf("00000000-0000-4000-8000-0000000000e3", "running") });
+    api.stopRun.mockRejectedValueOnce(apiError(404, "not_found"));
+    await expect(actions.stopRun(A1)).resolves.toMatchObject({ ok: false, text: "找不到要操作的内容，它可能已经不存在了。" });
+  });
+
+  it("a dismissed failure stays dismissed when a GET .../run already on its way answers with it (M3)", async () => {
+    const failedR1 = runOf(R1, "failed", { error: "provider_unavailable", retryable: true });
+    const t = fakeTransport({ sync: agentSync, agents: () => ({ agents: [agentOf()] }), conversation: conversationOf, run: () => ({ run: failedR1 }) });
+    const api = { dismissRun: vi.fn(async () => ({ ok: true })), retryRun: vi.fn(async () => Promise.reject(apiError(409, "busy_run"))) };
+    const { actions, model, transport } = await loaded({ api, transport: t });
+    expect(model().runs[A1]).toMatchObject({ id: R1, status: "failed" });
+    // A refused retry asks for the run again; that answer is held back until after the dismissal.
+    const late = deferred();
+    transport.handlers.run = () => late.promise;
+    await actions.retryRun(A1);
+    await settle();
+    await expect(actions.dismissRun(A1)).resolves.toMatchObject({ ok: true });
+    expect(model().runs[A1]).toBeNull();
+    late.resolve({ run: failedR1 });
+    await settle();
+    expect(model().runs[A1]).toBeNull();
+    // A newer run is shown as usual.
+    transport.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "queued") });
+    expect(model().runs[A1]).toMatchObject({ id: R2, status: "queued" });
   });
 
   it("resetTopic shows the notice at once", async () => {
@@ -318,6 +343,43 @@ describe("usage and site models", () => {
     expect(model().usage).toEqual(usage);
     await expect(actions.loadModels()).resolves.toMatchObject({ ok: true });
     expect(model().siteModels.map((m) => m.id)).toEqual(["paid-1"]);
+  });
+});
+
+describe("only the request decides ok or failed (M5)", () => {
+  it("a success whose answer cannot be kept still resolves ok, and that state is fetched again", async () => {
+    const malformed = { id: AG1, handle: "helper", conversationId: A1 };
+    Object.defineProperty(malformed, "name", {
+      enumerable: true,
+      get() {
+        throw new Error("a malformed answer");
+      },
+    });
+    const t = fakeTransport({ sync: agentSync, agents: () => ({ agents: [agentOf()] }), conversation: conversationOf });
+    const { actions, transport } = await loaded({ api: { createAgent: vi.fn(async () => malformed) }, transport: t });
+    const lists = transport.agentLog.filter((x) => x === "agents").length;
+    const syncs = transport.log.filter((x) => x === "sync").length;
+    const result = await actions.createAgent({ handle: "helper", name: "小助手" });
+    expect(result.ok).toBe(true);
+    await settle();
+    expect(transport.agentLog.filter((x) => x === "agents")).toHaveLength(lists + 1);
+    expect(transport.log.filter((x) => x === "sync")).toHaveLength(syncs + 1);
+  });
+
+  it("a provider answer that cannot be kept resolves ok without it, and the providers are fetched again", async () => {
+    const listProviders = vi.fn(async () => ({ providers: [provider()] }));
+    const bad = { ...provider(), models: "not a list" };
+    Object.defineProperty(bad, "models", {
+      get() {
+        throw new Error("a malformed answer");
+      },
+    });
+    const { actions, model } = await loaded({ api: { createProvider: vi.fn(async () => bad), listProviders } });
+    const result = await actions.createProvider({ name: "x", protocol: "anthropic", baseUrl: "https://a.example", apiKey: KEY });
+    expect(result).toEqual({ ok: true, value: null });
+    await settle();
+    expect(listProviders).toHaveBeenCalledTimes(1);
+    expect(model().providers[PID]).toEqual(provider());
   });
 });
 

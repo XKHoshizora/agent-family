@@ -386,10 +386,11 @@ export function toView(model, { now = Date.now() } = {}) {
     const lastHeld = held.length > 0 ? timeOf(held[held.length - 1].createdAt) : null;
     const activity = Math.max(lastHeld ?? 0, lastPendingAt ?? 0) || timeOf(conv.createdAt) || 0;
     ranking.push({ id: conv.id, activity, index: conv.syncIndex ?? 0 });
-    // The reply in progress: its run, and its streamed text as one bubble while it runs and its message has not come
-    // (never both: the stored message replaces the bubble).
-    const run = model.runs?.[conv.id] ?? null;
-    const streamed = run && run.status === "running" && !run.posted ? model.streams?.[run.id] : null;
+    // The reply in progress: its run (none while its state is unknown), and its streamed text as one bubble while it
+    // runs in order with the pushes and its message has not come (never both: the stored message replaces the bubble).
+    const heldRun = model.runs?.[conv.id] ?? null;
+    const run = heldRun && !heldRun.unknown ? heldRun : null;
+    const streamed = run && run.status === "running" && !run.posted && !run.joined ? model.streams?.[run.id] : null;
     convs[conv.id] = {
       id: conv.id,
       type: direct ? "human" : agentChat ? "agent" : "group",

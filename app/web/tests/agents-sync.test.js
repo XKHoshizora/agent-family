@@ -1,7 +1,7 @@
 // The sync engine's Agent pushes (agent, principal, run, delta) and what every connection loads for Agents.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyOlder, initial } from "../src/data/model.js";
-import { start } from "../src/data/sync.js";
+import { RUN_FETCHES, RUN_RETRY_MS, start } from "../src/data/sync.js";
 import { toView } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
 import {
@@ -39,23 +39,35 @@ afterEach(() => {
   engines = [];
 });
 
-function run(transport) {
+function run(transport, { onModel = () => {} } = {}) {
   const box = { model: initial() };
   const timers = fakeTimers();
   const onSignedOut = vi.fn();
+  const statuses = [];
   const engine = start(transport, {
     getModel: () => box.model,
     setModel: (m) => {
       box.model = m;
+      onModel(m);
     },
     timers,
     now: timers.now,
     random: () => 0.5,
     onSignedOut,
-    onStatus: () => {},
+    onStatus: (s) => statuses.push(s),
   });
   engines.push(engine);
-  return { box, timers, engine, onSignedOut };
+  return { box, timers, engine, onSignedOut, statuses };
+}
+
+/** Records every model the engine sets in which the bubble and the stored reply (A1, `seq`) are shown at once. */
+function bothShown(seq) {
+  const seen = [];
+  const onModel = (m) => {
+    const conv = toView(m, { now: 0 }).convs[A1];
+    if (conv?.stream && conv.messages.some((x) => x.seq === seq)) seen.push(conv.stream);
+  };
+  return { seen, onModel };
 }
 
 const card = (seq, status, id = P1) => wire(A1, seq, AG1, "我整理了一份设定，请查看并确认。", { proposal: { id, status, persona: "你是小助手。" } });
@@ -93,16 +105,18 @@ describe("every connection", () => {
     expect(runCalls(t).sort()).toEqual([A1, A2].sort());
     expect(t.agentLog.filter((x) => x === "models")).toHaveLength(1);
     expect(Object.keys(box.model.agents)).toEqual([AG1, AG2]);
-    expect(box.model.runs).toEqual({ [A1]: runOf(R1, "running"), [A2]: null });
+    // Known from an answer, not from a push of this connection: shown as replying, never streamed.
+    expect(box.model.runs).toEqual({ [A1]: { ...runOf(R1, "running"), joined: true }, [A2]: null });
     expect(box.model.siteModels.map((m) => m.id)).toEqual(["free-1"]);
     // Nothing on the first load asks for single messages: everything is fresh.
     expect(t.agentLog.some((x) => Array.isArray(x) && x[0] === "message")).toBe(false);
   });
 
   it("a reconnect clears every stream and asks for the run of each Agent conversation once more; the site models are not asked again", async () => {
-    const t = agentsTransport();
+    const t = agentsTransport({ run: () => ({ run: null }) });
     const { box, timers } = run(t);
     await settle();
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R1, "running") });
     t.socket.emit({ type: "delta", conversationId: A1, runId: R1, text: "你好" });
     expect(box.model.streams).toEqual({ [R1]: { text: "你好", reasoning: "" } });
 
@@ -121,9 +135,15 @@ describe("every connection", () => {
     expect(box.model.runs[A2]).toMatchObject({ id: R2, status: "failed" });
     expect(t.agentLog.filter((x) => x === "agents")).toHaveLength(2);
     expect(t.agentLog.filter((x) => x === "models")).toHaveLength(1);
-    // The run is still going: its next pieces show from here on.
+    // The run is still going, but what it said before the break is not sent again: no bubble starts mid-sentence.
     t.socket.emit({ type: "delta", conversationId: A1, runId: R1, text: "呀" });
-    expect(box.model.streams).toEqual({ [R1]: { text: "呀", reasoning: "" } });
+    expect(box.model.streams).toEqual({});
+    expect(toView(box.model, { now: 0 }).convs[A1]).toMatchObject({ run: { id: R1, status: "running" }, stream: null });
+    // The next reply, announced on this connection, streams from its first piece.
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R1, "done") });
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "running") });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R2, text: "好的" });
+    expect(box.model.streams).toEqual({ [R2]: { text: "好的", reasoning: "" } });
   });
 
   it("an Agent conversation that appears in a later sync (an Agent made in another tab) has its run and its Agent loaded", async () => {
@@ -276,5 +296,217 @@ describe("agent pushes", () => {
     await settle();
     expect(t.agentLog.filter((x) => Array.isArray(x) && x[0] === "message")).toEqual([["message", A1, 2]]);
     expect(box.model.messages[A1].find((m) => m.seq === 2).proposal.status).toBe("superseded");
+  });
+});
+
+describe("the reply posted while the connection was being made (M1)", () => {
+  const reply = wire(A1, 4, AG1, "你好呀");
+  const snapshotWith = (messages) =>
+    syncOf([agentConv(A1, AG1, { lastSeq: messages.at(-1).seq, readSeq: 3 }), agentConv(A2, AG2)], messages, agentsSync().principals);
+  const before = [wire(A1, 1, ME_ID, "在吗"), card(2, "confirmed"), wire(A1, 3, ME_ID, "说点什么")];
+
+  it("the page loads while a reply streams, and the reply is in the snapshot: never the bubble and the message at once", async () => {
+    const held = deferred();
+    const t = agentsTransport({ sync: () => held.promise, run: (id) => ({ run: id === A1 ? runOf(R1, "running") : null }) });
+    const watch = bothShown(4);
+    const { box } = run(t, { onModel: watch.onModel });
+    await settle();
+    // Buffered while /api/sync is on its way: the reply's last pieces, then the reply itself (posted before the snapshot).
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R1, text: "你" });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R1, text: "好呀" });
+    t.socket.emit({ type: "message", message: reply });
+    held.resolve(snapshotWith([...before, reply]));
+    await settle();
+    // GET .../run answered after the snapshot: still running (the run ends in a transaction of its own).
+    expect(box.model.runs[A1]).toMatchObject({ id: R1, status: "running", joined: true });
+    expect(watch.seen).toEqual([]);
+    expect(box.model.streams).toEqual({});
+    expect(box.model.messages[A1].filter((m) => m.seq === 4)).toHaveLength(1);
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R1, text: "！" });
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R1, "done") });
+    expect(watch.seen).toEqual([]);
+    expect(box.model.runs[A1]).toMatchObject({ id: R1, status: "done" });
+  });
+
+  it("a run starts during an outage and its reply comes with the snapshot: the buffered duplicate push ends the bubble", async () => {
+    const t = agentsTransport({ sync: () => snapshotWith(before), run: () => ({ run: null }) });
+    const watch = bothShown(4);
+    const { box, timers } = run(t, { onModel: watch.onModel });
+    await settle();
+    t.socket.drop(1006);
+    const held = deferred();
+    t.handlers.sync = () => held.promise;
+    t.handlers.run = (id) => ({ run: id === A1 ? runOf(R2, "running") : null });
+    timers.advance(60_000);
+    await settle();
+    // On the new socket, buffered: the run starts, streams, and posts (before the snapshot is read).
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "running") });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R2, text: "你" });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R2, text: "好呀" });
+    t.socket.emit({ type: "message", message: reply });
+    held.resolve(snapshotWith([...before, reply]));
+    await settle();
+    expect(watch.seen).toEqual([]);
+    expect(box.model.streams).toEqual({});
+    expect(box.model.runs[A1]).toMatchObject({ id: R2, status: "running", posted: true });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R2, text: "！" });
+    expect(box.model.streams).toEqual({});
+    expect(watch.seen).toEqual([]);
+  });
+});
+
+describe("a run that cannot be fetched (M2)", () => {
+  it("is tried once more after a short delay; failing again, a run held as replying is shown as unknown until a push", async () => {
+    const t = agentsTransport({ run: () => ({ run: null }) });
+    const { box, timers } = run(t);
+    await settle();
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R1, "running") });
+    t.socket.drop(1006);
+    t.handlers.run = () => {
+      throw apiError(503, "busy");
+    };
+    timers.advance(60_000);
+    await settle();
+    expect(runCalls(t).filter((id) => id === A1)).toHaveLength(2);
+    expect(toView(box.model, { now: 0 }).convs[A1].run).toMatchObject({ id: R1, status: "running" });
+    expect(timers.delays()).toContain(RUN_RETRY_MS);
+    timers.advance(RUN_RETRY_MS);
+    await settle();
+    expect(runCalls(t).filter((id) => id === A1)).toHaveLength(3);
+    expect(box.model.runs[A1]).toMatchObject({ id: R1, unknown: true });
+    expect(toView(box.model, { now: 0 }).convs[A1]).toMatchObject({ run: null, stream: null });
+    // No third try; the next push says what it is.
+    timers.advance(RUN_RETRY_MS * 10);
+    await settle();
+    expect(runCalls(t).filter((id) => id === A1)).toHaveLength(3);
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R1, "failed", { error: "provider_unavailable", retryable: true }) });
+    expect(toView(box.model, { now: 0 }).convs[A1].run).toMatchObject({ id: R1, status: "failed" });
+  });
+
+  it("a retry that succeeds shows the run", async () => {
+    let calls = 0;
+    const t = agentsTransport({
+      run: (id) => {
+        if (id !== A1) return { run: null };
+        calls += 1;
+        if (calls === 1) throw apiError(429, "rate_limited");
+        return { run: runOf(R1, "failed", { error: "busy", retryable: true }) };
+      },
+    });
+    const { box, timers } = run(t);
+    await settle();
+    expect(box.model.runs[A1]).toBeUndefined();
+    timers.advance(RUN_RETRY_MS);
+    await settle();
+    expect(box.model.runs[A1]).toMatchObject({ id: R1, status: "failed" });
+  });
+});
+
+describe("Agents never hold up or break the connection (M4)", () => {
+  const humanSync = () => syncOf([...agentsSync().conversations], [wire(D1, 1, ANN)], agentsSync().principals);
+
+  it("Agents, runs and models still on their way: live on batch 1's path, and human messages flow in order", async () => {
+    const never = () => new Promise(() => {});
+    const t = agentsTransport({ sync: humanSync, agents: never, run: never, models: never });
+    const { box, statuses } = run(t);
+    await settle();
+    expect(t.log).toEqual(["connect", "sync", "social"]);
+    expect(statuses.at(-1)).toBe("live");
+    t.socket.emit({ type: "message", message: wire(D1, 2, ANN, "在吗") });
+    t.socket.emit({ type: "message", message: wire(D1, 3, ANN, "人呢") });
+    expect(box.model.messages[D1].map((m) => m.seq)).toEqual([1, 2, 3]);
+    expect(box.model.conversations[D1]).toMatchObject({ position: 3, unread: 2 });
+    // The runs were asked for (a few at a time), the list and the models too, all still pending.
+    expect(runCalls(t).sort()).toEqual([A1, A2].sort());
+    expect(t.agentLog.filter((x) => x === "agents" || x === "models")).toEqual(["agents", "models"]);
+  });
+
+  it("pushes buffered while the connection was made are applied before any Agent answer", async () => {
+    const held = deferred();
+    const t = agentsTransport({ sync: () => held.promise, run: () => new Promise(() => {}) });
+    const { box, statuses } = run(t);
+    await settle();
+    t.socket.emit({ type: "message", message: wire(D1, 2, ANN, "早") });
+    held.resolve(humanSync());
+    await settle();
+    expect(statuses.at(-1)).toBe("live");
+    expect(box.model.messages[D1].map((m) => m.seq)).toEqual([1, 2]);
+  });
+
+  it("a failing /api/agents keeps the socket and human chats; the next connection asks for the list (and the models) again", async () => {
+    const t = agentsTransport({
+      sync: humanSync,
+      agents: () => {
+        throw apiError(500, "internal");
+      },
+      models: () => {
+        throw apiError(503, "busy");
+      },
+    });
+    const { box, timers, statuses, onSignedOut } = run(t);
+    await settle();
+    expect(t.sockets).toHaveLength(1);
+    expect(statuses.at(-1)).toBe("live");
+    expect(onSignedOut).not.toHaveBeenCalled();
+    t.socket.emit({ type: "message", message: wire(D1, 2, ANN, "在吗") });
+    expect(box.model.messages[D1].map((m) => m.seq)).toEqual([1, 2]);
+    // Runs do not depend on the list.
+    expect(box.model.runs[A1]).toMatchObject({ id: R1 });
+    t.handlers.agents = () => ({ agents: [agentOf(AG1)] });
+    t.handlers.models = () => ({ siteModels: [{ id: "free-1", label: "免费", tier: "free", vision: false, pdf: false, reasoning: [], contextTokens: 8000 }], providerDefaults: null });
+    t.socket.drop(1006);
+    timers.advance(60_000);
+    await settle();
+    expect(Object.keys(box.model.agents)).toEqual([AG1]);
+    expect(box.model.siteModels.map((m) => m.id)).toEqual(["free-1"]);
+    expect(t.agentLog.filter((x) => x === "models")).toHaveLength(2);
+  });
+
+  it("runs are fetched a few at a time", async () => {
+    const ids = Array.from({ length: 7 }, (_, i) => `00000000-0000-4000-8000-0000000001${String(i).padStart(2, "0")}`);
+    const agentIds = ids.map((_, i) => `00000000-0000-4000-8000-0000000002${String(i).padStart(2, "0")}`);
+    const sync = () =>
+      syncOf(
+        ids.map((id, i) => agentConv(id, agentIds[i])),
+        [],
+        [...PRINCIPALS, ...agentIds.map((id, i) => agentPrincipal(id, `agent_${i}`, `助手${i}`))],
+      );
+    const answers = [];
+    let inFlight = 0;
+    let most = 0;
+    const t = fakeTransport({
+      sync,
+      run: () => {
+        inFlight += 1;
+        most = Math.max(most, inFlight);
+        const d = deferred();
+        answers.push(d);
+        return d.promise.finally(() => {
+          inFlight -= 1;
+        });
+      },
+    });
+    run(t);
+    await settle();
+    expect(answers).toHaveLength(RUN_FETCHES);
+    for (let i = 0; i < ids.length; i += 1) {
+      answers[i].resolve({ run: null });
+      await settle();
+    }
+    expect(most).toBe(RUN_FETCHES);
+    expect(runCalls(t).sort()).toEqual([...ids].sort());
+  });
+
+  it("a GET .../run answer older than this connection's pushes changes nothing", async () => {
+    const late = deferred();
+    const t = agentsTransport({ run: (id) => (id === A1 ? late.promise : { run: null }) });
+    const { box } = run(t);
+    await settle();
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "running") });
+    t.socket.emit({ type: "delta", conversationId: A1, runId: R2, text: "你" });
+    late.resolve({ run: runOf(R1, "done") });
+    await settle();
+    expect(box.model.runs[A1]).toMatchObject({ id: R2, status: "running" });
+    expect(box.model.streams).toEqual({ [R2]: { text: "你", reasoning: "" } });
   });
 });

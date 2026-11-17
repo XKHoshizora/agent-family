@@ -27,6 +27,7 @@ import {
   bumpAvatar,
   closeWindow,
   discardPending,
+  dismissRunOf,
   markFailed,
   markReadDone,
   markReading,
@@ -535,15 +536,19 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const failure = (error, text) => ({ ok: false, error, text });
 
   /**
-   * Runs a route: on success `after(value)` (unless stop() came in between) and `{ok: true, value}`; on failure a 401
-   * signs out, `onFail(error)` may fetch what the refusal shows is stale, and `{ok: false, error, text: text(error)}`.
+   * Runs a route. Only the request decides the outcome:
+   * - it failed: a 401 signs out, `onFail(error)` may fetch what the refusal shows is stale, and the action resolves
+   *   `{ok: false, error, text: text(error)}`;
+   * - it succeeded: the action resolves `{ok: true, value}`, `value` being `map(answer)` (null if mapping fails). The
+   *   service has made the change, so a failure while keeping its answer (`map`, `after`: a malformed answer, a bug)
+   *   does not make it a failure: `refetch()` asks for that state again instead.
+   * Nothing is kept from an answer that arrives after stop().
    */
-  async function attempt(run, after, { text, onFail } = {}) {
+  async function attempt(send, { map = (answer) => answer, after, refetch, text, onFail } = {}) {
     const token = epoch();
+    let answer;
     try {
-      const value = await run();
-      if (token === epoch()) after?.(value);
-      return { ok: true, value };
+      answer = await send();
     } catch (err) {
       const error = failureOf(err);
       if (token === epoch()) {
@@ -552,6 +557,14 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       }
       return failure(error, text(error));
     }
+    let value = null;
+    try {
+      value = map(answer);
+      if (token === epoch()) after?.(value);
+    } catch {
+      if (token === epoch()) refetch?.();
+    }
+    return { ok: true, value };
   }
 
   const agentText = (action) => (error) => agentErrorText(action, error, now());
@@ -562,6 +575,8 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   /** The conversation of one of my Agents. */
   const conversationOfAgent = (agentId) =>
     getModel().agents[agentId]?.conversationId ?? Object.values(getModel().conversations).find((c) => c.agentId === agentId)?.id ?? null;
+  /** That Agent (and its open proposal cards) again, and its conversation's flags (paused, deleted, canSend). */
+  const refetchAgent = (agentId) => () => request({ agent: agentId, conversation: conversationOfAgent(agentId) });
   /** A refusal says my picture of the Agent is out of date (deleted elsewhere, not mine): fetch it and its cards again. */
   const staleAgent = (agentId) => (error) => {
     if (isStale(error)) request({ agent: agentId });
@@ -575,140 +590,130 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     setModel(applyAgent(getModel(), agent));
     if (agent?.conversationId) request({ conversation: agent.conversationId });
   };
+  const agentWrite = (action, agentId, after) => ({ after, refetch: refetchAgent(agentId), text: agentText(action), onFail: staleAgent(agentId) });
+  const providerWrite = (action, after, onFail) => ({ after, refetch: () => agentActions.loadProviders(), text: providerText(action), onFail });
+  const forgetProvider = (providerId) => (error) => {
+    if (error.status === 404) setModel(removeProvider(getModel(), providerId));
+  };
 
   const agentActions = {
-    loadAgents: () => attempt(() => api.listAgents(), (res) => setModel(applyAgents(getModel(), res?.agents)), { text: commonErrorText }),
+    loadAgents: () => attempt(() => api.listAgents(), { after: (res) => setModel(applyAgents(getModel(), res?.agents)), text: commonErrorText }),
     /** body: {handle, name, intro?, field?, persona?, replyMode?, reasoning?, model?} → value: the Agent. Its conversation follows by sync. */
     createAgent: (body) =>
-      attempt(
-        () => api.createAgent(body),
-        (agent) => {
+      attempt(() => api.createAgent(body), {
+        after: (agent) => {
           setModel(applyAgent(getModel(), agent));
           request({ sync: true });
         },
-        { text: agentText("create") },
-      ),
+        refetch: () => request({ agents: true, sync: true }),
+        text: agentText("create"),
+      }),
     patchAgent: (agentId, patch) =>
-      attempt(() => api.patchAgent(agentId, patch), (agent) => setModel(applyAgent(getModel(), agent)), { text: agentText("edit"), onFail: staleAgent(agentId) }),
-    pauseAgent: (agentId) => attempt(() => api.pauseAgent(agentId), agentChanged, { text: agentText("pause"), onFail: staleAgent(agentId) }),
-    resumeAgent: (agentId) => attempt(() => api.resumeAgent(agentId), agentChanged, { text: agentText("resume"), onFail: staleAgent(agentId) }),
-    deleteAgent: (agentId) => attempt(() => api.deleteAgent(agentId), agentChanged, { text: agentText("delete"), onFail: staleAgent(agentId) }),
+      attempt(() => api.patchAgent(agentId, patch), agentWrite("edit", agentId, (agent) => setModel(applyAgent(getModel(), agent)))),
+    pauseAgent: (agentId) => attempt(() => api.pauseAgent(agentId), agentWrite("pause", agentId, agentChanged)),
+    resumeAgent: (agentId) => attempt(() => api.resumeAgent(agentId), agentWrite("resume", agentId, agentChanged)),
+    deleteAgent: (agentId) => attempt(() => api.deleteAgent(agentId), agentWrite("delete", agentId, agentChanged)),
     /** Uploads the Agent's new avatar; on success its URL gets the next version at once. */
     uploadAgentAvatar: (agentId, file) =>
-      attempt(() => api.uploadAgentAvatar(agentId, file), () => setModel(bumpAvatar(getModel(), 0, agentId)), {
-        text: agentText("avatar"),
-        onFail: staleAgent(agentId),
-      }),
+      attempt(() => api.uploadAgentAvatar(agentId, file), agentWrite("avatar", agentId, () => setModel(bumpAvatar(getModel(), 0, agentId)))),
     /** body: {name, intro?, field?, model} → value: {persona}, for the persona box (nothing is stored). */
-    draftPersona: (body) => attempt(() => api.draftPersona(body), null, { text: agentText("draft") }),
+    draftPersona: (body) => attempt(() => api.draftPersona(body), { text: agentText("draft") }),
     /** edits: optional {persona?, intro?, field?}. On success the Agent is kept and the card reads confirmed. */
     confirmProposal: (agentId, proposalId, edits) =>
       attempt(
         () => api.confirmProposal(agentId, proposalId, edits),
-        (agent) => {
+        agentWrite("confirm", agentId, (agent) => {
           setModel(applyAgent(getModel(), agent));
           setModel(setProposalStatus(getModel(), conversationOfAgent(agentId), proposalId, "confirmed"));
-        },
-        { text: agentText("confirm"), onFail: staleAgent(agentId) },
+        }),
       ),
     discardProposal: (agentId, proposalId) =>
       attempt(
         () => api.discardProposal(agentId, proposalId),
-        () => setModel(setProposalStatus(getModel(), conversationOfAgent(agentId), proposalId, "discarded")),
-        { text: agentText("discard"), onFail: staleAgent(agentId) },
+        agentWrite("discard", agentId, () => setModel(setProposalStatus(getModel(), conversationOfAgent(agentId), proposalId, "discarded"))),
       ),
 
     /** Stops the reply in progress in an Agent conversation (the `run` push says when it has stopped). */
     stopRun: (conversationId) => {
       const run = getModel().runs[conversationId];
       if (!run || (run.status !== "queued" && run.status !== "running")) {
-        const error = dropped("not_found");
+        const error = dropped("no_run");
         return Promise.resolve(failure(error, replyErrorText("stop", error)));
       }
-      return attempt(() => api.stopRun(conversationId, run.id), null, { text: replyText("stop"), onFail: staleReply(conversationId) });
+      return attempt(() => api.stopRun(conversationId, run.id), { text: replyText("stop"), onFail: staleReply(conversationId) });
     },
     /** Tries the failed reply again: the new run replaces the failed one (unless a newer one was pushed meanwhile). */
     retryRun: (conversationId) => {
       const failed = getModel().runs[conversationId]?.id ?? null;
-      return attempt(
-        () => api.retryRun(conversationId),
-        (res) => {
-          if ((getModel().runs[conversationId]?.id ?? null) === failed && res?.run) setModel(applyRun(getModel(), conversationId, res.run));
+      return attempt(() => api.retryRun(conversationId), {
+        after: (res) => {
+          // In order: nothing of this conversation's runs happened between the failed run and its retry.
+          if ((getModel().runs[conversationId]?.id ?? null) === failed && res?.run) setModel(applyRun(getModel(), conversationId, res.run, { ordered: true }));
         },
-        { text: replyText("retry"), onFail: staleReply(conversationId) },
-      );
+        refetch: () => request({ run: conversationId }),
+        text: replyText("retry"),
+        onFail: staleReply(conversationId),
+      });
     },
-    /** Closes the failure notice: the failed run is shown no more (unless a newer one came meanwhile). */
+    /** Closes the failure notice: the failed run is shown no more, not even by an answer already on its way. */
     dismissRun: (conversationId) => {
       const failed = getModel().runs[conversationId]?.id ?? null;
-      return attempt(
-        () => api.dismissRun(conversationId),
-        () => {
-          if (failed !== null && getModel().runs[conversationId]?.id === failed) setModel(applyRun(getModel(), conversationId, null));
+      return attempt(() => api.dismissRun(conversationId), {
+        after: () => {
+          if (failed !== null) setModel(dismissRunOf(getModel(), conversationId, failed));
         },
-        { text: replyText("dismiss"), onFail: staleReply(conversationId) },
-      );
+        refetch: () => request({ run: conversationId }),
+        text: replyText("dismiss"),
+        onFail: staleReply(conversationId),
+      });
     },
     /** Starts a new topic: the notice shows at once (it is pushed too). */
     resetTopic: (conversationId) =>
-      attempt(
-        () => api.resetTopic(conversationId),
-        (res) => {
+      attempt(() => api.resetTopic(conversationId), {
+        after: (res) => {
           if (res?.message?.conversationId === conversationId) setModel(applyPosted(getModel(), res.message));
         },
-        {
-          text: replyText("topic"),
-          onFail: (error) => {
-            if (error.code === "cannot_send") setModel(setCanSend(getModel(), conversationId, { ok: false, reason: error.reason ?? "agent_deleted" }));
-            if (error.code === "cannot_send" || error.status === 404) request({ conversation: conversationId });
-          },
+        refetch: () => request({ conversation: conversationId }),
+        text: replyText("topic"),
+        onFail: (error) => {
+          if (error.code === "cannot_send") setModel(setCanSend(getModel(), conversationId, { ok: false, reason: error.reason ?? "agent_deleted" }));
+          if (error.code === "cannot_send" || error.status === 404) request({ conversation: conversationId });
         },
-      ),
+      }),
 
-    loadProviders: () => attempt(() => api.listProviders(), (res) => setModel(applyProviders(getModel(), res?.providers)), { text: commonErrorText }),
+    loadProviders: () => attempt(() => api.listProviders(), { after: (res) => setModel(applyProviders(getModel(), res?.providers)), text: commonErrorText }),
     /**
      * body: {name, protocol, baseUrl, apiKey, models?}. The key is sent once and kept nowhere: neither the model nor the
      * value resolved holds it (value: the provider's public fields, `keyLast4` only).
      */
     createProvider: (body) =>
-      attempt(async () => publicProvider(await api.createProvider(body)), (p) => setModel(applyProvider(getModel(), p)), { text: providerText("create") }),
+      attempt(() => api.createProvider(body), { map: publicProvider, ...providerWrite("create", (p) => setModel(applyProvider(getModel(), p))) }),
     /** patch: any of {name, baseUrl, apiKey, models}; the same as createProvider for a new key. */
     patchProvider: (providerId, patch) =>
-      attempt(async () => publicProvider(await api.patchProvider(providerId, patch)), (p) => setModel(applyProvider(getModel(), p)), {
-        text: providerText("edit"),
-        onFail: (error) => {
-          if (error.status === 404) setModel(removeProvider(getModel(), providerId));
-        },
+      attempt(() => api.patchProvider(providerId, patch), {
+        map: publicProvider,
+        ...providerWrite("edit", (p) => setModel(applyProvider(getModel(), p)), forgetProvider(providerId)),
       }),
     /** Refused with `provider_in_use` while Agents use it: the text names them. */
     deleteProvider: (providerId) =>
-      attempt(() => api.deleteProvider(providerId), () => setModel(removeProvider(getModel(), providerId)), {
-        text: providerText("delete"),
-        onFail: (error) => {
-          if (error.status === 404) setModel(removeProvider(getModel(), providerId));
-        },
-      }),
+      attempt(() => api.deleteProvider(providerId), providerWrite("delete", () => setModel(removeProvider(getModel(), providerId)), forgetProvider(providerId))),
     /** One call to the provider: {ok: true} or the reason it failed (the service answers 200 either way). */
     testProvider: async (providerId) => {
-      const result = await attempt(() => api.testProvider(providerId), null, { text: providerText("test") });
+      const result = await attempt(() => api.testProvider(providerId), { text: providerText("test") });
       if (!result.ok || result.value?.ok !== false) return result;
       const error = { code: typeof result.value.error === "string" ? result.value.error : "unknown", reason: null, status: 200 };
       return failure(error, providerErrorText("test", error));
     },
     /** The provider's model list merged in from the provider → value: {listed, provider}. */
     refreshProviderModels: (providerId) =>
-      attempt(
-        async () => {
-          const res = await api.refreshProviderModels(providerId);
-          return { listed: Array.isArray(res?.listed) ? res.listed : [], provider: publicProvider(res?.provider ?? {}) };
-        },
-        (res) => setModel(applyProvider(getModel(), res.provider)),
-        { text: providerText("refresh") },
-      ),
+      attempt(() => api.refreshProviderModels(providerId), {
+        map: (res) => ({ listed: Array.isArray(res?.listed) ? res.listed : [], provider: publicProvider(res?.provider) }),
+        ...providerWrite("refresh", (res) => setModel(applyProvider(getModel(), res.provider))),
+      }),
 
-    loadUsage: () => attempt(() => api.getUsage(), (usage) => setModel(applyUsage(getModel(), usage)), { text: commonErrorText }),
+    loadUsage: () => attempt(() => api.getUsage(), { after: (usage) => setModel(applyUsage(getModel(), usage)), text: commonErrorText }),
     /** The site's models again (Settings and the Agent form open). */
-    loadModels: () => attempt(() => api.getModels(), (res) => setModel(applyModels(getModel(), res)), { text: commonErrorText }),
+    loadModels: () => attempt(() => api.getModels(), { after: (res) => setModel(applyModels(getModel(), res)), text: commonErrorText }),
   };
 
   const actions = {

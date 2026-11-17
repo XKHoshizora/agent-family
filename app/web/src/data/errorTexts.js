@@ -197,20 +197,26 @@ export function agentErrorText(action, error, now = Date.now()) {
   return pick(AGENT, action, error);
 }
 
+// A 404 on a conversation's reply routes: not mine, not an Agent's conversation, or a run of another conversation.
+const NOT_FOUND = "找不到要操作的内容，它可能已经不存在了。";
 const REPLY = {
-  stop: { not_found: "这次回复已经结束了。" },
+  stop: {
+    not_found: NOT_FOUND,
+    // Not the service's: nothing was queued or running here, so nothing was sent.
+    no_run: "现在没有正在进行的回复。",
+  },
   retry: {
     busy_run: "它正在回复，请等这次回复结束。",
     agent_paused: "这个 Agent 已暂停，恢复后才能重试。",
     agent_deleted: AGENT_DELETED,
     invalid_request: "现在没有可以重试的回复，或这个 Agent 还没有选择模型。",
-    not_found: AGENT_NOT_FOUND,
+    not_found: NOT_FOUND,
     rate_limited: "回复太频繁了，请稍等一分钟再试。",
   },
-  dismiss: { not_found: AGENT_NOT_FOUND },
+  dismiss: { not_found: NOT_FOUND },
   topic: {
     cannot_send: "这个 Agent 已删除，不能再开始新话题。",
-    not_found: AGENT_NOT_FOUND,
+    not_found: NOT_FOUND,
   },
 };
 /** Why a reply action was refused. action: stop | retry | dismiss | topic */

@@ -125,6 +125,9 @@ describe("the sentences batch 2A names", () => {
     expect(providerErrorText("test", err("provider_rejected"))).toBe("供应商拒绝了这个密钥，请检查密钥是否正确。");
     expect(providerErrorText("test", err("provider_unavailable"))).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
     expect(agentErrorText("draft", err("busy", 503))).toBe("服务现在有点忙，请稍后再试。");
+    // A 404 on the reply routes is "not yours / not here", never "it has ended".
+    for (const route of ["stop", "retry", "dismiss", "topic"]) expect(replyErrorText(route, err("not_found", 404))).toBe("找不到要操作的内容，它可能已经不存在了。");
+    expect(replyErrorText("stop", err("no_run", 0))).toBe("现在没有正在进行的回复。");
   });
 
   it("provider_in_use names the Agents that use it", () => {
