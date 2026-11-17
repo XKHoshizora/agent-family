@@ -10,10 +10,16 @@ export interface CatalogEntry {
   contextTokens?: number;
   reasoningLevels?: string[];
 }
+export interface CatalogProvider {
+  id: string;
+  hosts: string[];
+  models: string[];
+}
 export const MODELS_URL: string;
 export const API_URL: string;
 export const LEVELS: string[];
 export function levelsOf(entry: unknown): string[] | undefined;
 export function reduceCatalog(models: unknown, api?: unknown): CatalogEntry[];
-export function formatCatalog(entries: CatalogEntry[]): string;
-export function catalogReadme(facts: { fetched: string; count: number }): string;
+export function reduceProviders(api: unknown): CatalogProvider[];
+export function formatCatalog(entries: ReadonlyArray<CatalogEntry | CatalogProvider>): string;
+export function catalogReadme(facts: { fetched: string; count: number; providers?: number }): string;

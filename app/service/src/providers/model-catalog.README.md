@@ -5,15 +5,23 @@ A reduced snapshot of the [models.dev](https://models.dev) model catalogue (repo
 (`scripts/update-model-catalog.mjs`); do not edit it by hand. The service reads it from here and never fetches the
 catalogue itself.
 
-- Source: https://models.dev/models.json (the canonical models) and https://models.dev/api.json (each lab's own entry, for its thinking levels; not kept)
+- Source: https://models.dev/models.json (the canonical models) and https://models.dev/api.json (each lab's own entry, for its thinking levels; and each provider's API address and model ids, for provider-catalog.json)
 - Fetched: 2026-11-17
 - Licence: MIT (below)
 - Entries: 631
+- Providers (provider-catalog.json): 294
 
 Each entry: `id` (the model id, lower case), `lab`, `name` (its display name), `vision` (takes images), `pdf` (takes
 PDFs), `reasoning`, `chat` (takes and answers text, and is not an embedding, reranking, speech, transcription, image,
 video or realtime model), `contextTokens` (when the catalogue gives one) and `reasoningLevels` (the lab's `effort`
 values among `low`, `medium`, `high`, `xhigh`, `max`, when it has them).
+
+# provider-catalog.json
+
+From the same api.json: the catalogue's providers that name their API address, what `catalogueModels`
+(`catalogue.ts`) offers a provider whose address has no model list (`POST /api/providers/:id/models/list`). Each entry:
+`id` (the catalogue's provider id), `hosts` (the host name of its `api` address, lower case) and `models` (its model ids
+as it names them, sorted).
 
 ## Licence of the catalogue data
 
