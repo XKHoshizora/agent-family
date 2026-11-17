@@ -1,11 +1,9 @@
-// Agents' texts that took too long to render as Markdown, remembered for this tab (sessionStorage, so across reloads)
-// so they are shown as plain text from then on, without being parsed again. Only a digest of each text is kept (a
-// 64-bit non-cryptographic hash and its length), never the text. Storage that is missing, full or refused only means
-// a text is not remembered: rendering never depends on it.
+// Agents' texts the Markdown worker did not answer in time (markdownClient.js), remembered for this tab (sessionStorage,
+// so across reloads) so they are shown as plain text from then on, without being sent to the worker again. Only a
+// digest of each text is kept (a 64-bit non-cryptographic hash and its length), never the text. Storage that is
+// missing, full or refused only means a text is not remembered: rendering never depends on it.
 import React from "react";
 
-/** One full render of a text (parse, limits, maths, highlighting, guards) longer than this marks it as slow. */
-export const SLOW_PASS_MS = 400;
 export const SLOW_TEXT_NOTE = "这条回复内容过于复杂，已按纯文本显示。";
 const KEY = "agent-family.slow-markdown";
 /** Digests kept; the oldest is dropped first. */
@@ -76,7 +74,7 @@ export function rememberSlowText(text) {
   }
 }
 
-/** A text shown as plain text because it is too complex to render, with a small note under it. */
+/** A text shown as plain text because it is too complex (or was too slow) to render, with a small note under it. */
 export function PlainWithNote({ text }) {
   return (
     <>

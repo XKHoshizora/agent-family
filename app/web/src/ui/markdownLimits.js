@@ -1,5 +1,6 @@
-// What an Agent's text may be and still be rendered as Markdown. Checked on the raw text before anything parses it
-// (and before the renderer's chunk is even asked for): a text beyond any limit is shown as plain text, as a person's is.
+// What an Agent's text may be and still be rendered as Markdown. Checked on the raw text before anything parses it, in
+// the Markdown worker (markdownPipeline.js): a text beyond any limit is shown as plain text, with a note. These checks
+// are cheap ways to refuse what is known to be slow; what bounds the work is the main thread's deadline on the worker.
 // Every count here errs on the side of plain text. The cost is one pass over the text: it is split into lines once, and
 // each line is looked at a constant number of times (patterns anchored at the line's start and without nested
 // repetition, and character counts), so the check is linear in the text's length.
@@ -12,8 +13,10 @@ export const MAX_LINE = 10000;
 export const MAX_PIPE_LINES = 400;
 /** `|` characters outside code fences. */
 export const MAX_PIPES = 2000;
-/** Code fences opened. */
+/** Code fences opened, and fence lines inside block quotes and list items (each such line counted). */
 export const MAX_FENCES = 300;
+/** `<` anywhere in the text: the parser tokenises raw HTML in time that grows with their number times the length. */
+export const MAX_ANGLES = 2000;
 /** `$$` outside code fences. */
 export const MAX_DOUBLE_DOLLARS = 2000;
 /** Nested lists and quotes: the markers that open a level, plus every two columns of indentation. */
@@ -26,6 +29,9 @@ export const MAX_DEPTH = 30;
 export const MAX_INLINE_WORK = 5000000;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+/** A fence inside a quote or a list item, once the quote markers and a list marker are taken off the line. */
+const NESTED_FENCE = /^(?:`{3,}|~{3,})/;
+const LIST_MARKER = /^(?:[-+*]|\d{1,9}[.)])[ \t]+/;
 const ORDERED_MARKER = /^\d{1,9}[.)]/;
 const DELIMITERS = /[*_~[\]$]/g;
 /** A line (after its quote markers) that starts a block of its own: a list item or a heading. */
@@ -86,6 +92,7 @@ function depthOf(line) {
 /** Whether `text` is small and shallow enough to be rendered as Markdown. */
 export function fitsMarkdown(text) {
   if (typeof text !== "string" || text.length > MAX_CHARS) return false;
+  if (occurrences(text, "<") > MAX_ANGLES) return false;
   let pipeLines = 0;
   let pipes = 0;
   let fences = 0;
@@ -114,6 +121,7 @@ export function fitsMarkdown(text) {
       table = false;
       continue;
     }
+    if (NESTED_FENCE.test(line.replace(QUOTE_MARKERS, "").replace(LIST_MARKER, "")) && ++fences > MAX_FENCES) return false;
     pipes += occurrences(line, "|");
     if (pipes > MAX_PIPES) return false;
     if (line.trimStart().startsWith("|") && ++pipeLines > MAX_PIPE_LINES) return false;

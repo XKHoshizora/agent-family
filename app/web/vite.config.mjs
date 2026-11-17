@@ -16,9 +16,16 @@ export default defineConfig({
     // The maths fonts (KaTeX's, in the Markdown chunk) are files served from the same origin, never inlined as data:
     // URLs: the page's Content-Security-Policy allows fonts from 'self' only.
     assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf|eot)$/i.test(file) ? false : undefined),
-    // The largest chunk is the Markdown renderer (~530 kB, most of it KaTeX): already split off, loaded only with the
-    // first Agent message. The warning stays for anything larger.
-    chunkSizeWarningLimit: 600,
+  },
+  // The Markdown worker (src/ui/markdownWorker.js) is a module worker in a same-origin file of its own: the page's
+  // Content-Security-Policy (script-src 'self') allows it as it stands. Never a blob: or data: worker.
+  worker: { format: "es" },
+  resolve: {
+    alias: [
+      // The parser's entity decoder has a "browser" build that decodes through the DOM; the worker has no DOM, so
+      // the plain one (its "worker" build) is used. Only the worker bundles the parser.
+      { find: /^decode-named-character-reference$/, replacement: path.join(root, "node_modules/decode-named-character-reference/index.js") },
+    ],
   },
   optimizeDeps: {
     include: ["react", "react-dom/client", "lucide-react"],
