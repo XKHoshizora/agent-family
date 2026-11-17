@@ -26,11 +26,18 @@ errors and the XSS probe (`support/fixtures.mjs`).
 **Local mode** (default). Global setup builds this client and the service (`npm run build` in both;
 `E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
 `TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced) and empties every table but
-`pgmigrations`, then starts one service (`node dist/server.js`) on `http://127.0.0.1:8911` (`E2E_PORT`, bound with `HOST=127.0.0.1`, so it is not reachable from the network) that serves
-`dist/` with a random `AUTH_SECRET`, a temporary `BLOB_DIR`, `RATE_LIMIT_SCALE=1000` and `SWEEP_INTERVAL_MINUTES=0`.
-Invites and mail come from the service CLI (`invite:create`, `inbox:list`). The restart spec stops and starts that
-process through a control endpoint of the runner (127.0.0.1, random port and token). Teardown stops the service and
-deletes the temporary directory; a service left by a crashed run is stopped by the next run. The service log is
+`pgmigrations`, starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
+speaking OpenAI Chat Completions and Anthropic Messages, streamed, scripted by the specs), then starts one service on
+`http://127.0.0.1:8911` (`E2E_PORT`, bound with `HOST=127.0.0.1`, so it is not reachable from the network) that serves
+`dist/` with a random `AUTH_SECRET`, a fixed fake `PROVIDER_KEY_SECRET`, a temporary `BLOB_DIR`, `RATE_LIMIT_SCALE=1000`,
+`SWEEP_INTERVAL_MINUTES=0`, `FREE_DAILY_POINTS=1` and two site models (one free, one paid) that are the stub. That service
+is the test-only entry `app/service/tests/helpers/e2e-server.ts`, run with `tsx` (`NODE_ENV=test`, and only on a
+database named `…_e2e`): the production entry (`dist/server.js`) cannot call a plain-http loopback address, by design.
+Invites, mail and points come from the service CLI (`invite:create`, `inbox:list`, `credits:grant`). The restart spec
+stops and starts that process, and the specs script the stub, through a control endpoint of the runner (127.0.0.1, random
+port and token). Teardown stops the service and the stub and deletes the temporary directory; a service left by a
+crashed run is stopped by the next run. `E2E_SHOTS=1` also saves the acceptance screenshots
+(`docs/acceptance/batch2a/shots/`, 1440×900 and 390×844) of this run's own seeded data. The service log is
 `e2e/test-results/service.log`; failures keep traces and screenshots in `e2e/test-results/`, the HTML report is in
 `e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored.
 
@@ -40,7 +47,7 @@ and talks to that origin. The invite code is the last line of `E2E_INVITE_CMD`'s
 `…@example.test` address. Example for the container: `E2E_INVITE_CMD="docker exec af node dist/cli.js invite:create"`,
 `E2E_INBOX_CMD="docker exec af node dist/cli.js inbox:list --to {email}"`. Only the specs tagged `@remote` run
 (§7.1, §7.2: the real registration limit is 10 a minute per address); `E2E_REMOTE_ALL=1` runs all of them, and the
-restart spec skips itself.
+restart spec and the specs that need the model stub (Agents, providers, Markdown) skip themselves.
 
 ## Layout
 

@@ -5,6 +5,7 @@ import { test, expect } from "./support/fixtures.mjs";
 import { befriend, uniq } from "./support/accounts.mjs";
 import { chatPane, composer, createGroupUi, expectStored, messagesWith, openChat, sendFile, sendText } from "./support/app.mjs";
 import { png, randomFile } from "./support/files.mjs";
+import { capture } from "./support/shots.mjs";
 
 const box = async (locator) => {
   const b = await locator.boundingBox();
@@ -55,6 +56,7 @@ test("the same one-emoji message has the same bubble width on both sides; anothe
   expect(row.width, "the name-and-time line is the wider one here").toBeGreaterThan(bubble.width + 40);
   // ...and left-aligned with it (the line and the bubble start at the same x).
   expect(Math.abs(row.x - bubble.x)).toBeLessThanOrEqual(1);
+  await capture(ann.page, "fix-same-emoji-bubbles");
 });
 
 for (const [label, size] of [
@@ -88,6 +90,22 @@ for (const [label, size] of [
     expect(after).toEqual(before);
     const replyBox = await box(reply);
     expect(replyBox.x + replyBox.width, "回复 is left of 已读").toBeLessThanOrEqual(after.x + 0.5);
+    const pane = await box(chats.ann.getByTestId("message-list"));
+    const inside = (b) => b.x >= pane.x - 0.5 && b.x + b.width <= pane.x + pane.width + 0.5;
+    expect(inside(replyBox), `my 回复 ${JSON.stringify(replyBox)} inside the message pane ${JSON.stringify(pane)}`).toBe(true);
+    if (label === "desktop") await capture(ann.page, "fix-read-receipt");
+
+    // The other person's message: its 回复 shows inside the pane too.
+    const theirs = `对方说一句 ${tag}`;
+    await sendText(bo.page, ann.displayName, theirs);
+    const their = messagesWith(chats.ann, theirs);
+    await expect(their).toHaveCount(1);
+    await their.scrollIntoViewIfNeeded();
+    await their.hover();
+    const theirReply = their.getByRole("button", { name: "回复" });
+    await expect(theirReply).toHaveCSS("opacity", "1");
+    const theirBox = await box(theirReply);
+    expect(inside(theirBox), `their 回复 ${JSON.stringify(theirBox)} inside the message pane ${JSON.stringify(pane)}`).toBe(true);
   });
 }
 

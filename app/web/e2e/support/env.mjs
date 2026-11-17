@@ -73,7 +73,26 @@ const SERVICE_KEYS = [
   "DB_ACQUIRE_TIMEOUT_MS",
   "SEARCH_STATEMENT_TIMEOUT_MS",
   "SWEEP_INTERVAL_MINUTES",
+  "HTTP_BODY_TIMEOUT_MS",
+  "PROVIDER_KEY_SECRET",
+  "SITE_MODELS",
+  "FREE_DAILY_POINTS",
+  "SITE_TIMEZONE",
+  "AGENT_TIERS",
+  "AGENT_MAX_CONCURRENT_RUNS",
+  "AGENT_RUNS_PER_MINUTE",
+  "AGENT_RUN_TIMEOUT_MS",
+  "PROVIDER_DEFAULT_CONTEXT_TOKENS",
+  "PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS",
+  "PROVIDER_MAX_CONCURRENT_CALLS",
+  "AGENT_MAX_RUNS_IN_FLIGHT",
 ];
+
+/**
+ * A fixed, obviously fake secret for the local suite's provider keys at rest (the service refuses to start without
+ * one of at least 32 characters). The suite's provider keys are fake too; nothing real is ever sealed with it.
+ */
+export const E2E_PROVIDER_KEY_SECRET = "e2e-provider-key-secret-not-a-real-one-0000";
 
 /** The process environment without any service configuration or suite variable, plus `extra`. */
 export function serviceEnv(extra) {
@@ -83,5 +102,5 @@ export function serviceEnv(extra) {
   return { ...env, ...extra };
 }
 
-/** Environment for the service's CLI (migrate, invite:create, inbox:list) against af_e2e. */
+/** Environment for the service's CLI (migrate, invite:create, inbox:list, credits:grant) against af_e2e. */
 export const cliEnv = () => serviceEnv({ DATABASE_URL: e2eDatabaseUrl() });

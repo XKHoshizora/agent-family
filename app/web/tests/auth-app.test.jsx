@@ -1,12 +1,18 @@
 // @vitest-environment jsdom
 import React from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, configure, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ApiError, request, setUnauthenticatedHandler } from "../src/api/http.js";
 import { AuthRoot, useSession } from "../src/auth/AuthRoot.jsx";
 import { clearResetToken } from "../src/auth/router.js";
 import { StoreProvider, emptyState } from "../src/data/store.jsx";
 import { SettingsMain } from "../src/pages/Settings.jsx";
+
+// The screens here load lazily (the app's chunk, the account screens): on a busy machine that takes longer than
+// Testing Library's default 1 s wait for findBy… / waitFor, which then failed for nothing. Each wait may now take 5 s
+// (and a test 15 s); it still ends as soon as what it waits for is there.
+configure({ asyncUtilTimeout: 5_000 });
+vi.setConfig({ testTimeout: 15_000 });
 
 const ANN = { id: "p-ann", handle: "ann", displayName: "小安", email: "ann@x.com" };
 const BO = { id: "p-bo", handle: "bo", displayName: "阿波", email: "bo@x.com" };

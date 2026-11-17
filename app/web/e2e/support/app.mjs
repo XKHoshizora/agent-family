@@ -141,3 +141,58 @@ export async function signInUi(page, { email, password }) {
   await page.getByLabel("密码", { exact: true }).fill(password);
   await page.getByRole("button", { name: "登录", exact: true }).click();
 }
+
+// --- Agents ----------------------------------------------------------------------------------------------------------
+
+/** The site models as the Agent form's model picker lists them (system.mjs `siteModels`). */
+export const FREE_MODEL = "演示快速模型 · 免费";
+export const PAID_MODEL = "演示高级模型 · 需余额";
+
+/**
+ * Agent → 创建 Agent → the form (名称, the model picked by its label, optionally 简介, 擅长领域, 思考程度, 人格文档) →
+ * 创建 Agent. `onFilled(form)` runs just before that click. Resolves with the Agent's conversation, which opens by itself.
+ */
+export async function createAgentUi(page, { name, model = FREE_MODEL, intro, field, reasoning, persona, onFilled }) {
+  await goTo(page, "Agent");
+  await page.getByRole("button", { name: "创建 Agent", exact: true }).click();
+  const form = page.getByRole("region", { name: "创建 Agent" });
+  await form.getByLabel("名称", { exact: true }).fill(name);
+  if (intro) await form.getByLabel("简介", { exact: true }).fill(intro);
+  if (field) await form.getByLabel("擅长领域", { exact: true }).fill(field);
+  await form.getByLabel("模型", { exact: true }).selectOption({ label: model });
+  if (reasoning) await form.getByLabel("思考程度", { exact: true }).selectOption({ label: reasoning });
+  if (persona) await form.getByLabel("人格文档", { exact: true }).fill(persona);
+  if (onFilled) await onFilled(form);
+  await form.getByRole("button", { name: "创建 Agent", exact: true }).click();
+  const chat = chatPane(page, name);
+  await expect(chat).toBeVisible();
+  return chat;
+}
+
+/** Agent → the Agent named `name`: its 管理 page. */
+export async function openAgentDetail(page, name) {
+  await goTo(page, "Agent");
+  await page.getByRole("button").filter({ has: page.getByText(name, { exact: true }) }).first().click();
+  const detail = page.getByRole("region", { name: "Agent 管理" });
+  await expect(detail.getByRole("heading", { name })).toBeVisible();
+  return detail;
+}
+
+/** The reply being written in an Agent's conversation (none when no reply is under way). */
+export const streamingBubble = (chat) => messageList(chat).locator("li.streaming");
+
+/** The failed reply's status line at the end of an Agent's conversation. */
+export const runStatusLine = (chat) => messageList(chat).locator("li.run-status");
+
+/** The messages from the Agent (the stored ones) whose text contains `text`. */
+export const agentMessagesWith = (chat, text) => messageList(chat).locator("li.msg.theirs:not(.streaming)").filter({ hasText: text });
+
+/** The open Agent conversation's 会话资料 → 开始新话题 → confirm; the panel is closed again. */
+export async function newTopicUi(page, chat) {
+  await chat.getByRole("button", { name: "会话资料" }).click();
+  await page.getByRole("button", { name: "开始新话题" }).click();
+  const dialog = page.getByRole("dialog", { name: "开始新话题" });
+  await dialog.getByRole("button", { name: "开始新话题" }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("button", { name: "关闭", exact: true }).click();
+}

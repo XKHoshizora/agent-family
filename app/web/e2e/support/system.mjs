@@ -1,6 +1,7 @@
 // The local system under test, run from the Playwright runner process: build the client and the service, give
-// the af_e2e database a fresh start, run ONE service process that serves the built client, and let test workers
-// stop and start that process through a small control endpoint (127.0.0.1, random port, random token).
+// the af_e2e database a fresh start, start the model stub (model-stub.mjs), run ONE service process that serves the
+// built client and whose site models are the stub, and let test workers stop and start that process and script the
+// stub through a small control endpoint (127.0.0.1, random port, random token).
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,13 +10,39 @@ import { createRequire } from "node:module";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { BASE_URL, E2E_DATABASE, OUTPUT_DIR, PORT, SERVICE_DIR, WEB_DIR, cliEnv, e2eDatabaseUrl, serviceEnv } from "./env.mjs";
+import { pathToFileURL } from "node:url";
+import { startModelStub } from "./model-stub.mjs";
+import { BASE_URL, E2E_DATABASE, E2E_PROVIDER_KEY_SECRET, OUTPUT_DIR, PORT, SERVICE_DIR, WEB_DIR, cliEnv, e2eDatabaseUrl, serviceEnv } from "./env.mjs";
 
 /** Everything of one run that is not in the repository: blobs, the pid of the service. Keyed by port. */
 const RUN_DIR = path.join(os.tmpdir(), `af-e2e-${PORT}`);
 const PID_FILE = path.join(RUN_DIR, "service.pid");
 const LOG_FILE = path.join(OUTPUT_DIR, "service.log");
 const HEALTH_TIMEOUT_MS = 30_000;
+/**
+ * The service runs from its test-only entry (app/service/tests/helpers/e2e-server.ts) under tsx's loader, in one
+ * process: the production entry cannot reach the local stub (it is plain http on 127.0.0.1), by design.
+ */
+const SERVICE_ENTRY = path.join(SERVICE_DIR, "tests", "helpers", "e2e-server.ts");
+const TSX_LOADER = pathToFileURL(createRequire(path.join(SERVICE_DIR, "package.json")).resolve("tsx")).href;
+
+/** The upstream key of the site models (the stub takes any): a fixed fake value. */
+const STUB_KEY = "e2e-site-model-key-not-real";
+
+/**
+ * The site's two models, both the stub: a free one and a paid one. Prices are micro-points per token: input is cheap, so
+ * a reply charged on its estimate (one stopped before the stub reported its usage: one token per character, and the
+ * service's system text is long) costs little; output is dear, so the usage a step reports decides the cost. With the
+ * stub's usual usage (model-stub.mjs DEFAULT_USAGE: 20 in, 10 out) a free reply costs 0.1002 of the 1-point daily
+ * allowance; agents.spec.mjs reports more to use it up.
+ */
+function siteModels(baseUrl) {
+  const common = { protocol: "openai_chat", baseUrl, apiKeyEnv: "E2E_STUB_MODEL_KEY", maxOutputTokens: 1024, contextTokens: 32_000, vision: false, pdf: false, reasoning: [] };
+  return [
+    { ...common, id: "e2e-free", label: "演示快速模型", tier: "free", model: "stub-chat", inputMicroPerToken: 10, outputMicroPerToken: 10_000 },
+    { ...common, id: "e2e-paid", label: "演示高级模型", tier: "paid", model: "stub-chat", inputMicroPerToken: 10, outputMicroPerToken: 12_000 },
+  ];
+}
 
 function run(label, command, cwd) {
   const res = spawnSync(command, { cwd, shell: true, encoding: "utf8", windowsHide: true });
@@ -121,7 +148,7 @@ function createService(env) {
     if (await portInUse()) throw new Error(`port ${PORT} is in use; stop whatever listens there or set E2E_PORT`);
     const log = openSync(LOG_FILE, "a");
     try {
-      child = spawn(process.execPath, ["--enable-source-maps", path.join(SERVICE_DIR, "dist", "server.js")], {
+      child = spawn(process.execPath, ["--enable-source-maps", "--import", TSX_LOADER, SERVICE_ENTRY], {
         cwd: RUN_DIR,
         env,
         stdio: ["ignore", log, log],
@@ -164,20 +191,40 @@ function createService(env) {
   return { start, stop };
 }
 
-/** POST /stop and POST /start for the workers (restart spec); answered once the step is done. */
-function startControl(service) {
+/**
+ * For the workers: POST /stop and POST /start (restart spec), answered once the step is done; POST /stub/<command>
+ * with a JSON body, the model stub's `control` (model-stub.mjs), answered with its JSON.
+ */
+function startControl(service, stub) {
   const token = randomBytes(24).toString("hex");
   let queue = Promise.resolve();
   const server = http.createServer((req, res) => {
-    const step = req.url === "/stop" ? service.stop : req.url === "/start" ? service.start : null;
-    if (req.method !== "POST" || !step || req.headers["x-e2e-token"] !== token) {
+    if (req.method !== "POST" || req.headers["x-e2e-token"] !== token) {
       res.writeHead(404).end();
       return;
     }
-    queue = queue.then(step).then(
-      () => res.writeHead(204).end(),
-      (err) => res.writeHead(500, { "content-type": "text/plain" }).end(String(err?.message ?? err)),
-    );
+    const failed = (err) => res.writeHead(500, { "content-type": "text/plain" }).end(String(err?.message ?? err));
+    if (req.url.startsWith("/stub/")) {
+      const parts = [];
+      req.on("data", (c) => parts.push(c));
+      req.on("end", () => {
+        try {
+          const raw = Buffer.concat(parts).toString("utf8");
+          const answer = stub.control(req.url.slice("/stub/".length), raw ? JSON.parse(raw) : {});
+          res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(answer));
+        } catch (err) {
+          failed(err);
+        }
+      });
+      return;
+    }
+    const step = req.url === "/stop" ? service.stop : req.url === "/start" ? service.start : null;
+    if (!step) {
+      res.writeHead(404).end();
+      return;
+    }
+    req.resume();
+    queue = queue.then(step).then(() => res.writeHead(204).end(), failed);
   });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
@@ -202,11 +249,15 @@ export async function startLocalSystem() {
   }
   await freshDatabase();
 
+  const stub = await startModelStub();
   const service = createService(
     serviceEnv({
+      // The test-only entry starts only so, and only on af_e2e (e2e-server.ts).
+      NODE_ENV: "test",
       DATABASE_URL: e2eDatabaseUrl(),
       APP_ORIGIN: BASE_URL,
       AUTH_SECRET: randomBytes(36).toString("base64url"),
+      PROVIDER_KEY_SECRET: E2E_PROVIDER_KEY_SECRET,
       BLOB_DIR: path.join(RUN_DIR, "blobs"),
       WEB_DIST: path.join(WEB_DIR, "dist"),
       PORT: String(PORT),
@@ -216,23 +267,32 @@ export async function startLocalSystem() {
       // The suite signs up and signs in far more often than a person; it must never meet a limit.
       RATE_LIMIT_SCALE: "1000",
       SWEEP_INTERVAL_MINUTES: "0",
+      E2E_SITE_MODELS: JSON.stringify(siteModels(stub.baseUrl)),
+      E2E_STUB_MODEL_KEY: STUB_KEY,
+      // Small, so a few replies use it up (agents.spec.mjs).
+      FREE_DAILY_POINTS: "1",
+      // tsx compiles the service's TypeScript with the service's own settings.
+      TSX_TSCONFIG_PATH: path.join(SERVICE_DIR, "tsconfig.json"),
     }),
   );
-  await service.start();
   let control;
   try {
-    control = await startControl(service);
+    await service.start();
+    control = await startControl(service, stub);
   } catch (err) {
     await service.stop();
+    await stub.close();
     throw err;
   }
   // Workers are started after global setup and inherit these.
   process.env.E2E_CONTROL_URL = control.url;
   process.env.E2E_CONTROL_TOKEN = control.token;
+  process.env.E2E_STUB_URL = stub.baseUrl;
 
   return async function teardown() {
     await control.close();
     await service.stop();
+    await stub.close();
     rmSync(RUN_DIR, { recursive: true, force: true });
   };
 }

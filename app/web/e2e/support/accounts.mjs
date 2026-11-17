@@ -33,6 +33,13 @@ async function remoteCommand(template, email) {
   return stdout;
 }
 
+/** The operator gives `person` (by handle) `points` (a decimal string) through the service CLI; local suite only. */
+export async function grantPoints(person, points) {
+  if (REMOTE) throw new Error("granting points needs the local service CLI");
+  if (!/^[a-z0-9_]{3,24}$/.test(person.handle) || !/^\d+(\.\d{1,6})?$/.test(points)) throw new Error("not a generated handle or a plain amount");
+  await serviceCli(["credits:grant", "--handle", person.handle, "--points", points, "--note", "e2e"]);
+}
+
 /** A new single-use invite code. */
 export async function mintInvite() {
   const out = REMOTE ? await remoteCommand(process.env.E2E_INVITE_CMD) : await serviceCli(["invite:create"]);
