@@ -96,7 +96,7 @@ export interface AgentPort {
    * meanwhile. Reading the attachments stops between files once the run should
    * stop (it then ends as `shouldStop` says) and is bounded by the run's time limit (`failed`, `busy`). `closing`
    * aborts when the service is closing: before the call is admitted, `begin` then rejects with its reason and records
-   * nothing — the run stays `running`, unadmitted, for the next start to recover.
+   * nothing — the run is still `running`, unadmitted, and the caller ends it (`release`).
    */
   begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd>;
   /**
@@ -116,6 +116,14 @@ export interface AgentPort {
    * meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts.
    */
   finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void>;
+  /**
+   * Ends a run that will not be finished here (the service is closing) exactly as recovery at start-up ends one: its
+   * reply posted → `done` (`stopped` when its message says so); interrupted by its Agent's pause or delete →
+   * `cancelled`; else `failed`, `provider_unavailable`, retryable — its hold released by a settlement on no tokens, which
+   * costs nothing, and the follow-up queued by the one rule. Its owner is told. Nothing when it had ended already.
+   * Rejects when that cannot be written: the run then stays `running`, for the stale-run sweep or the next start.
+   */
+  release(run: RunTicket): Promise<void>;
   /** Whether the run should stop now: its owner asked, or the Agent was paused or deleted. */
   shouldStop(run: RunTicket): boolean;
 }

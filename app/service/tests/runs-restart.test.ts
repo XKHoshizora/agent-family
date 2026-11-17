@@ -1,9 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { recoverRuns } from "../src/agents/port-impl.ts";
 import { isRunEnd } from "../src/agents/runtime/port.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { buildApp } from "../src/app.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
+import type { Db } from "../src/db.ts";
 import { settle } from "../src/metering/settle.ts";
 import type { ModelGateway } from "../src/models/gateway.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
@@ -20,8 +22,9 @@ import { closeAllSockets, connect } from "./helpers/ws.ts";
  * the worker, every run left `running` is ended without a model call — `failed` / `provider_unavailable` and
  * retryable, or `done` when its reply had been posted, or `cancelled` when its Agent's pause or delete had interrupted
  * it — and its hold released by a settlement that costs nothing. No second call, no duplicate message, no hold left.
- * Each test builds an app, closes it mid-reply (the closest a test gets to a crash: nothing more of the run is
- * recorded) and builds a new one on the same database.
+ * A graceful stop ends the runs its own worker and draft requests were working on in the same way itself (within 5 s);
+ * a crash is what the tests below make by driving the port by hand (no worker holds the run) or by a database that
+ * stops answering. Each test builds the apps it stops and starts on the same database.
  */
 
 const store = useProbeBlobs("af-restart-");
@@ -39,10 +42,10 @@ afterEach(async () => {
   for (const app of open.splice(0)) await app.close();
 });
 
-/** A new app on the test database (as if the service started), ready, its worker driven by hand. */
-async function start(models: ModelGateway, blobs: BlobStore = store.blobs, lines?: string[]): Promise<FastifyInstance> {
+/** A new app on the test database (or `database`), as if the service started: ready, its worker driven by hand. */
+async function start(models: ModelGateway, blobs: BlobStore = store.blobs, lines?: string[], database: Db = db): Promise<FastifyInstance> {
   const app = await buildApp(
-    { config: base.deps.config, db, models, blobs },
+    { config: base.deps.config, db: database, models, blobs },
     {
       agentWorker: false,
       answerFloor: NO_ANSWER_FLOOR,
@@ -54,6 +57,31 @@ async function start(models: ModelGateway, blobs: BlobStore = store.blobs, lines
   open.push(app);
   return app;
 }
+/**
+ * The test database, except that once `stall()` is called every transaction begun waits until `release()` and then
+ * fails (a database that stopped answering). Closing it closes nothing: the test's own pool stays open.
+ */
+function stallingDb(): { db: Db; stall(): void; release(): void } {
+  let stalled: Promise<void> | null = null;
+  let open!: () => void;
+  return {
+    db: {
+      get pool() {
+        return db.pool;
+      },
+      query: ((...args: unknown[]) => (db.query as (...a: unknown[]) => unknown)(...args)) as Db["query"],
+      tx: (fn) => (stalled ? stalled.then(() => Promise.reject(new Error("the database did not answer"))) : db.tx(fn)),
+      close: async () => {},
+    },
+    stall() {
+      stalled = new Promise<void>((resolve) => (open = resolve));
+    },
+    release() {
+      open();
+    },
+  };
+}
+
 /** Closes `app` (the service stops) and forgets it. */
 async function stop(app: FastifyInstance): Promise<void> {
   open.splice(open.indexOf(app), 1);
@@ -85,29 +113,33 @@ async function owned(app: FastifyInstance, name: string) {
   return { owner, agent, conv: agent.conversationId as string };
 }
 
-describe("a run left running when the service stopped", () => {
-  it("is failed and retryable at the next start: no model call for it, no message, no hold; retry then works", async () => {
+describe("a reply in progress when the service stops", () => {
+  it("is ended by the stopping service itself: failed and retryable, nothing held, nothing left for the next start; retry then works", async () => {
     const before = scriptedGateway();
     const old = await start(before);
     const { owner, agent, conv } = await owned(old, "rex");
     const hold = before.hang();
     await say(old, owner, conv, "你好");
     const running = old.agentWorker.runOnce();
-    await hold.reached;
+    const call = await hold.reached;
     const run = await latestRun(old, owner, conv);
     expect(run).toMatchObject({ status: "running" });
     expect(await holds()).not.toBe("0"); // admitted: its maximum cost is held
 
     await stop(old);
+    expect(call.signal.aborted).toBe(true);
+    // Before any new start: what recovery would have written, written by the service that stopped.
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await holds()).toBe("0");
+    expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
     await running;
-    expect(await statusOf(run.id)).toMatchObject({ status: "running" });
+    expect(await recoverRuns(db, base.deps.config, base.log)).toBe(0);
 
     const after = scriptedGateway();
     const fresh = await start(after);
     expect(after.calls).toHaveLength(0);
     expect(await latestRun(fresh, owner, conv)).toEqual({ id: run.id, status: "failed", error: "provider_unavailable", retryable: true });
-    expect(await holds()).toBe("0");
-    expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await records(run.id)).toHaveLength(1);
     expect(await fromAgent(fresh, owner, conv, agent.id)).toEqual([]);
     expect(await fresh.agentWorker.runOnce()).toBe(false);
     expect(after.calls).toHaveLength(0);
@@ -120,6 +152,38 @@ describe("a run left running when the service stopped", () => {
     expect(await holds()).toBe("0");
   });
 
+  it("whose ending cannot be written (the database stopped answering): the stop returns within its 5 s, and the next start recovers the run", { timeout: 20_000 }, async () => {
+    const stalling = stallingDb();
+    const before = scriptedGateway();
+    const old = await start(before, store.blobs, undefined, stalling.db);
+    const { owner, conv } = await owned(old, "stuck");
+    const hold = before.hang();
+    await say(old, owner, conv, "你好");
+    const running = old.agentWorker.runOnce();
+    await hold.reached;
+    const run = await latestRun(old, owner, conv);
+
+    stalling.stall();
+    const t0 = performance.now();
+    await stop(old);
+    expect(performance.now() - t0).toBeLessThan(6500);
+    expect(await statusOf(run.id)).toMatchObject({ status: "running" });
+    stalling.release();
+    await running;
+    // The write failed: the run is left as it was, for the stale-run sweep or the next start.
+    expect(await statusOf(run.id)).toMatchObject({ status: "running" });
+    expect(await records(run.id)).toEqual([]);
+
+    const after = scriptedGateway();
+    await start(after);
+    expect(after.calls).toHaveLength(0);
+    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await holds()).toBe("0");
+  });
+});
+
+describe("a run left running when the service stopped", () => {
   it("whose reply was posted before the stop (the crash fell between post and finish) is done, with exactly one message", async () => {
     const old = await start(scriptedGateway());
     const { owner, agent, conv } = await owned(old, "posty");
@@ -218,7 +282,7 @@ describe("a run left running when the service stopped", () => {
     expect(await records(draft)).toEqual([{ outcome: "failed", source: null, model: null, estimated: true, cost: "0", free: "0", balance: "0" }]);
   });
 
-  it("a persona draft under way when the service stops is abandoned, left running, and released at the next start", async () => {
+  it("a persona draft under way when the service stops is ended by that service: 503 busy, failed, nothing held, nothing for the next start", async () => {
     const before = scriptedGateway();
     const old = await start(before);
     const owner = await signUp(old, "drafty");
@@ -232,19 +296,19 @@ describe("a run left running when the service stopped", () => {
     await stop(old);
     expect(call.signal.aborted).toBe(true);
     expect(await answer).toEqual({ status: 503, json: { error: "busy" } });
-    expect(await statusOf(draft)).toMatchObject({ status: "running" });
-    expect(await records(draft)).toEqual([]);
+    expect(await statusOf(draft)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(draft)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await recoverRuns(db, base.deps.config, base.log)).toBe(0);
 
     const after = scriptedGateway();
     await start(after);
     expect(after.calls).toHaveLength(0);
-    expect(await statusOf(draft)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
-    expect(await records(draft)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await records(draft)).toHaveLength(1);
   });
 });
 
 describe("the service starting to close while a reply waits for its admission", () => {
-  it("is seen inside the admitting transaction: nothing is admitted, the run stays running for the next start", async () => {
+  it("is seen inside the admitting transaction: nothing is admitted and begin rejects, leaving the run to its caller (the worker ends it as recovery would)", async () => {
     let open!: () => void;
     let reached!: () => void;
     const reading = new Promise<void>((resolve) => (reached = resolve));
@@ -483,7 +547,7 @@ describe("the stale-run sweep", () => {
 });
 
 describe("the service stopping while a reply reads its attachments", () => {
-  it("abandons the read at once, admits nothing and leaves the run running, unadmitted; the next start fails it", async () => {
+  it("abandons the read at once, admits nothing and ends the run itself, as the next start would have", async () => {
     let reached!: () => void;
     const reading = new Promise<void>((resolve) => (reached = resolve));
     // A store whose reads never come (the service closes before they would).
@@ -514,12 +578,9 @@ describe("the service stopping while a reply reads its attachments", () => {
     await running;
     expect(performance.now() - t0).toBeLessThan(2000);
     expect(before.calls).toHaveLength(0);
-    expect(await statusOf(run.id)).toEqual({ status: "running", error: null, source: null, hold: "0" });
-    expect(await records(run.id)).toEqual([]);
-
-    await start(scriptedGateway());
-    expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", source: null, hold: "0" });
+    expect(await statusOf(run.id)).toEqual({ status: "failed", error: "provider_unavailable", source: null, hold: "0" });
     expect(await records(run.id)).toEqual([{ outcome: "failed", source: null, model: null, estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await recoverRuns(db, base.deps.config, base.log)).toBe(0);
     expect(await db.query("select 1 from messages where sender_id = $1", [agent.id]).then((r) => r.rowCount)).toBe(0);
   });
 });

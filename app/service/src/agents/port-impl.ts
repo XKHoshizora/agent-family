@@ -198,7 +198,7 @@ export class DbAgentPort implements AgentPort {
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
    *    before it has served one, or the step taking longer than `agentRunTimeoutMs`, ends the run `failed`, `busy`. When `closing`
    *    aborts (the service is closing) the read is abandoned and `begin` rejects with its reason before step 3: the run
-   *    stays `running`, unadmitted, for `recoverRuns` at the next start.
+   *    is still `running`, unadmitted, and its caller ends it (the worker: `release`).
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when
    *    `closing` has aborted by the time the locks are held, the transaction rolls back and `begin` rejects with its
    *    reason, admitting nothing (as in step 2); otherwise
@@ -266,7 +266,7 @@ export class DbAgentPort implements AgentPort {
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
       // The service may have started closing while this waited for the locks: then nothing is admitted (thrown, so the
-      // transaction rolls back) and the run stays running, unadmitted, for the next start.
+      // transaction rolls back) and the run is left running, unadmitted, for the caller to end (the worker: `release`).
       if (closing?.aborted) throw closing.reason;
       const { resolved, loaded, covers } = first;
       try {
@@ -359,6 +359,31 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     this.announce(result.ended);
     if (result.followUp) this.announce(result.followUp);
+  }
+
+  /** `AgentPort.release`: the worker's run, ended as recovery ends one (`releaseRun`). */
+  async release(run: RunTicket): Promise<void> {
+    await this.releaseRun(run.id, run.agentId);
+  }
+
+  /**
+   * Ends run `runId` (a reply of `agentId`, or a persona draft: null) that will not be finished where it was begun —
+   * this process is closing, or nobody is working on it — exactly as recovery at start-up ends one (`recoverRun`, in a
+   * transaction of its own under the locks `finish` takes), then tells its owner (and a follow-up queued by the one
+   * rule wakes the worker) and forgets its flags. False when it was no longer running. Rejects, changing nothing, when
+   * it cannot be written.
+   */
+  async releaseRun(runId: string, agentId: string | null): Promise<boolean> {
+    const { db, config, log } = this.deps;
+    let told: Announced[] | null;
+    try {
+      told = await db.tx((t) => recoverRun(t, config, runId, agentId, log));
+    } finally {
+      this.flags.delete(runId);
+    }
+    if (told === null) return false;
+    for (const a of told) this.announce(a);
+    return true;
   }
 }
 

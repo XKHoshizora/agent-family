@@ -289,6 +289,11 @@ export interface DraftDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn">;
   /** The drafts this process is working on, by run id (the stale-run sweep leaves them alone). */
   inFlight: Set<string>;
+  /**
+   * Ends a draft's run that will not be finished here (the service is closing) as recovery ends one: `failed`,
+   * `provider_unavailable`, its hold released at no charge (`DbAgentPort.releaseRun`). Rejects when it cannot be written.
+   */
+  release(runId: string): Promise<unknown>;
 }
 
 const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const;
@@ -304,8 +309,9 @@ const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const
  *    instruction, must hold the data (400 `context_too_small`); then admission (402 `no_quota`). Any refusal rolls all
  *    of it back: nothing is recorded, nothing called.
  * 2. The call: the fixed `DRAFT_INSTRUCTION` as the system text, the fields as data (`draftData`), reasoning `none`,
- *    ended after `agentRunTimeoutMs`. When `closing` aborts (the service is stopping), the call is abandoned and nothing
- *    more is recorded: the run stays `running` for `recoverRuns` at the next start; the caller is answered 503 `busy`.
+ *    ended after `agentRunTimeoutMs`. When `closing` aborts (the service is stopping), the call is abandoned and the
+ *    run is ended as recovery would end it (`release`: `failed`, `provider_unavailable`, nothing charged; when that
+ *    cannot be written it stays `running`, for the stale-run sweep or the next start); the caller is answered 503 `busy`.
  * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported) and the run ended
  *    `done`, or `failed` with the code it answers: `provider_rejected` / `provider_unavailable` (502),
  *    `address_not_allowed` (400). A call that said nothing usable (`draftText` empty) failed `provider_unavailable`;
@@ -314,7 +320,7 @@ const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const
  * Returns `draftText` of what the model wrote.
  */
 export async function draftPersona(deps: DraftDeps, ownerId: string, input: DraftInput, closing: AbortSignal): Promise<string> {
-  const { db, config, models, log, inFlight } = deps;
+  const { db, config, models, log, inFlight, release } = deps;
   const system = DRAFT_INSTRUCTION;
   const data = draftData(input);
   const inputChars = estimateTokens(system) + estimateTokens(data);
@@ -373,7 +379,14 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
         else reasoning += event.delta;
       }
     } catch (err) {
-      if (closing.aborted) throw new AppError(503, "busy");
+      if (closing.aborted) {
+        try {
+          await release(started.runId);
+        } catch (releaseErr) {
+          log.error({ err: releaseErr, runId: started.runId }, "persona draft: could not be ended as the service closed; the run stays running until the stale-run sweep or the next start releases it");
+        }
+        throw new AppError(503, "busy");
+      }
       if (!deadline.aborted) {
         failure = err instanceof ModelError ? err.code : "provider_unavailable";
         if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "persona draft: the model call failed unexpectedly");

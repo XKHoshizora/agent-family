@@ -83,9 +83,11 @@ const deletedError = () => new AppError(409, "agent_deleted");
 
 /**
  * Every route here is the owner's. Anyone else, and an id that is no Agent, gets the same 404. `draftRuns` holds the run
- * ids of the persona drafts this process is working on (the stale-run sweep leaves them alone).
+ * ids of the persona drafts this process is working on (the stale-run sweep leaves them alone). Returns `endDrafts`, for
+ * the service's stop: the drafts under way are abandoned, each run ended as recovery would end it (`draftPersona`);
+ * resolves once their requests have ended.
  */
-export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draftRuns: Set<string> }): void {
+export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draftRuns: Set<string> }): { endDrafts(): Promise<void> } {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
@@ -95,11 +97,11 @@ export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draft
   const draftLimit = perPrincipalLimit(app, 5);
   // An Agent's avatar also counts against the avatar budget its owner's own avatar uses (10 a minute).
   const avatarLimit = avatarBudget(app);
-  /** The drafts whose model call is under way: abandoned when the service starts closing (persona.ts `draftPersona`). */
-  const drafts = new Set<AbortController>();
-  app.addHook("preClose", async () => {
-    for (const closing of drafts) closing.abort(new Error("the service is closing"));
-  });
+  /**
+   * The drafts under way, each with what settles once its request has ended: abandoned when the service starts closing
+   * (persona.ts `draftPersona`).
+   */
+  const drafts = new Map<AbortController, Promise<unknown>>();
 
   api.post(
     "/api/agents",
@@ -156,15 +158,15 @@ export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draft
       await draftLimit(req, me.id);
       const { name, intro: givenIntro, field: givenField, model: chosen } = req.body;
       const closing = new AbortController();
-      drafts.add(closing);
+      const drafting = draftPersona(
+        { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns, release: (runId) => app.agentPort.releaseRun(runId, null) },
+        me.id,
+        { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
+        closing.signal,
+      );
+      drafts.set(closing, drafting.catch(() => {}));
       try {
-        const written = await draftPersona(
-          { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns },
-          me.id,
-          { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
-          closing.signal,
-        );
-        return { persona: written };
+        return { persona: await drafting };
       } finally {
         drafts.delete(closing);
       }
@@ -349,4 +351,11 @@ export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draft
     app.realtime.pushAgentChanged(me.id, id);
     await app.realtime.pushPrincipalChanged(id);
   });
+
+  return {
+    async endDrafts() {
+      for (const closing of drafts.keys()) closing.abort(new Error("the service is closing"));
+      await Promise.all(drafts.values());
+    },
+  };
 }

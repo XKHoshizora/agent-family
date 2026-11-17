@@ -404,8 +404,9 @@ save the Agent to keep it.
 - The call failing: 502 `provider_rejected` / `provider_unavailable`, 400 `address_not_allowed`, charged as a failed
   reply is (only what the upstream reported). An answer with nothing usable in it is 502 `provider_unavailable`. After
   `AGENT_RUN_TIMEOUT_MS` (2 minutes) the call is ended: what it had written is the answer (nothing: 502
-  `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the run is released
-  at the next start like a reply's (Agents and runs, Recovery). When the run was ended elsewhere while the model was
+  `provider_unavailable`). When the service stops during the call, it is abandoned (503 `busy`) and the stopping
+  service ends the run as recovery would (`failed`, `provider_unavailable`, nothing charged; Agents and runs, Recovery);
+  if that cannot be written within its 5 s, the run is released by the stale-run sweep or the next start. When the run was ended elsewhere while the model was
   answering (another instance's recovery, or the stale-run sweep), nothing more is recorded and the answer is 503
   `busy` (logged at warn). When its settlement cannot be stored (500 `internal`), that is logged with the run's id and
   the run, still `running`, is released by the stale-run sweep or the next start.
@@ -1473,10 +1474,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       bounded (`tests/runs-faults.test.ts`): once the owner stops the reply or the Agent is paused or deleted, no further
       file is read (the next step ends the run); the whole step may take at most `AGENT_RUN_TIMEOUT_MS`, after which
       the run fails `busy`; and when the service is closing the read under way is abandoned and nothing is admitted:
-      the run stays `running`, for recovery at the next start (`tests/runs-restart.test.ts`).
+      the closing service ends the run (Shutdown, below; `tests/runs-restart.test.ts`).
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
       the first step, with no call; when the service has started closing by the time the locks are held, the
-      transaction rolls back and nothing is admitted (the run stays `running`, for recovery at the next start;
+      transaction rolls back and nothing is admitted (the closing service ends the run, Shutdown below;
       `tests/runs-restart.test.ts`); otherwise the call is admitted on its input estimate (Metering; `no_quota`
       ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
       `peerReadSeq`).
@@ -1485,7 +1486,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    as cleaned): from there on no more text delta goes out for that reply, and the rest arrives with the message. A `<`
    that may begin one waits for the next piece and goes out in its place once it turns out not to. Reasoning deltas are
    pushed as they come. It is abandoned at once when the owner stops it or the Agent is paused or deleted (checked every
-   50 ms), after `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes.
+   50 ms), after `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes (then the run is ended as Shutdown,
+   below, says).
 3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
    delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
    generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
@@ -1571,7 +1573,7 @@ all of the above, attachments at their estimate.
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
-| The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start, or by the stale-run sweep of an instance still running (below): `failed`, `provider_unavailable`, retryable |
+| The service closed during the call, or while its attachments were read | none | ended by the closing service itself as recovery ends one (Shutdown, below): `failed`, `provider_unavailable`, retryable; charged nothing. Only if that cannot be written (or the process died): left `running`, then recovered at the next start, or by the stale-run sweep of an instance still running |
 
 Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the
 run. Every run the worker took is settled exactly once (its usage record's `outcome` is the run's status; the database
@@ -1595,12 +1597,24 @@ can be open yet — so a client learns the state from `GET /api/conversations/:i
 live in the process: a new start has none. A run that cannot be recovered is logged and left for the stale-run sweep
 or the next start.
 
+**Shutdown** (`app.close()`, which `SIGTERM` and `SIGINT` call; `tests/runs-restart.test.ts`). A graceful stop ends what
+this process was working on itself, so a run is left `running` only by a process that died (or whose writes failed): the
+worker claims nothing more; every call in flight, and every reply still reading its attachments, is abandoned without
+posting or admitting anything, and its run is ended exactly as recovery ends one (above: `failed`, `provider_unavailable`,
+retryable, its hold released at no charge — or `cancelled` when a pause or delete had interrupted it), each in its own
+transaction, and its owner is told (`run`; sockets already closing may miss it, and a client reads `GET …/run` when it
+reconnects). A reply already being posted finishes as usual. Persona drafts under way are abandoned and ended the same
+way (their requests answer 503 `busy`). All of this gets at most 5 s together (`SHUTDOWN_GRACE_MS`): what could not be
+written by then — the database not answering — stays `running` and is logged, for the stale-run sweep of another
+instance or the next start. Queued replies stay queued for the next start.
+
 A deploy may start the new instance while the old one is still answering (`tests/runs-restart.test.ts`, "a second
 instance"). The new one's recovery then ends the old one's runs as above; when the old one's call finishes, `post` finds
 its run no longer `running` (read under the same locks recovery takes) and stores nothing, and `finish` leaves the run as
 recovery recorded it: no message, no second usage record (logged at warn). While both run, both workers take queued
-runs; a reply the old instance takes after the new one has started, and is stopped in the middle of, is left `running`
-with nobody working on it. The stale-run sweep (below) releases it.
+runs; a reply the old instance takes after the new one has started is ended by the old instance's own stop (Shutdown,
+above) when it is stopped in the middle of it, or, if the old instance is killed before that, left `running` with
+nobody working on it: the stale-run sweep (below) releases it.
 
 **The stale-run sweep** (`port-impl.ts` `sweepStaleRuns`; `tests/runs-restart.test.ts`). Once a minute while the service
 runs (first a minute after start), every run — reply or persona draft — that has been `running` for longer than twice
@@ -1610,7 +1624,8 @@ under the same locks — unless this process is working on it (a run its worker 
 whose request is under way): those are never touched, however old. Unlike at start-up, the owner's sockets are told
 (`run`), and a follow-up queued by the one rule wakes the worker. An instance still working on a run that old elsewhere
 is past its own limits: its `post` is refused (the run is no longer `running`) and nothing is recorded twice. So a run
-left behind by a process that is gone — a deploy's old instance stopped mid-call, a `finish` that failed — is released
+left behind by a process that is gone — a deploy's old instance killed mid-call, or whose stop could not write its runs'
+end, a `finish` that failed — is released
 within about twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then it is stuck: the
 Agent's conversation shows it replying and the Agent answers nothing more (an Agent has one queued or running run at
 most), it occupies one of the owner's `AGENT_MAX_CONCURRENT_RUNS` slots, and, if it was admitted, its hold still counts
@@ -1618,7 +1633,7 @@ against the owner's allowance or balance.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,
-`emit`, `post`, `finish`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
+`emit`, `post`, `finish`, `release`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
 fails when a file there imports `db.ts`, `pg` or any `store.ts`. It is the shape an external Agent's connection would have.
 
 Lock order of every write here: the conversation row → the `agents` row → the run row → the `accounts` row. Like the

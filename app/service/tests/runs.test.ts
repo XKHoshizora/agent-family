@@ -470,7 +470,7 @@ describe("the run routes are the owner's", () => {
 });
 
 describe("closing the app", () => {
-  it("abandons a call in flight without posting, leaves the run running, and does not hang", async () => {
+  it("abandons a call in flight without posting, ends its run as recovery would (failed, retryable), and does not hang", async () => {
     const own = scriptedGateway();
     const other = await buildApp({ config: app.deps.config, db, models: own }, { agentWorker: false, answerFloor: NO_ANSWER_FLOOR });
     await other.ready();
@@ -485,8 +485,8 @@ describe("closing the app", () => {
     await running;
     expect(performance.now() - t0).toBeLessThan(2000);
     expect(call.signal.aborted).toBe(true);
-    const rows = await db.query("select status from agent_runs");
-    expect(rows.rows).toEqual([{ status: "running" }]);
+    const rows = await db.query("select status, error, hold_micro::text as hold from agent_runs");
+    expect(rows.rows).toEqual([{ status: "failed", error: "provider_unavailable", hold: "0" }]);
     const posted = await db.query("select count(*)::int n from messages where sender_id = $1", [agent.id]);
     expect(posted.rows[0].n).toBe(0);
   });

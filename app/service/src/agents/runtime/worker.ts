@@ -15,6 +15,25 @@ export const POLL_MS = 2_000;
 export const STOP_CHECK_MS = 50;
 /** Replies in flight at once in the whole service (each holds an outbound call; see the guard's own cap). */
 export const MAX_RUNS_IN_FLIGHT = 8;
+/**
+ * How long the service's stop gives the runs it was working on to end (their calls abandoned, each ended as recovery
+ * would end it, `AgentPort.release`), and the persona drafts under way likewise; what has not ended by then is left
+ * `running`, for the stale-run sweep or the next start.
+ */
+export const SHUTDOWN_GRACE_MS = 5_000;
+
+/** Whether `promise` settled within `ms` (it is not stopped when it did not). */
+export async function within(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+  try {
+    return await Promise.race([promise.then(() => true, () => true), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export interface WorkerLog {
   error(details: Record<string, unknown>, msg: string): void;
@@ -43,9 +62,11 @@ export interface AgentWorker {
   /** `runOnce` until nothing is queued (follow-ups included); how many ran. */
   drain(): Promise<number>;
   /**
-   * Stops: no more claims; calls in flight, and replies still reading their attachments, are abandoned without posting
-   * or admitting and their runs left `running` (recovered at the next start); replies already being posted finish.
-   * Resolves once nothing runs any more.
+   * Stops (once; later calls wait for the same stop): no more claims; calls in flight, and replies still reading their
+   * attachments, are abandoned without posting or admitting, and each such run is ended here as recovery would end it
+   * (`AgentPort.release`); replies already being posted finish. Resolves once nothing runs any more, or after
+   * `SHUTDOWN_GRACE_MS` at most: a run whose end could not be written by then (or at all) stays `running`, for the
+   * stale-run sweep or the next start.
    */
   stop(): Promise<void>;
 }
@@ -60,6 +81,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   let started = false;
   let closing = false;
   let pumping: Promise<void> | null = null;
+  let stopping: Promise<void> | null = null;
   let again = false;
   let timer: NodeJS.Timeout | null = null;
 
@@ -67,7 +89,16 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     try {
       await port.finish(run, end, usage, fallback);
     } catch (err) {
-      log.error({ err, runId: run.id }, "agent run: could not record how it ended; it stays running until the next start");
+      log.error({ err, runId: run.id }, "agent run: could not record how it ended; it stays running until the stale-run sweep or the next start releases it");
+    }
+  }
+
+  /** The service is closing: the run is ended here, as recovery would end it, instead of being left for the next start. */
+  async function release(run: RunTicket): Promise<void> {
+    try {
+      await port.release(run);
+    } catch (err) {
+      log.error({ err, runId: run.id }, "agent run: could not be ended as the service closed; it stays running until the stale-run sweep or the next start releases it");
     }
   }
 
@@ -148,8 +179,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     try {
       prepared = await port.begin(run, shutdown);
     } catch (err) {
-      // The service is closing before the call was admitted: the run stays running, to be recovered at the next start.
-      if (shutdown.aborted) return;
+      // The service is closing before the call was admitted (nothing was): the run is ended here.
+      if (shutdown.aborted) return release(run);
       // Ended elsewhere meanwhile (another instance's recovery, or the stale-run sweep): expected, not an error; `finish`
       // then finds it ended and changes nothing.
       if (err instanceof RunNotRunning) log.warn({ runId: run.id, status: err.status }, "agent run: ended elsewhere before it could start; nothing is called");
@@ -159,8 +190,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     if (isRunEnd(prepared)) return finish(run, prepared, null, NOTHING);
 
     const { out, finished, failure, why } = await call(run, prepared, shutdown);
-    // The service is closing: nothing is posted and the run stays running, to be recovered at the next start.
-    if (finished === null && why === "shutdown") return out.discard();
+    // The service is closing: nothing is posted, and the run is ended here as recovery would end it (no charge).
+    if (finished === null && why === "shutdown") {
+      out.discard();
+      return release(run);
+    }
     out.end();
 
     const usage = finished?.usage ?? null;
@@ -247,12 +281,23 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       while (await this.runOnce()) n++;
       return n;
     },
-    async stop() {
-      closing = true;
-      if (timer) clearInterval(timer);
-      for (const shutdown of shutdowns.values()) shutdown.abort(new Error("the service is closing"));
-      await pumping;
-      await Promise.all([...inFlight]);
+    stop() {
+      stopping ??= (async () => {
+        closing = true;
+        if (timer) clearInterval(timer);
+        for (const shutdown of shutdowns.values()) shutdown.abort(new Error("the service is closing"));
+        const ended = (async () => {
+          await pumping;
+          await Promise.all([...inFlight]);
+        })();
+        if (!(await within(ended, SHUTDOWN_GRACE_MS))) {
+          log.warn(
+            { runIds: [...shutdowns.keys()] },
+            `agent worker: replies not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; they stay running until the stale-run sweep or the next start releases them`,
+          );
+        }
+      })();
+      return stopping;
     },
   };
 }

@@ -22,7 +22,7 @@ import { registerAccountRoutes } from "./accounts/routes.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
-import { createAgentWorker, type AgentWorker } from "./agents/runtime/worker.ts";
+import { createAgentWorker, SHUTDOWN_GRACE_MS, within, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
 import { registerModelRoutes } from "./models/routes.ts";
@@ -265,8 +265,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   await registerSync(app);
 
   // The reply worker runs in this process (one instance, like the hub). Once the app is ready, the runs the previous
-  // process left running are recovered and then the worker starts; it stops on close before the hub and the database:
-  // calls in flight are abandoned, their runs left running for the next start.
+  // process left running are recovered and then the worker starts. It stops when the app starts closing, before the hub
+  // and the database: calls in flight are abandoned and their runs ended here as recovery would end them, within
+  // SHUTDOWN_GRACE_MS (what could not be written by then is left running, for the stale-run sweep or the next start).
   const agentPort = createAgentPort({
     db: deps.db,
     config,
@@ -305,7 +306,6 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     if (options.staleRunSweep !== false) staleTimer = startStaleRunSweep(() => staleRunSweep.run(), app.log, options.staleRunSweep ?? {});
   });
   app.addHook("onClose", async () => staleTimer?.stop());
-  app.addHook("onClose", async () => agentWorker.stop());
 
   const answerFloor = options.answerFloor ?? ANSWER_FLOOR;
   registerRegistrationRoutes(app, perMinute, answerFloor);
@@ -317,7 +317,17 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerMessageRoutes(app);
   registerAttachmentRoutes(app);
   registerAccountRoutes(app);
-  registerAgentRoutes(app, { draftRuns });
+  const { endDrafts } = registerAgentRoutes(app, { draftRuns });
+  // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —
+  // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself).
+  app.addHook("preClose", async () => {
+    await Promise.all([
+      within(endDrafts(), SHUTDOWN_GRACE_MS).then((ended) => {
+        if (!ended) app.log.warn(`persona drafts not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
+      }),
+      agentWorker.stop(),
+    ]);
+  });
   registerRunRoutes(app);
   registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true });
   registerModelRoutes(app);

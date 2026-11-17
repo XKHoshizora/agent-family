@@ -80,9 +80,11 @@ start-up with a message naming the variable. Values in the right column are for 
   A deploy that starts the new container while the old one still runs posts and charges nothing twice: the new one's
   start-up ends the old one's Agent replies in progress (they fail retryable, the owner retries), and when the old
   one's model call finishes it posts and charges nothing more (`app/service/README.md`, Agents and runs, Recovery).
-  While both run, the old container's worker may still take up a queued reply; if it is stopped in the middle of that
-  one, the running container's stale-run sweep releases it (failed, retryable) within about twice
-  `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then that Agent shows "replying" and
+  When the old container is stopped (`SIGTERM`), it ends the Agent replies and persona drafts it is still working on
+  itself — abandoned, failed and retryable, nothing charged — within 5 s, then exits (Agents and runs, Shutdown); give
+  it at least that long before it is killed. Only a container killed before that (or whose database stopped answering)
+  leaves a reply `running`; the running container's stale-run sweep then releases it (failed, retryable) within about
+  twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then that Agent shows "replying" and
   answers nothing more, the reply takes one of its owner's `AGENT_MAX_CONCURRENT_RUNS` slots and, if it was admitted,
   its hold still counts against the owner's points. Keep the overlap short.
 - **TLS terminates at the proxy** in front; the service speaks plain HTTP on `PORT` and must be reachable
