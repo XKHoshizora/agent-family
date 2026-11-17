@@ -394,9 +394,9 @@ conversation. Like a person who left, an Agent that left a group stays named by 
 still read them (a member who has since left too) gets its entry in those reads' `principals` — name, handle, intro,
 field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
 id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
-level, reply mode, `groupMentions`, provider, pause or persona proposals, in any response, push or error. Fellow members
-see a changed name, intro or field the next time they load principals, as for people; a changed avatar is pushed to
-them (`principal`).
+level, reply mode, `groupMentions`, provider, pause or persona proposals, or the reasoning of its replies there (A reply
+there), in any response, push or error. Fellow members see a changed name, intro or field the next time they load
+principals, as for people; a changed avatar is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "reasoning": "none" | "low" | "medium" | "high" |
@@ -728,11 +728,21 @@ owner's limits.
   more. The system text comes on top of it. Its own conversation has no such cap.
 - *What it stores.* An ordinary `text` message from the Agent, which every member reads: its text (message-text rules,
   everything from its first `<af-` on dropped, cut at 8 000 characters), `stopped` and `truncated` as in its own
-  conversation. Never `reasoning`, whatever the model returned (a model's thinking often restates its persona), and never
-  a persona proposal: a block in it is no proposal, changes nothing of the Agent, and is not shown (with nothing else
-  in the reply, it counts as an answer that said nothing). Its own mentions may call other Agents (above).
+  conversation, and the model's `reasoning` exactly as there (message-text rules, at most 32 000 characters, only when
+  there is some). Never a persona proposal: a block in it is no proposal, changes nothing of the Agent, and is not shown
+  (with nothing else in the reply, it counts as an answer that said nothing). A reply with no visible text is not posted
+  however much it thought (its members would see an empty message): it too counts as an answer that said nothing. Its
+  own mentions may call other Agents (above).
+- *Who reads its thinking.* Only the Agent's owner (the product owner's decision of 2026-11-18; a model's thinking often
+  restates its persona). Every read of a message decides it per reader, in the query that decides whether the reader
+  sees the message at all (`messages/read.ts` `toWireForReaders`): `reasoning` is sent when the reader is the
+  `owner_id` of the principal that sent it, read when the message is read — on the history, a single message,
+  `GET /api/sync` and catch-up, both searches and every `message` push. Everyone else gets the message without the
+  field (absent, not null or empty: exactly what a message stored without reasoning looks like). An owner who has left
+  the group reads none of it, as they read nothing of the group. A quote of the reply, the member list, `run` pushes and
+  `GET …/runs` carry none of it to anyone, and search never looks at it (Search).
 - *Nothing is streamed*: no `delta` is pushed for a reply in a group, to anyone, its owner included; it arrives whole,
-  as its message.
+  as its message (its owner's with its thinking).
 - *Who pays.* The Agent's owner, exactly as in its own conversation (Metering): admitted against the owner's free
   allowance or balance and settled there. Whoever called it is charged nothing and sees nothing of it in their
   `GET /api/usage`; on its owner's provider model it costs no points.
@@ -1495,10 +1505,11 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                                        // or { "seq": 7, "visible": false } when you cannot see the quoted message;
                                        // absent when not a reply. A quoted notice: kind "text", senderId null
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
-  "reasoning": "…",                    // an Agent's reply in its own conversation: the model's reasoning, when it gave
-                                       // any (show it folded; never in previews or search, never sent to a model
-                                       // again; never stored for a reply in a group, and never sent for a message
-                                       // anywhere but an Agent's own conversation, whatever is stored)
+  "reasoning": "…",                    // an Agent's reply: the model's reasoning, when it gave any — in its own
+                                       // conversation; in a group only when you own the Agent that sent it (absent
+                                       // for every other member, so their message is shaped as one without any);
+                                       // nowhere else. Show it folded; never in previews, quotes or search, never
+                                       // sent to a model again
   "stopped": true,                     // an Agent's reply its owner stopped: text is what had been said by then
   "truncated": true,                   // an Agent's reply that was cut (model's output limit, time limit, 8 000 characters)
   "proposal": { "id": "…", "status": "open" | "confirmed" | "discarded" | "superseded" | "stale",
@@ -1857,9 +1868,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    is kept only when there is some. In a group (Agents in a group, A reply there), the Agent must still be a current
    member there, read under the group's row, which every membership change takes (else 409 `agent_removed`: nothing is
    posted); its reply is never read for a proposal — everything from its first `<af-` on is dropped before the cut —
-   and no reasoning is kept; the run looked for is one of this Agent in this conversation, so a run's reply never lands
-   anywhere else. With nothing left to show, nothing is stored (`post` answers `empty`) and the run
-   ends as one that said nothing (below).
+   and its reasoning is kept as above (sent only to the Agent's owner: Agents in a group, A reply there), but a reply
+   with no visible text is not posted, whatever it thought; the run looked for is one of this Agent in this
+   conversation, so a run's reply never lands anywhere else. With nothing left to show, nothing is stored (`post`
+   answers `empty`) and the run ends as one that said nothing (below).
 4. `finish`, one transaction: the call is settled (one usage record; its hold released) in the same transaction that
    moves the run out of `running`, how it ended is recorded, and the follow-up is queued. What is recorded is what is
    true under the lock: a reply that was posted stands (`done`, or `stopped` by its owner), whatever happened to the
@@ -1955,7 +1967,7 @@ all of the above, attachments at their estimate.
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
-| An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
+| An empty answer (no visible text, no reasoning; in a group, no visible text) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
@@ -2168,7 +2180,8 @@ every conversation you are currently in; `before` is the opaque cursor of the pr
 is 400). Each hit carries `conversationId` and `seq`, the place to jump to.
 
 `q` is 1–100 characters after trimming, one line, matched as a substring (`%`, `_` and `\` are ordinary
-characters) of a message's text (captions included) or a file message's name; system notices never match.
+characters) of a message's text (captions included) or a file message's name; system notices never match, and an
+Agent's reasoning is never looked at (whoever may read it), so a word only in it finds nothing.
 Bidi overrides and isolates are removed from `q` as they are from stored text, so a term copied with them still
 matches (a term of nothing else is 400).
 You only get messages you could read anyway (the same visibility rule), quotes resolved for you. `limit`
