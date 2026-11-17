@@ -2,7 +2,9 @@
 // sent to the Markdown worker and rendered rich (an IntersectionObserver on the list, with a generous margin); a text
 // once rich stays rich while it is shown. And all the rich trees shown at once have at most VIEW_ELEMENTS elements:
 // when one more would pass that, the ones farthest from the viewport go back to plain text (until they come near
-// again). So opening a conversation costs at most what is visible, each text capped.
+// again). So opening a conversation costs at most what is visible, each text capped. And texts turn rich a few at a
+// time: at most FRAME_ELEMENTS elements' worth of trees per animation frame, the nearest to the viewport first
+// (`inFrame`), wherever their trees come from (the worker, or the answers the client has kept).
 import React, { createContext, useContext, useEffect, useMemo } from "react";
 
 /** The elements of all rich texts shown at once in one conversation. */
@@ -11,6 +13,77 @@ export const VIEW_ELEMENTS = 30000;
 export const NEAR_MARGIN = "100% 0px 100% 0px";
 /** Without IntersectionObserver: the newest this many Agent texts count as near. */
 export const NEWEST_NEAR = 20;
+
+// ───────── turning rich, a frame at a time
+
+/** The elements of all the trees turned rich in one animation frame (one tree is at most this big: it always fits). */
+export const FRAME_ELEMENTS = 3000;
+
+const nextFrame = (run) => {
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => run());
+  else setTimeout(run, 16);
+};
+let frameClock = nextFrame;
+/** Trees waiting to be shown: `{ elements, distance, apply }`. */
+const waiting = new Set();
+let frameAsked = false;
+/**
+ * Replaces what calls back at the next frame (tests: a clock of their own); nothing: the browser's again. A frame
+ * asked of the old clock is asked of the new one.
+ */
+export function setFrameClock(clock) {
+  frameClock = clock ?? nextFrame;
+  if (!frameAsked) return;
+  frameAsked = false;
+  if (waiting.size > 0) askFrame();
+}
+
+function askFrame() {
+  if (frameAsked) return;
+  frameAsked = true;
+  frameClock(turnFrame);
+}
+
+/** One frame: the nearest waiting trees are shown, up to FRAME_ELEMENTS elements; the rest wait for the next. */
+function turnFrame() {
+  frameAsked = false;
+  const order = [...waiting].map((item) => {
+    let far = Infinity;
+    try {
+      far = Number(item.distance());
+    } catch {
+      /* gone: last */
+    }
+    return [item, Number.isNaN(far) ? Infinity : far];
+  });
+  order.sort((a, b) => a[1] - b[1]);
+  let spent = 0;
+  for (const [item] of order) {
+    if (spent > 0 && spent + item.elements > FRAME_ELEMENTS) break;
+    waiting.delete(item);
+    spent += item.elements;
+    try {
+      item.apply();
+    } catch {
+      /* one text's failure is not the others' */
+    }
+  }
+  if (waiting.size > 0) askFrame();
+}
+
+/**
+ * Shows a tree of `elements` elements at an animation frame: `apply()` is called then, after the trees nearer the
+ * viewport (`distance()`, lower is nearer) and only while the frame's FRAME_ELEMENTS are not spent. Returns a function
+ * that gives up waiting.
+ */
+export function inFrame(elements, distance, apply) {
+  const item = { elements: Math.max(1, Number(elements) || 1), distance, apply };
+  waiting.add(item);
+  askFrame();
+  return () => waiting.delete(item);
+}
+
+// ───────── one conversation's view
 
 /**
  * A view: `root` the scrolling list (null: the page). `watch(element, id, onNear)` reports whether the element is near

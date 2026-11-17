@@ -22,6 +22,8 @@ async function freshAgentText(factory) {
   if (factory) vi.doMock("../src/ui/Markdown.jsx", factory);
   const { createMarkdownClient, setMarkdownClient } = await import("../src/ui/markdownClient.js");
   setMarkdownClient(createMarkdownClient({ createWorker: () => new InProcessWorker() }));
+  // (As in tests/setup.js, for these fresh modules: a tree is shown at the next microtask, not at a browser frame.)
+  (await import("../src/ui/markdownView.jsx")).setFrameClock((run) => queueMicrotask(run));
   return import("../src/ui/AgentText.jsx");
 }
 

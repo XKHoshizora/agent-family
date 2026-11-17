@@ -2,11 +2,14 @@
 // What one conversation spends on Agents' rendered texts (src/ui/markdownView.jsx): only texts in or near the visible
 // part of the list are sent to the worker and rendered rich (IntersectionObserver, mocked here); a rich text stays rich
 // while shown; all rich texts together stay within the view's element budget, the ones farthest from view going back
-// to plain first; without IntersectionObserver the newest 20 Agent texts count as near.
+// to plain first; without IntersectionObserver the newest 20 Agent texts count as near. A text whose answer the client
+// already holds (a conversation opened again) is treated like any other: plain until near, and texts turn rich at most
+// 3 000 elements' worth per animation frame, the nearest first.
 import React, { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
 import { AgentText, loadMarkdown } from "../src/ui/AgentText.jsx";
+import * as markdownView from "../src/ui/markdownView.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../src/ui/markdownView.jsx";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
 import { validateTree } from "../src/ui/markdownTree.js";
@@ -158,6 +161,93 @@ describe("the view's element budget", () => {
     expect(workers.flatMap((w) => w.sent)).toHaveLength(3);
     expect(container.querySelectorAll(".md")).toHaveLength(3);
     expect(container.querySelectorAll("li li").length).toBe(1500);
+  });
+});
+
+describe("a conversation opened again: its answers are already kept", () => {
+  /** A frame clock the test turns by hand: `turn()` runs the frame that was asked for, if any. */
+  function handFrames() {
+    const asked = [];
+    markdownView.setFrameClock?.((run) => asked.push(run));
+    return {
+      get waiting() {
+        return asked.length;
+      },
+      async turn() {
+        const run = asked.shift();
+        await act(async () => run?.());
+        await settle();
+      },
+    };
+  }
+  afterEach(() => markdownView.setFrameClock?.((run) => queueMicrotask(run)));
+
+  it("150 kept texts, 5 of them near: only those 5 become rich, the nearest first, never more than 3 000 elements in one frame", async () => {
+    const { client, workers } = useWorkers();
+    const texts = Array.from({ length: 150 }, (_, i) => items(i >= 145 ? 900 : 20, `第 ${i} 条`));
+    for (const text of texts) {
+      client.request(text);
+      await settle(4);
+    }
+    const elements = texts.map((text) => client.peek(text)?.elements);
+    expect(elements.every((n) => n > 20)).toBe(true); // every answer is kept
+    const sent = workers.flatMap((w) => w.sent).length;
+
+    const frames = handFrames();
+    const { container } = render(<Conversation texts={texts} />);
+    await settle();
+    while (frames.waiting > 0) await frames.turn();
+    // Opened: nothing is near yet, so nothing is rich, kept or not.
+    expect(container.querySelectorAll(".md")).toHaveLength(0);
+
+    container.querySelector("ol").getBoundingClientRect = () => ({ top: 0, bottom: 800 });
+    const tops = { 145: -3000, 146: 2000, 147: -500, 148: 1000, 149: 300 };
+    for (const [i, top] of Object.entries(tops)) placeAt(textEl(container, i), top);
+    await near([145, 146, 147, 148, 149].map((i) => textEl(container, i)));
+    expect(container.querySelectorAll(".md")).toHaveLength(0); // not before a frame
+
+    const richNow = () => texts.map((_, i) => i).filter((i) => isRich(container, i));
+    const perFrame = [];
+    let before = richNow();
+    while (frames.waiting > 0) {
+      await frames.turn();
+      const after = richNow();
+      perFrame.push(after.filter((i) => !before.includes(i)));
+      before = after;
+    }
+    const turned = perFrame.filter((frame) => frame.length > 0);
+    // 5 texts of about 900 elements: three in the first frame (the nearest), two in the next.
+    expect(turned).toEqual([
+      [147, 148, 149],
+      [145, 146],
+    ]);
+    for (const frame of turned) expect(frame.reduce((sum, i) => sum + elements[i], 0)).toBeLessThanOrEqual(3000);
+    expect(richNow()).toEqual([145, 146, 147, 148, 149]);
+    expect(textEl(container, 3).textContent).toBe(texts[3]);
+    expect(workers.flatMap((w) => w.sent)).toHaveLength(sent); // nothing was asked of the worker again
+  }, 30000);
+
+  it("a text pushed out of the budget and near again waits for a frame like any other", async () => {
+    useWorkers(() => new InProcessWorker());
+    const texts = [items(40, "甲"), items(40, "乙"), items(40, "丙")];
+    const rendered = validateTree(renderToTree(texts[0]).tree).rendered;
+    const frames = handFrames();
+    const { container } = render(<Conversation texts={texts} budget={2 * rendered + 5} />);
+    await settle();
+    container.querySelector("ol").getBoundingClientRect = () => ({ top: 0, bottom: 800 });
+    placeAt(textEl(container, 0), -5000);
+    placeAt(textEl(container, 1), -2000);
+    placeAt(textEl(container, 2), 300);
+    await near([0, 1, 2].map((i) => textEl(container, i)));
+    while (frames.waiting > 0) await frames.turn();
+    expect([0, 1, 2].map((i) => isRich(container, i))).toEqual([false, true, true]);
+    placeAt(textEl(container, 0), 200);
+    placeAt(textEl(container, 2), 4000);
+    await near([textEl(container, 0)], false);
+    await near([textEl(container, 0)]);
+    expect(isRich(container, 0)).toBe(false);
+    while (frames.waiting > 0) await frames.turn();
+    expect([0, 1, 2].map((i) => isRich(container, i))).toEqual([true, true, false]);
   });
 });
 

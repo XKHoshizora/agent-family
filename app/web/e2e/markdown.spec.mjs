@@ -1,7 +1,7 @@
 // An Agent's reply as Markdown in a real browser, through the real Markdown worker under the page's real
 // Content-Security-Policy: what renders (a heading, code, a table, display maths, every link with its real host), what
-// never happens (a remote image fetched, a raw <script> run), and that hostile replies cannot hold up the page (a
-// requestAnimationFrame heartbeat measured in the page). The replies come from the local model stub
+// never happens (a remote image fetched, a raw <script> run), and that neither hostile replies nor a long conversation
+// opened again can hold up the page (a requestAnimationFrame heartbeat measured in the page). The replies come from the local model stub
 // (support/model-stub.mjs); the people fixture also fails the test on any CSP violation, uncaught error or injected
 // markup (support/fixtures.mjs).
 import { test, expect } from "./support/fixtures.mjs";
@@ -167,6 +167,42 @@ test("hostile replies never hold up the page: streamed in full, then opened from
   expect(beat.frames).toBeGreaterThan(10);
   expect(beat.max, `longest frame gap while opening: ${beat.max} ms`).toBeLessThan(STALL_MS);
   expect(await ann.page.evaluate(() => window.__xss)).toBeUndefined();
+});
+
+/** An ordinary long reply (a heading and a list of 480 items with bold and code: about 1 440 elements, 6 700 characters). */
+const longReply = (i) => [`## 第 ${i} 篇`, "", ...Array.from({ length: 480 }, (_, n) => `- **项** \`c${n % 10}\` 文`)].join("\n");
+/** Replies in the conversation opened again (the service starts at most 20 replies a minute for one owner). */
+const REPLIES = 18;
+
+test("a conversation of many long replies opened again costs what is in view: far replies stay plain, the heartbeat never stalls", async ({ people }) => {
+  test.setTimeout(240_000);
+  const ann = await people.member("Ann");
+  const name = `重开${uniq(4)}`;
+  const other = `旁边${uniq(4)}`;
+  await createAgentUi(ann.page, { name: other, persona: "你回答。" });
+  let chat = await createAgentUi(ann.page, { name, persona: "你回答。" });
+  for (let i = 0; i < REPLIES; i += 1) {
+    await modelStub.reply(longReply(i), { chunkSize: 4000 });
+    await sendText(ann.page, name, `第 ${i} 问 ${uniq(4)}`);
+    const reply = agentMessagesWith(chat, `第 ${i} 篇`);
+    await expect(reply).toHaveCount(1);
+    // Each reply is rendered while it is the newest: the page now holds its answer.
+    await expect(reply.locator(".md li").first()).toBeVisible();
+  }
+
+  // Leave for another conversation, then open this one again, the heartbeat running from before it opens.
+  await openChat(ann.page, other);
+  await startHeartbeat(ann.page);
+  chat = await openChat(ann.page, name);
+  const newest = agentMessagesWith(chat, `第 ${REPLIES - 1} 篇`);
+  await expect(newest.locator(".md li").first()).toBeVisible();
+  await ann.page.waitForTimeout(1000);
+  // What is far from view stays plain, though its answer is held; nothing was rendered just because it was held.
+  await expect(agentMessagesWith(chat, "第 0 篇").locator(".md")).toHaveCount(0);
+  expect(await chat.locator(".md-text > .md").count()).toBeLessThan(REPLIES);
+  const beat = await heartbeat(ann.page, "opening again");
+  expect(beat.frames).toBeGreaterThan(10);
+  expect(beat.max, `longest frame gap while opening again: ${beat.max} ms`).toBeLessThan(STALL_MS);
 });
 
 test("a reply the worker is too slow for: the worker is ended and made again, the rest of the reply stays plain with the note, the page never stalls", async ({ people }) => {

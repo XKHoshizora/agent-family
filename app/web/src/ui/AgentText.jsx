@@ -3,12 +3,15 @@
 // spinner, nothing moves but the change from plain to rich. Nothing here parses, typesets or highlights. Shown plain:
 // while the tree is coming; for a text not near the visible part of its conversation, or pushed out of the
 // conversation's element budget (markdownView.jsx); with a note, for a text too complex or too slow to render; without
-// one, where there is no worker. Bidirectional controls are taken out of the text before it is shown either way.
+// one, where there is no worker. A tree the client already holds (the conversation was open before) is no different
+// from one the worker has yet to make: the text mounts plain, its tree is taken only once it is near, and every tree is
+// shown at an animation frame, a few per frame (markdownView.jsx `inFrame`). Bidirectional controls are taken out of
+// the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
-import { useMarkdownView } from "./markdownView.jsx";
+import { inFrame, useMarkdownView } from "./markdownView.jsx";
 import { PlainWithNote } from "./slowTexts.jsx";
 
 /** A reply being written asks for its tree at most this often, in milliseconds. */
@@ -73,19 +76,31 @@ const plainOf = (text, result) => (withNote(result) ? <PlainWithNote text={text}
 /**
  * Shows `rendered` elements of a tree if the conversation's budget allows (it may push others far from view back to
  * plain), until the tree changes, the text goes, or this text is pushed back itself; asks again when it comes near.
+ * `framed`: the budget is asked at an animation frame, in the frame's turn (a stored text turning rich); otherwise at
+ * once (a reply being written, whose trees are taken at a frame already and replace one another without a gap).
  */
-function useBudget(view, host, result, epoch) {
-  const [granted, setGranted] = useState(false);
+function useBudget(view, host, result, epoch, framed) {
+  const [grantedFor, setGrantedFor] = useState(null);
+  /** The ticket of the tree shown (or refused) now. */
+  const ticket = useRef(null);
+  useLayoutEffect(
+    () => () => {
+      ticket.current?.release();
+      ticket.current = null;
+    },
+    [view, host, result],
+  );
   useLayoutEffect(() => {
-    if (!result?.tree) {
-      setGranted(false);
-      return undefined;
-    }
-    const ticket = view.claim(host.current, result.rendered, () => setGranted(false));
-    setGranted(ticket.granted);
-    return () => ticket.release();
-  }, [view, host, result, epoch]);
-  return granted;
+    if (!result?.tree || ticket.current?.granted) return undefined;
+    const claim = () => {
+      ticket.current = view.claim(host.current, result.rendered, () => setGrantedFor(null));
+      setGrantedFor(ticket.current.granted ? result : null);
+    };
+    if (framed) return inFrame(result.elements, () => view.distance(host.current), claim);
+    claim();
+    return undefined;
+  }, [view, host, result, epoch, framed]);
+  return Boolean(result?.tree) && grantedFor === result;
 }
 
 /** Whether the element is near the visible part of its conversation; `epoch` counts its comings near. */
@@ -103,9 +118,16 @@ function useNear(view, host, id) {
   return { near, epoch };
 }
 
+/** What is known of a text without its tree: that it is shown plain (too long, slow before, no workers), or nothing. */
+const plainKnown = (client, text) => {
+  const known = client.peek(text);
+  return known?.plain ? known : null;
+};
+
 /**
  * The text of an Agent's stored message. `id`: the message's (where the browser cannot tell what is near, the newest
- * Agent texts are). Asked for once near; once rich it stays rich while shown (unless the budget pushes it back).
+ * Agent texts are). Asked for once near — of the worker or of the answers the client has kept, alike; once rich it
+ * stays rich while shown (unless the budget pushes it back).
  */
 export const AgentText = memo(function AgentText({ text, id = null }) {
   const shown = useMemo(() => withoutBidiControls(text), [text]);
@@ -113,12 +135,12 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
   const view = useMarkdownView();
   const host = useRef(null);
   const { near, epoch } = useNear(view, host, id);
-  const [held, setHeld] = useState(() => ({ text: shown, result: client.peek(shown) }));
+  const [held, setHeld] = useState(() => ({ text: shown, result: plainKnown(client, shown) }));
   const result = held.text === shown ? held.result : null;
 
   useEffect(() => {
     if (result) return undefined;
-    const now = client.peek(shown);
+    const now = plainKnown(client, shown);
     if (now) {
       setHeld({ text: shown, result: now });
       return undefined;
@@ -134,7 +156,7 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
     };
   }, [client, view, shown, near, result]);
 
-  const granted = useBudget(view, host, result, epoch);
+  const granted = useBudget(view, host, result, epoch, true);
   let body = shown;
   let kind = "plain";
   if (result?.plain) {
@@ -155,7 +177,8 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
 /**
  * The text of a reply being written. Every piece is shown at once; the tree is asked for at most every
  * STREAM_EVERY_MS, one request at a time, and a tree is taken only if the text has not changed while it was made (a
- * stale one is dropped). Until the next tree, the text that came after the taken one is shown after it, plain. After
+ * stale one is dropped), at an animation frame like every tree. Until the next tree, the text that came after the taken
+ * one is shown after it, plain. After
  * STREAM_LATE_MAX late answers in a row the rest of the reply is plain (with the note). The stored message that
  * replaces this is rendered on its own.
  */
@@ -169,7 +192,7 @@ export function StreamingAgentText({ text }) {
   const [taken, setTaken] = useState(null);
   const [plainRest, setPlainRest] = useState(false);
   const run = useRef(null);
-  run.current ??= { mounted: true, asking: false, cooling: false, again: false, late: 0, stopped: false, asked: null, timer: null };
+  run.current ??= { mounted: true, asking: false, cooling: false, again: false, late: 0, stopped: false, asked: null, timer: null, leave: null };
 
   useEffect(() => {
     const r = run.current;
@@ -177,6 +200,7 @@ export function StreamingAgentText({ text }) {
     return () => {
       r.mounted = false;
       clearTimeout(r.timer);
+      r.leave?.();
     };
   }, []);
 
@@ -213,17 +237,23 @@ export function StreamingAgentText({ text }) {
           }
         } else {
           r.late = 0;
-          // Taken only if the text is still the one it was made for (a stale tree is dropped).
-          if (latest.current === asked) setTaken({ text: asked, result: answer });
+          // Taken only if the text is still the one it was made for (a stale tree is dropped): a tree at a frame.
+          r.leave?.();
+          r.leave = null;
+          const take = () => {
+            if (r.mounted && latest.current === asked) setTaken({ text: asked, result: answer });
+          };
+          if (!answer.tree) take();
+          else if (latest.current === asked) r.leave = inFrame(answer.elements, () => view.distance(host.current), take);
         }
         if (r.again && !r.cooling) ask();
       });
     };
     ask();
-  }, [client, shown]);
+  }, [client, view, shown]);
 
   const current = taken && shown.startsWith(taken.text) ? taken : null;
-  const granted = useBudget(view, host, current?.result ?? null, 0);
+  const granted = useBudget(view, host, current?.result ?? null, 0, false);
   let body = shown;
   let kind = "plain";
   if (plainRest) {
