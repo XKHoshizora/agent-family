@@ -202,7 +202,7 @@ function kindOf(kind, attachment) {
   return "text";
 }
 
-function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }) {
+function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, keepsThinking }) {
   const attachment = m.kind === "file" ? attachmentView(m.attachment) : null;
   const kind = kindOf(m.kind, attachment);
   const system = systemView(m.system, alias);
@@ -232,8 +232,9 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }
     quote: quoteView(m.replyTo, alias),
     attachment,
     system,
-    // An Agent's reply: its reasoning (shown folded), whether it was stopped or cut, and the persona it proposes.
-    reasoning: typeof m.reasoning === "string" && m.reasoning ? m.reasoning : null,
+    // An Agent's reply: its reasoning (shown folded; only when it is mine to read: `keepsThinking`), whether it was
+    // stopped or cut, and the persona it proposes.
+    reasoning: keepsThinking(m.senderId) && typeof m.reasoning === "string" && m.reasoning ? m.reasoning : null,
     stopped: Boolean(m.stopped),
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,
@@ -515,7 +516,12 @@ export function toView(model, { now = Date.now() } = {}) {
     else if (agentChat) members = [ME, conv.agentId ?? members.find((id) => id !== ME)].filter(Boolean);
     else if (!members.includes(ME)) members.unshift(ME);
 
-    const viewOf = (m) => messageView(m, { alias, meId, pair: direct || agentChat, peerReadSeq: conv.peerReadSeq, now, nameOf, agentId: conv.agentId });
+    // Whose replies' thinking is kept (the service sends it only to their owner; whatever a message carries, nothing
+    // else is): in my Agent's own conversation that Agent's; in a group my own Agents', never someone else's Agent's.
+    const keepsThinking = (senderId) =>
+      typeof senderId === "string" && (agentChat ? senderId === conv.agentId : conv.type === "group" && ownsAgent(model, senderId));
+    const viewOf = (m) =>
+      messageView(m, { alias, meId, pair: direct || agentChat, peerReadSeq: conv.peerReadSeq, now, nameOf, agentId: conv.agentId, keepsThinking });
     const messages = held.map(viewOf);
     const win = model.windows?.[conv.id] ?? null;
     const claimed = new Set();

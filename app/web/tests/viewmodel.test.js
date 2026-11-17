@@ -499,6 +499,32 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
     expect(myAgents(v).map((a) => a.id).sort()).toEqual([AG1, OAG].sort());
   });
 
+  it("a group's message keeps an Agent's thinking only when the Agent is mine: someone else's Agent's is not kept, whatever the message carries", () => {
+    const members = [...MEMBERS, { id: AG1, role: "speaker", isCreator: false }];
+    const messages = [
+      wire(G1, 1, AG1, "我的回答", { reasoning: "我的思考" }),
+      wire(G1, 2, OAG, "安的回答", { reasoning: "安的思考" }),
+      wire(G1, 3, ANN, "人说的", { reasoning: "人不会有思考" }),
+      wire(A1, 1, AG1, "专属会话里的回答", { reasoning: "专属会话里的思考" }),
+    ];
+    const sync = syncOf([agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 }), group(G1, { members, lastSeq: 3, readSeq: 3 })], messages, [...PRINCIPALS, agentPrincipal(AG1), annBot()]);
+    const v = toView(M.applyAgents(M.applySync(M.initial(), sync), [agentOf(AG1)]), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => [m.from, m.text, m.reasoning])).toEqual([
+      [AG1, "我的回答", "我的思考"],
+      [OAG, "安的回答", null],
+      [ANN, "人说的", null],
+    ]);
+    expect(v.convs[A1].messages.map((m) => [m.text, m.reasoning])).toEqual([["专属会话里的回答", "专属会话里的思考"]]);
+    // The list's preview is the reply's text, never its thinking.
+    expect(lastPreview(v, v.convs[G1])).toBe("小安：人说的");
+    const mineLast = toView(M.applyAgents(M.applySync(M.initial(), { ...sync, messages: messages.slice(0, 1) }), [agentOf(AG1)]), { now: NOW });
+    expect(lastPreview(mineLast, mineLast.convs[G1])).toBe("小助手：我的回答");
+    // An Agent nobody says is mine (its owner unknown, no conversation of mine with it) is not mine: its thinking is not kept.
+    const { ownerId: _none, ...ownerless } = annBot();
+    const unknown = toView(M.applySync(M.initial(), { ...sync, principals: [...PRINCIPALS, agentPrincipal(AG1), ownerless] }), { now: NOW });
+    expect(unknown.convs[G1].messages[1].reasoning).toBeNull();
+  });
+
   it("the group's subtitle counts the people, and the Agents when there are any", () => {
     const v = toView(sharedModel(), { now: NOW });
     expect(v.convs[G1].members).toEqual([ME, ANN, BO, OAG]);

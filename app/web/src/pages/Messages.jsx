@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { isAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
+import { isAgent, isMyAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
 import { formatSize } from "../data/viewmodel.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
@@ -109,9 +109,11 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   }
   const mine = msg.from === ME;
   const agent = !mine && isAgent(state, msg.from);
-  // What only an owner is shown of a reply (its thinking, a persona proposal) belongs to the conversation with my own
-  // Agent: never in a group, whoever's Agent it is. (已停止 and 已截断 show wherever the reply is.)
-  const ownersOnly = agent && conv.type === "agent" && conv.agentId === msg.from;
+  // What only an owner is shown of a reply: its thinking, in the conversation with my own Agent and in a group when the
+  // Agent is mine (never someone else's Agent's, whatever the message carries); a persona proposal only in the
+  // conversation with my own Agent, never in a group. (已停止 and 已截断 show wherever the reply is.)
+  const ownChat = agent && conv.type === "agent" && conv.agentId === msg.from;
+  const thinking = ownChat || (agent && conv.type === "group" && isMyAgent(state, msg.from));
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
   const showReceipt = mine && (conv.type === "human" || conv.type === "agent");
   const cancelUpload = () => actions.cancelUpload(msg.clientTxn);
@@ -137,9 +139,9 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
           {agent && <span className="owner">主人：{nameOf(state, ownerOf(state, msg.from))}</span>}
           {!mine && stamp}
         </div>
-        {ownersOnly && <Thinking text={msg.reasoning} />}
+        {thinking && <Thinking text={msg.reasoning} />}
         <Body msg={msg} agent={agent} />
-        {ownersOnly && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
+        {ownChat && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
         <div className="msg-foot">
           {agent && msg.stopped && <Tag tone="muted">已停止</Tag>}
           {agent && msg.truncated && <Tag tone="muted">已截断</Tag>}
