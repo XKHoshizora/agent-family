@@ -28,6 +28,7 @@ import {
   wire,
 } from "./fixtures.js";
 import { click, dialog, flush, installBrowser, mainText, openApp, push, toastText } from "./harness.jsx";
+import { useWorkers } from "./markdown-worker.js";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -149,6 +150,61 @@ describe("the streaming bubble", () => {
     await runPush(transport, runOf(R1, "done"));
     expect(bubbleLi()).toBeNull();
     expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+  });
+
+  it("a very long reply: the bubble keeps its first 20 000 characters and says so; later pieces touch nothing in it", async () => {
+    const NOTE = "（内容较长，回复完成后显示完整结果）";
+    // (No Markdown worker here: the text stays the plain text it is, so what is in the bubble is exactly what was kept.)
+    useWorkers(() => {
+      throw new Error("no worker");
+    });
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    const piece = "一二三四五六七八九十".repeat(200); // 2 000 characters
+    for (let i = 0; i < 9; i += 1) await deltaPush(transport, { text: piece });
+    expect(bubbleLi().querySelector(".md-note")).toBeNull();
+    for (let i = 0; i < 3; i += 1) await deltaPush(transport, { text: piece });
+    await flush();
+    const text = bubbleLi().querySelector(".md-text");
+    expect(text.textContent).toBe(piece.repeat(10));
+    expect(bubbleText()).toBe(piece.repeat(10) + NOTE);
+    const note = bubbleLi().querySelector(".bubble > .md-note");
+    expect(note.textContent).toBe(NOTE);
+    expect(note.previousElementSibling).toBe(text);
+    // 200 000 characters in all: nothing in the bubble is touched by the pieces that follow.
+    const leaves = [];
+    const walker = document.createTreeWalker(text, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) leaves.push([walker.currentNode, walker.currentNode.data]);
+    const changes = [];
+    const observer = new MutationObserver((records) => changes.push(...records));
+    observer.observe(bubbleLi(), { subtree: true, childList: true, characterData: true, attributes: true });
+    for (let i = 0; i < 88; i += 1) await deltaPush(transport, { text: piece });
+    await flush();
+    changes.push(...observer.takeRecords());
+    observer.disconnect();
+    expect(changes).toHaveLength(0);
+    for (const [node, data] of leaves) {
+      expect(node.isConnected).toBe(true);
+      expect(node.data).toBe(data);
+    }
+    expect(text.textContent).toHaveLength(20000);
+    // The stored message replaces the bubble as ever (the service keeps what it keeps).
+    await messagePush(transport, wire(A1, 3, AG1, "完整的回复"));
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe("完整的回复");
+    expect(document.body.textContent).not.toContain(NOTE);
+    useWorkers();
+  });
+
+  it("very long thinking is kept to its first 20 000 characters too, with the same line", async () => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { reasoning: "想".repeat(20000) });
+    const thinking = () => bubbleLi().querySelector("details .thinking-text");
+    expect(thinking().textContent).toBe("想".repeat(20000));
+    await deltaPush(transport, { reasoning: "再想" });
+    expect(thinking().textContent).toBe(`${"想".repeat(20000)}（内容较长，回复完成后显示完整结果）`);
+    expect(thinking().querySelector(".md-note")).not.toBeNull();
   });
 
   it("thinking sits above the answer in a collapsed 思考过程; with only thinking so far it says 正在回复…", async () => {

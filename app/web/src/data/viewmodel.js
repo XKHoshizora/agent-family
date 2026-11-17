@@ -397,7 +397,10 @@ export function toView(model, { now = Date.now() } = {}) {
       agentId: conv.agentId ?? null,
       agent: conv.agent ?? null,
       run,
-      stream: streamed ? { runId: run.id, text: streamed.text, reasoning: streamed.reasoning } : null,
+      // (`cut`, `reasoningCut`: the run streamed more than is kept of its text, of its thinking.)
+      stream: streamed
+        ? { runId: run.id, text: streamed.text, reasoning: streamed.reasoning, cut: Boolean(streamed.cut), reasoningCut: Boolean(streamed.reasoningCut) }
+        : null,
       title: direct ? null : conv.title,
       members,
       memberRoles: conv.members.map((m) => ({ id: alias(m.id), role: m.role, isCreator: Boolean(m.isCreator) })),

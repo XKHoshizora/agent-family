@@ -71,7 +71,7 @@ export function initial() {
     runs: {},
     /** conversation id → the id of the failed run I dismissed (see the header). */
     dismissed: {},
-    /** run id → {text, reasoning} streamed so far (see the header). */
+    /** run id → {text, reasoning, cut?, reasoningCut?} streamed so far, each up to STREAM_CHARS (see the header). */
     streams: {},
   };
 }
@@ -842,9 +842,26 @@ export function applyRun(state, conversationId, run, { ordered = true, since } =
 }
 
 /**
+ * The most characters kept (and shown) of a reply being written, and of its thinking: what a run streams beyond them is
+ * dropped. The bubble lays out its whole text on every piece, so its text has an end; the stored message, when it
+ * arrives, replaces the bubble whatever was kept here.
+ */
+export const STREAM_CHARS = 20000;
+
+/** `kept` with `added` after it, up to STREAM_CHARS (never ending in half a surrogate pair); `kept` itself when full. */
+function streamedUpTo(kept, added) {
+  if (!added || kept.length >= STREAM_CHARS) return kept;
+  const whole = kept + added.slice(0, STREAM_CHARS - kept.length);
+  const last = whole.charCodeAt(whole.length - 1);
+  return whole.length === STREAM_CHARS && added.length > STREAM_CHARS - kept.length && last >= 0xd800 && last <= 0xdbff ? whole.slice(0, -1) : whole;
+}
+
+/**
  * A `delta` push: appended to the stream of the conversation's run only while that run is running, in order with this
  * connection's pushes, and its message has not arrived; anything else (an unknown, joined or finished run, another
- * conversation's) is ignored.
+ * conversation's) is ignored. The stream keeps the first STREAM_CHARS characters of the text and of the thinking;
+ * `cut` / `reasoningCut` (only when true) say that more came and was dropped. A delta that changes nothing that is
+ * kept returns the same state.
  */
 export function applyDelta(state, { conversationId, runId, text, reasoning } = {}) {
   const run = state.runs[conversationId];
@@ -853,7 +870,11 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
   const addReasoning = typeof reasoning === "string" ? reasoning : "";
   if (!addText && !addReasoning) return state;
   const prev = state.streams[runId] ?? { text: "", reasoning: "" };
-  return { ...state, streams: { ...state.streams, [runId]: { text: prev.text + addText, reasoning: prev.reasoning + addReasoning } } };
+  const next = { text: streamedUpTo(prev.text, addText), reasoning: streamedUpTo(prev.reasoning, addReasoning) };
+  if (prev.cut || next.text.length < prev.text.length + addText.length) next.cut = true;
+  if (prev.reasoningCut || next.reasoning.length < prev.reasoning.length + addReasoning.length) next.reasoningCut = true;
+  if (next.text === prev.text && next.reasoning === prev.reasoning && next.cut === prev.cut && next.reasoningCut === prev.reasoningCut) return state;
+  return { ...state, streams: { ...state.streams, [runId]: next } };
 }
 
 /**

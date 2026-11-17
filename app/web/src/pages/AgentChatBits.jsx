@@ -34,20 +34,28 @@ export const isReplying = (run) => Boolean(run) && (run.status === "queued" || r
 
 export { AgentText, StreamingAgentText, loadMarkdown } from "../ui/AgentText.jsx";
 
-/** The model's thinking: folded above the answer, opened only by the reader. */
-export function Thinking({ text }) {
+/** Ends a reply being written (or its thinking) of which only the first part is kept and shown (model.js STREAM_CHARS). */
+export const STREAM_CUT_NOTE = "（内容较长，回复完成后显示完整结果）";
+const StreamCutNote = () => <span className="md-note">{STREAM_CUT_NOTE}</span>;
+
+/** The model's thinking: folded above the answer, opened only by the reader. `cut`: more came than is shown (a stream). */
+export function Thinking({ text, cut = false }) {
   if (!text) return null;
   return (
     <details className="thinking">
       <summary>思考过程</summary>
-      <div className="thinking-text">{text}</div>
+      <div className="thinking-text">
+        {text}
+        {cut && <StreamCutNote />}
+      </div>
     </details>
   );
 }
 
 /**
  * The reply being written, at the end of the list: its text so far (or 正在回复… before the first piece, and for a reply
- * that was already under way when this page connected, whose text is not sent again), its thinking, and 停止生成.
+ * that was already under way when this page connected, whose text is not sent again), its thinking, and 停止生成. A
+ * very long reply shows its first part only, and says so under it; the stored reply shows what the service kept.
  * Busy for assistive technology while it grows: the stored reply that replaces it is announced instead (ChatView).
  */
 export function StreamBubble({ conv }) {
@@ -73,10 +81,13 @@ export function StreamBubble({ conv }) {
           <strong>{nameOf(state, conv.agentId)}</strong>
           <Tag>Agent</Tag>
         </div>
-        <Thinking text={conv.stream?.reasoning} />
+        <Thinking text={conv.stream?.reasoning} cut={conv.stream?.reasoningCut} />
         <div className="bubble">
           {text ? (
-            <StreamingAgentText text={text} />
+            <>
+              <StreamingAgentText text={text} />
+              {conv.stream.cut && <StreamCutNote />}
+            </>
           ) : (
             <>
               <span className="dots" aria-hidden="true">

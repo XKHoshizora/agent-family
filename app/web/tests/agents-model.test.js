@@ -61,7 +61,7 @@ describe("a reply's stream (Review Focus 1 and 2)", () => {
     let s = loaded();
     for (const step of ["running", "d1", "d2"]) s = STEPS[step](s);
     expect(s.streams).toEqual({ [R1]: { text: "你好", reasoning: "想一想" } });
-    expect(view(s).convs[A1].stream).toEqual({ runId: R1, text: "你好", reasoning: "想一想" });
+    expect(view(s).convs[A1].stream).toEqual({ runId: R1, text: "你好", reasoning: "想一想", cut: false, reasoningCut: false });
     expect(view(s).convs[A1].run).toMatchObject({ id: R1, status: "running" });
   });
 
@@ -98,6 +98,37 @@ describe("a reply's stream (Review Focus 1 and 2)", () => {
     expect(conv.unread).toBe(before.unread);
     expect(lastPreview(view(s), conv)).toBe("在吗");
     expect(s.conversations[A1].position).toBe(2);
+  });
+
+  it("keeps the first 20 000 characters of a reply being written, and of its thinking; what comes after is dropped", () => {
+    expect(M.STREAM_CHARS).toBe(20000);
+    let s = M.applyRun(loaded(), A1, runOf(R1, "running"));
+    const piece = "一二三四五六七八九十".repeat(200); // 2 000 characters
+    for (let i = 0; i < 9; i += 1) s = M.applyDelta(s, { conversationId: A1, runId: R1, text: piece, reasoning: piece });
+    expect(s.streams[R1]).toEqual({ text: piece.repeat(9), reasoning: piece.repeat(9) });
+    expect(view(s).convs[A1].stream).toMatchObject({ cut: false, reasoningCut: false });
+    // Exactly at the limit: nothing was dropped yet.
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: piece });
+    expect(s.streams[R1].text).toHaveLength(20000);
+    expect(view(s).convs[A1].stream).toMatchObject({ cut: false, reasoningCut: false });
+    // 200 000 characters in all: the first 20 000 are kept, and the view says the text was cut.
+    for (let i = 0; i < 90; i += 1) s = M.applyDelta(s, { conversationId: A1, runId: R1, text: piece });
+    expect(s.streams[R1].text).toBe(piece.repeat(10));
+    expect(view(s).convs[A1].stream).toMatchObject({ cut: true, reasoningCut: false });
+    // Once cut, a text delta changes nothing at all (the same state: nothing is rendered again).
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: piece })).toBe(s);
+    // The thinking has the same limit of its own; a piece that crosses it is kept up to it.
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, reasoning: "想".repeat(2500) });
+    expect(s.streams[R1].reasoning).toBe(piece.repeat(9) + "想".repeat(2000));
+    expect(view(s).convs[A1].stream).toMatchObject({ cut: true, reasoningCut: true });
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "又", reasoning: "又" })).toBe(s);
+  });
+
+  it("a reply cut at the limit never ends in half a character", () => {
+    let s = M.applyRun(loaded(), A1, runOf(R1, "running"));
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "a".repeat(19999) + "😀😀" });
+    expect(s.streams[R1].text).toBe("a".repeat(19999));
+    expect(view(s).convs[A1].stream.cut).toBe(true);
   });
 
   it("a delta for a queued run, another conversation's run, or a conversation not held is ignored", () => {
@@ -285,7 +316,7 @@ describe("the rules for runs known from an answer", () => {
     expect(s.runs[A1].joined).toBeUndefined();
     expect(s.runs[A1].since).toBe(2);
     s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "你" });
-    expect(view(s).convs[A1].stream).toEqual({ runId: R1, text: "你", reasoning: "" });
+    expect(view(s).convs[A1].stream).toEqual({ runId: R1, text: "你", reasoning: "", cut: false, reasoningCut: false });
   });
 
   it("an answer never replaces a run named by a push of this connection with another one, or with none", () => {
