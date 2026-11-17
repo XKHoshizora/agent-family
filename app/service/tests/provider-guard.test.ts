@@ -54,7 +54,6 @@ describe("isPublicAddress (the one range check)", () => {
     ["8.8.8.8", true],
     ["1.1.1.1", true],
     ["93.184.216.34", true],
-    ["203.0.113.7", true],
     ["100.63.255.255", true],
     ["100.128.0.0", true],
     ["172.15.255.255", true],
@@ -85,6 +84,52 @@ describe("isPublicAddress (the one range check)", () => {
     ["239.255.255.255", false],
     ["240.0.0.1", false],
     ["255.255.255.255", false],
+    ["192.0.3.1", true],
+    ["198.51.101.1", true],
+    ["203.0.114.1", true],
+    ["198.51.99.255", true],
+    ["198.17.255.255", true],
+    ["198.20.0.1", true],
+    ["192.0.1.1", true],
+    ["192.88.98.1", true],
+    ["192.88.100.1", true],
+    ["192.0.3.0", true],
+    ["203.0.112.255", true],
+    ["192.167.255.255", true],
+    ["0.0.0.0", false],
+    ["0.255.255.255", false],
+    ["10.0.0.0", false],
+    ["10.255.255.255", false],
+    ["100.64.0.0", false],
+    ["100.127.255.255", false],
+    ["127.0.0.0", false],
+    ["127.255.255.255", false],
+    ["169.254.0.0", false],
+    ["169.254.255.255", false],
+    ["172.16.0.0", false],
+    ["172.31.255.255", false],
+    ["192.0.0.0", false],
+    ["192.0.0.255", false],
+    ["192.0.2.0", false],
+    ["192.0.2.1", false],
+    ["192.0.2.255", false],
+    ["192.88.99.0", false],
+    ["192.88.99.255", false],
+    ["192.168.0.0", false],
+    ["192.168.255.255", false],
+    ["198.18.0.0", false],
+    ["198.19.255.255", false],
+    ["198.51.100.0", false],
+    ["198.51.100.255", false],
+    ["203.0.113.0", false],
+    ["203.0.113.7", false],
+    ["203.0.113.255", false],
+    ["224.0.0.0", false],
+    ["239.255.255.255", false],
+    ["240.0.0.0", false],
+    ["255.255.255.255", false],
+    ["::ffff:192.0.2.1", false],
+    ["::ffff:203.0.113.5", false],
     // IPv6: public
     ["2001:4860:4860::8888", true],
     ["2606:4700:4700::1111", true],
@@ -274,8 +319,8 @@ describe("guardedFetch refuses before connecting", () => {
   it("with allowInsecureLocal, loopback is allowed but private addresses still are not, and http: only to loopback", async () => {
     const f = (resolve: Resolve) => guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 1000, allowInsecureLocal: true });
     expect(await settle(f(scriptedResolver(["10.0.0.5"]))("https://intranet.example/v1"))).toMatchObject(refused);
-    expect(await settle(f(scriptedResolver(["203.0.113.7"]))("http://public.example/v1"))).toMatchObject(refused);
-    expect(await settle(f(scriptedResolver(["127.0.0.1", "203.0.113.7"]))("http://mixed.example/v1"))).toMatchObject(refused);
+    expect(await settle(f(scriptedResolver(["203.0.114.7"]))("http://public.example/v1"))).toMatchObject(refused);
+    expect(await settle(f(scriptedResolver(["127.0.0.1", "203.0.114.7"]))("http://mixed.example/v1"))).toMatchObject(refused);
     expect(await settle(f(scriptedResolver([]))("http://10.0.0.5/v1"))).toMatchObject(refused);
   });
 });
@@ -283,10 +328,10 @@ describe("guardedFetch refuses before connecting", () => {
 describe("guardedFetch connects to exactly the address it checked", () => {
   it("rebinding: one resolution per request, and the connection uses it — a name that turns local is refused", async () => {
     const local = await listener();
-    // First request: the name resolves to a public (documentation, unrouted) address; if the guard looked the name
+    // First request: the name resolves to a public (unrouted) address; if the guard looked the name
     // up again to connect, it would get 127.0.0.1 and reach the listener. It must dial the checked address instead
     // (which goes nowhere and times out). Second request: the name now resolves to 127.0.0.1 and is refused.
-    const resolve = scriptedResolver(["203.0.113.7"], ["127.0.0.1"]);
+    const resolve = scriptedResolver(["203.0.114.7"], ["127.0.0.1"]);
     const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 400 });
     const url = `https://rebind.example:${local.port}/v1/models`;
     expect(await settle(f(url))).toMatchObject(unavailable);
@@ -303,7 +348,7 @@ describe("guardedFetch connects to exactly the address it checked", () => {
       res.end("hello");
     });
     // A second lookup would answer an address nothing listens on.
-    const resolve = scriptedResolver(["127.0.0.1"], ["203.0.113.7"]);
+    const resolve = scriptedResolver(["127.0.0.1"], ["203.0.114.7"]);
     const f = guardedFetch({ calls: room(), resolve, maxResponseBytes: 1000, timeoutMs: 2000, allowInsecureLocal: true });
     const res = await f(`http://pinned.example:${local.port}/v1/models`);
     expect([res.status, await res.text()]).toEqual([200, "hello"]);

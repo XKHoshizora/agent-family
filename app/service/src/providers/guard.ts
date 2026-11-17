@@ -68,8 +68,12 @@ const NOT_PUBLIC_V4: ReadonlyArray<readonly [number, number]> = (
     ["169.254.0.0", 16], // link-local (cloud metadata services live here)
     ["172.16.0.0", 12], // private
     ["192.0.0.0", 24], // IETF protocol assignments
+    ["192.0.2.0", 24], // documentation (TEST-NET-1)
+    ["192.88.99.0", 24], // deprecated 6to4 relay anycast
     ["192.168.0.0", 16], // private
     ["198.18.0.0", 15], // benchmarking
+    ["198.51.100.0", 24], // documentation (TEST-NET-2)
+    ["203.0.113.0", 24], // documentation (TEST-NET-3)
     ["224.0.0.0", 4], // multicast
     ["240.0.0.0", 4], // reserved, and the broadcast address 255.255.255.255
   ] as const
@@ -109,7 +113,7 @@ function publicV6(g: number[]): boolean {
 
 /**
  * Whether `address` (IPv4 or IPv6 text) is a public internet address: not loopback, private, link-local,
- * carrier-grade NAT, unspecified, multicast, reserved or benchmarking, nor an IPv4-mapped form of one of those.
+ * carrier-grade NAT, unspecified, multicast, reserved, benchmarking or documentation (every IPv4 special-purpose range), nor an IPv4-mapped form of one of those.
  * An IPv6 address is public only inside 2000::/3 and outside its special ranges (Teredo, 6to4, documentation,
  * ORCHID, benchmarking); NAT64, IPv4-translated and IPv4-compatible forms are refused outright. Anything that does not parse as an address is not public.
  */
