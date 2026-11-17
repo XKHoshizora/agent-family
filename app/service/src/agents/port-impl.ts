@@ -11,7 +11,16 @@ import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
-import { BlobStoreDown, buildContext, hasOwnerTurn, loadContext, loadGroupScene, type BuiltContext, type LoadedContext } from "./context.ts";
+import {
+  BlobStoreDown,
+  buildContext,
+  GROUP_CONTEXT_MESSAGES,
+  hasOwnerTurn,
+  loadContext,
+  loadGroupScene,
+  type BuiltContext,
+  type LoadedContext,
+} from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
@@ -213,7 +222,8 @@ export class DbAgentPort implements AgentPort {
    *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). Otherwise the run
    *    takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be shown is read: the
    *    system text — its own conversation's (`systemPrompt`), or the group's (`groupSystemPrompt`, with the group's
-   *    title and other Agents, `loadGroupScene`) — and the conversation (`loadContext`, SQL only). With no owner's
+   *    title and other Agents, `loadGroupScene`) — and the conversation (`loadContext`, SQL only; in a group at most
+   *    `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages). With no owner's
    *    message in it (in a group: nobody else's) the run ends without a call: `cancelled` with no error when everything
    *    it was to answer is before a new topic (its owner started over), else `failed` `busy`; and so does one whose
    *    model's context cannot hold the newest such message, or 200 tokens of it (`failed`, `context_too_small`).
@@ -262,9 +272,11 @@ export class DbAgentPort implements AgentPort {
       const system = scene
         ? groupSystemPrompt(agent, { displayName }, scene, now, config.siteTimezone)
         : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
+      // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
+      const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const loaded = await loadContext(
         t,
-        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group },
+        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap },
         resolved,
         system,
       );

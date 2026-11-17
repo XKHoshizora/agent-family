@@ -47,6 +47,7 @@ describe("agent and metering configuration", () => {
       providerMaxConcurrentCalls: 64,
       agentMaxRunsInFlight: 8,
       agentChainLimit: 30,
+      agentGroupContextTokens: 12_000,
     });
   });
 
@@ -78,6 +79,7 @@ describe("agent and metering configuration", () => {
       ["PROVIDER_MAX_CONCURRENT_CALLS", "providerMaxConcurrentCalls", [["1", 1], ["1000", 1000], ["", 64]], ["0", "1001", "many"]],
       ["AGENT_MAX_RUNS_IN_FLIGHT", "agentMaxRunsInFlight", [["1", 1], ["64", 64], ["", 8]], ["0", "65", "-1", "1.5", "many"]],
       ["AGENT_CHAIN_LIMIT", "agentChainLimit", [["2", 2], ["500", 500], ["", 30]], ["0", "1", "501", "-3", "2.5", "thirty"]],
+      ["AGENT_GROUP_CONTEXT_TOKENS", "agentGroupContextTokens", [["2000", 2000], ["200000", 200_000], ["", 12_000]], ["0", "1999", "200001", "-1", "1.5", "12k"]],
     ];
     for (const [name, field, accepted, refused] of ranges) {
       for (const [value, parsed] of accepted) expect([name, value, (loadConfig({ ...base, [name]: value }) as any)[field]]).toEqual([name, value, parsed]);

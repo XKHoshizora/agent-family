@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { partTokens } from "../src/agents/runtime/context.ts";
 import { isRunEnd, NOTHING, type RunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
 import { groupSystemPrompt, systemPrompt } from "../src/agents/runtime/prompt.ts";
+import { estimateTokens } from "../src/metering/prices.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -361,6 +363,136 @@ describe("a reply in a group", () => {
     await ownerSocket.waitFor((e) => e.type === "run" && e.conversationId === agent.conversationId && e.run.status === "done");
     expect(deltas(ownerSocket, agent.conversationId).map((e) => e.text ?? "").join("")).toBe(story);
     expect(deltas(ownerSocket, g)).toEqual([]);
+  });
+});
+
+// --- how much of the group it is shown -------------------------------------------------------------------------------
+
+/** Tokens a call's turns are counted as (what admission adds to its system text's). */
+const historyTokens = (call: ModelCall): number => call.messages.flatMap((m) => m.parts).reduce((n, p) => n + partTokens(p), 0);
+/** The texts of a call's parts that start with a speaker's label: one per message of someone else's it shows. */
+const labelled = (call: ModelCall): string[] =>
+  call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" && /^(mia|ned|owen)(（Agent）)?：/.test(p.text) ? [p.text] : [])));
+/** What `fast` holds for a call: its input estimate at 1 micro-point a token and its 4 096 output tokens at 2. */
+const fastHold = (call: ModelCall): bigint => BigInt(estimateTokens(call.system) + historyTokens(call)) + 4096n * 2n;
+/** `n` messages of 200 characters, numbered. */
+const long = (n: number): string[] => Array.from({ length: n }, (_, i) => `${String(i + 1).padStart(2, "0")}号${"字".repeat(197)}`);
+const FILE_TEXT = "文".repeat(3000);
+
+/** Runs the queued reply, holding its call until the run's hold has been read: the call and that hold. */
+async function answerHeld(agentId: string, conv: string): Promise<{ call: ModelCall; hold: bigint }> {
+  const held = gateway.hangAfter("");
+  const running = app.agentWorker.runOnce();
+  const call = await held.reached;
+  const { rows } = await db.query<{ hold: string }>(
+    "select hold_micro::text as hold from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'running'",
+    [agentId, conv],
+  );
+  held.release("好的。");
+  expect(await running).toBe(true);
+  expect(rows).toHaveLength(1);
+  return { call, hold: BigInt(rows[0]!.hold) };
+}
+
+describe("how much of the group it is shown", () => {
+  it("at most AGENT_GROUP_CONTEXT_TOKENS (12 000) tokens of the group, the newest, its files counted; admission holds for that much", async () => {
+    const w = await world();
+    const { mia, ned, owner, g, agent } = w;
+    await addOwn(owner, g, agent.id);
+    // 90 messages of about 200 tokens each (18 000 in all), a 3 000-character file, then the mention: 92 messages.
+    const sent = long(90);
+    for (const [i, text] of sent.entries()) await say(i % 2 === 0 ? mia : ned, g, text);
+    await sendFile(ned, g, "notes.txt", FILE_TEXT);
+    await say(mia, g, "@helper_bot 总结一下");
+
+    const { call, hold } = await answerHeld(agent.id, g);
+    const shown = labelled(call);
+    expect(shown.slice(-2)).toEqual(["ned：", "mia：@helper_bot 总结一下"]);
+    // The newest of the 90 that fit, with no gap; the file by its name: its text does not fit after them.
+    const kept = shown.slice(0, -2);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThan(90);
+    expect(kept).toEqual(sent.slice(-kept.length).map((t, i) => `${(90 - kept.length + i) % 2 === 0 ? "mia" : "ned"}：${t}`));
+    expect(JSON.stringify(call.messages)).toContain("[文件：notes.txt]");
+    expect(JSON.stringify(call.messages)).not.toContain("文文文");
+    expect(shown.length).toBeLessThanOrEqual(80);
+    // Within the cap, and full: the next older message would not have fitted. The system text comes on top.
+    expect(historyTokens(call)).toBeLessThanOrEqual(12_000);
+    expect(historyTokens(call) + 204).toBeGreaterThan(12_000);
+    expect(hold).toBe(fastHold(call));
+    expect(hold).toBeLessThan(BigInt(estimateTokens(call.system) + 12_000) + 4096n * 2n + 1n);
+  });
+
+  it("at most its latest 80 messages, however few tokens they take; a file among them is shown whole within the cap", async () => {
+    const w = await world();
+    const { mia, ned, owner, g, agent } = w;
+    await addOwn(owner, g, agent.id);
+    const sent = Array.from({ length: 100 }, (_, i) => `第${i + 1}条。`);
+    for (const [i, text] of sent.entries()) await say(i % 2 === 0 ? mia : ned, g, text);
+    await sendFile(ned, g, "notes.txt", FILE_TEXT);
+    await say(mia, g, "@helper_bot 总结一下");
+
+    const { call, hold } = await answerHeld(agent.id, g);
+    // The newest 80: the mention, the file and the last 78 of the 100.
+    expect(labelled(call)).toEqual([...sent.slice(22).map((t, i) => `${(22 + i) % 2 === 0 ? "mia" : "ned"}：${t}`), "ned：", "mia：@helper_bot 总结一下"]);
+    expect(JSON.stringify(call.messages)).toContain(`[文件：notes.txt]\\n${FILE_TEXT}`);
+    expect(historyTokens(call)).toBeGreaterThan(3000);
+    expect(historyTokens(call)).toBeLessThanOrEqual(12_000);
+    expect(hold).toBe(fastHold(call));
+  });
+
+  it("in its own conversation the same history is not capped: every message, the file's text, more than 12 000 tokens", async () => {
+    const { owner, agent } = await world();
+    const conv = agent.conversationId;
+    expect((await api(app, owner, "POST", `/api/agents/${agent.id}/pause`)).status).toBe(200);
+    const sent = long(90);
+    for (const text of sent) await say(owner, conv, text);
+    await sendFile(owner, conv, "notes.txt", FILE_TEXT);
+    expect((await api(app, owner, "POST", `/api/agents/${agent.id}/resume`)).status).toBe(200);
+    await say(owner, conv, "总结一下");
+
+    const { call, hold } = await answerHeld(agent.id, conv);
+    expect(call.messages).toHaveLength(1);
+    expect(call.messages[0]!.parts).toEqual([
+      ...sent.map((text) => ({ type: "text", text })),
+      { type: "text", text: `[文件：notes.txt]\n${FILE_TEXT}` },
+      { type: "text", text: "总结一下" },
+    ]);
+    expect(historyTokens(call)).toBeGreaterThan(20_000);
+    expect(hold).toBe(fastHold(call));
+  });
+});
+
+describe("with AGENT_GROUP_CONTEXT_TOKENS=2000", () => {
+  const small = scriptedGateway();
+  const { app: smallApp } = useApp({ env: { ...ENV, AGENT_GROUP_CONTEXT_TOKENS: "2000" }, models: small, blobs, agentWorker: false });
+  afterEach(() => {
+    expect(small.pending()).toBe(0);
+  });
+
+  it("a reply in a group is shown at most 2 000 tokens of it, the newest; the system text comes on top", async () => {
+    expect(smallApp.deps.config.agentGroupContextTokens).toBe(2000);
+    const [mia, owner, ned] = [await signUp(smallApp, "mia"), await signUp(smallApp, "owen"), await signUp(smallApp, "ned")];
+    const g = await group(smallApp, mia, "小群", [owner, ned]);
+    const agent = await mustCreateAgent(smallApp, owner, { handle: "helper_bot", name: "小助手", model: FAST, persona: PERSONA });
+    expect((await api(smallApp, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    const sent = long(20);
+    for (const [i, text] of sent.entries()) {
+      expect((await api(smallApp, mia, "POST", `/api/conversations/${g}/messages`, { text, clientTxn: `small${i}` })).status).toBe(201);
+    }
+    expect((await api(smallApp, mia, "POST", `/api/conversations/${g}/messages`, { text: "@helper_bot 总结一下", clientTxn: "small-ask" })).status).toBe(201);
+    small.reply("好的。");
+    expect(await smallApp.agentWorker.runOnce()).toBe(true);
+
+    const call = small.calls.at(-1)!;
+    const shown = labelled(call);
+    expect(shown.at(-1)).toBe("mia：@helper_bot 总结一下");
+    const kept = shown.slice(0, -1);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept).toEqual(sent.slice(-kept.length).map((t) => `mia：${t}`));
+    expect(historyTokens(call)).toBeLessThanOrEqual(2000);
+    expect(historyTokens(call) + 204).toBeGreaterThan(2000);
+    expect(estimateTokens(call.system) + historyTokens(call)).toBeGreaterThan(2000);
   });
 });
 

@@ -36,6 +36,8 @@ import {
 
 /** Messages read per query, newest first, until the budget is passed. */
 const PAGE = 200;
+/** In a group, the most of its latest messages a reply is shown (with `AGENT_GROUP_CONTEXT_TOKENS`, `ContextRun.group`). */
+export const GROUP_CONTEXT_MESSAGES = 80;
 /** The first bytes of a file looked at before the rest is read as text (`startsLikeText`). */
 const PROBE_BYTES = 4096;
 /** A blob that has not been read after this long is given up on: it is shown by its name, like one that failed. */
@@ -61,14 +63,19 @@ export interface ContextRun {
   ownerId: string;
   conversationId: string;
   coversSeq: number;
-  /** The run's conversation is a group, not the Agent's own conversation with its owner. */
-  group: boolean;
+  /**
+   * The run's conversation is a group, not the Agent's own conversation with its owner (null): the most of the group's
+   * history its model is shown — `maxTokens` tokens, counted as admission counts them (attachments at their estimate;
+   * the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
+   * messages only. The Agent's own conversation is limited by the model's context alone.
+   */
+  group: { maxTokens: number; maxMessages: number } | null;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
 export interface LoadedContext {
   system: string;
-  /** Tokens the conversation may take (`contextBudget`). */
+  /** Tokens the conversation may take (`contextBudget`; in a group at most its `maxTokens`). */
   budget: number;
   /** The messages that may be shown, in the order they were answered, oldest first. */
   entries: ContextEntry[];
@@ -202,7 +209,7 @@ const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name:
 export const speakerLabel = (name: string, kind: "human" | "agent"): string => (kind === "agent" ? `${name}（Agent）：` : `${name}：`);
 
 /**
- * Up to `PAGE` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
+ * Up to `limit` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
  * not the fixed greeting) that belong after the topic start `from` — in its own conversation the owner's, in a group
  * everyone's but its own — and the Agent's replies to what is covered up to `coversSeq`. A reply belongs where it was
  * answered: right after the message its run covered when it began (the run is the one named by the message's
@@ -213,13 +220,16 @@ export const speakerLabel = (name: string, kind: "human" | "agent"): string => (
  * line). A reply of the Agent's that proposed a persona is its text followed by the proposal as the block it was written
  * in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed; it counts toward the budget like
  * any text and is never read for a block again. (A reply in a group never proposes: nothing is looked up there.)
+ * `read`: how many messages the query returned; `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
   q: Queryable,
   run: ContextRun,
   from: number,
   before: number | null,
-): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
+  limit: number,
+): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean; read: number }> {
+  const group = run.group !== null;
   const { rows } = await q.query<MessageRow>(
     `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.kind as sender_kind,
             m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
@@ -237,7 +247,7 @@ async function loadPage(
         and (m.sender_id = $6 or ($8::boolean and m.sender_id <> $1) or coalesce(r.covers_seq, m.seq) <= $5)
       order by m.seq desc
       limit $7`,
-    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, PAGE, run.group],
+    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, limit, group],
   );
   const quotedSeqs = [...new Set(rows.flatMap((r) => (typeof r.reply_to === "number" && Number.isSafeInteger(r.reply_to) ? [r.reply_to] : [])))];
   const quotes = new Map<number, string>();
@@ -254,12 +264,12 @@ async function loadPage(
     }
   }
   const loaded = rows.flatMap((r): Loaded[] => {
-    const role = r.sender_id === run.agentId ? "assistant" : run.group || r.sender_id === run.ownerId ? "user" : null;
+    const role = r.sender_id === run.agentId ? "assistant" : group || r.sender_id === run.ownerId ? "user" : null;
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
     let text = entryText(r.text ?? "", quoted);
-    if (run.group && role === "user") text = `${speakerLabel(r.sender_name, r.sender_kind)}${quoted === null ? "" : "\n"}${text}`;
+    if (group && role === "user") text =`${speakerLabel(r.sender_name, r.sender_kind)}${quoted === null ? "" : "\n"}${text}`;
     if (role === "assistant" && r.proposal_persona !== null) {
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
@@ -267,7 +277,7 @@ async function loadPage(
     const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
     return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null }];
   });
-  return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === PAGE };
+  return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === limit, read: rows.length };
 }
 
 /** In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq. */
@@ -277,9 +287,12 @@ const answeredOrder = (list: readonly Loaded[]): ContextEntry[] =>
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
  * the messages after the latest new topic in the order they were answered, read newest first until they are more than
- * the budget (the model's context less its output limit and `system`) can hold, and the records of the attachments the
- * plan could show — looked up only through `findDownloadable` with the Agent as reader (the download's own
- * permission); an image is not looked up when the model cannot see images.
+ * the budget (the model's context less its output limit and `system`; in a group at most `run.group.maxTokens`) can
+ * hold — in a group, its latest `run.group.maxMessages` messages at most, as if what is older were left unread — and the
+ * records of the attachments the plan could show — looked up only through `findDownloadable` with the Agent as reader
+ * (the download's own permission); an image is not looked up when the model cannot see images. Everything that uses
+ * the budget after this (`pastBudget` here, the plans here and in `buildContext`, `holdsNewest` in `begin`, and so
+ * admission, which holds for what `buildContext` built) uses the capped one.
  */
 export async function loadContext(
   q: Queryable,
@@ -287,7 +300,8 @@ export async function loadContext(
   resolved: Pick<Resolved, "contextTokens" | "vision" | "call">,
   system: string,
 ): Promise<LoadedContext> {
-  const budget = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, system);
+  const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, system);
+  const budget = run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   const from = await topicStart(q, run.agentId, run.conversationId);
   const loaded: Loaded[] = [];
   // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
@@ -295,11 +309,16 @@ export async function loadContext(
   let oldest = Number.POSITIVE_INFINITY;
   let more = true;
   let before: number | null = null;
+  let read = 0;
   while (more) {
-    const page = await loadPage(q, run, from, before);
+    const limit = run.group === null ? PAGE : Math.min(PAGE, run.group.maxMessages - read);
+    const page = await loadPage(q, run, from, before, limit);
     loaded.push(...page.loaded);
+    read += page.read;
     more = page.more;
     if (page.oldest !== null) oldest = page.oldest;
+    // A group's messages before its latest `maxMessages` are not read: they count as more left unread.
+    if (more && run.group !== null && read >= run.group.maxMessages) break;
     if (more && pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), budget)) break;
     before = page.oldest;
   }

@@ -160,6 +160,8 @@ const envSchema = z.object({
   AGENT_MAX_RUNS_IN_FLIGHT: wholeNumber(8, 1, 64),
   /** After this many messages in a row from Agents in a group (notices aside), an Agent's message calls no other Agent. */
   AGENT_CHAIN_LIMIT: wholeNumber(30, 2, 500),
+  /** Tokens of a group's history one reply there may show its model at most (the system text comes on top). */
+  AGENT_GROUP_CONTEXT_TOKENS: wholeNumber(12_000, 2_000, 200_000),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -259,6 +261,11 @@ export interface Config {
    * other Agent until a person writes (src/agents/runs.ts `triggerFromAgent`).
    */
   agentChainLimit: number;
+  /**
+   * The most a reply in a group may show its model of the group's history, in tokens by the service's estimate, when
+   * the model's context would hold more (src/agents/context.ts `loadContext`); the system text is not counted in it.
+   */
+  agentGroupContextTokens: number;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -402,6 +409,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     providerMaxConcurrentCalls: e.PROVIDER_MAX_CONCURRENT_CALLS,
     agentMaxRunsInFlight: e.AGENT_MAX_RUNS_IN_FLIGHT,
     agentChainLimit: e.AGENT_CHAIN_LIMIT,
+    agentGroupContextTokens: e.AGENT_GROUP_CONTEXT_TOKENS,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,
