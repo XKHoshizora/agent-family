@@ -21,12 +21,17 @@ const config = () => app.deps.config;
 const PARALLEL = 20;
 const ROUNDS = 4;
 const usageOf = (round: number): Usage => (round < 2 ? FULL_USAGE : OVER_USAGE);
+/**
+ * Every admission and settlement happens at this instant (noon in Shanghai), so all of a round's calls fall in one site
+ * day whatever the clock says when the suite runs: a round that crossed midnight would use two days' allowances.
+ */
+const NOW = new Date("2026-03-01T04:00:00Z");
 
 type Attempt = { run: string; admission: Admission } | { run: string; refused: AppError };
 
 async function tryAdmit(run: string, ownerId: string, resolved: Resolved): Promise<Attempt> {
   try {
-    return { run, admission: await db.tx((t) => admitRun(t, config(), run, ownerId, resolved, ESTIMATE, new Date())) };
+    return { run, admission: await db.tx((t) => admitRun(t, config(), run, ownerId, resolved, ESTIMATE, NOW)) };
   } catch (err) {
     if (err instanceof AppError) return { run, refused: err };
     throw err;
@@ -34,7 +39,7 @@ async function tryAdmit(run: string, ownerId: string, resolved: Resolved): Promi
 }
 
 const settleWith = (run: string, usage: Usage) =>
-  db.tx((t) => settle(t, config(), run, usage, { inputChars: 0, outputChars: 0 }, "done", new Date()));
+  db.tx((t) => settle(t, config(), run, usage, { inputChars: 0, outputChars: 0 }, "done", NOW));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
