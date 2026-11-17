@@ -1346,11 +1346,44 @@ describe("Agents in a group (batch 2C)", () => {
     expect(timeline().querySelector("li.run-status, li.streaming")).toBeNull();
   });
 
-  it("a stopped or cut reply of an Agent still says so in a group (and shows no thinking)", async () => {
+  it("a stopped or cut reply of an Agent still says so in a group (my own Agent's with its thinking)", async () => {
     await openGroup([wire(G1, 1, OAG, "说到一半", { stopped: true }), wire(G1, 2, AG1, "很长的回答", { truncated: true, reasoning: "我的思考" })]);
     expect(within(storedLi(1)).getByText("已停止")).toBeTruthy();
     expect(within(storedLi(2)).getByText("已截断")).toBeTruthy();
-    expect(storedLi(2).querySelector(".thinking")).toBeNull();
+    expect(storedLi(1).querySelector(".thinking")).toBeNull();
+    expect(storedLi(2).querySelector("details.thinking").textContent).toContain("我的思考");
+  });
+
+  it("my own Agent's reply in a group shows its thinking as in its own conversation: one 思考过程 above the answer, collapsed until I open it, and no proposal card", async () => {
+    const reply = wire(G1, 1, AG1, "**周六**十点", { reasoning: "我的 Agent 想了想", proposal: { id: PID, status: "open", persona: "群里不出卡片" } });
+    await openGroup([reply]);
+    const li = storedLi(1);
+    const details = li.querySelectorAll("details.thinking");
+    expect(details).toHaveLength(1);
+    const [thinking] = details;
+    expect(thinking.querySelector("summary").textContent).toBe("思考过程");
+    expect(thinking.open).toBe(false);
+    expect(thinking.querySelector(".thinking-text").textContent).toBe("我的 Agent 想了想");
+    const parts = [...li.querySelector(".msg-main").children];
+    expect(parts.indexOf(thinking)).toBeLessThan(parts.indexOf(li.querySelector(".bubble")));
+    expect(li.querySelector(".bubble .md strong").textContent).toBe("周六");
+    expect(li.querySelector(".proposal-card")).toBeNull();
+    expect(li.textContent).not.toMatch(/群里不出卡片|配置提议/);
+    fireEvent.click(thinking.querySelector("summary"));
+    expect(thinking.open).toBe(true);
+    // The chat list's line is the reply's text, never its thinking.
+    const row = screen.getByText("周末小组", { selector: ".list-col .row-name" }).closest("button");
+    expect(row.querySelector(".row-preview").textContent).toBe("小助手：周六十点");
+  });
+
+  it("someone else's Agent's reply carrying a reasoning field shows no thinking at all, wherever it appears", async () => {
+    const { transport } = await openGroup([wire(G1, 1, OAG, "周日十点", { reasoning: "别人的 Agent 想的" })]);
+    await push(transport, { type: "message", message: wire(G1, 2, OAG, "补充一句", { reasoning: "推来的思考" }) });
+    for (const seq of [1, 2]) {
+      expect(storedLi(seq).querySelector("details, .thinking")).toBeNull();
+      expect(storedLi(seq).textContent).not.toMatch(/思考过程|别人的 Agent 想的|推来的思考/);
+    }
+    expect(mainText()).not.toMatch(/别人的 Agent 想的|推来的思考/);
   });
 
   it("a reply being written: 正在回复… only (nothing streams), a row per Agent in member order; its owner can stop it, nobody else", async () => {
