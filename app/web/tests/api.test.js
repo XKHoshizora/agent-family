@@ -58,6 +58,31 @@ const table = [
   ["searchConversation (page)", () => routes.searchConversation(ID, { q: "a", before: 9, limit: 20 }), "GET", `/api/conversations/${ID}/search?q=a&before=9&limit=20`, undefined],
   ["searchAll", () => routes.searchAll({ q: "a" }), "GET", "/api/search?q=a", undefined],
   ["searchAll (cursor)", () => routes.searchAll({ q: "a", before: "cur+sor/=", limit: 5 }), "GET", "/api/search?q=a&before=cur%2Bsor%2F%3D&limit=5", undefined],
+  // Agents, proposals, replies, providers, usage, site models (batch 2A)
+  ["listAgents", () => routes.listAgents(), "GET", "/api/agents", undefined],
+  ["createAgent", () => routes.createAgent({ handle: "helper", name: "小助手", model: null }), "POST", "/api/agents", { handle: "helper", name: "小助手", model: null }],
+  ["getAgent", () => routes.getAgent(ID), "GET", `/api/agents/${ID}`, undefined],
+  ["patchAgent", () => routes.patchAgent(ID, { name: "新", model: null }), "PATCH", `/api/agents/${ID}`, { name: "新", model: null }],
+  ["pauseAgent", () => routes.pauseAgent(ID), "POST", `/api/agents/${ID}/pause`, undefined],
+  ["resumeAgent", () => routes.resumeAgent(ID), "POST", `/api/agents/${ID}/resume`, undefined],
+  ["deleteAgent", () => routes.deleteAgent(ID), "DELETE", `/api/agents/${ID}`, undefined],
+  ["draftPersona", () => routes.draftPersona({ name: "小助手", model: { source: "site", id: "m" } }), "POST", "/api/agents/draft-persona", { name: "小助手", model: { source: "site", id: "m" } }],
+  ["confirmProposal", () => routes.confirmProposal(ID, ID2), "POST", `/api/agents/${ID}/proposals/${ID2}/confirm`, undefined],
+  ["confirmProposal (edits)", () => routes.confirmProposal(ID, ID2, { persona: "改过的" }), "POST", `/api/agents/${ID}/proposals/${ID2}/confirm`, { persona: "改过的" }],
+  ["discardProposal", () => routes.discardProposal(ID, ID2), "POST", `/api/agents/${ID}/proposals/${ID2}/discard`, undefined],
+  ["getRun", () => routes.getRun(ID), "GET", `/api/conversations/${ID}/run`, undefined],
+  ["stopRun", () => routes.stopRun(ID, ID2), "POST", `/api/conversations/${ID}/runs/${ID2}/stop`, undefined],
+  ["retryRun", () => routes.retryRun(ID), "POST", `/api/conversations/${ID}/runs/retry`, undefined],
+  ["dismissRun", () => routes.dismissRun(ID), "POST", `/api/conversations/${ID}/runs/dismiss`, undefined],
+  ["resetTopic", () => routes.resetTopic(ID), "POST", `/api/conversations/${ID}/topic`, undefined],
+  ["listProviders", () => routes.listProviders(), "GET", "/api/providers", undefined],
+  ["createProvider", () => routes.createProvider({ name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }), "POST", "/api/providers", { name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }],
+  ["patchProvider", () => routes.patchProvider(ID, { name: "q" }), "PATCH", `/api/providers/${ID}`, { name: "q" }],
+  ["deleteProvider", () => routes.deleteProvider(ID), "DELETE", `/api/providers/${ID}`, undefined],
+  ["testProvider", () => routes.testProvider(ID), "POST", `/api/providers/${ID}/test`, undefined],
+  ["refreshProviderModels", () => routes.refreshProviderModels(ID), "POST", `/api/providers/${ID}/models/refresh`, undefined],
+  ["getUsage", () => routes.getUsage(), "GET", "/api/usage", undefined],
+  ["getModels", () => routes.getModels(), "GET", "/api/models", undefined],
 ];
 
 describe("routes.js builds the service's method, path and body", () => {
@@ -81,6 +106,17 @@ describe("routes.js builds the service's method, path and body", () => {
     await routes.getMessage("a/b", 1);
     expect(fetchMock.mock.calls[0][0]).toBe("/api/conversations/a%2Fb/messages/1");
   });
+
+  it("uploadAgentAvatar PUTs the raw image bytes to the Agent's avatar", async () => {
+    const file = new File(["png"], "a.png", { type: "image/png" });
+    await routes.uploadAgentAvatar(ID, file);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`/api/agents/${ID}/avatar`);
+    expect(init).toMatchObject({ method: "PUT", credentials: "same-origin", body: file });
+    expect(init.headers["Content-Type"]).toBe("image/png");
+    await routes.uploadAgentAvatar(ID, new File(["?"], "a", { type: "" }));
+    expect(fetchMock.mock.calls[1][1].headers["Content-Type"]).toBe("application/octet-stream");
+  });
 });
 
 describe("URL builders", () => {
@@ -88,6 +124,8 @@ describe("URL builders", () => {
     expect(routes.attachmentUploadUrl(ID)).toBe(`/api/conversations/${ID}/attachments`);
     expect(routes.attachmentUrl(ID)).toBe(`/api/attachments/${ID}`);
     expect(routes.avatarUrl(ID)).toBe(`/api/principals/${ID}/avatar`);
+    expect(routes.avatarUrl(ID, 0)).toBe(`/api/principals/${ID}/avatar`);
+    expect(routes.avatarUrl(ID, 3)).toBe(`/api/principals/${ID}/avatar?v=3`);
     expect(routes.myAvatarUploadUrl()).toBe("/api/me/avatar");
   });
 
@@ -105,6 +143,17 @@ describe("ApiError mapping", () => {
     const err = await request("POST", "/api/x", {}).catch((e) => e);
     expect(err).toBeInstanceOf(ApiError);
     expect(err).toMatchObject({ status: 403, code: "cannot_send", reason: "blocked" });
+  });
+
+  it("keeps the details the client shows: no_quota's resetsAt, provider_in_use's Agents", async () => {
+    fetchMock.mockResolvedValueOnce(reply(402, { error: "no_quota", reason: "free_and_balance", resetsAt: "2026-11-16T16:00:00.000Z" }));
+    await expect(request("POST", "/api/agents/draft-persona", {})).rejects.toMatchObject({ code: "no_quota", reason: "free_and_balance", resetsAt: "2026-11-16T16:00:00.000Z" });
+    fetchMock.mockResolvedValueOnce(reply(409, { error: "provider_in_use", agents: [{ id: ID, name: "小助手" }, { id: 7 }, "x"] }));
+    await expect(request("DELETE", `/api/providers/${ID2}`)).rejects.toMatchObject({ code: "provider_in_use", agents: [{ id: ID, name: "小助手" }] });
+    fetchMock.mockResolvedValueOnce(reply(409, { error: "busy_run" }));
+    const plain = await request("POST", "/api/x").catch((e) => e);
+    expect(plain.resetsAt).toBeNull();
+    expect(plain.agents).toBeNull();
   });
 
   it("maps a body without a reason, including busy", async () => {

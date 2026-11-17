@@ -18,8 +18,8 @@ export function Avatar({ id, size = 44, online = false, className = "" }) {
   const { state } = useStore();
   const who = entity(state, id);
   // Anyone has an avatar at the service (a generated one when none was uploaded), also a member who left;
-  // only "me" before the first load is not known yet.
-  const src = who?.avatar ?? (id && id !== ME ? avatarUrl(id) : null);
+  // only "me" before the first load is not known yet. Every URL carries the avatar's version, so a change shows at once.
+  const src = who?.avatar ?? (id && id !== ME ? avatarUrl(id, state.avatarVersions?.[id] ?? 0) : null);
   const initial = [...String(who?.displayName ?? who?.name ?? "")][0] ?? "";
   return (
     <span className={`avatar ${className}`} style={{ width: size, height: size }} role="img" aria-label={who?.name || "头像"}>

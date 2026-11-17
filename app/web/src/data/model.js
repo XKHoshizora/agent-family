@@ -14,13 +14,20 @@
 // the window is only what the screen shows while it exists, and it never moves the position or the read marker.
 // It is dropped when the person goes back to the newest messages, and absorbed into the held list as soon as it
 // reaches it (see `settleWindow`).
+//
+// Agents (batch 2A). `runs[conversationId]` is the latest reply of the Agent of that conversation (the service's Run,
+// plus `posted: true` once the reply's message is held). `streams[runId]` is the text and reasoning streamed so far
+// (`delta` pushes) of a run that is running and not posted yet: transient, never a message, never in search, unread or
+// the preview, and gone when the message, a terminal `run`, a `gone` or a reconnect arrives. `avatarVersions[id]` is
+// the version put in a principal's avatar URL: set by /api/sync and `principal` pushes, raised by every other answer that
+// names one, and for my own avatar also a newer cache-buster the moment I change it (`bumpAvatar`).
 
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
 
 export function initial() {
   return {
-    /** The signed-in principal from /api/sync: {id, handle, displayName, email}. */
+    /** The signed-in principal from /api/sync: {id, handle, displayName, avatarVersion, email}. */
     me: null,
     /** Whose drafts and unsent messages these are; survives `resetKeepingDrafts`. */
     owner: null,
@@ -40,8 +47,22 @@ export function initial() {
     stays: {},
     /** conversation id → detached window {n, messages, hasOlder, focusSeq} (see the header). */
     windows: {},
-    /** Cache-busting version of my avatar's URL: 0 until I change it. */
-    avatarVersion: 0,
+    /** principal id → the version in its avatar URL (see the header). */
+    avatarVersions: {},
+    /** agent id → my Agent as the service answers it (deleted ones included). */
+    agents: {},
+    /** provider id → my model provider: {id, name, protocol, baseUrl, keyLast4, models}. Never an API key. */
+    providers: {},
+    /** The last `GET /api/usage` answer (points are decimal strings), or null before it. */
+    usage: null,
+    /** The site's models from `GET /api/models`: [{id, label, tier, vision, pdf, reasoning, contextTokens}]. */
+    siteModels: [],
+    /** What a provider model gets when its entry says nothing: {contextTokens, maxOutputTokens}, or null before it. */
+    providerDefaults: null,
+    /** conversation id → its latest run (see the header), or null when there is none to show. */
+    runs: {},
+    /** run id → {text, reasoning} streamed so far (see the header). */
+    streams: {},
   };
 }
 
@@ -126,6 +147,7 @@ function unreadAfterReading(conv, list, meId, oldRead, newRead) {
 
 function metadata(entry) {
   const isGroup = entry.type === "group";
+  const isAgent = entry.type === "agent";
   return {
     id: entry.id,
     type: entry.type,
@@ -134,11 +156,52 @@ function metadata(entry) {
     creatorId: isGroup ? entry.creatorId ?? null : null,
     myRole: entry.myRole,
     closed: Boolean(entry.closed),
-    peerId: isGroup ? null : entry.peerId ?? null,
+    peerId: isGroup || isAgent ? null : entry.peerId ?? null,
+    // An Agent's conversation: the Agent, and whether it is paused or deleted.
+    agentId: isAgent ? entry.agentId ?? null : null,
+    agent: isAgent ? { paused: Boolean(entry.agent?.paused), deleted: Boolean(entry.agent?.deleted) } : null,
     canSend: entry.canSend ?? { ok: false, reason: "closed" },
     members: entry.members ?? [],
     createdAt: entry.createdAt ?? null,
   };
+}
+
+// ───────── avatar versions
+
+const isVersion = (v) => Number.isSafeInteger(v) && v >= 0;
+
+/** Raises `id`'s version to `version` (never lowers it): an answer may be older than a push already applied. */
+function raiseVersion(versions, id, version) {
+  if (typeof id !== "string" || !isVersion(version) || (versions[id] ?? -1) >= version) return versions;
+  return { ...versions, [id]: version };
+}
+
+function raiseVersionsOf(versions, principals) {
+  let next = versions;
+  for (const p of principals) if (p && typeof p.id === "string") next = raiseVersion(next, p.id, p.avatarVersion);
+  return next;
+}
+
+/** A `principal` push: someone's avatar changed. The push is the latest word, so it sets the version. */
+export function setAvatarVersion(state, principalId, version) {
+  if (typeof principalId !== "string" || !isVersion(version) || state.avatarVersions[principalId] === version) return state;
+  return { ...state, avatarVersions: { ...state.avatarVersions, [principalId]: version } };
+}
+
+// ───────── a reply in progress (runs and their streams)
+
+/** Whether `m` is a message of the conversation's Agent (its reply), not a notice. */
+const fromAgent = (conv, m) => conv.type === "agent" && Boolean(conv.agentId) && m.senderId === conv.agentId && m.kind !== "system";
+
+/**
+ * Messages of the Agent arrived while its run is running: that is the run's reply (one run at a time, and the service
+ * posts it before the run ends). Its stream is dropped and the run is marked posted, so no later delta brings it back.
+ */
+function notePosted(state, conversationId, arrived) {
+  const conv = state.conversations[conversationId];
+  const run = state.runs[conversationId];
+  if (!conv || !run || run.status !== "running" || run.posted || !arrived.some((m) => fromAgent(conv, m))) return state;
+  return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
 }
 
 function putConversation(state, conv, list) {
@@ -209,13 +272,43 @@ export function applySync(state, sync) {
   });
 
   const principals = { ...state.principals };
-  for (const p of sync.principals) principals[p.id] = p;
+  const avatarVersions = { ...state.avatarVersions };
+  for (const p of sync.principals) {
+    principals[p.id] = p;
+    if (isVersion(p.avatarVersion)) avatarVersions[p.id] = p.avatarVersion;
+  }
+  if (isVersion(sync.me.avatarVersion)) avatarVersions[meId] = sync.me.avatarVersion;
 
   const dropped = Object.keys(state.conversations).filter((id) => !(id in conversations));
   const pending = sameOwner ? filterValues(state.pending, (p) => p.conversationId in conversations) : {};
   const drafts = sameOwner ? filterValues(state.drafts, (_text, id) => id in conversations) : {};
   const detached = filterValues(state.windows, (_w, id) => id in conversations);
-  return { ...state, me: sync.me, owner: meId, synced: true, principals, conversations, messages, pending, drafts, windows: detached, stays: bumpStays(state.stays, dropped) };
+  // A conversation that is gone takes its run and stream with it.
+  const runs = filterValues(state.runs, (_run, id) => id in conversations);
+  const runIds = new Set(Object.values(runs).map((r) => r?.id));
+  const streams = filterValues(state.streams, (_s, runId) => runIds.has(runId));
+  let next = {
+    ...state,
+    me: sync.me,
+    owner: meId,
+    synced: true,
+    principals,
+    avatarVersions,
+    conversations,
+    messages,
+    pending,
+    drafts,
+    windows: detached,
+    stays: bumpStays(state.stays, dropped),
+    runs,
+    streams,
+  };
+  // The Agent's reply may have come with this snapshot (its push then reads as a duplicate).
+  for (const id of Object.keys(runs)) {
+    const prev = state.conversations[id];
+    if (prev) next = notePosted(next, id, (windows.get(id) ?? []).filter((m) => m.seq > prev.position));
+  }
+  return next;
 }
 
 /**
@@ -232,7 +325,8 @@ export function applyMessage(state, wire) {
   const list = mergeBySeq(state.messages[id] ?? [], [wire]);
   const position = advance(list, wire.seq);
   const unread = conv.unread + (wire.seq > conv.readSeq && countsAsUnread(wire, state.me?.id) ? 1 : 0);
-  return { state: putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list) };
+  const next = putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list);
+  return { state: notePosted(next, id, [wire]) };
 }
 
 /**
@@ -256,9 +350,13 @@ export function applyCatchup(state, response) {
   return { state: next };
 }
 
-/** "Not a member now": the conversation, its messages, unsent messages and draft go; a new stay starts. Idempotent. */
+/**
+ * "Not a member now": the conversation, its messages, unsent messages, draft, run and stream go; a new stay starts.
+ * Idempotent.
+ */
 export function applyGone(state, conversationId) {
   if (!(conversationId in state.conversations)) return state;
+  const run = state.runs[conversationId];
   return {
     ...state,
     conversations: without(state.conversations, conversationId),
@@ -267,6 +365,8 @@ export function applyGone(state, conversationId) {
     drafts: without(state.drafts, conversationId),
     windows: without(state.windows, conversationId),
     stays: bumpStays(state.stays, [conversationId]),
+    runs: without(state.runs, conversationId),
+    streams: run ? without(state.streams, run.id) : state.streams,
   };
 }
 
@@ -299,7 +399,9 @@ export function unknownMembers(state, conversationId) {
 }
 
 export function applySocial(state, social) {
-  return { ...state, social };
+  const named = social ? [...(social.friends ?? []), ...(social.blocked ?? []), ...(social.blockedBy ?? [])] : [];
+  for (const r of [...(social?.incoming ?? []), ...(social?.outgoing ?? [])]) named.push(r?.principal);
+  return { ...state, social, avatarVersions: raiseVersionsOf(state.avatarVersions, named) };
 }
 
 /**
@@ -312,7 +414,7 @@ export function applyPrincipals(state, principals) {
   if (valid.length === 0) return state;
   const next = { ...state.principals };
   for (const p of valid) next[p.id] = p;
-  return { ...state, principals: next };
+  return { ...state, principals: next, avatarVersions: raiseVersionsOf(state.avatarVersions, valid) };
 }
 
 /** Prepends an older page (`GET /api/conversations/:id/messages?before=`) and the people it names. */
@@ -416,12 +518,19 @@ export function markSending(state, { clientTxn, conversationId, text = "", reply
 
 /** The service stored it (`duplicate` or not): the unsent entry becomes the server's message. */
 export function markSent(state, clientTxn, wire) {
-  const next = { ...state, pending: without(state.pending, clientTxn) };
-  const conv = next.conversations[wire.conversationId];
-  if (!conv) return next;
-  const list = mergeBySeq(next.messages[wire.conversationId] ?? [], [{ ...wire, clientTxn }]);
+  return applyPosted({ ...state, pending: without(state.pending, clientTxn) }, { ...wire, clientTxn });
+}
+
+/**
+ * A message of mine that an HTTP answer returned (a send, the new-topic notice): held at once, also beyond a gap (the
+ * pushes before it follow); the position advances only when it is next.
+ */
+export function applyPosted(state, wire) {
+  const conv = state.conversations[wire.conversationId];
+  if (!conv) return state;
+  const list = mergeBySeq(state.messages[wire.conversationId] ?? [], [wire]);
   const position = wire.seq === conv.position + 1 ? advance(list, wire.seq) : conv.position;
-  return putConversation(next, { ...conv, position, lastSeq: Math.max(conv.lastSeq, wire.seq) }, list);
+  return putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, wire.seq) }, list);
 }
 
 export function markFailed(state, clientTxn, error) {
@@ -549,7 +658,214 @@ export function applyMyName(state, displayName) {
   return { ...state, me, principals: entry ? { ...state.principals, [me.id]: { ...entry, displayName } } : state.principals };
 }
 
-/** My avatar changed: every URL of it gets a new version, so the browser fetches it again. */
-export function bumpAvatar(state, version) {
-  return { ...state, avatarVersion: version > state.avatarVersion ? version : state.avatarVersion + 1 };
+/**
+ * An avatar I just changed (mine by default, or one of my Agents'): every URL of it gets a new version at once, so the
+ * browser fetches it again; `version` when it is newer than the one held, else the next one. The push that follows
+ * sets the service's own number.
+ */
+export function bumpAvatar(state, version, principalId = state.me?.id) {
+  if (typeof principalId !== "string") return state;
+  const current = state.avatarVersions[principalId] ?? 0;
+  return { ...state, avatarVersions: { ...state.avatarVersions, [principalId]: version > current ? version : current + 1 } };
+}
+
+// ───────── my Agents
+
+const isAgentRecord = (a) => a && typeof a.id === "string" && typeof a.handle === "string" && typeof a.name === "string";
+
+/** The Agent's principal entry follows the Agent (its name now, for notices and senders); its avatar version only rises. */
+function nameAgent(state, agent) {
+  const entry = { ...(state.principals[agent.id] ?? {}), id: agent.id, handle: agent.handle, displayName: agent.name, kind: "agent" };
+  return {
+    ...state,
+    principals: { ...state.principals, [agent.id]: entry },
+    avatarVersions: raiseVersion(state.avatarVersions, agent.id, agent.avatarVersion),
+  };
+}
+
+/** `GET /api/agents`: the whole list (deleted ones included) replaces what is held. */
+export function applyAgents(state, list) {
+  const valid = (Array.isArray(list) ? list : []).filter(isAgentRecord);
+  const agents = {};
+  for (const a of valid) agents[a.id] = a;
+  let next = { ...state, agents };
+  for (const a of valid) next = nameAgent(next, a);
+  return next;
+}
+
+/** One Agent as an answer (`GET`, create, edit, pause, resume, delete, confirm) returned it. */
+export function applyAgent(state, agent) {
+  if (!isAgentRecord(agent)) return state;
+  return nameAgent({ ...state, agents: { ...state.agents, [agent.id]: agent } }, agent);
+}
+
+/** An Agent the service no longer knows as mine. */
+export function dropAgent(state, agentId) {
+  return agentId in state.agents ? { ...state, agents: without(state.agents, agentId) } : state;
+}
+
+// ───────── persona proposal cards
+
+/** The conversation of `agentId` (held) and the seqs of its messages, held or in a window, whose proposal is still open. */
+export function openProposals(state, agentId) {
+  const conversationId =
+    state.agents[agentId]?.conversationId ?? Object.values(state.conversations).find((c) => c.agentId === agentId)?.id ?? null;
+  if (!conversationId || !state.conversations[conversationId]) return { conversationId: null, seqs: [] };
+  const seqs = new Set();
+  const shown = [...(state.messages[conversationId] ?? []), ...(state.windows[conversationId]?.messages ?? [])];
+  for (const m of shown) if (m.proposal?.status === "open") seqs.add(m.seq);
+  return { conversationId, seqs: [...seqs].sort((a, b) => a - b) };
+}
+
+/** Replaces `list`'s message with `wire`'s seq (keeping a known clientTxn); the same list when there is none. */
+function replaceBySeq(list, wire) {
+  const at = list.findIndex((m) => m.seq === wire.seq);
+  if (at < 0) return list;
+  const next = [...list];
+  next[at] = list[at].clientTxn ? { ...wire, clientTxn: list[at].clientTxn } : wire;
+  return next;
+}
+
+/**
+ * A message fetched again (`GET /api/conversations/:id/messages/:seq`, a proposal card after an `agent` push): the copy
+ * held, and the one in a detached window, are replaced. Nothing is added and no position moves.
+ */
+export function applyMessageUpdate(state, wire) {
+  const id = wire?.conversationId;
+  if (!state.conversations[id] || !Number.isSafeInteger(wire.seq)) return state;
+  const held = state.messages[id] ?? [];
+  const list = replaceBySeq(held, wire);
+  const win = state.windows[id];
+  const shown = win ? replaceBySeq(win.messages, wire) : null;
+  let next = state;
+  if (list !== held) next = { ...next, messages: { ...next.messages, [id]: list } };
+  if (win && shown !== win.messages) next = { ...next, windows: { ...next.windows, [id]: { ...win, messages: shown } } };
+  return next;
+}
+
+/** My confirmation or discard was answered: the card says so at once (the `agent` push refetches the others). */
+export function setProposalStatus(state, conversationId, proposalId, status) {
+  const mark = (list) => list.map((m) => (m.proposal?.id === proposalId ? { ...m, proposal: { ...m.proposal, status } } : m));
+  if (!state.conversations[conversationId]) return state;
+  const win = state.windows[conversationId];
+  return {
+    ...state,
+    messages: { ...state.messages, [conversationId]: mark(state.messages[conversationId] ?? []) },
+    windows: win ? { ...state.windows, [conversationId]: { ...win, messages: mark(win.messages) } } : state.windows,
+  };
+}
+
+// ───────── runs and streams
+
+const RUN_RANK = { queued: 0, running: 1 };
+const runRank = (status) => RUN_RANK[status] ?? 2;
+
+function wireRun(run) {
+  const out = { id: run.id, status: run.status, retryable: Boolean(run.retryable) };
+  if (typeof run.error === "string") out.error = run.error;
+  if (typeof run.resetsAt === "string") out.resetsAt = run.resetsAt;
+  return out;
+}
+
+/**
+ * The latest run of a held conversation (a `run` push, `GET .../run`, a retry's answer), or null for none. The same
+ * run's status only moves forward (an answer may overtake a push) and stays posted; a run that is not running has no
+ * stream; a newer run ends the older one's stream.
+ */
+export function applyRun(state, conversationId, run) {
+  if (!state.conversations[conversationId]) return state;
+  if (run !== null && !(run && typeof run.id === "string" && typeof run.status === "string")) return state;
+  const prev = state.runs[conversationId] ?? null;
+  let next = run === null ? null : wireRun(run);
+  if (next && prev && prev.id === next.id) {
+    if (runRank(next.status) < runRank(prev.status)) return state;
+    if (prev.posted) next = { ...next, posted: true };
+  }
+  let streams = state.streams;
+  if (prev && prev.id !== next?.id) streams = without(streams, prev.id);
+  if (next && next.status !== "running") streams = without(streams, next.id);
+  return { ...state, runs: { ...state.runs, [conversationId]: next }, streams };
+}
+
+/**
+ * A `delta` push: appended to the stream of the conversation's run only while that run is running and its message has
+ * not arrived; anything else (an unknown or finished run, another conversation's) is ignored.
+ */
+export function applyDelta(state, { conversationId, runId, text, reasoning } = {}) {
+  const run = state.runs[conversationId];
+  if (!run || run.id !== runId || run.status !== "running" || run.posted) return state;
+  const addText = typeof text === "string" ? text : "";
+  const addReasoning = typeof reasoning === "string" ? reasoning : "";
+  if (!addText && !addReasoning) return state;
+  const prev = state.streams[runId] ?? { text: "", reasoning: "" };
+  return { ...state, streams: { ...state.streams, [runId]: { text: prev.text + addText, reasoning: prev.reasoning + addReasoning } } };
+}
+
+/** A new connection: what was streamed before it is not sent again, so every stream goes. */
+export function clearStreams(state) {
+  return Object.keys(state.streams).length === 0 ? state : { ...state, streams: {} };
+}
+
+// ───────── providers, usage, the site's models
+
+/** A provider's public fields, and nothing else: whatever an answer carries, no key is ever kept (or passed on). */
+export function publicProvider(answer) {
+  const p = answer ?? {};
+  return {
+    id: p.id,
+    name: p.name,
+    protocol: p.protocol,
+    baseUrl: p.baseUrl,
+    keyLast4: p.keyLast4,
+    models: (Array.isArray(p.models) ? p.models : []).map((m) => ({
+      name: m.name,
+      vision: Boolean(m.vision),
+      pdf: Boolean(m.pdf),
+      reasoning: Boolean(m.reasoning),
+      contextTokens: m.contextTokens,
+    })),
+  };
+}
+
+const isProvider = (p) => p && typeof p.id === "string";
+
+/** `GET /api/providers`: the whole list replaces what is held (oldest first). */
+export function applyProviders(state, list) {
+  const providers = {};
+  for (const p of (Array.isArray(list) ? list : []).filter(isProvider)) providers[p.id] = publicProvider(p);
+  return { ...state, providers };
+}
+
+/** One provider as an answer returned it (create, edit, refresh). */
+export function applyProvider(state, provider) {
+  if (!isProvider(provider)) return state;
+  return { ...state, providers: { ...state.providers, [provider.id]: publicProvider(provider) } };
+}
+
+export function removeProvider(state, providerId) {
+  return providerId in state.providers ? { ...state, providers: without(state.providers, providerId) } : state;
+}
+
+/** `GET /api/usage` (points stay the service's decimal strings). */
+export function applyUsage(state, usage) {
+  return usage && typeof usage === "object" ? { ...state, usage } : state;
+}
+
+/** `GET /api/models`: the site's models and what a provider model gets by default. */
+export function applyModels(state, answer) {
+  if (!answer || !Array.isArray(answer.siteModels)) return state;
+  const siteModels = answer.siteModels
+    .filter((m) => m && typeof m.id === "string")
+    .map((m) => ({
+      id: m.id,
+      label: m.label,
+      tier: m.tier,
+      vision: Boolean(m.vision),
+      pdf: Boolean(m.pdf),
+      reasoning: Array.isArray(m.reasoning) ? m.reasoning : [],
+      contextTokens: m.contextTokens,
+    }));
+  const d = answer.providerDefaults;
+  const providerDefaults = d && typeof d === "object" ? { contextTokens: d.contextTokens, maxOutputTokens: d.maxOutputTokens } : state.providerDefaults;
+  return { ...state, siteModels, providerDefaults };
 }

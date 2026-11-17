@@ -1,5 +1,6 @@
-// Why a friend, block or group action was refused, in Chinese. Input: the route's ApiError ({code, status, reason}).
-// Each route lists the codes the service documents for it (app/service/README.md); anything else is generic.
+// Why an action was refused (friends, blocks, groups, search, my profile; Agents, replies, providers), in Chinese.
+// Input: the route's ApiError ({code, status, reason, resetsAt, agents}) or the actions' error object of the same
+// fields. Each route lists the codes the service documents for it (app/service/README.md); anything else is generic.
 
 const GENERIC = "操作没有成功，请稍后再试。";
 
@@ -78,6 +79,9 @@ const pick = (table, action, error) => {
   return table[action]?.[code] ?? COMMON[code] ?? GENERIC;
 };
 
+/** For a route that has no codes of its own (loading a list): the shared sentences, else the generic one. */
+export const commonErrorText = (error) => pick({}, null, error);
+
 /** action: lookup | sendRequest | accept | reject | withdraw | unfriend | block | unblock */
 export const friendErrorText = (action, error) => pick(FRIENDS, action, error);
 /** action: create | rename | add | remove | leave */
@@ -103,3 +107,165 @@ const PROFILE = {
 };
 /** action: name | avatar */
 export const profileErrorText = (action, error) => pick(PROFILE, action, error);
+
+// ───────── Agents, replies, providers (batch 2A)
+
+const pad = (n) => String(n).padStart(2, "0");
+
+/** When the free allowance comes back, in local time: "今天 16:00", "明天 00:00", else "11月20日 08:05". */
+function resetTimeText(resetsAt, now) {
+  const ms = Date.parse(resetsAt);
+  if (!Number.isFinite(ms)) return null;
+  const at = new Date(ms);
+  const day = new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+  const n = new Date(now);
+  const today = new Date(n.getFullYear(), n.getMonth(), n.getDate()).getTime();
+  const tomorrow = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1).getTime();
+  const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  if (day === today) return `今天 ${time}`;
+  if (day === tomorrow) return `明天 ${time}`;
+  return `${at.getMonth() + 1}月${at.getDate()}日 ${time}`;
+}
+
+/**
+ * Why a site-model call could not start (`no_quota`): the free allowance and the balance are both used up (a free-tier
+ * model; `resetsAt` says when the allowance comes back), or there is no balance (a paid-tier model).
+ * @param {{reason?: string|null, resetsAt?: string|null}} details the error's (an HTTP 402) or the run's
+ */
+export function noQuotaText(details, now = Date.now()) {
+  const free = details?.reason === "free_and_balance" || (details?.reason !== "balance" && Boolean(details?.resetsAt));
+  if (!free) return "余额不足：这个模型需要余额才能使用。";
+  const when = details?.resetsAt ? resetTimeText(details.resetsAt, now) : null;
+  if (!when) return "今天的免费额度和余额都已用完，免费额度会在每天零点重置。";
+  // A date (it starts with a digit) is set apart from the words before it, as a time is.
+  return `今天的免费额度和余额都已用完，免费额度将在${/^\d/.test(when) ? " " : ""}${when} 重置。`;
+}
+
+const AGENT_DELETED = "这个 Agent 已删除。";
+const AGENT_NOT_FOUND = "找不到这个 Agent。";
+const MODEL_FAILED = {
+  provider_rejected: "供应商拒绝了这个密钥，请检查密钥是否正确。",
+  provider_unavailable: "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。",
+  address_not_allowed: "这个接口地址不被允许：需要是 https 开头的公网地址。",
+};
+
+const AGENT = {
+  create: {
+    handle_taken: "这个账号名已被占用，请换一个。",
+    agent_limit: "你的 Agent 数量已达到当前档位的上限。",
+    invalid_request: "填写的内容有误：账号名需 3–24 位小写字母、数字或下划线，名称 1–20 个字；所选模型或思考程度也可能不可用。",
+  },
+  edit: {
+    agent_deleted: AGENT_DELETED,
+    not_found: AGENT_NOT_FOUND,
+    invalid_request: "填写的内容有误，或所选模型、思考程度不可用。",
+  },
+  pause: { agent_deleted: AGENT_DELETED, not_found: AGENT_NOT_FOUND },
+  resume: { agent_deleted: AGENT_DELETED, not_found: AGENT_NOT_FOUND },
+  delete: { not_found: AGENT_NOT_FOUND },
+  avatar: {
+    invalid_request: "头像需要是 PNG、JPEG 或 WebP 格式的图片。",
+    too_large: "头像不能超过 2 MB。",
+    agent_deleted: AGENT_DELETED,
+    not_found: AGENT_NOT_FOUND,
+  },
+  draft: {
+    ...MODEL_FAILED,
+    invalid_request: "所选模型不可用，请换一个模型。",
+    context_too_small: "所选模型的上下文太小，放不下起草所需的内容，请换一个模型。",
+    rate_limited: "起草太频繁，或正在进行的回复太多，请稍后再试。",
+  },
+  confirm: {
+    stale_proposal: "这份提议已失效，请让它重新生成提议。",
+    agent_deleted: AGENT_DELETED,
+    not_found: "这份提议已经不存在了。",
+    invalid_request: "人格文档需要 1–20000 个字，简介不超过 40 个字，擅长领域不超过 20 个字。",
+  },
+  discard: {
+    stale_proposal: "这份提议已失效，请让它重新生成提议。",
+    agent_deleted: AGENT_DELETED,
+    not_found: "这份提议已经不存在了。",
+  },
+};
+
+/**
+ * Why an Agent action was refused. action: create | edit | pause | resume | delete | avatar | draft | confirm | discard.
+ * `now` places a `no_quota` reset time.
+ */
+export function agentErrorText(action, error, now = Date.now()) {
+  if (error?.code === "no_quota" && action in AGENT) return noQuotaText(error, now);
+  return pick(AGENT, action, error);
+}
+
+const REPLY = {
+  stop: { not_found: "这次回复已经结束了。" },
+  retry: {
+    busy_run: "它正在回复，请等这次回复结束。",
+    agent_paused: "这个 Agent 已暂停，恢复后才能重试。",
+    agent_deleted: AGENT_DELETED,
+    invalid_request: "现在没有可以重试的回复，或这个 Agent 还没有选择模型。",
+    not_found: AGENT_NOT_FOUND,
+    rate_limited: "回复太频繁了，请稍等一分钟再试。",
+  },
+  dismiss: { not_found: AGENT_NOT_FOUND },
+  topic: {
+    cannot_send: "这个 Agent 已删除，不能再开始新话题。",
+    not_found: AGENT_NOT_FOUND,
+  },
+};
+/** Why a reply action was refused. action: stop | retry | dismiss | topic */
+export const replyErrorText = (action, error) => pick(REPLY, action, error);
+
+const PROVIDER_NOT_FOUND = "找不到这个供应商。";
+const PROVIDER = {
+  create: {
+    provider_limit: "最多只能添加 10 个模型供应商。",
+    name_taken: "你已经有一个同名的供应商了，请换个名称。",
+    invalid_request: "填写的内容有误：请检查名称、https 接口地址和密钥。",
+  },
+  edit: {
+    name_taken: "你已经有一个同名的供应商了，请换个名称。",
+    not_found: PROVIDER_NOT_FOUND,
+    invalid_request: "填写的内容有误。换到另一个地址时，需要同时重新填写密钥。",
+  },
+  delete: { not_found: PROVIDER_NOT_FOUND },
+  test: { ...MODEL_FAILED, not_found: PROVIDER_NOT_FOUND },
+  refresh: { ...MODEL_FAILED, not_found: PROVIDER_NOT_FOUND },
+};
+
+/** Why a provider action was refused. action: create | edit | delete | test | refresh */
+export function providerErrorText(action, error) {
+  if (error?.code === "provider_in_use" && action in PROVIDER) {
+    const names = Array.isArray(error.agents) ? error.agents.map((a) => a?.name).filter(Boolean) : [];
+    return names.length > 0
+      ? `还有 Agent 在使用这个供应商：${names.join("、")}。请先给它们换一个模型。`
+      : "还有 Agent 在使用这个供应商，请先给它们换一个模型。";
+  }
+  return pick(PROVIDER, action, error);
+}
+
+const RUN_FAILED = {
+  provider_rejected: "供应商拒绝了密钥，这次没有回复。请到设置里检查密钥。",
+  provider_unavailable: "暂时连不上模型服务，这次没有回复。可以重试。",
+  address_not_allowed: "模型的接口地址不被允许，这次没有回复。请到设置里检查地址。",
+  context_too_small: "人格文档太长或模型的上下文太小，放不下你的消息。请缩短人格文档或换一个模型。",
+  busy: "服务出了点问题，这次没有回复，也没有扣费。可以重试。",
+};
+const RUN_CANCELLED = {
+  agent_paused: "它已暂停，这次回复已取消。",
+  agent_deleted: "它已删除，这次回复已取消。",
+};
+
+/**
+ * The status line of a reply that failed or was cancelled (`Run`): why, in Chinese; "" when nothing went wrong (done,
+ * stopped, running, or cancelled because a new topic left it nothing to answer).
+ */
+export function runFailureText(run, now = Date.now()) {
+  if (!run) return "";
+  if (run.status === "failed") {
+    if (run.error === "no_quota") return noQuotaText({ resetsAt: run.resetsAt ?? null }, now);
+    return RUN_FAILED[run.error] ?? "这次没有回复成功。";
+  }
+  if (run.status === "cancelled") return RUN_CANCELLED[run.error] ?? "";
+  return "";
+}

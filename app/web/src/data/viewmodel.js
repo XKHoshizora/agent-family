@@ -1,5 +1,6 @@
 // Model → the state shape the prototype's pages and selectors read (people, agents, convs, order,
 // relations, blocks). The signed-in user appears as the alias id "me"; every other id is the real one.
+// Every avatar URL carries its principal's version (`avatarUrl(id, version)`), so a changed avatar shows at once.
 import { attachmentUrl, avatarUrl } from "../api/routes.js";
 import { ME } from "./identities.js";
 
@@ -57,8 +58,9 @@ const CANNOT_SEND_ANY_MORE = "双方不能再发送新消息，已有历史不�
  * for me) in the service's wording. The service's own sentence (`fallback`, names of that moment) is shown for
  * an event this client does not know, a malformed one, or when someone it names is not known here.
  * @param {(id: string) => string | null} nameOf
+ * @param {{agentId?: string | null}} [where] the conversation's Agent, for a notice that names it (`topic_reset`)
  */
-export function noticeText(system, fallback, nameOf) {
+export function noticeText(system, fallback, nameOf, where = {}) {
   if (!system || typeof system.event !== "string") return fallback;
   let missing = false;
   const n = (id) => {
@@ -105,10 +107,29 @@ export function noticeText(system, fallback, nameOf) {
     case "unblocked":
       text = `${n(system.actorId)}解除了对${n(system.principalId)}的拉黑`;
       break;
+    case "topic_reset":
+      if (!where.agentId) return fallback;
+      text = `${n(system.actorId)}开始了新话题，之前的对话不再发给${n(where.agentId)}`;
+      break;
     default:
       return fallback;
   }
   return missing ? fallback : text;
+}
+
+/**
+ * Points (a decimal string from the service) for display: digits grouped in threes, every digit of the string kept
+ * (no float maths, no rounding), trailing zeros after the point trimmed. What is not a decimal string is shown as it is.
+ */
+export function formatPoints(value) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  const parts = /^(-?)(\d+)(?:\.(\d+))?$/.exec(text);
+  if (!parts) return text;
+  const [, sign, whole, decimals = ""] = parts;
+  const fraction = decimals.replace(/0+$/, "");
+  const zero = /^0+$/.test(whole) && fraction === "";
+  return `${sign && !zero ? "-" : ""}${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${fraction ? `.${fraction}` : ""}`;
 }
 
 /** A byte count for people: "932 B", "1.4 KB", "12 MB" (one decimal below 10, base 1024). */
@@ -132,14 +153,14 @@ function kindOf(kind, attachment) {
   return "text";
 }
 
-function messageView(m, { alias, meId, direct, peerReadSeq, now, nameOf }) {
+function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }) {
   const attachment = m.kind === "file" ? attachmentView(m.attachment) : null;
   const kind = kindOf(m.kind, attachment);
   const system = systemView(m.system, alias);
   let text = m.text ?? "";
   // As in the prototype, a file or image message's `text` is its file name; the caption is separate.
   if (attachment) text = attachment.name;
-  else if (kind === "system") text = noticeText(system, text, nameOf);
+  else if (kind === "system") text = noticeText(system, text, nameOf, { agentId });
   const view = {
     id: `m${m.seq}`,
     seq: m.seq,
@@ -149,11 +170,17 @@ function messageView(m, { alias, meId, direct, peerReadSeq, now, nameOf }) {
     caption: attachment ? m.text ?? "" : null,
     at: formatAt(timeOf(m.createdAt), now),
     createdAt: m.createdAt,
-    status: m.senderId === meId && direct && peerReadSeq !== null && m.seq <= peerReadSeq ? "read" : "sent",
+    // Read by the other side: the peer of a direct chat, or the Agent of its conversation.
+    status: m.senderId === meId && pair && peerReadSeq !== null && m.seq <= peerReadSeq ? "read" : "sent",
     replyTo: m.replyTo ? `m${m.replyTo.seq}` : null,
     quote: quoteView(m.replyTo, alias),
     attachment,
     system,
+    // An Agent's reply: its reasoning (shown folded), whether it was stopped or cut, and the persona it proposes.
+    reasoning: typeof m.reasoning === "string" && m.reasoning ? m.reasoning : null,
+    stopped: Boolean(m.stopped),
+    truncated: Boolean(m.truncated),
+    proposal: m.proposal ?? null,
   };
   if (kind === "image") view.src = attachment.url;
   return view;
@@ -206,6 +233,9 @@ function holdOf(conv, social, people) {
   if (conv.canSend?.ok !== false) return null;
   const reason = conv.canSend.reason ?? "not_friends";
   if (reason === "closed") return { kind: "closed", reason, text: "本会话已暂停发布。", pending: [], canRestore: false };
+  if (reason === "agent_deleted") {
+    return { kind: "agentDeleted", reason, text: "这个 Agent 已删除，会话只能查看，不能再发送消息。", pending: [], canRestore: false };
+  }
   if (reason === "blocked") {
     const name = people[conv.peerId]?.name ?? "对方";
     const lines = [];
@@ -223,31 +253,78 @@ function holdOf(conv, social, people) {
   };
 }
 
-function personView(p) {
+function personView(p, version) {
   return {
     id: p.id,
     kind: "person",
     name: p.displayName,
     handle: `@${p.handle}`,
     displayName: p.displayName,
-    avatar: avatarUrl(p.id),
+    avatar: avatarUrl(p.id, version),
+  };
+}
+
+/** The prototype's two private-reply choices, by the service's `replyMode`. */
+const PRIVATE_REPLY = { always: "收到消息时回复", mention: "仅在我点名时回复" };
+
+/**
+ * My Agent in the shape the prototype's Agents page reads (`role` is the persona), plus the service's own fields.
+ * `loaded` is false for an Agent known only by its principal entry (its record not fetched yet): nothing of it may be
+ * edited then, since its persona and model are not known.
+ */
+function agentView(a, version, loaded) {
+  return {
+    id: a.id,
+    kind: "agent",
+    name: a.name,
+    displayName: a.name,
+    handle: `@${a.handle}`,
+    intro: a.intro ?? "",
+    field: a.field ?? "",
+    role: a.persona ?? "",
+    persona: a.persona ?? "",
+    personaVersion: a.personaVersion ?? 0,
+    privateReply: PRIVATE_REPLY[a.replyMode] ?? PRIVATE_REPLY.always,
+    replyMode: a.replyMode ?? "always",
+    model: a.model ?? null,
+    reasoning: a.reasoning ?? "none",
+    paused: Boolean(a.paused),
+    deleted: Boolean(a.deleted),
+    ownerId: ME,
+    conversationId: a.conversationId ?? null,
+    createdAt: a.createdAt ?? null,
+    avatar: avatarUrl(a.id, version),
+    loaded,
+  };
+}
+
+/** Usage with every amount of points also as display text (`formatPoints`). */
+function usageView(u) {
+  if (!u) return null;
+  return {
+    ...u,
+    balanceText: formatPoints(u.balance),
+    free: u.free ? { ...u.free, allowanceText: formatPoints(u.free.allowance), usedText: formatPoints(u.free.used) } : null,
+    recent: (Array.isArray(u.recent) ? u.recent : []).map((r) => ({ ...r, pointsText: formatPoints(r.points) })),
   };
 }
 
 /**
- * @returns {{people, agents, convs, order, relations, blocks, drafts, account, loaded}} — merged by the store
- * with the UI state (nav, toast) and `connection`.
+ * @returns {{people, agents, convs, order, relations, blocks, drafts, account, loaded, providers, usage, siteModels,
+ *   providerDefaults, avatarVersions}} — merged by the store with the UI state (nav, toast) and `connection`.
  */
 export function toView(model, { now = Date.now() } = {}) {
   const meId = model.me?.id ?? null;
   const alias = (id) => (id === null || id === undefined ? null : id === meId ? ME : id);
   const social = model.social;
+  const versions = model.avatarVersions ?? {};
 
   const people = {};
-  for (const p of Object.values(model.principals)) if (p.id !== meId) people[p.id] = personView(p);
+  // An Agent is never a person: it is listed under `agents` (every Agent anyone here can see is mine).
+  for (const p of Object.values(model.principals)) if (p.id !== meId && p.kind !== "agent") people[p.id] = personView(p, versions[p.id]);
   if (social) {
     const named = [...social.friends, ...social.blocked, ...social.blockedBy, ...social.incoming.map((r) => r.principal), ...social.outgoing.map((r) => r.principal)];
-    for (const p of named) if (p.id !== meId && !people[p.id]) people[p.id] = personView(p);
+    for (const p of named) if (p.id !== meId && !people[p.id]) people[p.id] = personView(p, versions[p.id]);
   }
   if (model.me) {
     people[ME] = {
@@ -257,10 +334,19 @@ export function toView(model, { now = Date.now() } = {}) {
       handle: `@${model.me.handle}`,
       displayName: model.me.displayName,
       principalId: meId,
-      avatar: avatarUrl(meId, model.avatarVersion),
+      avatar: avatarUrl(meId, versions[meId]),
     };
   }
-  const nameOf = (id) => people[id]?.name ?? null;
+
+  const agents = {};
+  for (const a of Object.values(model.agents ?? {})) agents[a.id] = agentView(a, versions[a.id], true);
+  for (const p of Object.values(model.principals)) {
+    if (p.kind !== "agent" || agents[p.id]) continue;
+    const conv = Object.values(model.conversations).find((c) => c.agentId === p.id);
+    const known = { id: p.id, handle: p.handle, name: p.displayName, conversationId: conv?.id ?? null, paused: conv?.agent?.paused, deleted: conv?.agent?.deleted };
+    agents[p.id] = agentView(known, versions[p.id], false);
+  }
+  const nameOf = (id) => people[id]?.name ?? agents[id]?.name ?? null;
 
   const pendingByConv = new Map();
   for (const p of Object.values(model.pending).sort((a, b) => a.at - b.at)) {
@@ -273,12 +359,14 @@ export function toView(model, { now = Date.now() } = {}) {
   const ranking = [];
   for (const conv of Object.values(model.conversations)) {
     const direct = conv.type === "direct";
+    const agentChat = conv.type === "agent";
     const held = model.messages[conv.id] ?? [];
     let members = conv.members.map((m) => alias(m.id));
     if (direct) members = [ME, conv.peerId ?? members.find((id) => id !== ME)].filter(Boolean);
+    else if (agentChat) members = [ME, conv.agentId ?? members.find((id) => id !== ME)].filter(Boolean);
     else if (!members.includes(ME)) members.unshift(ME);
 
-    const viewOf = (m) => messageView(m, { alias, meId, direct, peerReadSeq: conv.peerReadSeq, now, nameOf });
+    const viewOf = (m) => messageView(m, { alias, meId, pair: direct || agentChat, peerReadSeq: conv.peerReadSeq, now, nameOf, agentId: conv.agentId });
     const messages = held.map(viewOf);
     const win = model.windows?.[conv.id] ?? null;
     const claimed = new Set();
@@ -298,9 +386,17 @@ export function toView(model, { now = Date.now() } = {}) {
     const lastHeld = held.length > 0 ? timeOf(held[held.length - 1].createdAt) : null;
     const activity = Math.max(lastHeld ?? 0, lastPendingAt ?? 0) || timeOf(conv.createdAt) || 0;
     ranking.push({ id: conv.id, activity, index: conv.syncIndex ?? 0 });
+    // The reply in progress: its run, and its streamed text as one bubble while it runs and its message has not come
+    // (never both: the stored message replaces the bubble).
+    const run = model.runs?.[conv.id] ?? null;
+    const streamed = run && run.status === "running" && !run.posted ? model.streams?.[run.id] : null;
     convs[conv.id] = {
       id: conv.id,
-      type: direct ? "human" : "group",
+      type: direct ? "human" : agentChat ? "agent" : "group",
+      agentId: conv.agentId ?? null,
+      agent: conv.agent ?? null,
+      run,
+      stream: streamed ? { runId: run.id, text: streamed.text, reasoning: streamed.reasoning } : null,
       title: direct ? null : conv.title,
       members,
       memberRoles: conv.members.map((m) => ({ id: alias(m.id), role: m.role, isCreator: Boolean(m.isCreator) })),
@@ -338,7 +434,23 @@ export function toView(model, { now = Date.now() } = {}) {
     for (const p of social.blockedBy) blocks.push({ by: p.id, target: ME });
   }
 
-  return { people, agents: {}, convs, order, relations, blocks, drafts: model.drafts, account: model.me, loaded: model.synced };
+  return {
+    people,
+    agents,
+    convs,
+    order,
+    relations,
+    blocks,
+    drafts: model.drafts,
+    account: model.me,
+    loaded: model.synced,
+    providers: model.providers ?? {},
+    usage: usageView(model.usage),
+    siteModels: model.siteModels ?? [],
+    providerDefaults: model.providerDefaults ?? null,
+    /** principal id (the real one, mine too) → the version in its avatar URL; for an avatar of someone nobody names. */
+    avatarVersions: versions,
+  };
 }
 
 /**

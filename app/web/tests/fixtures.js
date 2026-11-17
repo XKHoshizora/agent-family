@@ -69,6 +69,62 @@ export function group(id = G1, fields = {}) {
 
 export const ME = { id: ME_ID, handle: "me_one", displayName: "Mei", email: "me@example.test" };
 
+// ───────── Agents (batch 2A): my Agents, their dedicated conversations, runs
+
+export const AG1 = "00000000-0000-4000-8000-0000000000b1"; // an Agent of mine
+export const AG2 = "00000000-0000-4000-8000-0000000000b2"; // another
+export const A1 = "00000000-0000-4000-8000-0000000000d1"; // AG1's conversation
+export const A2 = "00000000-0000-4000-8000-0000000000d2"; // AG2's conversation
+
+export const agentPrincipal = (id = AG1, handle = "helper", displayName = "小助手") => ({ id, handle, displayName, kind: "agent", avatarVersion: 0 });
+
+/** An Agent's dedicated conversation (members: me and the Agent), as /api/sync lists it. */
+export function agentConv(id = A1, agentId = AG1, fields = {}) {
+  return {
+    id,
+    type: "agent",
+    title: null,
+    myRole: "speaker",
+    closed: false,
+    agentId,
+    agent: { paused: false, deleted: false },
+    canSend: { ok: true },
+    members: [
+      { id: ME_ID, role: "speaker", isCreator: false },
+      { id: agentId, role: "speaker", isCreator: false },
+    ],
+    lastSeq: 0,
+    readSeq: 0,
+    unread: 0,
+    peerReadSeq: 0,
+    ...fields,
+  };
+}
+
+/** An Agent as `GET /api/agents/:id` answers. */
+export function agentOf(id = AG1, fields = {}) {
+  return {
+    id,
+    handle: "helper",
+    name: "小助手",
+    avatarVersion: 0,
+    intro: "",
+    field: "",
+    persona: "",
+    personaVersion: 0,
+    replyMode: "always",
+    reasoning: "none",
+    model: null,
+    paused: false,
+    deleted: false,
+    conversationId: A1,
+    createdAt: at(0),
+    ...fields,
+  };
+}
+
+export const runOf = (id, status, fields = {}) => ({ id, status, retryable: false, ...fields });
+
 export function syncOf(conversations, messages = [], principals = PRINCIPALS) {
   return { me: ME, conversations, principals, messages };
 }
@@ -97,7 +153,8 @@ export const settle = async () => {
   for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-export const apiError = (status, code, reason = null) => new ApiError(status, code, reason);
+/** `details`: the error body's other fields the client reads (`resetsAt` of `no_quota`, `agents` of `provider_in_use`). */
+export const apiError = (status, code, reason = null, details = undefined) => new ApiError(status, code, reason, details);
 
 /** Deterministic timers: nothing runs until `advance(ms)`. */
 export function fakeTimers() {
@@ -146,11 +203,13 @@ export function fakeTimers() {
 
 /**
  * A transport whose answers come from `handlers` (each may return a value, a promise, or throw).
- * `log` records every call in order; `sockets` every socket opened.
+ * `log` records every batch-1 call in order; `agentLog` the Agent calls (agents, one Agent, a message, a run,
+ * the site models); `sockets` every socket opened.
  */
 export function fakeTransport(handlers = {}) {
   const t = {
     log: [],
+    agentLog: [],
     sockets: [],
     /** When false, `connect` waits until the test calls `socket.open()` (or `socket.fail(err)`). */
     autoOpen: true,
@@ -162,6 +221,15 @@ export function fakeTransport(handlers = {}) {
       },
       social: () => emptySocial(),
       ticket: () => undefined,
+      agents: () => ({ agents: [] }),
+      agent: () => {
+        throw apiError(404, "not_found");
+      },
+      message: () => {
+        throw apiError(404, "not_found");
+      },
+      run: () => ({ run: null }),
+      models: () => ({ siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 } }),
       ...handlers,
     },
     get socket() {
@@ -211,6 +279,26 @@ export function fakeTransport(handlers = {}) {
     getSocial() {
       t.log.push("social");
       return Promise.resolve().then(() => t.handlers.social());
+    },
+    listAgents() {
+      t.agentLog.push("agents");
+      return Promise.resolve().then(() => t.handlers.agents());
+    },
+    getAgent(id) {
+      t.agentLog.push(["agent", id]);
+      return Promise.resolve().then(() => t.handlers.agent(id));
+    },
+    getMessage(conversationId, seq) {
+      t.agentLog.push(["message", conversationId, seq]);
+      return Promise.resolve().then(() => t.handlers.message(conversationId, seq));
+    },
+    getRun(conversationId) {
+      t.agentLog.push(["run", conversationId]);
+      return Promise.resolve().then(() => t.handlers.run(conversationId));
+    },
+    getModels() {
+      t.agentLog.push("models");
+      return Promise.resolve().then(() => t.handlers.models());
     },
   };
   return t;

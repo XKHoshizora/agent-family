@@ -5,13 +5,17 @@ export class ApiError extends Error {
    * @param {number} status HTTP status, or 0 when no response arrived (network failure).
    * @param {string} code the service's snake_case `error` code.
    * @param {string|null} reason the service's optional `reason` detail.
+   * @param {{resetsAt?: string|null, agents?: {id: string, name: string}[]|null}} [details] the other details a client
+   *   shows: `resetsAt` of `no_quota`, the `agents` of `provider_in_use` (null when absent).
    */
-  constructor(status, code, reason = null) {
+  constructor(status, code, reason = null, details = {}) {
     super(reason ? `${code}: ${reason}` : code);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.reason = reason;
+    this.resetsAt = details?.resetsAt ?? null;
+    this.agents = details?.agents ?? null;
   }
 }
 
@@ -88,7 +92,11 @@ export async function requestBytes(method, path, body, contentType) {
 function apiErrorOf(status, data, path, epoch) {
   const code = typeof data?.error === "string" ? data.error : "unknown";
   const reason = typeof data?.reason === "string" ? data.reason : null;
-  const error = new ApiError(status, code, reason);
+  const resetsAt = typeof data?.resetsAt === "string" ? data.resetsAt : null;
+  const agents = Array.isArray(data?.agents)
+    ? data.agents.filter((a) => a && typeof a.id === "string" && typeof a.name === "string").map((a) => ({ id: a.id, name: a.name }))
+    : null;
+  const error = new ApiError(status, code, reason, { resetsAt, agents });
   if (status === 401 && onUnauthenticated && epoch === sessionEpoch && !path.startsWith(AUTH_PREFIX)) {
     try {
       onUnauthenticated(error);

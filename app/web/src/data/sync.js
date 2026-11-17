@@ -4,16 +4,33 @@
 // already) catch up every held position while `more`, then GET /api/sync and /api/social; then apply the
 // buffered pushes. While live, a gap, an unknown conversation, a `conversation` or `social` push starts
 // the same kind of repair, and pushes are buffered again until it is done.
+//
+// Agents (README "Agents and runs", "Replies"): every connection drops what was streamed before it (deltas are not
+// sent again), loads my Agents and, after its /api/sync, the run of every Agent conversation (`GET .../run`). A
+// reconnect also fetches the proposal cards still open again (`agent` pushes are not replayed either); the first
+// connection after start loads the site's models. An `agent` push fetches that Agent and its open cards; `principal`,
+// `run` and `delta` pushes are applied as they come.
 import * as routes from "../api/routes.js";
 import { openSocket } from "../api/socket.js";
 import {
+  applyAgent,
+  applyAgents,
   applyCatchup,
   applyConversation,
+  applyDelta,
   applyGone,
   applyMessage,
+  applyMessageUpdate,
+  applyModels,
+  applyPrincipals,
+  applyRun,
   applySocial,
   applySync,
+  clearStreams,
+  dropAgent,
+  openProposals,
   positionsOf,
+  setAvatarVersion,
   setPeerRead,
   setRead,
   unknownMembers,
@@ -55,6 +72,11 @@ export function httpTransport({ timers, WebSocketImpl } = {}) {
     catchUp: routes.catchUp,
     getConversation: routes.getConversation,
     getSocial: routes.getSocial,
+    listAgents: routes.listAgents,
+    getAgent: routes.getAgent,
+    getMessage: routes.getMessage,
+    getRun: routes.getRun,
+    getModels: routes.getModels,
   };
 }
 
@@ -71,10 +93,11 @@ function safeClose(socket) {
 /**
  * Starts keeping the model in step with the service. Returns a handle:
  * `stop()` (closes the socket, cancels timers; late answers are ignored) and `request({sync, social,
- * conversation})` (ask for fresh state after an action).
+ * conversation, agents, agent, run})` (ask for fresh state after an action).
  *
  * @param transport {connect({onEvent, onClose}) → Promise<{close()}>, getSync(), catchUp(positions),
- *   getConversation(id), getSocial()}
+ *   getConversation(id), getSocial(), listAgents(), getAgent(id), getMessage(conversationId, seq),
+ *   getRun(conversationId), getModels()}
  */
 export function start(
   transport,
@@ -94,9 +117,35 @@ export function start(
   let status = null;
 
   function freshNeeds() {
-    return { catchupAll: false, catchup: new Set(), sync: false, convs: new Set(), social: false };
+    return {
+      catchupAll: false,
+      catchup: new Set(),
+      sync: false,
+      convs: new Set(),
+      social: false,
+      // My Agents: the whole list, single Agents (by id), and the open proposal cards of an Agent (by Agent id).
+      agents: false,
+      agentIds: new Set(),
+      cards: new Set(),
+      // Once this connection's /api/sync is in: the run of every Agent conversation (`runAll`), and on a reconnect
+      // the open cards of every Agent (`cardsAll`). `runs`: the conversations whose run to fetch.
+      runAll: false,
+      cardsAll: false,
+      runs: new Set(),
+      models: false,
+    };
   }
-  const hasNeeds = () => need.catchupAll || need.catchup.size > 0 || need.sync || need.convs.size > 0 || need.social;
+  const hasNeeds = () =>
+    need.catchupAll ||
+    need.catchup.size > 0 ||
+    need.sync ||
+    need.convs.size > 0 ||
+    need.social ||
+    need.agents ||
+    need.agentIds.size > 0 ||
+    need.cards.size > 0 ||
+    need.runs.size > 0 ||
+    need.models;
   const setStatus = (s) => {
     if (s === status) return;
     status = s;
@@ -116,6 +165,13 @@ export function start(
     need.catchupAll = !fresh;
     need.sync = true;
     need.social = true;
+    // Nor are `agent`, `run` and `delta`: the Agents, every run and (on a reconnect) the open cards are fetched again,
+    // and nothing streamed before this connection is shown any more.
+    need.agents = true;
+    need.runAll = true;
+    need.cardsAll = !fresh;
+    need.models = fresh;
+    setModel(clearStreams(getModel()));
     setStatus(fresh ? "connecting" : "reconnecting");
     let s;
     try {
@@ -154,6 +210,11 @@ export function start(
         else if (need.sync) await sync(my);
         else if (need.convs.size > 0) await refreshConversation(my);
         else if (need.social) await social(my);
+        else if (need.agents) await agents(my);
+        else if (need.agentIds.size > 0) await refreshAgent(my);
+        else if (need.cards.size > 0) await refreshCards(my);
+        else if (need.runs.size > 0) await refreshRun(my);
+        else if (need.models) await models(my);
         else if (buffer.length > 0) flush();
         else break;
       }
@@ -192,7 +253,19 @@ export function start(
     need.convs.clear(); // a full sync refreshes every conversation
     const res = await transport.getSync();
     if (my !== conn) return;
-    setModel(applySync(getModel(), res));
+    const before = getModel();
+    setModel(applySync(before, res));
+    // Agent conversations: the run of each new one (of every one, the first time on this connection), the Agent of
+    // one not known yet (made in another tab), and on a reconnect the cards still open.
+    const after = getModel();
+    for (const conv of Object.values(after.conversations)) {
+      if (conv.type !== "agent") continue;
+      if (need.runAll || !before.conversations[conv.id]) need.runs.add(conv.id);
+      if (conv.agentId && need.cardsAll) need.cards.add(conv.agentId);
+      if (conv.agentId && !after.agents[conv.agentId]) need.agents = true;
+    }
+    need.runAll = false;
+    need.cardsAll = false;
   }
 
   /**
@@ -228,6 +301,91 @@ export function start(
     const res = await transport.getSocial();
     if (my !== conn) return;
     setModel(applySocial(getModel(), res));
+  }
+
+  /** `GET /api/agents`: the whole list (it also answers every single Agent asked for meanwhile). */
+  async function agents(my) {
+    need.agents = false;
+    need.agentIds.clear();
+    const res = await transport.listAgents();
+    if (my !== conn) return;
+    setModel(applyAgents(getModel(), res?.agents));
+  }
+
+  /** One Agent after an `agent` push. 404: not mine any more (dropped); another failure: the whole list instead. */
+  async function refreshAgent(my) {
+    const [id] = need.agentIds;
+    need.agentIds.delete(id);
+    let agent;
+    try {
+      agent = await transport.getAgent(id);
+    } catch (err) {
+      if (my !== conn) return;
+      if (isSignedOut(err)) throw err;
+      if (err?.status === 404) setModel(dropAgent(getModel(), id));
+      else need.agents = true;
+      return;
+    }
+    if (my !== conn) return;
+    setModel(applyAgent(getModel(), agent));
+  }
+
+  /**
+   * The proposal cards of an Agent that are still open (`GET /api/conversations/:id/messages/:seq` each): one may have
+   * been confirmed, discarded, superseded or gone stale. Cards in another state cannot change any more. A card that
+   * cannot be fetched now keeps what it shows (confirming or discarding it fetches it again).
+   */
+  async function refreshCards(my) {
+    const [agentId] = need.cards;
+    need.cards.delete(agentId);
+    const { conversationId, seqs } = openProposals(getModel(), agentId);
+    for (const seq of seqs) {
+      let res;
+      try {
+        res = await transport.getMessage(conversationId, seq);
+      } catch (err) {
+        if (my !== conn) return;
+        if (isSignedOut(err)) throw err;
+        continue;
+      }
+      if (my !== conn) return;
+      if (res?.message?.conversationId === conversationId) setModel(applyMessageUpdate(applyPrincipals(getModel(), res.principals), res.message));
+    }
+  }
+
+  /**
+   * The latest run of an Agent conversation (`GET /api/conversations/:id/run`). 404: not a member now (the
+   * conversation is checked). Another failure leaves what is held: the next `run` push brings the truth.
+   */
+  async function refreshRun(my) {
+    const [id] = need.runs;
+    need.runs.delete(id);
+    if (!getModel().conversations[id]) return;
+    let res;
+    try {
+      res = await transport.getRun(id);
+    } catch (err) {
+      if (my !== conn) return;
+      if (isSignedOut(err)) throw err;
+      if (err?.status === 404) need.convs.add(id);
+      return;
+    }
+    if (my !== conn) return;
+    if (res && "run" in res) setModel(applyRun(getModel(), id, res.run));
+  }
+
+  /** The site's models (`GET /api/models`). On failure the list stays as it is; Settings and the Agent form ask again. */
+  async function models(my) {
+    need.models = false;
+    let res;
+    try {
+      res = await transport.getModels();
+    } catch (err) {
+      if (my === conn && isSignedOut(err)) throw err;
+      return;
+    }
+    if (my !== conn) return;
+    setModel(applyModels(getModel(), res));
   }
 
   function flush() {
@@ -266,6 +424,7 @@ export function start(
         setModel(applyGone(model, event.id));
         need.catchup.delete(event.id);
         need.convs.delete(event.id);
+        need.runs.delete(event.id);
         return;
       case "social":
         need.social = true;
@@ -277,6 +436,21 @@ export function start(
         if (next !== model) setModel(next);
         return;
       }
+      case "agent":
+        // One of my Agents changed, or one of its proposals was made, confirmed or discarded.
+        if (typeof event.id !== "string") return;
+        need.agentIds.add(event.id);
+        need.cards.add(event.id);
+        return;
+      case "principal":
+        setModel(setAvatarVersion(model, event.id, event.avatarVersion));
+        return;
+      case "run":
+        if (typeof event.conversationId === "string" && event.run) setModel(applyRun(model, event.conversationId, event.run));
+        return;
+      case "delta":
+        setModel(applyDelta(model, event));
+        return;
       default:
         return;
     }
@@ -337,8 +511,11 @@ export function start(
       halt();
       setStatus("idle");
     },
-    /** Asks for fresh state after an action; done right away when live, else on the next connection. */
-    request({ sync = false, social = false, conversation = null } = {}) {
+    /**
+     * Asks for fresh state after an action; done right away when live, else on the next connection. `agents`: my
+     * Agents again; `agent`: one Agent and its open proposal cards (as an `agent` push does); `run`: a conversation's run.
+     */
+    request({ sync = false, social = false, conversation = null, agents = false, agent = null, run = null } = {}) {
       if (!alive) return;
       if (sync) need.sync = true;
       if (social) need.social = true;
@@ -346,6 +523,12 @@ export function start(
         if (getModel().conversations[conversation]) need.convs.add(conversation);
         else need.sync = true;
       }
+      if (agents) need.agents = true;
+      if (agent) {
+        need.agentIds.add(agent);
+        need.cards.add(agent);
+      }
+      if (run) need.runs.add(run);
       if (!buffering) work();
     },
     /** Called when a request of the data layer got a 401. */

@@ -67,6 +67,51 @@ export function socketUrl(ticket) {
   return `${protocol === "https:" ? "wss:" : "ws:"}//${host}/api/ws?ticket=${seg(ticket)}`;
 }
 
+// ───────── Agents (owner only; app/service/README.md "Agents")
+export const listAgents = () => request("GET", "/api/agents"); // → {agents: [Agent]}, oldest first, deleted ones included
+/** body: {handle, name, intro?, field?, persona?, replyMode?, reasoning?, model?} → Agent */
+export const createAgent = (body) => request("POST", "/api/agents", body);
+export const getAgent = (agentId) => request("GET", `/api/agents/${seg(agentId)}`);
+/** patch: any of {name, intro, field, persona, replyMode, reasoning, model} (`model: null` clears it) → Agent */
+export const patchAgent = (agentId, patch) => request("PATCH", `/api/agents/${seg(agentId)}`, patch);
+export const pauseAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/pause`);
+export const resumeAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/resume`);
+export const deleteAgent = (agentId) => request("DELETE", `/api/agents/${seg(agentId)}`);
+/** Replaces the Agent's avatar with the image file (the rules of my own avatar) → {ok: true} */
+export const uploadAgentAvatar = (agentId, file) =>
+  requestBytes("PUT", `/api/agents/${seg(agentId)}/avatar`, file, file.type && file.type.startsWith("image/") ? file.type : "application/octet-stream");
+/** body: {name, intro?, field?, model} → {persona} (returned, never stored) */
+export const draftPersona = (body) => request("POST", "/api/agents/draft-persona", body);
+
+// ───────── persona proposals
+/** edits: optional {persona?, intro?, field?} to confirm instead of the proposal's own → Agent */
+export const confirmProposal = (agentId, proposalId, edits) =>
+  request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/confirm`, edits);
+export const discardProposal = (agentId, proposalId) => request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/discard`);
+
+// ───────── an Agent's replies (runs) and new topics, by its conversation
+export const getRun = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/run`); // → {run: Run | null}
+export const stopRun = (conversationId, runId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/${seg(runId)}/stop`);
+export const retryRun = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/retry`); // → {run}
+export const dismissRun = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/dismiss`);
+export const resetTopic = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/topic`); // → {message}
+
+// ───────── model providers (the API key is sent in a body and never comes back: `keyLast4` only)
+export const listProviders = () => request("GET", "/api/providers"); // → {providers: [Provider]}
+/** body: {name, protocol, baseUrl, apiKey, models?} → Provider */
+export const createProvider = (body) => request("POST", "/api/providers", body);
+/** patch: any of {name, baseUrl, apiKey, models} → Provider */
+export const patchProvider = (providerId, patch) => request("PATCH", `/api/providers/${seg(providerId)}`, patch);
+export const deleteProvider = (providerId) => request("DELETE", `/api/providers/${seg(providerId)}`);
+/** → {ok: true} or {ok: false, error: "provider_rejected" | "provider_unavailable" | "address_not_allowed"} (a 200 either way) */
+export const testProvider = (providerId) => request("POST", `/api/providers/${seg(providerId)}/test`);
+export const refreshProviderModels = (providerId) => request("POST", `/api/providers/${seg(providerId)}/models/refresh`); // → {listed, provider}
+
+// ───────── usage, points and the site's models
+export const getUsage = () => request("GET", "/api/usage");
+/** → {siteModels: [{id, label, tier, vision, pdf, reasoning, contextTokens}], providerDefaults: {contextTokens, maxOutputTokens}} */
+export const getModels = () => request("GET", "/api/models");
+
 // ───────── search
 export const searchConversation = (conversationId, { q, before, limit }) =>
   request("GET", withQuery(`/api/conversations/${seg(conversationId)}/search`, { q, before, limit }));
@@ -84,7 +129,10 @@ export function uploadAttachment(conversationId, file, options) {
   return upload(attachmentUploadUrl(conversationId), form, options);
 }
 export const attachmentUrl = (attachmentId) => `/api/attachments/${seg(attachmentId)}`;
-/** `version` (my own avatar after a change) only busts the browser's cache; the service ignores it. */
+/**
+ * A principal's avatar. `version` is its `avatarVersion` (or, for my own avatar just after I changed it, a newer
+ * cache-buster): a changed avatar is a new URL, fetched again at once. The service ignores it.
+ */
 export const avatarUrl = (principalId, version = 0) =>
   `/api/principals/${seg(principalId)}/avatar${version ? `?v=${encodeURIComponent(String(version))}` : ""}`;
 export const myAvatarUploadUrl = () => "/api/me/avatar";

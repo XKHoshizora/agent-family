@@ -1,9 +1,32 @@
 import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
-import { toView, formatAt, expiryText } from "../src/data/viewmodel.js";
+import { toView, formatAt, expiryText, formatPoints } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
-import { convSubtitle, convTitle, lastPreview, publishBlock, senderName } from "../src/state/selectors.js";
-import { ANN, BO, D1, G1, ME_ID, at, direct, emptySocial, group, notice, range, syncOf, wire } from "./fixtures.js";
+import { convSubtitle, convTitle, entity, isAgent, lastPreview, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
+import {
+  A1,
+  A2,
+  AG1,
+  AG2,
+  ANN,
+  BO,
+  D1,
+  G1,
+  ME_ID,
+  PRINCIPALS,
+  agentConv,
+  agentOf,
+  agentPrincipal,
+  at,
+  direct,
+  emptySocial,
+  group,
+  notice,
+  range,
+  runOf,
+  syncOf,
+  wire,
+} from "./fixtures.js";
 
 const NOW = new Date(2026, 10, 16, 12, 0).getTime();
 const D2 = "00000000-0000-4000-8000-0000000000c3";
@@ -245,6 +268,155 @@ describe("social: relations, blocks and the hold", () => {
     let m = model({ conversations: [direct(D1, ANN)], social: { ...emptySocial(), friends: [pub(ANN, "ann", "小安")] } });
     m = M.setCanSend(m, D1, { ok: false, reason: "not_friends" });
     expect(toView(m, { now: NOW }).convs[D1].hold.kind).toBe("relation");
+  });
+});
+
+describe("Agents (batch 2A)", () => {
+  const P1 = "00000000-0000-4000-8000-0000000000f7";
+  function agentModel({ agents = [agentOf(AG1, { intro: "帮你做事", field: "整理", persona: "你是小助手。", personaVersion: 2, model: { source: "site", id: "free-1" }, reasoning: "low" })], conversations, messages = [], principals } = {}) {
+    const sync = syncOf(
+      conversations ?? [agentConv(A1, AG1, { lastSeq: messages.length, readSeq: messages.length }), direct(D1, ANN)],
+      messages,
+      principals ?? [...PRINCIPALS, agentPrincipal(AG1)],
+    );
+    return M.applyAgents(M.applySync(M.initial(), sync), agents);
+  }
+
+  it("an Agent conversation is the prototype's type agent, with me and the Agent as members and its own flags", () => {
+    const v = toView(agentModel(), { now: NOW });
+    expect(v.convs[A1]).toMatchObject({ id: A1, type: "agent", title: null, agentId: AG1, agent: { paused: false, deleted: false }, run: null, stream: null });
+    expect(v.convs[A1].members).toEqual([ME, AG1]);
+    expect(convTitle(v, v.convs[A1])).toBe("小助手");
+    expect(v.convs[D1].type).toBe("human");
+  });
+
+  it("the Agent's row has what the prototype's Agents page reads, plus the new fields", () => {
+    const v = toView(agentModel(), { now: NOW });
+    expect(v.agents[AG1]).toMatchObject({
+      id: AG1,
+      kind: "agent",
+      name: "小助手",
+      handle: "@helper",
+      intro: "帮你做事",
+      field: "整理",
+      role: "你是小助手。",
+      privateReply: "收到消息时回复",
+      paused: false,
+      ownerId: ME,
+      personaVersion: 2,
+      model: { source: "site", id: "free-1" },
+      reasoning: "low",
+      deleted: false,
+      conversationId: A1,
+      avatar: `/api/principals/${AG1}/avatar`,
+    });
+    const mention = toView(agentModel({ agents: [agentOf(AG1, { replyMode: "mention", paused: true })] }), { now: NOW });
+    expect(mention.agents[AG1]).toMatchObject({ privateReply: "仅在我点名时回复", paused: true });
+    // The prototype's selectors see it as my Agent, not as a person.
+    expect(v.people[AG1]).toBeUndefined();
+    expect(isAgent(v, AG1)).toBe(true);
+    expect(ownerOf(v, AG1)).toBe(ME);
+    expect(nameOf(v, AG1)).toBe("小助手");
+  });
+
+  it("an Agent named only by /api/sync (its record not loaded yet) is still an Agent of mine", () => {
+    const v = toView(M.applySync(M.initial(), syncOf([agentConv()], [], [...PRINCIPALS, agentPrincipal(AG1, "helper", "小助手")])), { now: NOW });
+    expect(entity(v, AG1)).toMatchObject({ id: AG1, kind: "agent", name: "小助手", handle: "@helper", ownerId: ME });
+  });
+
+  it("every avatar URL of another principal carries its version (spec 6.11 item 1); mine as before", () => {
+    const principals = [{ ...PRINCIPALS[0] }, { ...PRINCIPALS[1], avatarVersion: 3 }, { ...PRINCIPALS[2], avatarVersion: 0 }, { ...agentPrincipal(AG1), avatarVersion: 7 }];
+    const sync = syncOf([agentConv(), direct(D1, ANN)], [], principals);
+    let m = M.applySync(M.initial(), { ...sync, me: { ...sync.me, avatarVersion: 1 } });
+    m = M.applyAgents(m, [agentOf(AG1, { avatarVersion: 7 })]);
+    const v = toView(m, { now: NOW });
+    expect(v.people[ANN].avatar).toBe(`/api/principals/${ANN}/avatar?v=3`);
+    expect(v.people[BO].avatar).toBe(`/api/principals/${BO}/avatar`);
+    expect(v.agents[AG1].avatar).toBe(`/api/principals/${AG1}/avatar?v=7`);
+    expect(v.people[ME].avatar).toBe(`/api/principals/${ME_ID}/avatar?v=1`);
+    expect(v.avatarVersions).toMatchObject({ [ANN]: 3, [AG1]: 7 });
+  });
+
+  it("Agent replies carry reasoning, stopped, truncated and the proposal; my messages read 已读 up to the Agent's marker", () => {
+    const messages = [
+      wire(A1, 1, ME_ID, "写一首诗"),
+      wire(A1, 2, AG1, "床前明月光", { reasoning: "想一想", stopped: true }),
+      wire(A1, 3, ME_ID, "继续"),
+      wire(A1, 4, AG1, "长长的", { truncated: true }),
+      wire(A1, 5, AG1, "我整理了一份设定，请查看并确认。", { proposal: { id: P1, status: "open", persona: "你是诗人。", intro: "写诗" } }),
+    ];
+    const v = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 5, readSeq: 5, peerReadSeq: 1 })], messages }), { now: NOW });
+    const [mine, poem, again, long, card] = v.convs[A1].messages;
+    expect(mine.status).toBe("read");
+    expect(again.status).toBe("sent");
+    expect(poem).toMatchObject({ from: AG1, text: "床前明月光", reasoning: "想一想", stopped: true, truncated: false, proposal: null });
+    expect(long).toMatchObject({ truncated: true, stopped: false, reasoning: null });
+    expect(card.proposal).toEqual({ id: P1, status: "open", persona: "你是诗人。", intro: "写诗" });
+    expect(lastPreview(v, v.convs[A1])).toBe("我整理了一份设定，请查看并确认。");
+  });
+
+  it("the run and the stream bubble of the conversation", () => {
+    let m = agentModel();
+    m = M.applyRun(m, A1, runOf("r1", "running"));
+    m = M.applyDelta(m, { conversationId: A1, runId: "r1", reasoning: "嗯" });
+    expect(toView(m, { now: NOW }).convs[A1]).toMatchObject({ run: { id: "r1", status: "running" }, stream: { runId: "r1", text: "", reasoning: "嗯" } });
+    m = M.applyRun(m, A1, runOf("r1", "failed", { error: "no_quota", retryable: true, resetsAt: "2026-11-16T16:00:00.000Z" }));
+    expect(toView(m, { now: NOW }).convs[A1]).toMatchObject({ run: { id: "r1", status: "failed", error: "no_quota", retryable: true, resetsAt: "2026-11-16T16:00:00.000Z" }, stream: null });
+  });
+
+  it("the new-topic notice is told with 你 and the Agent's name", () => {
+    const messages = [notice(A1, 1, "Mei 开始了新话题，之前的对话不再发给 小助手", { event: "topic_reset", actorId: ME_ID })];
+    const v = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 })], messages }), { now: NOW });
+    expect(v.convs[A1].messages[0].text).toBe("你开始了新话题，之前的对话不再发给小助手");
+  });
+
+  it("a deleted Agent's conversation can only be read, and says so", () => {
+    const conversations = [agentConv(A2, AG2, { agent: { paused: false, deleted: true }, canSend: { ok: false, reason: "agent_deleted" } })];
+    const v = toView(agentModel({ conversations, agents: [agentOf(AG2, { deleted: true, conversationId: A2 })], principals: [...PRINCIPALS, agentPrincipal(AG2)] }), { now: NOW });
+    expect(v.convs[A2].hold).toMatchObject({ kind: "agentDeleted", reason: "agent_deleted", canRestore: false });
+    expect(v.convs[A2].hold.text).toContain("已删除");
+    expect(v.agents[AG2].deleted).toBe(true);
+  });
+
+  it("providers (public fields only), usage with points for display, site models and the provider defaults", () => {
+    let m = M.applyProviders(M.initial(), [{ id: "p1", name: "我的", protocol: "anthropic", baseUrl: "https://a.example", keyLast4: "abcd", models: [] }]);
+    m = M.applyUsage(m, {
+      tier: "free",
+      agentLimit: 20,
+      agentCount: 2,
+      balance: "1234.50",
+      free: { allowance: "10", used: "2.250", resetsAt: "2026-11-16T16:00:00.000Z" },
+      canStartFreeReply: true,
+      recent: [{ agentId: AG1, model: "free-1", source: "site", points: "0.000001", replies: 3 }],
+    });
+    m = M.applyModels(m, { siteModels: [{ id: "free-1", label: "免费模型", tier: "free", vision: true, pdf: false, reasoning: [], contextTokens: 32000 }], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 } });
+    const v = toView(m, { now: NOW });
+    expect(v.providers).toEqual({ p1: { id: "p1", name: "我的", protocol: "anthropic", baseUrl: "https://a.example", keyLast4: "abcd", models: [] } });
+    expect(v.usage).toMatchObject({ balance: "1234.50", balanceText: "1,234.5", free: { allowanceText: "10", usedText: "2.25" }, recent: [{ pointsText: "0.000001" }] });
+    expect(v.siteModels).toEqual([{ id: "free-1", label: "免费模型", tier: "free", vision: true, pdf: false, reasoning: [], contextTokens: 32000 }]);
+    expect(v.providerDefaults).toEqual({ contextTokens: 16000, maxOutputTokens: 2048 });
+    expect(toView(M.initial(), { now: NOW })).toMatchObject({ providers: {}, usage: null, siteModels: [], providerDefaults: null });
+  });
+});
+
+describe("formatPoints (points are decimal strings: no float maths)", () => {
+  it("groups the digits and keeps every digit of the string", () => {
+    expect(formatPoints("0")).toBe("0");
+    expect(formatPoints("12.5")).toBe("12.5");
+    expect(formatPoints("-0.75")).toBe("-0.75");
+    expect(formatPoints("1234567.000001")).toBe("1,234,567.000001");
+    expect(formatPoints("-1234")).toBe("-1,234");
+    expect(formatPoints("123456789012345678901.5")).toBe("123,456,789,012,345,678,901.5");
+  });
+  it("trims trailing zeros after the decimal point", () => {
+    expect(formatPoints("12.500")).toBe("12.5");
+    expect(formatPoints("3.000")).toBe("3");
+    expect(formatPoints("-0.000")).toBe("0");
+  });
+  it("leaves what is not a decimal string as it is", () => {
+    expect(formatPoints("abc")).toBe("abc");
+    expect(formatPoints(undefined)).toBe("");
+    expect(formatPoints(null)).toBe("");
   });
 });
 
