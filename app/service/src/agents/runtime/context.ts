@@ -27,8 +27,13 @@ export const PDF_MAX_BYTES = 10 * 1024 * 1024;
 export const FILE_MAX_CHARS = 100_000;
 /** Characters of files shown as text in one call at most. */
 export const CALL_FILE_MAX_CHARS = 200_000;
-/** Bytes of attachments one call holds at most — images, PDFs and files' text together (10 images of 5 MB fill it). */
-export const CALL_ATTACHMENT_MAX_BYTES = IMAGES_PER_CALL * IMAGE_MAX_BYTES;
+/**
+ * Bytes of attachments one call holds at most — images, PDFs and files' text together (four images of 5 MiB, or two
+ * PDFs of 10 MiB, fill it). With `AGENT_MAX_RUNS_IN_FLIGHT` replies at once, and up to about five copies of what a call
+ * sends at its peak (the bytes, their base64 text, the request body holding it, its encoded bytes), this bounds the
+ * memory replies take for attachments: 8 × 20 MiB × 5, about 800 MiB, at the default.
+ */
+export const CALL_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
 /** UTF-8 takes at most this many bytes per character: reading 4 × n bytes yields at least n characters of a text. */
 export const UTF8_MAX_BYTES_PER_CHAR = 4;
 /** Ends a file's text that was cut. */

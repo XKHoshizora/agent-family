@@ -437,14 +437,14 @@ describe("reading attachments", () => {
     }
   });
 
-  it("holds at most 50 MB of attachments in one call", () => {
+  it("holds at most 20 MiB of attachments in one call", () => {
     const pdf = (i: number): ContextEntry => ({ role: "user", text: "", attachment: { id: `a${i}`, name: `${i}.pdf`, image: false } });
-    const plan = new ContextPlan([0, 1, 2, 3, 4, 5].map(pdf), 100_000_000);
-    expect(CALL_ATTACHMENT_MAX_BYTES).toBe(50 * 1024 * 1024);
+    const plan = new ContextPlan([0, 1, 2].map(pdf), 100_000_000);
+    expect(CALL_ATTACHMENT_MAX_BYTES).toBe(20 * 1024 * 1024);
     const tenMegabytes = new Uint8Array(10 * 1024 * 1024);
     const offered = plan.attachments(false).map(([slot]) => plan.offer(slot, { type: "pdf", data: tenMegabytes }));
-    // Newest first: five of 10 MB fill it; the oldest is named.
-    expect(offered).toEqual([true, true, true, true, true, false]);
+    // Newest first: two of 10 MiB fill it; the oldest is named.
+    expect(offered).toEqual([true, true, false]);
     expect(plan.bytesLeft).toBe(0);
     expect(plan.build().messages[0]!.parts[0]).toEqual({ type: "text", text: "[文件：0.pdf]" });
   });

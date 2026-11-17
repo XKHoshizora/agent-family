@@ -85,6 +85,9 @@ context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER
 limit of every call to a provider model; 1–1 000 000, default 2 048; it must be less than
 `PROVIDER_DEFAULT_CONTEXT_TOKENS`, else start-up fails naming both), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
 and site models in flight at once in the whole service, see Model providers; 1–1 000, default 64),
+`AGENT_MAX_RUNS_IN_FLIGHT` (replies the worker runs at once in the whole service, all owners together; further ones wait
+queued; 1–64, default 8 — each holds up to 20 MiB of attachments in memory, see Agents and runs, so the worst case is
+about this × 20 MiB × 5 copies: about 800 MiB at the default; lower it on a small container),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -1465,7 +1468,8 @@ during the pause is answered only as part of the next reply a later message of t
 after the resume while the interrupted reply is still ending is noted on it, and its follow-up answers it.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
-(2) runs running, replies and persona drafts together (further replies wait queued), at most 8 at once in the service.
+(2) runs running, replies and persona drafts together (further replies wait queued), at most `AGENT_MAX_RUNS_IN_FLIGHT`
+(8) at once in the service.
 A draft counts the owner's running calls under the account's lock, the worker's claim does not take that lock: so a
 draft and a reply that start at the same moment may briefly run one over the limit (never more: the worker claims one
 run at a time, and drafts wait for each other on the lock). It is woken after a trigger commits and also looks every
@@ -1547,11 +1551,13 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   not the name or type — at most 100 000 characters a file and 200 000 a call (newest first), cut with `…（已截断）`, a
   byte-order mark dropped and what message text may not hold removed (bidi controls, control characters); else
   `[文件：name]` alone. A file is read at most 4 bytes per character it may still show, and its first 4 KB decide whether
-  the rest is read. A message with only an attachment is a turn like any other. At most 50 MiB of attachments are
-  held for one call, whatever their kind (10 images of 5 MB fill it; a PDF or file that would pass it is named), each
-  checked on its stored size before a byte is read: so the worst case for one reply is 50 MiB of attachment bytes in
-  memory (plus the model library's base64 copy of what it sends, about a third more), and at most 8 replies run at
-  once. Blobs are read with no transaction open. A missing blob is shown by name (and logged), and so is one whose read
+  the rest is read. A message with only an attachment is a turn like any other. At most 20 MiB of attachments are
+  held for one call, whatever their kind (four images of 5 MiB, or two PDFs of 10 MiB, fill it; an attachment that would
+  pass it is named), each checked on its stored size before a byte is read. **Memory:** the worst case for one reply is
+  20 MiB of attachment bytes, held in up to about five copies at its peak (the bytes, the model library's base64 text of
+  them, a third larger, the request body holding that text, and its encoded bytes), and at most
+  `AGENT_MAX_RUNS_IN_FLIGHT` (8) replies run at once: about 8 × 20 MiB × 5 = 800 MiB for the whole service at the
+  default (lower `AGENT_MAX_RUNS_IN_FLIGHT` on a small container). Blobs are read with no transaction open. A missing blob is shown by name (and logged), and so is one whose read
   fails or takes more than 15 s (logged once): an unreadable file does not fail the reply. Only when two reads have
   failed and none of this reply's has succeeded (a missing blob counts as an answer of the store) is the store down: the
   run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
