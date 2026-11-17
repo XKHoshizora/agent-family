@@ -11,6 +11,7 @@ import { resolveModel } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { characters, hasVisibleText, stripUnsafeText, userText } from "../schemas.ts";
 import { contextBudget } from "./runtime/context.ts";
+import { UNAVAILABLE } from "./runtime/port.ts";
 import { assertModelChoice, lockOwnedAgent, updateAgent, type AgentModel, type AgentRow } from "./store.ts";
 
 /**
@@ -295,8 +296,6 @@ export interface DraftDeps {
    */
   release(runId: string): Promise<unknown>;
 }
-
-const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const;
 
 /**
  * `POST /api/agents/draft-persona`: one model call, metered as a reply is (README "Usage and points"), recorded as an

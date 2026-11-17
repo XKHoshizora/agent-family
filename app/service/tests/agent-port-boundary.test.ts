@@ -70,4 +70,15 @@ describe("the agent runtime's boundary", () => {
     );
     expect(offending).toEqual([]);
   });
+
+  it("a run's shared ends (UNAVAILABLE, BUSY) are defined once, in runtime/port.ts, and used from there", () => {
+    const src = fileURLToPath(new URL("../src/", import.meta.url));
+    // A constant spelling out a failed run's error inline: `{ status: "failed", error: "<code>" }` bound to a name.
+    const definitions = filesUnder(src).flatMap((f) =>
+      [...readFileSync(f, "utf8").matchAll(/\bconst\s+(\w+)\b[^=;\n]*=\s*\{\s*status:\s*"failed",\s*error:\s*"(provider_unavailable|busy)"/g)].map(
+        (m) => `${path.relative(src, f).replaceAll("\\", "/")}: ${m[1]} = ${m[2]}`,
+      ),
+    );
+    expect(definitions.sort()).toEqual(["agents/runtime/port.ts: BUSY = busy", "agents/runtime/port.ts: UNAVAILABLE = provider_unavailable"]);
+  });
 });
