@@ -2,9 +2,11 @@ import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { isAgent, isMyAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
-import { formatSize } from "../data/viewmodel.js";
+import { formatSize, replyPoints } from "../data/viewmodel.js";
+import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
+import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
@@ -95,6 +97,32 @@ function Body({ msg, agent }) {
   );
 }
 
+/** How the line under a reply says the thinking level its run was sent. */
+const VIA_LEVELS = { none: "不思考", low: "思考：低", medium: "思考：中", high: "思考：高", xhigh: "思考：超高", max: "思考：最大" };
+
+/**
+ * The muted line under a reply of my own Agent: which model and thinking level its run used (`via`, sent to its owner
+ * only), and — when 在每条回复下显示消耗的点数 is on in this browser — what it cost: “GPT-6 Sol · 思考：中 · 6.9 点”;
+ * a reply on my own provider's model costs no points: “ · 不扣点”.
+ */
+function ReplyVia({ via }) {
+  const withPoints = useShowReplyPoints();
+  const { model } = via;
+  const name = model.source === "site" ? model.label : model.model;
+  const lab = model.source === "site" ? labOfModel(model.id) ?? labOfModel(model.label) : labOfModel(model.model);
+  let points = "";
+  if (withPoints) {
+    if (model.source === "provider" && via.points === "0") points = " · 不扣点";
+    else if (replyPoints(via.points)) points = ` · ${replyPoints(via.points)} 点`;
+  }
+  return (
+    <p className="msg-via">
+      <LabLogo lab={lab} size={14} />
+      {`${name} · ${VIA_LEVELS[via.reasoning]}${points}`}
+    </p>
+  );
+}
+
 export function MessageItem({ msg, conv, onReply, flash = false }) {
   const { state, dispatch, actions } = useStore();
   // A notice of an event this client does not know shows nothing.
@@ -109,9 +137,10 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   }
   const mine = msg.from === ME;
   const agent = !mine && isAgent(state, msg.from);
-  // What only an owner is shown of a reply: its thinking, in the conversation with my own Agent and in a group when the
-  // Agent is mine (never someone else's Agent's, whatever the message carries); a persona proposal only in the
-  // conversation with my own Agent, never in a group. (已停止 and 已截断 show wherever the reply is.)
+  // What only an owner is shown of a reply: its thinking and which model and level it used (`via`), in the conversation
+  // with my own Agent and in a group when the Agent is mine (never someone else's Agent's, whatever the message
+  // carries); a persona proposal only in the conversation with my own Agent, never in a group. (已停止 and 已截断 show
+  // wherever the reply is.)
   const ownChat = agent && conv.type === "agent" && conv.agentId === msg.from;
   const thinking = ownChat || (agent && conv.type === "group" && isMyAgent(state, msg.from));
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
@@ -142,6 +171,7 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
         {thinking && <Thinking text={msg.reasoning} />}
         <Body msg={msg} agent={agent} />
         {ownChat && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
+        {thinking && msg.via && <ReplyVia via={msg.via} />}
         <div className="msg-foot">
           {agent && msg.stopped && <Tag tone="muted">已停止</Tag>}
           {agent && msg.truncated && <Tag tone="muted">已截断</Tag>}

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { A1, AG1, AG2, A2, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, deferred, runOf, syncOf, usageOf } from "./fixtures.js";
 import { click, flush, inMain, installBrowser, mainText, openApp, push } from "./harness.jsx";
+import { REPLY_POINTS_KEY, setShowReplyPoints, showReplyPoints } from "../src/data/prefs.js";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -165,5 +166,57 @@ describe("reading it again", () => {
     await run(app.transport, "r1", "running");
     await run(app.transport, "r1", "done");
     expect(kv("当前余额")).toBe("4.75 点");
+  });
+});
+
+describe("在每条回复下显示消耗的点数", () => {
+  beforeEach(() => localStorage.clear());
+  const pointsSwitch = () => inMain().getByRole("switch", { name: "在每条回复下显示消耗的点数" });
+
+  it("is off by default, says it only changes this device, and is kept in this browser (not the account): on, then off", async () => {
+    const { getUsage } = await openUsage();
+    expect(pointsSwitch().checked).toBe(false);
+    expect(mainText()).toContain("只影响你这台设备上的显示。");
+    fireEvent.click(pointsSwitch());
+    expect(pointsSwitch().checked).toBe(true);
+    expect(localStorage.getItem(REPLY_POINTS_KEY)).toBe("1");
+    expect(showReplyPoints()).toBe(true);
+    // Nothing is asked of the service for it.
+    expect(getUsage).toHaveBeenCalledTimes(1);
+    cleanup();
+    await openUsage();
+    expect(pointsSwitch().checked).toBe(true);
+    fireEvent.click(pointsSwitch());
+    expect(pointsSwitch().checked).toBe(false);
+    expect(localStorage.getItem(REPLY_POINTS_KEY)).toBeNull();
+  });
+
+  it("shows even when the usage cannot be read", async () => {
+    await openUsage({
+      getUsage: vi.fn(async () => {
+        throw apiError(503, "busy");
+      }),
+    });
+    expect(pointsSwitch().checked).toBe(false);
+  });
+
+  it("a browser that refuses storage: off, and turning it on still holds on this page", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    vi.spyOn(Storage.prototype, "removeItem").mockImplementation(() => {
+      throw new Error("denied");
+    });
+    await openUsage();
+    expect(pointsSwitch().checked).toBe(false);
+    fireEvent.click(pointsSwitch());
+    expect(pointsSwitch().checked).toBe(true);
+    expect(showReplyPoints()).toBe(true);
+    vi.restoreAllMocks();
+    act(() => setShowReplyPoints(false));
+    expect(showReplyPoints()).toBe(false);
   });
 });

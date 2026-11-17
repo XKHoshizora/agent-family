@@ -30,6 +30,7 @@ import {
 import { click, dialog, elapse, flush, installBrowser, mainText, openApp, push, toastText } from "./harness.jsx";
 import { useWorkers } from "./markdown-worker.js";
 import { forgetRevealed, thinkingLine, useThinkingSeconds } from "../src/pages/AgentChatBits.jsx";
+import { REPLY_POINTS_KEY, setShowReplyPoints } from "../src/data/prefs.js";
 import { REVEAL_FINISH_MS, REVEAL_MAX_LAG_MS, setRevealFrames } from "../src/ui/reveal.js";
 
 beforeEach(() => installBrowser());
@@ -116,9 +117,31 @@ describe("the header and the list row", () => {
     expect(within(row).getByText("Agent", { selector: ".tag" })).toBeTruthy();
     const head = document.querySelector(".chat-head");
     expect(within(head).getByText("Agent", { selector: ".tag" })).toBeTruthy();
-    expect(head.querySelector(".chat-title p").textContent).toBe("你的 Agent · 专属会话");
+    expect(head.querySelector(".chat-title p").textContent).toBe("你的 Agent · 专属会话 · 小模型");
     expect(mainText()).not.toMatch(/好友|真人私聊/);
     expect(input().disabled).toBe(false);
+  });
+
+  it("the header names the Agent's model now, with its lab's logo; the model opens the Agent's edit form; no model reads 未选模型", async () => {
+    const subtitle = () => document.querySelector(".chat-head .chat-title p");
+    await openAgentChat({ agent: { model: PROVIDER_MODEL }, providers: [providerOf()] });
+    expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · gpt-x");
+    const model = within(subtitle()).getByRole("button", { name: "gpt-x" });
+    expect(model.querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    await click(model);
+    expect(screen.getByRole("heading", { name: "编辑 小助手" })).toBeTruthy();
+    expect(screen.getByLabelText("人格文档")).toBeTruthy();
+    cleanup();
+
+    await openAgentChat({ agent: { model: SITE_PAID } });
+    expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 大模型");
+    expect(within(subtitle()).getByRole("button", { name: "大模型" }).querySelector("img")).toBeNull();
+    cleanup();
+
+    await openAgentChat({ agent: { model: null } });
+    expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 未选模型");
+    await click(within(subtitle()).getByRole("button", { name: "未选模型" }));
+    expect(screen.getByLabelText("人格文档")).toBeTruthy();
   });
 
   it("a deleted Agent's row reads 已删除 after its tag", async () => {
@@ -142,6 +165,62 @@ describe("the header and the list row", () => {
     const row = screen.getByText("小助手", { selector: ".list-col .row-name" }).closest("button");
     expect(row.querySelector(".row-preview").textContent).toBe("在吗");
     expect(bubbleText()).toBe("正在写的秘密");
+  });
+});
+
+describe("which model and level a reply of mine used (via)", () => {
+  const SOL = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "medium", points: "6.9" };
+  const CLAUDE = { model: { source: "provider", model: "claude-x" }, reasoning: "none", points: "0" };
+  const viaLine = (seq) => storedLi(seq).querySelector(".msg-via");
+  beforeEach(() => localStorage.clear());
+
+  it("a muted line under the reply: the model with its lab's logo and the level; a site model by its label, a provider's by its name; no line without via", async () => {
+    await openAgentChat({ messages: [...BASE, wire(A1, 3, AG1, "好的", { via: SOL }), wire(A1, 4, AG1, "嗯", { via: CLAUDE })] });
+    expect(viaLine(1)).toBeNull(); // the greeting: no run posted it
+    expect(viaLine(2)).toBeNull(); // mine
+    expect(viaLine(3).textContent).toBe("GPT-6 Sol · 思考：中");
+    expect(viaLine(3).querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(viaLine(4).textContent).toBe("claude-x · 不思考");
+    expect(viaLine(4).querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/anthropic.svg");
+    // Below the answer, not in it.
+    const parts = [...storedLi(3).querySelector(".msg-main").children];
+    expect(parts.indexOf(viaLine(3))).toBeGreaterThan(parts.indexOf(storedLi(3).querySelector(".bubble")));
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe("好的");
+  });
+
+  it("says each thinking level in words: 不思考, 思考：低, 中, 高, 超高, 最大", async () => {
+    const levels = ["none", "low", "medium", "high", "xhigh", "max"];
+    await openAgentChat({ messages: [...BASE, ...levels.map((reasoning, i) => wire(A1, 3 + i, AG1, `第${i}`, { via: { ...SOL, reasoning } }))] });
+    expect(levels.map((_l, i) => viaLine(3 + i).textContent)).toEqual([
+      "GPT-6 Sol · 不思考",
+      "GPT-6 Sol · 思考：低",
+      "GPT-6 Sol · 思考：中",
+      "GPT-6 Sol · 思考：高",
+      "GPT-6 Sol · 思考：超高",
+      "GPT-6 Sol · 思考：最大",
+    ]);
+  });
+
+  it("points only when the switch is on: · 6.9 点, at most 4 decimals; a provider's reply · 不扣点; turning it off or on changes an open conversation at once", async () => {
+    const tiny = { ...SOL, points: "0.123456" };
+    await openAgentChat({ messages: [...BASE, wire(A1, 3, AG1, "好的", { via: SOL }), wire(A1, 4, AG1, "嗯", { via: CLAUDE }), wire(A1, 5, AG1, "零头", { via: tiny })] });
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中", "claude-x · 不思考", "GPT-6 Sol · 思考：中"]);
+    act(() => setShowReplyPoints(true));
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中 · 6.9 点", "claude-x · 不思考 · 不扣点", "GPT-6 Sol · 思考：中 · 0.1235 点"]);
+    expect(localStorage.getItem(REPLY_POINTS_KEY)).toBe("1");
+    act(() => setShowReplyPoints(false));
+    expect(viaLine(3).textContent).toBe("GPT-6 Sol · 思考：中");
+  });
+
+  it("the reply pushed again once its run is charged brings the line; a push without via shows none", async () => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await messagePush(transport, wire(A1, 3, AG1, "你好呀"));
+    expect(viaLine(3)).toBeNull();
+    await messagePush(transport, wire(A1, 3, AG1, "你好呀", { via: SOL }));
+    await runPush(transport, runOf(R1, "done"));
+    expect(viaLine(3).textContent).toBe("GPT-6 Sol · 思考：中");
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
   });
 });
 
@@ -1551,6 +1630,23 @@ describe("Agents in a group (batch 2C)", () => {
     // The chat list's line is the reply's text, never its thinking.
     const row = screen.getByText("周末小组", { selector: ".list-col .row-name" }).closest("button");
     expect(row.querySelector(".row-preview").textContent).toBe("小助手：周六十点");
+  });
+
+  it("my own Agent's reply in a group shows which model and level it used; someone else's Agent's, carrying a via, shows none, stored or pushed; the group's header names no model", async () => {
+    localStorage.clear();
+    setShowReplyPoints(true);
+    try {
+      const mine = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "high", points: "6.9" };
+      const theirs = { model: { source: "provider", model: "secret-claude" }, reasoning: "max", points: "12" };
+      const { transport } = await openGroup([wire(G1, 1, AG1, "周六十点", { via: mine }), wire(G1, 2, OAG, "周日十点", { via: theirs })]);
+      await push(transport, { type: "message", message: wire(G1, 3, OAG, "补充一句", { via: theirs }) });
+      expect(storedLi(1).querySelector(".msg-via").textContent).toBe("GPT-6 Sol · 思考：高 · 6.9 点");
+      for (const seq of [2, 3]) expect(storedLi(seq).querySelector(".msg-via")).toBeNull();
+      expect(mainText()).not.toMatch(/secret-claude|思考：最大|12 点/);
+      expect(document.querySelector(".chat-head .chat-title p").textContent).toBe("3 位真人 · 2 个 Agent");
+    } finally {
+      act(() => setShowReplyPoints(false));
+    }
   });
 
   it("someone else's Agent's reply carrying a reasoning field shows no thinking at all, wherever it appears", async () => {

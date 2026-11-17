@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
-import { toView, formatAt, formatMessageAt, formatMessageTitle, expiryText, formatPoints } from "../src/data/viewmodel.js";
+import { toView, formatAt, formatMessageAt, formatMessageTitle, expiryText, formatPoints, replyPoints } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
 import { convSubtitle, convTitle, entity, isAgent, lastPreview, myAgents, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
 import {
@@ -525,6 +525,41 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
     expect(unknown.convs[G1].messages[1].reasoning).toBeNull();
   });
 
+  it("a reply's via (its model, level and points) is kept as its thinking is: on my own Agents' replies only, checked, never someone else's", () => {
+    const SOL = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "medium", points: "6.9" };
+    const PROV = { model: { source: "provider", model: "claude-x" }, reasoning: "none", points: "0" };
+    const members = [...MEMBERS, { id: AG1, role: "speaker", isCreator: false }];
+    const messages = [
+      wire(G1, 1, AG1, "我的回答", { via: SOL }),
+      wire(G1, 2, OAG, "安的回答", { via: PROV }),
+      wire(G1, 3, ANN, "人说的", { via: SOL }),
+      wire(G1, 4, AG1, "坏的", { via: { model: { source: "site", id: "x" }, reasoning: "medium", points: "1" } }),
+      wire(G1, 5, AG1, "坏的级别", { via: { ...SOL, reasoning: "huge" } }),
+      wire(G1, 6, AG1, "坏的点数", { via: { ...SOL, points: 7 } }),
+      wire(G1, 7, AG1, "没有"),
+      wire(A1, 1, AG1, "专属会话里的回答", { via: PROV }),
+    ];
+    const sync = syncOf([agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 }), group(G1, { members, lastSeq: 7, readSeq: 7 })], messages, [...PRINCIPALS, agentPrincipal(AG1), annBot()]);
+    const v = toView(M.applyAgents(M.applySync(M.initial(), sync), [agentOf(AG1)]), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => [m.seq, m.via])).toEqual([
+      [1, SOL],
+      [2, null],
+      [3, null],
+      [4, null],
+      [5, null],
+      [6, null],
+      [7, null],
+    ]);
+    expect(v.convs[A1].messages.map((m) => m.via)).toEqual([PROV]);
+    // An Agent nobody says is mine: nothing kept.
+    const { ownerId: _none, ...ownerless } = annBot();
+    const unknown = toView(M.applySync(M.initial(), { ...sync, principals: [...PRINCIPALS, agentPrincipal(AG1), ownerless] }), { now: NOW });
+    expect(unknown.convs[G1].messages[1].via).toBeNull();
+    // The list's preview is the reply's text.
+    const mineLast = toView(M.applyAgents(M.applySync(M.initial(), { ...sync, messages: messages.slice(0, 1) }), [agentOf(AG1)]), { now: NOW });
+    expect(lastPreview(mineLast, mineLast.convs[G1])).toBe("小助手：我的回答");
+  });
+
   it("the group's subtitle counts the people, and the Agents when there are any", () => {
     const v = toView(sharedModel(), { now: NOW });
     expect(v.convs[G1].members).toEqual([ME, ANN, BO, OAG]);
@@ -554,6 +589,25 @@ describe("formatPoints (points are decimal strings: no float maths)", () => {
     expect(formatPoints("abc")).toBe("abc");
     expect(formatPoints(undefined)).toBe("");
     expect(formatPoints(null)).toBe("");
+  });
+});
+
+describe("replyPoints (what one reply cost, under it: at most 4 decimals)", () => {
+  it("keeps up to 4 decimals, rounding half up on the string's digits, trailing zeros trimmed, digits grouped", () => {
+    expect(replyPoints("6.9")).toBe("6.9");
+    expect(replyPoints("6.90")).toBe("6.9");
+    expect(replyPoints("12")).toBe("12");
+    expect(replyPoints("0.1234")).toBe("0.1234");
+    expect(replyPoints("0.00073")).toBe("0.0007");
+    expect(replyPoints("1.23456")).toBe("1.2346");
+    expect(replyPoints("0.99995")).toBe("1");
+    expect(replyPoints("9999.99999")).toBe("10,000");
+    expect(replyPoints("0.00005")).toBe("0.0001");
+    expect(replyPoints("1234.5")).toBe("1,234.5");
+    expect(replyPoints("0")).toBe("0");
+  });
+  it("is empty for anything that is not a decimal string of points", () => {
+    for (const bad of ["", "abc", "1e3", "-", "-1", ".5", "1.", null, undefined, 7]) expect(replyPoints(bad)).toBe("");
   });
 });
 

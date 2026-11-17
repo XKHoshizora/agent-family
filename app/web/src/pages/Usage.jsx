@@ -1,4 +1,5 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
+import { setShowReplyPoints, useShowReplyPoints } from "../data/prefs.js";
 import { useStore } from "../data/store.jsx";
 import { Btn, KV, Reason } from "../ui/primitives.jsx";
 
@@ -71,8 +72,27 @@ function useUsage() {
 }
 
 /**
+ * 在每条回复下显示消耗的点数: a preference of this browser (data/prefs.js), off by default; my Agents' replies show
+ * what each cost under them while it is on, in every open conversation at once.
+ */
+function ReplyPointsSwitch() {
+  const on = useShowReplyPoints();
+  const hint = useId();
+  return (
+    <div className="reply-points">
+      <label className="check">
+        <input type="checkbox" role="switch" checked={on} aria-describedby={hint} onChange={(e) => setShowReplyPoints(e.target.checked)} />
+        在每条回复下显示消耗的点数
+      </label>
+      <p id={hint} className="muted">只影响你这台设备上的显示。</p>
+    </div>
+  );
+}
+
+/**
  * Settings › 用量与余额: today's free allowance and when it resets, the balance, the tier and the number of Agents,
  * and the last 7 days per Agent and model. Points are shown as the service gives them (`formatPoints`, no arithmetic).
+ * Below them, whether my Agents' replies show their points (`ReplyPointsSwitch`), whether or not the usage was read.
  * `back`: the settings back button (to the settings list on a phone).
  */
 export function UsagePage({ back }) {
@@ -163,7 +183,10 @@ export function UsagePage({ back }) {
           <h2>我的用量</h2>
         </div>
       </header>
-      <div className="page-body">{body}</div>
+      <div className="page-body">
+        {body}
+        <ReplyPointsSwitch />
+      </div>
     </section>
   );
 }

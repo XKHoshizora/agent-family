@@ -615,6 +615,54 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     expect(synced.messages[G1].find((m) => m.seq === 4).reasoning).toBe("想");
   });
 
+  it("the store never keeps someone else's Agent's via in a group, pushed, paged or synced; mine keeps it; it stays while the sender is unknown", () => {
+    const base = inGroup();
+    const VIA = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "medium", points: "6.9" };
+    const charged = (seq, sender) => wire(G1, seq, sender, "答", { reasoning: "想", via: VIA });
+    const s = M.applyMessage(M.applyMessage(base, charged(3, OAG)).state, charged(4, AG1)).state;
+    expect(s.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("via");
+    expect(s.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("reasoning");
+    expect(s.messages[G1].find((m) => m.seq === 4).via).toEqual(VIA);
+    expect(JSON.stringify(s.messages[G1].find((m) => m.seq === 3))).not.toContain("GPT-6 Sol");
+    const older = M.applyOlder(base, G1, { messages: [charged(0, OAG), charged(-1, AG1)], nextBefore: null });
+    expect(older.messages[G1].find((m) => m.seq === 0)).not.toHaveProperty("via");
+    expect(older.messages[G1].find((m) => m.seq === -1).via).toEqual(VIA);
+    const LATE = "00000000-0000-4000-8000-0000000000b8";
+    expect(M.applyMessage(base, charged(3, LATE)).state.messages[G1].find((m) => m.seq === 3).via).toEqual(VIA);
+    const sync = syncOf([groupWith([ME_ID, ANN, AG1, OAG], { lastSeq: 4, readSeq: 4 })], [...BASE, charged(3, OAG), charged(4, AG1)], [
+      ...PRINCIPALS,
+      { ...agentPrincipal(), ownerId: ME_ID },
+      annBot,
+    ]);
+    const synced = M.applySync(M.initial(), sync);
+    expect(synced.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("via");
+    expect(synced.messages[G1].find((m) => m.seq === 4).via).toEqual(VIA);
+  });
+
+  it("my Agent's reply pushed again once its run is charged replaces the copy held (and a window's), now with its via; someone else's Agent's changes nothing", () => {
+    const VIA = { model: { source: "provider", model: "claude-x" }, reasoning: "high", points: "0" };
+    let s = put(inGroup(), ownerPush(runOf(R1, "running")));
+    s = M.applyMessage(s, wire(G1, 3, AG1, "周六十点", { reasoning: "想" })).state;
+    expect(s.messages[G1].find((m) => m.seq === 3)).not.toHaveProperty("via");
+    const position = s.conversations[G1].position;
+    const again = M.applyMessage(s, wire(G1, 3, AG1, "周六十点", { reasoning: "想", via: VIA }));
+    expect(again.gap).toBeUndefined();
+    expect(again.state.messages[G1].find((m) => m.seq === 3).via).toEqual(VIA);
+    expect(again.state.conversations[G1]).toMatchObject({ position, unread: s.conversations[G1].unread });
+    expect(again.state.messages[G1].filter((m) => m.seq === 3)).toHaveLength(1);
+    // A detached window holding it gets the charged copy too.
+    const windowed = { ...s, windows: { ...s.windows, [G1]: { messages: [wire(G1, 3, AG1, "周六十点", { reasoning: "想" })] } } };
+    const inWindow = M.applyMessage(windowed, wire(G1, 3, AG1, "周六十点", { reasoning: "想", via: VIA })).state;
+    expect(inWindow.windows[G1].messages[0].via).toEqual(VIA);
+    // A copy without via, or one from someone else's Agent, replaces nothing.
+    expect(M.applyMessage(again.state, wire(G1, 3, AG1, "周六十点", { reasoning: "想" })).state.messages[G1].find((m) => m.seq === 3).via).toEqual(VIA);
+    const theirs = M.applyMessage(again.state, wire(G1, 4, OAG, "周日", {})).state;
+    const theirsAgain = M.applyMessage(theirs, wire(G1, 4, OAG, "周日", { via: VIA })).state;
+    expect(theirsAgain.messages[G1].find((m) => m.seq === 4)).not.toHaveProperty("via");
+    // A page or catch-up copy is not a push: nothing is replaced by it.
+    expect(M.applyMessage(s, wire(G1, 3, AG1, "周六十点", { via: VIA }), { pushed: false }).state).toBe(s);
+  });
+
   it("an Agent's slot clears when its reply arrives; someone else's message does not clear it; a new run shows again", () => {
     let s = put(put(inGroup(), ownerPush(runOf(R1, "running"))), memberPush("replying"));
     s = M.applyMessage(s, wire(G1, 3, ANN, "还有我")).state;

@@ -3,6 +3,7 @@ import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
+import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
 import { withoutBidiControls } from "../ui/markdownRules.js";
 import { REVEAL_FINISH_MS } from "../ui/reveal.js";
@@ -58,6 +59,46 @@ function newestFrom(messages, from) {
   return null;
 }
 const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBoundingClientRect().top;
+
+/**
+ * The header line of my Agent's own conversation ends with the Agent's model now — a site model's label, a provider
+ * model's name, 未选模型 when it has none — and its lab's logo; it opens the Agent's edit form. Nothing until the
+ * Agent's record is loaded (its model is not known before then); not a link once the Agent is deleted.
+ */
+function AgentModel({ agentId }) {
+  const { state, dispatch } = useStore();
+  const agent = state.agents[agentId];
+  if (!agent?.loaded) return null;
+  const model = agent.model;
+  let name = "未选模型";
+  let lab = null;
+  if (model?.source === "site") {
+    name = (state.siteModels ?? []).find((m) => m.id === model.id)?.label ?? model.id;
+    lab = labOfModel(model.id) ?? labOfModel(name);
+  } else if (model?.source === "provider") {
+    name = model.model;
+    lab = labOfModel(model.model);
+  }
+  const shown = (
+    <>
+      <LabLogo lab={lab} size={14} />
+      {name}
+    </>
+  );
+  const edit = () => dispatch({ type: "nav", patch: { section: "agents", agentId, agentView: "edit", pane: "main" } });
+  return (
+    <>
+      {" · "}
+      {agent.deleted ? (
+        <span className="head-model">{shown}</span>
+      ) : (
+        <button type="button" className="head-model" onClick={edit}>
+          {shown}
+        </button>
+      )}
+    </>
+  );
+}
 
 /**
  * Whether a bubble may finish revealing `stream` before `reply` (its stored message) takes its place: only when the
@@ -451,7 +492,10 @@ export function ChatView({ conv }) {
               </>
             )}
           </h2>
-          <p>{convSubtitle(state, conv)}</p>
+          <p>
+            {convSubtitle(state, conv)}
+            {agentChat && <AgentModel agentId={conv.agentId} />}
+          </p>
         </div>
         <div className="chat-head-actions">
           <IconBtn label="搜索本会话" className="boxed" aria-pressed={searching} onClick={() => (setSearching(!searching), setQuery(""))}><Search size={22} /></IconBtn>

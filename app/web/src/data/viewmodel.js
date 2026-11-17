@@ -181,6 +181,39 @@ export function formatPoints(value) {
   return `${sign && !zero ? "-" : ""}${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}${fraction ? `.${fraction}` : ""}`;
 }
 
+/**
+ * What one reply cost (`via.points`, a decimal string of points from the service), for the line under it: at most 4
+ * decimals, rounded half up on the string's own digits (no float maths), trailing zeros trimmed, digits grouped
+ * (`formatPoints`); "" for anything that is not a non-negative decimal string.
+ */
+export function replyPoints(value) {
+  if (typeof value !== "string") return "";
+  const parts = /^(\d+)(?:\.(\d+))?$/.exec(value);
+  if (!parts) return "";
+  const [, whole, decimals = ""] = parts;
+  // In ten-thousandths, rounded half up on the fifth decimal.
+  const scaled = BigInt(whole + (decimals + "0000").slice(0, 4)) + (Number(decimals[4] ?? "0") >= 5 ? 1n : 0n);
+  const digits = scaled.toString().padStart(5, "0");
+  return formatPoints(`${digits.slice(0, -4)}.${digits.slice(-4)}`);
+}
+
+const VIA_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
+const isText = (v) => typeof v === "string" && v.length > 0;
+
+/**
+ * A reply's `via` as the service sends it to the Agent's owner (which model and level its run used, what it cost), or
+ * null when it is not exactly that shape: `{model: {source: "site", id, label} | {source: "provider", model}, reasoning,
+ * points}`.
+ */
+function viaView(via) {
+  if (!via || typeof via !== "object" || !VIA_LEVELS.has(via.reasoning) || typeof via.points !== "string") return null;
+  const m = via.model;
+  let model = null;
+  if (m?.source === "site" && isText(m.id) && isText(m.label)) model = { source: "site", id: m.id, label: m.label };
+  else if (m?.source === "provider" && isText(m.model)) model = { source: "provider", model: m.model };
+  return model ? { model, reasoning: via.reasoning, points: via.points } : null;
+}
+
 /** A byte count for people: "932 B", "1.4 KB", "12 MB" (one decimal below 10, base 1024). */
 export function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
@@ -202,7 +235,7 @@ function kindOf(kind, attachment) {
   return "text";
 }
 
-function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, keepsThinking }) {
+function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, keepsOwners }) {
   const attachment = m.kind === "file" ? attachmentView(m.attachment) : null;
   const kind = kindOf(m.kind, attachment);
   const system = systemView(m.system, alias);
@@ -232,9 +265,10 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     quote: quoteView(m.replyTo, alias),
     attachment,
     system,
-    // An Agent's reply: its reasoning (shown folded; only when it is mine to read: `keepsThinking`), whether it was
-    // stopped or cut, and the persona it proposes.
-    reasoning: typeof m.reasoning === "string" && m.reasoning && keepsThinking(m.senderId) ? m.reasoning : null,
+    // An Agent's reply: its reasoning (shown folded) and which model and level it used (`via`), only when it is mine
+    // to read (`keepsOwners`); whether it was stopped or cut, and the persona it proposes.
+    reasoning: typeof m.reasoning === "string" && m.reasoning && keepsOwners(m.senderId) ? m.reasoning : null,
+    via: m.via !== undefined && keepsOwners(m.senderId) ? viaView(m.via) : null,
     stopped: Boolean(m.stopped),
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,
@@ -516,12 +550,13 @@ export function toView(model, { now = Date.now() } = {}) {
     else if (agentChat) members = [ME, conv.agentId ?? members.find((id) => id !== ME)].filter(Boolean);
     else if (!members.includes(ME)) members.unshift(ME);
 
-    // Whose replies' thinking is kept (the service sends it only to their owner; whatever a message carries, nothing
-    // else is): in my Agent's own conversation that Agent's; in a group my own Agents', never someone else's Agent's.
-    const keepsThinking = (senderId) =>
+    // Whose replies' thinking and `via` are kept (the service sends them only to their owner; whatever a message
+    // carries, nothing else is): in my Agent's own conversation that Agent's; in a group my own Agents', never someone
+    // else's Agent's.
+    const keepsOwners = (senderId) =>
       typeof senderId === "string" && (agentChat ? senderId === conv.agentId : conv.type === "group" && ownsAgent(model, senderId));
     const viewOf = (m) =>
-      messageView(m, { alias, meId, pair: direct || agentChat, peerReadSeq: conv.peerReadSeq, now, nameOf, agentId: conv.agentId, keepsThinking });
+      messageView(m, { alias, meId, pair: direct || agentChat, peerReadSeq: conv.peerReadSeq, now, nameOf, agentId: conv.agentId, keepsOwners });
     const messages = held.map(viewOf);
     const win = model.windows?.[conv.id] ?? null;
     const claimed = new Set();
