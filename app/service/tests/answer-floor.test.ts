@@ -10,6 +10,11 @@ import { listen } from "./helpers/ws.ts";
 
 // Long enough to cover a registration's password hashing on a loaded machine, short enough to keep the file quick.
 const FLOOR = { ms: 300, jitterMs: 10 };
+/**
+ * What a measured answer may fall short of the floor by: timers fire on whole milliseconds and the clocks of the server's
+ * timer and of the measurement differ by a little. The floor itself is unchanged; this only keeps the test from flaking.
+ */
+const TIMER_SLACK_MS = 2;
 
 const median = (xs: number[]) => [...xs].sort((x, y) => x - y)[Math.floor(xs.length / 2)]!;
 
@@ -69,7 +74,7 @@ describe("answer floor", () => {
     await reset(a.email)(); // warm up both paths
     await unknown();
     const { as: known, bs: absent } = await interleaved(9, reset(a.email), unknown);
-    expect(Math.min(...known, ...absent)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.min(...known, ...absent)).toBeGreaterThanOrEqual(FLOOR.ms - TIMER_SLACK_MS);
     expect(Math.abs(median(known) - median(absent))).toBeLessThan(40);
     // Only the registered address got mail.
     const { rows } = await db.query<{ recipient: string }>("select distinct recipient from mail_outbox where kind = 'reset_password'");
@@ -92,7 +97,7 @@ describe("answer floor", () => {
     await register(owner.email)(); // warm up both paths
     await fresh();
     const { as: taken, bs: free } = await interleaved(7, register(owner.email), fresh);
-    expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms - TIMER_SLACK_MS);
     expect(Math.abs(median(taken) - median(free))).toBeLessThan(40);
   });
 
@@ -133,7 +138,7 @@ describe("answer floor", () => {
     await reset(a.email)(); // warm up both paths
     await unknown();
     const { as: known, bs: absent } = await interleaved(7, reset(a.email), unknown);
-    expect(Math.min(...known, ...absent)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.min(...known, ...absent)).toBeGreaterThanOrEqual(FLOOR.ms - TIMER_SLACK_MS);
     expect(Math.abs(median(known) - median(absent))).toBeLessThan(40);
   });
 
@@ -151,7 +156,7 @@ describe("answer floor", () => {
     await register(owner.email)();
     await fresh();
     const { as: taken, bs: free } = await interleaved(5, register(owner.email), fresh);
-    expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms);
+    expect(Math.min(...taken, ...free)).toBeGreaterThanOrEqual(FLOOR.ms - TIMER_SLACK_MS);
     expect(Math.abs(median(taken) - median(free))).toBeLessThan(40);
   });
 });
