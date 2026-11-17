@@ -272,6 +272,9 @@ const RUN_FAILED = {
   address_not_allowed: "模型的接口地址不被允许，这次没有回复。请到设置里检查地址。",
   context_too_small: "人格文档太长或模型的上下文太小，放不下你的消息。请缩短人格文档或换一个模型。",
   busy: "服务出了点问题，这次没有回复，也没有扣费。可以重试。",
+  rate_limited: "发得太快了，请稍后重试。",
+  agent_paused: "它已暂停，这次没有回复。",
+  agent_deleted: "它已删除，这次没有回复。",
 };
 const RUN_CANCELLED = {
   agent_paused: "它已暂停，这次回复已取消。",

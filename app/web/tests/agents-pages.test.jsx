@@ -95,6 +95,8 @@ const levels = () => within(inMain().getByLabelText("思考程度")).getAllByRol
 const createButton = () => inMain().getByRole("button", { name: /^创建 Agent$|^创建中…$/ });
 const personaBox = () => inMain().getByLabelText("人格文档");
 const sectionShown = () => document.querySelector(".rail-item.active").textContent;
+/** The open chat's title (before the Agent tag the header puts after an Agent's name). */
+const chatTitle = () => document.querySelector(".main-col .chat-head h2").firstChild.textContent;
 
 describe("the Agent list", () => {
   it("lists my Agents with the prototype's row (status tag, field, model); a deleted one last, marked 已删除", async () => {
@@ -158,7 +160,7 @@ describe("creating an Agent", () => {
     expect(createAgent.mock.calls[0][0]).toEqual({ handle: "mybot", name: "MyBot", replyMode: "always", reasoning: "none", model: SITE_MODEL });
     await flush();
     expect(sectionShown()).toContain("消息");
-    expect(document.querySelector(".main-col .chat-head h2").textContent).toBe("MyBot");
+    expect(chatTitle()).toBe("MyBot");
   });
 
   it("keeps the create button disabled until a model is chosen, and says why", async () => {
@@ -672,7 +674,7 @@ describe("the Agent's page", () => {
     expect(inMain().getAllByRole("listitem")).toHaveLength(1);
     await click(inMain().getByRole("button", { name: "进入查看" }));
     expect(sectionShown()).toContain("消息");
-    expect(document.querySelector(".main-col .chat-head h2").textContent).toBe("小助手");
+    expect(chatTitle()).toBe("小助手");
   });
 
   it("pause and resume toggle the tag and call their routes", async () => {
@@ -723,7 +725,7 @@ describe("the Agent's page", () => {
     for (const name of [/编辑/, /暂停/, /恢复/, /删除 Agent/]) expect(inMain().queryByRole("button", { name })).toBeNull();
     await click(inMain().getByRole("tab", { name: "参与的会话" }));
     await click(inMain().getByRole("button", { name: "进入查看" }));
-    expect(document.querySelector(".main-col .chat-head h2").textContent).toBe("小助手");
+    expect(chatTitle()).toBe("小助手");
   });
 });
 
@@ -747,7 +749,7 @@ describe("contacts: 我的 Agent", () => {
     expect(document.querySelector(".list-col").textContent.replace("Agent Family", "").match(/Agent/g)).toHaveLength(2);
     await click(row);
     expect(sectionShown()).toContain("消息");
-    expect(document.querySelector(".main-col .chat-head h2").textContent).toBe("小助手");
+    expect(chatTitle()).toBe("小助手");
   });
 
   it("the search box finds my Agents by name or account name", async () => {

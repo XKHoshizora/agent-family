@@ -1,9 +1,10 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { convTitle, convSubtitle, publishBlock } from "../state/selectors.js";
-import { ConvAvatar, Btn, IconBtn, Notice } from "../ui/primitives.jsx";
+import { convTitle, convSubtitle, nameOf, publishBlock } from "../state/selectors.js";
+import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
 import { MessageItem } from "./Messages.jsx";
+import { AGENT_PAUSED_TEXT, IMAGE_HINT, RunStatusLine, StreamBubble, isReplying, seesImages } from "./AgentChatBits.jsx";
 import { ChatHitRow, SearchFooter } from "./SearchHits.jsx";
 import { useJumpTo } from "./useJumpTo.js";
 import { useMessageSearch } from "./useMessageSearch.js";
@@ -32,6 +33,11 @@ const inView = () => document.visibilityState === "visible" && document.hasFocus
 /** The element is laid out: not inside a `display: none` pane (the phone layout hides the chat while the list shows). */
 const onScreen = (element) => Boolean(element) && element.getClientRects().length > 0;
 const firstMessageNode = (list) => [...list.children].find((li) => li.dataset.msg);
+/** The newest message `from` sent (not a notice), or null. */
+function newestFrom(messages, from) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) if (messages[i].from === from && messages[i].kind !== "system") return messages[i];
+  return null;
+}
 const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBoundingClientRect().top;
 
 export function ChatView({ conv }) {
@@ -73,10 +79,51 @@ export function ChatView({ conv }) {
   const lastTop = useRef(0);
   const wasShowingHits = useRef(false);
 
+  // An Agent's conversation: its reply being written (a bubble at the end) or its failed reply (a status line at the
+  // end), as the view model says; neither under a detached window, which does not reach the end.
+  const agentChat = conv.type === "agent";
+  const agent = agentChat ? state.agents[conv.agentId] ?? null : null;
+  const run = agentChat && !detached ? conv.run : null;
+  const replying = isReplying(run);
+  const failedRun = run?.status === "failed" ? run : null;
+  const paused = agentChat && !block && Boolean(agent ? agent.paused : conv.agent?.paused);
+  /** What changes at the end of the list besides messages: the bubble growing, the status line coming or going. */
+  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${failedRun?.id ?? ""}`;
+  // An image picked or pasted here while the Agent's model cannot see images: one line under the composer says so.
+  const [imagePicked, setImagePicked] = useState(false);
+  const noteFiles = useCallback(
+    (files) => {
+      if (agentChat && !block && [...files].some((file) => file.type?.startsWith("image/"))) setImagePicked(true);
+    },
+    [agentChat, block],
+  );
+  const imageHint = imagePicked && seesImages(state, agent?.model) === false ? IMAGE_HINT : null;
+  const providerNeeded = imagePicked && agent?.model?.source === "provider" && !state.providers[agent.model.providerId] ? agent.model.providerId : null;
+  // (A provider's model is looked up in my providers, read once when they are not held here.)
+  useEffect(() => {
+    if (providerNeeded) actions.loadProviders();
+  }, [providerNeeded, actions]);
+  // The Agent's reply is announced once, when its stored message arrives (never piece by piece while it streams).
+  const newestReply = agentChat ? newestFrom(conv.messages, conv.agentId) : null;
+  const [announcement, setAnnouncement] = useState("");
+  const announced = useRef({ convId: null, seq: 0 });
+
   useEffect(() => {
     setSearching(false);
     setQuery("");
+    setImagePicked(false);
   }, [conv.id]);
+
+  useEffect(() => {
+    const seq = newestReply?.seq ?? 0;
+    if (announced.current.convId !== conv.id) {
+      announced.current = { convId: conv.id, seq };
+      setAnnouncement("");
+    } else if (seq > announced.current.seq) {
+      announced.current.seq = seq;
+      setAnnouncement(`${nameOf(state, conv.agentId)}：${newestReply.text}`);
+    }
+  }, [conv.id, newestReply?.seq]);
 
   // A chat opens at its newest message. Opening it is also the person asking again for history that failed.
   useLayoutEffect(() => {
@@ -89,7 +136,8 @@ export function ChatView({ conv }) {
   }, [conv.id]);
 
   // After the list changed: an older page keeps what was on screen where it was; otherwise a list that was at
-  // the newest message stays there, and so does one where I just sent something. Scrolled up: no jump.
+  // the newest message stays there, and so does one where I just sent something. Scrolled up: no jump. (The end of
+  // the list also changes while an Agent's reply streams in, or its status line comes or goes: the same rule.)
   useLayoutEffect(() => {
     const list = listRef.current;
     if (!list) return;
@@ -108,7 +156,7 @@ export function ChatView({ conv }) {
       lastTop.current = list.scrollTop;
       atBottom.current = true;
     }
-  }, [conv.id, firstId, last?.id, messages.length, detached]);
+  }, [conv.id, firstId, last?.id, messages.length, detached, tail]);
 
   // The results cover the list while there is a query: its scroll position is kept for when they go away.
   useLayoutEffect(() => {
@@ -259,7 +307,9 @@ export function ChatView({ conv }) {
       if (!hasFiles(e)) return;
       e.preventDefault();
       setDropping(false);
-      sendFiles(droppedFiles(e.dataTransfer));
+      const files = droppedFiles(e.dataTransfer);
+      noteFiles(files);
+      sendFiles(files);
     },
   };
 
@@ -269,7 +319,15 @@ export function ChatView({ conv }) {
         <IconBtn label="返回列表" className="only-mobile" onClick={() => dispatch({ type: "nav", patch: { pane: "list" } })}><ChevronLeft size={22} /></IconBtn>
         <ConvAvatar conv={conv} size={56} />
         <div className="chat-title">
-          <h2>{convTitle(state, conv)}</h2>
+          <h2>
+            {convTitle(state, conv)}
+            {agentChat && (
+              <>
+                {" "}
+                <Tag>Agent</Tag>
+              </>
+            )}
+          </h2>
           <p>{convSubtitle(state, conv)}</p>
         </div>
         <div className="chat-head-actions">
@@ -320,10 +378,18 @@ export function ChatView({ conv }) {
         {messages.map((msg) => (
           <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
         ))}
+        {replying && <StreamBubble conv={conv} />}
+        {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
         <li aria-hidden="true" />
       </ol>
 
-      <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} />
+      {paused && <Notice tone="pause">{AGENT_PAUSED_TEXT}</Notice>}
+      <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} onFiles={noteFiles} note={imageHint} />
+      {agentChat && (
+        <p className="sr-only" aria-live="polite">
+          {announcement}
+        </p>
+      )}
     </section>
   );
 }

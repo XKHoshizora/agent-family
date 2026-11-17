@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { entity, nameOf, senderName } from "../state/selectors.js";
+import { entity, isAgent, nameOf, ownerOf, senderName } from "../state/selectors.js";
 import { Avatar, Btn, IconBtn } from "../ui/primitives.jsx";
 import { useSendFiles } from "./useSendFiles.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
@@ -18,7 +18,11 @@ export const TEXT_LIMIT = 8000;
 /** Typing pauses this long before the draft is written to the data layer (and at once on leaving the chat). */
 const DRAFT_SAVE_MS = 300;
 
-export function Composer({ conv, block, replyTo, setReplyTo }) {
+/**
+ * `onFiles(files)` hears every file handed over to be sent (picked or pasted); `note` is a line under the composer (the
+ * image hint of an Agent conversation).
+ */
+export function Composer({ conv, block, replyTo, setReplyTo, onFiles, note = null }) {
   const { state, actions } = useStore();
   const [text, setText] = useState(() => state.drafts?.[conv.id] ?? "");
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -117,12 +121,13 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
   };
   const sendFiles = useSendFiles(conv, block);
   // The same file input can pick the same file again; the pick is handed over and forgotten.
-  const picked = e => { const list = [...e.target.files]; e.target.value = ""; sendFiles(list); };
+  const picked = e => { const list = [...e.target.files]; e.target.value = ""; onFiles?.(list); sendFiles(list); };
   const paste = e => {
     const images = [...(e.clipboardData?.files ?? [])].filter(f => f.type.startsWith("image/"));
     if (images.length === 0) return;
     // Text on the clipboard as well (copied from a page or a document): it still pastes into the box.
     if (!e.clipboardData.getData?.("text/plain")) e.preventDefault();
+    onFiles?.(images);
     sendFiles(images);
   };
   const sendNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : invisible ? "消息里没有看得见的文字，无法发送" : null;
@@ -156,7 +161,7 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
           <div className="mention-heading">提及会话中的成员 <small>↑↓ 选择 · Enter 确认</small></div>
           {!matches.length && <p className="mention-empty">没有匹配的成员</p>}
           {matches.map((id,i)=><button key={id} id={`mention-${id}`} role="option" aria-selected={i===selected} type="button" onMouseDown={e=>e.preventDefault()} onClick={()=>chooseMention(id)}>
-            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>真人 · 会话成员</small></span>
+            <Avatar id={id} size={28}/><span><strong>{nameOf(state,id)}</strong><small>{isAgent(state,id)?`Agent · 主人：${nameOf(state,ownerOf(state,id))}${state.agents[id].paused?" · 已暂停":""}`:"真人 · 会话成员"}</small></span>
           </button>)}
         </div>}
         <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":"发送消息，或 @ 会话成员"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined}
@@ -168,5 +173,6 @@ export function Composer({ conv, block, replyTo, setReplyTo }) {
       <Btn variant="primary" className="send" disabled={disabled||!body||invisible||tooLong} reason={block?.text ?? sendNote} onClick={()=>send()}>发送</Btn>
     </div>
     <p className="composer-hint">{disabled?block.text:sendNote?<span className="failed">{sendNote}</span>:"Enter 发送 · Shift+Enter 换行"}</p>
+    {note && <p className="composer-hint" role="status">{note}</p>}
   </footer>;
 }

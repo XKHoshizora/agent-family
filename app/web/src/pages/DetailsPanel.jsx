@@ -1,18 +1,25 @@
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { convTitle, TYPE_LABEL, nameOf, otherMember } from "../state/selectors.js";
+import { agentDeleted, convTitle, TYPE_LABEL, nameOf, otherMember } from "../state/selectors.js";
 import { blockedMe, iBlocked } from "../state/social.js";
 import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, KV, Reason } from "../ui/primitives.jsx";
 import { BlockModal } from "./BlockModal.jsx";
+import { NewTopicModal } from "./AgentChatBits.jsx";
 import { X } from "../icons.js";
+
+/** What my Agent does not get from its conversation with me (the prototype's line, without devices or tasks here). */
+const AGENT_NOT_GRANTED = "其他会话、文件夹与电脑";
 
 export function DetailsPanel({ conv }) {
   const { state, dispatch } = useStore();
   const other = otherMember(conv);
   const group = conv.type === "group";
+  const agentChat = conv.type === "agent";
   const [blockOpen, setBlockOpen] = useState(false);
-  const blocked = !group && iBlocked(state, other);
-  const blockedByThem = !group && blockedMe(state, other);
+  const [topicOpen, setTopicOpen] = useState(false);
+  const blocked = conv.type === "human" && iBlocked(state, other);
+  const blockedByThem = conv.type === "human" && blockedMe(state, other);
+  const deleted = agentChat && agentDeleted(state, conv);
   const go = (patch) => dispatch({ type: "nav", patch: { pane: "main", ...patch } });
 
   return (
@@ -37,7 +44,12 @@ export function DetailsPanel({ conv }) {
             </li>
           ))}
         </ul>
-        <KV rows={[["谁能看", conv.members.map((id) => nameOf(state, id)).join("、")]]} />
+        <KV
+          rows={[
+            ["谁能看", conv.members.map((id) => nameOf(state, id)).join("、")],
+            ...(agentChat ? [["不随关系获得", AGENT_NOT_GRANTED]] : []),
+          ]}
+        />
 
         <h3>操作</h3>
         <div className="stack-actions">
@@ -47,9 +59,12 @@ export function DetailsPanel({ conv }) {
             <Btn variant={blocked ? "ghost" : "danger"} onClick={() => setBlockOpen(true)}>{blocked ? "解除我的拉黑" : "拉黑此用户"}</Btn>
           )}
           {conv.type === "human" && blockedByThem && <Reason>对方拉黑了你，只能由对方解除。</Reason>}
+          {agentChat && <Btn onClick={() => go({ section: "agents", agentId: other, agentView: "detail", agentTab: "profile" })}>管理这个 Agent</Btn>}
+          {agentChat && !deleted && <Btn onClick={() => setTopicOpen(true)}>开始新话题</Btn>}
         </div>
       </div>
       {blockOpen && <BlockModal target={other} onClose={() => setBlockOpen(false)} />}
+      {topicOpen && <NewTopicModal conv={conv} onClose={() => setTopicOpen(false)} />}
     </div>
   );
 }

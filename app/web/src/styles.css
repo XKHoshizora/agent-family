@@ -267,6 +267,13 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .msg-system > span {
   display: inline-block; padding: 4px 12px; border-radius: 10px; background: rgba(255, 255, 255, 0.5); color: var(--ink-2); font-size: 13px;
 }
+/* An Agent's conversation: a new topic's divider, the folded thinking, a proposal's persona */
+.msg-divider { align-self: stretch; display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 13px; }
+.msg-divider::before, .msg-divider::after { content: ""; flex: 1; height: 1px; background: var(--line-strong); }
+.thinking { font-size: 13px; color: var(--ink-2); }
+.thinking > summary { width: fit-content; cursor: pointer; }
+.thinking-text { margin-top: 4px; padding: 4px 10px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; word-break: break-word; }
+.proposal-persona { white-space: pre-wrap; overflow-wrap: anywhere; }
 .dots { display: inline-flex; gap: 4px; padding: 5px 0; }
 .dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); animation: blink 1.2s infinite; }
 .dots i:nth-child(2) { animation-delay: 0.2s; }

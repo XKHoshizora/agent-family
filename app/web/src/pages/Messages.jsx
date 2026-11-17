@@ -1,10 +1,11 @@
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { publishBlock, senderName } from "../state/selectors.js";
+import { isAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
 import { formatSize } from "../data/viewmodel.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
-import { Avatar, Btn } from "../ui/primitives.jsx";
+import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
+import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
 /** The quoted message as the reader may see it: the service says whether it is visible to them. */
@@ -78,7 +79,7 @@ function FileBody({ msg }) {
   );
 }
 
-function Body({ msg }) {
+function Body({ msg, agent }) {
   if (msg.kind === "image" || msg.kind === "file")
     return (
       <>
@@ -89,22 +90,25 @@ function Body({ msg }) {
   return (
     <div className="bubble">
       <Quote quote={msg.quote} />
-      {msg.text}
+      {agent ? <AgentText text={msg.text} /> : msg.text}
     </div>
   );
 }
 
 export function MessageItem({ msg, conv, onReply, flash = false }) {
   const { state, dispatch, actions } = useStore();
-  if (msg.kind === "system")
+  if (msg.kind === "system") {
+    if (msg.system?.event === "topic_reset") return <TopicDivider msg={msg} />;
     return (
       <li className="msg-system" data-msg={msg.id}>
         <span>{msg.text}</span>
       </li>
     );
+  }
   const mine = msg.from === ME;
-  // Read state only in direct chats; "sending" is shown wherever it happens.
-  const showReceipt = mine && conv.type === "human";
+  const agent = !mine && isAgent(state, msg.from);
+  // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
+  const showReceipt = mine && (conv.type === "human" || conv.type === "agent");
   const cancelUpload = () => actions.cancelUpload(msg.clientTxn);
   const retry = () => {
     const block = publishBlock(state, conv);
@@ -117,10 +121,16 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
       <div className="msg-main">
         <div className="msg-meta">
           <strong>{senderName(state, msg.from)}</strong>
+          {agent && <Tag>Agent</Tag>}
+          {agent && <span className="owner">主人：{nameOf(state, ownerOf(state, msg.from))}</span>}
           <time>{msg.at}</time>
         </div>
-        <Body msg={msg} />
+        {agent && <Thinking text={msg.reasoning} />}
+        <Body msg={msg} agent={agent} />
+        {agent && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
         <div className="msg-foot">
+          {agent && msg.stopped && <Tag tone="muted">已停止</Tag>}
+          {agent && msg.truncated && <Tag tone="muted">已截断</Tag>}
           {msg.status === "failed" ? (
             <>
               <span className="failed">

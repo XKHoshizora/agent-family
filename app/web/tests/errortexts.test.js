@@ -181,4 +181,15 @@ describe("the sentences batch 2A names", () => {
     expect(runFailureText({ id: "r", status: "stopped" }, NOW)).toBe("");
     expect(runFailureText(null, NOW)).toBe("");
   });
+
+  it("every error a failed run can carry has its own sentence (none falls back to the generic one)", () => {
+    const failed = (error) => ({ id: "r", status: "failed", error, retryable: true });
+    const codes = ["no_quota", "provider_rejected", "provider_unavailable", "address_not_allowed", "context_too_small", "busy", "rate_limited", "agent_paused", "agent_deleted"];
+    const texts = codes.map((code) => runFailureText(failed(code), NOW));
+    for (const [i, text] of texts.entries()) expect(text, codes[i]).not.toBe("这次没有回复成功。");
+    expect(new Set(texts).size).toBe(codes.length);
+    expect(runFailureText(failed("rate_limited"), NOW)).toBe("发得太快了，请稍后重试。");
+    expect(runFailureText(failed("agent_paused"), NOW)).toBe("它已暂停，这次没有回复。");
+    expect(runFailureText(failed("agent_deleted"), NOW)).toBe("它已删除，这次没有回复。");
+  });
 });
