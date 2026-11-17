@@ -1,19 +1,23 @@
 // @vitest-environment jsdom
-// An Agent's text is shown as Markdown, rendered by a renderer that treats it as hostile: the model writing it can be
-// steered by anything in the conversation, and it is shown in the reader's signed-in page. Raw HTML is text, a URL is a
-// link only when it is http(s), an image is never fetched, nothing gets an id, a handler or a style of its own, and a
-// text too big (or too deep) to render safely is shown as plain text. A person's message is never Markdown.
-import { useTimeLimits } from "./markdown-ready.js";
+// An Agent's text is shown as Markdown, made by a pipeline that treats it as hostile and runs in the Markdown worker
+// (here on this thread: tests/markdown-worker.js), checked again on the main thread and turned into React elements
+// there. Raw HTML is text, a URL is a link only when it is http(s) and always shows its real host, an image is never
+// fetched, nothing gets an id, a handler or a style of its own, and a text too big (or too deep) to render safely is
+// shown as plain text with a note. A person's message is never Markdown. Every assertion is on the final DOM.
+import "./markdown-ready.js";
 import React from "react";
 import { readFileSync } from "node:fs";
 import katex from "katex";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AgentText, StreamingAgentText } from "../src/pages/AgentChatBits.jsx";
+import { AgentText } from "../src/pages/AgentChatBits.jsx";
 import { fitsMarkdown } from "../src/ui/markdownLimits.js";
-import { APP_CLASSES, safeHref } from "../src/ui/Markdown.jsx";
+import { APP_CLASSES, TREE_ELEMENTS, safeHref } from "../src/ui/markdownRules.js";
+import { renderToTree } from "../src/ui/markdownPipeline.js";
+import { SLOW_TEXT_NOTE } from "../src/ui/slowTexts.jsx";
 import { A1, AG1, D1, ME_ID, ANN, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, direct, syncOf, wire } from "./fixtures.js";
 import { click, installBrowser, openApp } from "./harness.jsx";
+import { settle, useWorkers } from "./markdown-worker.js";
 
 /** Elements an Agent's text must never produce under its bubble. */
 const FORBIDDEN = [
@@ -25,6 +29,7 @@ const REL = ["noopener", "noreferrer", "nofollow"];
 let spies;
 let errors;
 beforeEach(() => {
+  useWorkers();
   Object.defineProperty(navigator, "sendBeacon", { value: vi.fn(() => true), configurable: true, writable: true });
   spies = {
     fetch: vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -42,14 +47,27 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** The Agent's text in a bubble, as the conversation shows it. */
-function show(text) {
-  const { container } = render(
-    <div className="bubble">
-      <AgentText text={text} />
-    </div>,
-  );
+const inBubble = (text) => (
+  <div className="bubble">
+    <AgentText text={text} />
+  </div>
+);
+
+/** The Agent's text in a bubble, as the conversation shows it, once the worker's answer has come. */
+async function show(text) {
+  const { container } = render(inBubble(text));
+  await settle();
   return container.firstChild;
+}
+/** Shows the text, then each of `more` in its place (as a text that changes), each once answered. */
+async function showInTurn(text, ...more) {
+  const { container, rerender } = render(inBubble(text));
+  await settle();
+  for (const next of more) {
+    rerender(inBubble(next));
+    await settle();
+  }
+  return container;
 }
 
 /**
@@ -83,6 +101,10 @@ function expectSafe(bubble, { katexSvg = false } = {}) {
     expect(a.getAttribute("target")).toBe("_blank");
     const rel = (a.getAttribute("rel") ?? "").split(/\s+/);
     for (const word of REL) expect(rel, a.outerHTML).toContain(word);
+    // Every link sits in its own isolated wrapper; the host after it, when there is one, is not a link.
+    expect(a.parentElement.matches("span.md-link[dir='auto']"), a.outerHTML).toBe(true);
+    const host = a.nextElementSibling;
+    if (host) expect(host.matches("span.md-host[dir='auto']") && host.querySelector("a") === null, host.outerHTML).toBe(true);
   }
   expect(spies.fetch).not.toHaveBeenCalled();
   expect(spies.xhr).not.toHaveBeenCalled();
@@ -94,10 +116,20 @@ function expectSafe(bubble, { katexSvg = false } = {}) {
 
 const md = (bubble) => bubble.querySelector(".md");
 const hrefs = (bubble) => [...bubble.querySelectorAll("a")].map((a) => a.getAttribute("href"));
+/** The host note after a link, or null. */
+const hostAfter = (a) => (a.nextElementSibling?.matches(".md-host") ? a.nextElementSibling.textContent : null);
 
 describe("what an Agent's Markdown renders to", () => {
-  it("paragraphs, emphasis, strikethrough and inline code", () => {
-    const bubble = show("第一段 *斜体* **粗体** ~~删掉~~ `code`\n\n第二段");
+  it("plain text first, then the rendered text once the worker's tree has come", async () => {
+    const { container } = render(inBubble("**粗体**"));
+    expect(container.textContent).toBe("**粗体**");
+    expect(container.querySelector(".md")).toBeNull();
+    await settle();
+    expect(container.querySelector(".md strong").textContent).toBe("粗体");
+  });
+
+  it("paragraphs, emphasis, strikethrough and inline code", async () => {
+    const bubble = await show("第一段 *斜体* **粗体** ~~删掉~~ `code`\n\n第二段");
     expect(md(bubble)).not.toBeNull();
     expect(bubble.querySelectorAll("p")).toHaveLength(2);
     expect(bubble.querySelector("em").textContent).toBe("斜体");
@@ -107,8 +139,8 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("a line break is a line break in a paragraph, a list item and a heading alike (no stray space); a hard one once", () => {
-    const bubble = show("第一行\n第二行\n\n甲\\\n乙\n\n- 项一行\n  项二行\n\n标题上\n标题下\n===");
+  it("a line break is a line break in a paragraph, a list item and a heading alike (no stray space); a hard one once", async () => {
+    const bubble = await show("第一行\n第二行\n\n甲\\\n乙\n\n- 项一行\n  项二行\n\n标题上\n标题下\n===");
     const [soft, hard] = bubble.querySelectorAll("p");
     for (const [el, text] of [[soft, "第一行第二行"], [hard, "甲乙"], [bubble.querySelector("li"), "项一行项二行"], [bubble.querySelector("h1"), "标题上标题下"]]) {
       expect(el.textContent).toBe(text);
@@ -117,14 +149,14 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("headings h1 to h6, with no id of their own", () => {
-    const bubble = show("# 一\n## 二\n### 三\n#### 四\n##### 五\n###### 六");
+  it("headings h1 to h6, with no id of their own", async () => {
+    const bubble = await show("# 一\n## 二\n### 三\n#### 四\n##### 五\n###### 六");
     for (const [i, text] of ["一", "二", "三", "四", "五", "六"].entries()) expect(bubble.querySelector(`h${i + 1}`).textContent).toBe(text);
     expectSafe(bubble);
   });
 
-  it("lists, nested lists and task lists (a box, never a form control)", () => {
-    const bubble = show("- 甲\n- 乙\n  1. 一\n  2. 二\n\n- [x] 做完\n- [ ] 没做");
+  it("lists, nested lists and task lists (a box, never a form control)", async () => {
+    const bubble = await show("- 甲\n- 乙\n  1. 一\n  2. 二\n\n- [x] 做完\n- [ ] 没做");
     expect(bubble.querySelectorAll("ul > li").length).toBeGreaterThanOrEqual(2);
     expect([...bubble.querySelectorAll("ol > li")].map((li) => li.textContent)).toEqual(["一", "二"]);
     expect(bubble.textContent).toContain("☑ 做完");
@@ -132,15 +164,20 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("block quotes and rules", () => {
-    const bubble = show("> 引用的话\n\n---\n\n后文");
+  it("an ordered list keeps its start", async () => {
+    const bubble = await show("3. 三\n4. 四");
+    expect(bubble.querySelector("ol").getAttribute("start")).toBe("3");
+  });
+
+  it("block quotes and rules", async () => {
+    const bubble = await show("> 引用的话\n\n---\n\n后文");
     expect(md(bubble).querySelector("blockquote").textContent.trim()).toBe("引用的话");
     expect(bubble.querySelector("hr")).not.toBeNull();
     expectSafe(bubble);
   });
 
-  it("a table, inside a horizontally scrolling wrapper", () => {
-    const bubble = show("| 名称 | 数量 |\n|:--|--:|\n| 苹果 | 3 |\n| 梨 | 5 |");
+  it("a table, inside a horizontally scrolling wrapper", async () => {
+    const bubble = await show("| 名称 | 数量 |\n|:--|--:|\n| 苹果 | 3 |\n| 梨 | 5 |");
     const table = bubble.querySelector(".md-table > table");
     expect(table).not.toBeNull();
     expect([...table.querySelectorAll("th")].map((th) => th.textContent)).toEqual(["名称", "数量"]);
@@ -149,8 +186,8 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("a link opens in a new tab, without the opener or the referrer; its tooltip is its real address, not the text's", () => {
-    const bubble = show("看 [文档](https://docs.example/a?b=1#c \"说明\")");
+  it("a link opens in a new tab, without the opener or the referrer; its tooltip is its real address, not the text's", async () => {
+    const bubble = await show("看 [文档](https://docs.example/a?b=1#c \"说明\")");
     const a = bubble.querySelector("a");
     expect(a.textContent).toBe("文档");
     expect(a.getAttribute("href")).toBe("https://docs.example/a?b=1#c");
@@ -159,30 +196,15 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("a link whose text is an address on another host is followed by the real host", () => {
-    const bubble = show(
-      "[https://bank.example/](https://evil.example/ \"https://bank.example/\") 和 [www.bank.example](https://evil.example:8443/x) 和 " +
-        "[https://a.example/x](https://a.example/y) 和 ![https://bank.example/](https://evil.example/p.png) 和 https://plain.example/",
-    );
-    const after = (a) => a.nextSibling?.textContent ?? "";
-    const [bank, www, same, image, plain] = bubble.querySelectorAll("a");
-    expect(bank.getAttribute("title")).toBe("https://evil.example/");
-    expect(after(bank).startsWith(" （实际指向 evil.example）")).toBe(true);
-    expect(after(www).startsWith(" （实际指向 evil.example:8443）")).toBe(true);
-    expect(after(same)).not.toContain("实际指向");
-    expect(after(image).startsWith(" （实际指向 evil.example）")).toBe(true);
-    expect(after(plain)).not.toContain("实际指向");
-    expectSafe(bubble);
-  });
-
-  it("autolinked www. and bare URLs are links like any other", () => {
-    const bubble = show("见 www.example.com 和 https://bare.example/path 以及 <https://angle.example>");
+  it("autolinked www. and bare URLs are links like any other, without the host repeated after them", async () => {
+    const bubble = await show("见 www.example.com 和 https://bare.example/path 以及 <https://angle.example>");
     expect(hrefs(bubble)).toEqual(["http://www.example.com/", "https://bare.example/path", "https://angle.example/"]);
+    for (const a of bubble.querySelectorAll("a")) expect(hostAfter(a), a.textContent).toBeNull();
     expectSafe(bubble);
   });
 
-  it("fenced code is highlighted for a known language, with a 复制 button", () => {
-    const bubble = show("```js\nconst a = 1; // 注释\n```");
+  it("fenced code is highlighted for a known language, with a 复制 button", async () => {
+    const bubble = await show("```js\nconst a = 1; // 注释\n```");
     const code = bubble.querySelector(".md-code pre > code");
     expect(code.textContent).toBe("const a = 1; // 注释\n");
     expect(code.querySelector(".hljs-keyword").textContent).toBe("const");
@@ -197,8 +219,6 @@ describe("what an Agent's Markdown renders to", () => {
     ["tsx", "const a = <b />;"],
     ["jsx", "const a = <b />;"],
     ["json", '{"a": 1}'],
-    ["html", "<div>x</div>"],
-    ["xml", "<a>x</a>"],
     ["css", "a { color: red; }"],
     ["python", "def f(): pass"],
     ["bash", "echo hi"],
@@ -212,117 +232,143 @@ describe("what an Agent's Markdown renders to", () => {
     ["cpp", "int main() {}"],
     ["yaml", "a: 1"],
     ["diff", "+ a\n- b"],
-  ])("highlights %s", (lang, source) => {
-    const bubble = show(`\`\`\`${lang}\n${source}\n\`\`\``);
+  ])("highlights %s", async (lang, source) => {
+    const bubble = await show(`\`\`\`${lang}\n${source}\n\`\`\``);
     expect(bubble.querySelector("pre > code").textContent).toBe(`${source}\n`);
     expect(bubble.querySelector("pre > code span[class^='hljs-']"), lang).not.toBeNull();
   });
 
-  it.each(["mermaid", "plantuml", "kotlin", "markdown", "md", ""])("renders a %s fence (unknown, a diagram, Markdown, or none) as plain code", (lang) => {
-    const source = "graph TD\n  A-->B";
-    const bubble = show(`\`\`\`${lang}\n${source}\n\`\`\``);
-    const code = bubble.querySelector("pre > code");
-    expect(code.textContent).toBe(`${source}\n`);
-    expect(code.querySelector("span")).toBeNull();
-    expect(bubble.querySelector("svg")).toBeNull();
-  });
+  it.each(["mermaid", "plantuml", "kotlin", "markdown", "md", "html", "xml", "svg", "xhtml", ""])(
+    "renders a %s fence (unknown, a diagram, Markdown, HTML/XML, or none) as plain code",
+    async (lang) => {
+      const source = "graph TD\n  A-->B <script>x</script>";
+      const bubble = await show(`\`\`\`${lang}\n${source}\n\`\`\``);
+      const code = bubble.querySelector("pre > code");
+      expect(code.textContent).toBe(`${source}\n`);
+      expect(code.querySelector("span")).toBeNull();
+      expect(bubble.querySelector("svg, script")).toBeNull();
+    },
+  );
 
   it("复制 copies the code; a refused clipboard fails quietly", async () => {
     const writeText = vi.fn(async () => {});
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    show("```python\nprint('hi')\n```");
+    await show("```python\nprint('hi')\n```");
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "复制" })));
     expect(writeText).toHaveBeenCalledWith("print('hi')\n");
     expect(screen.getByRole("button", { name: "已复制" })).toBeTruthy();
     cleanup();
 
     Object.defineProperty(navigator, "clipboard", { value: { writeText: vi.fn(async () => Promise.reject(new Error("denied"))) }, configurable: true });
-    show("```\nx\n```");
+    await show("```\nx\n```");
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "复制" })));
     expect(screen.getByRole("button", { name: "复制" })).toBeTruthy();
     cleanup();
 
     Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
-    show("```\nx\n```");
+    await show("```\ny\n```");
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "复制" })));
     expect(screen.getByRole("button", { name: "复制" })).toBeTruthy();
     expect(errors).not.toHaveBeenCalled();
   });
 
-  // The note cannot be dodged: invisible characters, words around the address, no scheme, `//`, look-alike letters.
-  it.each([
-    ["a zero-width space before the scheme", "[​https://bank.example/](https://evil.example/)", "evil.example"],
-    ["a word joiner before the scheme", "[⁠https://bank.example/](https://evil.example/)", "evil.example"],
-    ["a left-to-right mark before the scheme", "[‎https://bank.example/](https://evil.example/)", "evil.example"],
-    ["a zero-width space inside the host", "[https://bank​.example/](https://evil.example/)", "evil.example"],
-    ["a soft hyphen inside the host", "[https://bank­.example/](https://evil.example/)", "evil.example"],
-    ["a fullwidth colon", "[https：//bank.example/](https://evil.example/)", "evil.example"],
-    ["words before the address", "[登录 https://bank.example/](https://evil.example/)", "evil.example"],
-    ["a protocol-relative address", "[//bank.example/](https://evil.example/)", "evil.example"],
-    ["a bare domain", "[bank.example](https://evil.example/)", "evil.example"],
-    ["the address in a code span", "[`https://bank.example/`](https://evil.example/)", "evil.example"],
-    ["the address in emphasis", "[*https://bank.example/*](https://evil.example/)", "evil.example"],
-    ["a user name that looks like the host", "[https://bank.example@evil.example/](https://evil.example/)", "evil.example"],
-    ["an ideographic full stop for a dot", "[bank。example](https://evil.example/)", "evil.example"],
-    ["an IPv4 address", "[http://10.0.0.1/](https://evil.example/)", "evil.example"],
-    ["an IDN look-alike target", "[https://apple.com/](https://аррӏе.com/)", "xn--80ak6aa92e.com"],
-  ])("a link whose text shows another host gets the note: %s", (_, text, host) => {
-    const bubble = show(text);
-    expect(bubble.querySelector("a").nextSibling?.textContent).toBe(` （实际指向 ${host}）`);
-    expectSafe(bubble);
-  });
-
-  it.each([
-    ["plain words", "[文档](https://example.com/docs)"],
-    ["an autolink", "https://example.com/docs"],
-    ["the text equal to the target", "[https://example.com/a](https://example.com/a)"],
-    ["the same host, other path", "[example.com/a](https://example.com/b)"],
-    ["www. on one side only", "[https://www.example.com/](https://example.com/b)"],
-    ["the same IDN host on both sides", "[https://аррӏе.com/](https://аррӏе.com/)"],
-    ["a version number, not a host", "[v1.2](https://example.com/releases)"],
-  ])("an ordinary link gets no note: %s", (_, text) => {
-    expect(show(text).textContent).not.toContain("实际指向");
-  });
-
-  it("maths is $$…$$ only: a single $ is text (`$5 和 $10` stays a sentence)", () => {
-    const bubble = show("价格 $5 和 $10，以及 $x$");
+  it("maths is $$…$$ only: a single $ is text (`$5 和 $10` stays a sentence)", async () => {
+    const bubble = await show("价格 $5 和 $10，以及 $x$");
     expect(bubble.textContent).toBe("价格 $5 和 $10，以及 $x$");
     expect(bubble.querySelector(".katex")).toBeNull();
   });
 
-  it("inline and block maths, and a ```math fence", () => {
-    const bubble = show("质能 $$E=mc^2$$ 与\n\n$$\n\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\n$$\n\n```math\n\\sqrt{2}\n```");
+  it("inline and block maths, and a ```math fence", async () => {
+    const bubble = await show("质能 $$E=mc^2$$ 与\n\n$$\n\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\n$$\n\n```math\n\\sqrt{2}\n```");
     expect(bubble.querySelectorAll(".katex")).toHaveLength(3);
     expect(bubble.querySelectorAll(".katex-display")).toHaveLength(2);
     expect(bubble.querySelector("annotation").textContent).toBe("E=mc^2");
+    // KaTeX's MathML is in its namespace, its layout styles are KaTeX's own.
+    expect(bubble.querySelector("math").namespaceURI).toBe("http://www.w3.org/1998/Math/MathML");
+    expect(bubble.querySelector(".katex [style]")).not.toBeNull();
     // KaTeX draws a few shapes (here the root sign) as inline SVG: allowed inside its own output only.
     expect(bubble.querySelector(".katex svg")).not.toBeNull();
     expectSafe(bubble, { katexSvg: true });
   });
 
-  it("maths KaTeX cannot read is shown as its source, without the error message", () => {
-    const bubble = show("坏的 $$\\frac{1}{$$ 和 $$\\notacommand{x}$$");
+  it("maths KaTeX cannot read is shown as its source, without the error message", async () => {
+    const bubble = await show("坏的 $$\\frac{1}{$$ 和 $$\\notacommand{x}$$");
     expect(bubble.textContent).toContain("\\notacommand{x}");
     expect(bubble.textContent).not.toMatch(/ParseError|Undefined control sequence/);
     expect(bubble.querySelector("[title]")).toBeNull();
     expectSafe(bubble);
   });
 
-  it("a maths block over 2 000 characters is shown as code, not typeset", () => {
+  it("a maths block over 2 000 characters is shown as code, not typeset", async () => {
     const long = "x+".repeat(1001);
-    const bubble = show(`$$\n${long}\n$$\n\n行内 $$${long}$$\n\n\`\`\`math\n${long}\n\`\`\``);
+    const bubble = await show(`$$\n${long}\n$$\n\n行内 $$${long}$$\n\n\`\`\`math\n${long}\n\`\`\``);
     expect(bubble.querySelector(".katex")).toBeNull();
     expect(bubble.querySelectorAll("pre > code")).toHaveLength(2);
     expect(bubble.querySelectorAll("p > code")).toHaveLength(1);
     expect(bubble.querySelector("pre > code").textContent).toContain(long);
   });
 
-  it("footnotes: the reference and the note, with no ids and no in-page links", () => {
-    const bubble = show("正文[^1]。\n\n[^1]: 注释内容");
+  it("footnotes: the reference and the note, with no ids and no in-page links", async () => {
+    const bubble = await show("正文[^1]。\n\n[^1]: 注释内容");
     expect(bubble.querySelector("sup").textContent).toBe("1");
     expect(bubble.textContent).toContain("注释内容");
     expect(bubble.querySelector("a")).toBeNull();
     expectSafe(bubble);
+  });
+});
+
+describe("every link shows where it goes", () => {
+  it("an ordinary link is its text followed by its real host, in a muted note that is not a link", async () => {
+    const bubble = await show("看 [文档](https://www.docs.example/a/b?c=1) 和 [登录](https://evil.example:8443/x)");
+    const [docs, login] = bubble.querySelectorAll("a");
+    expect(docs.textContent).toBe("文档");
+    expect(hostAfter(docs)).toBe("（docs.example）");
+    expect(hostAfter(login)).toBe("（evil.example:8443）");
+    expect(bubble.textContent).toBe("看 文档（docs.example） 和 登录（evil.example:8443）");
+    expectSafe(bubble);
+  });
+
+  it.each([
+    ["the address itself", "[https://example.com/docs](https://example.com/docs)"],
+    ["the address without its final slash", "[https://example.com](https://example.com/)"],
+    ["the host", "[example.com](https://example.com/b)"],
+    ["the host with www.", "[www.example.com](https://example.com/b)"],
+    ["the host without www.", "[example.com](https://www.example.com/b)"],
+    ["a bare autolink", "https://example.com/docs"],
+    ["the address in another case", "[HTTPS://EXAMPLE.COM/](https://example.com/)"],
+    ["the address with its path unencoded", "[https://example.com/文档](https://example.com/文档)"],
+  ])("a link whose text is its address shows no duplicate: %s", async (_, text) => {
+    const bubble = await show(text);
+    expect(hostAfter(bubble.querySelector("a"))).toBeNull();
+  });
+
+  it("a link whose text shows nothing is labelled by its address", async () => {
+    const bubble = await show("[](https://evil.example/x) [\u200B](https://evil.example/y)");
+    const [a, b] = bubble.querySelectorAll("a");
+    expect(a.textContent).toBe("https://evil.example/x");
+    expect(b.textContent).toBe("https://evil.example/y");
+    expect(hostAfter(a)).toBeNull();
+    expectSafe(bubble);
+  });
+
+  it("a long host keeps its end (its registrable part)", async () => {
+    const host = `${"a".repeat(63)}.${"b".repeat(63)}.example`;
+    const bubble = await show(`[x.example](https://${host}/)`);
+    const shown = hostAfter(bubble.querySelector("a"));
+    expect(shown).toBe(`（…${host.slice(-39)}）`);
+    expect(shown.length).toBe(42);
+  });
+
+  it("bidirectional controls are taken out before anything is shown, plain or rich", async () => {
+    const bubble = await show("请访问 [\u202Eelpmaxe.knab](https://evil.example/) \u2067看\u2069 \u200F。");
+    expect(bubble.textContent).toBe("请访问 elpmaxe.knab（evil.example） 看 。");
+    expect(bubble.textContent).not.toMatch(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/);
+    cleanup();
+    useWorkers(() => {
+      throw new Error("no workers here");
+    });
+    const plain = await show("\u202E倒过来\u202C");
+    expect(plain.textContent).toBe("倒过来");
   });
 });
 
@@ -364,59 +410,69 @@ describe("what an Agent's Markdown never renders", () => {
     ["a link to an address with a user name", "[x](https://bank.example@evil.example/) [y](https://u:p@evil.example/)"],
     ["an HTML comment and a CDATA section", "<!-- <img src=x onerror=alert(1)> --><![CDATA[<script>alert(1)</script>]]>"],
     ["a link with a quoting title", "[x](https://ok.example/ \"\\\" onmouseover=\\\"alert(1)\")"],
+    ["bidi controls around a link", "\u202E[gnp.exe](https://evil.example/)\u202C \u2066x\u2069"],
   ];
 
-  it.each(HOSTILE)("%s", (_, text) => {
-    expectSafe(show(text));
+  it.each(HOSTILE)("%s", async (_, text) => {
+    expectSafe(await show(text));
   });
 
-  it("raw HTML is shown as text, not parsed", () => {
-    const bubble = show('<img src=x onerror="alert(1)"> and <b>bold</b>');
+  it("raw HTML is shown as text, not parsed", async () => {
+    const bubble = await show('<img src=x onerror="alert(1)"> and <b>bold</b>');
     expect(bubble.textContent).toContain('<img src=x onerror="alert(1)">');
     expect(bubble.textContent).toContain("<b>bold</b>");
     expect(bubble.querySelector("b")).toBeNull();
   });
 
-  it("a URL that is not http(s) is shown as its text, not as a link", () => {
+  it("a URL that is not http(s) is shown as its text, not as a link", async () => {
     for (const [text, shown] of [
       ["[点我](javascript:alert(1))", "点我"],
       ["[x](//evil.example/a)", "x"],
       ["[退出](/api/auth/sign-out)", "退出"],
       ["<javascript:alert(1)>", "javascript:alert(1)"],
     ]) {
-      const bubble = show(text);
+      const bubble = await show(text);
       expect(bubble.querySelector("a"), text).toBeNull();
       expect(bubble.textContent.trim()).toBe(shown);
       cleanup();
     }
   });
 
-  it("an image becomes a link labelled by its alt text (or its URL), never an <img>", () => {
-    const bubble = show("![一张图](https://evil.example/p.png) ![](https://evil.example/q.png)");
-    expect([...bubble.querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
-      ["一张图", "https://evil.example/p.png"],
-      ["https://evil.example/q.png", "https://evil.example/q.png"],
+  it("an image becomes a link labelled by its alt text (or its URL), never an <img>", async () => {
+    const bubble = await show("![一张图](https://evil.example/p.png) ![](https://evil.example/q.png)");
+    expect([...bubble.querySelectorAll("a")].map((a) => [a.textContent, a.getAttribute("href"), hostAfter(a)])).toEqual([
+      ["一张图", "https://evil.example/p.png", "（evil.example）"],
+      ["https://evil.example/q.png", "https://evil.example/q.png", null],
     ]);
     expect(bubble.querySelector("img")).toBeNull();
   });
 
-  it("an image inside a link is the link's text, never a link in a link", () => {
-    const bubble = show("[![图](https://evil.example/p.png)](https://ok.example/)");
+  it("an image inside a link is the link's text, never a link in a link", async () => {
+    const bubble = await show("[![图](https://evil.example/p.png)](https://ok.example/)");
     expect(hrefs(bubble)).toEqual(["https://ok.example/"]);
     expect(bubble.querySelector("a").textContent).toBe("图");
   });
 
-  it("KaTeX's \\tag keeps its label but not the app's `tag` class", () => {
-    const bubble = show("$$\nx = 1 \\tag*{假标签}\n$$");
+  it("KaTeX's \\tag keeps its label but not the app's `tag` class", async () => {
+    const bubble = await show("$$\nx = 1 \\tag*{假标签}\n$$");
     expect(bubble.querySelector(".katex-display").textContent).toContain("假标签");
     expect(bubble.querySelector(".tag")).toBeNull();
   });
 
-  it("KaTeX output carrying the app's classes (as KaTeX before 0.18 gave \\tag) keeps only its own", () => {
+  it("KaTeX output carrying the app's classes (as KaTeX before 0.18 gave \\tag) keeps only its own", async () => {
     vi.spyOn(katex, "renderToString").mockReturnValue('<span class="katex"><span class="tag card msg bubble btn row mord">x</span></span>');
-    const bubble = show("$$y^{classes}$$");
+    const bubble = await show("$$y^{classes}$$");
     expect(bubble.querySelector(".katex > span").className).toBe("mord");
     expect(bubble.querySelector(".tag, .card, .msg, .bubble, .btn, .row")).toBeNull();
+  });
+
+  it("KaTeX output with a style that could fetch something, or a fixed position, keeps none of it", async () => {
+    vi.spyOn(katex, "renderToString").mockReturnValue(
+      '<span class="katex"><span style="background-image:url(https://evil.example/x);position:fixed;height:1em;color:expression(alert(1))">x</span></span>',
+    );
+    const bubble = await show("$$y^{styles}$$");
+    expect(bubble.querySelector(".katex > span").getAttribute("style")).toBe("height: 1em;");
+    expectSafe(bubble);
   });
 
   it("the classes left out of KaTeX's output are every class styles.css styles", () => {
@@ -444,44 +500,43 @@ describe("safeHref", () => {
 /** The brief's "within a second", with room for a machine that runs other work at the same time. */
 const WALL_MS = 3000;
 const elementsIn = (bubble) => bubble.querySelectorAll("*").length;
-const timed = (text) => {
+const timed = async (text) => {
   const start = performance.now();
-  const bubble = show(text);
+  const bubble = await show(text);
   return { bubble, ms: performance.now() - start };
 };
+/** Shown as its plain text with the note: not rendered. */
+const plainShown = (bubble, text) => {
+  expect(md(bubble)).toBeNull();
+  expect(bubble.textContent).toBe(`${text}${SLOW_TEXT_NOTE}`);
+};
 
-describe("what is shown as plain text without trying", () => {
-  const plainShown = (bubble, text) => {
-    expect(md(bubble)).toBeNull();
-    expect(bubble.textContent).toBe(text);
-  };
-
-  it("over 50 000 characters", () => {
+describe("what is shown as plain text, with the note, without being parsed", () => {
+  it("over 50 000 characters", async () => {
     const text = `**粗** ${"字".repeat(50000)}`;
-    plainShown(show(text), text);
+    plainShown(await show(text), text);
   });
 
-  it("a line over 10 000 characters", () => {
+  it("a line over 10 000 characters", async () => {
     const text = `# 标题\n${"a".repeat(10001)}`;
-    plainShown(show(text), text);
+    plainShown(await show(text), text);
   });
 
-  it("a 5 000-row table, within a second", () => {
+  it("a 5 000-row table, within a second", async () => {
     const text = `| a | b |\n|---|---|\n${"| 1 | 2 |\n".repeat(5000)}`;
-    const { bubble, ms } = timed(text);
+    const { bubble, ms } = await timed(text);
     plainShown(bubble, text);
-    expect(elementsIn(bubble)).toBe(0);
+    expect(elementsIn(bubble)).toBe(2); // the text's wrapper and the note
     expect(ms).toBeLessThan(WALL_MS);
   });
 
-  it("lists nested 200 deep (by indentation or on one line), within a second", () => {
+  it("lists nested 200 deep (by indentation or on one line), within a second", async () => {
     const indented = Array.from({ length: 200 }, (_, i) => `${"  ".repeat(i)}- 第${i}层`).join("\n");
     const inline = `${"- ".repeat(200)}x`;
     const quotes = `${"> ".repeat(200)}x`;
     for (const text of [indented, inline, quotes]) {
-      const { bubble, ms } = timed(text);
+      const { bubble, ms } = await timed(text);
       plainShown(bubble, text);
-      expect(elementsIn(bubble)).toBe(0);
       expect(ms).toBeLessThan(WALL_MS);
       cleanup();
     }
@@ -502,6 +557,14 @@ describe("what is shown as plain text without trying", () => {
     expect(fitsMarkdown("```\nx\n```\n".repeat(301))).toBe(false);
     expect(fitsMarkdown("$$x$$\n\n".repeat(1000))).toBe(true);
     expect(fitsMarkdown("$$x$$\n\n".repeat(1001))).toBe(false);
+    // `<` anywhere, code included: 2 000 at most.
+    expect(fitsMarkdown("a<b ".repeat(2000))).toBe(true);
+    expect(fitsMarkdown("a<b ".repeat(2001))).toBe(false);
+    expect(fitsMarkdown(`\`\`\`html\n${"<i>\n".repeat(2001)}\`\`\``)).toBe(false);
+    // Fences inside quotes and list items count too, each fence line (opening and closing).
+    expect(fitsMarkdown("> ```js\n> x\n> ```\n\n".repeat(150))).toBe(true);
+    expect(fitsMarkdown("> ```js\n> x\n> ```\n\n".repeat(151))).toBe(false);
+    expect(fitsMarkdown("- ```js\n  x\n- ~~~\n".repeat(151))).toBe(false);
     // Table rows and $$ inside a code fence are code: not counted.
     expect(fitsMarkdown(`\`\`\`\n${"| a | $$ |\n".repeat(2001)}\`\`\``)).toBe(true);
     expect(fitsMarkdown(`${"- ".repeat(30)}x`)).toBe(true);
@@ -525,36 +588,35 @@ describe("what is shown as plain text without trying", () => {
   });
 });
 
-/** Rendered or shown plain, safely, within the time, with no more than `maxElements` elements made. */
-function bounded(text, maxElements = 12000) {
-  const { bubble, ms } = timed(text);
+/** Rendered or shown plain, safely, within the time, with no more elements than one text's tree may make. */
+async function bounded(text) {
+  const { bubble, ms } = await timed(text);
   expect(ms, text.slice(0, 40)).toBeLessThan(WALL_MS);
-  expect(elementsIn(bubble), text.slice(0, 40)).toBeLessThanOrEqual(maxElements);
+  expect(elementsIn(bubble), text.slice(0, 40)).toBeLessThanOrEqual(3 * TREE_ELEMENTS + 2);
   expectSafe(bubble, { katexSvg: true });
   cleanup();
   return bubble;
 }
 
 describe("half-written and pathological text", () => {
-  it("an unclosed code fence renders as code to the end", () => {
-    const bubble = show("前文\n\n```js\nconst a = 1;\nconst b");
+  it("an unclosed code fence renders as code to the end", async () => {
+    const bubble = await show("前文\n\n```js\nconst a = 1;\nconst b");
     expect(bubble.querySelector("pre > code").textContent).toBe("const a = 1;\nconst b\n");
     expect(errors).not.toHaveBeenCalled();
   });
 
-  it("an unbalanced $$ is text; an unclosed maths block is its plain text until it closes, never typeset half-written", () => {
+  it("an unbalanced $$ is text; an unclosed maths block is its plain text until it closes, never typeset half-written", async () => {
     const typesets = vi.spyOn(katex, "renderToString");
-    expect(show("价格 $$5，没有闭合").textContent).toBe("价格 $$5，没有闭合");
+    expect((await show("价格 $$5，没有闭合")).textContent).toBe("价格 $$5，没有闭合");
     cleanup();
     const open = "前文\n\n$$\n\\frac{1}{2open}";
-    const { container, rerender } = render(<div className="bubble"><AgentText text={open} /></div>);
+    const container = await showInTurn(open);
     expect(container.querySelector(".md-plain").textContent).toBe("$$\n\\frac{1}{2open}");
-    rerender(<div className="bubble"><AgentText text={`${open}\n\\cdot 3`} /></div>);
-    rerender(<div className="bubble"><AgentText text={"前文\n\n```math\n\\sqrt{2open}"} /></div>);
-    expect(container.querySelector(".md-plain").textContent).toBe("```math\n\\sqrt{2open}");
+    const later = await showInTurn(`${open}\n\\cdot 3`, "前文\n\n```math\n\\sqrt{2open}");
+    expect(later.querySelector(".md-plain").textContent).toBe("```math\n\\sqrt{2open}");
     expect(typesets).not.toHaveBeenCalled();
-    rerender(<div className="bubble"><AgentText text={`${open}\n\\cdot 3\n$$`} /></div>);
-    expect(container.querySelector(".katex-display")).not.toBeNull();
+    const closed = await showInTurn(`${open}\n\\cdot 3\n$$`);
+    expect(closed.querySelector(".katex-display")).not.toBeNull();
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(errors).not.toHaveBeenCalled();
   });
@@ -595,60 +657,30 @@ describe("half-written and pathological text", () => {
     ["many links", Array.from({ length: 20 }, () => "[a](https://a.example/) ".repeat(25)).join("\n\n")],
     ["many formulas", Array.from({ length: 10 }, () => "$$x_1$$ ".repeat(20)).join("\n\n")],
     ["many code blocks", "```js\nlet a = 1;\n```\n".repeat(100)],
-  ])("%s: rendered or plain within a second, without an error", (_, text) => {
-    bounded(asLines(text));
+  ])("%s: rendered or plain within a second, without an error", async (_, text) => {
+    await bounded(asLines(text));
   });
 
-  it("a text the parser nests too deeply is shown as its plain text", () => {
+  it("a text the parser nests too deeply is shown as its plain text, with the note", async () => {
     const text = "*a _b ".repeat(200) + "x" + " b_ a*".repeat(200);
     expect(fitsMarkdown(text)).toBe(true);
-    const bubble = show(text);
-    expect(bubble.querySelector(".md .md-plain").textContent).toBe(text);
-    expect(bubble.querySelector("em, strong")).toBeNull();
+    plainShown(await show(text), text);
   });
 
-  it("a text with more than 500 formulas typesets the first 500 and shows the rest as code", () => {
-    const bubble = show(Array.from({ length: 6 }, () => "$$x$$ ".repeat(100)).join("\n\n"));
-    expect(bubble.querySelectorAll(".katex")).toHaveLength(500);
-    expect(bubble.querySelectorAll("p > code")).toHaveLength(100);
-  });
-
-  it("every prefix of a reply being written renders without an error", async () => {
-    const reply = [
-      "# 计划",
-      "",
-      "1. **第一步**：读 [文档](https://docs.example/)",
-      "2. 第二步 $$a^2+b^2=c^2$$",
-      "",
-      "| 列 | 值 |",
-      "|---|---|",
-      "| x | 1 |",
-      "",
-      "```python",
-      "def f(x):",
-      "    return x * 2",
-      "```",
-      "",
-      "$$",
-      "\\int_0^1 x\\,dx",
-      "$$",
-      "",
-      "> 结束[^1]",
-      "",
-      "[^1]: 注",
-    ].join("\n");
-    // (As the streaming bubble renders it: at a lower priority, each piece settled before the next.)
-    const { container, rerender } = render(<div className="bubble"><StreamingAgentText text="" /></div>);
-    for (let i = 1; i <= reply.length; i += 1) {
-      await act(async () => rerender(<div className="bubble"><StreamingAgentText text={reply.slice(0, i)} /></div>));
-      expect(container.querySelector(".md"), reply.slice(0, i)).not.toBeNull();
-      if (i === 30) expect(container.querySelector("strong")?.textContent).toBe("第一步"); // the latest piece is shown
-      if (i % 10 === 0) expectSafe(container.firstChild, { katexSvg: true });
-    }
-    expectSafe(container.firstChild, { katexSvg: true });
-    expect(container.querySelector("h1").textContent).toBe("计划");
-    expect(container.querySelector(".katex-display")).not.toBeNull();
-    expect(container.querySelector(".hljs-keyword").textContent).toBe("def");
+  it("a text with more than 500 formulas typesets no more than its first 500, and the rest are code", () => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    const text = Array.from({ length: 6 }, () => "$$q$$ ".repeat(100)).join("\n\n");
+    const katexRoots = (result) => (JSON.stringify(result.tree).match(/"katex"/g) ?? []).length;
+    // Only the count in the way (the output and element caps lifted): exactly 500 typeset, 100 code.
+    const counted = renderToTree(text, { now: () => 0, limits: { katexTextOutput: Infinity, treeElements: Infinity } });
+    expect(katexRoots(counted)).toBe(500);
+    expect(JSON.stringify(counted.tree).match(/\{"tag":"code","children":\["q"\]\}/g)).toHaveLength(100);
+    expect(typesets.mock.calls.length).toBeLessThanOrEqual(1); // one formula, typeset once and kept
+    // As the app has it, the text's KaTeX output cap stops it sooner.
+    const capped = renderToTree(text, { now: () => 0 });
+    expect(katexRoots(capped)).toBeGreaterThan(0);
+    expect(katexRoots(capped)).toBeLessThan(500);
+    expect(capped.elements).toBeLessThanOrEqual(TREE_ELEMENTS);
   });
 });
 
@@ -656,40 +688,40 @@ describe("the work a text can cause is bounded", () => {
   const wideTable = (cols, rows, row = "x") => `${"|a".repeat(cols)}|\n${"|-".repeat(cols)}|\n${`${row}\n`.repeat(rows)}`;
   const cells = (bubble) => bubble.querySelectorAll("td, th").length;
 
-  it("a table with more | than a text may have is shown plain without being parsed", () => {
+  it("a table with more | than a text may have is shown plain without being parsed", async () => {
     for (const text of [wideTable(2000, 20000), wideTable(100, 60, `${"|b".repeat(100)}|`), Array.from({ length: 1200 }, () => "|a|b|\n|-|-|\n|c|d|").join("\n\n")]) {
       expect(fitsMarkdown(text)).toBe(false);
-      const { bubble, ms } = timed(text);
-      expect(md(bubble)).toBeNull();
-      expect(elementsIn(bubble)).toBe(0);
+      const { bubble, ms } = await timed(text);
+      plainShown(bubble, text);
       expect(ms).toBeLessThan(WALL_MS);
       cleanup();
     }
   });
 
-  it("a table that would have more than 5 000 cells (rows padded to a wide header, pipes or none) is shown as plain text", () => {
-    for (const text of [wideTable(300, 2000), wideTable(60, 100), wideTable(100, 300, "|b|")]) {
+  it("a table that would have more than 600 cells (rows padded to a wide header, pipes or none) is shown plain, with the note", async () => {
+    for (const text of [wideTable(300, 2000), wideTable(60, 10), wideTable(100, 300, "|b|"), wideTable(6, 100, "|1|2|3|4|5|6|")]) {
       expect(fitsMarkdown(text)).toBe(true);
-      const { bubble, ms } = timed(text);
+      const { bubble, ms } = await timed(text);
       expect(cells(bubble)).toBe(0);
-      expect(bubble.querySelector(".md-plain").textContent).toBe(text);
+      plainShown(bubble, text);
       expect(ms).toBeLessThan(WALL_MS);
       cleanup();
     }
   });
 
-  it("a wide table within the cap is rendered, padded as GFM pads it", () => {
-    const bubble = show(wideTable(20, 40, `${"|b".repeat(20)}|`));
+  it("a table within the cap is rendered, padded as GFM pads it", async () => {
+    const bubble = await show(wideTable(20, 28, `${"|b".repeat(20)}|`)); // 29 rows × 20 = 580 cells
     expect(bubble.querySelectorAll("th")).toHaveLength(20);
-    expect(bubble.querySelectorAll("td")).toHaveLength(800);
-    expect(show(wideTable(5, 3)).querySelectorAll("td")).toHaveLength(15);
+    expect(bubble.querySelectorAll("td")).toHaveLength(560);
+    cleanup();
+    expect((await show(wideTable(5, 3))).querySelectorAll("td")).toHaveLength(15);
   });
 
-  it("a formula that defines macros is shown as code, never typeset (the reviewer's 10×10×10×100 expansion)", () => {
+  it("a formula that defines macros is shown as code, never typeset (the reviewer's 10×10×10×100 expansion)", async () => {
     const typesets = vi.spyOn(katex, "renderToString");
     const macro = `\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(100)}}}}`;
     const others = ["\\gdef\\b{y}\\b", "\\newcommand{\\c}{z}\\c", "\\let\\d=\\alpha \\d", "\\color{#ff0000}{r}", "\\global\\def\\e{1}"];
-    const { bubble, ms } = timed([`$$\n${macro}\n$$`, ...others.map((tex) => `$$${tex}$$`)].join("\n\n"));
+    const { bubble, ms } = await timed([`$$\n${macro}\n$$`, ...others.map((tex) => `$$${tex}$$`)].join("\n\n"));
     expect(typesets).not.toHaveBeenCalled();
     expect(bubble.querySelector(".katex")).toBeNull();
     expect(bubble.querySelector("pre > code").textContent).toBe(`${macro}\n`);
@@ -697,69 +729,75 @@ describe("the work a text can cause is bounded", () => {
     expect(ms).toBeLessThan(WALL_MS);
   });
 
-  it("KaTeX output over 100 000 characters is discarded (the formula shown as code), and not typeset again", () => {
+  it("KaTeX output over 100 000 characters is discarded (the formula shown as code), and not typeset again", async () => {
     const typesets = vi.spyOn(katex, "renderToString");
     const big = `x^{1}`.repeat(380); // 1 900 characters, ~180 000 of HTML
     const text = `$$\n${big}\n$$`;
-    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
+    const container = await showInTurn(text);
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(typesets.mock.results[0].value.length).toBeGreaterThan(100000);
     expect(container.querySelector(".katex")).toBeNull();
     expect(container.querySelector("pre > code").textContent).toBe(big);
-    rerender(<div className="bubble"><AgentText text={`${text}\n\n后文`} /></div>);
+    const again = await showInTurn(`${text}\n\n后文`);
     expect(typesets).toHaveBeenCalledTimes(1);
-    expect(container.querySelector(".katex")).toBeNull();
+    expect(again.querySelector(".katex")).toBeNull();
+  });
+
+  it("a text's KaTeX output is capped at 100 000 characters, kept results included", () => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    const big = (i) => `$$\n${i}+${"x^{1}".repeat(100)}\n$$`; // ~48 000 characters of HTML each
+    const text = [200, 201, 202].map(big).join("\n\n");
+    const first = renderToTree(text, { now: () => 0, limits: { treeElements: Infinity, treeDepth: Infinity } });
+    const sizes = typesets.mock.results.map(({ value }) => value.length);
+    expect(sizes.every((size) => size > 40000 && size <= 100000)).toBe(true);
+    const shown = JSON.stringify(first.tree);
+    expect(shown.match(/"katex-display"/g)).toHaveLength(2);
+    expect(typesets.mock.calls.length).toBeLessThanOrEqual(3);
   });
 
   /** A clock that moves only while KaTeX works: each typeset "takes" `cost(tex)` milliseconds. */
   function slowKatex(cost) {
-    let clock = 1000;
-    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const clock = { now: 1000 };
     const real = katex.renderToString;
-    return vi.spyOn(katex, "renderToString").mockImplementation((tex, options) => {
-      clock += cost(tex);
+    const typesets = vi.spyOn(katex, "renderToString").mockImplementation((tex, options) => {
+      clock.now += cost(tex);
       return real.call(katex, tex, options);
     });
+    return { typesets, now: () => clock.now };
   }
+  const katexIn = (result) => (JSON.stringify(result.tree).match(/"className":\["katex"\]/g) ?? []).length;
 
-  describe("within the app's time limits", () => {
-  useTimeLimits();
-
-  it("past 150 ms of KaTeX in one text the remaining formulas are code; the next pieces typeset the rest", () => {
-    const typesets = slowKatex(() => 40);
+  it("past 100 ms of KaTeX in one text the remaining formulas are code; the next pieces typeset the rest", () => {
+    const { typesets, now } = slowKatex(() => 40);
     const formulas = Array.from({ length: 8 }, (_, i) => `$$b_{${i}}^{budget}$$`).join(" ");
-    const { container, rerender } = render(<div className="bubble"><AgentText text={formulas} /></div>);
-    // 40, 80, 120, 160 ms: after the fourth the budget is spent.
-    expect(typesets).toHaveBeenCalledTimes(4);
-    expect(container.querySelectorAll(".katex")).toHaveLength(4);
-    expect(container.querySelectorAll("p > code")).toHaveLength(4);
-    rerender(<div className="bubble"><AgentText text={`${formulas} 。`} /></div>);
-    expect(typesets).toHaveBeenCalledTimes(8);
-    expect(container.querySelectorAll(".katex")).toHaveLength(8);
+    // 40, 80, 120 ms: after the third the budget is spent.
+    const first = renderToTree(formulas, { now });
+    expect(typesets).toHaveBeenCalledTimes(3);
+    expect(katexIn(first)).toBe(3);
+    renderToTree(`${formulas} 。`, { now });
+    expect(typesets).toHaveBeenCalledTimes(6);
+    expect(katexIn(renderToTree(`${formulas} 。。`, { now }))).toBe(8);
   });
 
   it("a formula that alone takes too long spends the text's budget, and is never typeset again", () => {
-    const typesets = slowKatex((tex) => (tex.includes("slow") ? 300 : 1));
+    const { typesets, now } = slowKatex((tex) => (tex.includes("slow") ? 300 : 1));
     const text = "$$\\text{slow}^{once}$$ 和 $$q^{fast}$$";
-    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
+    const first = renderToTree(text, { now });
     expect(typesets).toHaveBeenCalledTimes(1); // the slow one spent the budget: the other is code this time
-    expect(container.querySelectorAll(".katex")).toHaveLength(1);
-    expect(container.querySelector("p > code").textContent).toBe("q^{fast}");
-    for (const tail of [" 。", " 。。", " 。。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
+    expect(katexIn(first)).toBe(1);
+    for (const tail of [" 。", " 。。", " 。。。"]) renderToTree(text + tail, { now });
     expect(typesets).toHaveBeenCalledTimes(2); // the fast one, once; the slow one never again (shown while kept)
-    expect(container.querySelectorAll(".katex")).toHaveLength(2);
-  });
+    expect(katexIn(renderToTree(`${text} 。。。。`, { now }))).toBe(2);
   });
 
-  it("typeset formulas and highlighted code are used again unchanged, in every bubble and on every piece", () => {
+  it("typeset formulas and highlighted code are used again unchanged, in every bubble and on every piece", async () => {
     const text = "$$\\frac{a}{b}^{reuse}$$\n\n```js\nconst reuse = 1;\n```";
     const typesets = vi.spyOn(katex, "renderToString");
-    const first = show(text);
-    const second = show(text);
+    const first = await show(text);
+    const second = await show(text);
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(second.innerHTML).toBe(first.innerHTML);
-    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
-    for (const tail of ["\n\n。", "\n\n。。", "\n\n。。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
+    const container = await showInTurn(text, `${text}\n\n。`, `${text}\n\n。。`, `${text}\n\n。。。`);
     expect(typesets).toHaveBeenCalledTimes(1);
     expect(container.querySelector(".katex")).not.toBeNull();
     expect(container.querySelector(".hljs-keyword").textContent).toBe("const");
@@ -777,15 +815,15 @@ describe("the work a text can cause is bounded", () => {
     ["nested macros", `$$\n\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(400)}}}}\n$$`],
     ["many small formulas", Array.from({ length: 40 }, (_, i) => Array.from({ length: 10 }, (_, j) => `$$s_{${i}}^{${j}}$$`).join(" ")).join("\n\n")],
     ["deeply nested emphasis", "*a _b ".repeat(400) + "x" + " b_ a*".repeat(400)],
-    ...["[", "*", "_", "`", "$", "|", ">", "-"].flatMap((ch) => [
+    ...["[", "*", "_", "`", "$", "|", ">", "-", "<"].flatMap((ch) => [
       [`49 999 × ${ch} on one line`, ch.repeat(49999)],
       [`49 999 × ${ch} in lines`, asLines(ch.repeat(49999))],
     ]),
     ["49 999 mixed on one line", mixed],
     ["49 999 mixed in lines", asLines(mixed)],
-  ])("%s", (_, text) => {
+  ])("%s", async (_, text) => {
     const typesets = vi.spyOn(katex, "renderToString");
-    const bubble = bounded(text, 25000);
+    const bubble = await bounded(text);
     expect(typesets.mock.calls.length).toBeLessThanOrEqual(500);
     expect(bubble.querySelectorAll(".katex").length).toBeLessThanOrEqual(500);
   });
@@ -825,6 +863,7 @@ describe("whose messages are Markdown", () => {
     expect(agents.querySelector("h1").textContent).toBe("标题");
     expect(agents.querySelector("strong").textContent).toBe("粗体");
     expect(agents.querySelector("a").getAttribute("href")).toBe("https://a.example/");
+    expect(hostAfter(agents.querySelector("a"))).toBe("（a.example）");
     // Its thinking and its proposal's persona are plain text too.
     const li = document.querySelector('li[data-msg="m3"]');
     expect(li.querySelector(".thinking-text").textContent).toBe("**想** `一下`");
