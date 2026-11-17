@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { REASONING_LEVELS } from "../config.ts";
 import { AppError, notFound } from "../errors.ts";
-import { perPrincipalLimit } from "../limits.ts";
+import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
 import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
@@ -83,11 +83,15 @@ const deletedError = () => new AppError(409, "agent_deleted");
 
 /**
  * Every route here is the owner's. Anyone else, and an id that is no Agent, gets the same 404. `draftRuns` holds the run
- * ids of the persona drafts this process is working on (the stale-run sweep leaves them alone). Returns `endDrafts`, for
+ * ids of the persona drafts this process is working on (the stale-run sweep leaves them alone); `readLimit` the budget
+ * the reads of Agents share with the owner's other reads of their providers and replies. Returns `endDrafts`, for
  * the service's stop: the drafts under way are abandoned, each run ended as recovery would end it (`draftPersona`);
  * resolves once their requests have ended.
  */
-export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draftRuns: Set<string> }): { endDrafts(): Promise<void> } {
+export function registerAgentRoutes(
+  app: FastifyInstance,
+  { draftRuns, readLimit }: { draftRuns: Set<string>; readLimit: PrincipalLimit },
+): { endDrafts(): Promise<void> } {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
@@ -178,6 +182,7 @@ export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draft
     { schema: { params: empty, querystring: empty, response: { 200: z.object({ agents: z.array(agentView) }) } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
       return { agents: (await listOwnedAgents(db, me.id)).map(toView) };
     },
   );
@@ -187,6 +192,7 @@ export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draft
     { schema: { params: idParams, querystring: empty, response: { 200: agentView } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
       const agent = await readOwnedAgent(db, me.id, req.params.id);
       if (!agent) throw notFound();
       return toView(agent);

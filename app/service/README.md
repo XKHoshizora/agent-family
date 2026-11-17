@@ -309,7 +309,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
 | Replies started (each message that queues a reply of one of your Agents, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`) and can retry — it started nothing and is not counted; a retry over it is 429 | owner |
-| `GET /api/conversations/:id/run` | 120 | principal |
+| `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
 | `POST /api/conversations/:id/attachments` | 60 per hour; at most 3 in progress | principal |
@@ -425,11 +425,13 @@ save the Agent to keep it.
 
 #### `GET /api/agents`
 
-*Session: required.* → 200 `{"agents": [Agent]}`: yours, oldest first, deleted ones included (`deleted: true`).
+*Session: required.* → 200 `{"agents": [Agent]}`: yours, oldest first, deleted ones included (`deleted: true`). Limit:
+120 per minute, together with `GET /api/agents/:id`, `GET /api/providers` and `GET /api/conversations/:id/run`.
 
 #### `GET /api/agents/:id`
 
-*Session: required.* → 200 Agent (also a deleted one); 404 `not_found` unless yours.
+*Session: required.* → 200 Agent (also a deleted one); 404 `not_found` unless yours. Limit: 120 per minute, shared as
+for `GET /api/agents`.
 
 #### `PATCH /api/agents/:id`
 
@@ -557,7 +559,7 @@ after `rate_limited`, which a retry within the same minute meets again as 429). 
 
 *Session: required.* → 200 `{"run": Run | null}`: the conversation's latest run — so a page loaded during a reply shows
 "replying", and one loaded after a failure shows it — or null when there is none, or when the latest failed and you
-dismissed it. Limit: 120 per minute.
+dismissed it. Limit: 120 per minute, shared as for `GET /api/agents`.
 
 #### `POST /api/conversations/:id/runs/:runId/stop`
 
@@ -641,7 +643,8 @@ call stopped by its caller closes its connection at once.
 
 #### `GET /api/providers`
 
-*Session: required.* → 200 `{"providers": [Provider]}`: yours, oldest first.
+*Session: required.* → 200 `{"providers": [Provider]}`: yours, oldest first. Limit: 120 per minute, shared as for
+`GET /api/agents`.
 
 #### `PATCH /api/providers/:id`
 

@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { PROTOCOLS, type Protocol } from "../config.ts";
 import { notFound } from "../errors.ts";
-import { perPrincipalLimit } from "../limits.ts";
+import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { normaliseBaseUrl } from "./guard.ts";
@@ -72,9 +72,13 @@ const toView = (p: ProviderRow): z.infer<typeof providerView> => ({
 
 /**
  * Every route here is the owner's: anyone else's provider id, and an id that is no provider, get the same 404.
- * `allowInsecureLocal` (tests only, `BuildOptions`) also lets a baseUrl be `http:`.
+ * `allowInsecureLocal` (tests only, `BuildOptions`) also lets a baseUrl be `http:`. `readLimit`: the budget
+ * `GET /api/providers` shares with the owner's other reads of their Agents and replies.
  */
-export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLocal }: { allowInsecureLocal: boolean }): void {
+export function registerProviderRoutes(
+  app: FastifyInstance,
+  { allowInsecureLocal, readLimit }: { allowInsecureLocal: boolean; readLimit: PrincipalLimit },
+): void {
   const { db, config, providerProbe } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const secret = config.providerKeySecret;
@@ -134,6 +138,7 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
     { schema: { params: empty, querystring: empty, response: { 200: z.object({ providers: z.array(providerView) }) } } },
     async (req) => {
       const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
       return { providers: (await listProviders(db, me.id)).map(toView) };
     },
   );

@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { notFound } from "../errors.ts";
-import { perPrincipalLimit } from "../limits.ts";
+import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { dismissRun, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
@@ -14,11 +14,11 @@ const ok = z.object({ ok: z.literal(true) });
 /**
  * The owner's view of their Agent's replies, per conversation (README "Agents and runs"). For anyone else, and for a
  * conversation that is not an Agent's, every route answers the JSON 404 exactly as for an id that does not exist.
+ * `readLimit`: the budget `GET …/run` shares with the owner's other reads of their Agents and providers.
  */
-export function registerRunRoutes(app: FastifyInstance): void {
+export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLimit: PrincipalLimit }): void {
   const { db, config } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
-  const readLimit = perPrincipalLimit(app, 120);
   // Stop, retry and dismiss share one budget; a retry also counts toward the replies one may start a minute.
   const writeLimit = perPrincipalLimit(app, 60);
   const noBody = empty.nullish();

@@ -36,7 +36,7 @@ import { registerConversationRoutes } from "./conversations/routes.ts";
 import { createReadEvents, type ReadEvents } from "./messages/read.ts";
 import { registerMessageRoutes } from "./messages/routes.ts";
 import { MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT } from "./messages/search.ts";
-import { clientIp } from "./limits.ts";
+import { clientIp, perPrincipalLimit } from "./limits.ts";
 import { appOriginCheck } from "./origin.ts";
 import { createSlots, type Slots } from "./slots.ts";
 import type { Hub } from "./sync/hub.ts";
@@ -318,7 +318,10 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerMessageRoutes(app);
   registerAttachmentRoutes(app);
   registerAccountRoutes(app);
-  const { endDrafts } = registerAgentRoutes(app, { draftRuns });
+  // One budget for an owner's reads of their Agents, providers and replies (GET /api/agents, /api/agents/:id,
+  // /api/providers, /api/conversations/:id/run): 120 a minute together.
+  const ownReads = perPrincipalLimit(app, 120);
+  const { endDrafts } = registerAgentRoutes(app, { draftRuns, readLimit: ownReads });
   // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —
   // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself).
   app.addHook("preClose", async () => {
@@ -329,8 +332,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
       agentWorker.stop(),
     ]);
   });
-  registerRunRoutes(app);
-  registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true });
+  registerRunRoutes(app, { readLimit: ownReads });
+  registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true, readLimit: ownReads });
   registerModelRoutes(app);
 
   const api = app.withTypeProvider<ZodTypeProvider>();
