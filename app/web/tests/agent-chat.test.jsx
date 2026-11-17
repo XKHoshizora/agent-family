@@ -2,6 +2,7 @@
 // The conversation with one of my Agents, over the real data layer with the fake transport and fake routes: the
 // streaming bubble and its thinking, 停止生成, the run's status line, pause and delete, a new topic, proposal cards,
 // the image hint, scrolling, mentions, read receipts and the details panel.
+import "./markdown-ready.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
 import {

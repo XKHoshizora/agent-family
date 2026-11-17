@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 // The Agent pages (list, create, edit, detail, pause, delete) and the "我的 Agent" group of the contacts, over the real
 // data layer with the fake transport and fake routes.
+import "./markdown-ready.js";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";

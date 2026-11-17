@@ -281,6 +281,61 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 @keyframes blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dots i { animation: none; } }
 
+/* An Agent's text rendered from Markdown (ui/Markdown.jsx), inside its bubble. Nothing it renders reaches outside the
+   bubble: wide content scrolls sideways, and anything maths moved above or below it is cut off (the padding and the
+   negative margin leave room for focus outlines). */
+.md { white-space: normal; overflow-wrap: break-word; overflow-x: auto; overflow-y: hidden; padding: 4px; margin: -4px; }
+.md p { white-space: pre-line; }
+.md :is(p, ul, ol, blockquote, .md-code, .md-table, .katex-display, hr) { margin: 0 0 8px; }
+.md :is(h1, h2, h3, h4, h5, h6) { margin: 12px 0 6px; font-weight: 700; line-height: 1.4; }
+.md :is(h1, h2) { font-size: 18px; }
+.md h3 { font-size: 17px; }
+.md :is(h4, h5, h6) { font-size: 16px; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child, .md li > :last-child { margin-bottom: 0; }
+.md ul { list-style: disc; padding-left: 1.4em; }
+.md ol { list-style: decimal; padding-left: 1.6em; }
+.md li ul { list-style: circle; }
+.md li + li { margin-top: 2px; }
+.md li > :is(ul, ol) { margin: 2px 0 0; }
+.md .task-list-item { list-style: none; }
+.md blockquote {
+  display: block; padding: 2px 0 2px 10px; border-left: 3px solid var(--line-strong); border-radius: 0; background: none;
+  color: var(--ink-2); font-size: inherit;
+}
+.md hr { border: 0; border-top: 1px solid var(--line-strong); }
+.md a { color: var(--purple-dark); text-decoration: underline; text-underline-offset: 2px; }
+.md code { font-family: Consolas, monospace; font-size: 0.875em; padding: 1px 5px; border-radius: 5px; background: rgba(120, 110, 180, 0.12); }
+.md-code { position: relative; }
+.md pre {
+  margin: 0; padding: 10px 12px; overflow-x: auto; white-space: pre; tab-size: 4; font-size: 13.5px; line-height: 1.5;
+  border-radius: 8px; border: 1px solid var(--line); background: rgba(120, 110, 180, 0.07);
+}
+.md pre code { padding: 0; border-radius: 0; background: none; font-size: inherit; }
+.md-copy { position: absolute; top: 6px; right: 6px; height: 26px; background: rgba(255, 255, 255, 0.9); opacity: 0; }
+.md-code:hover .md-copy, .md-code:focus-within .md-copy { opacity: 1; }
+@media (hover: none) { .md-copy { opacity: 1; } }
+.md-table { max-width: 100%; overflow-x: auto; }
+.md table { border-collapse: collapse; font-size: 14px; line-height: 1.45; }
+.md :is(th, td) { min-width: 5em; padding: 5px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; }
+.md th { background: rgba(221, 214, 255, 0.45); font-weight: 600; white-space: nowrap; }
+.md sup { font-size: 0.75em; line-height: 0; }
+.md .footnotes { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
+.md .katex-display { padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+.md .katex-error { color: var(--ink-2); }
+.md .md-plain { white-space: pre-wrap; }
+/* Highlighted code: a few colours of the palette */
+.md :is(.hljs-keyword, .hljs-built_in, .hljs-selector-tag, .hljs-type) { color: var(--purple-dark); }
+.md :is(.hljs-title, .hljs-section, .hljs-name, .hljs-selector-id, .hljs-selector-class) { color: var(--pending); }
+.md :is(.hljs-string, .hljs-regexp, .hljs-addition, .hljs-template-variable) { color: var(--ok); }
+.md :is(.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet, .hljs-attr, .hljs-attribute) { color: var(--warn); }
+.md :is(.hljs-comment, .hljs-quote, .hljs-meta) { color: var(--ink-3); }
+.md .hljs-comment { font-style: italic; }
+.md .hljs-deletion { color: var(--danger); }
+.md :is(.hljs-addition, .hljs-deletion) { display: inline-block; width: 100%; }
+.md .hljs-emphasis { font-style: italic; }
+.md .hljs-strong { font-weight: 700; }
+
 .attachment-image { border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #fff; max-width: 320px; }
 .attachment-image img { display: block; width: 100%; height: auto; aspect-ratio: 3 / 2; max-height: 240px; object-fit: cover; }
 .attachment-image figcaption { padding: 6px 10px; font-size: 12.5px; color: var(--ink-2); }

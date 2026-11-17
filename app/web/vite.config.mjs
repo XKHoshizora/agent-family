@@ -13,6 +13,12 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // The maths fonts (KaTeX's, in the Markdown chunk) are files served from the same origin, never inlined as data:
+    // URLs: the page's Content-Security-Policy allows fonts from 'self' only.
+    assetsInlineLimit: (file) => (/\.(woff2?|ttf|otf|eot)$/i.test(file) ? false : undefined),
+    // The largest chunk is the Markdown renderer (~610 kB, most of it KaTeX): already split off, loaded only with the
+    // first Agent message. The warning stays for anything larger.
+    chunkSizeWarningLimit: 650,
   },
   optimizeDeps: {
     include: ["react", "react-dom/client", "lucide-react"],

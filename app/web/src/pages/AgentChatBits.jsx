@@ -2,10 +2,12 @@
 // and streaming replies), the folded thinking, the reply being written, the failed reply's status line, the persona
 // proposal card, the new-topic confirmation and divider, and the image hint. Each shows what the view model says
 // (`conv.run`, `conv.stream`, `msg.proposal`…); none of them derives it again from the model.
-import React, { useEffect, useRef, useState } from "react";
+import React, { Suspense, memo, use, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
 import { nameOf, publishBlock } from "../state/selectors.js";
+import { ChunkBoundary } from "../ui/ChunkBoundary.jsx";
+import { fitsMarkdown } from "../ui/markdownLimits.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { refusalText, settled } from "./AgentForm.jsx";
 import { useAction, useNow } from "./useAction.js";
@@ -31,10 +33,51 @@ export function seesImages(state, model) {
 /** Whether a reply of the conversation's Agent is being written: queued or running, its message not here yet. */
 export const isReplying = (run) => Boolean(run) && (run.status === "queued" || run.status === "running") && !run.posted;
 
-/** The text of an Agent's message, stored or streaming. Plain like a person's for now: the one place a renderer goes. */
-export function AgentText({ text }) {
-  return <>{text}</>;
+/** The Markdown renderer's chunk (ui/Markdown.jsx), asked for the first time an Agent's text is shown, then kept. */
+let markdownChunk = null;
+
+/**
+ * Starts loading the renderer (once) and returns its chunk; `use` reads it at once when it has arrived. A chunk that
+ * could not be loaded is not asked for again (a stale tab reloads itself: staleChunk.js). `load`: tests.
+ */
+export function loadMarkdown(load = () => import("../ui/Markdown.jsx")) {
+  if (!markdownChunk) {
+    const chunk = Object.assign(load(), { status: "pending" });
+    chunk.then(
+      (value) => {
+        Object.assign(chunk, { status: "fulfilled", value });
+      },
+      (reason) => {
+        Object.assign(chunk, { status: "rejected", reason });
+      },
+    );
+    markdownChunk = chunk;
+  }
+  return markdownChunk;
 }
+
+/** The renderer, once its chunk is here (suspends until then). */
+function LoadedMarkdown({ text }) {
+  const { Markdown } = use(loadMarkdown());
+  return <Markdown text={text} />;
+}
+
+/**
+ * The text of an Agent's message, stored or streaming, as safe Markdown (ui/Markdown.jsx). Shown plain, as a person's
+ * message is, while the renderer loads, when it could not be loaded, when it fails on this text (the next text is
+ * tried again), and for a text too big or too deep to render (ui/markdownLimits.js). Nothing else is ever Markdown.
+ */
+export const AgentText = memo(function AgentText({ text }) {
+  const plain = <>{text}</>;
+  if (!fitsMarkdown(text) || markdownChunk?.status === "rejected") return plain;
+  return (
+    <ChunkBoundary fallback={plain} resetKey={text}>
+      <Suspense fallback={plain}>
+        <LoadedMarkdown text={text} />
+      </Suspense>
+    </ChunkBoundary>
+  );
+});
 
 /** The model's thinking: folded above the answer, opened only by the reader. */
 export function Thinking({ text }) {

@@ -57,3 +57,6 @@ restart spec skips itself.
   signed in, stops it on sign-out / 401 / close 4001), the path router (`router.js`), field rules, error-code texts.
 - `src/App.jsx` - the sign-in gate and the lazy application (`src/AppShell.jsx`: rail, lists, chat; its own chunk, so the account screens never download it).
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.
+- `src/ui/Markdown.jsx` - the safe Markdown renderer for Agents' messages only (its own chunk, loaded with the first Agent message;
+  `AgentText` in `src/pages/AgentChatBits.jsx` shows the plain text until then, on any failure, and for a text beyond
+  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched.

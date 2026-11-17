@@ -8,12 +8,19 @@ export const isChunkLoadError = (error) => error?.name === "ChunkLoadError" || C
 /**
  * Catches an error under the lazy application chunk instead of leaving a blank page: a failed chunk load (a stale tab
  * after a deploy) says the page was updated, any other error says something went wrong; both offer a reload.
+ * Under a smaller lazy part (the Markdown renderer) it shows `fallback` instead, until `resetKey` changes (a new text
+ * is tried again).
  */
 export class ChunkBoundary extends React.Component {
-  state = { failed: false, stale: false };
+  state = { failed: false, stale: false, resetKey: this.props.resetKey };
 
   static getDerivedStateFromError(error) {
     return { failed: true, stale: isChunkLoadError(error) };
+  }
+
+  static getDerivedStateFromProps(props, state) {
+    if (props.resetKey === state.resetKey) return null;
+    return { failed: false, stale: false, resetKey: props.resetKey };
   }
 
   componentDidCatch(error) {
@@ -22,6 +29,7 @@ export class ChunkBoundary extends React.Component {
 
   render() {
     if (!this.state.failed) return this.props.children;
+    if ("fallback" in this.props) return this.props.fallback;
     return (
       <main className="auth-page">
         <p role="alert">{this.state.stale ? "页面已更新，请刷新" : "出了点问题，请刷新页面"}</p>
