@@ -201,28 +201,29 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, c
 
 /**
  * `POST …/runs/:runId/stop`: a queued run is stopped at once (it never reached a model: nothing to settle); a running
- * one is reported so the caller can flag it for the worker; a finished one is left as it is. 404 unless the run is of
- * the caller's Agent conversation.
+ * one is reported, with its Agent, so the caller can flag it for the worker working on it, or release it when nobody
+ * here is; a finished one is left as it is. 404 unless the run is of the caller's Agent conversation.
  */
 export async function stopRun(
   t: Tx,
   ownerId: string,
   conversationId: string,
   runId: string,
-): Promise<{ stopped: Announced | null; running: boolean }> {
-  if (!(await ownedAgentOf(t, ownerId, conversationId))) throw notFound();
+): Promise<{ stopped: Announced | null; running: boolean; agentId: string }> {
+  const agentId = await ownedAgentOf(t, ownerId, conversationId);
+  if (!agentId) throw notFound();
   const { rows } = await t.query<{ status: RunStatus }>("select status from agent_runs where id = $1 and conversation_id = $2 for update", [
     runId,
     conversationId,
   ]);
   const status = rows[0]?.status;
   if (status === undefined) throw notFound();
-  if (status !== "queued") return { stopped: null, running: status === "running" };
+  if (status !== "queued") return { stopped: null, running: status === "running", agentId };
   const stopped = await t.query<RunRow>(
     `update agent_runs as r set status = 'stopped', finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId],
   );
-  return { stopped: { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) }, running: false };
+  return { stopped: { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) }, running: false, agentId };
 }
 
 /** `POST …/runs/dismiss`: the latest run, if it failed, is no longer shown by `GET …/run`. 404 unless the caller's. */

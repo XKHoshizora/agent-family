@@ -272,6 +272,37 @@ describe("stopping, pausing, failing", () => {
     expect(await latestRun(owner, conv)).toMatchObject({ status: "stopped" });
   });
 
+  it("a running run nobody here is working on is released by the stop at once, as recovery would end it", async () => {
+    // Claimed and admitted by hand, then left: what another instance, or one that died, leaves behind.
+    const { owner, conv } = await owned("orphan");
+    const s = await connect(app, owner);
+    await say(owner, conv, "你在吗");
+    const ticket = (await app.agentPort.claimNext())!;
+    expect(await app.agentPort.begin(ticket)).toHaveProperty("call");
+    expect(app.agentWorker.isWorking(ticket.id)).toBe(false);
+    expect(await holds()).not.toBe("0");
+
+    expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/${ticket.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    expect(await latestRun(owner, conv)).toEqual({ id: ticket.id, status: "failed", error: "provider_unavailable", retryable: true });
+    await s.next((e) => isRun(conv, "failed")(e) && e.run.id === ticket.id);
+    expect(await holds()).toBe("0");
+    expect(await usageOf(ticket.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true }]);
+    expect(callsHere()).toHaveLength(0);
+    // Idempotent: an ended run is left as it is.
+    expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/${ticket.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    expect(await usageOf(ticket.id)).toHaveLength(1);
+
+    // One whose reply was already posted (stopped) ends stopped, with that message.
+    const other = await owned("orphan2");
+    await say(other.owner, other.conv, "讲吧");
+    const posted = (await app.agentPort.claimNext())!;
+    await app.agentPort.begin(posted);
+    expect(await app.agentPort.post(posted, { text: "讲到一半", reasoning: "", stopped: true, truncated: false })).toBe("posted");
+    expect((await api(app, other.owner, "POST", `/api/conversations/${other.conv}/runs/${posted.id}/stop`)).status).toBe(200);
+    expect(await latestRun(other.owner, other.conv)).toEqual({ id: posted.id, status: "stopped", retryable: false });
+    expect(await fromAgent(other.owner, other.conv, other.agent.id)).toMatchObject([{ text: "讲到一半", stopped: true }]);
+  });
+
   it("pause mid-run: the call is abandoned, nothing is posted, the run is cancelled", async () => {
     const { owner, agent, conv } = await owned("paula");
     const hold = gateway.hang();

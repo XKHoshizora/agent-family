@@ -549,8 +549,12 @@ dismissed it. Limit: 120 per minute.
 
 *Session: required.* Body: none or `{}`. Stops the reply: a queued one at once (it never reaches the model; `run`
 `stopped` is pushed); a running one as soon as the worker notices (within 50 ms): what it had said so far is posted
-with `stopped: true` and the run ends `stopped` (nothing said: no message). A run that has ended is left as it is.
-Idempotent. → 200 `{"ok": true}`. Limit: 60 per minute with retry and dismiss.
+with `stopped: true` and the run ends `stopped` (nothing said: no message). A running one that no worker of this
+instance is working on — another instance's during a deploy, or one left by a process that is gone — is released at
+once, exactly as recovery releases one (Agents and runs, Recovery): `failed`, `provider_unavailable`, retryable, its
+hold released at no charge (or, when its reply had been posted, `done` / `stopped` as its message says; `cancelled`
+when a pause had interrupted it); `run` is pushed. A run that has ended is left as it is. Idempotent. → 200
+`{"ok": true}`. Limit: 60 per minute with retry and dismiss.
 
 #### `POST /api/conversations/:id/runs/retry`
 

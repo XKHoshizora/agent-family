@@ -172,7 +172,10 @@ describe("pause or delete ends the active reply for good", () => {
     await say(owner, conv, "讲吧");
     const run = (await app.agentPort.claimNext())!;
     await app.agentPort.begin(run);
-    expect(await api(app, owner, "POST", `/api/conversations/${conv}/runs/${run.id}/stop`)).toEqual({ status: 200, json: { ok: true } });
+    // The test plays the worker: the owner's stop reaches it as the stop route flags a run its worker is working on
+    // (a run nobody works on would be released by the route at once).
+    app.agentPort.requestStop(run.id);
+    expect(app.agentPort.shouldStop(run)).toBe(true);
     expect(await app.agentPort.post(run, { text: "讲到一半", reasoning: "", stopped: true, truncated: false })).toBe("posted");
     await pause(owner, agent.id);
     await app.agentPort.finish(run, { status: "stopped" }, null, { inputChars: 2, outputChars: 4 });
