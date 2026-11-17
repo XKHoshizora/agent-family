@@ -482,16 +482,58 @@ export async function triggerFromAgent(
   return { runs: await reachAgents(t, conversationId, called, message.seq, "agent", config), notices };
 }
 
+/** What a run's end calls for in its conversation, to act on after commit (`followUp`). */
+export interface FollowUp {
+  /** The follow-up queued — or, over the owner's replies a minute, the Agent's reusable `rate_limited` run — to announce. */
+  run: Announced | null;
+  /** Notices it appended to the group, to publish. */
+  notices: StoredMessage[];
+}
+
+const NO_FOLLOW_UP: FollowUp = { run: null, notices: [] };
+
 /**
  * The follow-up of a run of `agent` in `conversationId` that ended having noted messages up to `pending` beyond what it
  * covered (`covers`), under that conversation's row and the Agent's (`finish`, recovery): a queued reply answering up
- * to `pending`. In the Agent's own conversation it is its owner's, as always. In a group it is a person's when a
- * person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it); otherwise only Agents'
- * messages called for it: it is an Agent's, and is not queued at all while the group is halted (ruling 11) — what
- * Agents asked before a halt is not answered after it. Null when nothing is queued.
+ * to `pending`. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
+ * replies a minute (it answers what its owner wrote meanwhile; README "Replies started"). In a group it is a person's
+ * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it); otherwise only
+ * Agents' messages called for it: it is an Agent's, and is not queued at all while the group is halted (ruling 11) —
+ * what Agents asked before a halt is not answered after it. A group's follow-up, a person's or an Agent's, is a reply
+ * started like any other, so the owner's `agentRunsPerMinute` decides as for a mention (`reachAgents`): counted under
+ * the owner's `accounts` row (the lock order's last step; the caller holds the group's row, the Agent's and the run's),
+ * and over it the Agent's reusable `rate_limited` run in the group records it instead (`rateLimitedInGroup`), so a member
+ * who keeps mentioning an Agent while it replies cannot keep it replying past its owner's limit.
+ */
+export async function followUp(
+  t: Tx,
+  agent: AgentRow,
+  conversationId: string,
+  covers: number,
+  pending: number,
+  config: Pick<Config, "agentRunsPerMinute">,
+): Promise<FollowUp> {
+  return followUpWith(t, agent, conversationId, covers, pending, config);
+}
+
+/**
+ * `followUp` as port-impl.ts calls it today, without the configuration: all of it but the owner's replies a minute,
+ * which cannot be counted without `agentRunsPerMinute`; the notices it appends are stored, not handed back to be
+ * published. Null when nothing is queued. To be replaced by `followUp` in port-impl.ts (`finish`, `recoverRun`).
  */
 export async function queueFollowUp(t: Tx, agent: AgentRow, conversationId: string, covers: number, pending: number): Promise<Announced | null> {
-  if (conversationId === agent.conversationId) return queueRun(t, agent, conversationId, pending);
+  return (await followUpWith(t, agent, conversationId, covers, pending, null)).run;
+}
+
+async function followUpWith(
+  t: Tx,
+  agent: AgentRow,
+  conversationId: string,
+  covers: number,
+  pending: number,
+  config: Pick<Config, "agentRunsPerMinute"> | null,
+): Promise<FollowUp> {
+  if (conversationId === agent.conversationId) return { run: await queueRun(t, agent, conversationId, pending), notices: [] };
   const { rows } = await t.query<{ sender_id: string; text: string | null }>(
     `select m.sender_id, m.body ->> 'text' as text from messages m join principals p on p.id = m.sender_id
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and p.kind = 'human'`,
@@ -499,9 +541,12 @@ export async function queueFollowUp(t: Tx, agent: AgentRow, conversationId: stri
   );
   const handle = agent.handle.toLowerCase();
   const asked = rows.some((r) => (agent.groupMentions === "members" || r.sender_id === agent.ownerId) && mentionedHandles(r.text ?? "").includes(handle));
-  if (asked) return queueRun(t, agent, conversationId, pending, "human");
-  if (await isHalted(t, conversationId, await latestHumanSeq(t, conversationId))) return null;
-  return queueRun(t, agent, conversationId, pending, "agent");
+  if (!asked && (await isHalted(t, conversationId, await latestHumanSeq(t, conversationId)))) return NO_FOLLOW_UP;
+  const by: TriggeredBy = asked ? "human" : "agent";
+  if (config !== null && (await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) {
+    return { run: await rateLimitedInGroup(t, agent, conversationId, pending, by), notices: [] };
+  }
+  return { run: await queueRun(t, agent, conversationId, pending, by), notices: [] };
 }
 
 /** What a halt did, to act on after it commits. */

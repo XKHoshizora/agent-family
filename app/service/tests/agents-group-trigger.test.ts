@@ -2,15 +2,16 @@ import type { InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mentionedHandles } from "../src/agents/mentions.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
-import { maybeTrigger, triggerFromAgent } from "../src/agents/runs.ts";
+import { followUp, maybeTrigger, triggerFromAgent, type FollowUp } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
+import { buildApp } from "../src/app.ts";
 import type { Config } from "../src/config.ts";
 import type { WriteLock } from "../src/conversations/store.ts";
 import type { Tx } from "../src/db.ts";
 import { insertMessage, type StoredMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
-import { useApp } from "./helpers/harness.ts";
+import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -704,6 +705,103 @@ describe("POST /api/conversations/:id/agents/halt", () => {
     const ticket: RunTicket = { id, agentId: agent.id, ownerId: owner.id, conversationId: agent.conversationId };
     expect(await app.agentPort.post(ticket, { text: "回答", reasoning: "", stopped: false, truncated: false })).toBe("refused");
     expect(Number((await db.query("select count(*) n from messages where client_txn = $1", [id])).rows[0].n)).toBe(0);
+  });
+});
+
+// --- follow-ups ------------------------------------------------------------------------------------------------
+
+/**
+ * Ends the running run `runId` as `finish` records it — under its conversation's row, its Agent's, then its own — and
+ * follows it up by the one rule (something noted beyond what it covered) through `followUp`, with `config`: what
+ * `finish` and recovery pass once port-impl.ts calls `followUp` (it calls `queueFollowUp`, which has no configuration).
+ */
+const endRun = (runId: string, config: Pick<Config, "agentRunsPerMinute">): Promise<FollowUp | null> =>
+  db.tx(async (t) => {
+    const of = (await t.query<{ agent_id: string; conversation_id: string }>("select agent_id, conversation_id from agent_runs where id = $1", [runId])).rows[0]!;
+    const agent = await lockAgent(t, of.agent_id, of.conversation_id);
+    const state = (
+      await t.query<{ covers: number; pending: number | null }>("select covers_seq::int as covers, pending_seq::int as pending from agent_runs where id = $1 for update", [
+        runId,
+      ])
+    ).rows[0]!;
+    await t.query("update agent_runs set status = 'done', finished_at = now() where id = $1", [runId]);
+    return state.pending !== null && state.pending > state.covers ? followUp(t, agent, of.conversation_id, state.covers, state.pending, config) : null;
+  });
+
+describe("follow-ups in a group", () => {
+  it("count toward the owner's replies a minute: continuous mentions while each reply runs never start more than AGENT_RUNS_PER_MINUTE; over it, the reusable failed run", async () => {
+    const limit = 3;
+    const capped = await buildApp(
+      { config: { ...app.deps.config, agentRunsPerMinute: limit }, db, models: gateway },
+      { answerFloor: NO_ANSWER_FLOOR, staleRunSweep: false, agentWorker: false },
+    );
+    try {
+      await capped.ready();
+      const config = capped.deps.config;
+      const w = await world();
+      const anna = await agentOf(w.owner, "anna", w.g);
+      const alpha = await agentOf(w.member, "alpha", w.g);
+      const mention = async (who: Actor, text: string): Promise<number> => {
+        const sent = await api(capped, who, "POST", `/api/conversations/${w.g}/messages`, { text, clientTxn: `fu${++txn}` });
+        expect(sent.status).toBe(201);
+        return sent.json.message.seq as number;
+      };
+      /** Replies the owner started in the last minute, as the limit counts them. */
+      const started = async () =>
+        Number(
+          (
+            await db.query(
+              `select count(*) n from agent_runs
+                where owner_id = $1 and purpose = 'reply' and created_at > now() - interval '1 minute' and error is distinct from 'rate_limited'`,
+              [w.owner.id],
+            )
+          ).rows[0].n,
+        );
+      const active = async () =>
+        (await db.query<{ id: string }>("select id from agent_runs where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')", [anna.id, w.g])).rows[0]?.id ??
+        null;
+
+      await mention(w.member, "@anna 开始");
+      expect(await started()).toBe(1);
+      // Members keep mentioning it while each reply runs — a person and an Agent in turn — and each reply's end follows
+      // up what was noted; once there is no reply under way, each further mention meets the limit at once.
+      const counts: number[] = [];
+      const followed: FollowUp[] = [];
+      let last = 0;
+      for (let i = 0; i < 7; i++) {
+        const id = await active();
+        if (id === null) {
+          last = await mention(w.third, `@anna 还在吗 ${i}`);
+        } else {
+          await db.query("update agent_runs set status = 'running', started_at = now() where id = $1", [id]);
+          last = i % 2 === 0 ? await mention(w.third, `@anna 再说 ${i}`) : (await agentSays(alpha.id, w.g, `@anna 补充 ${i}`, config)).message.seq;
+          followed.push((await endRun(id, config))!);
+        }
+        counts.push(await started());
+      }
+      expect(counts).toEqual([2, 3, 3, 3, 3, 3, 3]);
+      // Two follow-ups were queued (a person's, then an Agent's); the third met the limit: the failed run, announced to the
+      // owner, a person's (a person's mention was noted on that reply).
+      expect(followed.map((f) => [f.run?.ownerId, f.run?.run.status, f.run?.run.error ?? null, f.notices])).toEqual([
+        [w.owner.id, "queued", null, []],
+        [w.owner.id, "queued", null, []],
+        [w.owner.id, "failed", "rate_limited", []],
+      ]);
+      const limited = followed[2]!.run!.run;
+      expect(limited).toEqual({ id: limited.id, status: "failed", error: "rate_limited", retryable: true });
+      expect((await runsOf(anna.id, w.g)).map((r) => [r.status, r.error, r.by])).toEqual([
+        ["done", null, "human"],
+        ["done", null, "human"],
+        ["done", null, "agent"],
+        ["failed", "rate_limited", "human"],
+      ]);
+      // Every later mention is covered by that one failed run: its owner sees one retryable line, the others its state.
+      expect((await runsOf(anna.id, w.g)).at(-1)?.covers).toBe(last);
+      expect((await api(capped, w.owner, "GET", `/api/conversations/${w.g}/runs`)).json.runs).toEqual([{ agentId: anna.id, state: "unavailable", run: limited }]);
+      expect((await api(capped, w.member, "GET", `/api/conversations/${w.g}/runs`)).json.runs).toEqual([{ agentId: anna.id, state: "unavailable" }]);
+    } finally {
+      await capped.close();
+    }
   });
 });
 
