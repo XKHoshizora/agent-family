@@ -35,9 +35,13 @@ export function convTitle(state, conv) {
   return nameOf(state, otherMember(conv));
 }
 
+/** The chat header's line: a group counts its people, and its Agents when it has any. */
 export function convSubtitle(state, conv) {
   if (conv.type === "agent") return "你的 Agent · 专属会话";
-  return conv.type === "group" ? `${conv.members.filter((id) => !isAgent(state, id)).length} 位真人` : "真人私聊";
+  if (conv.type !== "group") return "真人私聊";
+  const agents = conv.members.filter((id) => isAgent(state, id)).length;
+  const people = `${conv.members.length - agents} 位真人`;
+  return agents > 0 ? `${people} · ${agents} 个 Agent` : people;
 }
 
 /** A deleted Agent's conversation: read only, said in the frozen-conversation style. */
@@ -59,7 +63,9 @@ export function publishBlock(state, conv) {
  * out (ui/markdownPreview.js); a person's text is shown as written.
  */
 export function lastPreview(state, conv) {
-  const last = [...conv.messages].reverse().find((x) => x.kind !== "system") || conv.messages[conv.messages.length - 1];
+  // (A notice of an event this client does not know shows nothing: it is never the preview either.)
+  const shown = conv.messages.filter((x) => !x.hidden);
+  const last = [...shown].reverse().find((x) => x.kind !== "system") || shown[shown.length - 1];
   if (!last) return "暂无消息";
   let body = last.kind !== "system" && isAgent(state, last.from) && typeof last.text === "string" ? previewOfMarkdown(last.text) : last.text;
   if (last.kind === "image") body = "[图片]";

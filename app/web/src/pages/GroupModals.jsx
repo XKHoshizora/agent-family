@@ -5,7 +5,7 @@ import { useStore } from "../data/store.jsx";
 import { groupErrorText } from "../data/errorTexts.js";
 import { groupTitle } from "../auth/validation.js";
 import { ME } from "../data/identities.js";
-import { convTitle, isAgent, myAgents, nameOf } from "../state/selectors.js";
+import { convTitle, isAgent, isMyAgent, myAgents, nameOf } from "../state/selectors.js";
 import { eligibleFriends, matchesPerson } from "../state/social.js";
 import { Avatar, Btn, Field, IdentityLine, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
 import { useAction } from "./useAction.js";
@@ -13,9 +13,9 @@ import { useAction } from "./useAction.js";
 /** Fewest friends a group starts with (the service's rule). */
 export const MIN_GROUP_FRIENDS = 2;
 
-function SearchField({ value, onChange }) {
+function SearchField({ value, onChange, label = "搜索好友" }) {
   return (
-    <Field label="搜索好友">
+    <Field label={label}>
       <input type="search" value={value} onChange={(e) => onChange(e.target.value)} placeholder="名字或账号" autoComplete="off" data-autofocus />
     </Field>
   );
@@ -101,7 +101,7 @@ export function NewGroupModal({ onClose }) {
 
 /**
  * "添加成员": my friends who are not in the group yet (nobody with a block in either direction), and below them my own
- * Agents that are not deleted and not in it yet (someone else's Agent is never offered). The search is the friends'.
+ * Agents that are not deleted and not in it yet (someone else's Agent is never offered). The search covers both.
  */
 export function AddMemberModal({ conv, onClose }) {
   const { state, dispatch, actions } = useStore();
@@ -112,9 +112,10 @@ export function AddMemberModal({ conv, onClose }) {
   const offered = eligibleFriends(state, inGroup);
   const shown = offered.filter((id) => matchesPerson(state.people[id], query));
   const agents = myAgents(state).filter((a) => !a.deleted && !inGroup.includes(a.id));
+  const shownAgents = agents.filter((a) => matchesPerson(a, query));
 
   const add = async (id) => {
-    const res = await run(id, () => actions.addMember(conv.id, id), (e) => groupErrorText("add", e));
+    const res = await run(id, () => actions.addMember(conv.id, id), (e) => groupErrorText(isAgent(state, id) ? "addAgent" : "add", e));
     if (res.ok) {
       setAdded((list) => [...list, id]);
       dispatch({ type: "toast", text: `已添加${nameOf(state, id)}` });
@@ -129,9 +130,9 @@ export function AddMemberModal({ conv, onClose }) {
   );
   return (
     <Modal title="添加成员" onClose={onClose} footer={<Btn onClick={onClose}>完成</Btn>}>
-      <SearchField value={query} onChange={setQuery} />
+      <SearchField value={query} onChange={setQuery} label="搜索好友或我的 Agent" />
       {offered.length === 0 && agents.length === 0 && <p className="muted">没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。</p>}
-      {offered.length > 0 && shown.length === 0 && <p className="muted">没有找到匹配的好友。</p>}
+      {offered.length + agents.length > 0 && shown.length + shownAgents.length === 0 && <p className="muted">没有找到匹配的好友或 Agent。</p>}
       <ul className="member-rows" aria-label="可添加的好友">
         {shown.map((id) => (
           <li key={id}>
@@ -144,11 +145,11 @@ export function AddMemberModal({ conv, onClose }) {
           </li>
         ))}
       </ul>
-      {agents.length > 0 && (
+      {shownAgents.length > 0 && (
         <>
           <h3>我的 Agent</h3>
           <ul className="member-rows" aria-label="可添加的 Agent">
-            {agents.map((a) => (
+            {shownAgents.map((a) => (
               <li key={a.id}>
                 <Avatar id={a.id} size={40} />
                 <div className="member-body">
@@ -165,13 +166,14 @@ export function AddMemberModal({ conv, onClose }) {
   );
 }
 
-/** The creator removes a member, or an owner their own Agent: confirm first. */
+/** The creator removes a member, or an owner their own Agent: confirm first (an Agent in words of its own). */
 export function RemoveMemberModal({ conv, memberId, onClose }) {
   const { state, dispatch, actions } = useStore();
   const { busy, run } = useAction();
   const name = nameOf(state, memberId);
+  const agent = isAgent(state, memberId);
   const confirm = async () => {
-    const res = await run("remove", () => actions.removeMember(conv.id, memberId), (e) => groupErrorText("remove", e));
+    const res = await run("remove", () => actions.removeMember(conv.id, memberId), (e) => groupErrorText(agent ? "removeAgent" : "remove", e));
     if (res.ok) {
       dispatch({ type: "toast", text: `已将${name}移出群聊` });
       onClose();
@@ -190,9 +192,15 @@ export function RemoveMemberModal({ conv, memberId, onClose }) {
         </>
       }
     >
-      <p>
-        把 <strong>{name}</strong> 移出「{convTitle(state, conv)}」？对方会立刻失去这个群聊的全部内容，群里会留下一条提示。
-      </p>
+      {agent ? (
+        <p>
+          把 <strong>{name}</strong> 移出群聊？它将不再在这个群里回复。
+        </p>
+      ) : (
+        <p>
+          把 <strong>{name}</strong> 移出「{convTitle(state, conv)}」？对方会立刻失去这个群聊的全部内容，群里会留下一条提示。
+        </p>
+      )}
     </Modal>
   );
 }
@@ -208,11 +216,16 @@ export function successorOf(state, conv) {
   return state.people[next.id] ? next.id : undefined;
 }
 
-/** Leaving: confirm first; the creator is told who takes over. */
+/**
+ * Leaving: confirm first; the creator is told who takes over (people only: an Agent never does), and anyone whose own
+ * Agents are in the group that they leave with them.
+ */
 export function LeaveModal({ conv, onLeave, onClose }) {
   const { state } = useStore();
   const creator = conv.admin === ME;
   const successor = creator ? successorOf(state, conv) : null;
+  const mineHere = conv.memberRoles.some((m) => isMyAgent(state, m.id));
+  const withMine = mineHere ? "你的 Agent 会一起离开。" : "";
   return (
     <Modal
       title={`退出群聊「${convTitle(state, conv)}」`}
@@ -225,13 +238,20 @@ export function LeaveModal({ conv, onLeave, onClose }) {
       }
     >
       <p>退出后你不会再收到这个群的消息，也看不到群里的历史消息；需要群里的人重新邀请你才能回来。</p>
-      {creator && successor === null && <Notice tone="warn">你是群里的最后一位成员，退出后这个群会关闭。</Notice>}
+      {creator && successor === null && (
+        <Notice tone="warn">
+          {mineHere ? "你是群里的最后一位真人，退出后这个群会关闭。" : "你是群里的最后一位成员，退出后这个群会关闭。"}
+          {withMine}
+        </Notice>
+      )}
       {creator && successor !== null && (
         <Notice tone="info">
           你是这个群的创建者。
           {successor ? `退出后，最早加入的成员${nameOf(state, successor)}会成为新的创建者。` : "退出后，最早加入的成员会成为新的创建者。"}
+          {withMine}
         </Notice>
       )}
+      {!creator && mineHere && <Notice tone="info">{withMine}</Notice>}
     </Modal>
   );
 }

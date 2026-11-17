@@ -238,8 +238,8 @@ export function fakeTimers() {
 
 /**
  * A transport whose answers come from `handlers` (each may return a value, a promise, or throw).
- * `log` records every batch-1 call in order; `agentLog` the Agent calls (agents, one Agent, a message, a run,
- * the site models); `sockets` every socket opened.
+ * `log` records every batch-1 call in order; `agentLog` the Agent calls (agents, one Agent, a message, a run, a
+ * group's runs, the site models); `sockets` every socket opened.
  */
 export function fakeTransport(handlers = {}) {
   const t = {
@@ -264,6 +264,7 @@ export function fakeTransport(handlers = {}) {
         throw apiError(404, "not_found");
       },
       run: () => ({ run: null }),
+      groupRuns: () => ({ runs: [] }),
       models: () => ({ siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 } }),
       ...handlers,
     },
@@ -330,6 +331,10 @@ export function fakeTransport(handlers = {}) {
     getRun(conversationId) {
       t.agentLog.push(["run", conversationId]);
       return Promise.resolve().then(() => t.handlers.run(conversationId));
+    },
+    getGroupRuns(conversationId) {
+      t.agentLog.push(["groupRuns", conversationId]);
+      return Promise.resolve().then(() => t.handlers.groupRuns(conversationId));
     },
     getModels() {
       t.agentLog.push("models");

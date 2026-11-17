@@ -22,6 +22,9 @@ const GROUP_ROUTES = {
   add: ["not_found", "already_member", "forbidden", "rate_limited"],
   remove: ["not_found", "forbidden", "rate_limited"],
   leave: ["not_found", "rate_limited"],
+  // The same two routes when the member is an Agent (batch 2C).
+  addAgent: ["not_found", "already_member", "forbidden", "rate_limited"],
+  removeAgent: ["not_found", "forbidden", "rate_limited"],
 };
 
 describe("friend and block refusals", () => {
@@ -61,6 +64,14 @@ describe("group refusals", () => {
     expect(groupErrorText("add", err("already_member"))).toBe("对方已经在群里了。");
     expect(groupErrorText("add", err("rate_limited"))).toContain("太频繁");
   });
+  it("adding or removing an Agent reads as being about an Agent, never about a friend", () => {
+    expect(groupErrorText("addAgent", err("already_member"))).toBe("它已经在群里了。");
+    expect(groupErrorText("addAgent", err("forbidden"))).toBe("没能添加：这个 Agent 可能已删除，或本群已满 500 人。");
+    expect(groupErrorText("addAgent", err("not_found"))).toBe("你已不在这个群聊中。");
+    expect(groupErrorText("removeAgent", err("forbidden"))).toBe("只有群的创建者和它的主人可以把它移出群聊。");
+    expect(groupErrorText("removeAgent", err("not_found"))).toBe("它已经不在群里了。");
+    for (const code of ["already_member", "forbidden", "not_found"]) expect(groupErrorText("addAgent", err(code))).not.toMatch(/好友|对方/);
+  });
 });
 
 // ───────── Agents, replies and providers (batch 2A): every code app/service/README.md documents for each route.
@@ -80,6 +91,8 @@ const REPLY_ROUTES = {
   retry: ["busy_run", "agent_paused", "agent_deleted", "invalid_request", "not_found", "rate_limited"],
   dismiss: ["not_found", "rate_limited"],
   topic: ["cannot_send", "not_found", "rate_limited"],
+  // 让 Agent 停下 (batch 2C)
+  halt: ["not_found", "forbidden", "rate_limited"],
 };
 const PROVIDER_ROUTES = {
   create: ["provider_limit", "name_taken", "invalid_request", "rate_limited"],
@@ -130,6 +143,18 @@ describe("the sentences batch 2A names", () => {
     // A 404 on the reply routes is "not yours / not here", never "it has ended".
     for (const route of ["stop", "retry", "dismiss", "topic"]) expect(replyErrorText(route, err("not_found", 404))).toBe("找不到要操作的内容，它可能已经不存在了。");
     expect(replyErrorText("stop", err("no_run", 0))).toBe("现在没有正在进行的回复。");
+    // 让 Agent 停下 (batch 2C)
+    expect(replyErrorText("halt", err("rate_limited", 429))).toBe("叫停太频繁了，请稍等一会儿再试。");
+    expect(replyErrorText("halt", err("not_found", 404))).toBe("你已不在这个群聊中。");
+    expect(replyErrorText("halt", err("forbidden", 403))).toBe("只有群里的真人成员可以让 Agent 停下。");
+  });
+
+  it("an Agent's reply in a group that was halted, or whose Agent was taken out: why, and nothing to retry", () => {
+    expect(runFailureText({ id: "r", status: "cancelled", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停");
+    expect(runFailureText({ id: "r", status: "cancelled", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里");
+    // (Should either come as a failure, it reads the same.)
+    expect(runFailureText({ id: "r", status: "failed", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停");
+    expect(runFailureText({ id: "r", status: "failed", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里");
   });
 
   it("provider_in_use names the Agents that use it", () => {

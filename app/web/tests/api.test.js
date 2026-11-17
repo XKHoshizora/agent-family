@@ -75,6 +75,11 @@ const table = [
   ["retryRun", () => routes.retryRun(ID), "POST", `/api/conversations/${ID}/runs/retry`, undefined],
   ["dismissRun", () => routes.dismissRun(ID), "POST", `/api/conversations/${ID}/runs/dismiss`, undefined],
   ["resetTopic", () => routes.resetTopic(ID), "POST", `/api/conversations/${ID}/topic`, undefined],
+  // An Agent's reply in a group, and the stop for Agent-to-Agent talk (batch 2C)
+  ["getGroupRuns", () => routes.getGroupRuns(ID), "GET", `/api/conversations/${ID}/runs`, undefined],
+  ["retryRun (a group's Agent)", () => routes.retryRun(ID, ID2), "POST", `/api/conversations/${ID}/runs/retry`, { agentId: ID2 }],
+  ["dismissRun (a group's Agent)", () => routes.dismissRun(ID, ID2), "POST", `/api/conversations/${ID}/runs/dismiss`, { agentId: ID2 }],
+  ["haltAgents", () => routes.haltAgents(ID), "POST", `/api/conversations/${ID}/agents/halt`, undefined],
   ["listProviders", () => routes.listProviders(), "GET", "/api/providers", undefined],
   ["createProvider", () => routes.createProvider({ name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }), "POST", "/api/providers", { name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }],
   ["patchProvider", () => routes.patchProvider(ID, { name: "q" }), "PATCH", `/api/providers/${ID}`, { name: "q" }],

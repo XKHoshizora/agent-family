@@ -13,6 +13,7 @@ import {
   applyAgent,
   applyAgents,
   applyGone,
+  applyGroupRun,
   applyModels,
   applyMyName,
   applyNewerInWindow,
@@ -27,6 +28,7 @@ import {
   bumpAvatar,
   closeWindow,
   discardPending,
+  dismissGroupRunOf,
   dismissRunOf,
   markFailed,
   markReadDone,
@@ -582,10 +584,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const staleAgent = (agentId) => (error) => {
     if (isStale(error)) request({ agent: agentId });
   };
-  /** A refusal says the reply or the conversation is not what the screen shows: fetch both. */
-  const staleReply = (conversationId) => (error) => {
-    if (isStale(error)) request({ run: conversationId, conversation: conversationId });
+  /** A refusal says the reply (in a group: the group's replies) or the conversation is not what the screen shows: fetch both. */
+  const staleReply = (conversationId, agentId = null) => (error) => {
+    if (isStale(error)) request(agentId ? { groupRuns: conversationId, conversation: conversationId } : { run: conversationId, conversation: conversationId });
   };
+  /** The run held of `agentId` in a group (mine: only my Agents' runs are ever held), or of an Agent's conversation. */
+  const heldRun = (conversationId, agentId) =>
+    agentId ? getModel().groupRuns[conversationId]?.[agentId]?.run ?? null : getModel().runs[conversationId] ?? null;
   /** An Agent changed by my own request: kept at once, and its conversation's flags (paused, deleted, canSend) refreshed. */
   const agentChanged = (agent) => {
     setModel(applyAgent(getModel(), agent));
@@ -666,40 +671,62 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         agentWrite("discard", agentId, () => setModel(setProposalStatus(getModel(), conversationOfAgent(agentId), proposalId, "discarded"))),
       ),
 
-    /** Stops the reply in progress in an Agent conversation (the `run` push says when it has stopped). */
-    stopRun: (conversationId) => {
-      const run = getModel().runs[conversationId];
+    /**
+     * Stops the reply in progress in an Agent conversation, or (`agentId`) of my Agent in a group — by its run either
+     * way (the `run` push says when it has stopped). Someone else's Agent's reply is not mine to stop: nothing is sent.
+     */
+    stopRun: (conversationId, agentId = null) => {
+      const run = heldRun(conversationId, agentId);
       if (!run || (run.status !== "queued" && run.status !== "running")) {
         const error = dropped("no_run");
         return Promise.resolve(failure(error, replyErrorText("stop", error)));
       }
-      return attempt(() => api.stopRun(conversationId, run.id), { text: replyText("stop"), onFail: staleReply(conversationId) });
+      return attempt(() => api.stopRun(conversationId, run.id), { text: replyText("stop"), onFail: staleReply(conversationId, agentId) });
     },
-    /** Tries the failed reply again: the new run replaces the failed one (unless a newer one was pushed meanwhile). */
-    retryRun: (conversationId) => {
-      const failed = getModel().runs[conversationId]?.id ?? null;
-      return attempt(() => api.retryRun(conversationId), {
+    /**
+     * Tries the failed reply again (in a group: of my Agent `agentId`, which the request names): the new run replaces
+     * the failed one (unless a newer one was pushed meanwhile).
+     */
+    retryRun: (conversationId, agentId = null) => {
+      const failed = heldRun(conversationId, agentId)?.id ?? null;
+      const keep = (run) =>
+        setModel(agentId ? applyGroupRun(getModel(), conversationId, agentId, { run }, { ordered: true }) : applyRun(getModel(), conversationId, run, { ordered: true }));
+      return attempt(() => (agentId ? api.retryRun(conversationId, agentId) : api.retryRun(conversationId)), {
         after: (res) => {
-          // In order: nothing of this conversation's runs happened between the failed run and its retry.
-          if ((getModel().runs[conversationId]?.id ?? null) === failed && res?.run) setModel(applyRun(getModel(), conversationId, res.run, { ordered: true }));
+          // In order: nothing of this reply's runs happened between the failed run and its retry.
+          if ((heldRun(conversationId, agentId)?.id ?? null) === failed && res?.run) keep(res.run);
         },
-        refetch: () => request({ run: conversationId }),
+        refetch: () => request(agentId ? { groupRuns: conversationId } : { run: conversationId }),
         text: replyText("retry"),
-        onFail: staleReply(conversationId),
+        onFail: staleReply(conversationId, agentId),
       });
     },
-    /** Closes the failure notice: the failed run is shown no more, not even by an answer already on its way. */
-    dismissRun: (conversationId) => {
-      const failed = getModel().runs[conversationId]?.id ?? null;
-      return attempt(() => api.dismissRun(conversationId), {
+    /**
+     * Closes the failure notice (in a group: of my Agent `agentId`, which the request names): the failed run is shown no
+     * more, not even by an answer already on its way.
+     */
+    dismissRun: (conversationId, agentId = null) => {
+      const failed = heldRun(conversationId, agentId)?.id ?? null;
+      return attempt(() => (agentId ? api.dismissRun(conversationId, agentId) : api.dismissRun(conversationId)), {
         after: () => {
-          if (failed !== null) setModel(dismissRunOf(getModel(), conversationId, failed));
+          if (failed === null) return;
+          setModel(agentId ? dismissGroupRunOf(getModel(), conversationId, agentId, failed) : dismissRunOf(getModel(), conversationId, failed));
         },
-        refetch: () => request({ run: conversationId }),
+        refetch: () => request(agentId ? { groupRuns: conversationId } : { run: conversationId }),
         text: replyText("dismiss"),
-        onFail: staleReply(conversationId),
+        onFail: staleReply(conversationId, agentId),
       });
     },
+    /** A group's Agent replies again (`GET …/runs`, in the background): the group was opened, or the connection came back. */
+    loadGroupRuns: (conversationId) => request({ groupRuns: conversationId }),
+    /** 让 Agent 停下: the group's Agents stop calling each other until a person speaks (its notice and runs are pushed). */
+    haltAgents: (conversationId) =>
+      attempt(() => api.haltAgents(conversationId), {
+        text: replyText("halt"),
+        onFail: (error) => {
+          if (error.status === 404) request({ conversation: conversationId });
+        },
+      }),
     /** Starts a new topic: the notice shows at once (it is pushed too). */
     resetTopic: (conversationId) =>
       attempt(() => api.resetTopic(conversationId), {

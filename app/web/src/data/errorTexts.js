@@ -72,6 +72,16 @@ const GROUPS = {
   leave: {
     not_found: "你已不在这个群聊中。",
   },
+  // The same routes when the member is one of my Agents (batch 2C): no friendship is involved.
+  addAgent: {
+    not_found: "你已不在这个群聊中。",
+    already_member: "它已经在群里了。",
+    forbidden: "没能添加：这个 Agent 可能已删除，或本群已满 500 人。",
+  },
+  removeAgent: {
+    forbidden: "只有群的创建者和它的主人可以把它移出群聊。",
+    not_found: "它已经不在群里了。",
+  },
 };
 
 const pick = (table, action, error) => {
@@ -84,7 +94,7 @@ export const commonErrorText = (error) => pick({}, null, error);
 
 /** action: lookup | sendRequest | accept | reject | withdraw | unfriend | block | unblock */
 export const friendErrorText = (action, error) => pick(FRIENDS, action, error);
-/** action: create | rename | add | remove | leave */
+/** action: create | rename | add | remove | leave, and addAgent | removeAgent (the member is an Agent) */
 export const groupErrorText = (action, error) => pick(GROUPS, action, error);
 
 const SEARCH = {
@@ -218,8 +228,14 @@ const REPLY = {
     cannot_send: "这个 Agent 已删除，不能再开始新话题。",
     not_found: NOT_FOUND,
   },
+  // 让 Agent 停下 in a group (batch 2C)
+  halt: {
+    not_found: "你已不在这个群聊中。",
+    forbidden: "只有群里的真人成员可以让 Agent 停下。",
+    rate_limited: "叫停太频繁了，请稍等一会儿再试。",
+  },
 };
-/** Why a reply action was refused. action: stop | retry | dismiss | topic */
+/** Why a reply action was refused. action: stop | retry | dismiss | topic | halt */
 export const replyErrorText = (action, error) => pick(REPLY, action, error);
 
 const PROVIDER_NOT_FOUND = "找不到这个供应商。";
@@ -279,6 +295,11 @@ const RUN_FAILED = {
   agent_paused: "它已暂停，这次没有回复。",
   agent_deleted: "它已删除，这次没有回复。",
 };
+/** How a reply in a group ends that is not a failure of the owner's to fix: neither is retried (batch 2C). */
+const RUN_ENDED_IN_GROUP = {
+  halted: "已被群成员叫停",
+  agent_removed: "它已不在这个群里",
+};
 /** A site model's key and address are the site's: the owner can only wait or choose another model. */
 const SITE_MODEL_FAILED = "站点提供的这个模型暂时用不了，请稍后重试，或换一个模型。";
 const SITE_MODEL_CODES = ["provider_rejected", "provider_unavailable", "address_not_allowed"];
@@ -294,6 +315,7 @@ const RUN_CANCELLED = {
  */
 export function runFailureText(run, now = Date.now(), source = null) {
   if (!run) return "";
+  if ((run.status === "failed" || run.status === "cancelled") && Object.hasOwn(RUN_ENDED_IN_GROUP, run.error ?? "")) return RUN_ENDED_IN_GROUP[run.error];
   if (run.status === "failed") {
     if (run.error === "no_quota") return noQuotaText({ resetsAt: run.resetsAt ?? null }, now);
     if (source === "site" && SITE_MODEL_CODES.includes(run.error)) return SITE_MODEL_FAILED;

@@ -164,7 +164,15 @@ describe("creating an Agent", () => {
     await chooseModel("小模型 · 免费");
     await click(createButton());
     expect(createAgent).toHaveBeenCalledTimes(1);
-    expect(createAgent.mock.calls[0][0]).toEqual({ handle: "mybot", name: "MyBot", replyMode: "always", groupMentions: "members", reasoning: "none", model: SITE_MODEL });
+    expect(createAgent.mock.calls[0][0]).toEqual({
+      handle: "mybot",
+      name: "MyBot",
+      replyMode: "always",
+      groupMentions: "members",
+      chainBudget: "50",
+      reasoning: "none",
+      model: SITE_MODEL,
+    });
     await flush();
     expect(sectionShown()).toContain("消息");
     expect(chatTitle()).toBe("MyBot");
@@ -242,6 +250,7 @@ describe("creating an Agent", () => {
       persona: "你是一位旅行家。",
       replyMode: "mention",
       groupMentions: "members",
+      chainBudget: "50",
       reasoning: "high",
       model: { source: "provider", providerId: P1, model: "gpt-x" },
     });
@@ -718,6 +727,103 @@ describe("群里谁可以叫它 (groupMentions)", () => {
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[1][1]).toEqual({ groupMentions: "members" });
     expect(document.querySelector(".main-col .kv").textContent).toContain("群里谁可以叫它所有群成员");
+  });
+});
+
+describe("一次接话最多花费 (chainBudget, batch 2C)", () => {
+  const LABEL = "一次接话最多花费（点）";
+  const box = () => inMain().getByLabelText(LABEL);
+  const HELP = "两次真人发言之间，它被其他 Agent 叫动所花的点数到了这个数就不再接话。真人 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。";
+  const WRONG = "请填写 1 到 100000 之间的点数（最多 6 位小数）";
+  const kv = () => document.querySelector(".main-col .kv").textContent;
+
+  it("creating: 50 by default, right under 群里谁可以叫它, with what it means; what I type is sent as a decimal string", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    expect(box().value).toBe("50");
+    expect(box().closest(".field").textContent).toContain(HELP);
+    expect(box().closest(".field").previousElementSibling).toBe(inMain().getByLabelText("群里谁可以叫它").closest(".field"));
+    type("名称", "MyBot");
+    type(LABEL, " 012.50 ");
+    await chooseModel("小模型 · 免费");
+    await click(createButton());
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ chainBudget: "12.5" });
+  });
+
+  it("refuses what is not 1–100000 points (up to 6 decimals), inline, before any request", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    for (const value of ["0", "0.5", "100001", "100000.000001", "abc", "", "1e3", "-5", "1.1234567", "１０"]) {
+      type(LABEL, value);
+      await click(createButton());
+      expect(box().closest(".field").textContent, value).toContain(WRONG);
+      expect(box().getAttribute("aria-invalid"), value).toBe("true");
+    }
+    expect(createAgent).not.toHaveBeenCalled();
+    for (const value of ["1", "100000", "99.999999"]) {
+      type(LABEL, value);
+      expect(box().closest(".field").textContent, value).not.toContain(WRONG);
+    }
+    await click(createButton());
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ chainBudget: "99.999999" });
+  });
+
+  it("editing: opens with the stored value and sends it only when it changed; the Agent's page shows it", async () => {
+    const record = agentOf(AG1, { model: SITE_MODEL, chainBudget: "80" });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    await openAgents({ agents: [record], api: { patchAgent } });
+    await openRow("小助手");
+    expect(kv()).toContain("一次接话最多花费80 点");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(box().value).toBe("80");
+    type(LABEL, "80.0");
+    type("简介", "新简介");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    type(LABEL, "100000");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchAgent.mock.calls[1][1]).toEqual({ chainBudget: "100000" });
+    expect(kv()).toContain("一次接话最多花费100,000 点");
+  });
+
+  it("a record that does not say it reads as the default, 50", async () => {
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL })] });
+    await openRow("小助手");
+    expect(kv()).toContain("一次接话最多花费50 点");
+  });
+});
+
+describe("where an Agent replies (batch 2C)", () => {
+  const G2 = "00000000-0000-4000-8000-0000000000c4";
+  const live = () => agentOf(AG1, { model: SITE_MODEL });
+
+  it("the create form says it replies in its own conversation, and in the groups I bring it to", async () => {
+    await openAgents();
+    await openCreate();
+    expect(mainText()).toContain("它会在专属会话里回复你；你也可以把它拉进你所在的群。");
+    expect(mainText()).not.toContain("只在这个会话里回复你");
+  });
+
+  it("参与的会话 lists its own conversation and the groups it is in now, each opening its chat", async () => {
+    const members = [ME_ID, ANN, AG1].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    const extra = [group(G1, { members }), group(G2, { title: "另一个群" })];
+    await openAgents({ agents: [live()], extra });
+    await openRow("小助手");
+    await click(inMain().getByRole("tab", { name: "参与的会话" }));
+    const items = inMain().getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0].textContent).toContain("Agent 私聊");
+    expect(items[1].textContent).toContain("周末小组");
+    expect(items[1].textContent).toContain("群聊");
+    expect(mainText()).not.toContain("另一个群");
+    await click(within(items[1]).getByRole("button", { name: "进入查看" }));
+    expect(sectionShown()).toContain("消息");
+    expect(chatTitle()).toBe("周末小组");
   });
 });
 

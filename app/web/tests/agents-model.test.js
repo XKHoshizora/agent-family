@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
 import { toView } from "../src/data/viewmodel.js";
 import { lastPreview } from "../src/state/selectors.js";
-import { A1, A2, AG1, AG2, ANN, D1, ME_ID, PRINCIPALS, agentConv, agentOf, agentPrincipal, direct, notice, runOf, syncOf, wire } from "./fixtures.js";
+import { A1, A2, AG1, AG2, ANN, D1, G1, ME_ID, PRINCIPALS, agentConv, agentOf, agentPrincipal, at, direct, group, notice, runOf, syncOf, wire } from "./fixtures.js";
 
 const NOW = new Date(2026, 10, 16, 12, 0).getTime();
 const R1 = "00000000-0000-4000-8000-0000000000e1";
@@ -525,6 +525,203 @@ describe("providers, usage and site models", () => {
     });
     expect(s.siteModels).toEqual([{ id: "free-1", label: "免费模型", tier: "free", vision: false, pdf: false, reasoning: ["low"], contextTokens: 32000 }]);
     expect(s.providerDefaults).toEqual({ contextTokens: 16000, maxOutputTokens: 2048 });
+  });
+});
+
+describe("an Agent's reply in a group (batch 2C)", () => {
+  const OAG = "00000000-0000-4000-8000-0000000000b9"; // 小安's Agent
+  const annBot = { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN };
+  const member = (id, isCreator = false) => ({ id, role: "speaker", isCreator });
+  const groupWith = (ids, fields = {}) => group(G1, { members: ids.map((id, i) => member(id, i === 0)), lastSeq: 2, readSeq: 2, ...fields });
+  const BASE = [wire(G1, 1, ANN, "@helper @annbot 在吗"), wire(G1, 2, ME_ID, "嗯")];
+  /** G1 with me, 小安, my 小助手 (AG1) and 小安's 安的助手 (OAG); my Agent's own conversation A1; a direct chat. */
+  function inGroup({ ids = [ME_ID, ANN, AG1, OAG], messages = BASE } = {}) {
+    const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
+    const sync = syncOf([groupWith(ids, { lastSeq, readSeq: lastSeq }), agentConv(A1, AG1), direct(D1, ANN)], messages, [
+      ...PRINCIPALS,
+      { ...agentPrincipal(), ownerId: ME_ID },
+      annBot,
+    ]);
+    return M.applyAgents(M.applySync(M.initial(), sync), [agentOf()]);
+  }
+  /** The push the owner gets, and the one everyone else gets. */
+  const ownerPush = (run, agentId = AG1) => ({ type: "run", conversationId: G1, agentId, run });
+  const memberPush = (state, agentId = OAG) => ({ type: "run", conversationId: G1, agentId, state });
+  const put = (s, push) => M.applyGroupRun(s, G1, push.agentId, push);
+  const rows = (s) => view(s).convs[G1].agentRuns;
+  const failed = runOf(R1, "failed", { error: "busy", retryable: true });
+
+  it("the owner's push holds the run, anyone else's only the state; the Agent's own conversation is untouched and nothing streams", () => {
+    let s = put(inGroup(), ownerPush(runOf(R1, "running")));
+    s = put(s, memberPush("replying"));
+    expect(rows(s)).toEqual([
+      { agentId: AG1, mine: true, kind: "replying", run: { id: R1, status: "running", retryable: false } },
+      { agentId: OAG, mine: false, kind: "replying" },
+    ]);
+    expect(s.runs).toEqual({});
+    expect(view(s).convs[A1].run).toBeNull();
+    expect(M.applyDelta(s, { conversationId: G1, runId: R1, text: "不该出现" })).toBe(s);
+    expect(s.streams).toEqual({});
+    s = put(s, memberPush("unavailable"));
+    expect(rows(s)[1]).toEqual({ agentId: OAG, mine: false, kind: "unavailable" });
+    s = put(s, memberPush(null));
+    expect(rows(s).map((r) => r.agentId)).toEqual([AG1]);
+    // A dedicated conversation's run is still kept by its conversation, beside the group's.
+    s = M.applyRun(s, A1, runOf(R2, "running"));
+    expect(s.runs[A1]).toMatchObject({ id: R2 });
+    expect(rows(s)).toHaveLength(1);
+  });
+
+  it("someone else's Agent never holds a run, whatever a malformed push carries: only `state` is read", () => {
+    const base = inGroup();
+    const leaky = { ...memberPush("unavailable"), run: runOf(R1, "failed", { error: "provider_rejected", resetsAt: at(30) }), error: "no_quota", retryable: true };
+    const s = put(base, leaky);
+    expect(s.groupRuns[G1][OAG].state).toBe("unavailable");
+    expect(s.groupRuns[G1][OAG]).not.toHaveProperty("run");
+    expect(rows(s)).toEqual([{ agentId: OAG, mine: false, kind: "unavailable" }]);
+    for (const leak of [R1, "provider_rejected", "no_quota", "resetsAt", "retryable"]) expect(JSON.stringify(s.groupRuns)).not.toContain(leak);
+    // A run without a state, or a state that is not one of the three: nothing at all.
+    expect(put(base, { type: "run", conversationId: G1, agentId: OAG, run: runOf(R1, "running") })).toBe(base);
+    expect(put(base, memberPush("thinking"))).toBe(base);
+    expect(M.applyGroupRun(base, G1, undefined, memberPush("replying"))).toBe(base);
+    // An answer carrying one for someone else's Agent: the same.
+    const answered = M.applyGroupRuns(base, G1, { runs: [{ agentId: OAG, state: "unavailable", run: runOf(R1, "failed", { error: "no_quota" }) }] });
+    for (const leak of [R1, "no_quota"]) expect(JSON.stringify(answered.groupRuns)).not.toContain(leak);
+    expect(rows(answered)).toEqual([{ agentId: OAG, mine: false, kind: "unavailable" }]);
+  });
+
+  it("an Agent's slot clears when its reply arrives; someone else's message does not clear it; a new run shows again", () => {
+    let s = put(put(inGroup(), ownerPush(runOf(R1, "running"))), memberPush("replying"));
+    s = M.applyMessage(s, wire(G1, 3, ANN, "还有我")).state;
+    expect(rows(s)).toHaveLength(2);
+    s = M.applyMessage(s, wire(G1, 4, OAG, "在的")).state;
+    expect(rows(s).map((r) => r.agentId)).toEqual([AG1]);
+    s = M.applyMessage(s, wire(G1, 5, AG1, "我也在")).state;
+    expect(rows(s)).toEqual([]);
+    // The pushes that end the runs after their messages change nothing shown.
+    s = put(put(s, ownerPush(runOf(R1, "done"))), memberPush(null));
+    expect(rows(s)).toEqual([]);
+    s = put(put(s, ownerPush(runOf(R2, "queued"))), memberPush("replying"));
+    expect(rows(s).map((r) => r.kind)).toEqual(["replying", "replying"]);
+    // A history page holding the reply, after the run was named: cleared too.
+    s = M.applyOlder(s, G1, { messages: [wire(G1, 6, OAG, "好")], nextBefore: null });
+    expect(rows(s).map((r) => r.agentId)).toEqual([AG1]);
+  });
+
+  it("a buffered push whose reply the snapshot already holds shows no row (its since is the lastSeq before)", () => {
+    const s = M.applyGroupRun(inGroup({ messages: [...BASE, wire(G1, 3, OAG, "在的")] }), G1, OAG, memberPush("replying"), { since: 2 });
+    expect(rows(s)).toEqual([]);
+  });
+
+  it("an Agent that leaves takes its slot with it: a pushed leave or removal notice, or a member list without it", () => {
+    let s = put(put(inGroup(), memberPush("replying")), ownerPush(failed));
+    s = M.applyMessage(s, notice(G1, 3, "小安将安的助手移出了群聊", { event: "member_removed", actorId: ANN, principalId: OAG })).state;
+    expect(rows(s).map((r) => r.agentId)).toEqual([AG1]);
+    s = M.applyConversation(s, groupWith([ME_ID, ANN]));
+    expect(rows(s)).toEqual([]);
+    let t = put(inGroup(), memberPush("replying"));
+    t = M.applyMessage(t, notice(G1, 3, "安的助手退出了群聊", { event: "member_left", actorId: OAG, principalId: OAG, newCreatorId: null })).state;
+    expect(rows(t)).toEqual([]);
+    // A history page with an old leave notice takes nothing.
+    const u = M.applyOlder(put(inGroup(), memberPush("replying")), G1, { messages: [notice(G1, 0, "x", { event: "member_left", actorId: OAG, principalId: OAG })], nextBefore: null });
+    expect(rows(u)).toHaveLength(1);
+  });
+
+  it("the owner is told when the Agent was taken out while replying, or halted: neither offers a retry; other ends show nothing", () => {
+    let s = put(inGroup(), ownerPush(runOf(R1, "running")));
+    s = M.applyMessage(s, notice(G1, 3, "x", { event: "member_removed", actorId: ANN, principalId: AG1 })).state;
+    s = M.applyConversation(s, groupWith([ME_ID, ANN, OAG]));
+    s = put(s, ownerPush(runOf(R1, "cancelled", { error: "agent_removed" })));
+    const removed = { agentId: AG1, mine: true, kind: "status", run: { id: R1, status: "cancelled", retryable: false, error: "agent_removed" } };
+    expect(rows(s)).toEqual([removed]);
+    // (A later refresh of the member list keeps it until I close it.)
+    s = M.applyConversation(s, groupWith([ME_ID, ANN, OAG]));
+    expect(rows(s)).toEqual([removed]);
+    expect(rows(M.dismissGroupRunOf(s, G1, AG1, R1))).toEqual([]);
+    const halted = put(inGroup(), ownerPush(runOf(R2, "cancelled", { error: "halted" })));
+    expect(rows(halted)).toEqual([{ agentId: AG1, mine: true, kind: "status", run: { id: R2, status: "cancelled", retryable: false, error: "halted" } }]);
+    for (const run of [runOf(R2, "cancelled", { error: "agent_paused" }), runOf(R2, "cancelled"), runOf(R2, "done"), runOf(R2, "stopped")]) {
+      expect(rows(put(inGroup(), ownerPush(run))), run.status).toEqual([]);
+    }
+  });
+
+  it("GET …/runs fills what this connection's pushes did not name; what it leaves out has nothing to show", () => {
+    const answer = { runs: [{ agentId: AG1, state: "unavailable", run: failed }, { agentId: OAG, state: "replying" }] };
+    let s = M.applyGroupRuns(inGroup(), G1, answer);
+    expect(rows(s)).toEqual([
+      { agentId: AG1, mine: true, kind: "status", run: failed },
+      { agentId: OAG, mine: false, kind: "replying" },
+    ]);
+    expect(s.groupRuns[G1][OAG].joined).toBe(true);
+    // Pushes of this connection are never replaced by an answer (it may have been read before them).
+    s = put(put(s, memberPush(null)), ownerPush(runOf(R2, "running")));
+    const pushed = rows(s);
+    expect(rows(M.applyGroupRuns(s, G1, answer))).toEqual(pushed);
+    expect(rows(M.applyGroupRuns(s, G1, { runs: [] }))).toEqual(pushed);
+    // The same run further on is taken.
+    expect(rows(M.applyGroupRuns(s, G1, { runs: [{ agentId: AG1, state: null, run: runOf(R2, "done") }] }))).toEqual([]);
+    // Known only from before a reconnect: the answer's word is taken, its silence too.
+    const before = M.clearStreams(put(inGroup(), memberPush("replying")));
+    expect(before.groupRuns[G1][OAG].joined).toBe(true);
+    expect(rows(M.applyGroupRuns(before, G1, { runs: [] }))).toEqual([]);
+    // Malformed answers change nothing.
+    for (const bad of [null, {}, { runs: "x" }, { runs: [null, { agentId: 3, state: "replying" }] }]) expect(M.applyGroupRuns(before, G1, bad)).toBe(before);
+  });
+
+  it("a dismissed failure does not come back with a late answer; the next run shows", () => {
+    let s = M.dismissGroupRunOf(put(inGroup(), ownerPush(failed)), G1, AG1, R1);
+    expect(rows(s)).toEqual([]);
+    s = M.applyGroupRuns(s, G1, { runs: [{ agentId: AG1, state: "unavailable", run: failed }] });
+    expect(rows(s)).toEqual([]);
+    expect(rows(put(s, ownerPush(runOf(R2, "queued"))))).toMatchObject([{ agentId: AG1, kind: "replying" }]);
+  });
+
+  it("runs that could not be fetched are not shown as replying until a push or an answer says what they are", () => {
+    let s = M.clearStreams(put(put(inGroup(), memberPush("replying")), ownerPush(runOf(R1, "queued"))));
+    s = M.markGroupRunsUnknown(s, G1);
+    expect(rows(s)).toEqual([]);
+    expect(M.markGroupRunsUnknown(s, G1)).toBe(s);
+    s = M.applyGroupRuns(s, G1, { runs: [{ agentId: OAG, state: "replying" }] });
+    expect(rows(s)).toEqual([{ agentId: OAG, mine: false, kind: "replying" }]);
+    expect(rows(put(s, ownerPush(runOf(R1, "running"))))).toHaveLength(2);
+  });
+
+  it("gone, or a sync that no longer lists the group, drops its slots; a reconnect keeps them as known from before", () => {
+    const s = put(put(inGroup(), memberPush("replying")), ownerPush(runOf(R1, "running")));
+    expect(M.applyGone(s, G1).groupRuns[G1]).toBeUndefined();
+    const sync = syncOf([agentConv(A1, AG1), direct(D1, ANN)], [], [...PRINCIPALS, agentPrincipal(), annBot]);
+    expect(M.applySync(s, sync).groupRuns[G1]).toBeUndefined();
+    const again = M.clearStreams(s);
+    expect(Object.values(again.groupRuns[G1]).every((slot) => slot.joined && !("since" in slot))).toBe(true);
+    expect(rows(again)).toHaveLength(2);
+  });
+
+  it("several Agents: one row each, in the group's member order, whatever order their pushes came in", () => {
+    let s = inGroup({ ids: [ME_ID, OAG, ANN, AG1] });
+    s = put(put(s, ownerPush(runOf(R1, "running"))), memberPush("replying"));
+    expect(rows(s).map((r) => r.agentId)).toEqual([OAG, AG1]);
+  });
+
+  it("Agents talking: a reply under way, or the newest message an Agent's that @-mentions another Agent of the group", () => {
+    const talking = (messages) => view(inGroup({ messages: [...BASE, ...messages] })).convs[G1].agentsTalking;
+    expect(view(inGroup()).convs[G1].agentsTalking).toBe(false);
+    expect(view(put(inGroup(), memberPush("replying"))).convs[G1].agentsTalking).toBe(true);
+    expect(view(put(inGroup(), memberPush("unavailable"))).convs[G1].agentsTalking).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "问问 @helper 吧")])).toBe(true);
+    expect(talking([wire(G1, 3, OAG, "@HELPER，你来")])).toBe(true);
+    expect(talking([wire(G1, 3, AG1, "@annbot")])).toBe(true);
+    // Itself, a person, a longer handle, an address, a person's message, a notice after it: no.
+    expect(talking([wire(G1, 3, OAG, "我是 @annbot")])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "@ann 你好")])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "@helper_2 你好")])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "写信到 me@helper")])).toBe(false);
+    expect(talking([wire(G1, 3, ANN, "@helper 你好")])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "@helper"), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })])).toBe(false);
+    // An Agent that is not (or no longer) in the group is nobody to call.
+    expect(view(inGroup({ ids: [ME_ID, ANN, OAG], messages: [...BASE, wire(G1, 3, OAG, "@helper")] })).convs[G1].agentsTalking).toBe(false);
+    // Only a group has it.
+    expect(view(inGroup()).convs[A1].agentsTalking).toBe(false);
+    expect(view(inGroup()).convs[A1].agentRuns).toEqual([]);
   });
 });
 

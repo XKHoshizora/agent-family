@@ -419,10 +419,10 @@ describe("Agents in a group (batch 2C)", () => {
     expect(dialog().textContent).toContain("没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。");
   });
 
-  it("an Agent's row carries the Agent tag, its owner, and its intro · field; 共 N 位成员 counts everyone, the chat header people only", async () => {
+  it("an Agent's row carries the Agent tag, its owner, and its intro · field; 共 N 位成员 counts everyone, the chat header people and Agents", async () => {
     await openApp({ sync: withAgents(CREATED), social: social(), handlers });
     await openChat("周末小组");
-    expect(document.querySelector(".main-col .chat-title p").textContent).toBe("3 位真人");
+    expect(document.querySelector(".main-col .chat-title p").textContent).toBe("3 位真人 · 2 个 Agent");
     await openProfile();
     expect(inMain().getByText("共 5 位成员")).toBeTruthy();
     const theirs = memberRow("安的助手");
@@ -466,11 +466,76 @@ describe("Agents in a group (batch 2C)", () => {
     expect(dialog().textContent).toContain("最早加入的成员小安会成为新的创建者");
   });
 
-  it("the creator with only Agents left is told the group closes", async () => {
+  it("the creator with only my Agents left is told the group closes, counting people only, and that my Agents leave too", async () => {
     await openApp({ sync: withAgents([MEMBER(ME_ID, true), MEMBER(AG3)]), social: social(), handlers });
     await openProfile("周末小组", "群设置");
     await click(button("退出本群"));
-    expect(dialog().textContent).toContain("你是群里的最后一位成员，退出后这个群会关闭。");
+    expect(dialog().textContent).toContain("你是群里的最后一位真人，退出后这个群会关闭。你的 Agent 会一起离开。");
+    expect(dialog().textContent).not.toContain("最后一位成员");
+  });
+
+  it.each([
+    ["the creator", [MEMBER(ME_ID, true), MEMBER(AG3), MEMBER(ANN), MEMBER(OAG)], ME_ID, "你是这个群的创建者。退出后，最早加入的成员小安会成为新的创建者。你的 Agent 会一起离开。"],
+    ["a member", [MEMBER(ANN, true), MEMBER(ME_ID), MEMBER(AG3)], ANN, "你的 Agent 会一起离开。"],
+  ])("%s leaving with my Agent in the group is told it leaves too", async (_who, members, creatorId, sentence) => {
+    await openApp({ sync: withAgents(members, creatorId), social: social(), handlers });
+    await openProfile("周末小组", "群设置");
+    await click(button("退出本群"));
+    expect(dialog().textContent).toContain(sentence);
+  });
+
+  it("leaving a group where only someone else's Agent is says nothing about Agents", async () => {
+    await openApp({ sync: withAgents([MEMBER(ME_ID, true), MEMBER(ANN), MEMBER(OAG)]), social: social(), handlers });
+    await openProfile("周末小组", "群设置");
+    await click(button("退出本群"));
+    expect(dialog().textContent).not.toContain("Agent");
+  });
+
+  it("添加成员's search finds friends and my Agents; nothing matching either says so once", async () => {
+    await openApp({ sync: withAgents(CREATED), social: social(), handlers });
+    await openProfile();
+    await click(button("添加成员"));
+    const box = within(dialog()).getByLabelText("搜索好友或我的 Agent");
+    fireEvent.change(box, { target: { value: "@help" } });
+    expect(namesIn("可添加的好友")).toEqual([]);
+    expect(namesIn("可添加的 Agent")).toEqual(["小助手"]);
+    expect(dialog().textContent).not.toContain("没有找到");
+    fireEvent.change(box, { target: { value: "朵" } });
+    expect(namesIn("可添加的好友")).toEqual(["朵拉"]);
+    expect(within(dialog()).queryByRole("list", { name: "可添加的 Agent" })).toBeNull();
+    expect(dialog().textContent).not.toContain("没有找到");
+    fireEvent.change(box, { target: { value: "zzz" } });
+    expect(dialog().textContent).toContain("没有找到匹配的好友或 Agent。");
+    expect(dialog().textContent.match(/没有找到/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ["forbidden", 403, "没能添加：这个 Agent 可能已删除，或本群已满 500 人。"],
+    ["already_member", 409, "它已经在群里了。"],
+    ["rate_limited", 429, "操作太频繁了，请稍等一分钟再试。"],
+  ])("adding my Agent refused (%s) reads as being about an Agent", async (code, status, text) => {
+    const addMember = vi.fn(async () => Promise.reject(apiError(status, code)));
+    await openApp({ sync: withAgents(CREATED), social: social(), api: { addMember }, handlers });
+    await openProfile();
+    await click(button("添加成员"));
+    await click(within(listIn("可添加的 Agent")).getByRole("button", { name: "添加" }));
+    expect(toastText()).toBe(text);
+  });
+
+  it("removing an Agent asks in its own words; a refusal reads as being about it; a person's removal reads as before", async () => {
+    const removeMember = vi.fn(async () => Promise.reject(apiError(403, "forbidden")));
+    await openApp({ sync: withAgents(CREATED), social: social(), api: { removeMember }, handlers });
+    await openProfile();
+    await click(within(memberRow("安的助手")).getByRole("button", { name: "移除" }));
+    expect(dialog().textContent).toContain("把 安的助手 移出群聊？它将不再在这个群里回复。");
+    expect(dialog().textContent).not.toContain("对方会立刻失去");
+    await click(dialogButton("确认移除"));
+    expect(toastText()).toBe("只有群的创建者和它的主人可以把它移出群聊。");
+    await click(dialogButton("取消"));
+    await click(within(memberRow("小安")).getByRole("button", { name: "移除" }));
+    expect(dialog().textContent).toContain("对方会立刻失去这个群聊的全部内容");
+    await click(dialogButton("确认移除"));
+    expect(toastText()).toBe("只有群的创建者可以移除成员。");
   });
 });
 

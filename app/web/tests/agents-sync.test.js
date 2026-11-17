@@ -11,6 +11,7 @@ import {
   AG2,
   ANN,
   D1,
+  G1,
   ME_ID,
   PRINCIPALS,
   agentConv,
@@ -20,6 +21,7 @@ import {
   deferred,
   direct,
   fakeTimers,
+  group,
   fakeTransport,
   range,
   runOf,
@@ -221,6 +223,120 @@ describe("run and delta pushes", () => {
     t.socket.emit({ type: "gone", id: A1 });
     expect(box.model.runs[A1]).toBeUndefined();
     expect(box.model.streams).toEqual({});
+  });
+});
+
+describe("an Agent's reply in a group (batch 2C)", () => {
+  const OAG = "00000000-0000-4000-8000-0000000000b9"; // 小安's Agent
+  const groupSync = () => {
+    const base = agentsSync();
+    const members = [ME_ID, ANN, AG1, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    return syncOf(
+      [group(G1, { members, lastSeq: 1, readSeq: 1 }), ...base.conversations],
+      [wire(G1, 1, ANN, "@helper @annbot 在吗"), ...base.messages],
+      [...base.principals, { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN }],
+    );
+  };
+  const groupCalls = (t) => t.agentLog.filter((x) => Array.isArray(x) && x[0] === "groupRuns").map((x) => x[1]);
+  const rows = (model) => toView(model, { now: 0 }).convs[G1].agentRuns;
+
+  it("both push shapes, each kept by (group, Agent): the owner's run, anyone else's state; nothing streams; a dedicated push is as before", async () => {
+    const t = agentsTransport({ sync: groupSync, run: () => ({ run: null }) });
+    const { box } = run(t);
+    await settle();
+    t.socket.emit({ type: "run", conversationId: G1, agentId: AG1, run: runOf(R1, "running") });
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "replying" });
+    t.socket.emit({ type: "delta", conversationId: G1, runId: R1, text: "不该出现" });
+    t.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "running") });
+    expect(rows(box.model)).toEqual([
+      { agentId: AG1, mine: true, kind: "replying", run: runOf(R1, "running") },
+      { agentId: OAG, mine: false, kind: "replying" },
+    ]);
+    expect(box.model.runs[A1]).toMatchObject({ id: R2, status: "running" });
+    expect(box.model.runs[G1]).toBeUndefined();
+    expect(box.model.streams).toEqual({});
+    // A push to a member that (wrongly) carries the run's details: only its state is kept.
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "unavailable", run: runOf(P1, "failed", { error: "provider_rejected" }) });
+    expect(rows(box.model)[1]).toEqual({ agentId: OAG, mine: false, kind: "unavailable" });
+    expect(JSON.stringify(box.model.groupRuns)).not.toMatch(/provider_rejected|f7/);
+    // The reply clears its Agent's row.
+    t.socket.emit({ type: "message", message: wire(G1, 2, AG1, "在的") });
+    expect(rows(box.model).map((r) => r.agentId)).toEqual([OAG]);
+    t.socket.emit({ type: "gone", id: G1 });
+    expect(box.model.groupRuns[G1]).toBeUndefined();
+  });
+
+  it("malformed group pushes change nothing", async () => {
+    const t = agentsTransport({ sync: groupSync });
+    const { box } = run(t);
+    await settle();
+    const before = box.model;
+    t.socket.emit({ type: "run", conversationId: G1 });
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG });
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "thinking" });
+    t.socket.emit({ type: "run", conversationId: G1, agentId: 7, state: "replying" });
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG, run: runOf(R1, "running") });
+    expect(box.model).toBe(before);
+  });
+
+  it("a group's runs are fetched when asked (the group is opened), once while one is on its way, and on a reconnect for the groups that hold any", async () => {
+    const answer = deferred();
+    const t = agentsTransport({ sync: groupSync, groupRuns: () => answer.promise });
+    const { box, engine, timers } = run(t);
+    await settle();
+    // Not on a first load: nothing is held yet, and the open group asks for itself.
+    expect(groupCalls(t)).toEqual([]);
+    engine.request({ groupRuns: G1 });
+    engine.request({ groupRuns: G1 });
+    await settle();
+    engine.request({ groupRuns: G1 });
+    await settle();
+    expect(groupCalls(t)).toEqual([G1]);
+    answer.resolve({ runs: [{ agentId: OAG, state: "replying" }, { agentId: AG1, state: "unavailable", run: runOf(R1, "failed", { error: "busy", retryable: true }) }] });
+    await settle();
+    expect(rows(box.model).map((r) => [r.agentId, r.kind])).toEqual([
+      [AG1, "status"],
+      [OAG, "replying"],
+    ]);
+    // A reconnect: the pushes of the break are not replayed, so the group holding rows is asked again.
+    t.handlers.groupRuns = () => ({ runs: [] });
+    t.socket.drop(1006);
+    timers.advance(60_000);
+    await settle();
+    expect(groupCalls(t)).toEqual([G1, G1]);
+    expect(rows(box.model)).toEqual([]);
+    // Holding nothing now: the next reconnect does not ask.
+    t.socket.drop(1006);
+    timers.advance(60_000);
+    await settle();
+    expect(groupCalls(t)).toEqual([G1, G1]);
+  });
+
+  it("a fetch that fails is tried once more; failing again, the group's replying rows are hidden; a 404 checks the conversation", async () => {
+    const t = agentsTransport({
+      sync: groupSync,
+      groupRuns: () => {
+        throw apiError(503, "busy");
+      },
+    });
+    const { box, engine, timers } = run(t);
+    await settle();
+    t.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "replying" });
+    engine.request({ groupRuns: G1 });
+    await settle();
+    expect(groupCalls(t)).toEqual([G1]);
+    expect(rows(box.model)).toHaveLength(1);
+    expect(timers.delays()).toContain(RUN_RETRY_MS);
+    timers.advance(RUN_RETRY_MS);
+    await settle();
+    expect(groupCalls(t)).toEqual([G1, G1]);
+    expect(rows(box.model)).toEqual([]);
+    t.handlers.groupRuns = () => {
+      throw apiError(404, "not_found");
+    };
+    engine.request({ groupRuns: G1 });
+    await settle();
+    expect(t.log).toContainEqual(["conversation", G1]);
   });
 });
 

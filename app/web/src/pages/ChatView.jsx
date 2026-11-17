@@ -1,11 +1,21 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { convTitle, convSubtitle, nameOf, publishBlock } from "../state/selectors.js";
+import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
 import { MessageItem } from "./Messages.jsx";
-import { AGENT_PAUSED_TEXT, IMAGE_HINT, RunStatusLine, StreamBubble, isReplying, seesImages } from "./AgentChatBits.jsx";
+import {
+  AGENT_PAUSED_TEXT,
+  GroupReplying,
+  GroupUnavailable,
+  HaltBar,
+  IMAGE_HINT,
+  RunStatusLine,
+  StreamBubble,
+  isReplying,
+  seesImages,
+} from "./AgentChatBits.jsx";
 import { ChatHitRow, SearchFooter } from "./SearchHits.jsx";
 import { useJumpTo } from "./useJumpTo.js";
 import { useMessageSearch } from "./useMessageSearch.js";
@@ -88,8 +98,20 @@ export function ChatView({ conv }) {
   const replying = isReplying(run);
   const failedRun = run?.status === "failed" ? run : null;
   const paused = agentChat && !block && Boolean(agent ? agent.paused : conv.agent?.paused);
-  /** What changes at the end of the list besides messages: the bubble growing, the status line coming or going. */
-  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${failedRun?.id ?? ""}`;
+  // A group: each Agent's reply being written, my Agent's status line, someone else's 暂时无法回复 — at the end of the
+  // list (not under a detached window); and 让 Agent 停下 above the composer while its Agents talk to each other.
+  const groupRows = group && !detached ? conv.agentRuns ?? [] : [];
+  const hasAgents = group && conv.members.some((id) => isAgent(state, id));
+  const live = state.connection === "live";
+  /** What changes at the end of the list besides messages: the bubble growing, the status lines coming or going. */
+  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${failedRun?.id ?? ""}|${groupRows
+    .map((r) => `${r.agentId}:${r.kind}:${r.run?.id ?? ""}`)
+    .join(",")}`;
+  // A group with Agents: what their replies are now is fetched when it opens, and again when the connection comes back
+  // (the pushes of a break are not sent again).
+  useEffect(() => {
+    if (hasAgents && live) actions.loadGroupRuns(conv.id);
+  }, [conv.id, hasAgents, live, actions]);
   // Files picked, pasted or dropped are sent the same way (nothing is uploaded where sending is held). An image on its
   // way to an Agent whose model cannot see images gets one line under the composer, until its upload settles (sent or
   // refused) or another conversation is opened: `imagesSending` counts those in flight here.
@@ -403,11 +425,21 @@ export function ChatView({ conv }) {
           ))}
           {replying && <StreamBubble conv={conv} />}
           {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
+          {groupRows.map((row) =>
+            row.kind === "replying" ? (
+              <GroupReplying key={`${row.agentId}:replying`} conv={conv} row={row} />
+            ) : row.kind === "status" ? (
+              <RunStatusLine key={`${row.agentId}:${row.run.id}`} conv={conv} run={row.run} agentId={row.agentId} />
+            ) : (
+              <GroupUnavailable key={`${row.agentId}:unavailable`} agentId={row.agentId} />
+            ),
+          )}
           <li aria-hidden="true" />
         </ol>
       </MarkdownView>
 
       {paused && <Notice tone="pause">{AGENT_PAUSED_TEXT}</Notice>}
+      {group && conv.agentsTalking && <HaltBar key={conv.id} conv={conv} />}
       <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} sendFiles={sendAndNote} note={imageHint} />
       {agentChat && (
         <p className="sr-only" aria-live="polite">

@@ -88,10 +88,12 @@ export async function openApp({ sync, social = emptySocial(), api = {}, handlers
     ...api,
   };
   let n = 0;
-  const layer = createDataLayer({ transport, api: calls, timers: fakeTimers(), now: () => NOW, random: () => 0.5, uuid: () => `tx-${++n}` });
+  // (The data layer's own timers: a reconnect's backoff runs only when the test advances them.)
+  const timers = fakeTimers();
+  const layer = createDataLayer({ transport, api: calls, timers, now: () => NOW, random: () => 0.5, uuid: () => `tx-${++n}` });
   render(<App api={{ getMe: async () => ME }} createLayer={() => layer} />);
   await flush();
-  return { env, layer, transport, api: calls };
+  return { env, layer, transport, api: calls, timers };
 }
 
 const rail = (name) => within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name });

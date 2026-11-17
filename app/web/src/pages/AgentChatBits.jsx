@@ -1,7 +1,9 @@
 // The parts of a conversation with one of my Agents that a human chat does not have: its text (ui/AgentText.jsx, for
 // stored and streaming replies), the folded thinking, the reply being written, the failed reply's status line, the persona
-// proposal card, the new-topic confirmation and divider, and the image hint. Each shows what the view model says
-// (`conv.run`, `conv.stream`, `msg.proposal`…); none of them derives it again from the model.
+// proposal card, the new-topic confirmation and divider, and the image hint. In a group (batch 2C): each Agent's reply
+// being written (never streamed), my Agent's status line, someone else's Agent's 暂时无法回复, and 让 Agent 停下. Each
+// shows what the view model says (`conv.run`, `conv.stream`, `conv.agentRuns`, `msg.proposal`…); none of them derives it
+// again from the model.
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
@@ -55,6 +57,43 @@ export function Thinking({ text, cut = false }) {
   );
 }
 
+/** A reply before any of its text: three dots and 正在回复…. */
+function Writing() {
+  return (
+    <>
+      <span className="dots" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+      </span>{" "}
+      正在回复…
+    </>
+  );
+}
+
+/**
+ * 停止生成 for a reply of mine: the reply of an Agent conversation, or (`agentId`) of my Agent in a group. The button stays
+ * disabled from the press until that run ends (a new run has its own button); a stop that could not be sent says why.
+ */
+function StopButton({ conversationId, agentId = null, runId }) {
+  const { dispatch, actions } = useStore();
+  const [stopping, setStopping] = useState(null);
+  const stop = async () => {
+    setStopping(runId);
+    const res = await (agentId ? actions.stopRun(conversationId, agentId) : actions.stopRun(conversationId));
+    if (res.ok) return;
+    // The reply ended meanwhile (nothing to stop), or it is not there any more: nothing to say.
+    if (res.error?.code === "no_run" || res.error?.status === 404) return;
+    setStopping(null);
+    dispatch({ type: "toast", text: res.text });
+  };
+  return (
+    <Btn small disabled={stopping === runId} onClick={stop}>
+      <Square size={12} aria-hidden="true" /> 停止生成
+    </Btn>
+  );
+}
+
 /**
  * The reply being written, at the end of the list: its text so far (or 正在回复… before the first piece, and for a reply
  * that was already under way when this page connected, whose text is not sent again), its thinking, and 停止生成. A
@@ -62,20 +101,9 @@ export function Thinking({ text, cut = false }) {
  * Busy for assistive technology while it grows: the stored reply that replaces it is announced instead (ChatView).
  */
 export function StreamBubble({ conv }) {
-  const { state, dispatch, actions } = useStore();
+  const { state } = useStore();
   const run = conv.run;
   const text = conv.stream?.text ?? "";
-  // The run whose stop was asked for: the button stays disabled until that run ends (a new run has its own button).
-  const [stopping, setStopping] = useState(null);
-  const stop = async () => {
-    setStopping(run.id);
-    const res = await actions.stopRun(conv.id);
-    if (res.ok) return;
-    // The reply ended meanwhile (nothing to stop), or it is not there any more: nothing to say.
-    if (res.error?.code === "no_run" || res.error?.status === 404) return;
-    setStopping(null);
-    dispatch({ type: "toast", text: res.text });
-  };
   return (
     <li className="msg theirs streaming" aria-busy="true">
       <Avatar id={conv.agentId} size={40} />
@@ -92,23 +120,75 @@ export function StreamBubble({ conv }) {
               {conv.stream.cut && <StreamCutNote />}
             </>
           ) : (
-            <>
-              <span className="dots" aria-hidden="true">
-                <i />
-                <i />
-                <i />
-              </span>{" "}
-              正在回复…
-            </>
+            <Writing />
           )}
         </div>
         <div className="msg-foot">
-          <Btn small disabled={stopping === run.id} onClick={stop}>
-            <Square size={12} aria-hidden="true" /> 停止生成
-          </Btn>
+          <StopButton key={run.id} conversationId={conv.id} runId={run.id} />
         </div>
       </div>
     </li>
+  );
+}
+
+/**
+ * An Agent's reply being written in a group (`row` of `conv.agentRuns`): 正在回复… only — nothing streams in a group, nor
+ * is any thinking shown. Its owner may stop it; nobody else has a control.
+ */
+export function GroupReplying({ conv, row }) {
+  const { state } = useStore();
+  return (
+    <li className="msg theirs streaming" aria-busy="true">
+      <Avatar id={row.agentId} size={40} />
+      <div className="msg-main">
+        <div className="msg-meta">
+          <strong>{nameOf(state, row.agentId)}</strong>
+          <Tag>Agent</Tag>
+        </div>
+        <div className="bubble">
+          <Writing />
+        </div>
+        {row.mine && (
+          <div className="msg-foot">
+            <StopButton key={row.run.id} conversationId={conv.id} agentId={row.agentId} runId={row.run.id} />
+          </div>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** Someone else's Agent could not reply in a group: one muted line, no reason (that is its owner's to know). */
+export function GroupUnavailable({ agentId }) {
+  const { state } = useStore();
+  return (
+    <li className="msg-system run-unavailable">
+      <span>{nameOf(state, agentId)} 暂时无法回复</span>
+    </li>
+  );
+}
+
+/**
+ * 让 Agent 停下, above a group's composer while its Agents are talking to each other (any member may press it): their
+ * calling each other stops until a person speaks. Disabled while the request is on its way; a refusal says why.
+ */
+export function HaltBar({ conv }) {
+  const { dispatch, actions } = useStore();
+  const mounted = useMounted();
+  const [busy, setBusy] = useState(false);
+  const halt = async () => {
+    setBusy(true);
+    const res = await actions.haltAgents(conv.id);
+    if (!mounted.current) return;
+    setBusy(false);
+    if (!res.ok) dispatch({ type: "toast", text: res.text });
+  };
+  return (
+    <div className="quick-bar">
+      <Btn small disabled={busy} onClick={halt}>
+        <Square size={12} aria-hidden="true" /> 让 Agent 停下
+      </Btn>
+    </div>
   );
 }
 
@@ -124,16 +204,21 @@ function useMounted() {
   return mounted;
 }
 
+/** How a reply in a group ended that trying again cannot change: a member halted it, or its Agent was taken out. */
+const NOT_RETRIED = new Set(["halted", "agent_removed"]);
+
 /**
  * A failed reply, at the end of the list: not a message (no seq, no avatar, no time, nothing to quote or find). Its
  * sentence, 重试 when trying again may work, where to fix it (usage and balance, the Agent's edit page), and a close
  * control. A retry refused because a reply is already going says nothing (that reply shows as it comes); any other
- * refusal says why here.
+ * refusal says why here. In a group (`agentId`: which of my Agents) the line names the Agent, and also tells of a reply
+ * a member halted or whose Agent was taken out of the group — neither can be retried.
  */
-export function RunStatusLine({ conv, run }) {
+export function RunStatusLine({ conv, run, agentId = null }) {
   const { state, dispatch, actions } = useStore();
+  const agent = agentId ?? conv.agentId;
   // (A site model's key and address are the site's: its sentence does not send me to my settings.)
-  const source = state.agents[conv.agentId]?.model?.source ?? null;
+  const source = state.agents[agent]?.model?.source ?? null;
   const mounted = useMounted();
   // (A reset time reads 今天 / 明天 from now: kept current while the line is shown.)
   const now = useNow();
@@ -148,15 +233,15 @@ export function RunStatusLine({ conv, run }) {
     setBusy(null);
     if (!res.ok && !quiet(res.error)) setNote(res.text);
   };
-  const retry = () => act("retry", () => actions.retryRun(conv.id), (error) => error?.code === "busy_run");
-  const dismiss = () => act("dismiss", () => actions.dismissRun(conv.id));
+  const retry = () => act("retry", () => (agentId ? actions.retryRun(conv.id, agentId) : actions.retryRun(conv.id)), (error) => error?.code === "busy_run");
+  const dismiss = () => act("dismiss", () => (agentId ? actions.dismissRun(conv.id, agentId) : actions.dismissRun(conv.id)));
   return (
     <li className="msg-system run-status">
       <Notice
         tone="warn"
         action={
           <span className="notice-actions">
-            {run.retryable && (
+            {run.retryable && !NOT_RETRIED.has(run.error) && (
               <Btn small variant="primary" disabled={busy !== null} onClick={retry}>
                 <RotateCw size={13} aria-hidden="true" /> 重试
               </Btn>
@@ -167,7 +252,7 @@ export function RunStatusLine({ conv, run }) {
               </Btn>
             )}
             {run.error === "context_too_small" && (
-              <Btn small onClick={() => go({ section: "agents", agentId: conv.agentId, agentView: "edit" })}>
+              <Btn small onClick={() => go({ section: "agents", agentId: agent, agentView: "edit" })}>
                 修改 Agent
               </Btn>
             )}
@@ -177,6 +262,11 @@ export function RunStatusLine({ conv, run }) {
           </span>
         }
       >
+        {agentId && (
+          <>
+            <strong>{nameOf(state, agentId)}</strong>：
+          </>
+        )}
         {runFailureText(run, now, source)}
         {note && <span className="notice-sub">{note}</span>}
       </Notice>

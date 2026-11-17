@@ -8,6 +8,7 @@ import {
   AG1,
   ANN,
   D1,
+  G1,
   ME_ID,
   PRINCIPALS,
   agentConv,
@@ -19,6 +20,7 @@ import {
   fakeFile,
   fakeTimers,
   fakeTransport,
+  group,
   notice,
   runOf,
   settle,
@@ -386,6 +388,76 @@ describe("replies", () => {
     expect(view().convs[A1].messages.at(-1)).toMatchObject({ seq: 4, kind: "system", text: "你开始了新话题，之前的对话不再发给小助手" });
     resetTopic.mockRejectedValueOnce(apiError(403, "cannot_send", "agent_deleted"));
     await expect(actions.resetTopic(A1)).resolves.toMatchObject({ ok: false, text: "这个 Agent 已删除，不能再开始新话题。" });
+  });
+});
+
+describe("replies in a group (batch 2C)", () => {
+  const OAG = "00000000-0000-4000-8000-0000000000b9"; // 小安's Agent
+  function groupSync() {
+    const base = agentSync();
+    const members = [ME_ID, ANN, AG1, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    return syncOf(
+      [group(G1, { members, lastSeq: 1, readSeq: 1 }), ...base.conversations],
+      [wire(G1, 1, ANN, "@helper 在吗"), ...base.messages],
+      [...base.principals, { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN }],
+    );
+  }
+  const inGroup = (api) => {
+    const conversation = (id) => {
+      const found = groupSync().conversations.find((c) => c.id === id);
+      if (!found) throw apiError(404, "not_found");
+      return found;
+    };
+    return loaded({ api, transport: fakeTransport({ sync: groupSync, agents: () => ({ agents: [agentOf()] }), conversation }) });
+  };
+  const ownerPush = (run) => ({ type: "run", conversationId: G1, agentId: AG1, run });
+
+  it("stopRun stops my Agent's reply in the group by its run; someone else's Agent, or nothing going, sends nothing", async () => {
+    const api = { stopRun: vi.fn(async () => ({ ok: true })) };
+    const { actions, transport } = await inGroup(api);
+    transport.socket.emit(ownerPush(runOf(R1, "running")));
+    transport.socket.emit({ type: "run", conversationId: A1, run: runOf(R2, "running") });
+    await expect(actions.stopRun(G1, AG1)).resolves.toMatchObject({ ok: true });
+    expect(api.stopRun).toHaveBeenCalledWith(G1, R1);
+    transport.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "replying" });
+    await expect(actions.stopRun(G1, OAG)).resolves.toMatchObject({ ok: false, error: { code: "no_run" }, text: "现在没有正在进行的回复。" });
+    transport.socket.emit(ownerPush(runOf(R1, "stopped")));
+    await expect(actions.stopRun(G1, AG1)).resolves.toMatchObject({ ok: false, error: { code: "no_run" } });
+    expect(api.stopRun).toHaveBeenCalledTimes(1);
+    // The Agent's own conversation is stopped as before.
+    await actions.stopRun(A1);
+    expect(api.stopRun).toHaveBeenLastCalledWith(A1, R2);
+  });
+
+  it("retryRun and dismissRun send the Agent: the retry's run replaces the failed one, the dismissal closes the line", async () => {
+    const api = { retryRun: vi.fn(async () => ({ run: runOf(R2, "queued") })), dismissRun: vi.fn(async () => ({ ok: true })) };
+    const { actions, model, transport, view } = await inGroup(api);
+    transport.socket.emit(ownerPush(runOf(R1, "failed", { error: "busy", retryable: true })));
+    await expect(actions.retryRun(G1, AG1)).resolves.toMatchObject({ ok: true });
+    expect(api.retryRun).toHaveBeenCalledWith(G1, AG1);
+    expect(model().groupRuns[G1][AG1].run).toMatchObject({ id: R2, status: "queued" });
+    expect(model().runs[G1]).toBeUndefined();
+    transport.socket.emit(ownerPush(runOf(R2, "failed", { error: "rate_limited", retryable: true })));
+    expect(view().convs[G1].agentRuns).toHaveLength(1);
+    await expect(actions.dismissRun(G1, AG1)).resolves.toMatchObject({ ok: true });
+    expect(api.dismissRun).toHaveBeenCalledWith(G1, AG1);
+    expect(view().convs[G1].agentRuns).toEqual([]);
+    // The Agent's own conversation's routes go without an Agent, as before.
+    await actions.retryRun(A1);
+    expect(api.retryRun).toHaveBeenLastCalledWith(A1);
+    await actions.dismissRun(A1);
+    expect(api.dismissRun).toHaveBeenLastCalledWith(A1);
+  });
+
+  it("haltAgents asks the group to stop its Agents; a refusal says why", async () => {
+    const api = { haltAgents: vi.fn(async () => ({ ok: true })) };
+    const { actions } = await inGroup(api);
+    await expect(actions.haltAgents(G1)).resolves.toMatchObject({ ok: true });
+    expect(api.haltAgents).toHaveBeenCalledWith(G1);
+    api.haltAgents.mockRejectedValueOnce(apiError(429, "rate_limited"));
+    await expect(actions.haltAgents(G1)).resolves.toMatchObject({ ok: false, text: "叫停太频繁了，请稍等一会儿再试。" });
+    api.haltAgents.mockRejectedValueOnce(apiError(404, "not_found"));
+    await expect(actions.haltAgents(G1)).resolves.toMatchObject({ ok: false, text: "你已不在这个群聊中。" });
   });
 });
 

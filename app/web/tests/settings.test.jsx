@@ -357,7 +357,7 @@ describe("carried fixes", () => {
     await flush();
     await click(within(document.querySelector(".side-col")).getByRole("button", { name: "打开群资料" }));
     await click(button("添加成员"));
-    expect(document.activeElement).toBe(within(dialog()).getByLabelText("搜索好友"));
+    expect(document.activeElement).toBe(within(dialog()).getByLabelText("搜索好友或我的 Agent"));
   });
 
   it("lifting my block says what has to be true for sending to work again", async () => {

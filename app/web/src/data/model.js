@@ -29,6 +29,17 @@
 // carries it does not bring it back. `avatarVersions[id]` is the version put in a principal's avatar URL: set by
 // /api/sync and `principal` pushes, raised by every other answer that names one, and for my own avatar also a newer
 // cache-buster the moment I change it (`bumpAvatar`).
+//
+// Agents in a group (batch 2C; an Agent's dedicated conversation keeps `runs` and `streams` as above).
+// `groupRuns[conversationId][agentId]` is the latest reply of each Agent member of a group, as this reader may know
+// it: for one of my Agents its Run (`{run, …}`: the `run` push to its owner), for anyone else's
+// only its state (`{state: "replying" | "unavailable" | null, …}`: the reduced push every other member gets — whatever
+// else such a push carries is never read). Nothing streams in a group. The flags are those of `runs`: `since` (the
+// group's lastSeq when a push of this connection first named it), `joined` (known from an answer, `GET …/runs`, or from
+// before this connection), `posted` (its reply is held: the Agent's next message after `since`, or any of its pushed
+// messages), `unknown` (could not be fetched), and `dismissed` (the failed run I closed). A slot goes with its Agent:
+// a pushed leave or removal notice of the Agent, or a member list without it, drops it (an owner's run that ended because
+// the Agent was taken out stays until closed: it says so).
 
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
@@ -76,6 +87,8 @@ export function initial() {
     dismissed: {},
     /** run id → {text, reasoning, cut?, reasoningCut?} streamed so far, each up to STREAM_CHARS (see the header). */
     streams: {},
+    /** group id → Agent id → its latest reply there, as this reader may know it (see the header). */
+    groupRuns: {},
   };
 }
 
@@ -214,6 +227,10 @@ const fromAgent = (conv, m) => conv.type === "agent" && Boolean(conv.agentId) &&
  * that order: there the reply is a message of the Agent after the run's `since`.
  */
 function notePosted(state, conversationId, arrived, pushed) {
+  return noteGroupPosted(noteRunPosted(state, conversationId, arrived, pushed), conversationId, arrived, pushed);
+}
+
+function noteRunPosted(state, conversationId, arrived, pushed) {
   const conv = state.conversations[conversationId];
   const run = state.runs[conversationId];
   if (!conv || !run || run.status !== "running" || run.posted) return state;
@@ -221,6 +238,54 @@ function notePosted(state, conversationId, arrived, pushed) {
   const isReply = pushed ? replies.length > 0 : typeof run.since === "number" && replies.some((m) => m.seq > run.since);
   if (!isReply) return state;
   return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
+}
+
+/** Whether a group slot is a reply being written: my Agent's run queued or running, or someone else's `replying`. */
+const replyingSlot = (slot) => ("run" in slot ? Boolean(slot.run) && isActive(slot.run.status) : slot.state === "replying");
+
+/** The same rule in a group, for each Agent whose reply is being written: a message of that Agent is its reply. */
+function noteGroupPosted(state, conversationId, arrived, pushed) {
+  const slots = state.groupRuns[conversationId];
+  if (!slots || arrived.length === 0) return state;
+  let next = null;
+  for (const [agentId, slot] of Object.entries(slots)) {
+    if (!replyingSlot(slot) || slot.posted) continue;
+    const replies = arrived.filter((m) => m.senderId === agentId && m.kind !== "system");
+    const isReply = pushed ? replies.length > 0 : typeof slot.since === "number" && replies.some((m) => m.seq > slot.since);
+    if (!isReply) continue;
+    next ??= { ...slots };
+    next[agentId] = { ...slot, posted: true };
+  }
+  return next ? { ...state, groupRuns: { ...state.groupRuns, [conversationId]: next } } : state;
+}
+
+/** The slots of a group, `slots` (an empty map: none at all). */
+function putGroupSlots(state, conversationId, slots) {
+  const groupRuns = Object.keys(slots).length > 0 ? { ...state.groupRuns, [conversationId]: slots } : without(state.groupRuns, conversationId);
+  return { ...state, groupRuns };
+}
+
+/** A pushed notice that an Agent left the group, or was taken out of it: its slot goes. */
+function dropLeaver(state, conversationId, wire) {
+  const event = wire.kind === "system" ? wire.system?.event : null;
+  if (event !== "member_left" && event !== "member_removed") return state;
+  const slots = state.groupRuns[conversationId];
+  const who = wire.system.principalId;
+  if (!slots || typeof who !== "string" || !(who in slots)) return state;
+  return putGroupSlots(state, conversationId, without(slots, who));
+}
+
+/** An owner's run that ended because its Agent was taken out of the group: it stays, saying so, until closed. */
+const REMOVED = "agent_removed";
+
+/** Slots of Agents that are not members of the group (as its member list now says) go. */
+function pruneGroupSlots(state, conversationId) {
+  const slots = state.groupRuns[conversationId];
+  const conv = state.conversations[conversationId];
+  if (!slots || !conv) return state;
+  const members = new Set(conv.members.map((m) => m.id));
+  const kept = filterValues(slots, (slot, agentId) => members.has(agentId) || slot.run?.error === REMOVED);
+  return Object.keys(kept).length === Object.keys(slots).length ? state : putGroupSlots(state, conversationId, kept);
 }
 
 /** A principal entry as an answer names it, keeping the owner known of an Agent when the answer does not say it. */
@@ -325,9 +390,12 @@ export function applySync(state, sync) {
     runs,
     streams,
     dismissed: filterValues(state.dismissed, (_runId, id) => id in conversations),
+    // A group that is gone takes its Agents' replies with it; so does an Agent no longer among its members.
+    groupRuns: filterValues(state.groupRuns, (_slots, id) => conversations[id]?.type === "group"),
   };
+  for (const id of Object.keys(next.groupRuns)) next = pruneGroupSlots(next, id);
   // The Agent's reply may have come with this snapshot (its push then reads as a duplicate).
-  for (const id of Object.keys(runs)) next = notePosted(next, id, windows.get(id) ?? [], false);
+  for (const id of new Set([...Object.keys(runs), ...Object.keys(next.groupRuns)])) next = notePosted(next, id, windows.get(id) ?? [], false);
   return next;
 }
 
@@ -347,8 +415,9 @@ export function applyMessage(state, wire, { pushed = true } = {}) {
   const list = mergeBySeq(state.messages[id] ?? [], [wire]);
   const position = advance(list, wire.seq);
   const unread = conv.unread + (wire.seq > conv.readSeq && countsAsUnread(wire, state.me?.id) ? 1 : 0);
-  const next = putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list);
-  return { state: notePosted(next, id, [wire], pushed) };
+  const next = notePosted(putConversation(state, { ...conv, position, lastSeq: Math.max(conv.lastSeq, position), unread }, list), id, [wire], pushed);
+  // (Only a push is in order with the run pushes: a catch-up page may hold a leave from before the Agent came back.)
+  return { state: pushed ? dropLeaver(next, id, wire) : next };
 }
 
 /**
@@ -373,7 +442,8 @@ export function applyCatchup(state, response) {
 }
 
 /**
- * "Not a member now": the conversation, its messages, unsent messages, draft, run and stream go; a new stay starts.
+ * "Not a member now": the conversation, its messages, unsent messages, draft, run and stream (a group: its Agents'
+ * replies) go; a new stay starts.
  * Idempotent.
  */
 export function applyGone(state, conversationId) {
@@ -390,6 +460,7 @@ export function applyGone(state, conversationId) {
     runs: without(state.runs, conversationId),
     streams: run ? without(state.streams, run.id) : state.streams,
     dismissed: without(state.dismissed, conversationId),
+    groupRuns: without(state.groupRuns, conversationId),
   };
 }
 
@@ -403,7 +474,7 @@ export function applyConversation(state, entry) {
   const readSeq = Math.max(prev.readSeq, entry.readSeq ?? 0);
   const list = state.messages[entry.id] ?? [];
   const peerReadSeq = entry.peerReadSeq == null ? prev.peerReadSeq : Math.max(prev.peerReadSeq ?? 0, entry.peerReadSeq);
-  return putConversation(state, {
+  const next = putConversation(state, {
     ...prev,
     ...metadata(entry),
     createdAt: entry.createdAt ?? prev.createdAt,
@@ -413,6 +484,8 @@ export function applyConversation(state, entry) {
     unread: readSeq > prev.readSeq ? unreadAfterReading(prev, list, state.me?.id, prev.readSeq, readSeq) : prev.unread,
     peerReadSeq,
   });
+  // An Agent no longer among the members has no reply here any more.
+  return pruneGroupSlots(next, entry.id);
 }
 
 /** Member ids of a held conversation that no principal entry names. */
@@ -894,12 +967,14 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
 }
 
 /**
- * A new connection: what was streamed before it is not sent again, so every stream goes; and every run held is known
- * only from before it (`joined`) until a push of this connection names it again.
+ * A new connection: what was streamed before it is not sent again, so every stream goes; and every run held — in an
+ * Agent's conversation or in a group — is known only from before it (`joined`) until a push of this connection names it
+ * again. (A group slot that then says nothing at all is forgotten.)
  */
 export function clearStreams(state) {
   const settled = Object.values(state.runs).every((r) => !r || r.joined);
-  if (settled && Object.keys(state.streams).length === 0) return state;
+  const groupsSettled = Object.values(state.groupRuns).every((slots) => Object.values(slots).every((slot) => slot.joined));
+  if (settled && groupsSettled && Object.keys(state.streams).length === 0) return state;
   const runs = {};
   for (const [id, r] of Object.entries(state.runs)) {
     if (!r || r.joined) runs[id] = r;
@@ -908,7 +983,17 @@ export function clearStreams(state) {
       runs[id] = { ...rest, joined: true };
     }
   }
-  return { ...state, runs, streams: {} };
+  const groupRuns = {};
+  for (const [id, slots] of Object.entries(state.groupRuns)) {
+    const kept = {};
+    for (const [agentId, slot] of Object.entries(slots)) {
+      const { since: _since, ...rest } = slot;
+      const known = { ...rest, joined: true };
+      if (!emptySlot(known)) kept[agentId] = known;
+    }
+    if (Object.keys(kept).length > 0) groupRuns[id] = kept;
+  }
+  return { ...state, runs, streams: {}, groupRuns };
 }
 
 /**
@@ -930,6 +1015,149 @@ export function dismissRunOf(state, conversationId, runId) {
     dismissed: { ...state.dismissed, [conversationId]: runId },
     runs: held?.id === runId ? { ...state.runs, [conversationId]: null } : state.runs,
   };
+}
+
+// ───────── an Agent's reply in a group (see the header)
+
+const GROUP_STATES = new Set(["replying", "unavailable"]);
+const isGroupState = (value) => value === null || GROUP_STATES.has(value);
+const isRun = (run) => Boolean(run) && typeof run.id === "string" && typeof run.status === "string";
+
+/**
+ * Whether `agentId` is one of my Agents: its record is mine (`GET /api/agents`), its principal names me as its owner,
+ * or — naming no owner — I hold its conversation (only its owner has one). Anyone else's otherwise (the safe side).
+ */
+export function ownsAgent(state, agentId) {
+  if (state.agents[agentId]) return true;
+  const owner = state.principals[agentId]?.ownerId;
+  if (typeof owner === "string") return owner === state.me?.id;
+  return Object.values(state.conversations).some((c) => c.type === "agent" && c.agentId === agentId);
+}
+
+/**
+ * What a push or an answer's entry says of an Agent's latest reply in a group, as this reader may keep it: the Run for
+ * the owner (`{run}`), only the state for anyone else (`{state}`); null when it says nothing usable. For someone else's
+ * Agent nothing but `state` is ever read, whatever else the entry carries.
+ */
+function slotValue(state, agentId, entry) {
+  if (ownsAgent(state, agentId) && isRun(entry.run)) return { run: wireRun(entry.run) };
+  if ("state" in entry && isGroupState(entry.state)) return { state: entry.state };
+  return null;
+}
+
+/** A slot that says nothing and guards nothing: known only from an answer or from before, no run, no closed failure. */
+const emptySlot = (slot) => Boolean(slot.joined) && !slot.dismissed && ("run" in slot ? slot.run === null : slot.state === null);
+
+/** Whether a message of `agentId` after `since` is held in the group (or shown in a detached window). */
+function heldMessageOf(state, conversationId, agentId, since) {
+  const shown = [...(state.messages[conversationId] ?? []), ...(state.windows[conversationId]?.messages ?? [])];
+  return shown.some((m) => m.seq > since && m.senderId === agentId && m.kind !== "system");
+}
+
+/** My Agent's slot after `run` (or none): `applyRun`'s rules, for one Agent of the group. */
+function ownerSlot(prev, run, ordered, from, heldReply) {
+  const prevRun = prev && "run" in prev ? prev.run : null;
+  let next = run;
+  if (next && next.status === "failed" && prev?.dismissed === next.id) next = null;
+  // An answer never replaces what a push of this connection named with another run, or with none.
+  if (!ordered && prev && !prev.joined && !prev.unknown && (next === null || next.id !== prevRun?.id)) return prev;
+  const slot = { run: next };
+  if (prev?.dismissed) slot.dismissed = prev.dismissed;
+  let placed = false;
+  if (next && prevRun && prevRun.id === next.id) {
+    if (runRank(next.status) < runRank(prevRun.status)) return prev;
+    if (prev.posted) slot.posted = true;
+    if (ordered && prev.joined) placed = true;
+    else if (prev.joined) slot.joined = true;
+    else slot.since = prev.since;
+  } else if (next) {
+    if (ordered) placed = true;
+    else slot.joined = true;
+  } else if (!ordered) slot.joined = true;
+  if (placed) {
+    slot.since = from;
+    if (!slot.posted && heldReply(from)) slot.posted = true;
+  }
+  return slot;
+}
+
+/** Someone else's Agent's slot after `value` (there is no run id to tell runs apart: a push is the latest word). */
+function memberSlot(prev, value, ordered, from, heldReply) {
+  if (!ordered && prev && !prev.joined && !prev.unknown) return prev;
+  const slot = { state: value };
+  if (!ordered) slot.joined = true;
+  else {
+    slot.since = from;
+    if (value === "replying" && heldReply(from)) slot.posted = true;
+  }
+  return slot;
+}
+
+function putGroupSlot(state, conversationId, agentId, value, { ordered, since }) {
+  const conv = state.conversations[conversationId];
+  const slots = state.groupRuns[conversationId] ?? {};
+  const prev = slots[agentId] ?? null;
+  const from = typeof since === "number" ? since : conv.lastSeq;
+  const heldReply = (after) => heldMessageOf(state, conversationId, agentId, after);
+  const next = "run" in value ? ownerSlot(prev, value.run, ordered, from, heldReply) : memberSlot(prev, value.state, ordered, from, heldReply);
+  if (next === prev) return state;
+  return putGroupSlots(state, conversationId, emptySlot(next) ? without(slots, agentId) : { ...slots, [agentId]: next });
+}
+
+/**
+ * A `run` push of a group (`{conversationId, agentId, run}` to the Agent's owner, `{conversationId, agentId, state}` to
+ * everyone else), or my own retry's answer (`{run}`, in order). `ordered`, `since`: as for `applyRun`. A push that names
+ * no Agent, no usable run or state, or a conversation that is not a held group changes nothing.
+ */
+export function applyGroupRun(state, conversationId, agentId, push, { ordered = true, since } = {}) {
+  const conv = state.conversations[conversationId];
+  if (!conv || conv.type !== "group" || typeof agentId !== "string" || !push || typeof push !== "object") return state;
+  const value = slotValue(state, agentId, push);
+  return value ? putGroupSlot(state, conversationId, agentId, value, { ordered, since }) : state;
+}
+
+/**
+ * `GET /api/conversations/:id/runs` (`{runs: [{agentId, state, run?}]}`): an answer, applied by the rules that make a
+ * late one harmless. An Agent it does not list has nothing to show (unless a push of this connection said otherwise).
+ * A malformed answer changes nothing.
+ */
+export function applyGroupRuns(state, conversationId, answer) {
+  const conv = state.conversations[conversationId];
+  if (!conv || conv.type !== "group" || !Array.isArray(answer?.runs)) return state;
+  if (!answer.runs.every((e) => e && typeof e === "object" && typeof e.agentId === "string")) return state;
+  let next = state;
+  const listed = new Set();
+  for (const entry of answer.runs) {
+    listed.add(entry.agentId);
+    const value = slotValue(next, entry.agentId, entry);
+    if (value) next = putGroupSlot(next, conversationId, entry.agentId, value, { ordered: false });
+  }
+  for (const [agentId, slot] of Object.entries(next.groupRuns[conversationId] ?? {})) {
+    if (!listed.has(agentId)) next = putGroupSlot(next, conversationId, agentId, "run" in slot ? { run: null } : { state: null }, { ordered: false });
+  }
+  return next;
+}
+
+/** I closed the failure notice of my Agent's `runId` in the group: as `dismissRunOf`. */
+export function dismissGroupRunOf(state, conversationId, agentId, runId) {
+  if (state.conversations[conversationId]?.type !== "group" || typeof agentId !== "string" || typeof runId !== "string") return state;
+  const slots = state.groupRuns[conversationId] ?? {};
+  const held = slots[agentId];
+  const slot = held && "run" in held && held.run?.id !== runId ? { ...held, dismissed: runId } : { run: null, joined: true, dismissed: runId };
+  return putGroupSlots(state, conversationId, { ...slots, [agentId]: slot });
+}
+
+/** The runs of a group could not be fetched: a reply held as being written may long have ended, so it is not shown. */
+export function markGroupRunsUnknown(state, conversationId) {
+  const slots = state.groupRuns[conversationId];
+  if (!slots) return state;
+  let next = null;
+  for (const [agentId, slot] of Object.entries(slots)) {
+    if (!replyingSlot(slot) || slot.unknown) continue;
+    next ??= { ...slots };
+    next[agentId] = { ...slot, unknown: true };
+  }
+  return next ? putGroupSlots(state, conversationId, next) : state;
 }
 
 // ───────── providers, usage, the site's models

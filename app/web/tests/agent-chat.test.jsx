@@ -849,18 +849,24 @@ describe("Agents in a group (batch 2C)", () => {
   const members = [ME_ID, ANN, BO, AG1, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
   const groupOf = (lastSeq) => ({ id: G1, type: "group", title: "周末小组", creatorId: ME_ID, myRole: "speaker", closed: false, canSend: { ok: true }, members, lastSeq, readSeq: lastSeq, unread: 0 });
 
-  /** The group with my 小助手 and 小安's 安的助手 in it, open; `messages` of the group. */
-  async function openGroup(messages = []) {
+  /** The group with my 小助手 and 小安's 安的助手 in it, open; `messages` of the group; `api` and `handlers` as openApp's. */
+  async function openGroup(messages = [], { api = {}, handlers = {} } = {}) {
     const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
     const sync = () => syncOf([groupOf(lastSeq), agentConv(A1, AG1)], messages, [...PRINCIPALS, { ...agentPrincipal(), ownerId: ME_ID }, annBot]);
     const app = await openApp({
       sync,
-      api: { listProviders: vi.fn(async () => ({ providers: [] })) },
-      handlers: { agents: () => ({ agents: [agentOf(AG1, { model: SITE_FREE, paused: true })] }), models: () => MODELS },
+      api: { listProviders: vi.fn(async () => ({ providers: [] })), ...api },
+      handlers: { agents: () => ({ agents: [agentOf(AG1, { model: SITE_FREE, paused: true })] }), models: () => MODELS, ...handlers },
     });
     await click(screen.getByText("周末小组", { selector: ".list-col .row-name" }));
     return app;
   }
+  /** A `run` push of the group: the owner's (`{run}`) or anyone else's (`{state}`). */
+  const groupRun = (agentId, fields) => ({ type: "run", conversationId: G1, agentId, ...fields });
+  const replyingRows = () => [...timeline().querySelectorAll("li.streaming")];
+  const unavailableLines = () => [...timeline().querySelectorAll("li.run-unavailable")];
+  const haltButton = () => screen.queryByRole("button", { name: /让 Agent 停下|处理中…/ });
+  const groupCalls = (transport) => transport.agentLog.filter((x) => Array.isArray(x) && x[0] === "groupRuns").map((x) => x[1]);
 
   it("the @ picker shows each Agent with its account name and owner; choosing one inserts @ and its account name, a person stays @ and the name", async () => {
     await openGroup();
@@ -892,5 +898,135 @@ describe("Agents in a group (batch 2C)", () => {
     expect(li.textContent).not.toMatch(/思考过程|不该给别人看|配置提议/);
     expect(within(li).queryByRole("button", { name: /重试|停止生成|确认|放弃/ })).toBeNull();
     expect(timeline().querySelector("li.run-status, li.streaming")).toBeNull();
+  });
+
+  it("a stopped or cut reply of an Agent still says so in a group (and shows no thinking)", async () => {
+    await openGroup([wire(G1, 1, OAG, "说到一半", { stopped: true }), wire(G1, 2, AG1, "很长的回答", { truncated: true, reasoning: "我的思考" })]);
+    expect(within(storedLi(1)).getByText("已停止")).toBeTruthy();
+    expect(within(storedLi(2)).getByText("已截断")).toBeTruthy();
+    expect(storedLi(2).querySelector(".thinking")).toBeNull();
+  });
+
+  it("a reply being written: 正在回复… only (nothing streams), a row per Agent in member order; its owner can stop it, nobody else", async () => {
+    const { transport, api } = await openGroup([], { api: { stopRun: vi.fn(async () => ({ ok: true })) } });
+    await push(transport, groupRun(OAG, { state: "replying" }));
+    await push(transport, groupRun(AG1, { run: runOf(R1, "running") }));
+    await push(transport, { type: "delta", conversationId: G1, runId: R1, text: "不该出现的半句话" });
+    const rows = replyingRows();
+    expect(rows.map((li) => li.querySelector(".msg-meta strong").textContent)).toEqual(["小助手", "安的助手"]);
+    for (const li of rows) {
+      expect(li.querySelector(".bubble").textContent).toContain("正在回复…");
+      expect(within(li).getByText("Agent", { selector: ".tag" })).toBeTruthy();
+    }
+    expect(timeline().textContent).not.toContain("不该出现");
+    expect(timeline().querySelector(".thinking")).toBeNull();
+    expect(within(rows[1]).queryByRole("button")).toBeNull();
+    await click(within(rows[0]).getByRole("button", { name: "停止生成" }));
+    expect(api.stopRun).toHaveBeenCalledWith(G1, R1);
+    expect(within(replyingRows()[0]).getByRole("button", { name: "停止生成" }).disabled).toBe(true);
+    // Each reply, once it is here, takes its row away.
+    await push(transport, { type: "message", message: wire(G1, 1, OAG, "在的") });
+    expect(replyingRows().map((li) => li.querySelector(".msg-meta strong").textContent)).toEqual(["小助手"]);
+    await push(transport, { type: "message", message: wire(G1, 2, AG1, "说到一半", { stopped: true }) });
+    await push(transport, groupRun(AG1, { run: runOf(R1, "stopped") }));
+    expect(replyingRows()).toHaveLength(0);
+    expect(within(storedLi(2)).getByText("已停止")).toBeTruthy();
+  });
+
+  it("a failed reply: its owner gets the status line with why, 重试 and 关闭; everyone else one muted line, no reason", async () => {
+    const api = { retryRun: vi.fn(async () => ({ run: runOf(R2, "queued") })), dismissRun: vi.fn(async () => ({ ok: true })) };
+    const { transport } = await openGroup([], { api });
+    await push(transport, groupRun(AG1, { run: runOf(R1, "failed", { error: "busy", retryable: true }) }));
+    await push(transport, groupRun(OAG, { state: "unavailable" }));
+    expect(statusLines()).toHaveLength(1);
+    const line = statusLine();
+    expect(line.textContent).toContain("小助手：服务出了点问题，这次没有回复，也没有扣费。可以重试。");
+    expect(within(line).getByRole("button", { name: "关闭提示" })).toBeTruthy();
+    const muted = unavailableLines();
+    expect(muted.map((li) => li.textContent)).toEqual(["安的助手 暂时无法回复"]);
+    expect(muted[0].classList.contains("run-status")).toBe(false);
+    expect(within(muted[0]).queryByRole("button")).toBeNull();
+    await click(within(line).getByRole("button", { name: "重试" }));
+    expect(api.retryRun).toHaveBeenCalledWith(G1, AG1);
+    expect(statusLines()).toHaveLength(0);
+    expect(replyingRows()).toHaveLength(1);
+    await push(transport, groupRun(AG1, { run: runOf(R2, "failed", { error: "rate_limited", retryable: true }) }));
+    await click(within(statusLine()).getByRole("button", { name: "关闭提示" }));
+    expect(api.dismissRun).toHaveBeenCalledWith(G1, AG1);
+    expect(statusLines()).toHaveLength(0);
+    expect(unavailableLines()).toHaveLength(1);
+    await push(transport, groupRun(OAG, { state: null }));
+    expect(unavailableLines()).toHaveLength(0);
+  });
+
+  it("halted, or taken out of the group while replying: the owner is told why, with nothing to retry", async () => {
+    const { transport } = await openGroup();
+    await push(transport, groupRun(AG1, { run: runOf(R1, "cancelled", { error: "halted", retryable: true }) }));
+    expect(statusLine().textContent).toContain("小助手：已被群成员叫停");
+    expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
+    await push(transport, groupRun(AG1, { run: runOf(R2, "cancelled", { error: "agent_removed" }) }));
+    expect(statusLines()).toHaveLength(1);
+    expect(statusLine().textContent).toContain("小助手：它已不在这个群里");
+    expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
+    expect(within(statusLine()).getByRole("button", { name: "关闭提示" })).toBeTruthy();
+  });
+
+  it("opening the group loads its Agents' replies; an Agent conversation does not", async () => {
+    const answer = { runs: [{ agentId: OAG, state: "replying" }, { agentId: AG1, state: "unavailable", run: runOf(R1, "failed", { error: "busy", retryable: true }) }] };
+    const { transport } = await openGroup([], { handlers: { groupRuns: () => answer } });
+    expect(groupCalls(transport)).toEqual([G1]);
+    expect(replyingRows().map((li) => li.querySelector(".msg-meta strong").textContent)).toEqual(["安的助手"]);
+    expect(statusLine().textContent).toContain("小助手：");
+    await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
+    expect(groupCalls(transport)).toEqual([G1]);
+  });
+
+  it("the connection coming back while the group is open loads its replies again", async () => {
+    const { transport, timers } = await openGroup();
+    expect(groupCalls(transport)).toEqual([G1]);
+    transport.handlers.groupRuns = () => ({ runs: [{ agentId: OAG, state: "replying" }] });
+    await act(async () => transport.socket.drop(1006));
+    await act(async () => timers.advance(60_000));
+    await flush();
+    expect(groupCalls(transport)).toEqual([G1, G1]);
+    expect(replyingRows()).toHaveLength(1);
+  });
+
+  it("让 Agent 停下: for every member while an Agent replies, or when an Agent's newest message calls another; it asks the group", async () => {
+    const halt = deferred();
+    const { transport, api } = await openGroup([wire(G1, 1, ANN, "@annbot 你好")], { api: { haltAgents: vi.fn(() => halt.promise) } });
+    expect(haltButton()).toBeNull();
+    await push(transport, groupRun(OAG, { state: "replying" }));
+    expect(haltButton()).toBeTruthy();
+    // Above the composer, below the messages.
+    expect(haltButton().compareDocumentPosition(document.querySelector(".composer")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(haltButton().compareDocumentPosition(timeline()) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    await push(transport, { type: "message", message: wire(G1, 2, OAG, "问问 @helper 吧") });
+    await push(transport, groupRun(OAG, { state: null }));
+    expect(replyingRows()).toHaveLength(0);
+    expect(haltButton()).toBeTruthy();
+    await click(haltButton());
+    expect(api.haltAgents).toHaveBeenCalledWith(G1);
+    expect(haltButton().disabled).toBe(true);
+    await click(haltButton());
+    expect(api.haltAgents).toHaveBeenCalledTimes(1);
+    await act(async () => halt.resolve({ ok: true }));
+    await flush();
+    expect(haltButton().disabled).toBe(false);
+    await push(transport, { type: "message", message: notice(G1, 3, "Mei 让 Agent 停止了接话", { event: "agents_halted", actorId: ME_ID }) });
+    expect(haltButton()).toBeNull();
+    expect(timeline().textContent).toContain("你 让 Agent 停止了接话");
+  });
+
+  it("让 Agent 停下 stays away when no Agent calls another; a refusal says why", async () => {
+    const haltAgents = vi.fn(async () => Promise.reject(apiError(429, "rate_limited")));
+    const { transport } = await openGroup([wire(G1, 1, OAG, "我是 @annbot，有事找 @ann")], { api: { haltAgents } });
+    expect(haltButton()).toBeNull();
+    await push(transport, { type: "message", message: wire(G1, 2, ANN, "@helper @annbot 你们聊") });
+    expect(haltButton()).toBeNull();
+    await push(transport, { type: "message", message: wire(G1, 3, AG1, "@annbot 交给你了") });
+    await click(haltButton());
+    expect(toastText()).toBe("叫停太频繁了，请稍等一会儿再试。");
+    expect(haltButton().disabled).toBe(false);
   });
 });

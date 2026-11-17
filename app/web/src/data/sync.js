@@ -14,6 +14,11 @@
 // A failure there is isolated: what it was to load is loaded again by the next connection. These answers arrive while
 // pushes are applied live, so they are applied by the rules that make a late answer harmless (model.js `applyRun`).
 // `principal`, `run` and `delta` pushes are applied as they come.
+//
+// Agents in a group (batch 2C): a `run` push of a group is kept by (group, Agent) (model.js `applyGroupRun`); a group's
+// replies (`GET …/runs`) are loaded when asked (`request({groupRuns})`: the group was opened, or the connection came
+// back while it is open), and on a reconnect for every group holding any — on the same few lanes as the runs above, once
+// at a time per group; one that fails is tried once more, then its replies being written are shown as unknown.
 import * as routes from "../api/routes.js";
 import { openSocket } from "../api/socket.js";
 import {
@@ -23,6 +28,8 @@ import {
   applyConversation,
   applyDelta,
   applyGone,
+  applyGroupRun,
+  applyGroupRuns,
   applyMessage,
   applyMessageUpdate,
   applyModels,
@@ -32,6 +39,7 @@ import {
   applySync,
   clearStreams,
   dropAgent,
+  markGroupRunsUnknown,
   markRunUnknown,
   openProposals,
   positionsOf,
@@ -90,6 +98,7 @@ export function httpTransport({ timers, WebSocketImpl } = {}) {
     getAgent: routes.getAgent,
     getMessage: routes.getMessage,
     getRun: routes.getRun,
+    getGroupRuns: routes.getGroupRuns,
     getModels: routes.getModels,
   };
 }
@@ -107,11 +116,11 @@ function safeClose(socket) {
 /**
  * Starts keeping the model in step with the service. Returns a handle:
  * `stop()` (closes the socket, cancels timers; late answers are ignored) and `request({sync, social,
- * conversation, agents, agent, run})` (ask for fresh state after an action).
+ * conversation, agents, agent, run, groupRuns})` (ask for fresh state after an action).
  *
  * @param transport {connect({onEvent, onClose}) → Promise<{close()}>, getSync(), catchUp(positions),
  *   getConversation(id), getSocial(), listAgents(), getAgent(id), getMessage(conversationId, seq),
- *   getRun(conversationId), getModels()}
+ *   getRun(conversationId), getGroupRuns(conversationId), getModels()}
  */
 export function start(
   transport,
@@ -158,6 +167,12 @@ export function start(
       cardsAll: false,
       runs: new Set(),
       runTries: new Map(),
+      // A group's Agent replies: the groups to fetch (`groupRunsHeld`: on this connection's first sync, every group
+      // holding any), those being fetched now, and how often a group's fetch failed on this connection.
+      groupRunsHeld: false,
+      groupRuns: new Set(),
+      groupRunsFetching: new Set(),
+      groupRunTries: new Map(),
       models: false,
     };
   }
@@ -188,6 +203,7 @@ export function start(
     agentNeed = freshAgentNeeds();
     agentNeed.agents = true;
     agentNeed.runAll = true;
+    agentNeed.groupRunsHeld = true;
     agentNeed.cardsAll = !fresh;
     agentNeed.models = !modelsLoaded;
     lanes = { conn: my, live: false, agents: false, runs: 0, models: false };
@@ -283,8 +299,12 @@ export function start(
       if (conv.agentId && agentNeed.cardsAll) agentNeed.cards.add(conv.agentId);
       if (conv.agentId && !after.agents[conv.agentId]) agentNeed.agents = true;
     }
+    // Groups holding Agent replies from before this connection: what became of them is fetched (the open group asks
+    // for itself too).
+    if (agentNeed.groupRunsHeld) for (const id of Object.keys(after.groupRuns)) agentNeed.groupRuns.add(id);
     agentNeed.runAll = false;
     agentNeed.cardsAll = false;
+    agentNeed.groupRunsHeld = false;
   }
 
   /**
@@ -333,7 +353,9 @@ export function start(
     if (!alive || !lane || !lane.live || lane.conn !== conn) return;
     const n = agentNeed;
     if (!lane.agents && (n.agents || n.agentIds.size > 0 || n.cards.size > 0)) agentLane(lane);
-    while (lane.runs < RUN_FETCHES && n.runs.size > 0) runLane(lane);
+    // (A group already being fetched is not asked again meanwhile: its answer is on its way.)
+    for (const id of n.groupRuns) if (n.groupRunsFetching.has(id)) n.groupRuns.delete(id);
+    while (lane.runs < RUN_FETCHES && (n.runs.size > 0 || n.groupRuns.size > 0)) runLane(lane);
     if (!lane.models && n.models) modelsLane(lane);
   }
 
@@ -362,15 +384,20 @@ export function start(
     }
   }
 
+  /** One fetch: an Agent conversation's run first, else a group's Agent replies. */
   async function runLane(lane) {
-    const [id] = agentNeed.runs;
-    agentNeed.runs.delete(id);
+    const n = agentNeed;
+    const group = n.runs.size === 0;
+    const [id] = group ? n.groupRuns : n.runs;
+    (group ? n.groupRuns : n.runs).delete(id);
+    if (group) n.groupRunsFetching.add(id);
     lane.runs += 1;
     try {
-      await refreshRun(lane.conn, id);
+      await (group ? refreshGroupRuns(lane.conn, id) : refreshRun(lane.conn, id));
     } catch (err) {
       laneFailed(lane, err);
     } finally {
+      if (group) n.groupRunsFetching.delete(id);
       lane.runs -= 1;
       pumpAgents();
     }
@@ -471,14 +498,43 @@ export function start(
     if (res && "run" in res) setModel(applyRun(getModel(), id, res.run, { ordered: false }));
   }
 
-  function retryRunLater(my, id) {
+  function retryRunLater(my, id, group = false) {
     const timer = timers.setTimeout(() => {
       runRetries.delete(timer);
       if (my !== conn || !alive) return;
-      agentNeed.runs.add(id);
+      (group ? agentNeed.groupRuns : agentNeed.runs).add(id);
       pumpAgents();
     }, RUN_RETRY_MS);
     runRetries.add(timer);
+  }
+
+  /**
+   * A group's Agent replies (`GET /api/conversations/:id/runs`), an answer applied by the rules that make a late one
+   * harmless (`applyGroupRuns`). 404: not a member now (the conversation is checked). Another failure: tried once more
+   * after RUN_RETRY_MS; failing again, its replies held as being written are shown as unknown.
+   */
+  async function refreshGroupRuns(my, id) {
+    if (getModel().conversations[id]?.type !== "group") return;
+    let res;
+    try {
+      res = await transport.getGroupRuns(id);
+    } catch (err) {
+      if (my !== conn) return;
+      if (isSignedOut(err)) throw err;
+      if (err?.status === 404) {
+        need.convs.add(id);
+        work();
+        return;
+      }
+      const tries = (agentNeed.groupRunTries.get(id) ?? 0) + 1;
+      agentNeed.groupRunTries.set(id, tries);
+      if (tries < 2) retryRunLater(my, id, true);
+      else setModel(markGroupRunsUnknown(getModel(), id));
+      return;
+    }
+    if (my !== conn) return;
+    agentNeed.groupRunTries.delete(id);
+    setModel(applyGroupRuns(getModel(), id, res));
   }
 
   function clearRunRetries() {
@@ -525,6 +581,7 @@ export function start(
         need.catchup.delete(event.id);
         need.convs.delete(event.id);
         agentNeed.runs.delete(event.id);
+        agentNeed.groupRuns.delete(event.id);
         return;
       case "social":
         need.social = true;
@@ -546,9 +603,15 @@ export function start(
         setModel(setAvatarVersion(model, event.id, event.avatarVersion));
         return;
       case "run": {
-        if (typeof event.conversationId !== "string" || !event.run) return;
+        if (typeof event.conversationId !== "string") return;
         // A conversation not held when buffering began has no floor: anything of the Agent held counts (no bubble).
         const since = buffered ? buffered.get(event.conversationId) ?? 0 : undefined;
+        // A group's: one Agent's reply, the owner's run or anyone else's state (only that is read of it).
+        if (model.conversations[event.conversationId]?.type === "group") {
+          setModel(applyGroupRun(model, event.conversationId, event.agentId, event, { since }));
+          return;
+        }
+        if (!event.run) return;
         setModel(applyRun(model, event.conversationId, event.run, { since }));
         return;
       }
@@ -621,9 +684,9 @@ export function start(
     /**
      * Asks for fresh state after an action; done right away when live, else on the next connection. `agents`: my
      * Agents again; `agent`: one Agent and its open proposal cards (as an `agent` push does); `run`: a conversation's
-     * run (these three in the background, see the header).
+     * run; `groupRuns`: a group's Agent replies (these four in the background, see the header).
      */
-    request({ sync = false, social = false, conversation = null, agents = false, agent = null, run = null } = {}) {
+    request({ sync = false, social = false, conversation = null, agents = false, agent = null, run = null, groupRuns = null } = {}) {
       if (!alive) return;
       if (sync) need.sync = true;
       if (social) need.social = true;
@@ -637,6 +700,7 @@ export function start(
         agentNeed.cards.add(agent);
       }
       if (run) agentNeed.runs.add(run);
+      if (groupRuns) agentNeed.groupRuns.add(groupRuns);
       if (!buffering) work();
       pumpAgents();
     },

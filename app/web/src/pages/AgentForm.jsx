@@ -21,6 +21,29 @@ export const GROUP_MENTIONS = [
 const PERSONA_MAX = 20000;
 const chars = (text) => [...text].length;
 
+/** 一次接话最多花费 when nothing else is said, in points (the service's default). */
+export const CHAIN_BUDGET_DEFAULT = "50";
+const CHAIN_BUDGET_MIN = 1;
+const CHAIN_BUDGET_MAX = 100000;
+/** Points as the service counts them: whole points, and at most six decimals (micro-points). */
+const POINTS = /^\d+(?:\.\d{1,6})?$/;
+const CHAIN_BUDGET_WRONG = `请填写 ${CHAIN_BUDGET_MIN} 到 ${CHAIN_BUDGET_MAX} 之间的点数（最多 6 位小数）`;
+
+/**
+ * 一次接话最多花费 as typed, as the decimal string sent (" 012.50 " → "12.5"); null when it is not 1–100000 points with at
+ * most six decimals.
+ */
+export function chainBudgetOf(text) {
+  const typed = typeof text === "string" ? text.trim() : "";
+  if (!POINTS.test(typed)) return null;
+  const value = Number(typed);
+  if (!(value >= CHAIN_BUDGET_MIN && value <= CHAIN_BUDGET_MAX)) return null;
+  const [whole, fraction = ""] = typed.split(".");
+  const kept = fraction.replace(/0+$/, "");
+  const points = whole.replace(/^0+(?=\d)/, "");
+  return kept ? `${points}.${kept}` : points;
+}
+
 /** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
 export async function settled(pending) {
   const result = await pending;
@@ -65,14 +88,16 @@ const recordFields = (a) => ({
   persona: a?.persona ?? "",
   replyMode: a?.replyMode ?? "always",
   groupMentions: a?.groupMentions ?? "members",
+  chainBudget: chainBudgetOf(a?.chainBudget) ?? CHAIN_BUDGET_DEFAULT,
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
 });
 
-/** A field of the form as it would be stored (the text fields trimmed), to compare with the record. */
+/** A field of the form as it would be stored (the text fields trimmed, points as sent), to compare with the record. */
 const storedValue = (key, f) => {
   if (key === "persona") return personaOf(f.persona);
   if (key === "name" || key === "intro" || key === "field") return f[key].trim();
+  if (key === "chainBudget") return chainBudgetOf(f.chainBudget) ?? f.chainBudget.trim();
   return f[key];
 };
 
@@ -149,6 +174,7 @@ export function AgentForm({ agent = null }) {
     intro: chars(intro) > 40 ? "简介不超过 40 个字" : "",
     field: chars(field) > 20 ? "擅长领域不超过 20 个字" : "",
     persona: chars(persona) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
+    chainBudget: chainBudgetOf(f.chainBudget) === null ? CHAIN_BUDGET_WRONG : "",
   };
   const invalid = Object.values(errors).some(Boolean);
   const shown = (key) => (touched ? errors[key] : "");
@@ -220,6 +246,7 @@ export function AgentForm({ agent = null }) {
     if (persona) body.persona = persona;
     body.replyMode = f.replyMode;
     body.groupMentions = f.groupMentions;
+    body.chainBudget = chainBudgetOf(f.chainBudget);
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -257,7 +284,7 @@ export function AgentForm({ agent = null }) {
     // sent, so a change made elsewhere meanwhile is not overwritten by the value this form opened with.
     const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
     const patch = {};
-    for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions"]) if (mine(key)) patch[key] = storedValue(key, f);
+    for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions", "chainBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -428,8 +455,17 @@ export function AgentForm({ agent = null }) {
             ))}
           </select>
         </Field>
+        <Field
+          label="一次接话最多花费（点）"
+          hint="两次真人发言之间，它被其他 Agent 叫动所花的点数到了这个数就不再接话。真人 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。"
+          error={shown("chainBudget")}
+        >
+          <input value={f.chainBudget} onChange={set("chainBudget")} inputMode="decimal" autoComplete="off" />
+        </Field>
         <Notice tone="info">
-          {agent ? "修改从它的下一次回复起生效。" : "创建后会生成一个你和它的专属会话。它没有工具、文件或电脑权限，只在这个会话里回复你。"}
+          {agent
+            ? "修改从它的下一次回复起生效。"
+            : "创建后会生成一个你和它的专属会话。它没有工具、文件或电脑权限。它会在专属会话里回复你；你也可以把它拉进你所在的群。"}
         </Notice>
         {refusal && refusal.code !== "handle_taken" && <Notice tone="warn">{limitText}</Notice>}
         <div className="form-actions">

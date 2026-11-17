@@ -327,6 +327,40 @@ describe("timeline", () => {
     ]);
   });
 
+  it("the notices of Agents talking to each other in a group (batch 2C); a notice of an unknown event shows nothing", async () => {
+    const BOT = "00000000-0000-4000-8000-0000000000b9";
+    const sync = () =>
+      syncOf(
+        [group(G1, { lastSeq: 6, readSeq: 6 })],
+        [
+          wire(G1, 1, ANN, "@annbot 你好"),
+          notice(G1, 2, "x", { event: "agent_chain_paused", actorId: ANN, limit: 30 }),
+          notice(G1, 3, "x", { event: "agents_halted", actorId: ANN }),
+          notice(G1, 4, "x", { event: "agent_budget_reached", actorId: ANN, agentId: BOT }),
+          notice(G1, 5, "以后才有的通知", { event: "from_the_future", actorId: ANN, agentId: BOT }),
+          notice(G1, 6, "x", { event: "agents_halted", actorId: ME_ID }),
+        ],
+        [...PRINCIPALS, { id: BOT, handle: "annbot", displayName: "安的助手", kind: "agent", ownerId: ANN }],
+      );
+    const { transport } = await openApp({ sync });
+    await openChat("周末小组");
+    const lines = () => [...document.querySelectorAll("li.msg-system > span")].map((x) => x.textContent);
+    expect(lines()).toEqual([
+      "Agent 已连续对话 30 条，已暂停互相接话，有人发言后继续。",
+      "小安 让 Agent 停止了接话",
+      "安的助手 已达到本次接话的点数上限，有人发言后继续。",
+      "你 让 Agent 停止了接话",
+    ]);
+    expect(timeline().querySelector('[data-msg="m5"]')).toBeNull();
+    expect(timeline().textContent).not.toContain("以后才有的通知");
+    // Pushed, it shows nothing either and breaks nothing after it; it is never the list's preview line.
+    await push(transport, { type: "message", message: notice(G1, 7, "又一个以后才有的通知", { event: "from_the_future_2", actorId: ANN }) });
+    expect(lines()).toHaveLength(4);
+    expect(document.querySelector(".list-col").textContent).not.toContain("以后才有的通知");
+    await push(transport, { type: "message", message: wire(G1, 8, ANN, "还在吗") });
+    expect(timeline().querySelector('[data-msg="m8"]').textContent).toContain("还在吗");
+  });
+
   it("quotes: an invisible one says so, a visible file quote shows the file name, names come from people", async () => {
     const sync = () =>
       syncOf(

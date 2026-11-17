@@ -56,7 +56,8 @@ const CANNOT_SEND_ANY_MORE = "双方不能再发送新消息，已有历史不�
 /**
  * A system notice's sentence, rendered from its event (`system`, ids aliased) with the names known now ("你"
  * for me) in the service's wording. The service's own sentence (`fallback`, names of that moment) is shown for
- * an event this client does not know, a malformed one, or when someone it names is not known here.
+ * a malformed event, or when someone it names is not known here; an event this client does not know is null (the
+ * notice shows nothing).
  * @param {(id: string) => string | null} nameOf
  * @param {{agentId?: string | null}} [where] the conversation's Agent, for a notice that names it (`topic_reset`)
  */
@@ -111,10 +112,31 @@ export function noticeText(system, fallback, nameOf, where = {}) {
       if (!where.agentId) return fallback;
       text = `${n(system.actorId)}开始了新话题，之前的对话不再发给${n(where.agentId)}`;
       break;
+    // Agents talking to each other in a group (batch 2C): the sentences of the wire contract.
+    case "agent_chain_paused":
+      if (!Number.isSafeInteger(system.limit) || system.limit < 1) return fallback;
+      text = `Agent 已连续对话 ${system.limit} 条，已暂停互相接话，有人发言后继续。`;
+      break;
+    case "agents_halted":
+      text = `${n(system.actorId)} 让 Agent 停止了接话`;
+      break;
+    case "agent_budget_reached":
+      text = `${n(system.agentId)} 已达到本次接话的点数上限，有人发言后继续。`;
+      break;
     default:
-      return fallback;
+      return null;
   }
   return missing ? fallback : text;
+}
+
+/**
+ * Whether `text` calls `handle` (an account name, without "@"): `@handle` not preceded or followed by a letter, a digit
+ * or "_", in any case — the service's rule for what triggers an Agent in a group.
+ */
+export function mentionsHandle(text, handle) {
+  if (typeof text !== "string" || typeof handle !== "string" || handle === "") return false;
+  const name = handle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![A-Za-z0-9_])@${name}(?![A-Za-z0-9_])`, "i").test(text);
 }
 
 /**
@@ -158,9 +180,15 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }
   const kind = kindOf(m.kind, attachment);
   const system = systemView(m.system, alias);
   let text = m.text ?? "";
+  let hidden = false;
   // As in the prototype, a file or image message's `text` is its file name; the caption is separate.
   if (attachment) text = attachment.name;
-  else if (kind === "system") text = noticeText(system, text, nameOf, { agentId });
+  else if (kind === "system") {
+    // A notice of an event this client does not know shows nothing (it stays in the list, so seqs and reads are kept).
+    const said = noticeText(system, text, nameOf, { agentId });
+    hidden = said === null;
+    text = said ?? "";
+  }
   const view = {
     id: `m${m.seq}`,
     seq: m.seq,
@@ -182,8 +210,57 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId }
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,
   };
+  if (hidden) view.hidden = true;
   if (kind === "image") view.src = attachment.url;
   return view;
+}
+
+/** Whether a run is queued or running. */
+const runActive = (status) => status === "queued" || status === "running";
+/** How a reply in a group ended that its owner is told of, though it did not fail: halted, or its Agent taken out. */
+const ENDED_IN_GROUP = new Set(["halted", "agent_removed"]);
+
+/**
+ * One row of a group's Agent replies (model.js `groupRuns`), or null when there is nothing to show:
+ * - `replying`: being written (its owner gets `run`, to stop it);
+ * - `status`: my Agent's reply failed, was halted, or its Agent was taken out — the status line, with `run`;
+ * - `unavailable`: someone else's Agent could not reply (no reason is known, nor shown).
+ */
+function groupRunRow(agentId, slot) {
+  if ("run" in slot) {
+    const run = slot.run;
+    if (!run) return null;
+    if (runActive(run.status)) return slot.posted || slot.unknown ? null : { agentId, mine: true, kind: "replying", run };
+    if (run.status === "failed" || (run.status === "cancelled" && ENDED_IN_GROUP.has(run.error))) return { agentId, mine: true, kind: "status", run };
+    return null;
+  }
+  if (slot.state === "replying") return slot.posted || slot.unknown ? null : { agentId, mine: false, kind: "replying" };
+  if (slot.state === "unavailable") return { agentId, mine: false, kind: "unavailable" };
+  return null;
+}
+
+/** A group's rows, one per Agent with something to show, in the group's member order (then by id). */
+function groupRunRows(conv, slots) {
+  const at = new Map(conv.members.map((m, i) => [m.id, i]));
+  const place = (id) => at.get(id) ?? Number.MAX_SAFE_INTEGER;
+  return Object.entries(slots ?? {})
+    .map(([agentId, slot]) => groupRunRow(agentId, slot))
+    .filter(Boolean)
+    .sort((a, b) => place(a.agentId) - place(b.agentId) || (a.agentId < b.agentId ? -1 : 1));
+}
+
+/**
+ * Whether Agents of the group are talking to each other, or may be about to: a reply is being written, or the newest
+ * message is an Agent's that @-mentions another Agent member (by its account name). It shows 让 Agent 停下.
+ */
+function agentsTalking(model, conv, held, rows) {
+  if (rows.some((r) => r.kind === "replying")) return true;
+  const last = held[held.length - 1];
+  if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
+  const handleOf = (id) => model.agents[id]?.handle ?? model.principals[id]?.handle;
+  return conv.members.some(
+    (m) => m.id !== last.senderId && model.principals[m.id]?.kind === "agent" && mentionsHandle(last.text, handleOf(m.id)),
+  );
 }
 
 function pendingView(p, { held, alias, now }) {
@@ -287,6 +364,8 @@ function agentView(a, version, loaded) {
     privateReply: PRIVATE_REPLY[a.replyMode] ?? PRIVATE_REPLY.always,
     replyMode: a.replyMode ?? "always",
     groupMentions: a.groupMentions === "owner" ? "owner" : "members",
+    /** 一次接话最多花费: decimal points as the service says them (its default when it says nothing). */
+    chainBudget: typeof a.chainBudget === "string" ? a.chainBudget : "50",
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),
@@ -431,6 +510,8 @@ export function toView(model, { now = Date.now() } = {}) {
     const heldRun = model.runs?.[conv.id] ?? null;
     const run = heldRun && !heldRun.unknown ? heldRun : null;
     const streamed = run && run.status === "running" && !run.posted && !run.joined ? model.streams?.[run.id] : null;
+    // A group: each Agent's reply in progress or failed (never streamed), and whether its Agents are talking.
+    const agentRuns = conv.type === "group" ? groupRunRows(conv, model.groupRuns?.[conv.id]) : [];
     convs[conv.id] = {
       id: conv.id,
       type: direct ? "human" : agentChat ? "agent" : "group",
@@ -441,6 +522,9 @@ export function toView(model, { now = Date.now() } = {}) {
       stream: streamed
         ? { runId: run.id, text: streamed.text, reasoning: streamed.reasoning, cut: Boolean(streamed.cut), reasoningCut: Boolean(streamed.reasoningCut) }
         : null,
+      /** [{agentId, mine, kind: "replying" | "status" | "unavailable", run?}] (`groupRunRow`); empty but in a group. */
+      agentRuns: agentRuns.map((row) => ({ ...row, agentId: alias(row.agentId) })),
+      agentsTalking: conv.type === "group" && agentsTalking(model, conv, held, agentRuns),
       title: direct ? null : conv.title,
       members,
       memberRoles: conv.members.map((m) => ({ id: alias(m.id), role: m.role, isCreator: Boolean(m.isCreator) })),

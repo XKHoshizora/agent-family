@@ -97,6 +97,8 @@ function Body({ msg, agent }) {
 
 export function MessageItem({ msg, conv, onReply, flash = false }) {
   const { state, dispatch, actions } = useStore();
+  // A notice of an event this client does not know shows nothing.
+  if (msg.hidden) return null;
   if (msg.kind === "system") {
     if (msg.system?.event === "topic_reset") return <TopicDivider msg={msg} />;
     return (
@@ -108,7 +110,7 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   const mine = msg.from === ME;
   const agent = !mine && isAgent(state, msg.from);
   // What only an owner is shown of a reply (its thinking, a persona proposal) belongs to the conversation with my own
-  // Agent: never in a group, whoever's Agent it is.
+  // Agent: never in a group, whoever's Agent it is. (已停止 and 已截断 show wherever the reply is.)
   const ownersOnly = agent && conv.type === "agent" && conv.agentId === msg.from;
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
   const showReceipt = mine && (conv.type === "human" || conv.type === "agent");

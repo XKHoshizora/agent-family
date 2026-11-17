@@ -162,12 +162,48 @@ describe("messages", () => {
       "小安拉黑了你，只能由对方解除。双方不能再发送新消息，已有历史不受影响",
       "你拉黑了小安。双方不能再发送新消息，已有历史不受影响",
       "你解除了对小安的拉黑",
-      // an event this client does not know, someone nobody named here, a malformed event: the service's sentence
-      "以后才有的通知",
+      // an event this client does not know: nothing (batch 2C); someone nobody named here, a malformed event: the
+      // service's sentence
+      "",
       "小安邀请小猫加入了群聊",
       "名字缺了",
       `你创建了群聊「大群」，并邀请${["小安", ...Array(9).fill("阿波")].join("、")}等11人加入`,
     ]);
+    expect(v.convs[G1].messages.filter((m) => m.hidden).map((m) => m.seq)).toEqual([12]);
+  });
+
+  it("the notices of Agents talking to each other in a group (batch 2C); an unknown event shows nothing and never fails", () => {
+    const BOT = "00000000-0000-4000-8000-0000000000b9";
+    const ev = (seq, system, text = `服务端句子${seq}`) => notice(G1, seq, text, system);
+    const sync = syncOf(
+      [group(G1, { lastSeq: 9 })],
+      [
+        ev(1, { event: "agent_chain_paused", actorId: ANN, limit: 30 }),
+        ev(2, { event: "agents_halted", actorId: ANN }),
+        ev(3, { event: "agents_halted", actorId: ME_ID }),
+        ev(4, { event: "agent_budget_reached", actorId: ANN, agentId: BOT }),
+        ev(5, { event: "agent_chain_paused", actorId: ANN }, "缺了上限"),
+        ev(6, { event: "agent_budget_reached", actorId: ANN, agentId: "00000000-0000-4000-8000-0000000000ef" }, "不认识的 Agent"),
+        ev(7, { event: "from_the_future", actorId: ANN, agentId: BOT, limit: 3 }, "以后才有的通知"),
+        ev(8, { event: 42 }, "事件不是字符串"),
+        ev(9, null, "没有事件"),
+      ],
+      [...PRINCIPALS, { ...agentPrincipal(BOT, "annbot", "安的助手"), ownerId: ANN }],
+    );
+    const v = toView(M.applySync(M.initial(), sync), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => [m.text, Boolean(m.hidden)])).toEqual([
+      ["Agent 已连续对话 30 条，已暂停互相接话，有人发言后继续。", false],
+      ["小安 让 Agent 停止了接话", false],
+      ["你 让 Agent 停止了接话", false],
+      ["安的助手 已达到本次接话的点数上限，有人发言后继续。", false],
+      ["缺了上限", false],
+      ["不认识的 Agent", false],
+      ["", true],
+      ["事件不是字符串", false],
+      ["没有事件", false],
+    ]);
+    // An unknown notice is never the list's preview line either.
+    expect(lastPreview(v, { ...v.convs[G1], messages: v.convs[G1].messages.slice(0, 7) })).toBe("不认识的 Agent");
   });
 
   it("a sender nobody has named here is 已退出的成员 (in the timeline and the list preview)", () => {
@@ -426,7 +462,7 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
   it("is an Agent with its real owner and its public fields only, and never one of my Agents", () => {
     const v = toView(sharedModel(), { now: NOW });
     expect(v.agents[OAG]).toMatchObject({ id: OAG, kind: "agent", name: "安的助手", handle: "@annbot", intro: "帮小安记事", field: "记事", ownerId: ANN, mine: false });
-    for (const key of ["persona", "personaVersion", "model", "reasoning", "replyMode", "privateReply", "groupMentions", "paused", "deleted", "conversationId"]) {
+    for (const key of ["persona", "personaVersion", "model", "reasoning", "replyMode", "privateReply", "groupMentions", "chainBudget", "paused", "deleted", "conversationId"]) {
       expect(v.agents[OAG]).not.toHaveProperty(key);
     }
     expect(v.people[OAG]).toBeUndefined();
@@ -454,10 +490,14 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
     expect(myAgents(v).map((a) => a.id).sort()).toEqual([AG1, OAG].sort());
   });
 
-  it("the group's subtitle counts the people only", () => {
+  it("the group's subtitle counts the people, and the Agents when there are any", () => {
     const v = toView(sharedModel(), { now: NOW });
     expect(v.convs[G1].members).toEqual([ME, ANN, BO, OAG]);
-    expect(convSubtitle(v, v.convs[G1])).toBe("3 位真人");
+    expect(convSubtitle(v, v.convs[G1])).toBe("3 位真人 · 1 个 Agent");
+    const two = toView(M.applySync(M.initial(), syncOf([agentConv(A1, AG1), group(G1, { members: [...MEMBERS, { id: AG1, role: "speaker", isCreator: false }] })], [], [...PRINCIPALS, agentPrincipal(AG1), annBot()])), { now: NOW });
+    expect(convSubtitle(two, two.convs[G1])).toBe("3 位真人 · 2 个 Agent");
+    const none = toView(model({ conversations: [group(G1)] }), { now: NOW });
+    expect(convSubtitle(none, none.convs[G1])).toBe("3 位真人");
   });
 });
 

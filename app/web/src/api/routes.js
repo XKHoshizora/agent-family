@@ -69,10 +69,13 @@ export function socketUrl(ticket) {
 
 // ───────── Agents (owner only; app/service/README.md "Agents")
 export const listAgents = () => request("GET", "/api/agents"); // → {agents: [Agent]}, oldest first, deleted ones included
-/** body: {handle, name, intro?, field?, persona?, replyMode?, reasoning?, model?} → Agent */
+/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, reasoning?, model?} → Agent */
 export const createAgent = (body) => request("POST", "/api/agents", body);
 export const getAgent = (agentId) => request("GET", `/api/agents/${seg(agentId)}`);
-/** patch: any of {name, intro, field, persona, replyMode, reasoning, model} (`model: null` clears it) → Agent */
+/**
+ * patch: any of {name, intro, field, persona, replyMode, groupMentions, chainBudget, reasoning, model} (`model: null`
+ * clears it; `chainBudget` is a decimal string of points) → Agent
+ */
 export const patchAgent = (agentId, patch) => request("PATCH", `/api/agents/${seg(agentId)}`, patch);
 export const pauseAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/pause`);
 export const resumeAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/resume`);
@@ -89,12 +92,19 @@ export const confirmProposal = (agentId, proposalId, edits) =>
   request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/confirm`, edits);
 export const discardProposal = (agentId, proposalId) => request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/discard`);
 
-// ───────── an Agent's replies (runs) and new topics, by its conversation
+// ───────── an Agent's replies (runs) and new topics, by its conversation; in a group, by the group and the Agent
 export const getRun = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/run`); // → {run: Run | null}
+/** A group's Agent replies → {runs: [{agentId, state: "replying" | "unavailable", run?}]} (`run` only for my Agents) */
+export const getGroupRuns = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/runs`);
 export const stopRun = (conversationId, runId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/${seg(runId)}/stop`);
-export const retryRun = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/retry`); // → {run}
-export const dismissRun = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/runs/dismiss`);
+/** In a group, `agentId` names which of my Agents' reply (sent as `{agentId}`); none in an Agent's conversation. → {run} */
+export const retryRun = (conversationId, agentId) =>
+  request("POST", `/api/conversations/${seg(conversationId)}/runs/retry`, agentId ? { agentId } : undefined);
+export const dismissRun = (conversationId, agentId) =>
+  request("POST", `/api/conversations/${seg(conversationId)}/runs/dismiss`, agentId ? { agentId } : undefined);
 export const resetTopic = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/topic`); // → {message}
+/** 让 Agent 停下: the group's Agents stop calling each other (any person in the group) → {ok: true} */
+export const haltAgents = (conversationId) => request("POST", `/api/conversations/${seg(conversationId)}/agents/halt`);
 
 // ───────── model providers (the API key is sent in a body and never comes back: `keyLast4` only)
 export const listProviders = () => request("GET", "/api/providers"); // → {providers: [Provider]}

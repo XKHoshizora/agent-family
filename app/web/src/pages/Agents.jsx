@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { Avatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
+import { formatPoints } from "../data/viewmodel.js";
+import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
-import { AgentForm, GROUP_MENTIONS, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
+import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
 import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
-import { isMyAgent, myAgents } from "../state/selectors.js";
+import { convSubtitle, convTitle, isMyAgent, myAgents } from "../state/selectors.js";
 import { useAction } from "./useAction.js";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
@@ -80,14 +81,20 @@ export function AgentsList() {
   );
 }
 
+/**
+ * Where it talks: its conversation with me, and the groups it is a member of now (as the conversations held here say,
+ * in the chat list's order).
+ */
 function Conversations({ agent }) {
   const { state, dispatch, actions } = useStore();
   const id = agent.conversationId;
+  const groups = state.order.map((convId) => state.convs[convId]).filter((c) => c?.type === "group" && c.members.includes(agent.id));
   return (
     <>
       <p className="muted">这是你和它的专属会话：只有你们两个成员，只包含其中的消息与附件。</p>
+      {groups.length > 0 && <p className="muted">它也在下面这些群里：只看得到它进群之后的消息与附件，群成员 @ 它时回复。</p>}
       <ul className="member-rows">
-        {id ? (
+        {id && (
           <li>
             <Avatar id={agent.id} size={44} />
             <div className="member-body">
@@ -100,9 +107,22 @@ function Conversations({ agent }) {
               <Btn small variant="primary" onClick={() => openAgentChat(state, dispatch, actions, id)}>进入查看</Btn>
             </div>
           </li>
-        ) : (
-          <li className="rows-empty">它还没有参与任何会话</li>
         )}
+        {groups.map((c) => (
+          <li key={c.id}>
+            <ConvAvatar conv={c} size={44} />
+            <div className="member-body">
+              <strong>
+                {convTitle(state, c)} <Tag tone="muted">群聊</Tag>
+              </strong>
+              <p className="muted">{convSubtitle(state, c)}</p>
+            </div>
+            <div className="member-actions">
+              <Btn small variant="primary" onClick={() => dispatch({ type: "nav/openConv", convId: c.id })}>进入查看</Btn>
+            </div>
+          </li>
+        ))}
+        {!id && groups.length === 0 && <li className="rows-empty">它还没有参与任何会话</li>}
       </ul>
     </>
   );
@@ -225,6 +245,7 @@ function AgentDetail({ agent }) {
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],
                     ["群里谁可以叫它", groupMentionsLabel(agent)],
+                    ["一次接话最多花费", `${formatPoints(agent.chainBudget ?? CHAIN_BUDGET_DEFAULT)} 点`],
                   ]}
                 />
                 <Reason>人格文档只影响它如何回复，不授予任何权限。</Reason>
