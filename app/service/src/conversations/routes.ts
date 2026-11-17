@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { announceEnded } from "../agents/group-leave.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { agentProfileShape } from "../messages/principals.ts";
@@ -127,7 +128,9 @@ export function registerConversationRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await requirePrincipal(req);
       await changeLimit(req, me.id);
-      const change = await db.tx((t) => removeMember(t, req.params.id, me.id, req.params.principalId));
+      const { change, ended } = await db.tx((t) => removeMember(t, req.params.id, me.id, req.params.principalId));
+      // The replies of the Agents that left end (as a pause ends them) before the answer.
+      announceEnded(app.agentPort, ended);
       conversations.publish(change, req.log);
       return { ok: true as const };
     },

@@ -107,8 +107,9 @@ export interface AgentPort {
    */
   begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd>;
   /**
-   * Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause or delete
-   * interrupted the run — also a piece that was already waiting to be delivered, whenever it is delivered.
+   * Pushes a piece of the reply to the owner's sockets; nothing is stored. Dropped once the Agent's pause, delete or
+   * removal from the run's conversation interrupted the run — also a piece that was already waiting to be delivered,
+   * whenever it is delivered.
    */
   emit(run: RunTicket, delta: Delta): void;
   /**
@@ -125,13 +126,14 @@ export interface AgentPort {
   finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void>;
   /**
    * Ends a run that will not be finished here (the service is closing) exactly as recovery at start-up ends one: its
-   * reply posted → `done` (`stopped` when its message says so); interrupted by its Agent's pause or delete →
-   * `cancelled`; else `failed`, `provider_unavailable`, retryable — its hold released by a settlement on no tokens, which
+   * reply posted → `done` (`stopped` when its message says so); interrupted by its Agent's pause, delete or removal from
+   * the run's conversation → `cancelled`; else `failed`, `provider_unavailable`, retryable — its hold released by a
+   * settlement on no tokens, which
    * costs nothing, and the follow-up queued by the one rule. Its owner is told. Nothing when it had ended already.
    * Rejects when that cannot be written: the run then stays `running`, for the stale-run sweep or the next start.
    */
   release(run: RunTicket): Promise<void>;
-  /** Whether the run should stop now: its owner asked, or the Agent was paused or deleted. */
+  /** Whether the run should stop now: its owner asked, or the Agent was paused, deleted or taken out of the run's conversation. */
   shouldStop(run: RunTicket): boolean;
 }
 

@@ -52,7 +52,8 @@ const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
  * what its owner wrote meanwhile when something was noted on it (`pending_seq` beyond what it covered) and its Agent
  * can still answer (not paused, not deleted, has a model) — however the run itself ended. A pause or delete drops what
- * was noted (runs.ts `interruptRuns`) and nothing is noted while the Agent is paused, so what is noted on an
+ * was noted (runs.ts `interruptRuns`), and so does the Agent's leaving the run's group (group-leave.ts
+ * `endRunsInGroup`); nothing is noted while the Agent is paused or out of that group, so what is noted on an
  * interrupted run came after the resume, and is answered.
  */
 function followUpSeq(state: RunState, agent: AgentRow): number | null {
@@ -67,16 +68,17 @@ function followUpSeq(state: RunState, agent: AgentRow): number | null {
  * forgotten the run.
  */
 interface RunFlags {
-  /** Its owner asked it to stop, or its Agent's pause or delete interrupted it. */
+  /** Its owner asked it to stop, or its Agent's pause, delete or leaving the run's group interrupted it. */
   stop: boolean;
-  /** Its Agent's pause or delete interrupted it: nothing more of it is pushed. */
+  /** Its Agent's pause, delete or leaving the run's group interrupted it: nothing more of it is pushed. */
   silenced: boolean;
 }
 
 /**
  * How a run is recorded, from what is true under `lockAgent` rather than what the worker could tell (an owner's stop
  * and a pause look alike to it): a reply that was posted stands — `done`, or `stopped` by its owner — whatever happened
- * to the Agent after; a run its Agent's pause or delete interrupted, and that posted nothing, is `cancelled` with that
+ * to the Agent after; a run its Agent's pause, delete or leaving the run's group (`agent_removed`) interrupted, and that
+ * posted nothing, is `cancelled` with that
  * reason (also when the Agent was resumed meanwhile); a refused post is `cancelled` for the Agent's state.
  */
 function recorded(end: RunEnd, s: { posted: boolean; interrupted: Interruption | null; agent: AgentRow }): RunEnd {
@@ -130,7 +132,8 @@ export class DbAgentPort implements AgentPort {
   }
 
   /**
-   * Runs the Agent's pause or delete has just marked `interrupted` (runs.ts `interruptRuns`): their calls are abandoned
+   * Runs the Agent's pause or delete (runs.ts `interruptRuns`), or its leaving the run's group (group-leave.ts
+   * `endRunsInGroup`), has just marked `interrupted`: their calls are abandoned
    * and, from now on, none of their deltas reaches the owner — not even one already waiting in the hub's queue, also
    * when the hub delivers it after the run has finished.
    */
@@ -179,7 +182,8 @@ export class DbAgentPort implements AgentPort {
 
   /**
    * Under `lockRun`: how the run ends instead of calling its model — interrupted by its Agent's pause or delete (even if
-   * resumed since), the Agent paused or deleted, or a stop asked for — or null when it may go on.
+   * resumed since) or by its leaving the run's group (even if back since), the Agent paused or deleted, or a stop asked
+   * for — or null when it may go on.
    */
   private halted(run: RunTicket, agent: AgentRow, state: RunState): RunEnd | null {
     if (state.interrupted) return { status: "cancelled", error: state.interrupted };
@@ -295,8 +299,9 @@ export class DbAgentPort implements AgentPort {
   }
 
   emit(run: RunTicket, delta: Delta): void {
-    // Checked now and again when the hub delivers it, against the flags it was emitted under: once the pause or delete
-    // has answered, no delta goes out, however late it is delivered. A run that has finished emits nothing.
+    // Checked now and again when the hub delivers it, against the flags it was emitted under: once the pause, delete or
+    // removal from the run's group has answered, no delta goes out, however late it is delivered. A run that has
+    // finished emits nothing.
     const flags = this.flags.get(run.id);
     if (!flags || flags.silenced) return;
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
@@ -342,7 +347,8 @@ export class DbAgentPort implements AgentPort {
     try {
       result = await this.record(run, end, usage, fallback, new Date());
     } finally {
-      // An interrupted run is silenced here too, whether or not the pause's own call (`interruptRuns`) came first.
+      // An interrupted run is silenced here too, whether or not the pause's (or removal's) own call (`interruptRuns`)
+      // came first.
       const flags = this.flags.get(run.id);
       if (flags && result?.interrupted) flags.silenced = true;
       this.flags.delete(run.id);
@@ -422,7 +428,7 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * message either, so it always ends as the last case:
  * - its reply had been posted in its conversation (the stop fell between post and finish): `done`, or `stopped` when
  *   the message says so;
- * - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
+ * - else, its Agent's pause, delete or leaving the run's group had interrupted it: `cancelled` with that reason;
  * - else `failed`, `provider_unavailable`, retryable.
  * In the same transaction its hold is released by a settlement that costs nothing (whatever the upstream reported died
  * with the process: no tokens, all forgiven) — unless it already has its usage record: it is never settled twice. A

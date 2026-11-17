@@ -145,7 +145,7 @@ describe("an Agent is invisible to everyone but its owner", () => {
     expect(agent.handle).toBe("lookup_bot");
   });
 
-  it("an Agent id cannot be put into a group: refused byte-identically to a random uuid, for its owner and for a stranger", async () => {
+  it("an Agent id among a new group's members is refused byte-identically to a random uuid, for its owner and for a stranger; adding it to a group is its owner's alone, a stranger answered as for a random uuid", async () => {
     const [owner, stranger, f1, f2, f3, f4] = [
       await signUp(app, "gus"),
       await signUp(app, "gil"),
@@ -171,11 +171,16 @@ describe("an Agent is invisible to everyone but its owner", () => {
       const made = await api(app, who, "POST", "/api/conversations", { title: "g", memberIds: [a.id, b.id] });
       expect(made.status).toBe(201);
       const add = (id: string) => observe(who, "POST", `/api/conversations/${made.json.id}/members`, { principalId: id });
-      expect(await add(agent.id)).toEqual(await add(nobody));
-      expect((await add(agent.id)).status).toBe(403);
+      if (who === stranger) {
+        expect(await add(agent.id)).toEqual(await add(nobody));
+        expect((await add(agent.id)).status).toBe(403);
+      } else {
+        // Its owner may, to a group they are in (tests/agents-group-membership.test.ts).
+        expect((await add(agent.id)).status).toBe(201);
+      }
     }
     const members = await db.query("select count(*)::int as n from memberships where principal_id = $1", [agent.id]);
-    expect(members.rows[0].n).toBe(1); // its own dedicated conversation only
+    expect(members.rows[0].n).toBe(2); // its own dedicated conversation, and the group its owner put it in
   });
 
   it("changes to an Agent are pushed to its owner's sockets and nobody else's", async () => {

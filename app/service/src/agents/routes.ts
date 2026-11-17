@@ -12,6 +12,7 @@ import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
+import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
 import { interruptRuns } from "./runs.ts";
 import {
@@ -269,7 +270,10 @@ export function registerAgentRoutes(
 
   /**
    * Pause, resume and delete: under `lockAgent` (the lock `postAsAgent` takes, so no reply is posted once a pause or
-   * delete has committed), idempotent, announced to the owner's other tabs when they change something.
+   * delete has committed), idempotent, announced to the owner's other tabs when they change something. Once a delete has
+   * committed, the Agent leaves every group it is in, a transaction per group (group-leave.ts `leaveGroupsOfDeleted`;
+   * also on a repeated delete, which so finishes a leaving that failed), before the answer; a group it could not leave
+   * is left by the start-up sweep.
    */
   const stateRoute = (method: "post" | "delete", url: string, change: { paused: boolean } | { deleted: true }) =>
     api[method](
@@ -298,6 +302,7 @@ export function registerAgentRoutes(
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
           app.realtime.pushAgentChanged(me.id, agent.id);
         }
+        if ("deleted" in change) await leaveGroupsOfDeleted({ db, conversations, log: req.log }, agent.id);
         return toView(agent);
       },
     );

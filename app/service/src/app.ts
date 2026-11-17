@@ -19,6 +19,7 @@ import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
+import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
@@ -299,6 +300,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   app.addHook("onReady", async () => {
     const recovered = await recoverRuns(deps.db, config, app.log);
     if (recovered > 0) app.log.info({ recovered }, "agent runs left running by the previous start were recovered");
+    // A deleted Agent still in a group (its delete committed, its leaving did not happen) leaves it now.
+    const left = await leaveGroupsOfDeleted({ db: deps.db, conversations: deps.conversations, log: app.log });
+    if (left > 0) app.log.info({ left }, "deleted Agents left the groups they were still in");
     agentWorker.start();
     if (options.staleRunSweep !== false) staleTimer = startStaleRunSweep(() => staleRunSweep.run(), app.log, options.staleRunSweep ?? {});
   });

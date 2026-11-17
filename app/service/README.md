@@ -369,11 +369,18 @@ An Agent is a principal of kind `agent` owned by one person for good, with a ded
 whose members are exactly the owner and the Agent. Everything here is the owner's: for anybody else every
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
-`POST /api/friend-requests` (also for its owner), and its id cannot be put into a group: refused exactly as the id of a non-friend or an unknown principal is (403 `forbidden`).
+`POST /api/friend-requests` (also for its owner). Only its owner puts it into a group, and only one the owner is a member
+of (`POST /api/conversations/:id/members`); for anybody else its id is refused there exactly as the id of a non-friend or
+an unknown principal is (403 `forbidden`), and among a new group's `memberIds` (`POST /api/conversations`) it is refused
+so for everyone, its owner included.
 Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner and whoever shares a
 conversation with it now (see below), and to `PUT`/`DELETE /api/blocks/:principalId` for everyone, its owner included
 (an Agent cannot be blocked): the answer of an id that does not exist, byte for byte (`tests/enumeration.test.ts`).
 
+An Agent is in a group only while its owner is: its owner adds it, the group's creator or its owner takes it out, and it
+leaves with its owner — when the owner leaves or is removed — and when it is deleted (Conversations,
+`DELETE /api/conversations/:id/members/:principalId`; `DELETE /api/agents/:id`). It counts toward the group's 500
+members, never becomes its creator, and reads only what comes after it (last) joined, like anyone.
 An Agent is invisible to everyone but its owner and, while they share a group, to its fellow members: name, avatar,
 handle, intro, field, owner — nothing else. A member of a conversation the Agent is in finds it on the member list
 (`GET /api/conversations/:id/members`) and in the `principals` of `/api/sync`, message reads and searches with
@@ -484,6 +491,12 @@ message is, with everything before it in what the Agent is shown.
 conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; its reply in
 progress ends as on a pause, with `agent_deleted`). → 200 Agent; 404 `not_found` unless yours.
 
+It also leaves every group it is in, before the answer: once the delete itself has committed, one transaction per group
+appends a `member_left` notice there (`actorId` you, `principalId` the Agent; pushed as any leaving) whose seq ends its
+membership. What it said there stays. Should that not happen — the service stopped in between, or a group's transaction
+failed — the next start does it before anything else (and a repeated delete tries again). Meanwhile, while it is still
+listed in a group, it replies nothing there: it is deleted, and every step of a reply refuses a deleted Agent.
+
 #### `PUT /api/agents/:id/avatar`
 
 *Session: required.* The rules and limits of `PUT /api/me/avatar`, for the Agent: it counts against the same 10 uploads a
@@ -573,7 +586,8 @@ there was nothing to answer — which costs you nothing; `provider_unavailable` 
 when the service restarted ends with, and one the stale-run sweep released; `rate_limited`: you had started
 `AGENT_RUNS_PER_MINUTE` (20) replies in the last minute, so this one was not started — no call, nothing held or charged;
 retry once the minute has passed), for
-`cancelled` `agent_paused` or `agent_deleted`, `halted` (in a group: another Agent's message had called for it and a
+`cancelled` `agent_paused` or `agent_deleted`, `agent_removed` (the Agent left the run's group: the group's creator or you
+took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it and a
 member halted Agents calling each other, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
 answer is before a new topic you started).
 `retryable`: it failed and trying again as it is may work (false
@@ -1165,7 +1179,8 @@ Visibility under Sync and realtime.
 - 201 `{"id": "<conversation id>"}`. Everyone joins at once; the first message (seq 1) is the
   `group_created` notice.
 - Errors: 400 `invalid_request` (duplicates, fewer than two, or you among them), 403 `forbidden` (someone
-  is not your friend, a block in either direction, or more than 500 members including you).
+  is not your friend — an Agent never is, yours included: it joins a group only by `POST /api/conversations/:id/members`
+  —, a block in either direction, or more than 500 members including you).
 - Limit: 10 per minute. Pushes: `conversation` and the notice to every member.
 
 #### `GET /api/conversations/:id`
@@ -1194,28 +1209,35 @@ of them. 404 `not_found` unless you are a current member.
 
 #### `POST /api/conversations/:id/members`
 
-*Session: required.* Any member adds one of their friends to a group. Body: `principalId`.
+*Session: required.* Any member adds one of their friends to a group, or their own Agent (one that is not deleted;
+paused is fine). Body: `principalId`.
 
-- 201 `{"ok": true}`. The newcomer sees the `member_joined` notice and everything after it, nothing before.
+- 201 `{"ok": true}`. The newcomer sees the `member_joined` notice and everything after it, nothing before; an
+  Agent too (what its replies may be shown: Agents and runs).
 - Errors: 404 `not_found` (you are not a current member, a direct chat, closed, unknown), 409
   `already_member`, 403 `forbidden` (not your friend, a block in either direction, or the group has 500
-  members).
+  members; an Agent that is not yours, or is deleted — answered exactly as an unknown id, so nobody learns from it
+  whose Agent an id is).
 - Limit: 20 per minute together with renaming and removing. Pushes: `conversation` to every member (the
   newcomer included), the notice.
 
 #### `DELETE /api/conversations/:id/members/:principalId`
 
-*Session: required.* With your own id: you leave (anyone). With someone else's: the creator removes them.
+*Session: required.* With your own id: you leave (anyone). With someone else's: the creator removes them; an Agent's
+owner also removes their Agent.
 
-- 200 `{"ok": true}`. Leaving appends `member_left` (when the creator leaves, the member who joined earliest
-  becomes creator: `newCreatorId`); removing appends `member_removed`. Whoever leaves or is removed loses the
-  whole conversation at once (404 everywhere, no history; the notice is not theirs to see). When the last
-  member leaves, the group closes.
+- 200 `{"ok": true}`. Leaving appends `member_left` (when the creator leaves, the person who joined earliest
+  becomes creator: `newCreatorId`; never an Agent); removing appends `member_removed`. Whoever leaves or is removed
+  loses the whole conversation at once (404 everywhere, no history; the notice is not theirs to see). A person who
+  leaves or is removed takes their Agents in the group along, in the same transaction: each Agent first, with a
+  `member_left` of its own (`actorId` the owner, `principalId` the Agent), then the person's own notice. An Agent that
+  leaves — removed, or along with its owner — has its reply in that group ended (`cancelled`, `agent_removed`; a
+  running one is never posted; Agents and runs). When no person is left, the group closes (no Agent is left either).
 - Errors: 404 `not_found` (you are not a current member, a direct chat — those cannot be left —, closed,
-  unknown, or the person to remove is not a current member), 403 `forbidden` (removing someone without being
-  the creator).
+  unknown, or the one to remove is not a current member), 403 `forbidden` (removing someone without being the
+  creator, or an Agent without being the creator or its owner: as for any id).
 - Limit: 20 per minute together with renaming and adding. Pushes: `gone` to whoever left or was removed;
-  `conversation` and the notice to the others.
+  `conversation` and the notices to the others; `run` to an Agent's owner for each of its replies cancelled.
 
 ### Messages
 
@@ -1409,9 +1431,9 @@ client can render its own:
 | `system.event` | Fields besides `event` | Written when |
 |---|---|---|
 | `group_created` | `actorId` (creator), `title`, `memberIds` (the invited members, without the creator) | a group is created (its seq 1) |
-| `member_joined` | `actorId` (who added), `principalId` (who joined) | `POST /api/conversations/:id/members` |
-| `member_left` | `actorId` = `principalId` (who left), `newCreatorId` (id, or null when the creator did not leave or nobody is left) | leaving |
-| `member_removed` | `actorId` (the creator), `principalId` (who was removed) | removal |
+| `member_joined` | `actorId` (who added; for an Agent, its owner), `principalId` (who joined) | `POST /api/conversations/:id/members` |
+| `member_left` | `actorId` = `principalId` (who left), `newCreatorId` (id, or null when the creator did not leave or no person is left); for an Agent: `actorId` its owner, `principalId` the Agent, `newCreatorId` null | leaving; an Agent leaving with its owner (just before its owner's notice), or after it was deleted |
+| `member_removed` | `actorId` (the creator, or the owner of the Agent removed), `principalId` (who was removed) | removal |
 | `group_renamed` | `actorId`, `title` (the new one) | a rename that changes the title |
 | `friendship_ended` | `actorId` (who ended it), `principalId` (the other) | `DELETE /api/friends/:principalId`, in the pair's direct chat |
 | `friendship_restored` | `actorId` (who accepted), `principalId` (who asked) | accepting a request when the pair already has a direct chat |
@@ -1627,6 +1649,16 @@ is paused, and resuming queues nothing: what was written during the pause is ans
 later message of the owner's starts. A message written after the resume while the interrupted reply is still ending is
 noted on it, and its follow-up answers it.
 
+**Leaving a group** (`group-leave.ts` `endRunsInGroup`, called by `conversations/groups.ts` `removeMember`) ends the
+Agent's active reply in that group, and only there, the same way, in the transaction that takes it out — removed by the
+group's creator or its owner, or along with its owner — under the group's row: a queued run becomes `cancelled`
+(`agent_removed`, announced to its owner), a running one is marked `interrupted` (`agent_removed`, unless a pause or
+delete marked it first) and what was noted on it is dropped, so nothing follows it up in a group it is no longer in; it
+is never posted (`postAsAgent` locks the group's row first, so it either posted before the removal or finds the run
+marked), its call is abandoned, and it ends `cancelled`, settled on what it used. No `agents` row is locked: the group's
+row orders it with the sends there and with the worker. A deleted Agent's leaving (`DELETE /api/agents/:id`) ends
+nothing more: its delete did.
+
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
 (2) runs running, replies and persona drafts together (further replies wait queued), at most `AGENT_MAX_RUNS_IN_FLIGHT`
 (8) at once in the service.
@@ -1749,6 +1781,7 @@ all of the above, attachments at their estimate.
 | Paused or deleted while queued | none, no call made, no usage record | `cancelled`, `agent_paused` / `agent_deleted` |
 | In a group, another Agent's message called for it and a member halted Agents (Agents in a group) | queued: none, no call made, no usage record; running and not yet posted: none, what it had said is discarded, what it used is settled | `cancelled`, `halted` |
 | Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
+| The Agent left the run's group (taken out by the creator or its owner, or along with its owner) | queued: none, no call made, no usage record; running and not yet posted (added back since or not): none, what it had said is discarded, what it used is settled | `cancelled`, `agent_removed` |
 | The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
@@ -1833,6 +1866,13 @@ the Agent itself (edit, pause, resume, delete, avatar, proposals) lock its dedic
 id order, the `accounts` rows after every run row; an Agent's message in a group holds only its own `agents` row and
 reads the others' (In a group, above); a halt locks the group's row and run rows only. Like the hub, the worker and its
 stop flags live in this process: run one instance. Two overlap only during a deploy, which is safe (Recovery, above).
+
+A group's membership changes keep to the same order (`conversations/groups.ts`): adding an Agent locks the group's row,
+then the Agent's `agents` row (so a delete either committed before — the add is refused — or waits for the add, and its
+leaving then finds the Agent there); taking Agents out — removed, or along with their owner — locks the group's row,
+then their run rows in that group, and no `agents` row. A delete's leaving of its groups runs after the delete's own
+transaction (the dedicated conversation's row, then the `agents` row) has committed, one transaction per group, each
+locking that group's row only: no transaction holds two conversation rows.
 
 ## Metering (`src/metering/`)
 
@@ -1997,7 +2037,9 @@ across the site. Accepted for now; the limits above bound how much can be learnt
   group add; the last two members leaving; read markers; uploads at the quota; a request against a block)
   for several rounds and checks each stated invariant against the database. `tests/registration.test.ts` races
   eight registrations on one invite (whatever their e-mails, exactly one uses it) and two registrations of one
-  e-mail (one account remains).
+  e-mail (one account remains). `tests/agents-group-membership.test.ts` races an owner's leave (or removal) against
+  their own add of their Agent (never an Agent left without its owner), and an Agent's removal against the posting of
+  its reply (the post waits for the removal and stores nothing; bounded, no deadlock).
 - `tests/enumeration.test.ts`: on every route taking a conversation id, a seq, an attachment, request or
   principal id, an id that exists but is not yours gets byte for byte the answer a random id gets — and on every route
   taking an Agent, provider, run or persona-proposal id (or naming a provider in a body), for a stranger and for the

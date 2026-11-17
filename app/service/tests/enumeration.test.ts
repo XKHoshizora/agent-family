@@ -228,14 +228,29 @@ describe("enumeration: an existing id that is not yours is answered like a rando
     expect((await api(app, eve, "DELETE", `/api/friends/${exStrangerFriend.id}`)).status).toBe(200);
     const strangers = { stranger: stranger.id, exFriend: exStrangerFriend.id, upperCase: stranger.id.toUpperCase() };
 
+    // Someone else's Agent, too: only its owner may put it into a group, and eve is the creator here, so taking it out of
+    // a group it is not in is the 404 anyone not in it gets. Her own Agent cannot be among a new group's members either.
+    const othersAgent = (await mustCreateAgent(app, stranger)).id as string;
+    const ownAgent = (await mustCreateAgent(app, eve)).id as string;
+    const ids = { ...strangers, othersAgent };
+
     const unfriend = await indistinguishable(eve, "unfriend", (id) => json("DELETE", `/api/friends/${id}`), strangers);
     expect(unfriend).toMatchObject({ status: 404, body: '{"error":"not_found"}' });
-    const addToGroup = await indistinguishable(eve, "add", (id) => json("POST", `/api/conversations/${g}/members`, { principalId: id }), strangers);
+    const addToGroup = await indistinguishable(eve, "add", (id) => json("POST", `/api/conversations/${g}/members`, { principalId: id }), ids);
     expect(addToGroup).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
-    const newGroup = await indistinguishable(eve, "new group", (id) => json("POST", "/api/conversations", { title: "t", memberIds: [friend1.id, id] }), strangers);
+    const newGroup = await indistinguishable(eve, "new group", (id) => json("POST", "/api/conversations", { title: "t", memberIds: [friend1.id, id] }), {
+      ...ids,
+      ownAgent,
+    });
     expect(newGroup).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
-    const removeFromGroup = await indistinguishable(eve, "remove", (id) => json("DELETE", `/api/conversations/${g}/members/${id}`), strangers);
+    const removeFromGroup = await indistinguishable(eve, "remove", (id) => json("DELETE", `/api/conversations/${g}/members/${id}`), { ...ids, ownAgent });
     expect(removeFromGroup).toMatchObject({ status: 404, body: '{"error":"not_found"}' });
+    // A member who is not the creator: removing anybody is refused, someone else's Agent included.
+    const notCreator = await indistinguishable(friend1, "remove, not the creator", (id) => json("DELETE", `/api/conversations/${g}/members/${id}`), {
+      ...ids,
+      ownAgent,
+    });
+    expect(notCreator).toMatchObject({ status: 403, body: '{"error":"forbidden"}' });
 
     // Unblocking someone you never blocked is a no-op, existing or not: the same 200.
     const unblock = async (id: string) => observe(eve, json("DELETE", `/api/blocks/${id}`));

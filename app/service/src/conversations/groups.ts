@@ -1,5 +1,7 @@
-import type { Tx } from "../db.ts";
+import { endRunsInGroup, type EndedRuns } from "../agents/group-leave.ts";
+import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
+import type { StoredMessage } from "../messages/model.ts";
 import { lockPair, lockPairs } from "../social/pair.ts";
 import { areFriends, blockBetween } from "../social/relations.ts";
 import type { Change } from "./events.ts";
@@ -78,12 +80,20 @@ export async function createGroup(
   };
 }
 
+/** What a principal is, or null for an unknown id. Read without a lock: neither `kind` nor `owner_id` ever changes. */
+async function principalOf(q: Queryable, principalId: string): Promise<{ kind: "human" | "agent"; ownerId: string | null } | null> {
+  const { rows } = await q.query<{ kind: "human" | "agent"; owner_id: string | null }>("select kind, owner_id from principals where id = $1", [principalId]);
+  return rows[0] ? { kind: rows[0].kind, ownerId: rows[0].owner_id } : null;
+}
+
 /**
- * Any current member adds one of their own friends. The newcomer's `joined_seq` is the seq at this
- * moment, so they see the "joined" notice and nothing before it. 409 `already_member`; 403 `forbidden`
+ * Any current member adds one of their own friends, or their own Agent (`addAgent`). The newcomer's `joined_seq` is
+ * the seq at this moment, so they see the "joined" notice and nothing before it. 409 `already_member`; 403 `forbidden`
  * for non-friends, blocks either way, or a 501st member.
  */
 export async function addMember(t: Tx, conversationId: string, actorId: string, targetId: string): Promise<Change> {
+  const target = await principalOf(t, targetId);
+  if (target?.kind === "agent") return addAgent(t, conversationId, actorId, targetId, target.ownerId);
   const { conversation } = await lockGroup(t, conversationId, actorId, targetId);
   if (await currentMembership(t, conversationId, targetId)) throw new AppError(409, "already_member");
   if (!(await mayAdd(t, actorId, targetId))) throw forbidden();
@@ -99,20 +109,92 @@ export async function addMember(t: Tx, conversationId: string, actorId: string, 
 }
 
 /**
- * Leaving (target = actor; anyone) or removal (only the creator). `left_seq` is the seq of the notice, so
- * the person who left does not see it. When the creator leaves, the earliest current member (lowest
- * `joined_seq`, ties by membership id) becomes creator; when the last member leaves the group closes.
+ * An Agent joins a group only by its owner's hand, and only a group its owner is in (design rule 1); its owner leaving
+ * takes it out again (`removeMember`). Anyone else gets the 403 `forbidden` a random id gets (who owns an Agent is not
+ * to be learnt from this), and so does its owner for a deleted Agent; a paused one may join. An Agent has no friends or
+ * blocks: no pair lock, no friendship rule. The `agents` row is locked after the group's row (the lock order), so a
+ * delete has either committed — refused here — or waits for this add to commit, and then its follow-up finds the Agent
+ * in this group and takes it out (agents/group-leave.ts). Otherwise as a person: 409 `already_member`, the 500 cap,
+ * `joined_seq`, the `member_joined` notice (actor: the owner).
  */
-export async function removeMember(t: Tx, conversationId: string, actorId: string, targetId: string): Promise<Change> {
+async function addAgent(t: Tx, conversationId: string, actorId: string, agentId: string, ownerId: string | null): Promise<Change> {
+  const { conversation } = await lockGroup(t, conversationId, actorId);
+  if (ownerId !== actorId) throw forbidden();
+  const { rows } = await t.query<{ deleted: boolean }>("select deleted_at is not null as deleted from agents where principal_id = $1 for update", [agentId]);
+  if (rows[0]?.deleted !== false) throw forbidden();
+  if (await currentMembership(t, conversationId, agentId)) throw new AppError(409, "already_member");
+  const before = await currentMemberIds(t, conversationId);
+  if (before.length + 1 > MAX_GROUP_MEMBERS) throw forbidden();
+
+  await t.query(
+    `insert into memberships (conversation_id, principal_id, role, joined_seq) values ($1, $2, 'speaker', $3)`,
+    [conversationId, agentId, conversation.seq],
+  );
+  const notice = await appendSystem(t, conversationId, { event: "member_joined", actorId, principalId: agentId });
+  return { messages: [notice], conversations: [{ conversationId, principalIds: [...before, agentId] }] };
+}
+
+/** A current member as `removeMember` weighs them: who they are and whose Agent, in join order. */
+interface CurrentMember {
+  membershipId: string;
+  principalId: string;
+  kind: "human" | "agent";
+  /** The owner of an Agent; null for a person. */
+  ownerId: string | null;
+}
+
+async function currentMembers(q: Queryable, conversationId: string): Promise<CurrentMember[]> {
+  const { rows } = await q.query<{ id: string; principal_id: string; kind: "human" | "agent"; owner_id: string | null }>(
+    `select ms.id, ms.principal_id, p.kind, p.owner_id
+       from memberships ms join principals p on p.id = ms.principal_id
+      where ms.conversation_id = $1 and ms.left_seq is null
+      order by ms.joined_seq, ms.id`,
+    [conversationId],
+  );
+  return rows.map((r) => ({ membershipId: r.id, principalId: r.principal_id, kind: r.kind, ownerId: r.owner_id }));
+}
+
+/**
+ * Leaving (target = actor; anyone) or removal (the creator removes anyone; an Agent's owner also removes their Agent;
+ * anyone else gets 403 `forbidden`, the same for an Agent as for any id). `left_seq` is the seq of the notice, so the
+ * one who left does not see it.
+ *
+ * A person who leaves or is removed takes their Agents in the group along (design rule 4: an Agent is only ever where
+ * its owner is), in this transaction under the group's row: each Agent first, in join order, with a `member_left` of its
+ * own (actor: its owner) whose seq ends its membership, then the person's own notice. The Agents' replies in this group
+ * end (`endRunsInGroup`, `agent_removed`), as do a removed Agent's: the caller announces them after commit
+ * (`announceEnded`). No `agents` row is locked for this: the group's row serialises it with sends and the worker.
+ *
+ * When the creator leaves, the earliest remaining person (lowest `joined_seq`, ties by membership id) becomes creator,
+ * never an Agent (plan ruling 9); when no person remains the group closes (and then no Agent remains either: each left
+ * with its owner).
+ */
+export async function removeMember(
+  t: Tx,
+  conversationId: string,
+  actorId: string,
+  targetId: string,
+): Promise<{ change: Change; ended: EndedRuns }> {
+  const target = await principalOf(t, targetId);
   const { conversation, membership } = await lockGroup(t, conversationId, actorId);
   const leaving = targetId === actorId;
-  if (!leaving && conversation.creatorId !== actorId) throw forbidden();
-  const target = leaving ? membership : await currentMembership(t, conversationId, targetId);
-  if (!target) throw notFound();
+  const agent = target?.kind === "agent";
+  if (!leaving && conversation.creatorId !== actorId && !(agent && target.ownerId === actorId)) throw forbidden();
+  const targetMembership = leaving ? membership : await currentMembership(t, conversationId, targetId);
+  if (!targetMembership) throw notFound();
 
-  const before = await currentMemberIds(t, conversationId);
-  const remaining = before.filter((id) => id !== targetId);
-  const newCreatorId = targetId === conversation.creatorId ? (remaining[0] ?? null) : null;
+  const members = await currentMembers(t, conversationId);
+  const along = agent ? [] : members.filter((m) => m.ownerId === targetId);
+  const out = new Set([targetId, ...along.map((m) => m.principalId)]);
+  const people = members.filter((m) => m.kind === "human" && !out.has(m.principalId));
+  const newCreatorId = targetId === conversation.creatorId ? (people[0]?.principalId ?? null) : null;
+
+  const messages: StoredMessage[] = [];
+  for (const m of along) {
+    const notice = await appendSystem(t, conversationId, { event: "member_left", actorId: targetId, principalId: m.principalId, newCreatorId: null });
+    await t.query("update memberships set left_seq = $2 where id = $1", [m.membershipId, notice.seq]);
+    messages.push(notice);
+  }
   const notice = await appendSystem(
     t,
     conversationId,
@@ -120,10 +202,12 @@ export async function removeMember(t: Tx, conversationId: string, actorId: strin
       ? { event: "member_left", actorId, principalId: actorId, newCreatorId }
       : { event: "member_removed", actorId, principalId: targetId },
   );
-  await t.query("update memberships set left_seq = $2 where id = $1", [target.id, notice.seq]);
+  await t.query("update memberships set left_seq = $2 where id = $1", [targetMembership.id, notice.seq]);
+  messages.push(notice);
   if (newCreatorId) await t.query("update conversations set creator_id = $2 where id = $1", [conversationId, newCreatorId]);
-  if (remaining.length === 0) await t.query("update conversations set closed_at = now() where id = $1", [conversationId]);
-  return { messages: [notice], conversations: [{ conversationId, principalIds: before }] };
+  if (people.length === 0) await t.query("update conversations set closed_at = now() where id = $1", [conversationId]);
+  const ended = await endRunsInGroup(t, conversationId, agent ? [targetId] : along.map((m) => m.principalId));
+  return { change: { messages, conversations: [{ conversationId, principalIds: members.map((m) => m.principalId) }] }, ended };
 }
 
 /** Only the creator renames. Renaming to the current title changes nothing and announces nothing. */
