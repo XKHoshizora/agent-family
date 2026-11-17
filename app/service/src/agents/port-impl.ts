@@ -206,7 +206,9 @@ export class DbAgentPort implements AgentPort {
    *    in a row, or the step taking longer than `agentRunTimeoutMs`, ends the run `failed`, `busy`. When `closing`
    *    aborts (the service is closing) the read is abandoned and `begin` rejects with its reason before step 3: the run
    *    stays `running`, unadmitted, for `recoverRuns` at the next start.
-   * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; otherwise
+   * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when
+   *    `closing` has aborted by the time the locks are held, the transaction rolls back and `begin` rejects with its
+   *    reason, admitting nothing (as in step 2); otherwise
    *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
    *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
    *    else `none`.
@@ -270,6 +272,9 @@ export class DbAgentPort implements AgentPort {
       const { agent, state } = await this.lockRun(t, run);
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
+      // The service may have started closing while this waited for the locks: then nothing is admitted (thrown, so the
+      // transaction rolls back) and the run stays running, unadmitted, for the next start.
+      if (closing?.aborted) throw closing.reason;
       const { resolved, loaded, covers } = first;
       try {
         await admitRun(t, config, run.id, run.ownerId, resolved, context.inputTokensEstimate, now);

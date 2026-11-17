@@ -1476,7 +1476,9 @@ and also looks every 2 s. Per run:
       the run fails `busy`; and when the service is closing the read under way is abandoned and nothing is admitted:
       the run stays `running`, for recovery at the next start (`tests/runs-restart.test.ts`).
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
-      the first step, with no call; otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
+      the first step, with no call; when the service has started closing by the time the locks are held, the
+      transaction rolls back and nothing is admitted (the run stays `running`, for recovery at the next start;
+      `tests/runs-restart.test.ts`); otherwise the call is admitted on its input estimate (Usage and points; `no_quota`
       ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
       `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`).

@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { isRunEnd } from "../src/agents/runtime/port.ts";
+import { lockAgent } from "../src/agents/store.ts";
 import { buildApp } from "../src/app.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
 import { settle } from "../src/metering/settle.ts";
@@ -255,6 +256,54 @@ describe("a run left running when the service stopped", () => {
     const deltas = s.events.filter((e) => e.type === "delta").map((e) => e.text ?? "");
     expect(deltas.join("")).toBe("这一次完整地说完了。");
     expect((await fromAgent(fresh, owner, conv, agent.id)).map((m) => m.text)).toEqual(["这一次完整地说完了。"]);
+  });
+});
+
+describe("the service starting to close while a reply waits for its admission", () => {
+  it("is seen inside the admitting transaction: nothing is admitted, the run stays running for the next start", async () => {
+    let open!: () => void;
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => (reached = resolve));
+    const gate = new Promise<void>((resolve) => (open = resolve));
+    store.probe.beforeGet = async () => {
+      reached();
+      await gate;
+    };
+    const old = await start(scriptedGateway());
+    const { owner, agent, conv } = await owned(old, "closer");
+    const upload = await old.inject({
+      method: "POST",
+      url: `/api/conversations/${conv}/attachments`,
+      headers: { cookie: owner.cookie, "content-type": MULTIPART },
+      payload: multipart([{ name: "file", filename: "notes.txt", type: "text/plain", data: "一些笔记" }]),
+    });
+    expect((await api(old, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId: upload.json().id, clientTxn: "rs-close" })).status).toBe(201);
+    const ticket = (await old.agentPort.claimNext())!;
+    const closing = new AbortController();
+    const begun = old.agentPort.begin(ticket, closing.signal);
+    begun.catch(() => {});
+    await reading; // step 2: the attachment is being read, no transaction open
+
+    // Someone holds the Agent's locks, so step 3 waits for them after the read; meanwhile the service starts closing.
+    let release!: () => void;
+    let held!: () => void;
+    const holding = new Promise<void>((resolve) => (held = resolve));
+    const holder = db.tx(async (t) => {
+      await lockAgent(t, agent.id);
+      held();
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await holding;
+    open();
+    await vi.waitFor(async () => expect((await db.query("select 1 from pg_locks where not granted")).rowCount).toBeGreaterThan(0));
+    closing.abort(new Error("the service is closing"));
+    release();
+    await holder;
+
+    await expect(begun).rejects.toThrow("the service is closing");
+    expect(await statusOf(ticket.id)).toEqual({ status: "running", error: null, source: null, hold: "0" });
+    expect(await records(ticket.id)).toEqual([]);
+    expect(await holds()).toBe("0");
   });
 });
 
