@@ -10,7 +10,7 @@ import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
-import { ownedAgentOf } from "./runs.ts";
+import { ownedAgentOf, triggerFromAgent, type AgentTriggered } from "./runs.ts";
 import {
   agentLimit,
   assertModelChoice,
@@ -153,7 +153,9 @@ export interface AgentReply {
  * never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules of message
  * text, is cut at 32 000 characters (no mark) and is stored only when there is some. Null, storing nothing, when there
  * is nothing to show: no visible text and no reasoning. Any conversation but the Agent's dedicated one is refused (it
- * throws): the only one an Agent posts in so far.
+ * throws): the only one an Agent posts in so far. In a group, the message may call other Agents there, in this same
+ * transaction (runs.ts `triggerFromAgent`): `triggered` is what to announce and publish after commit (nothing for a
+ * repeat, or in the dedicated conversation).
  */
 export async function postAsAgent(
   t: Tx,
@@ -161,14 +163,15 @@ export async function postAsAgent(
   conversationId: string,
   runId: string,
   reply: AgentReply,
-): Promise<{ message: StoredMessage; duplicate: boolean } | null> {
+  config: Pick<Config, "agentRunsPerMinute" | "agentChainLimit">,
+): Promise<{ message: StoredMessage; duplicate: boolean; triggered: AgentTriggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
   if (agent.conversationId !== conversationId) throw new Error(`postAsAgent: ${conversationId} is not the conversation of Agent ${agentId}`);
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
     [conversationId, agentId, runId],
   );
-  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true };
+  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: { runs: [], notices: [] } };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
   // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts).
   const run = await t.query<{ status: string; interrupted: string | null }>("select status, interrupted from agent_runs where id = $1 and agent_id = $2", [
@@ -204,7 +207,9 @@ export async function postAsAgent(
   if (proposalId !== null) body.proposalId = proposalId;
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
-  return { message, duplicate: false };
+  // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group.
+  const triggered = conversationId === agent.conversationId ? { runs: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
+  return { message, duplicate: false, triggered };
 }
 
 /**

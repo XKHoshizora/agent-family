@@ -15,7 +15,7 @@ import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { systemPrompt } from "./runtime/prompt.ts";
-import { queueRun, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
+import { queueFollowUp, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 export interface AgentPortDeps {
@@ -35,6 +35,9 @@ const STARTED_OVER: RunEnd = { status: "cancelled" };
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 /** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
 const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
+
+/** Why `postAsAgent` refuses a run's reply (409): the Agent's state, or what interrupted the run. */
+const REFUSED: ReadonlySet<string> = new Set(["agent_paused", "agent_deleted", "agent_removed", "halted"]);
 
 /** What `begin`, `finish` and recovery read of the run, under its row lock. */
 interface RunState {
@@ -307,14 +310,16 @@ export class DbAgentPort implements AgentPort {
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
     try {
-      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out));
+      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, this.deps.config));
       if (!posted) return "empty";
-      const { message, duplicate } = posted;
-      if (!duplicate) this.deps.conversations.publish({ messages: [message], conversations: [] }, this.deps.log);
+      const { message, duplicate, triggered } = posted;
+      // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners.
+      if (!duplicate) this.deps.conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, this.deps.log);
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
+      for (const called of triggered.runs) this.announce(called);
       return "posted";
     } catch (err) {
-      if (err instanceof AppError && (err.code === "agent_paused" || err.code === "agent_deleted" || err.code === "agent_removed")) return "refused";
+      if (err instanceof AppError && REFUSED.has(err.code)) return "refused";
       if (err instanceof RunNotRunning) {
         this.deps.log.warn({ runId: run.id, status: err.status }, "agent run: ended elsewhere while it was answered (another instance's recovery); its reply is not posted");
         return "refused";
@@ -374,7 +379,7 @@ export class DbAgentPort implements AgentPort {
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent);
-      const followUp = next === null ? null : await queueRun(t, agent, run.conversationId, next);
+      const followUp = next === null ? null : await queueFollowUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next);
       return { ended, followUp, interrupted: state.rows[0].interrupted !== null };
     });
   }
@@ -486,7 +491,8 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent) : null;
-  return next === null ? [ended] : [ended, await queueRun(t, agent, conversationId, next)];
+  const followUp = next === null ? null : await queueFollowUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next);
+  return followUp === null ? [ended] : [ended, followUp];
 }
 
 /** How long a run must have been `running` before the stale-run sweep may release it: twice the run's time limit (the

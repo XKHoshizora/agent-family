@@ -341,8 +341,10 @@ async function fixture(): Promise<Fixture> {
 
 /** The routes of an Agent's conversation that only its owner has: its run, replies and new topics. */
 const AGENT_CONVERSATION = /^\/api\/conversations\/:id\/(run|runs|topic)(\/|$)/;
+/** A group member's brakes on its Agents (batch 2C): reached with the fixture's group. */
+const GROUP_AGENTS = /^\/api\/conversations\/:id\/agents\//;
 /** The routes of Agents, providers, usage and replies (this batch's): checked more strictly below. */
-const isAgentRoute = (url: string) => /^\/api\/(agents|providers|usage)(\/|$)/.test(url) || AGENT_CONVERSATION.test(url);
+const isAgentRoute = (url: string) => /^\/api\/(agents|providers|usage)(\/|$)/.test(url) || AGENT_CONVERSATION.test(url) || GROUP_AGENTS.test(url);
 
 /** A real id for each path parameter, so malformed bodies and queries reach as deep as they can. */
 function validParams(route: Pick<RouteEntry, "method" | "url">, fx: Fixture): Record<string, string> {
@@ -403,9 +405,9 @@ function plausibleBody(route: RouteEntry, fx: Fixture): Record<string, unknown> 
     case "POST /api/sync/catchup":
       return { positions: { [fx.group]: 0 } };
     case "POST /api/agents":
-      return { handle: `fz_${n}`, name: "Fuzz", groupMentions: "owner" };
+      return { handle: `fz_${n}`, name: "Fuzz", groupMentions: "owner", chainBudget: "50" };
     case "PATCH /api/agents/:id":
-      return { intro: "fuzz", groupMentions: "members" };
+      return { intro: "fuzz", groupMentions: "members", chainBudget: "12.5" };
     case "POST /api/agents/draft-persona":
       return { name: "Fuzz", model: FAST };
     case "POST /api/providers":
@@ -528,6 +530,7 @@ describe("fuzz", () => {
       "POST /api/providers/:id/models/list",
       "POST /api/conversations/:id/runs/:runId/stop",
       "POST /api/conversations/:id/topic",
+      "POST /api/conversations/:id/agents/halt",
     ]) {
       expect(agentRoutes.map((r) => `${r.method} ${r.url}`)).toContain(known);
     }
@@ -538,9 +541,11 @@ describe("fuzz", () => {
       const name = `${route.method} ${route.url}`;
       const malformedPath = sent[i]!.filter((x) => x.label.startsWith("path "));
       expect([name, malformedPath.filter((x) => x.status < 400 || x.status >= 500)]).toEqual([name, []]);
-      // Every field an Agent is created or edited with is walked, `groupMentions` (batch 2C) included.
+      // Every field an Agent is created or edited with is walked, `groupMentions` and `chainBudget` (batch 2C) included.
       if (name === "POST /api/agents" || name === "PATCH /api/agents/:id") {
-        expect([name, sent[i]!.some((x) => x.label.startsWith("body.groupMentions="))]).toEqual([name, true]);
+        for (const field of ["groupMentions", "chainBudget"]) {
+          expect([name, field, sent[i]!.some((x) => x.label.startsWith(`body.${field}=`))]).toEqual([name, field, true]);
+        }
       }
       // So is a raw body that is no JSON object (`null` aside: "none"), and a body in a content type that is not JSON.
       const malformedBody = sent[i]!.filter((x) => (x.label.startsWith("body ") && !x.label.startsWith("body null ")) || x.label.startsWith("content-type "));

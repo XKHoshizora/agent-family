@@ -8,6 +8,7 @@ function idsIn(e: SystemEvent): string[] {
   if ("principalId" in e) ids.push(e.principalId);
   if ("newCreatorId" in e && e.newCreatorId) ids.push(e.newCreatorId);
   if ("memberIds" in e) ids.push(...e.memberIds.slice(0, LISTED_NAMES));
+  if ("agentId" in e) ids.push(e.agentId);
   return ids;
 }
 
@@ -52,6 +53,12 @@ export async function renderNotice(q: Queryable, conversationId: string, e: Syst
       );
       return `${n(e.actorId)} 开始了新话题，之前的对话不再发给 ${agent.rows[0]?.display_name ?? "某人"}`;
     }
+    case "agents_halted":
+      return `${n(e.actorId)} 让 Agent 停止了接话`;
+    case "agent_chain_paused":
+      return `Agent 已连续对话 ${e.limit} 条，已暂停互相接话，有人发言后继续。`;
+    case "agent_budget_reached":
+      return `${n(e.agentId)} 已达到本次接话的点数上限，有人发言后继续。`;
   }
 }
 

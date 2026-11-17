@@ -5,7 +5,7 @@ import { notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
-import { dismissRun, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
+import { dismissRun, haltAgents, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
@@ -13,11 +13,12 @@ const ok = z.object({ ok: z.literal(true) });
 
 /**
  * The owner's view of their Agent's replies, per conversation (README "Agents and runs"). For anyone else, and for a
- * conversation that is not an Agent's, every route answers the JSON 404 exactly as for an id that does not exist.
+ * conversation that is not an Agent's, every route answers the JSON 404 exactly as for an id that does not exist. The
+ * one route here that is not the owner's: a group member's halt of Agents calling each other (`…/agents/halt`).
  * `readLimit`: the budget `GET …/run` shares with the owner's other reads of their Agents and providers.
  */
 export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLimit: PrincipalLimit }): void {
-  const { db, config } = app.deps;
+  const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   // Stop, retry and dismiss share one budget; a retry also counts toward the replies one may start a minute.
   const writeLimit = perPrincipalLimit(app, 60);
@@ -63,6 +64,23 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
       const queued = await db.tx((t) => retryRun(t, me.id, req.params.id, config));
       app.agentPort.announce(queued);
       return reply.code(201).send({ run: queued.run });
+    },
+  );
+
+  // Any current member of a group stops Agents calling each other there (runs.ts `haltAgents`); a budget of its own.
+  const haltLimit = perPrincipalLimit(app, 20);
+  api.post(
+    "/api/conversations/:id/agents/halt",
+    { schema: { params: idParams, querystring: empty, body: noBody, response: { 200: ok } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await haltLimit(req, me.id);
+      const halted = await db.tx((t) => haltAgents(t, req.params.id, me.id));
+      // Before answering: the interrupted calls are abandoned, and nothing more of them reaches their owners.
+      app.agentPort.interruptRuns(halted.running);
+      for (const cancelled of halted.cancelled) app.agentPort.announce(cancelled);
+      if (halted.notice) conversations.publish({ messages: [halted.notice], conversations: [] }, req.log);
+      return { ok: true as const };
     },
   );
 

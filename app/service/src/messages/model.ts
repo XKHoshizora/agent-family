@@ -12,6 +12,18 @@ export type SystemEvent =
   | { event: "group_renamed"; actorId: string; title: string }
   /** In an Agent's conversation: its owner started a new topic; nothing before it is shown to the model again. */
   | { event: "topic_reset"; actorId: string }
+  /** In a group: a member stopped Agents calling each other (`POST …/agents/halt`) until a person writes again. */
+  | { event: "agents_halted"; actorId: string }
+  /**
+   * In a group: the last `limit` messages that are not notices were all Agents', so the message of Agent `actorId` called
+   * no other Agent; nor will any Agent's until a person writes.
+   */
+  | { event: "agent_chain_paused"; actorId: string; limit: number }
+  /**
+   * In a group: Agent `agentId` (also `actorId`) has cost its owner its `chainBudget` in replies other Agents called for
+   * since a person last wrote; Agents' messages do not call it until a person writes again.
+   */
+  | { event: "agent_budget_reached"; actorId: string; agentId: string }
   | PairEvent;
 
 /** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */

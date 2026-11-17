@@ -1,18 +1,22 @@
 import { z } from "zod";
 import { lockAccount } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
-import type { WriteLock } from "../conversations/store.ts";
+import { lockForWrite, peekConversation, type WriteLock } from "../conversations/store.ts";
+import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import type { StoredMessage } from "../messages/model.ts";
+import { mentionedHandles } from "./mentions.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
  * dismiss and the latest run of a conversation. The worker's side is `port-impl.ts`. A run belongs to one conversation
  * (`conversation_id`), and everything here acts on that one: an Agent has at most one queued or running run per
- * conversation, and a message is folded only into the active run of its own conversation. Lock order everywhere: the
- * run's conversation row → the `agents` row (`lockAgent`) → the run row → the `accounts` row.
+ * conversation, and a message is folded only into the active run of its own conversation. In a group a message calls
+ * Agents by `@handle` (`triggerInGroup`, `triggerFromAgent`), under brakes on Agents calling Agents (the chain limit,
+ * the halt, the chain budget). Lock order everywhere: the run's conversation row → `agents` rows (`lockAgent`; several
+ * in id order) → run rows → `accounts` rows (several in id order).
  */
 
 export const RUN_STATUSES = ["queued", "running", "done", "failed", "stopped", "cancelled"] as const;
@@ -109,10 +113,14 @@ async function startedLastMinute(t: Tx, ownerId: string): Promise<number> {
 }
 
 /**
- * Why an Agent's running reply was cut short (`agent_runs.interrupted`): by the Agent's pause or delete, or because the
- * Agent left the run's conversation (`agent_removed`).
+ * Why an Agent's running reply was cut short (`agent_runs.interrupted`): by the Agent's pause or delete, because the
+ * Agent left the run's conversation (`agent_removed`), or because a member of the group halted Agents calling each
+ * other and an Agent's message had called for it (`halted`, `haltAgents`).
  */
-export type Interruption = "agent_paused" | "agent_deleted" | "agent_removed";
+export type Interruption = "agent_paused" | "agent_deleted" | "agent_removed" | "halted";
+
+/** Whose message called for a run (`agent_runs.triggered_by`): a person's, or an Agent's in a group. */
+export type TriggeredBy = "human" | "agent";
 
 /**
  * In the pause's (or delete's) own transaction, which holds `lockAgent`: the Agent's active replies, in every
@@ -126,7 +134,7 @@ export type Interruption = "agent_paused" | "agent_deleted" | "agent_removed";
 export async function interruptRuns(
   t: Tx,
   agent: AgentRow,
-  reason: Exclude<Interruption, "agent_removed">,
+  reason: Exclude<Interruption, "agent_removed" | "halted">,
 ): Promise<{ cancelled: Announced[]; running: string[] }> {
   const queued = await t.query<RunRow & { conversation_id: string }>(
     `update agent_runs as r set status = 'cancelled', error = $2, finished_at = now()
@@ -143,12 +151,20 @@ export async function interruptRuns(
   };
 }
 
-/** Queues a reply of the locked Agent in `conversationId` answering up to `coversSeq` (a seq of that conversation). */
-export async function queueRun(t: Tx, agent: AgentRow, conversationId: string, coversSeq: number): Promise<Announced> {
+/** The Agent as a run row names it. */
+type RunAgent = Pick<AgentRow, "id" | "ownerId">;
+
+/**
+ * Queues a reply of the Agent in `conversationId` answering up to `coversSeq` (a seq of that conversation), called for
+ * by a person's message unless `triggeredBy` says an Agent's. Under that conversation's row lock, which every writer of
+ * the Agent's runs there holds: the Agent has no active run there (`agent_runs_one_active_per_agent_conversation` would
+ * refuse a second).
+ */
+export async function queueRun(t: Tx, agent: RunAgent, conversationId: string, coversSeq: number, triggeredBy: TriggeredBy = "human"): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
-    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, covers_seq)
-     values ('reply', $1, $2, $3, 'queued', $4) returning ${RUN_COLUMNS}`,
-    [conversationId, agent.id, agent.ownerId, coversSeq],
+    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by)
+     values ('reply', $1, $2, $3, 'queued', $4, $5) returning ${RUN_COLUMNS}`,
+    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy],
   );
   return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
@@ -158,39 +174,312 @@ export async function queueRun(t: Tx, agent: AgentRow, conversationId: string, c
  * covering `coversSeq`, so the owner sees it and can retry. It never reached a model: no hold, no usage record, and it
  * is not active (it takes no concurrency slot, and the Agent's one active run there stays free).
  */
-async function recordRateLimited(t: Tx, agent: AgentRow, conversationId: string, coversSeq: number): Promise<Announced> {
+async function recordRateLimited(t: Tx, agent: RunAgent, conversationId: string, coversSeq: number, triggeredBy: TriggeredBy = "human"): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
-    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at)
-     values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now()) returning ${RUN_COLUMNS}`,
-    [conversationId, agent.id, agent.ownerId, coversSeq],
+    `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at, triggered_by)
+     values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now(), $5) returning ${RUN_COLUMNS}`,
+    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy],
   );
   return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
 
 /**
- * The trigger (spec 6.5): in the send transaction, after `message` was stored (not a repeat), under the send's locks.
- * Only a message from the owner in an Agent conversation counts, and nothing happens when the Agent is paused, deleted
- * or has no model, or answers only when called (`replyMode` `mention`) and the text calls it neither by `@handle` nor
- * by `@name`. With a reply of the Agent already active in this conversation the message is folded into it: a queued
- * one now covers it, a running one notes it in `pending_seq` (one follow-up answers everything that came meanwhile); a
- * reply active in another conversation is not touched. Otherwise a reply is queued here — unless the owner has started
+ * `recordRateLimited` in a group (plan ruling 7): one such run per Agent there, not one per mention. When the Agent's
+ * latest run in the group is a `rate_limited` failure its owner has not dismissed, that run now covers `coversSeq` too
+ * (and is announced again); otherwise a new one is recorded. So repeated mentions over the limit show one line.
+ */
+async function rateLimitedInGroup(t: Tx, agent: RunAgent, conversationId: string, coversSeq: number, triggeredBy: TriggeredBy): Promise<Announced> {
+  const latest = await t.query<{ id: string; reusable: boolean }>(
+    `select id, (status = 'failed' and error is not distinct from 'rate_limited' and dismissed_at is null) as reusable
+       from agent_runs where agent_id = $1 and conversation_id = $2 order by created_at desc, id desc limit 1`,
+    [agent.id, conversationId],
+  );
+  const row = latest.rows[0];
+  if (!row?.reusable) return recordRateLimited(t, agent, conversationId, coversSeq, triggeredBy);
+  const { rows } = await t.query<RunRow>(
+    `update agent_runs as r
+        set covers_seq = greatest(r.covers_seq, $2), finished_at = now(),
+            triggered_by = case when $3 = 'human' then 'human' else r.triggered_by end
+      where r.id = $1 returning ${RUN_COLUMNS}`,
+    [row.id, coversSeq, triggeredBy],
+  );
+  return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
+}
+
+const textOf = (message: StoredMessage): string => (typeof message.body.text === "string" ? message.body.text : "");
+
+/**
+ * In a group, under its row lock: the message at `seq` reaches each of `agents` (in id order; whether each may be
+ * called is decided already). It is folded into the Agent's active run in the group — a queued one now covers it, and
+ * becomes a person's when a person's message is folded in; a running one notes it (`pending_seq`) — or, failing that,
+ * the owner's replies a minute decide: a reply is queued, or the reusable `rate_limited` run records it
+ * (`rateLimitedInGroup`). The owners' `accounts` rows are locked once the run rows are done with, all of them in id
+ * order, before any is counted (the lock order's last step). Returns what to announce after commit.
+ */
+async function reachAgents(
+  t: Tx,
+  conversationId: string,
+  agents: readonly RunAgent[],
+  seq: number,
+  triggeredBy: TriggeredBy,
+  config: Pick<Config, "agentRunsPerMinute">,
+): Promise<Announced[]> {
+  const unfolded: RunAgent[] = [];
+  for (const agent of agents) {
+    const folded = await t.query(
+      `update agent_runs
+          set covers_seq = case when status = 'queued' then greatest(covers_seq, $3) else covers_seq end,
+              pending_seq = case when status = 'running' then greatest(pending_seq, $3) else pending_seq end,
+              triggered_by = case when status = 'queued' and $4 = 'human' then 'human' else triggered_by end
+        where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
+      [agent.id, conversationId, seq, triggeredBy],
+    );
+    if (!folded.rowCount) unfolded.push(agent);
+  }
+  for (const ownerId of [...new Set(unfolded.map((a) => a.ownerId))].sort()) await lockAccount(t, ownerId);
+  const announced: Announced[] = [];
+  for (const agent of unfolded) {
+    const over = (await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute;
+    announced.push(
+      over ? await rateLimitedInGroup(t, agent, conversationId, seq, triggeredBy) : await queueRun(t, agent, conversationId, seq, triggeredBy),
+    );
+  }
+  return announced;
+}
+
+/**
+ * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
+ * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles;
+ * each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
+ * deleted, paused or has no model, or only its owner may call it (`groupMentions` `owner`) and this is someone else's
+ * message. `replyMode` plays no part in a group. Then `reachAgents`.
+ */
+async function triggerInGroup(t: Tx, conversationId: string, message: StoredMessage, config: Pick<Config, "agentRunsPerMinute">): Promise<Announced[]> {
+  const handles = mentionedHandles(textOf(message));
+  if (handles.length === 0) return [];
+  const { rows } = await t.query<{ id: string }>(
+    `select p.id from memberships m
+       join principals p on p.id = m.principal_id
+       join agents a on a.principal_id = p.id
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[])
+      order by p.id`,
+    [conversationId, handles],
+  );
+  const called: AgentRow[] = [];
+  for (const { id } of rows) {
+    const agent = await lockAgent(t, id, conversationId);
+    if (agent.deleted || agent.paused || agent.model === null) continue;
+    if (agent.groupMentions === "owner" && message.senderId !== agent.ownerId) continue;
+    called.push(agent);
+  }
+  return reachAgents(t, conversationId, called, message.seq, "human", config);
+}
+
+/** The seq of the group's latest message from a person (a notice is nobody's message), 0 when there is none. */
+async function latestHumanSeq(t: Tx, conversationId: string): Promise<number> {
+  const { rows } = await t.query<{ seq: string }>(
+    `select m.seq::text as seq from messages m join principals p on p.id = m.sender_id
+      where m.conversation_id = $1 and m.kind <> 'system' and p.kind = 'human'
+      order by m.seq desc limit 1`,
+    [conversationId],
+  );
+  return rows[0] ? Number(rows[0].seq) : 0;
+}
+
+/** Whether Agents are halted in the group (ruling 11): its latest message from a person is at or before the halt. */
+async function isHalted(t: Tx, conversationId: string, latestHuman: number): Promise<boolean> {
+  const { rows } = await t.query<{ halted: string | null }>("select agents_halted_seq::text as halted from conversations where id = $1", [conversationId]);
+  const halted = rows[0]?.halted ?? null;
+  return halted !== null && latestHuman <= Number(halted);
+}
+
+/** Whether a notice of `event` (about Agent `agentId`, when given) was appended to the group after seq `since`. */
+async function toldSince(t: Tx, conversationId: string, since: number, event: string, agentId: string | null = null): Promise<boolean> {
+  const { rowCount } = await t.query(
+    `select 1 from messages
+      where conversation_id = $1 and seq > $2 and kind = 'system' and body ->> 'event' = $3 and ($4::text is null or body ->> 'agentId' = $4)
+      limit 1`,
+    [conversationId, since, event, agentId],
+  );
+  return rowCount !== 0;
+}
+
+/** What Agent `agentId`'s owner was charged for its replies in the group covering messages after seq `since`. */
+async function chargedSince(t: Tx, agentId: string, conversationId: string, since: number): Promise<bigint> {
+  const { rows } = await t.query<{ charged: string }>(
+    `select coalesce(sum(u.free_micro + u.balance_micro), 0)::text as charged
+       from agent_runs r join usage_records u on u.run_id = r.id
+      where r.agent_id = $1 and r.conversation_id = $2 and r.purpose = 'reply' and r.covers_seq > $3`,
+    [agentId, conversationId, since],
+  );
+  return BigInt(rows[0]!.charged);
+}
+
+/** What an Agent's own message in a group called for: runs to announce and notices to publish, after commit. */
+export interface AgentTriggered {
+  runs: Announced[];
+  notices: StoredMessage[];
+}
+
+/**
+ * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
+ * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
+ * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
+ * paused, with a model, `groupMentions` `members`. Their `agents` rows are read, not locked: the poster's is held
+ * already, and locking another's after it could take two Agents' rows out of id order — two Agents calling each other
+ * from two groups at once would deadlock. Their rows need not be held: their runs in this group are written only under
+ * the group's row, which this transaction holds (the one-active-run index backs that), and a pause or delete committing
+ * meanwhile is met by the worker, which ends such a run without a call (`begin`). With nobody to call, nothing more.
+ * Then, in turn:
+ * - halted (ruling 11): the group's latest message from a person is at or before `agents_halted_seq` → nothing;
+ * - the chain limit (ruling 10): the group's last `agentChainLimit` messages that are not notices were all Agents' (this
+ *   one among them) → nobody is called, and an `agent_chain_paused` notice is appended unless one was since a person
+ *   last wrote;
+ * - the chain budget (ruling 12), per Agent: what its owner was charged for its replies in this group covering
+ *   messages after a person's latest has reached its `chainBudget` → it is not called, and an `agent_budget_reached`
+ *   notice about it is appended unless one was since a person last wrote.
+ * The rest are reached as a person's message reaches them (`reachAgents`), as an Agent's (`triggered_by` `agent`).
+ */
+export async function triggerFromAgent(
+  t: Tx,
+  conversationId: string,
+  message: StoredMessage,
+  poster: AgentRow,
+  config: Pick<Config, "agentRunsPerMinute" | "agentChainLimit">,
+): Promise<AgentTriggered> {
+  const nothing: AgentTriggered = { runs: [], notices: [] };
+  const own = poster.handle.toLowerCase();
+  const handles = mentionedHandles(textOf(message)).filter((h) => h !== own);
+  if (handles.length === 0) return nothing;
+  const { rows: targets } = await t.query<{ id: string; owner_id: string; budget: string }>(
+    `select p.id, p.owner_id, a.chain_budget_micro::text as budget
+       from memberships m
+       join principals p on p.id = m.principal_id
+       join agents a on a.principal_id = p.id
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
+        and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
+      order by p.id`,
+    [conversationId, handles, poster.id],
+  );
+  if (targets.length === 0) return nothing;
+
+  const human = await latestHumanSeq(t, conversationId);
+  if (await isHalted(t, conversationId, human)) return nothing;
+  const limit = config.agentChainLimit;
+  // Every message after a person's latest that is not a notice is an Agent's.
+  const inARow = await t.query<{ n: number }>(
+    `select count(*)::int as n from (select 1 from messages where conversation_id = $1 and seq > $2 and kind <> 'system' limit $3) x`,
+    [conversationId, human, limit],
+  );
+  if (inARow.rows[0]!.n >= limit) {
+    if (await toldSince(t, conversationId, human, "agent_chain_paused")) return nothing;
+    return { runs: [], notices: [await appendSystem(t, conversationId, { event: "agent_chain_paused", actorId: poster.id, limit })] };
+  }
+
+  const notices: StoredMessage[] = [];
+  const called: RunAgent[] = [];
+  for (const target of targets) {
+    if ((await chargedSince(t, target.id, conversationId, human)) >= BigInt(target.budget)) {
+      if (!(await toldSince(t, conversationId, human, "agent_budget_reached", target.id))) {
+        notices.push(await appendSystem(t, conversationId, { event: "agent_budget_reached", actorId: target.id, agentId: target.id }));
+      }
+      continue;
+    }
+    called.push({ id: target.id, ownerId: target.owner_id });
+  }
+  return { runs: await reachAgents(t, conversationId, called, message.seq, "agent", config), notices };
+}
+
+/**
+ * The follow-up of a run of `agent` in `conversationId` that ended having noted messages up to `pending` beyond what it
+ * covered (`covers`), under that conversation's row and the Agent's (`finish`, recovery): a queued reply answering up
+ * to `pending`. In the Agent's own conversation it is its owner's, as always. In a group it is a person's when a
+ * person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it); otherwise only Agents'
+ * messages called for it: it is an Agent's, and is not queued at all while the group is halted (ruling 11) — what
+ * Agents asked before a halt is not answered after it. Null when nothing is queued.
+ */
+export async function queueFollowUp(t: Tx, agent: AgentRow, conversationId: string, covers: number, pending: number): Promise<Announced | null> {
+  if (conversationId === agent.conversationId) return queueRun(t, agent, conversationId, pending);
+  const { rows } = await t.query<{ sender_id: string; text: string | null }>(
+    `select m.sender_id, m.body ->> 'text' as text from messages m join principals p on p.id = m.sender_id
+      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and p.kind = 'human'`,
+    [conversationId, covers, pending],
+  );
+  const handle = agent.handle.toLowerCase();
+  const asked = rows.some((r) => (agent.groupMentions === "members" || r.sender_id === agent.ownerId) && mentionedHandles(r.text ?? "").includes(handle));
+  if (asked) return queueRun(t, agent, conversationId, pending, "human");
+  if (await isHalted(t, conversationId, await latestHumanSeq(t, conversationId))) return null;
+  return queueRun(t, agent, conversationId, pending, "agent");
+}
+
+/** What a halt did, to act on after it commits. */
+export interface Halted {
+  /** The `agents_halted` notice, or null when the group was halted already. */
+  notice: StoredMessage | null;
+  /** Queued runs it cancelled, each to announce to its owner. */
+  cancelled: Announced[];
+  /** Running runs it interrupted, whose calls this process abandons (`DbAgentPort.interruptRuns`). */
+  running: string[];
+}
+
+/**
+ * `POST /api/conversations/:id/agents/halt` (ruling 11), by `actorId`: unless the conversation is a group, 404 before
+ * any lock; then under the group's row (`lockForWrite`: 404 unless a current member of an open conversation)
+ * `agents_halted_seq` becomes the group's current seq, so Agents' messages call nobody until a person writes again. The
+ * runs Agents' messages called for end: a queued one is `cancelled`, `halted` (it never reached a model); a running one
+ * is marked `interrupted` `halted` — never posted, it ends `cancelled` with that reason and is settled as any; what a
+ * person asked of it meanwhile still gets its follow-up (`queueFollowUp`). Runs a person called for are left alone. The
+ * `agents_halted` notice is appended unless the group was halted already (no person has written since the last halt):
+ * then nothing changes. Lock order: the group's row, then run rows; no `agents` or `accounts` row.
+ */
+export async function haltAgents(t: Tx, conversationId: string, actorId: string): Promise<Halted> {
+  if ((await peekConversation(t, conversationId))?.type !== "group") throw notFound();
+  const lock = await lockForWrite(t, conversationId, actorId);
+  const already = await isHalted(t, conversationId, await latestHumanSeq(t, conversationId));
+  await t.query("update conversations set agents_halted_seq = greatest(coalesce(agents_halted_seq, 0), $2) where id = $1", [conversationId, lock.conversation.seq]);
+  const queued = await t.query<RunRow & { owner_id: string }>(
+    `update agent_runs as r set status = 'cancelled', error = 'halted', finished_at = now()
+      where r.conversation_id = $1 and r.status = 'queued' and r.triggered_by = 'agent' returning ${RUN_COLUMNS}, r.owner_id`,
+    [conversationId],
+  );
+  const running = await t.query<{ id: string }>(
+    `update agent_runs set interrupted = 'halted'
+      where conversation_id = $1 and status = 'running' and triggered_by = 'agent' and interrupted is null returning id`,
+    [conversationId],
+  );
+  return {
+    notice: already ? null : await appendSystem(t, conversationId, { event: "agents_halted", actorId }),
+    cancelled: queued.rows.map((r) => ({ ownerId: r.owner_id, conversationId, run: toWireRun(r) })),
+    running: running.rows.map((r) => r.id),
+  };
+}
+
+/**
+ * The trigger (spec 6.5): in the send transaction, after a person's `message` was stored (not a repeat), under the
+ * send's locks. In a group: `triggerInGroup`, the Agent members its text names by `@handle`. In an Agent conversation
+ * only a message from the owner counts, and nothing happens when the Agent is paused, deleted or has no model, or
+ * answers only when called (`replyMode` `mention`) and the text calls it neither by `@handle` nor by `@name`. With a
+ * reply of the Agent already active in this conversation the message is folded into it: a queued one now covers it, a
+ * running one notes it in `pending_seq` (one follow-up answers everything that came meanwhile); a reply active in
+ * another conversation is not touched. Otherwise a reply is queued here — unless the owner has started
  * `agentRunsPerMinute` in the last minute: then a `failed` run, `rate_limited`, is recorded instead
- * (`recordRateLimited`; the message stays sent). Returns the run to announce after commit, or null.
+ * (`recordRateLimited`; the message stays sent). Returns the runs to announce after commit (none in a direct chat).
  */
 export async function maybeTrigger(
   t: Tx,
   lock: WriteLock,
   message: StoredMessage,
   config: Pick<Config, "agentRunsPerMinute">,
-): Promise<Announced | null> {
-  if (lock.conversation.type !== "agent" || message.kind === "system") return null;
+): Promise<Announced[]> {
+  if (message.kind === "system") return [];
+  if (lock.conversation.type === "group") return triggerInGroup(t, lock.conversation.id, message, config);
+  if (lock.conversation.type !== "agent") return [];
   const conversationId = lock.conversation.id;
   const found = await t.query<{ agent_id: string }>("select agent_id from agent_conversations where conversation_id = $1", [conversationId]);
-  if (!found.rows[0]) return null;
+  if (!found.rows[0]) return [];
   const agent = await lockAgent(t, found.rows[0].agent_id, conversationId);
-  if (message.senderId !== agent.ownerId || agent.paused || agent.deleted || agent.model === null) return null;
-  const text = typeof message.body.text === "string" ? message.body.text : "";
-  if (agent.replyMode === "mention" && !mentions(text, agent)) return null;
+  if (message.senderId !== agent.ownerId || agent.paused || agent.deleted || agent.model === null) return [];
+  if (agent.replyMode === "mention" && !mentions(textOf(message), agent)) return [];
 
   const folded = await t.query(
     `update agent_runs
@@ -199,9 +488,9 @@ export async function maybeTrigger(
       where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
     [agent.id, conversationId, message.seq],
   );
-  if (folded.rowCount) return null;
-  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return recordRateLimited(t, agent, conversationId, message.seq);
-  return queueRun(t, agent, conversationId, message.seq);
+  if (folded.rowCount) return [];
+  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return [await recordRateLimited(t, agent, conversationId, message.seq)];
+  return [await queueRun(t, agent, conversationId, message.seq)];
 }
 
 /**

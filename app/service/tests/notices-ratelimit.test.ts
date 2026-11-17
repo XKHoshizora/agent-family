@@ -5,7 +5,8 @@ import { useApp } from "./helpers/harness.ts";
 /**
  * Scale 1: writes that append a system notice others cannot stop — blocking and unblocking (in the pair's
  * direct chat), renaming a group and adding or removing members (in the group) — are limited to 20 per
- * minute per principal: block + unblock share one budget, rename + add + remove (and leave) another.
+ * minute per principal: block + unblock share one budget, rename + add + remove (and leave) another, and halting a
+ * group's Agents (`POST …/agents/halt`) a third.
  */
 const { app, db } = useApp({ env: { RATE_LIMIT_SCALE: "1" } });
 
@@ -54,5 +55,26 @@ describe("notice-producing writes", () => {
     // Another member has a budget of their own.
     expect((await api(app, b, "DELETE", `/api/conversations/${g}/members/${b.id}`)).status).toBe(200);
     expect(await notices(g)).toBe(before + 20);
+  });
+
+  it("halting a group's Agents: 20 per minute per principal, a budget of its own, then 429 and no notice", async () => {
+    const [a, b, c] = [await signUp(app, "gina"), await signUp(app, "hank"), await signUp(app, "ivy")];
+    const g = await group(app, a, "halts", [b, c]);
+    const halt = (who: Actor) => api(app, who, "POST", `/api/conversations/${g}/agents/halt`);
+    const say = (text: string, n: number) => api(app, b, "POST", `/api/conversations/${g}/messages`, { text, clientTxn: `h${n}` });
+    const before = await notices(g);
+    // A person writing between halts makes each one a new halt with its notice.
+    for (let i = 0; i < 10; i++) {
+      expect((await halt(a)).status).toBe(200);
+      expect((await halt(a)).status).toBe(200); // halted already: nothing appended, still counted
+      expect((await say(`继续 ${i}`, i)).status).toBe(201);
+    }
+    expect(await notices(g)).toBe(before + 10);
+    expect(await halt(a)).toEqual({ status: 429, json: { error: "rate_limited" } });
+    expect(await notices(g)).toBe(before + 10);
+    // Renaming is another budget; another member has a halt budget of their own.
+    expect((await api(app, a, "PATCH", `/api/conversations/${g}`, { title: "renamed" })).status).toBe(200);
+    expect((await halt(c)).status).toBe(200);
+    expect(await notices(g)).toBe(before + 12);
   });
 });
