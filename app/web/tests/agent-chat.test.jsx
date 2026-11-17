@@ -126,21 +126,22 @@ describe("the header and the list row", () => {
     const subtitle = () => document.querySelector(".chat-head .chat-title p");
     await openAgentChat({ agent: { model: PROVIDER_MODEL }, providers: [providerOf()] });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · gpt-x");
-    const model = within(subtitle()).getByRole("button", { name: "gpt-x" });
+    const model = within(subtitle()).getByRole("button", { name: "模型：gpt-x，点击更改" });
     expect(model.querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/openai.svg");
     await click(model);
     expect(screen.getByRole("heading", { name: "编辑 小助手" })).toBeTruthy();
     expect(screen.getByLabelText("人格文档")).toBeTruthy();
+    expect(model.getAttribute("aria-label")).toBe("模型：gpt-x，点击更改");
     cleanup();
 
     await openAgentChat({ agent: { model: SITE_PAID } });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 大模型");
-    expect(within(subtitle()).getByRole("button", { name: "大模型" }).querySelector("img")).toBeNull();
+    expect(within(subtitle()).getByRole("button", { name: "模型：大模型，点击更改" }).querySelector("img")).toBeNull();
     cleanup();
 
     await openAgentChat({ agent: { model: null } });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 未选模型");
-    await click(within(subtitle()).getByRole("button", { name: "未选模型" }));
+    await click(within(subtitle()).getByRole("button", { name: "模型：未选模型，点击更改" }));
     expect(screen.getByLabelText("人格文档")).toBeTruthy();
   });
 
@@ -172,7 +173,10 @@ describe("which model and level a reply of mine used (via)", () => {
   const SOL = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "medium", points: "6.9" };
   const CLAUDE = { model: { source: "provider", model: "claude-x" }, reasoning: "none", points: "0" };
   const viaLine = (seq) => storedLi(seq).querySelector(".msg-via");
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    window.dispatchEvent(new StorageEvent("storage", { key: null }));
+  });
 
   it("a muted line under the reply: the model with its lab's logo and the level; a site model by its label, a provider's by its name; no line without via", async () => {
     await openAgentChat({ messages: [...BASE, wire(A1, 3, AG1, "好的", { via: SOL }), wire(A1, 4, AG1, "嗯", { via: CLAUDE })] });
@@ -188,7 +192,7 @@ describe("which model and level a reply of mine used (via)", () => {
     expect(storedLi(3).querySelector(".bubble").textContent).toBe("好的");
   });
 
-  it("says each thinking level in words: 不思考, 思考：低, 中, 高, 超高, 最大", async () => {
+  it("says each thinking level in words: 不思考, 思考：低, 中, 高, 很高, 最高", async () => {
     const levels = ["none", "low", "medium", "high", "xhigh", "max"];
     await openAgentChat({ messages: [...BASE, ...levels.map((reasoning, i) => wire(A1, 3 + i, AG1, `第${i}`, { via: { ...SOL, reasoning } }))] });
     expect(levels.map((_l, i) => viaLine(3 + i).textContent)).toEqual([
@@ -196,8 +200,8 @@ describe("which model and level a reply of mine used (via)", () => {
       "GPT-6 Sol · 思考：低",
       "GPT-6 Sol · 思考：中",
       "GPT-6 Sol · 思考：高",
-      "GPT-6 Sol · 思考：超高",
-      "GPT-6 Sol · 思考：最大",
+      "GPT-6 Sol · 思考：很高",
+      "GPT-6 Sol · 思考：最高",
     ]);
   });
 
@@ -210,6 +214,35 @@ describe("which model and level a reply of mine used (via)", () => {
     expect(localStorage.getItem(REPLY_POINTS_KEY)).toBe("1");
     act(() => setShowReplyPoints(false));
     expect(viaLine(3).textContent).toBe("GPT-6 Sol · 思考：中");
+  });
+
+  it("another tab turning the switch on or off shows on every open line at once, and the storage is not read again per line or per render", async () => {
+    await openAgentChat({ messages: [...BASE, wire(A1, 3, AG1, "好的", { via: SOL }), wire(A1, 4, AG1, "嗯", { via: SOL }), wire(A1, 5, AG1, "再", { via: CLAUDE })] });
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中", "GPT-6 Sol · 思考：中", "claude-x · 不思考"]);
+    const read = vi.spyOn(Storage.prototype, "getItem");
+    // The other tab writes; the browser tells this page with a storage event.
+    localStorage.setItem(REPLY_POINTS_KEY, "1");
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: REPLY_POINTS_KEY, newValue: "1" }));
+    });
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中 · 6.9 点", "GPT-6 Sol · 思考：中 · 6.9 点", "claude-x · 不思考 · 不扣点"]);
+    // One read for the event, not one per line; re-rendering the lines reads nothing.
+    expect(read.mock.calls.filter(([key]) => key === REPLY_POINTS_KEY).length).toBeLessThanOrEqual(1);
+    read.mockClear();
+    act(() => setShowReplyPoints(true));
+    act(() => setShowReplyPoints(true));
+    expect(read).not.toHaveBeenCalled();
+    // An event about another key changes nothing and reads nothing.
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: "something-else" }));
+    });
+    expect(read).not.toHaveBeenCalled();
+    localStorage.removeItem(REPLY_POINTS_KEY);
+    act(() => {
+      window.dispatchEvent(new StorageEvent("storage", { key: REPLY_POINTS_KEY, newValue: null }));
+    });
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中", "GPT-6 Sol · 思考：中", "claude-x · 不思考"]);
+    read.mockRestore();
   });
 
   it("the reply pushed again once its run is charged brings the line; a push without via shows none", async () => {
@@ -1642,7 +1675,7 @@ describe("Agents in a group (batch 2C)", () => {
       await push(transport, { type: "message", message: wire(G1, 3, OAG, "补充一句", { via: theirs }) });
       expect(storedLi(1).querySelector(".msg-via").textContent).toBe("GPT-6 Sol · 思考：高 · 6.9 点");
       for (const seq of [2, 3]) expect(storedLi(seq).querySelector(".msg-via")).toBeNull();
-      expect(mainText()).not.toMatch(/secret-claude|思考：最大|12 点/);
+      expect(mainText()).not.toMatch(/secret-claude|思考：最高|12 点/);
       expect(document.querySelector(".chat-head .chat-title p").textContent).toBe("3 位真人 · 2 个 Agent");
     } finally {
       act(() => setShowReplyPoints(false));

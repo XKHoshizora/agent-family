@@ -7,6 +7,7 @@ import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
 import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
+import { levelLabel } from "./ModelPicker.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
@@ -97,8 +98,8 @@ function Body({ msg, agent }) {
   );
 }
 
-/** How the line under a reply says the thinking level its run was sent. */
-const VIA_LEVELS = { none: "不思考", low: "思考：低", medium: "思考：中", high: "思考：高", xhigh: "思考：超高", max: "思考：最大" };
+/** How the line under a reply says the thinking level its run was sent: the Agent form's words. */
+const levelWords = (level) => (level === "none" ? "不思考" : `思考：${levelLabel(level)}`);
 
 /**
  * The muted line under a reply of my own Agent: which model and thinking level its run used (`via`, sent to its owner
@@ -118,7 +119,7 @@ function ReplyVia({ via }) {
   return (
     <p className="msg-via">
       <LabLogo lab={lab} size={14} />
-      {`${name} · ${VIA_LEVELS[via.reasoning]}${points}`}
+      {`${name} · ${levelWords(via.reasoning)}${points}`}
     </p>
   );
 }

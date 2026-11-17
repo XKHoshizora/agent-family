@@ -5,16 +5,14 @@ import { useSyncExternalStore } from "react";
 export const REPLY_POINTS_KEY = "agent-family:show-reply-points";
 
 const listeners = new Set();
-/** This page's value when the browser's storage refused it (a private window, storage blocked); null otherwise. */
-let unstored = null;
+/** The value this page holds, read from the storage once (null until then) and kept in step by `set` and the `storage` event. */
+let cached = null;
 
 function storage() {
   return globalThis.localStorage;
 }
 
-/** Whether replies show their points: off by default, and when the storage cannot be read. */
-export function showReplyPoints() {
-  if (unstored !== null) return unstored;
+function readStored() {
   try {
     return storage()?.getItem(REPLY_POINTS_KEY) === "1";
   } catch {
@@ -22,29 +20,40 @@ export function showReplyPoints() {
   }
 }
 
-/** Turns it on or off for this browser; every open page of this tab shows the change at once. */
+function notify() {
+  for (const fn of [...listeners]) fn();
+}
+
+// Another tab of this browser changed it (or cleared the storage): read it again once, then tell every subscriber.
+globalThis.addEventListener?.("storage", (event) => {
+  if (event.key !== REPLY_POINTS_KEY && event.key !== null) return;
+  cached = readStored();
+  notify();
+});
+
+/** Whether replies show their points: off by default, and when the storage cannot be read. Never reads the storage twice. */
+export function showReplyPoints() {
+  if (cached === null) cached = readStored();
+  return cached;
+}
+
+/** Turns it on or off for this browser; every open line on this page shows the change at once. A storage that refuses the write still holds the value for this page. */
 export function setShowReplyPoints(on) {
   const value = on === true;
   try {
     if (value) storage().setItem(REPLY_POINTS_KEY, "1");
     else storage().removeItem(REPLY_POINTS_KEY);
-    unstored = null;
   } catch {
-    unstored = value;
+    // kept in memory only
   }
-  for (const fn of [...listeners]) fn();
+  cached = value;
+  notify();
 }
 
 function subscribe(fn) {
   listeners.add(fn);
-  // Another tab of this browser changed it.
-  const onStorage = (event) => {
-    if (event.key === REPLY_POINTS_KEY || event.key === null) fn();
-  };
-  globalThis.addEventListener?.("storage", onStorage);
   return () => {
     listeners.delete(fn);
-    globalThis.removeEventListener?.("storage", onStorage);
   };
 }
 

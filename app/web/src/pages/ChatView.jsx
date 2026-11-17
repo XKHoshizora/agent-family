@@ -3,7 +3,8 @@ import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
-import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
+import { LabLogo } from "../ui/LabLogo.jsx";
+import { modelLab } from "./ModelPicker.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
 import { withoutBidiControls } from "../ui/markdownRules.js";
 import { REVEAL_FINISH_MS } from "../ui/reveal.js";
@@ -71,14 +72,9 @@ function AgentModel({ agentId }) {
   if (!agent?.loaded) return null;
   const model = agent.model;
   let name = "未选模型";
-  let lab = null;
-  if (model?.source === "site") {
-    name = (state.siteModels ?? []).find((m) => m.id === model.id)?.label ?? model.id;
-    lab = labOfModel(model.id) ?? labOfModel(name);
-  } else if (model?.source === "provider") {
-    name = model.model;
-    lab = labOfModel(model.model);
-  }
+  if (model?.source === "site") name = (state.siteModels ?? []).find((m) => m.id === model.id)?.label ?? model.id;
+  else if (model?.source === "provider") name = model.model;
+  const lab = modelLab(state, model);
   const shown = (
     <>
       <LabLogo lab={lab} size={14} />
@@ -92,7 +88,7 @@ function AgentModel({ agentId }) {
       {agent.deleted ? (
         <span className="head-model">{shown}</span>
       ) : (
-        <button type="button" className="head-model" onClick={edit}>
+        <button type="button" className="head-model" aria-label={`模型：${name}，点击更改`} onClick={edit}>
           {shown}
         </button>
       )}

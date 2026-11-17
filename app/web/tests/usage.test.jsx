@@ -170,7 +170,10 @@ describe("reading it again", () => {
 });
 
 describe("在每条回复下显示消耗的点数", () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    window.dispatchEvent(new StorageEvent("storage", { key: null }));
+  });
   const pointsSwitch = () => inMain().getByRole("switch", { name: "在每条回复下显示消耗的点数" });
 
   it("is off by default, says it only changes this device, and is kept in this browser (not the account): on, then off", async () => {
