@@ -1,7 +1,8 @@
 // A person's own model providers in a real browser. The provider that answers is the local model stub
 // (support/model-stub.mjs) at http://127.0.0.1, an address the form itself refuses (it asks for https, its own check
-// before any request, also when editing): that provider is added through the API with the page's session, and
-// everything after that is done in the page — 测试连接, 从供应商读取, an Agent choosing its model and answering with it.
+// before any request, also when editing): the provider is added in the form at an https address, and the one request
+// that adds it goes on with the stub's address in its place. Everything else is done in the page — 同步模型 (which
+// opens by itself for a provider added without models), 测试连接, an Agent choosing its model and answering with it.
 // The form's own handling of a typed key is then shown on providers at an https address that is never called: a key
 // typed in reaches the service once and stays nowhere in the page or the browser's storage.
 import { randomBytes } from "node:crypto";
@@ -43,38 +44,68 @@ const leftovers = (page) =>
     return [document.documentElement.outerHTML, ...values, ...stored(localStorage), ...stored(sessionStorage)].join("\n");
   });
 
-test("my own provider: 测试连接 and 从供应商读取 reach it with its key; an Agent on its model answers through it; the key is nowhere in the page", async ({ people }) => {
+test("my own provider: added in the form, 同步模型 opens with its model list; two found by search are saved with 完成; 测试连接 reaches it; an Agent on one answers through it; the key is nowhere in the page", async ({ people }) => {
   const ann = await people.member("Ann");
+  const page = ann.page;
   const name = `我的演示供应商${uniq(4)}`;
   const key = fakeKey();
-  const added = await ann.request.post("/api/providers", { data: { name, protocol: "openai_chat", baseUrl: modelStub.baseUrl, apiKey: key } });
-  expect(added.status(), await added.text()).toBe(201);
+  // The request that adds a provider goes on with the stub's address for the https one typed (see the header).
+  await page.route("**/api/providers", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    const body = JSON.parse(route.request().postData() ?? "{}");
+    await route.continue({ postData: JSON.stringify({ ...body, baseUrl: modelStub.baseUrl }) });
+  });
 
-  const section = await openProviders(ann.page);
-  const row = providerRow(section, name);
-  await expect(row).toContainText(`密钥 …${key.slice(-4)}`);
-  await expect(row).toContainText("还没有模型");
+  const section = await openProviders(page);
+  await section.getByRole("button", { name: "添加供应商" }).click();
+  const add = page.getByRole("region", { name: "添加模型供应商" });
+  await expect(add).toContainText("保存后可以点“同步模型”，从供应商的模型列表里挑选；也可以在这里手动添加。");
+  await add.getByLabel("名称", { exact: true }).fill(name);
+  await add.getByLabel("接口地址", { exact: true }).fill(NEVER_CALLED);
+  await add.getByLabel("密钥", { exact: true }).fill(key);
+  await add.getByRole("button", { name: "保存", exact: true }).click();
 
-  // 测试连接: the provider is asked for its model list, with the key.
-  await row.getByRole("button", { name: "测试连接" }).click();
-  await expect(row.getByRole("status")).toHaveText("连接成功，供应商正常回应。");
+  // Added without models: 同步模型 opens by itself with the provider's own list, asked for with the key.
+  const sync = page.getByRole("dialog", { name: `${name} 的模型（${STUB_MODELS.length}）` });
+  await expect(sync).toBeVisible();
+  const chatRows = sync.getByRole("list", { name: "供应商的模型" }).getByRole("listitem");
+  await expect(chatRows).toHaveCount(STUB_MODELS.length - 1);
+  // What the catalogue knows shows its name; the stub's own models are marked 未收录; the embedding model is folded away.
+  await expect(chatRows.filter({ hasText: "claude-sonnet-5-5" })).toContainText("Claude Sonnet 5.5");
+  await expect(chatRows.filter({ hasText: "stub-chat" })).toContainText("未收录");
+  await expect(sync.getByRole("button", { name: /可能不是对话模型/ })).toHaveAttribute("aria-expanded", "false");
   const listing = () => modelStub.state().then((s) => s.requests.filter((r) => r.method === "GET").map((r) => [r.path, r.authorization]));
   expect(await listing()).toEqual([["/v1/models", `Bearer ${key}`]]);
 
-  // 从供应商读取 (in its form) lists the provider's models; the service keeps them.
-  await row.getByRole("button", { name: "编辑" }).click();
-  const form = editForm(ann.page);
-  await form.getByRole("button", { name: "从供应商读取" }).click();
-  await expect(form.getByRole("status").filter({ hasText: "找到" })).toHaveText(`找到 ${STUB_MODELS.length} 个模型，已把其中 ${STUB_MODELS.length} 个新的加入列表。`);
-  await expect(form.getByRole("list", { name: "模型列表" }).getByRole("listitem")).toHaveCount(STUB_MODELS.length);
-  expect(await listing()).toHaveLength(2);
+  await sync.getByRole("searchbox", { name: "搜索模型" }).fill("STUB");
+  await expect(chatRows).toHaveCount(2);
+  await sync.getByRole("button", { name: "添加：stub-chat" }).click();
+  await sync.getByRole("button", { name: "添加：stub-vision" }).click();
+  await expect(sync.getByRole("button", { name: "移除：stub-vision" })).toBeVisible();
+  await expect(chatRows.filter({ hasText: "stub-chat" })).toContainText("已添加");
+  await capture(page, "settings-providers-sync");
+  await sync.getByRole("button", { name: "完成" }).click();
+  await expect(sync).toBeHidden();
+  await expect(toast(page, "已保存 2 个模型")).toBeVisible();
+  const form = editForm(page);
+  await expect(form.getByRole("list", { name: "模型列表" }).getByRole("listitem")).toHaveCount(2);
   await form.getByRole("button", { name: "返回" }).click();
-  await expect(row).toContainText(`${STUB_MODELS.length} 个模型`);
+  const row = providerRow(section, name);
+  await expect(row).toContainText("2 个模型");
+  await expect(row).toContainText(`密钥 …${key.slice(-4)}`);
 
-  // An Agent on the provider's first model answers through it, with that key.
+  // 测试连接: the provider is asked for its model list again, with the key.
+  await row.getByRole("button", { name: "测试连接" }).click();
+  await expect(row.getByRole("status")).toHaveText("连接成功，供应商正常回应。");
+  expect(await listing()).toEqual([
+    ["/v1/models", `Bearer ${key}`],
+    ["/v1/models", `Bearer ${key}`],
+  ]);
+
+  // An Agent on one of the two answers through the provider, with that key.
   const agent = `自带模型${uniq(4)}`;
   await modelStub.reply("这是供应商模型的回答。");
-  const chat = await createAgentUi(ann.page, { name: agent, model: STUB_MODELS[0], persona: "你是一个用自己供应商的助手。" });
+  const chat = await createAgentUi(page, { name: agent, model: STUB_MODELS[0], persona: "你是一个用自己供应商的助手。" });
   await sendText(ann.page, agent, `你好 ${uniq(4)}`);
   await expectStored(chat, "这是供应商模型的回答。");
   const [call] = await modelStub.calls();

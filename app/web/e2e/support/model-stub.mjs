@@ -12,8 +12,11 @@ import { controlCall } from "./control.mjs";
 export const DEFAULT_REPLY = "好的，收到。";
 /** The usage every answer reports unless its step names another: small, so a person's free allowance lasts a while. */
 export const DEFAULT_USAGE = { input: 20, output: 10 };
-/** The model names `GET …/models` lists. */
-export const STUB_MODELS = ["stub-chat", "stub-vision"];
+/**
+ * The model names `GET …/models` lists: two of the stub's own (unknown to the service's model catalogue), two the
+ * catalogue knows, and one that is no chat model.
+ */
+export const STUB_MODELS = ["stub-chat", "stub-vision", "gpt-4o-mini", "claude-sonnet-5-5", "text-embedding-3-small"];
 
 /** Chunks of at most `size` code points (a surrogate pair is never split). */
 function chunks(text, size) {
