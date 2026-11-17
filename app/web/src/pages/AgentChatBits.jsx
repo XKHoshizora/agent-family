@@ -8,7 +8,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
 import { nameOf, publishBlock } from "../state/selectors.js";
-import { StreamingAgentText } from "../ui/AgentText.jsx";
+import { GrowingText, StreamingAgentText } from "../ui/AgentText.jsx";
 import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { refusalText, settled } from "./AgentForm.jsx";
@@ -107,17 +107,18 @@ export function useThinkingSeconds(since, counting) {
 export const thoughtFor = (ms) => `思考了 ${Math.max(1, Math.floor(ms / 1000))} 秒`;
 
 /**
- * When this page saw each reply's moments (by run id), for its thinking seconds: `start` (first seen), `thinkFrom` (its
- * first piece of thinking) and `textAt` (its first piece of text) — each a time, null before it, or false when it
- * happened while its bubble was not shown (a time this page did not see). The service's run carries no times; these
- * survive leaving the conversation and coming back (the bubble is made again), for the newest RUN_CLOCKS_KEPT replies.
+ * When this page saw each reply's moments (by run id), for its thinking seconds — one clock a reply, from its start to
+ * its text: `start` (first seen, queued or thinking) and `textAt` (its first piece of text: a time, null before it, or
+ * false when it came while its bubble was not shown — a time this page did not see). The service's run carries no
+ * times; these survive leaving the conversation and coming back (the bubble is made again), for the newest
+ * RUN_CLOCKS_KEPT replies.
  */
 const runClocks = new Map();
 const RUN_CLOCKS_KEPT = 50;
 function runClock(runId) {
   let clock = runClocks.get(runId);
   if (clock === undefined) {
-    clock = { start: Date.now(), thinkFrom: null, textAt: null };
+    clock = { start: Date.now(), textAt: null };
     runClocks.set(runId, clock);
     if (runClocks.size > RUN_CLOCKS_KEPT) runClocks.delete(runClocks.keys().next().value);
   }
@@ -125,25 +126,40 @@ function runClock(runId) {
 }
 
 /**
- * Notes the first piece of a reply's thinking and of its text as this bubble sees them: at the moment it sees one, if
- * it saw the reply without it before (in this showing); otherwise it came while the bubble was not shown (false).
+ * Notes the first piece of a reply's text as this bubble sees it: at the moment it sees it, if it saw the reply without
+ * it before (in this showing); otherwise it came while the bubble was not shown (false).
  */
-function useRunClock(runId, reasoning, text) {
+function useRunClock(runId, text) {
   const clock = runClock(runId);
-  const watched = useRef({ runId, reasoning: false, text: false });
-  if (watched.current.runId !== runId) watched.current = { runId, reasoning: false, text: false };
+  const watched = useRef({ runId, text: false });
+  if (watched.current.runId !== runId) watched.current = { runId, text: false };
   const seen = watched.current;
-  if (!reasoning) seen.reasoning = true;
-  else if (clock.thinkFrom === null) clock.thinkFrom = seen.reasoning ? Date.now() : false;
   if (!text) seen.text = true;
   else if (clock.textAt === null) clock.textAt = seen.text ? Date.now() : false;
   return clock;
 }
 
 /**
+ * How much of each reply's text its bubble has shown (by run id), so that a bubble made again — its conversation left
+ * and opened again, or a detached window closed, while the reply is written — goes on from there instead of revealing
+ * it all again. Forgotten when the reply's bubble gives way to its stored message, its end or a newer reply (ChatView:
+ * `forgetRevealed`); the newest REVEALED_KEPT at most. A run id is never used twice, and its text only grows.
+ */
+const revealedSoFar = new Map();
+const REVEALED_KEPT = 20;
+function noteRevealed(runId, upTo) {
+  if (!revealedSoFar.has(runId) && revealedSoFar.size >= REVEALED_KEPT) revealedSoFar.delete(revealedSoFar.keys().next().value);
+  revealedSoFar.set(runId, upTo);
+}
+/** The reply's bubble gave way: what it had shown is not kept any more. */
+export function forgetRevealed(runId) {
+  revealedSoFar.delete(runId);
+}
+
+/**
  * The thinking of a reply being written, under `summary`. Open by itself while `streaming` (its thinking comes, none of
  * its text yet), folded by itself once its text starts — unless the reader opened or closed it meanwhile: from then on
- * it is as the reader left it.
+ * it is as the reader left it. Each piece is appended to its text (GrowingText): work for what came, not for all of it.
  */
 function LiveThinking({ text, cut, summary, streaming }) {
   const [mine, setMine] = useState(null);
@@ -157,7 +173,7 @@ function LiveThinking({ text, cut, summary, streaming }) {
     <details className="thinking" open={open} onToggle={toggled}>
       <summary>{summary}</summary>
       <div className="thinking-text">
-        {text}
+        <GrowingText text={text} />
         {cut && <StreamCutNote />}
       </div>
     </details>
@@ -195,10 +211,11 @@ function StopButton({ conversationId, agentId = null, runId, disabled = false, o
  * the text received is kept as it comes, model.js), its thinking, and 停止生成. Before the first piece of its text — and
  * for a reply that was already under way when this page connected, whose text is not sent again — it says 正在回复…, or
  * for an Agent that thinks (its reasoning level is not none) 正在思考… and the whole seconds since this page first saw
- * the reply. While such a reply's thinking streams, that line heads its thinking instead (counted from its first piece),
- * open; once its text starts the thinking folds (unless the reader opened or closed it meanwhile) under 思考了 N 秒 —
- * from its first piece of thinking (or from the reply's start, if that was not seen here) to its first piece of text; 思考过程
- * when this page did not see when its text started. The stored reply's thinking reads 思考过程 as ever. A press of
+ * the reply (queued or thinking). While such a reply's thinking streams, that line heads its thinking instead (the same
+ * count, from the same start), open; once its text starts the thinking folds (unless the reader opened or closed it
+ * meanwhile) under 思考了 N 秒 — from that start to its first piece of text; 思考过程 when this page did not see when its
+ * text started. The stored reply's thinking reads 思考过程 as ever. A bubble made again while the reply is written (its
+ * conversation left and opened again) shows at once what it had shown, and goes on from there. A press of
  * 停止生成 (until a stop that could not be sent) and a run that is not running any more show everything received at
  * once. A very long reply shows its first part only, and says so under it (what is left of that part is revealed
  * within a moment); the stored reply shows what the service kept, and replaces the bubble the moment it arrives,
@@ -216,14 +233,13 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
   const reasoning = stream?.reasoning ?? "";
   const thinks = (state.agents[conv.agentId]?.reasoning ?? "none") !== "none";
   const thinking = thinks && !text;
-  const clock = useRunClock(run.id, reasoning, text);
-  const since = clock.thinkFrom || clock.start;
-  const seconds = useThinkingSeconds(since, thinking);
+  const clock = useRunClock(run.id, text);
+  const seconds = useThinkingSeconds(clock.start, thinking);
   const [stopped, setStopped] = useState(null);
   const line = thinking ? thinkingLine(seconds) : null;
   let summary = "思考过程";
   if (thinking) summary = line;
-  else if (thinks && clock.textAt) summary = thoughtFor(clock.textAt - since);
+  else if (thinks && clock.textAt) summary = thoughtFor(clock.textAt - clock.start);
   // (While its thinking streams, the line heads it: the bubble keeps the dots only; so it does for the frame before
   // the first characters of the text of a reply that thought.)
   const waiting = <Writing text={thinking ? (reasoning ? "" : line) : undefined} />;
@@ -246,8 +262,10 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
                 ended={Boolean(stream.cut) || Boolean(finishing)}
                 endWithin={stream.cut ? REVEAL_END_MS : REVEAL_FINISH_MS}
                 all={stopped === run.id || (!finishing && run.status !== "running")}
+                resumeAt={revealedSoFar.get(run.id) ?? 0}
                 placeholder={thinks ? <Writing text="" /> : waiting}
                 onShown={(upTo, length) => {
+                  noteRevealed(run.id, upTo);
                   onReveal?.(run.id, upTo >= length);
                   if (finishing && upTo >= length) onFinished?.();
                 }}

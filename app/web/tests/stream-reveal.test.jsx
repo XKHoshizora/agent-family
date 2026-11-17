@@ -32,15 +32,16 @@ const FRAME = 16;
 /**
  * Frames at FRAME ms, called as the hook calls: only while something waits or has just come (or the end is told), with
  * the time since the previous call. `arrivals`: [[atMs, receivedLength]] in order; `endAt`: when nothing more will
- * come; `text`: the received text (boundaries). Returns every frame's `{ t, received, revealed, state }`.
+ * come; `text`: the received text (boundaries); `from`: that many characters were there and shown already (the state
+ * started again, as a bubble made again starts it). Returns every frame's `{ t, received, revealed, state }`.
  */
-function simulate({ arrivals, until, endAt = Infinity, text = null }) {
-  let state = revealStart();
-  let revealed = 0;
+function simulate({ arrivals, until, endAt = Infinity, text = null, from = 0 }) {
+  let state = from > 0 ? { ...revealStart(), received: from } : revealStart();
+  let revealed = from;
   let last = null;
   const out = [];
   for (let t = FRAME; t <= until; t += FRAME) {
-    let received = 0;
+    let received = from;
     for (const [at, length] of arrivals) if (at < t) received = length;
     const ending = t > endAt && !state.ended;
     if (ending) state = endReveal(state);
@@ -90,6 +91,17 @@ describe("the pace (nextReveal)", () => {
     // message, when it comes, finishes it within REVEAL_FINISH_MS.)
     const lastAt = arrivals[arrivals.length - 1][0];
     for (const [at, length] of arrivals) expect(shownAt(frames, length) - at, `${length} at ${at}`).toBeLessThanOrEqual(REVEAL_CUSHION_MIN_MS + (at < 1000 || at === lastAt ? 250 : 100));
+  });
+
+  it("started again with 3 000 characters shown (a bubble made again): the pace counts what comes from then on, not all of the text", () => {
+    const arrivals = steady({ every: 100, size: 3, count: 30, base: 3000 });
+    const frames = simulate({ arrivals, until: 3500, from: 3000 });
+    expect(frames[0].revealed).toBe(3000);
+    // A trickle paced as a trickle is (about the cushion behind) — not each piece the frame it comes, as it would be
+    // at the pace of 3 000 characters come in a second.
+    const lags = arrivals.map(([at, length]) => shownAt(frames, length) - at);
+    expect(Math.min(...lags.slice(10))).toBeGreaterThan(100);
+    for (const lag of lags) expect(lag).toBeLessThanOrEqual(REVEAL_CUSHION_MIN_MS + 250);
   });
 
   it("a stall grows the cushion (up to its most); it decays back over a few seconds", () => {
@@ -412,6 +424,27 @@ describe("a reply being revealed", () => {
     expect(shownText(container).length).toBeLessThan(500);
     rerender(bubble(text, { all: true }));
     expect(shownText(container)).toBe(text);
+    expect(frames.pending).toBe(0);
+  });
+
+  it("made again (`resumeAt`: how far it had got before): that much at once, no placeholder, the rest revealed from there", async () => {
+    const text = sample(500);
+    const { container, unmount } = render(bubble(text, { resumeAt: 200 }));
+    expect(shownText(container)).toBe(text.slice(0, 200));
+    frames.step();
+    expect(shownText(container).length).toBeGreaterThan(200);
+    expect(shownText(container).length).toBeLessThan(500);
+    for (let i = 0; i < 200 && frames.pending > 0; i += 1) frames.step();
+    expect(shownText(container)).toBe(text);
+    unmount();
+    // All of it shown before: all of it at once, and no frame.
+    const again = render(bubble(text, { resumeAt: 500 }));
+    expect(shownText(again.container)).toBe(text);
+    expect(frames.pending).toBe(0);
+    again.unmount();
+    // (Never past what was received.)
+    const shorter = render(bubble(text.slice(0, 100), { resumeAt: 200 }));
+    expect(shownText(shorter.container)).toBe(text.slice(0, 100));
     expect(frames.pending).toBe(0);
   });
 

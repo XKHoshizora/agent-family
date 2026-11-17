@@ -214,24 +214,34 @@ function PlainTail({ source, from, to, epoch }) {
   return <span ref={host} />;
 }
 
+/**
+ * A text that grows by its pieces (the thinking of a reply being written), shown as PlainTail shows the end of a
+ * reply: what was added is appended to its one text node; any other change sets it once.
+ */
+export function GrowingText({ text }) {
+  const epoch = useEpoch(text);
+  return <PlainTail source={text} from={0} to={text.length} epoch={epoch} />;
+}
+
 /** A taken tree, shown again only when it changes (not at every frame of a reply being revealed). */
 const StreamRich = memo(Rich);
 
 /**
  * The text of a reply being written. Without `paced` every piece is shown at once; with it, a prefix of the text
  * received that grows at every frame (ui/reveal.js: `ended` — nothing more will come, the rest within `endWithin` ms;
- * `all` — everything received now), with `placeholder` shown until its first characters; `onShown(upTo, length)` is told
- * how far it has got whenever that changes. The tree is asked for what is shown,
+ * `all` — everything received now; `resumeAt` — how far it had got before it was made again, shown at once), with
+ * `placeholder` shown until its first characters; `onShown(upTo, length)` is told how far it has got whenever that
+ * changes. The tree is asked for what is shown,
  * at most every STREAM_EVERY_MS, one request at a time, and is shown at an animation frame, like every tree. A tree is
  * taken only if what is shown still is the text it was made for — unpaced, unchanged; paced, the same text grown by
  * the frames since (any other text is a stale tree, dropped). Until the next tree, what is shown after the taken one is
  * shown after it, plain. After STREAM_LATE_MAX late answers in a row the rest of the reply is plain (with the note).
  * The stored message that replaces this is rendered on its own.
  */
-export function StreamingAgentText({ text, paced = false, ended = false, endWithin = undefined, all = false, placeholder = null, onShown = null }) {
+export function StreamingAgentText({ text, paced = false, ended = false, endWithin = undefined, all = false, resumeAt = 0, placeholder = null, onShown = null }) {
   const received = useMemo(() => withoutBidiControls(text), [text]);
   const epoch = useEpoch(received);
-  const upTo = useReveal(received, epoch, { paced, ended, endWithin, all });
+  const upTo = useReveal(received, epoch, { paced, ended, endWithin, all, resumeAt });
   const shown = upTo === received.length ? received : received.slice(0, upTo);
   const client = markdownClient();
   const view = useMarkdownView();

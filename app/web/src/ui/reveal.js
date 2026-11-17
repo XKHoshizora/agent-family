@@ -62,16 +62,18 @@ const MARKS_MAX = 64;
 /**
  * The pacing state: `clock` (ms: the time passed, as the calls said it), `play` (ms: the time played, each frame at
  * most REVEAL_MAX_FRAME_MS), `credit` (the fraction of a character carried to the next frame), `received` (the length
- * last seen), `firstAt` / `lastAt` (clock times of the first and the latest piece), `gaps` (the latest gaps between
- * pieces), `cushion` (ms), `caughtUp` (all of it was shown at the last call), `marks` (`{end, by}`: what had arrived by
- * then must be shown by play time `by`), `ended` (nothing more will come) and `endBy` (play time by which all of it
- * must be shown, once ended).
+ * last seen), `firstAt` / `lastAt` (clock times of the first and the latest piece), `base` (the length before the first
+ * piece: what had come before the pace was measured — 0, unless the state was started again with some of the text
+ * shown), `gaps` (the latest gaps between pieces), `cushion` (ms), `caughtUp` (all of it was shown at the last call),
+ * `marks` (`{end, by}`: what had arrived by then must be shown by play time `by`), `ended` (nothing more will come) and
+ * `endBy` (play time by which all of it must be shown, once ended).
  */
 export const revealStart = () => ({
   clock: 0,
   play: 0,
   credit: 0,
   received: 0,
+  base: 0,
   firstAt: null,
   lastAt: null,
   gaps: [],
@@ -104,17 +106,20 @@ const median = (values) => {
 export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart(), text = null) {
   const dt = Math.max(Number(dtMs) || 0, 0);
   const now = state.clock + dt;
-  let { credit, received, firstAt, lastAt, gaps, marks, endBy } = state;
+  let { credit, received, firstAt, lastAt, gaps, marks, endBy, base = 0 } = state;
   // (A raised cushion decays with the time passed — before a stall seen now raises it again.)
   let cushion = REVEAL_CUSHION_MIN_MS + (state.cushion - REVEAL_CUSHION_MIN_MS) * Math.exp(-dt / REVEAL_CUSHION_DECAY_MS);
   let changed = false;
   if (receivedLen !== received) {
     if (receivedLen < received) {
       // (Not the same text any more: its pace and deadlines go with it.)
-      ({ credit, firstAt, lastAt, gaps, cushion, marks } = revealStart());
+      ({ credit, firstAt, lastAt, gaps, cushion, marks, base } = revealStart());
     } else {
-      if (firstAt === null) firstAt = now;
-      else {
+      // (The pace counts what came from its first piece on, not what was there before it.)
+      if (firstAt === null) {
+        firstAt = now;
+        base = received;
+      } else {
         const gap = now - lastAt;
         if (gaps.length >= 3 && gap > REVEAL_STALL_MIN_MS && gap > REVEAL_STALL_FACTOR * median(gaps)) {
           cushion = Math.min(REVEAL_CUSHION_MAX_MS, Math.max(cushion, gap * STALL_SHARE));
@@ -136,12 +141,12 @@ export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart()
   const backlog = receivedLen - from;
   if (backlog <= 0 && !changed && from === revealedLen) return { revealed: revealedLen, state };
   if (backlog <= 0) {
-    return { revealed: from, state: { ...state, clock: now, credit: 0, received, firstAt, lastAt, gaps, cushion, caughtUp: true, marks: [], endBy } };
+    return { revealed: from, state: { ...state, clock: now, credit: 0, received, base, firstAt, lastAt, gaps, cushion, caughtUp: true, marks: [], endBy } };
   }
   // A frame plays at most REVEAL_MAX_FRAME_MS; the first after everything was shown, one frame.
   const step = Math.min(dt, state.caughtUp ? REVEAL_FRAME_MS : REVEAL_MAX_FRAME_MS);
   // Characters a millisecond: the sustained pace, the backlog pulled toward its cushion, its excess drained.
-  const pace = received / Math.max(now - firstAt, REVEAL_RATE_MIN_MS);
+  const pace = (received - base) / Math.max(now - firstAt, REVEAL_RATE_MIN_MS);
   let rate = Math.max(pace / 2, pace + (backlog - pace * cushion) / REVEAL_PULL_MS);
   if (backlog > REVEAL_BACKLOG_MAX) rate += (backlog - REVEAL_BACKLOG_MAX) / REVEAL_EXCESS_MS;
   const paced = credit + rate * step;
@@ -164,7 +169,7 @@ export function nextReveal(revealedLen, receivedLen, dtMs, state = revealStart()
   }
   credit = to >= receivedLen ? 0 : Math.min(Math.max(want - (to - from), -REVEAL_TOKEN_MAX), 1);
   if (marks.some((mark) => mark.end <= to)) marks = marks.filter((mark) => mark.end > to);
-  const next = { clock: now, play: state.play + step, credit, received, firstAt, lastAt, gaps, cushion, caughtUp: to >= receivedLen, marks, ended: state.ended, endBy };
+  const next = { clock: now, play: state.play + step, credit, received, base, firstAt, lastAt, gaps, cushion, caughtUp: to >= receivedLen, marks, ended: state.ended, endBy };
   return { revealed: to, state: next };
 }
 
@@ -337,17 +342,29 @@ function useAtOnce(watching) {
 }
 
 /**
+ * The pacing state of a text of which `upTo` characters were shown before it was made again: as after a pause with
+ * everything shown (what has come since is paced from there, its pace measured afresh).
+ */
+const resumedAt = (upTo) => (upTo > 0 ? { ...revealStart(), received: upTo } : revealStart());
+
+/**
  * How much of `text` is shown, as its length. `text` grows by appending while `epoch` stays the same (another epoch:
  * another text, shown from its start). `paced`: revealed at the frames (otherwise all of it at once); `ended`: nothing
- * more will come (the rest within `endWithin`, REVEAL_END_MS unless said); `all`: everything received is shown now. One frame at a time is
- * asked, only while something waits; none is left once it is all shown, at unmount, or when it is shown at once.
+ * more will come (the rest within `endWithin`, REVEAL_END_MS unless said); `all`: everything received is shown now;
+ * `resumeAt` (read when it is made): how much of this text was shown before — shown at once, the rest revealed from
+ * there. One frame at a time is asked, only while something waits; none is left once it is all shown, at unmount, or
+ * when it is shown at once.
  */
-export function useReveal(text, epoch, { paced = true, ended = false, endWithin = REVEAL_END_MS, all = false } = {}) {
+export function useReveal(text, epoch, { paced = true, ended = false, endWithin = REVEAL_END_MS, all = false, resumeAt = 0 } = {}) {
   const atOnce = useAtOnce(paced);
   const instant = !paced || all || atOnce;
   const [, shown] = useReducer((n) => n + 1, 0);
   const ref = useRef(null);
-  ref.current ??= { epoch, text, upTo: 0, pace: revealStart(), frame: null, last: null, shown, alive: true };
+  if (ref.current === null) {
+    let upTo = Math.max(0, Math.min(Math.floor(Number(resumeAt) || 0), text.length));
+    if (upTo > 0 && upTo < text.length && isHigh(text.charCodeAt(upTo - 1))) upTo -= 1;
+    ref.current = { epoch, text, upTo, pace: resumedAt(upTo), frame: null, last: null, shown, alive: true };
+  }
   const r = ref.current;
   const upTo = instant ? text.length : r.epoch === epoch ? Math.min(r.upTo, text.length) : 0;
 

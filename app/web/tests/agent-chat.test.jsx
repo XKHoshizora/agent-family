@@ -29,7 +29,7 @@ import {
 } from "./fixtures.js";
 import { click, dialog, elapse, flush, installBrowser, mainText, openApp, push, toastText } from "./harness.jsx";
 import { useWorkers } from "./markdown-worker.js";
-import { thinkingLine, useThinkingSeconds } from "../src/pages/AgentChatBits.jsx";
+import { forgetRevealed, thinkingLine, useThinkingSeconds } from "../src/pages/AgentChatBits.jsx";
 import { REVEAL_FINISH_MS, REVEAL_MAX_LAG_MS, setRevealFrames } from "../src/ui/reveal.js";
 
 beforeEach(() => installBrowser());
@@ -37,6 +37,10 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  // (How much of a reply its bubble had shown is kept by run id for the page's life; a run id is never used twice
+  // there, but these tests use R1 and R2 again and again.)
+  forgetRevealed(R1);
+  forgetRevealed(R2);
 });
 
 const R1 = "00000000-0000-4000-8000-0000000000e5";
@@ -381,6 +385,86 @@ describe("the streaming bubble", () => {
     expect(storedLi(3).querySelector(".bubble").textContent).toBe(`${BURST}。`);
   });
 
+  it.each([
+    ["is the stream's text", BURST, BURST],
+    ["begins with the stream's text (a piece was still on its way)", BURST, `${BURST}。`],
+    ["is the stream's text but for the white space it began with (the service trims what it stores)", `\n\n${BURST}`, BURST],
+  ])("a stored reply that %s: the bubble finishes first, then the stored reply takes its place", async (_how, streamed, stored) => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { text: streamed });
+    await elapse(50);
+    await messagePush(transport, wire(A1, 3, AG1, stored));
+    expect(bubbleLi()).not.toBeNull();
+    expect(storedLi(3)).toBeNull();
+    await elapse(REVEAL_FINISH_MS + 32);
+    expect(bubbleLi()).toBeNull();
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(stored);
+  });
+
+  it.each([
+    ["differs from the stream in the middle", wire(A1, 3, AG1, `${BURST.slice(0, 250)}另${BURST.slice(251)}`)],
+    ["is shorter than the stream", wire(A1, 3, AG1, BURST.slice(0, 400))],
+    ["was cut by the service (已截断)", wire(A1, 3, AG1, `${BURST}。`, { truncated: true })],
+    ["had a persona proposal taken out of it", wire(A1, 3, AG1, `${BURST}。`, { proposal: { id: PID, status: "open", persona: "新的人格" } })],
+  ])("a stored reply that %s replaces the bubble at once, with what was left unrevealed", async (_how, message) => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { text: BURST });
+    await elapse(50);
+    expect(bubbleText().length).toBeLessThan(BURST.length);
+    await messagePush(transport, message);
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(message.text);
+    await elapse(REVEAL_FINISH_MS + 100);
+    expect(bubbleLi()).toBeNull();
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+  });
+
+  it("a new reply starting while the bubble finishes: the finished one's stored reply at once, and the new reply's bubble after it", async () => {
+    const { transport } = await openAgentChat();
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { text: BURST });
+    await elapse(50);
+    await messagePush(transport, wire(A1, 3, AG1, `${BURST}。`));
+    expect(bubbleLi()).not.toBeNull();
+    expect(storedLi(3)).toBeNull();
+    await runPush(transport, runOf(R2, "queued"));
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(`${BURST}。`);
+    expect(timeline().querySelectorAll("li.streaming")).toHaveLength(1);
+    expect(bubbleText()).toContain("正在回复…");
+    expect(bubbleText()).not.toContain("一二三");
+    expect(timeline().lastElementChild.previousElementSibling).toBe(bubbleLi());
+    await elapse(REVEAL_FINISH_MS + 100);
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+    expect(bubbleText()).toContain("正在回复…");
+  });
+
+  it("leaving the conversation and coming back while the reply is written: what was revealed is not revealed again; the rest goes on from there", async () => {
+    const { transport } = await openAgentChat({ extra: [direct(D1, ANN)] });
+    await runPush(transport, runOf(R1, "running"));
+    await deltaPush(transport, { text: BURST });
+    await elapse(50);
+    const part = bubbleText();
+    expect(part.length).toBeGreaterThan(0);
+    expect(part.length).toBeLessThan(BURST.length);
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
+    // At once what was shown when it was left (not the placeholder, not from its start)...
+    expect(bubbleText().length).toBeGreaterThanOrEqual(part.length);
+    expect(BURST.startsWith(bubbleText())).toBe(true);
+    // ... and the rest revealed from there.
+    await revealed();
+    expect(bubbleText()).toBe(BURST);
+    // All of it shown: coming back shows all of it at once.
+    await deltaPush(transport, { text: "完" });
+    await revealed();
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
+    expect(bubbleText()).toBe(`${BURST}完`);
+  });
+
   it("the stored message replaces the bubble at once when nothing is left to reveal, under reduced motion, or in a hidden tab", async () => {
     // Nothing left: at once.
     const first = await openAgentChat();
@@ -523,28 +607,28 @@ describe("thinking (an Agent whose reasoning level is not none)", () => {
     expect(bubbleText()).toContain("正在思考… 1 秒");
     await elapse(1500);
     expect(bubbleText()).toContain("正在思考… 2 秒");
-    // Its thinking streams: the line heads it, counted from its first piece; it is open while it comes; the bubble
+    // Its thinking streams: the line heads it — the same count, never back to 0; it is open while it comes; the bubble
     // keeps only the dots.
     await deltaPush(transport, { reasoning: "先想一想" });
-    expect(thinkingSummary()).toBe("正在思考…");
+    expect(thinkingSummary()).toBe("正在思考… 2 秒");
     expect(bubbleLi().querySelector("details").open).toBe(true);
     expect(bubbleLi().querySelector("details .thinking-text").textContent).toBe("先想一想");
     expect(bubbleText()).toBe("");
     expect(bubbleLi().querySelector(".bubble .dots")).not.toBeNull();
     await elapse(1000);
-    expect(thinkingSummary()).toBe("正在思考… 1 秒");
+    expect(thinkingSummary()).toBe("正在思考… 3 秒");
     await deltaPush(transport, { reasoning: "，再想一想" });
     await elapse(2400);
-    expect(thinkingSummary()).toBe("正在思考… 3 秒");
-    // The first piece of the reply: the thinking folds by itself under how long it took; the text is revealed, the
-    // count stops.
+    expect(thinkingSummary()).toBe("正在思考… 5 秒");
+    // The first piece of the reply: the thinking folds by itself under how long it took, from that same start; the text
+    // is revealed, the count stops.
     await deltaPush(transport, { text: "答案" });
-    expect(thinkingSummary()).toBe("思考了 3 秒");
+    expect(thinkingSummary()).toBe("思考了 5 秒");
     expect(bubbleLi().querySelector("details").open).toBe(false);
     await revealed();
     expect(bubbleText()).toBe("答案");
     await elapse(5000);
-    expect(thinkingSummary()).toBe("思考了 3 秒");
+    expect(thinkingSummary()).toBe("思考了 5 秒");
     // The stored reply keeps its usual header: no duration is stored.
     await messagePush(transport, wire(A1, 3, AG1, "答案", { reasoning: "先想一想，再想一想" }));
     expect(storedLi(3).querySelector("details > summary").textContent).toBe("思考过程");
@@ -634,6 +718,42 @@ describe("thinking (an Agent whose reasoning level is not none)", () => {
     expect(vi.getTimerCount()).toBe(1);
     act(() => unmount());
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("the thinking shown open while it streams grows by appending what came to one text node; its whole text is never set again", async () => {
+    const { transport } = await openAgentChat({ agent: { reasoning: "high" } });
+    await runPush(transport, runOf(R1, "running"));
+    let full = "想".repeat(5000);
+    await deltaPush(transport, { reasoning: full });
+    const host = bubbleLi().querySelector("details .thinking-text");
+    const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+    const node = walker.nextNode();
+    expect(node.data).toBe(full);
+    const observer = new MutationObserver(() => {});
+    observer.observe(host, { subtree: true, childList: true, characterData: true, attributes: true });
+    // Every way a text node's whole text is set, and what is appended (counted inside the thinking only).
+    const replaced = [
+      vi.spyOn(CharacterData.prototype, "data", "set"),
+      vi.spyOn(Node.prototype, "nodeValue", "set"),
+      vi.spyOn(Node.prototype, "textContent", "set"),
+    ];
+    const appended = vi.spyOn(CharacterData.prototype, "appendData");
+    const inThinking = (spy) => spy.mock.calls.filter((_call, i) => host.contains(spy.mock.contexts[i]));
+    for (let i = 0; i < 10; i += 1) {
+      const piece = `第${i}步，`.repeat(40);
+      appended.mockClear();
+      for (const spy of replaced) spy.mockClear();
+      await deltaPush(transport, { reasoning: piece });
+      full += piece;
+      expect(inThinking(appended).map(([s]) => s).join("")).toBe(piece);
+      for (const spy of replaced) expect(inThinking(spy)).toHaveLength(0);
+      const changes = observer.takeRecords();
+      expect(changes.length).toBeLessThanOrEqual(2);
+      for (const change of changes) expect(change.target).toBe(node);
+    }
+    observer.disconnect();
+    expect(host.textContent).toBe(full);
+    expect(document.createTreeWalker(host, NodeFilter.SHOW_TEXT).nextNode()).toBe(node);
   });
 });
 
@@ -1235,6 +1355,45 @@ describe("scrolling", () => {
     await elapse(REVEAL_FINISH_MS + 100);
     expect(bubbleLi()).toBeNull();
     expect(again.list.scrollTop).toBe(1000);
+  });
+
+  it("a burst of 12 000 characters whose stored reply the service cut at 8 000 (已截断): replaced at once — nothing past the stored reply is shown after it came, and a list at its end stays there", async () => {
+    // (No Markdown worker: the texts stay plain, so what is in the list is exactly what was revealed or stored.)
+    useWorkers(() => {
+      throw new Error("no worker");
+    });
+    const { transport, list } = await streaming();
+    const kept = "一二三四五六七八九十".repeat(800); // 8 000 characters
+    await deltaPush(transport, { text: `${kept}${"尾".repeat(4000)}` });
+    list.grow(200);
+    await elapse(50);
+    expect(bubbleText().length).toBeGreaterThan(0);
+    expect(bubbleText().length).toBeLessThan(8000);
+    expect(list.scrollTop).toBe(2600);
+    // Everything put in the list from now on.
+    const added = [];
+    const observer = new MutationObserver((records) => {
+      for (const record of records) {
+        if (record.type === "characterData") added.push(record.target.data);
+        for (const node of record.addedNodes ?? []) added.push(node.textContent);
+      }
+    });
+    observer.observe(timeline(), { subtree: true, childList: true, characterData: true });
+    const appended = vi.spyOn(CharacterData.prototype, "appendData");
+    await messagePush(transport, wire(A1, 3, AG1, kept, { truncated: true }));
+    expect(bubbleLi()).toBeNull();
+    expect(storedLi(3).querySelector(".bubble").textContent).toBe(kept);
+    expect(within(storedLi(3)).getByText("已截断")).toBeTruthy();
+    expect(list.scrollTop).toBe(2600);
+    await elapse(REVEAL_FINISH_MS + 200);
+    observer.disconnect();
+    expect(added.length).toBeGreaterThan(0);
+    for (const text of added) expect(text).not.toContain("尾");
+    for (const [piece] of appended.mock.calls) expect(piece).not.toContain("尾");
+    expect(timeline().textContent).not.toContain("尾");
+    expect(timeline().querySelectorAll('li[data-msg="m3"]')).toHaveLength(1);
+    expect(list.scrollTop).toBe(2600);
+    useWorkers();
   });
 
   it("the list pulled up because its content shrank stays stuck to its end", async () => {

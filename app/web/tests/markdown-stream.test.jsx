@@ -2,7 +2,8 @@
 // A reply being written (StreamingAgentText): every piece is shown at once as plain text; the worker is asked for a
 // tree at most every 300 ms, never twice at the same time; a tree is taken only if the text has not changed while it
 // was being made (a stale one is dropped), and what came after the taken tree is shown after it, plain, until the next;
-// two late answers in a row and the rest of the reply is plain, with the note.
+// two late answers in a row and the rest of the reply is plain, with the note. The same rules paced, as the bubble
+// shows a reply (revealed at frames, asked for what is shown).
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
@@ -191,6 +192,115 @@ describe("a reply being written", () => {
     await advance(DEADLINE_MS); // late again: one in a row
     expect(container.querySelector(".md-note")).toBeNull();
     expect(container.textContent).toBe("一 二 三");
+  });
+
+  describe("paced, as a reply being written is shown (its frames run on the fake clock: tests/setup.js)", () => {
+    beforeEach(() => {
+      // (The frames tell the time by Date.now(): it moves with the clock here.)
+      vi.useRealTimers();
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    });
+    const paced = (text) => (
+      <div className="bubble">
+        <StreamingAgentText text={text} paced />
+      </div>
+    );
+    // 6 006 characters in one piece: revealed over some 600 ms of frames.
+    const BURST = `# 标题\n\n${"一二三四五六七八九十".repeat(600)}`;
+
+    it(`asks for what is shown, at most every ${STREAM_EVERY_MS} ms and one at a time, while more is revealed at every frame`, async () => {
+      const { container } = render(paced(BURST));
+      await settle();
+      expect(sentTexts()).toEqual([]); // nothing shown yet: nothing to ask for
+      await advance(16); // the first frame
+      expect(sentTexts()).toHaveLength(1);
+      const [first] = sentTexts();
+      expect(first.length).toBeGreaterThan(0);
+      expect(first.length).toBeLessThan(BURST.length);
+      expect(BURST.startsWith(first)).toBe(true);
+      // The frames go on revealing; nothing more is asked while the first is in flight.
+      await advance(DEADLINE_MS - 50);
+      expect(sentTexts()).toHaveLength(1);
+      expect(container.textContent.length).toBeGreaterThan(first.length);
+      // Answered in time: taken (what is shown is the same text, grown), the rest plain after it.
+      workers[0].answer(0);
+      await settle();
+      expect(container.querySelector(".md h1").textContent).toBe("标题");
+      // The next is asked STREAM_EVERY_MS after the first was sent, not sooner, for what is shown then.
+      await advance(STREAM_EVERY_MS - (DEADLINE_MS - 50) - 1);
+      expect(sentTexts()).toHaveLength(1);
+      await advance(1);
+      expect(sentTexts()).toHaveLength(2);
+      expect(sentTexts()[1].length).toBeGreaterThan(first.length);
+      expect(BURST.startsWith(sentTexts()[1])).toBe(true);
+      expect(sentTexts()[1].length).toBeLessThan(BURST.length); // (still being revealed: not what was received)
+    });
+
+    it(`never two requests at a time, even when one waits behind another text for longer than ${STREAM_EVERY_MS} ms`, async () => {
+      const client = markdownClient();
+      const request = client.request;
+      let open = 0;
+      let most = 0;
+      vi.spyOn(client, "request").mockImplementation((text, options) => {
+        const answer = request.call(client, text, options);
+        if (options?.remember === false) {
+          open += 1;
+          most = Math.max(most, open);
+          answer.then(() => {
+            open -= 1;
+          });
+        }
+        return answer;
+      });
+      const { rerender } = render(<AgentText text="存着的回复" />);
+      await settle();
+      rerender(
+        <>
+          <AgentText text="存着的回复" />
+          {paced(BURST)}
+        </>,
+      );
+      await advance(16); // the first frame: what is shown is asked for, behind the stored text
+      expect(sentTexts()).toEqual(["存着的回复"]);
+      await advance(DEADLINE_MS - 30);
+      workers[0].answer(0);
+      await settle();
+      expect(sentTexts()).toHaveLength(2); // sent now, some 220 ms after it was asked for
+      await advance(STREAM_EVERY_MS - (DEADLINE_MS - 30)); // 300 ms since it was asked for: still in flight
+      expect(sentTexts()).toHaveLength(2);
+      expect(most).toBe(1);
+      workers[0].answer(1);
+      await settle();
+      expect(sentTexts()).toHaveLength(3); // only now the next is asked for
+      expect(most).toBe(1);
+      expect(BURST.startsWith(sentTexts()[2])).toBe(true);
+      expect(sentTexts()[2].length).toBeGreaterThan(sentTexts()[1].length);
+    });
+
+    it("two late answers in a row: what is left is revealed plain with the note, and nothing more is asked", async () => {
+      const { container, rerender } = render(paced(BURST));
+      await advance(16);
+      expect(sentTexts()).toHaveLength(1);
+      await advance(DEADLINE_MS); // late
+      expect(workers[0].terminated).toBe(true);
+      expect(container.querySelector(".md-note")).toBeNull();
+      await advance(STREAM_EVERY_MS - DEADLINE_MS); // asked again, of a new worker, for what is shown now
+      expect(sentTexts()).toHaveLength(2);
+      expect(sentTexts()[1].length).toBeGreaterThan(sentTexts()[0].length);
+      await advance(DEADLINE_MS); // late again
+      expect(workers[1].terminated).toBe(true);
+      expect(container.querySelector(".md-note").textContent).toBe(SLOW_TEXT_NOTE);
+      expect(container.textContent.length).toBeLessThan(BURST.length + SLOW_TEXT_NOTE.length);
+      // The frames reveal the rest, plain, with the note after it; more text too.
+      await advance(2000);
+      expect(container.textContent).toBe(`${BURST}${SLOW_TEXT_NOTE}`);
+      rerender(paced(`${BURST} **再来**`));
+      await advance(2000);
+      expect(container.textContent).toBe(`${BURST} **再来**${SLOW_TEXT_NOTE}`);
+      expect(sentTexts()).toHaveLength(2);
+      // The pieces of a reply are never remembered: the stored message is judged on its own.
+      for (const text of sentTexts()) expect(isSlowText(text)).toBe(false);
+    });
   });
 
   it("a tree is shown at an animation frame; what came between its arrival and the frame is shown after it, plain", async () => {

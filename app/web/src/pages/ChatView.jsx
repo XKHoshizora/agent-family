@@ -4,6 +4,7 @@ import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
+import { withoutBidiControls } from "../ui/markdownRules.js";
 import { REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { MessageItem } from "./Messages.jsx";
 import {
@@ -14,6 +15,7 @@ import {
   IMAGE_HINT,
   RunStatusLine,
   StreamBubble,
+  forgetRevealed,
   isReplying,
   seesImages,
 } from "./AgentChatBits.jsx";
@@ -56,6 +58,22 @@ function newestFrom(messages, from) {
   return null;
 }
 const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBoundingClientRect().top;
+
+/**
+ * Whether a bubble may finish revealing `stream` before `reply` (its stored message) takes its place: only when the
+ * stored reply has every character the bubble would show, in the same order — so the finish never shows anything the
+ * stored reply then takes away. Not when the service cut it (已截断: it streams on past what it keeps) or stopped it,
+ * took a persona proposal out of it, or the stream was cut here; and its text must be the stream's, or begin with it (a
+ * piece still on its way), both as the bubble shows text (bidi controls taken out) — white space the stream began with
+ * aside, as the service trims what it stores. Marks and lengths first, then one comparison of the two texts: this is
+ * asked once, when the stored reply comes, never at a frame.
+ */
+function finishable(reply, stream) {
+  if (reply.truncated || reply.stopped || reply.proposal || stream.cut) return false;
+  const stored = withoutBidiControls(reply.text);
+  const streamed = withoutBidiControls(stream.text).trimStart();
+  return stored.length >= streamed.length && stored.startsWith(streamed);
+}
 
 export function ChatView({ conv }) {
   const { state, dispatch, actions } = useStore();
@@ -106,10 +124,12 @@ export function ChatView({ conv }) {
   const paused = agentChat && !block && Boolean(agent ? agent.paused : conv.agent?.paused);
   // A reply whose stored message came while its bubble still had some of what it had received to reveal: the bubble
   // stays and finishes (within REVEAL_FINISH_MS: StreamBubble `finishing`), and the stored message waits meanwhile —
-  // never both. Decided while rendering, so the bubble is never taken down for a moment. Not for a stopped reply (all of
-  // it was shown at the press), nor with nothing left to reveal (reduced motion, a hidden tab: everything is shown). It
-  // ends when the bubble is done (in the same commit the stored message takes its place), when anything comes after
-  // the reply, when the conversation changes or a new reply starts, and at the latest FINISH_GIVE_UP_MS later.
+  // never both. Decided while rendering, so the bubble is never taken down for a moment. Only when the stored reply has
+  // all the bubble would show (`finishable`: not cut, stopped — all of it was shown at the press — or changed); nor
+  // with nothing left to reveal (reduced motion, a hidden tab: everything is shown). Otherwise the stored message
+  // replaces the bubble at once. It ends when the bubble is done (in the same commit the stored message takes its
+  // place), when anything comes after the reply, when the conversation changes or a new reply starts, and at the latest
+  // FINISH_GIVE_UP_MS later.
   const shownStream = useRef(null);
   const revealedAll = useRef({ runId: null, done: true });
   const [finish, setFinish] = useState(null);
@@ -118,13 +138,21 @@ export function ChatView({ conv }) {
     const reply = newestFrom(conv.messages, conv.agentId);
     const held = revealedAll.current;
     const posted = !detached && seen.convId === conv.id && conv.run?.id === seen.runId && conv.run.posted;
-    if (posted && reply && !reply.stopped && last?.id === reply.id && held.runId === seen.runId && !held.done) {
+    if (posted && reply && last?.id === reply.id && held.runId === seen.runId && !held.done && finishable(reply, seen.stream)) {
       setFinish({ convId: conv.id, runId: seen.runId, stream: seen.stream, run: conv.run, messageId: reply.id });
     }
   }
   const finishing = finish && finish.convId === conv.id && !replying && !detached && last?.id === finish.messageId ? finish : null;
+  /** The reply whose bubble was shown at the last commit: `{ convId, runId }`, or null. */
+  const bubbleShown = useRef(null);
   useLayoutEffect(() => {
     shownStream.current = replying && conv.stream ? { convId: conv.id, runId: run.id, stream: conv.stream } : null;
+    // A bubble that gave way here (to its stored message, its end, a newer reply) is not made again: what it had shown
+    // is forgotten. Not when the conversation was left or a detached window hides it: made again, it goes on from there.
+    const showing = finishing ? finishing.runId : replying ? run.id : null;
+    const was = bubbleShown.current;
+    if (was && was.convId === conv.id && !detached && was.runId !== showing) forgetRevealed(was.runId);
+    bubbleShown.current = showing ? { convId: conv.id, runId: showing } : null;
     if (finish && !finishing) setFinish(null);
   });
   useEffect(() => {
