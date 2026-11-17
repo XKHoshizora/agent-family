@@ -335,7 +335,8 @@ How a model call is admitted, held, settled and forgiven, and the bound on what 
   read at that moment).
 - `recent`: the last 7 site-days (today included) summed per Agent, model and source: `model` is the site model's `id`
   or the provider model's name, `points` what you were charged for those calls — taken from the free allowance and the
-  balance; what was forgiven is not in it, so it is not the true cost (`"0"` for `provider`) —, `replies` how many were
+  balance; what was forgiven is not in it, so it is not the true cost (`"0"` for `provider`, and for site calls that were
+  forgiven in full) —, `replies` how many were
   replies; `agentId` is `null` for persona drafts. Largest first. Runs that never reached a model (no model recorded)
   are not listed.
 - Limit: 60 per minute.

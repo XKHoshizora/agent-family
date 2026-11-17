@@ -264,14 +264,19 @@ describe("the service starting to close while a reply waits for its admission", 
     let release!: () => void;
     let held!: () => void;
     const holding = new Promise<void>((resolve) => (held = resolve));
+    let holderPid = 0;
     const holder = db.tx(async (t) => {
       await lockAgent(t, agent.id);
+      holderPid = (await t.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
       held();
       await new Promise<void>((resolve) => (release = resolve));
     });
     await holding;
     open();
-    await vi.waitFor(async () => expect((await db.query("select 1 from pg_locks where not granted")).rowCount).toBeGreaterThan(0));
+    // Step 3 waits for the Agent's conversation row, which the holder has locked.
+    const waitingForTheAgent = () =>
+      db.query("select 1 from pg_stat_activity where $1 = any(pg_blocking_pids(pid)) and query ilike '%from conversations where id%for update%'", [holderPid]);
+    await vi.waitFor(async () => expect((await waitingForTheAgent()).rowCount).toBe(1));
     closing.abort(new Error("the service is closing"));
     release();
     await holder;

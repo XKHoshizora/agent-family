@@ -44,7 +44,7 @@ describe("request logging", () => {
     expect(urls.filter((u) => u.includes("?")).every((u) => u.endsWith("?[redacted]"))).toBe(true);
   });
 
-  it("a whole reply logs no persona, no message or reply text and no provider key, at any level", async () => {
+  it("a whole reply logs no persona, no message or reply text and no provider key at info and above (every line the log has)", async () => {
     const KEY = "sk-live-LOGGING-secret-key-9f8e7d6c";
     const PERSONA = "PERSONA-SECRET-你是只在这里出现的设定";
     const MESSAGE = "MESSAGE-SECRET-主人的一句私话";

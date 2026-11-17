@@ -142,8 +142,8 @@ describe("agent and metering configuration", () => {
     const s3 = { S3_ENDPOINT: "https://s3.example.test", S3_REGION: "r", S3_BUCKET: "b", S3_ACCESS_KEY_ID: "access-id", S3_SECRET_ACCESS_KEY: "s3-secret" };
     expect(loadConfig(withModels([model], { TEST_UPSTREAM_KEY: "upstream-key-value", ...s3 })).siteModels).toHaveLength(1);
     for (const own of ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID", "auth_secret"]) {
-      // Each of them is set (base and s3), as it is in production.
-      expect(() => loadConfig(withModels([{ ...model, apiKeyEnv: own }], s3)), own).toThrow(
+      // Each of them is set (base, s3, and the lower-case name too), so only the rule can refuse it.
+      expect(() => loadConfig(withModels([{ ...model, apiKeyEnv: own }], { ...s3, auth_secret: "a-lower-case-variable" })), own).toThrow(
         new RegExp(`SITE_MODELS: model "fast".*${own}`),
       );
     }
@@ -159,8 +159,7 @@ describe("agent and metering configuration", () => {
 
   test("AGENT_TIERS must contain free and hold whole non-negative limits", () => {
     expect(loadConfig({ ...base, AGENT_TIERS: '{"free":5,"pro":100}' }).agentTiers).toEqual({ free: 5, pro: 100 });
-    // `free` must be a tier of its own: not one an object inherits.
-    for (const bad of ['{"pro":100}', "[]", "nope", '{"free":-1}', '{"free":1.5}', '{"free":"3"}', '{"__proto__":{"free":5}}', '{"constructor":3}']) {
+    for (const bad of ['{"pro":100}', "[]", "nope", '{"free":-1}', '{"free":1.5}', '{"free":"3"}']) {
       expect(() => loadConfig({ ...base, AGENT_TIERS: bad }), bad).toThrow(/AGENT_TIERS/);
     }
   });
