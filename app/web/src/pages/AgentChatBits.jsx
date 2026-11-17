@@ -2,7 +2,7 @@
 // and streaming replies), the folded thinking, the reply being written, the failed reply's status line, the persona
 // proposal card, the new-topic confirmation and divider, and the image hint. Each shows what the view model says
 // (`conv.run`, `conv.stream`, `msg.proposal`…); none of them derives it again from the model.
-import React, { Suspense, memo, use, useEffect, useRef, useState } from "react";
+import React, { Suspense, memo, use, useDeferredValue, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { runFailureText } from "../data/errorTexts.js";
 import { nameOf, publishBlock } from "../state/selectors.js";
@@ -79,6 +79,14 @@ export const AgentText = memo(function AgentText({ text }) {
   );
 });
 
+/**
+ * The text of a reply being written, rendered at a lower priority than typing and scrolling: pieces arriving faster than
+ * it renders are taken together (useDeferredValue).
+ */
+export function StreamingAgentText({ text }) {
+  return <AgentText text={useDeferredValue(text)} />;
+}
+
 /** The model's thinking: folded above the answer, opened only by the reader. */
 export function Thinking({ text }) {
   if (!text) return null;
@@ -121,7 +129,7 @@ export function StreamBubble({ conv }) {
         <Thinking text={conv.stream?.reasoning} />
         <div className="bubble">
           {text ? (
-            <AgentText text={text} />
+            <StreamingAgentText text={text} />
           ) : (
             <>
               <span className="dots" aria-hidden="true">

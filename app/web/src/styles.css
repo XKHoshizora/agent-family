@@ -285,7 +285,6 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
    bubble: wide content scrolls sideways, and anything maths moved above or below it is cut off (the padding and the
    negative margin leave room for focus outlines). */
 .md { white-space: normal; overflow-wrap: break-word; overflow-x: auto; overflow-y: hidden; padding: 4px; margin: -4px; }
-.md p { white-space: pre-line; }
 .md :is(p, ul, ol, blockquote, .md-code, .md-table, .katex-display, hr) { margin: 0 0 8px; }
 .md :is(h1, h2, h3, h4, h5, h6) { margin: 12px 0 6px; font-weight: 700; line-height: 1.4; }
 .md :is(h1, h2) { font-size: 18px; }
@@ -322,6 +321,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .md sup { font-size: 0.75em; line-height: 0; }
 .md .footnotes { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
 .md .katex-display { padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+/* (A bubble is as wide as its content: an equation's number follows it instead of being placed over its right end.) */
+.md .katex-display > .katex > .katex-html > .katex-tag { position: static; margin-left: 1.5em; }
 .md .katex-error { color: var(--ink-2); }
 .md .md-plain { white-space: pre-wrap; }
 /* Highlighted code: a few colours of the palette */

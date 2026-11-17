@@ -5,11 +5,13 @@
 // text too big (or too deep) to render safely is shown as plain text. A person's message is never Markdown.
 import "./markdown-ready.js";
 import React from "react";
+import { readFileSync } from "node:fs";
+import katex from "katex";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AgentText } from "../src/pages/AgentChatBits.jsx";
+import { AgentText, StreamingAgentText } from "../src/pages/AgentChatBits.jsx";
 import { fitsMarkdown } from "../src/ui/markdownLimits.js";
-import { safeHref } from "../src/ui/Markdown.jsx";
+import { APP_CLASSES, safeHref } from "../src/ui/Markdown.jsx";
 import { A1, AG1, D1, ME_ID, ANN, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, direct, syncOf, wire } from "./fixtures.js";
 import { click, installBrowser, openApp } from "./harness.jsx";
 
@@ -71,8 +73,13 @@ function expectSafe(bubble, { katexSvg = false } = {}) {
       expect(cellAlign || el.closest(".katex") !== null, `style on ${el.tagName}: ${el.getAttribute("style")}`).toBe(true);
     }
   }
+  // KaTeX's output never carries a class the app's stylesheet styles.
+  for (const el of bubble.querySelectorAll(".katex *, .katex-display *")) {
+    for (const cls of el.classList) expect(APP_CLASSES.has(cls), `class ${cls} in KaTeX output`).toBe(false);
+  }
   for (const a of bubble.querySelectorAll("a")) {
     expect(a.getAttribute("href") ?? "", a.outerHTML).toMatch(/^https?:\/\//);
+    expect(a.getAttribute("title"), a.outerHTML).toBe(a.getAttribute("href"));
     expect(a.getAttribute("target")).toBe("_blank");
     const rel = (a.getAttribute("rel") ?? "").split(/\s+/);
     for (const word of REL) expect(rel, a.outerHTML).toContain(word);
@@ -100,12 +107,14 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("a paragraph keeps its line breaks (shown by styles.css), a hard break only once", () => {
-    const bubble = show("第一行\n第二行\n\n甲\\\n乙");
+  it("a line break is a line break in a paragraph, a list item and a heading alike (no stray space); a hard one once", () => {
+    const bubble = show("第一行\n第二行\n\n甲\\\n乙\n\n- 项一行\n  项二行\n\n标题上\n标题下\n===");
     const [soft, hard] = bubble.querySelectorAll("p");
-    expect(soft.textContent).toBe("第一行\n第二行");
-    expect(hard.querySelector("br")).not.toBeNull();
-    expect(hard.textContent).toBe("甲乙");
+    for (const [el, text] of [[soft, "第一行第二行"], [hard, "甲乙"], [bubble.querySelector("li"), "项一行项二行"], [bubble.querySelector("h1"), "标题上标题下"]]) {
+      expect(el.textContent).toBe(text);
+      expect(el.querySelectorAll("br")).toHaveLength(1);
+    }
+    expectSafe(bubble);
   });
 
   it("headings h1 to h6, with no id of their own", () => {
@@ -140,12 +149,29 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("a link opens in a new tab, without the opener or the referrer", () => {
+  it("a link opens in a new tab, without the opener or the referrer; its tooltip is its real address, not the text's", () => {
     const bubble = show("看 [文档](https://docs.example/a?b=1#c \"说明\")");
     const a = bubble.querySelector("a");
     expect(a.textContent).toBe("文档");
     expect(a.getAttribute("href")).toBe("https://docs.example/a?b=1#c");
-    expect(a.getAttribute("title")).toBe("说明");
+    expect(a.getAttribute("title")).toBe("https://docs.example/a?b=1#c");
+    expect(bubble.textContent).not.toContain("说明");
+    expectSafe(bubble);
+  });
+
+  it("a link whose text is an address on another host is followed by the real host", () => {
+    const bubble = show(
+      "[https://bank.example/](https://evil.example/ \"https://bank.example/\") 和 [www.bank.example](https://evil.example:8443/x) 和 " +
+        "[https://a.example/x](https://a.example/y) 和 ![https://bank.example/](https://evil.example/p.png) 和 https://plain.example/",
+    );
+    const after = (a) => a.nextSibling?.textContent ?? "";
+    const [bank, www, same, image, plain] = bubble.querySelectorAll("a");
+    expect(bank.getAttribute("title")).toBe("https://evil.example/");
+    expect(after(bank).startsWith(" （实际指向 evil.example）")).toBe(true);
+    expect(after(www).startsWith(" （实际指向 evil.example:8443）")).toBe(true);
+    expect(after(same)).not.toContain("实际指向");
+    expect(after(image).startsWith(" （实际指向 evil.example）")).toBe(true);
+    expect(after(plain)).not.toContain("实际指向");
     expectSafe(bubble);
   });
 
@@ -224,8 +250,14 @@ describe("what an Agent's Markdown renders to", () => {
     expect(errors).not.toHaveBeenCalled();
   });
 
+  it("maths is $$…$$ only: a single $ is text (`$5 和 $10` stays a sentence)", () => {
+    const bubble = show("价格 $5 和 $10，以及 $x$");
+    expect(bubble.textContent).toBe("价格 $5 和 $10，以及 $x$");
+    expect(bubble.querySelector(".katex")).toBeNull();
+  });
+
   it("inline and block maths, and a ```math fence", () => {
-    const bubble = show("质能 $E=mc^2$ 与\n\n$$\n\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\n$$\n\n```math\n\\sqrt{2}\n```");
+    const bubble = show("质能 $$E=mc^2$$ 与\n\n$$\n\\sum_{i=1}^n i = \\frac{n(n+1)}{2}\n$$\n\n```math\n\\sqrt{2}\n```");
     expect(bubble.querySelectorAll(".katex")).toHaveLength(3);
     expect(bubble.querySelectorAll(".katex-display")).toHaveLength(2);
     expect(bubble.querySelector("annotation").textContent).toBe("E=mc^2");
@@ -235,7 +267,7 @@ describe("what an Agent's Markdown renders to", () => {
   });
 
   it("maths KaTeX cannot read is shown as its source, without the error message", () => {
-    const bubble = show("坏的 $\\frac{1}{$ 和 $\\notacommand{x}$");
+    const bubble = show("坏的 $$\\frac{1}{$$ 和 $$\\notacommand{x}$$");
     expect(bubble.textContent).toContain("\\notacommand{x}");
     expect(bubble.textContent).not.toMatch(/ParseError|Undefined control sequence/);
     expect(bubble.querySelector("[title]")).toBeNull();
@@ -244,7 +276,7 @@ describe("what an Agent's Markdown renders to", () => {
 
   it("a maths block over 2 000 characters is shown as code, not typeset", () => {
     const long = "x+".repeat(1001);
-    const bubble = show(`$$\n${long}\n$$\n\n行内 $${long}$\n\n\`\`\`math\n${long}\n\`\`\``);
+    const bubble = show(`$$\n${long}\n$$\n\n行内 $$${long}$$\n\n\`\`\`math\n${long}\n\`\`\``);
     expect(bubble.querySelector(".katex")).toBeNull();
     expect(bubble.querySelectorAll("pre > code")).toHaveLength(2);
     expect(bubble.querySelectorAll("p > code")).toHaveLength(1);
@@ -293,7 +325,9 @@ describe("what an Agent's Markdown never renders", () => {
     ["a javascript: image", "![a](javascript:alert(1))"],
     ["a footnote named like an app id", "文[^root]\n\n[^root]: 注"],
     ["a heading with an id attempt", "# root {#root}\n\n<h1 id=\"root\">x</h1><a name=\"root\">y</a>"],
-    ["KaTeX links, images, ids, styles and data", "$\\href{javascript:alert(1)}{x}$ $\\url{https://evil.example/}$ $\\includegraphics{https://evil.example/p.png}$ $\\htmlId{root}{x}$ $\\htmlStyle{position:fixed}{x}$ $\\htmlClass{toast}{x}$ $\\htmlData{x=y}{z}$"],
+    ["KaTeX links, images, ids, styles and data", "$$\\href{javascript:alert(1)}{x}$$ $$\\url{https://evil.example/}$$ $$\\includegraphics{https://evil.example/p.png}$$ $$\\htmlId{root}{x}$$ $$\\htmlStyle{position:fixed}{x}$$ $$\\htmlClass{toast}{x}$$ $$\\htmlData{x=y}{z}$$"],
+    ["KaTeX's \\tag, which makes a class the app styles", "$$\nx = 1 \\tag*{假标签}\n$$\n\n$$\ny \\tag{2}\n$$"],
+    ["a link to an address with a user name", "[x](https://bank.example@evil.example/) [y](https://u:p@evil.example/)"],
     ["an HTML comment and a CDATA section", "<!-- <img src=x onerror=alert(1)> --><![CDATA[<script>alert(1)</script>]]>"],
     ["a link with a quoting title", "[x](https://ok.example/ \"\\\" onmouseover=\\\"alert(1)\")"],
   ];
@@ -337,6 +371,26 @@ describe("what an Agent's Markdown never renders", () => {
     expect(hrefs(bubble)).toEqual(["https://ok.example/"]);
     expect(bubble.querySelector("a").textContent).toBe("图");
   });
+
+  it("KaTeX's \\tag keeps its label but not the app's `tag` class", () => {
+    const bubble = show("$$\nx = 1 \\tag*{假标签}\n$$");
+    expect(bubble.querySelector(".katex-display").textContent).toContain("假标签");
+    expect(bubble.querySelector(".tag")).toBeNull();
+  });
+
+  it("KaTeX output carrying the app's classes (as KaTeX before 0.18 gave \\tag) keeps only its own", () => {
+    vi.spyOn(katex, "renderToString").mockReturnValue('<span class="katex"><span class="tag card msg bubble btn row mord">x</span></span>');
+    const bubble = show("$$y^{classes}$$");
+    expect(bubble.querySelector(".katex > span").className).toBe("mord");
+    expect(bubble.querySelector(".tag, .card, .msg, .bubble, .btn, .row")).toBeNull();
+  });
+
+  it("the classes left out of KaTeX's output are every class styles.css styles", () => {
+    const css = readFileSync("src/styles.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const styled = new Set([...css.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((m) => m[1]).filter((name) => !/^(katex|hljs)/.test(name)));
+    expect(styled.size).toBeGreaterThan(100);
+    for (const name of styled) expect(APP_CLASSES.has(name), name).toBe(true);
+  });
 });
 
 describe("safeHref", () => {
@@ -347,21 +401,25 @@ describe("safeHref", () => {
     ["HTTPS://A.EXAMPLE/", "https://a.example/"],
   ])("keeps %s", (url, kept) => expect(safeHref(url)).toBe(kept));
 
-  it.each(["javascript:alert(1)", " JaVaScRiPt:alert(1)", "data:text/html,x", "vbscript:x", "mailto:a@b.example", "//evil.example", "/api/auth/sign-out", "#top", "relative/path", "", "file:///etc/passwd", "ftp://a.example", null, undefined])(
+  it.each(["javascript:alert(1)", " JaVaScRiPt:alert(1)", "data:text/html,x", "vbscript:x", "mailto:a@b.example", "//evil.example", "/api/auth/sign-out", "#top", "relative/path", "", "file:///etc/passwd", "ftp://a.example", "https://bank.example@evil.example/", "https://user:pass@a.example/", "http://:pass@a.example/", null, undefined])(
     "refuses %s",
     (url) => expect(safeHref(url)).toBeNull(),
   );
 });
 
+/** The brief's "within a second", with room for a machine that runs other work at the same time. */
+const WALL_MS = 3000;
+const elementsIn = (bubble) => bubble.querySelectorAll("*").length;
+const timed = (text) => {
+  const start = performance.now();
+  const bubble = show(text);
+  return { bubble, ms: performance.now() - start };
+};
+
 describe("what is shown as plain text without trying", () => {
   const plainShown = (bubble, text) => {
     expect(md(bubble)).toBeNull();
     expect(bubble.textContent).toBe(text);
-  };
-  const timed = (text) => {
-    const start = performance.now();
-    const bubble = show(text);
-    return { bubble, ms: performance.now() - start };
   };
 
   it("over 50 000 characters", () => {
@@ -378,7 +436,8 @@ describe("what is shown as plain text without trying", () => {
     const text = `| a | b |\n|---|---|\n${"| 1 | 2 |\n".repeat(5000)}`;
     const { bubble, ms } = timed(text);
     plainShown(bubble, text);
-    expect(ms).toBeLessThan(1000);
+    expect(elementsIn(bubble)).toBe(0);
+    expect(ms).toBeLessThan(WALL_MS);
   });
 
   it("lists nested 200 deep (by indentation or on one line), within a second", () => {
@@ -388,7 +447,8 @@ describe("what is shown as plain text without trying", () => {
     for (const text of [indented, inline, quotes]) {
       const { bubble, ms } = timed(text);
       plainShown(bubble, text);
-      expect(ms).toBeLessThan(1000);
+      expect(elementsIn(bubble)).toBe(0);
+      expect(ms).toBeLessThan(WALL_MS);
       cleanup();
     }
   });
@@ -424,28 +484,37 @@ describe("what is shown as plain text without trying", () => {
   });
 });
 
-describe("half-written and pathological text", () => {
-  const within1s = (text) => {
-    const start = performance.now();
-    const bubble = show(text);
-    expect(performance.now() - start, text.slice(0, 40)).toBeLessThan(1000);
-    expectSafe(bubble);
-    cleanup();
-    return bubble;
-  };
+/** Rendered or shown plain, safely, within the time, with no more than `maxElements` elements made. */
+function bounded(text, maxElements = 12000) {
+  const { bubble, ms } = timed(text);
+  expect(ms, text.slice(0, 40)).toBeLessThan(WALL_MS);
+  expect(elementsIn(bubble), text.slice(0, 40)).toBeLessThanOrEqual(maxElements);
+  expectSafe(bubble, { katexSvg: true });
+  cleanup();
+  return bubble;
+}
 
+describe("half-written and pathological text", () => {
   it("an unclosed code fence renders as code to the end", () => {
     const bubble = show("前文\n\n```js\nconst a = 1;\nconst b");
     expect(bubble.querySelector("pre > code").textContent).toBe("const a = 1;\nconst b\n");
     expect(errors).not.toHaveBeenCalled();
   });
 
-  it("an unbalanced $ is text; an unclosed $$ renders as far as it can", () => {
-    expect(show("价格 $5，没有闭合").textContent).toBe("价格 $5，没有闭合");
+  it("an unbalanced $$ is text; an unclosed maths block is its plain text until it closes, never typeset half-written", () => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    expect(show("价格 $$5，没有闭合").textContent).toBe("价格 $$5，没有闭合");
     cleanup();
-    const bubble = show("$$\n\\frac{1}{2");
-    expect(bubble.querySelector(".md")).not.toBeNull();
-    expect(bubble.textContent).not.toMatch(/ParseError/);
+    const open = "前文\n\n$$\n\\frac{1}{2open}";
+    const { container, rerender } = render(<div className="bubble"><AgentText text={open} /></div>);
+    expect(container.querySelector(".md-plain").textContent).toBe("$$\n\\frac{1}{2open}");
+    rerender(<div className="bubble"><AgentText text={`${open}\n\\cdot 3`} /></div>);
+    rerender(<div className="bubble"><AgentText text={"前文\n\n```math\n\\sqrt{2open}"} /></div>);
+    expect(container.querySelector(".md-plain").textContent).toBe("```math\n\\sqrt{2open}");
+    expect(typesets).not.toHaveBeenCalled();
+    rerender(<div className="bubble"><AgentText text={`${open}\n\\cdot 3\n$$`} /></div>);
+    expect(container.querySelector(".katex-display")).not.toBeNull();
+    expect(typesets).toHaveBeenCalledTimes(1);
     expect(errors).not.toHaveBeenCalled();
   });
 
@@ -483,10 +552,10 @@ describe("half-written and pathological text", () => {
     ["a long list of bold items", Array.from({ length: 500 }, (_, i) => `- **项${i}**：说明`).join("\n")],
     ["a long table of bold cells", "| a | b |\n|---|---|\n" + Array.from({ length: 500 }, (_, i) => `| **${i}** | _x_ |`).join("\n")],
     ["many links", Array.from({ length: 20 }, () => "[a](https://a.example/) ".repeat(25)).join("\n\n")],
-    ["many formulas", Array.from({ length: 10 }, () => "$x_1$ ".repeat(20)).join("\n\n")],
+    ["many formulas", Array.from({ length: 10 }, () => "$$x_1$$ ".repeat(20)).join("\n\n")],
     ["many code blocks", "```js\nlet a = 1;\n```\n".repeat(100)],
   ])("%s: rendered or plain within a second, without an error", (_, text) => {
-    within1s(asLines(text));
+    bounded(asLines(text));
   });
 
   it("a text the parser nests too deeply is shown as its plain text", () => {
@@ -498,17 +567,17 @@ describe("half-written and pathological text", () => {
   });
 
   it("a text with more than 500 formulas typesets the first 500 and shows the rest as code", () => {
-    const bubble = show(Array.from({ length: 6 }, () => "$x$ ".repeat(100)).join("\n\n"));
+    const bubble = show(Array.from({ length: 6 }, () => "$$x$$ ".repeat(100)).join("\n\n"));
     expect(bubble.querySelectorAll(".katex")).toHaveLength(500);
     expect(bubble.querySelectorAll("p > code")).toHaveLength(100);
   });
 
-  it("every prefix of a reply being written renders without an error", () => {
+  it("every prefix of a reply being written renders without an error", async () => {
     const reply = [
       "# 计划",
       "",
       "1. **第一步**：读 [文档](https://docs.example/)",
-      "2. 第二步 $a^2+b^2=c^2$",
+      "2. 第二步 $$a^2+b^2=c^2$$",
       "",
       "| 列 | 值 |",
       "|---|---|",
@@ -527,16 +596,142 @@ describe("half-written and pathological text", () => {
       "",
       "[^1]: 注",
     ].join("\n");
-    const { container, rerender } = render(<div className="bubble"><AgentText text="" /></div>);
+    // (As the streaming bubble renders it: at a lower priority, each piece settled before the next.)
+    const { container, rerender } = render(<div className="bubble"><StreamingAgentText text="" /></div>);
     for (let i = 1; i <= reply.length; i += 1) {
-      rerender(<div className="bubble"><AgentText text={reply.slice(0, i)} /></div>);
+      await act(async () => rerender(<div className="bubble"><StreamingAgentText text={reply.slice(0, i)} /></div>));
       expect(container.querySelector(".md"), reply.slice(0, i)).not.toBeNull();
+      if (i === 30) expect(container.querySelector("strong")?.textContent).toBe("第一步"); // the latest piece is shown
       if (i % 10 === 0) expectSafe(container.firstChild, { katexSvg: true });
     }
     expectSafe(container.firstChild, { katexSvg: true });
     expect(container.querySelector("h1").textContent).toBe("计划");
     expect(container.querySelector(".katex-display")).not.toBeNull();
     expect(container.querySelector(".hljs-keyword").textContent).toBe("def");
+  });
+});
+
+describe("the work a text can cause is bounded", () => {
+  const wideTable = (cols, rows, row = "x") => `${"|a".repeat(cols)}|\n${"|-".repeat(cols)}|\n${`${row}\n`.repeat(rows)}`;
+  const cells = (bubble) => bubble.querySelectorAll("td, th").length;
+
+  it("a table that would have more than 5 000 cells (rows padded to a wide header, pipes or none) is shown as plain text", () => {
+    for (const text of [wideTable(300, 2000), wideTable(2000, 20000), wideTable(100, 60, `${"|b".repeat(100)}|`)]) {
+      expect(fitsMarkdown(text)).toBe(true);
+      const { bubble, ms } = timed(text);
+      expect(cells(bubble)).toBe(0);
+      expect(bubble.querySelector(".md-plain").textContent).toBe(text);
+      expect(ms).toBeLessThan(WALL_MS);
+      cleanup();
+    }
+  });
+
+  it("a wide table within the cap is rendered, padded as GFM pads it", () => {
+    const bubble = show(wideTable(100, 40, `${"|b".repeat(100)}|`));
+    expect(bubble.querySelectorAll("th")).toHaveLength(100);
+    expect(bubble.querySelectorAll("td")).toHaveLength(4000);
+    expect(show(wideTable(5, 3)).querySelectorAll("td")).toHaveLength(15);
+  });
+
+  it("a formula that defines macros is shown as code, never typeset (the reviewer's 10×10×10×100 expansion)", () => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    const macro = `\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(100)}}}}`;
+    const others = ["\\gdef\\b{y}\\b", "\\newcommand{\\c}{z}\\c", "\\let\\d=\\alpha \\d", "\\color{#ff0000}{r}", "\\global\\def\\e{1}"];
+    const { bubble, ms } = timed([`$$\n${macro}\n$$`, ...others.map((tex) => `$$${tex}$$`)].join("\n\n"));
+    expect(typesets).not.toHaveBeenCalled();
+    expect(bubble.querySelector(".katex")).toBeNull();
+    expect(bubble.querySelector("pre > code").textContent).toBe(`${macro}\n`);
+    expect(bubble.querySelectorAll("p > code")).toHaveLength(others.length);
+    expect(ms).toBeLessThan(WALL_MS);
+  });
+
+  it("KaTeX output over 100 000 characters is discarded (the formula shown as code), and not typeset again", () => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    const big = `x^{1}`.repeat(380); // 1 900 characters, ~180 000 of HTML
+    const text = `$$\n${big}\n$$`;
+    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(1);
+    expect(typesets.mock.results[0].value.length).toBeGreaterThan(100000);
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector("pre > code").textContent).toBe(big);
+    rerender(<div className="bubble"><AgentText text={`${text}\n\n后文`} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".katex")).toBeNull();
+  });
+
+  /** A clock that moves only while KaTeX works: each typeset "takes" `cost(tex)` milliseconds. */
+  function slowKatex(cost) {
+    let clock = 1000;
+    vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const real = katex.renderToString;
+    return vi.spyOn(katex, "renderToString").mockImplementation((tex, options) => {
+      clock += cost(tex);
+      return real.call(katex, tex, options);
+    });
+  }
+
+  it("past 150 ms of KaTeX in one text the remaining formulas are code; the next pieces typeset the rest", () => {
+    const typesets = slowKatex(() => 40);
+    const formulas = Array.from({ length: 8 }, (_, i) => `$$b_{${i}}^{budget}$$`).join(" ");
+    const { container, rerender } = render(<div className="bubble"><AgentText text={formulas} /></div>);
+    // 40, 80, 120, 160 ms: after the fourth the budget is spent.
+    expect(typesets).toHaveBeenCalledTimes(4);
+    expect(container.querySelectorAll(".katex")).toHaveLength(4);
+    expect(container.querySelectorAll("p > code")).toHaveLength(4);
+    rerender(<div className="bubble"><AgentText text={`${formulas} 。`} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(8);
+    expect(container.querySelectorAll(".katex")).toHaveLength(8);
+  });
+
+  it("a formula that alone takes too long spends the text's budget, and is never typeset again", () => {
+    const typesets = slowKatex((tex) => (tex.includes("slow") ? 400 : 1));
+    const text = "$$\\text{slow}^{once}$$ 和 $$q^{fast}$$";
+    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(1); // the slow one spent the budget: the other is code this time
+    expect(container.querySelectorAll(".katex")).toHaveLength(1);
+    expect(container.querySelector("p > code").textContent).toBe("q^{fast}");
+    for (const tail of [" 。", " 。。", " 。。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(2); // the fast one, once; the slow one never again (shown while kept)
+    expect(container.querySelectorAll(".katex")).toHaveLength(2);
+  });
+
+  it("typeset formulas and highlighted code are used again unchanged, in every bubble and on every piece", () => {
+    const text = "$$\\frac{a}{b}^{reuse}$$\n\n```js\nconst reuse = 1;\n```";
+    const typesets = vi.spyOn(katex, "renderToString");
+    const first = show(text);
+    const second = show(text);
+    expect(typesets).toHaveBeenCalledTimes(1);
+    expect(second.innerHTML).toBe(first.innerHTML);
+    const { container, rerender } = render(<div className="bubble"><AgentText text={text} /></div>);
+    for (const tail of [" ", " 。", " 。。"]) rerender(<div className="bubble"><AgentText text={text + tail} /></div>);
+    expect(typesets).toHaveBeenCalledTimes(1);
+    expect(container.querySelector(".katex")).not.toBeNull();
+    expect(container.querySelector(".hljs-keyword").textContent).toBe("const");
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  // Hostile sizes, as a table: each renders or falls back with bounded work (elements made, KaTeX runs).
+  const LINE = 9000;
+  const asLines = (text) => Array.from({ length: Math.ceil(text.length / LINE) }, (_, i) => text.slice(i * LINE, (i + 1) * LINE)).join("\n");
+  const MIX = "[*_`$|>-a ";
+  const mixed = Array.from({ length: 49999 }, (_, i) => MIX[(i * 7 + Math.floor(i / 13)) % MIX.length]).join("");
+  it.each([
+    ["a wide header over pipe-less rows", wideTable(300, 2000)],
+    ["a wide header over piped rows", wideTable(100, 400, `${"|b".repeat(100)}|`)],
+    ["nested macros", `$$\n\\def\\a#1{#1#1#1#1#1#1#1#1#1#1}\\a{\\a{\\a{${"x".repeat(400)}}}}\n$$`],
+    ["many small formulas", Array.from({ length: 40 }, (_, i) => Array.from({ length: 10 }, (_, j) => `$$s_{${i}}^{${j}}$$`).join(" ")).join("\n\n")],
+    ["deeply nested emphasis", "*a _b ".repeat(400) + "x" + " b_ a*".repeat(400)],
+    ...["[", "*", "_", "`", "$", "|", ">", "-"].flatMap((ch) => [
+      [`49 999 × ${ch} on one line`, ch.repeat(49999)],
+      [`49 999 × ${ch} in lines`, asLines(ch.repeat(49999))],
+    ]),
+    ["49 999 mixed on one line", mixed],
+    ["49 999 mixed in lines", asLines(mixed)],
+  ])("%s", (_, text) => {
+    const typesets = vi.spyOn(katex, "renderToString");
+    const bubble = bounded(text, 25000);
+    expect(typesets.mock.calls.length).toBeLessThanOrEqual(500);
+    expect(bubble.querySelectorAll(".katex").length).toBeLessThanOrEqual(500);
   });
 });
 

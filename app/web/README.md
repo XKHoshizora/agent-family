@@ -59,4 +59,5 @@ restart spec skips itself.
 - `src/state/` - UI reducer (navigation, toast) and selectors; `src/pages/`, `src/ui/` - the approved prototype UI.
 - `src/ui/Markdown.jsx` - the safe Markdown renderer for Agents' messages only (its own chunk, loaded with the first Agent message;
   `AgentText` in `src/pages/AgentChatBits.jsx` shows the plain text until then, on any failure, and for a text beyond
-  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched.
+  `src/ui/markdownLimits.js`). No raw HTML, http(s) links only, images as links, nothing fetched; maths is `$$…$$` only;
+  table cells, formulas, maths output and maths time per text are capped.
