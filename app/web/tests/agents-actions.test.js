@@ -449,6 +449,16 @@ describe("replies in a group (batch 2C)", () => {
     expect(api.dismissRun).toHaveBeenLastCalledWith(A1);
   });
 
+  it("retryRun and dismissRun for someone else's Agent in a group send nothing", async () => {
+    const api = { retryRun: vi.fn(async () => ({ run: runOf(R2, "queued") })), dismissRun: vi.fn(async () => ({ ok: true })) };
+    const { actions, transport } = await inGroup(api);
+    transport.socket.emit({ type: "run", conversationId: G1, agentId: OAG, state: "unavailable" });
+    await expect(actions.retryRun(G1, OAG)).resolves.toMatchObject({ ok: false, error: { code: "no_run" } });
+    await expect(actions.dismissRun(G1, OAG)).resolves.toMatchObject({ ok: false, error: { code: "no_run" } });
+    expect(api.retryRun).not.toHaveBeenCalled();
+    expect(api.dismissRun).not.toHaveBeenCalled();
+  });
+
   it("haltAgents asks the group to stop its Agents; a refusal says why", async () => {
     const api = { haltAgents: vi.fn(async () => ({ ok: true })) };
     const { actions } = await inGroup(api);

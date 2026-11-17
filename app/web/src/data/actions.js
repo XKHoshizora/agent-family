@@ -689,6 +689,11 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
      */
     retryRun: (conversationId, agentId = null) => {
       const failed = heldRun(conversationId, agentId)?.id ?? null;
+      // In a group only my Agent's run is held (someone else's is a bare state): nothing to try again, nothing is sent.
+      if (agentId && failed === null) {
+        const error = dropped("no_run");
+        return Promise.resolve(failure(error, replyErrorText("retry", error)));
+      }
       const keep = (run) =>
         setModel(agentId ? applyGroupRun(getModel(), conversationId, agentId, { run }, { ordered: true }) : applyRun(getModel(), conversationId, run, { ordered: true }));
       return attempt(() => (agentId ? api.retryRun(conversationId, agentId) : api.retryRun(conversationId)), {
@@ -708,6 +713,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     dismissRun: (conversationId, agentId = null) => {
       const held = heldRun(conversationId, agentId);
       const failed = held?.id ?? null;
+      if (agentId && failed === null) {
+        const error = dropped("no_run");
+        return Promise.resolve(failure(error, replyErrorText("dismiss", error)));
+      }
       // A group's reply that ended without failing (halted, its Agent taken out): the service keeps nothing to dismiss
       // (and the Agent may be gone from the group), so the line is closed here only.
       if (agentId && held && held.status !== "failed") {
