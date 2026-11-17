@@ -13,7 +13,7 @@ import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { runningRun } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
-import { closeAllSockets } from "./helpers/ws.ts";
+import { closeAllSockets, connect } from "./helpers/ws.ts";
 
 /**
  * The service dying mid-reply (review focus 5, spec 6.4 and 6.5, README "Agents and runs"): at the next start, before
@@ -43,7 +43,12 @@ afterEach(async () => {
 async function start(models: ModelGateway, blobs: BlobStore = store.blobs, lines?: string[]): Promise<FastifyInstance> {
   const app = await buildApp(
     { config: base.deps.config, db, models, blobs },
-    { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, ...(lines ? { logStream: { write: (l: string) => void lines.push(l) } } : {}) },
+    {
+      agentWorker: false,
+      answerFloor: NO_ANSWER_FLOOR,
+      staleRunSweep: false,
+      ...(lines ? { logStream: { write: (l: string) => void lines.push(l) } } : {}),
+    },
   );
   await app.ready();
   open.push(app);
@@ -355,6 +360,125 @@ describe("a run another instance ended while this one was still starting it", ()
     expect(await db.query("select 1 from messages where sender_id = $1", [agent.id]).then((r) => r.rowCount)).toBe(0);
     const about = lines.map((l) => JSON.parse(l) as { msg: string; runId?: string; level: number }).filter((l) => l.runId === run.id);
     expect(about).toEqual([expect.objectContaining({ level: 40, msg: expect.stringMatching(/ended elsewhere/) })]);
+  });
+});
+
+describe("the stale-run sweep", () => {
+  /** Makes the run look as if it had been running for `minutes`. */
+  const age = (runId: string, minutes: number) => db.query("update agent_runs set started_at = now() - make_interval(mins => $2) where id = $1", [runId, minutes]);
+  // AGENT_RUN_TIMEOUT_MS is 2 minutes here: a run is stale after 2 × 2 + 1 = 5 minutes.
+
+  it("releases a running run no worker holds once it is old enough — as start-up recovery would — and leaves a fresh one alone", async () => {
+    const gateway = scriptedGateway();
+    const app = await start(gateway);
+    const { owner, agent, conv } = await owned(app, "sweepy");
+    await say(app, owner, conv, "你好");
+    // Claimed and admitted, then left: what an instance that died mid-call leaves behind.
+    const ticket = (await app.agentPort.claimNext())!;
+    expect(isRunEnd(await app.agentPort.begin(ticket))).toBe(false);
+    expect(await holds()).not.toBe("0");
+
+    await age(ticket.id, 4);
+    expect(await app.staleRunSweep.run()).toBe(0); // not stale yet
+    expect(await statusOf(ticket.id)).toMatchObject({ status: "running" });
+
+    const socket = await connect(app, owner);
+    await age(ticket.id, 6);
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(await statusOf(ticket.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await holds()).toBe("0");
+    expect(await records(ticket.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await latestRun(app, owner, conv)).toEqual({ id: ticket.id, status: "failed", error: "provider_unavailable", retryable: true });
+    // Its owner is told (unlike at start-up, sockets are open now).
+    expect(await socket.next((e) => e.type === "run" && e.run.id === ticket.id && e.run.status === "failed")).toMatchObject({ conversationId: conv });
+    expect(gateway.calls).toHaveLength(0);
+    // Sweeping again finds nothing; a retry then works.
+    expect(await app.staleRunSweep.run()).toBe(0);
+    gateway.reply("重新回答。");
+    expect((await api(app, owner, "POST", `/api/conversations/${conv}/runs/retry`)).status).toBe(201);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await fromAgent(app, owner, conv, agent.id)).map((m) => m.text)).toEqual(["重新回答。"]);
+  });
+
+  it("a stale run its Agent's pause interrupted ends cancelled, and one whose reply had been posted ends done with its follow-up queued", async () => {
+    const app = await start(scriptedGateway());
+    const paused = await owned(app, "sweptpaused");
+    await say(app, paused.owner, paused.conv, "你好");
+    const interrupted = (await app.agentPort.claimNext())!;
+    expect(interrupted.agentId).toBe(paused.agent.id);
+    await app.agentPort.begin(interrupted);
+    expect((await api(app, paused.owner, "POST", `/api/agents/${paused.agent.id}/pause`)).status).toBe(200);
+    await age(interrupted.id, 10);
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(await statusOf(interrupted.id)).toMatchObject({ status: "cancelled", error: "agent_paused", hold: "0" });
+
+    const posted = await owned(app, "sweptdone");
+    await say(app, posted.owner, posted.conv, "第一句");
+    const done = (await app.agentPort.claimNext())!;
+    await app.agentPort.begin(done);
+    await say(app, posted.owner, posted.conv, "第二句"); // noted on the running reply
+    expect(await app.agentPort.post(done, { text: "回第一句。", reasoning: "", stopped: false, truncated: false })).toBe("posted");
+    await age(done.id, 10);
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(await statusOf(done.id)).toMatchObject({ status: "done", hold: "0" });
+    expect(await latestRun(app, posted.owner, posted.conv)).toMatchObject({ status: "queued" });
+  });
+
+  it("never touches a run this process's worker is working on, however old it looks", async () => {
+    const gateway = scriptedGateway();
+    const app = await start(gateway);
+    const { owner, agent, conv } = await owned(app, "busyworker");
+    const hold = gateway.hang();
+    await say(app, owner, conv, "慢慢说");
+    const running = app.agentWorker.runOnce();
+    await hold.reached;
+    const run = await latestRun(app, owner, conv);
+    await age(run.id, 60);
+    expect(app.agentWorker.isWorking(run.id)).toBe(true);
+    expect(await app.staleRunSweep.run()).toBe(0);
+    expect(await statusOf(run.id)).toMatchObject({ status: "running", source: "site" });
+    hold.release("说完了。");
+    await running;
+    expect(await statusOf(run.id)).toMatchObject({ status: "done", hold: "0" });
+    expect(await records(run.id)).toHaveLength(1);
+    expect((await fromAgent(app, owner, conv, agent.id)).map((m) => m.text)).toEqual(["说完了。"]);
+  });
+
+  it("releases a stale persona draft, but never one a request of this process is still making", async () => {
+    const gateway = scriptedGateway();
+    const app = await start(gateway);
+    const owner = await signUp(app, "staledraft");
+    const left = await runningRun(db, owner.id);
+    await age(left, 10);
+
+    const hold = gateway.hang();
+    const answer = api(app, owner, "POST", "/api/agents/draft-persona", { name: "小橘", model: FAST });
+    await hold.reached;
+    const live = (await db.query<{ id: string }>("select id from agent_runs where owner_id = $1 and id <> $2", [owner.id, left])).rows[0]!.id;
+    await age(live, 10);
+
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(await statusOf(left)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await records(left)).toEqual([{ outcome: "failed", source: null, model: null, estimated: true, cost: "0", free: "0", balance: "0" }]);
+    expect(await statusOf(live)).toMatchObject({ status: "running", source: "site" });
+
+    hold.release("你是一个温和的读书伙伴。");
+    expect(await answer).toEqual({ status: 200, json: { persona: "你是一个温和的读书伙伴。" } });
+    expect(await statusOf(live)).toMatchObject({ status: "done", hold: "0" });
+  });
+
+  it("runs on its own: a minute after start, then every minute (shortened here)", async () => {
+    const owner = await signUp(base, "timed");
+    const left = await runningRun(db, owner.id);
+    await age(left, 10);
+    const app = await buildApp({ config: base.deps.config, db, models: scriptedGateway() }, { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, staleRunSweep: { initialDelayMs: 20, intervalMs: 50 } });
+    open.push(app);
+    await app.ready();
+    // Start-up recovery takes it first; a second one, left later, is the timer's.
+    expect(await statusOf(left)).toMatchObject({ status: "failed" });
+    const later = await runningRun(db, owner.id);
+    await age(later, 10);
+    await vi.waitFor(async () => expect(await statusOf(later)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" }), { timeout: 3000 });
   });
 });
 

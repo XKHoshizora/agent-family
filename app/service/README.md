@@ -114,7 +114,7 @@ blobs is not cut off; migrations run on their own connection and are not subject
 this long (or whose new connection takes longer to open) is answered 503 `busy`.
 An invalid value stops the service at start-up with a message naming the variable.
 
-`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor, allowInsecureLocal, agentWorker })` takes `{ config, db }`;
+`buildApp(deps?: Partial<Deps>, options?: { logStream, sweepInitialDelayMs, answerFloor, allowInsecureLocal, agentWorker, staleRunSweep })` takes `{ config, db }`;
 anything omitted is built from the environment. Tests pass their own config (raised `RATE_LIMIT_SCALE`) and a pool
 on `TEST_DATABASE_URL`. `answerFloor` (`{ ms, jitterMs }`, default 400 ms + up to 50 ms) is how long a
 registration's and a reset request's success answer takes at least (see those routes); it is a build option, not
@@ -125,6 +125,8 @@ providers may also be reached at loopback addresses, and over plain `http:` ther
 inject a scripted one (`scriptedGateway()` in `tests/helpers/models.ts`). `agentWorker: false` (tests only) turns the
 reply worker's background loop off: replies then run only when the test calls `app.agentWorker.runOnce()` (claims the
 oldest queued reply and runs it to its end; false when none is queued) or `drain()` (see Agents and runs).
+`staleRunSweep` (tests only): `false` turns the stale-run sweep's timer off, `{ initialDelayMs, intervalMs }` shortens
+it; `app.staleRunSweep.run()` sweeps at once either way (see Agents and runs, Recovery).
 
 ## Deployment
 
@@ -197,7 +199,8 @@ in `process.env` while the file runs (a site model's key is read from there when
 serially because they share one database. Tests never call a real model: rule tests inject `scriptedGateway()`, and
 the gateway's own tests talk to `protocolStub()`, a local server speaking the four protocols' wire formats
 (`tests/helpers/models.ts`). `useApp({ agentWorker: false })` drives the reply worker by hand (`app.agentWorker.runOnce()`);
-files that insert queued runs themselves use it too, so no background worker picks them up.
+files that insert queued runs themselves use it too, so no background worker picks them up. `useApp()` starts no
+stale-run sweep timer unless asked (`staleRunSweep`); tests sweep with `app.staleRunSweep.run()`.
 
 ## HTTP API
 
@@ -528,7 +531,7 @@ Failures are never messages: they live on the run, which the owner learns from t
 `context_too_small` — the model's context cannot hold your newest message, or 200 tokens of it, after the persona — or
 `busy`: the service's own trouble — the reply could not be started or stored, its attachments could not be read, or
 there was nothing to answer — which costs you nothing; `provider_unavailable` is also what a reply that was under way
-when the service restarted ends with), for
+when the service restarted ends with, and one the stale-run sweep released), for
 `cancelled` `agent_paused` or `agent_deleted`, or none (everything it was to answer is before a new topic you started).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail). `resetsAt` (ISO instant): for
@@ -1552,7 +1555,7 @@ all of the above, attachments at their estimate.
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
 | `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
-| The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start (below) |
+| The service closed during the call, or while its attachments were read | none | left `running`, then recovered at the next start, or by the stale-run sweep of an instance still running (below): `failed`, `provider_unavailable`, retryable |
 
 Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the
 run. Every run the worker took is settled exactly once (its usage record's `outcome` is the run's status; the database
@@ -1573,14 +1576,29 @@ upstream reported died with the process); a run that already has its usage recor
 cancelled run is followed up by the one rule above (the follow-up is queued for the worker); a failed one is not, since a
 retry answers everything. Queued runs stay queued and are answered once the worker starts. Nothing is pushed — no socket
 can be open yet — so a client learns the state from `GET /api/conversations/:id/run`. The worker's stop and pause flags
-live in the process: a new start has none. A run that cannot be recovered is logged and left for the next start.
+live in the process: a new start has none. A run that cannot be recovered is logged and left for the stale-run sweep
+or the next start.
 
 A deploy may start the new instance while the old one is still answering (`tests/runs-restart.test.ts`, "a second
 instance"). The new one's recovery then ends the old one's runs as above; when the old one's call finishes, `post` finds
 its run no longer `running` (read under the same locks recovery takes) and stores nothing, and `finish` leaves the run as
-recovery recorded it: no message, no second usage record (logged at warn). Not covered: a reply the old instance claims
-after the new one has started (both workers take queued runs while they overlap) and is stopped in the middle of stays
-`running` — its Agent answers nothing more — until the service next starts, whose recovery ends it as above.
+recovery recorded it: no message, no second usage record (logged at warn). While both run, both workers take queued
+runs; a reply the old instance takes after the new one has started, and is stopped in the middle of, is left `running`
+with nobody working on it. The stale-run sweep (below) releases it.
+
+**The stale-run sweep** (`port-impl.ts` `sweepStaleRuns`; `tests/runs-restart.test.ts`). Once a minute while the service
+runs (first a minute after start), every run — reply or persona draft — that has been `running` for longer than twice
+`AGENT_RUN_TIMEOUT_MS` and a minute (the most attachments and then a call may take, and a minute to post and record;
+5 minutes with the default) is released exactly as start-up recovery releases one, each in a transaction of its own
+under the same locks — unless this process is working on it (a run its worker has claimed and not yet finished, a draft
+whose request is under way): those are never touched, however old. Unlike at start-up, the owner's sockets are told
+(`run`), and a follow-up queued by the one rule wakes the worker. An instance still working on a run that old elsewhere
+is past its own limits: its `post` is refused (the run is no longer `running`) and nothing is recorded twice. So a run
+left behind by a process that is gone — a deploy's old instance stopped mid-call, a `finish` that failed — is released
+within about twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then it is stuck: the
+Agent's conversation shows it replying and the Agent answers nothing more (an Agent has one queued or running run at
+most), it occupies one of the owner's `AGENT_MAX_CONCURRENT_RUNS` slots, and, if it was admitted, its hold still counts
+against the owner's allowance or balance.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,

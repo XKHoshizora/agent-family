@@ -19,7 +19,7 @@ import { runSweep, startSweeper } from "./attachments/sweeper.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
-import { createAgentPort, recoverRuns, type DbAgentPort } from "./agents/port-impl.ts";
+import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
 import { createAgentWorker, type AgentWorker } from "./agents/runtime/worker.ts";
@@ -88,6 +88,8 @@ declare module "fastify" {
     agentPort: DbAgentPort;
     /** The reply worker (src/agents/runtime/worker.ts); with `agentWorker: false` tests run replies with `runOnce()`. */
     agentWorker: AgentWorker;
+    /** The stale-run sweep (src/agents/port-impl.ts `sweepStaleRuns`): `run()` sweeps now; the timer does it every minute. */
+    staleRunSweep: { run(): Promise<number> };
   }
 }
 
@@ -111,6 +113,11 @@ export interface BuildOptions {
    * when the test calls `app.agentWorker.runOnce()` or `drain()`.
    */
   agentWorker?: false;
+  /**
+   * The stale-run sweep's timer (default: first a minute after start, then every minute). Tests: `false` turns it off
+   * (`app.staleRunSweep.run()` still sweeps by hand), or shorter delays.
+   */
+  staleRunSweep?: false | { initialDelayMs?: number; intervalMs?: number };
 }
 
 /**
@@ -278,11 +285,25 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   agentPort.onQueued(() => agentWorker.wake());
   app.decorate("agentPort", agentPort);
   app.decorate("agentWorker", agentWorker);
+  // The persona drafts this process is working on, by run id: the stale-run sweep leaves them alone, as it does the
+  // worker's runs.
+  const draftRuns = new Set<string>();
+  const staleRunSweep = {
+    async run(): Promise<number> {
+      const { released, announced } = await sweepStaleRuns(deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id));
+      for (const told of announced) agentPort.announce(told); // to the owner's sockets; a queued follow-up wakes the worker
+      return released;
+    },
+  };
+  app.decorate("staleRunSweep", staleRunSweep);
+  let staleTimer: { stop(): Promise<void> } | undefined;
   app.addHook("onReady", async () => {
     const recovered = await recoverRuns(deps.db, config, app.log);
     if (recovered > 0) app.log.info({ recovered }, "agent runs left running by the previous start were recovered");
     agentWorker.start();
+    if (options.staleRunSweep !== false) staleTimer = startStaleRunSweep(() => staleRunSweep.run(), app.log, options.staleRunSweep ?? {});
   });
+  app.addHook("onClose", async () => staleTimer?.stop());
   app.addHook("onClose", async () => agentWorker.stop());
 
   const answerFloor = options.answerFloor ?? ANSWER_FLOOR;
@@ -295,7 +316,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   registerMessageRoutes(app);
   registerAttachmentRoutes(app);
   registerAccountRoutes(app);
-  registerAgentRoutes(app);
+  registerAgentRoutes(app, { draftRuns });
   registerRunRoutes(app);
   registerProviderRoutes(app, { allowInsecureLocal: options.allowInsecureLocal === true });
 

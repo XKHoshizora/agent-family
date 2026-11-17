@@ -38,6 +38,8 @@ export interface AgentWorker {
   wake(): void;
   /** Claims the oldest queued reply and runs it to its end; false when none was queued. */
   runOnce(): Promise<boolean>;
+  /** Whether this worker is working on the run now (from its claim until its `finish` has returned). */
+  isWorking(runId: string): boolean;
   /** `runOnce` until nothing is queued (follow-ups included); how many ran. */
   drain(): Promise<number>;
   /**
@@ -232,6 +234,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       wake();
     },
     wake,
+    isWorking: (runId) => shutdowns.has(runId),
     async runOnce() {
       if (closing) return false;
       const run = await port.claimNext();

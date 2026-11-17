@@ -28,7 +28,7 @@ let timed: FastifyInstance;
 beforeAll(async () => {
   timed = await buildApp(
     { config: { ...app.deps.config, agentRunTimeoutMs: 1000 }, db, models: gateway, blobs: store.blobs },
-    { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, logStream },
+    { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, logStream, staleRunSweep: false },
   );
   await timed.ready();
 });

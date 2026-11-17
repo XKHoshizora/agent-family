@@ -69,7 +69,7 @@ start-up with a message naming the variable. Values in the right column are for 
 | `HTTP_BODY_TIMEOUT_MS` | A request with a body must have arrived whole within this long (default 30000); an upload is released from it once it is admitted and then follows the upload deadlines. | default |
 | `HTTP_CONNECTION_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_KEEP_ALIVE_TIMEOUT_MS` | Server-wide socket idle (120000), whole request (upload total + 60000), keep-alive idle (72000). Must exceed the upload deadlines. Keep the proxy's idle timeout above the keep-alive value. | defaults |
 | `DB_STATEMENT_TIMEOUT_MS`, `DB_ACQUIRE_TIMEOUT_MS`, `SEARCH_STATEMENT_TIMEOUT_MS` | Database limits: statement (30000), wait for a pool connection (10000), one search (3000). Past them: 503 `busy`. | defaults |
-| `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_RUNS_PER_MINUTE`, `AGENT_RUN_TIMEOUT_MS` | Model calls per person: running at once, replies and persona drafts together — further replies wait, a further draft is refused; a draft and a reply that start at the same moment may briefly run one over (1–100, default 2); replies started a minute (1–10000, default 20); how long a call may take, in ms (1000–3600000, default 120000) — a reply first reads its attachments, which may take that long too, then calls the model, so one reply can take up to about twice the value. | defaults |
+| `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_RUNS_PER_MINUTE`, `AGENT_RUN_TIMEOUT_MS` | Model calls per person: running at once, replies and persona drafts together — further replies wait, a further draft is refused; a draft and a reply that start at the same moment may briefly run one over (1–100, default 2); replies started a minute (1–10000, default 20); how long a call may take, in ms (1000–3600000, default 120000) — a reply first reads its attachments, which may take that long too, then calls the model, so one reply can take up to about twice the value; a run still `running` after twice the value and a minute, with no instance working on it, is released by the stale-run sweep. | defaults |
 | `PROVIDER_DEFAULT_CONTEXT_TOKENS`, `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` | A provider model's context when its owner gives none (1000–2000000, default 16000) and the output limit of every call to a provider model (1–1000000, default 2048); the first must be larger than the second. | defaults |
 | `PROVIDER_MAX_CONCURRENT_CALLS` | Calls to model providers and site models in flight at once in the whole service (1–1000, default 64); one more is refused as `provider_unavailable`. | default |
 
@@ -80,9 +80,11 @@ start-up with a message naming the variable. Values in the right column are for 
   A deploy that starts the new container while the old one still runs posts and charges nothing twice: the new one's
   start-up ends the old one's Agent replies in progress (they fail retryable, the owner retries), and when the old
   one's model call finishes it posts and charges nothing more (`app/service/README.md`, Agents and runs, Recovery).
-  One gap remains: while both run, the old container's worker may still take up a queued reply; if it is stopped in
-  the middle of that one, the reply shows "replying" and its Agent answers nothing more until the service next starts
-  (a restart ends it as above). Keep the overlap short.
+  While both run, the old container's worker may still take up a queued reply; if it is stopped in the middle of that
+  one, the running container's stale-run sweep releases it (failed, retryable) within about twice
+  `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then that Agent shows "replying" and
+  answers nothing more, the reply takes one of its owner's `AGENT_MAX_CONCURRENT_RUNS` slots and, if it was admitted,
+  its hold still counts against the owner's points. Keep the overlap short.
 - **TLS terminates at the proxy** in front; the service speaks plain HTTP on `PORT` and must be reachable
   only through that proxy (otherwise a client could forge `CLIENT_IP_HEADER`). The proxy must pass WebSocket
   upgrades on `/api/ws`.

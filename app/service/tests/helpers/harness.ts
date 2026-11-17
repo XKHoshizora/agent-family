@@ -32,15 +32,17 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * `allowInsecureLocal` lets the app's providers reach a local stub over plain HTTP (src/providers/guard.ts).
  * `models` replaces the model gateway (a `scriptedGateway()` from helpers/models.ts), `providerProbe` how the provider
  * routes reach a provider. `agentWorker: false` turns the
- * reply worker's background loop off: the test then runs replies itself with `app.agentWorker.runOnce()`.
+ * reply worker's background loop off: the test then runs replies itself with `app.agentWorker.runOnce()`. The stale-run
+ * sweep's timer is off unless `staleRunSweep` asks for it (`app.staleRunSweep.run()` sweeps by hand).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe">> & { env?: Record<string, string> } & BuildOptions = {},
 ): { app: FastifyInstance; db: Db } {
-  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, ...overrides } = extra;
+  const { env, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, ...overrides } = extra;
   const options: BuildOptions = {
     answerFloor,
+    staleRunSweep,
     ...(logStream ? { logStream } : {}),
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
     ...(allowInsecureLocal ? { allowInsecureLocal } : {}),

@@ -389,7 +389,8 @@ export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseL
   let recovered = 0;
   for (const run of rows) {
     try {
-      if (await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log))) recovered++;
+      // Nothing is announced: no socket can be open yet, and the worker starts after this.
+      if ((await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log))) !== null) recovered++;
     } catch (err) {
       log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the next start");
     }
@@ -397,12 +398,15 @@ export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseL
   return recovered;
 }
 
-/** One run of `recoverRuns`; false when it was no longer running. */
-async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null, log: Pick<FastifyBaseLogger, "warn">): Promise<boolean> {
+/**
+ * One run of `recoverRuns` (and of `sweepStaleRuns`): null when it was no longer running, else what to tell its owner —
+ * the run as it ended and the follow-up queued, if any (a draft has no conversation: nothing).
+ */
+async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null, log: Pick<FastifyBaseLogger, "warn">): Promise<Announced[] | null> {
   // A reply has its Agent; a persona draft has none.
   const agent = agentId === null ? null : await lockAgent(t, agentId);
   const state = (await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [runId])).rows[0];
-  if (state?.status !== "running") return false;
+  if (state?.status !== "running") return null;
   const posted =
     agent === null
       ? null
@@ -421,8 +425,94 @@ async function recoverRun(t: Tx, config: Config, runId: string, agentId: string 
   const settled = (await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0;
   if (!settled) await settle(t, config, runId, null, NOTHING, end.status, new Date(), { forgiveAll: true, log });
   const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
-  await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [runId, end.status, error]);
-  const next = agent !== null && end.status !== "failed" ? followUpSeq(state, agent) : null;
-  if (agent !== null && next !== null) await queueRun(t, agent, next);
-  return true;
+  const updated = await t.query<RunRow>(
+    `update agent_runs as r set status = $2, error = $3, finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
+    [runId, end.status, error],
+  );
+  if (agent === null) return [];
+  const ended: Announced = { ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(updated.rows[0]!) };
+  const next = end.status !== "failed" ? followUpSeq(state, agent) : null;
+  return next === null ? [ended] : [ended, await queueRun(t, agent, next)];
+}
+
+/** How long a run must have been `running` before the stale-run sweep may release it: twice the run's time limit (the
+ * reading of its attachments, then its call) and a minute for posting and recording. */
+export const staleAfterMs = (config: Pick<Config, "agentRunTimeoutMs">): number => 2 * config.agentRunTimeoutMs + 60_000;
+
+/**
+ * The stale-run sweep (README "Agents and runs", Recovery): every run — reply or draft — that is `running`, has been
+ * since longer than `staleAfterMs`, and is not one this process is working on (`held`: its worker's runs and its drafts
+ * in flight) is released exactly as start-up recovery releases one (`recoverRun`, each in a transaction of its own under
+ * the same locks). Such a run's process died or stopped mid-call while another instance kept running (a deploy where two
+ * overlap), or its `finish` failed. Every run is bounded well within `staleAfterMs`, so one that is still being worked
+ * on elsewhere is past its time: `post` then refuses it (`RunNotRunning`) and nothing is recorded twice. A run that cannot
+ * be released is logged and tried again by the next sweep. Returns the runs released and what to tell their owners.
+ */
+export async function sweepStaleRuns(
+  db: Db,
+  config: Config,
+  log: Pick<FastifyBaseLogger, "error" | "warn">,
+  held: (runId: string) => boolean,
+): Promise<{ released: number; announced: Announced[] }> {
+  const { rows } = await db.query<{ id: string; agent_id: string | null }>(
+    `select id, agent_id from agent_runs
+      where status = 'running' and started_at < now() - ($1::bigint * interval '1 millisecond')
+      order by started_at, id`,
+    [staleAfterMs(config)],
+  );
+  let released = 0;
+  const announced: Announced[] = [];
+  for (const run of rows) {
+    if (held(run.id)) continue;
+    try {
+      const told = await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log));
+      if (told === null) continue;
+      released++;
+      announced.push(...told);
+      log.warn({ runId: run.id }, "agent run: released by the stale-run sweep (left running by a process that is gone)");
+    } catch (err) {
+      log.error({ err, runId: run.id }, "agent run: the stale-run sweep could not release it; the next sweep tries again");
+    }
+  }
+  return { released, announced };
+}
+
+/**
+ * Runs `sweep` once after `initialDelayMs` (default a minute), then every `intervalMs` (default a minute); never two at
+ * once. `stop` cancels the timers and waits for a sweep under way.
+ */
+export function startStaleRunSweep(
+  sweep: () => Promise<unknown>,
+  log: Pick<FastifyBaseLogger, "error">,
+  { initialDelayMs = 60_000, intervalMs = 60_000 }: { initialDelayMs?: number; intervalMs?: number } = {},
+): { stop(): Promise<void> } {
+  let stopped = false;
+  let inFlight: Promise<void> | undefined;
+  let every: NodeJS.Timeout | undefined;
+  const tick = (): void => {
+    if (stopped || inFlight) return;
+    inFlight = sweep()
+      .then(
+        () => undefined,
+        (err: unknown) => log.error({ err }, "the stale-run sweep failed; it runs again shortly"),
+      )
+      .finally(() => {
+        inFlight = undefined;
+      });
+  };
+  const first = setTimeout(() => {
+    tick();
+    if (stopped) return;
+    every = setInterval(tick, intervalMs);
+    every.unref();
+  }, initialDelayMs);
+  first.unref();
+  return {
+    async stop() {
+      stopped = true;
+      clearTimeout(first);
+      if (every) clearInterval(every);
+      await inFlight;
+    },
+  };
 }

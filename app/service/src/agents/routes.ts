@@ -81,8 +81,11 @@ const toView = (a: AgentRow): z.infer<typeof agentView> => ({
 
 const deletedError = () => new AppError(409, "agent_deleted");
 
-/** Every route here is the owner's. Anyone else, and an id that is no Agent, gets the same 404. */
-export function registerAgentRoutes(app: FastifyInstance): void {
+/**
+ * Every route here is the owner's. Anyone else, and an id that is no Agent, gets the same 404. `draftRuns` holds the run
+ * ids of the persona drafts this process is working on (the stale-run sweep leaves them alone).
+ */
+export function registerAgentRoutes(app: FastifyInstance, { draftRuns }: { draftRuns: Set<string> }): void {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
 
@@ -156,7 +159,7 @@ export function registerAgentRoutes(app: FastifyInstance): void {
       drafts.add(closing);
       try {
         const written = await draftPersona(
-          { db, config, models: app.deps.models, log: req.log },
+          { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns },
           me.id,
           { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
           closing.signal,

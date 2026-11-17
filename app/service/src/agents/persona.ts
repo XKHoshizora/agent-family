@@ -287,6 +287,8 @@ export interface DraftDeps {
   config: Config;
   models: Pick<ModelGateway, "stream">;
   log: Pick<FastifyBaseLogger, "error" | "warn">;
+  /** The drafts this process is working on, by run id (the stale-run sweep leaves them alone). */
+  inFlight: Set<string>;
 }
 
 const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const;
@@ -312,7 +314,7 @@ const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const
  * Returns `draftText` of what the model wrote.
  */
 export async function draftPersona(deps: DraftDeps, ownerId: string, input: DraftInput, closing: AbortSignal): Promise<string> {
-  const { db, config, models, log } = deps;
+  const { db, config, models, log, inFlight } = deps;
   const system = DRAFT_INSTRUCTION;
   const data = draftData(input);
   const inputChars = estimateTokens(system) + estimateTokens(data);
@@ -346,70 +348,76 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
     return { runId, call: resolved.call };
   });
 
-  const deadline = AbortSignal.timeout(config.agentRunTimeoutMs);
-  let text = "";
-  let reasoning = "";
-  let finished: { usage: Usage | null } | null = null;
-  let failure: ModelErrorCode | null = null;
+  // From here until the draft has ended, the run is this process's: the stale-run sweep leaves it alone.
+  inFlight.add(started.runId);
   try {
-    const stream = models.stream({
-      ...started.call,
-      system,
-      messages: [{ role: "user", parts: [{ type: "text", text: data }] }],
-      reasoning: "none",
-      signal: AbortSignal.any([closing, deadline]),
-    });
-    for await (const event of stream) {
-      if (event.type === "finish") {
-        finished = { usage: event.usage };
-        break;
+    const deadline = AbortSignal.timeout(config.agentRunTimeoutMs);
+    let text = "";
+    let reasoning = "";
+    let finished: { usage: Usage | null } | null = null;
+    let failure: ModelErrorCode | null = null;
+    try {
+      const stream = models.stream({
+        ...started.call,
+        system,
+        messages: [{ role: "user", parts: [{ type: "text", text: data }] }],
+        reasoning: "none",
+        signal: AbortSignal.any([closing, deadline]),
+      });
+      for await (const event of stream) {
+        if (event.type === "finish") {
+          finished = { usage: event.usage };
+          break;
+        }
+        if (event.type === "text") text += event.delta;
+        else reasoning += event.delta;
       }
-      if (event.type === "text") text += event.delta;
-      else reasoning += event.delta;
+    } catch (err) {
+      if (closing.aborted) throw new AppError(503, "busy");
+      if (!deadline.aborted) {
+        failure = err instanceof ModelError ? err.code : "provider_unavailable";
+        if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "persona draft: the model call failed unexpectedly");
+      }
     }
-  } catch (err) {
-    if (closing.aborted) throw new AppError(503, "busy");
-    if (!deadline.aborted) {
-      failure = err instanceof ModelError ? err.code : "provider_unavailable";
-      if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "persona draft: the model call failed unexpectedly");
-    }
-  }
 
-  const persona = draftText(text);
-  const end =
-    failure !== null
-      ? ({ status: "failed", error: failure } as const)
-      : (finished === null && !deadline.aborted) || !hasVisibleText(persona)
-        ? UNAVAILABLE
-        : ({ status: "done" } as const);
-  const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
-  let endedElsewhere: string | null = null;
-  try {
-    await db.tx(async (t) => {
-      // The run row first (the order `settle` keeps): one that is no longer running was ended elsewhere meanwhile —
-      // another instance's recovery or the stale-run sweep settled it already; nothing more is recorded.
-      const now = await t.query<{ status: string }>("select status from agent_runs where id = $1 for update", [started.runId]);
-      if (now.rows[0]?.status !== "running") {
-        endedElsewhere = now.rows[0]?.status ?? "gone";
-        return;
-      }
-      await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { log });
-      await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
-        started.runId,
-        end.status,
-        end.status === "failed" ? end.error : null,
-      ]);
-    });
-  } catch (err) {
-    // Nothing of it was recorded: the run stays running, its hold counting, until the stale-run sweep or the next start
-    // releases it.
-    log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
-    throw err;
+    const persona = draftText(text);
+    const end =
+      failure !== null
+        ? ({ status: "failed", error: failure } as const)
+        : (finished === null && !deadline.aborted) || !hasVisibleText(persona)
+          ? UNAVAILABLE
+          : ({ status: "done" } as const);
+    const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
+    let endedElsewhere: string | null = null;
+    try {
+      await db.tx(async (t) => {
+        // The run row first (the order `settle` keeps): one that is no longer running was ended elsewhere meanwhile —
+        // another instance's recovery or the stale-run sweep settled it already; nothing more is recorded.
+        const now = await t.query<{ status: string }>("select status from agent_runs where id = $1 for update", [started.runId]);
+        if (now.rows[0]?.status !== "running") {
+          endedElsewhere = now.rows[0]?.status ?? "gone";
+          return;
+        }
+        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { log });
+        await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
+          started.runId,
+          end.status,
+          end.status === "failed" ? end.error : null,
+        ]);
+      });
+    } catch (err) {
+      // Nothing of it was recorded: the run stays running, its hold counting, until the stale-run sweep or the next start
+      // releases it.
+      log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
+      throw err;
+    }
+    if (endedElsewhere !== null) {
+      log.warn({ runId: started.runId, status: endedElsewhere }, "persona draft: ended elsewhere (another instance's recovery or the stale-run sweep) before it was settled; answered busy");
+      throw new AppError(503, "busy");
+    }
+    if (end.status === "failed") throw new ModelError(end.error);
+    return persona;
+  } finally {
+    inFlight.delete(started.runId);
   }
-  if (endedElsewhere !== null) {
-    log.warn({ runId: started.runId, status: endedElsewhere }, "persona draft: ended elsewhere (another instance's recovery or the stale-run sweep) before it was settled; answered busy");
-    throw new AppError(503, "busy");
-  }
-  if (end.status === "failed") throw new ModelError(end.error);
-  return persona;
 }
