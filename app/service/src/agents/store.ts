@@ -7,6 +7,10 @@ import { lockProviderModels } from "../providers/store.ts";
 
 export type ReplyMode = "always" | "mention";
 
+export const GROUP_MENTIONS = ["members", "owner"] as const;
+/** Who may call the Agent with `@` in a group it is in: every member, or its owner only. The owner's setting. */
+export type GroupMentions = (typeof GROUP_MENTIONS)[number];
+
 /** What the Agent answers with; `null` until the owner has chosen. */
 export type AgentModel = { source: "site"; id: string } | { source: "provider"; providerId: string; model: string } | null;
 
@@ -23,6 +27,7 @@ export interface AgentRow {
   persona: string;
   personaVersion: number;
   replyMode: ReplyMode;
+  groupMentions: GroupMentions;
   reasoning: ReasoningLevel;
   model: AgentModel;
   paused: boolean;
@@ -43,6 +48,7 @@ interface AgentDbRow {
   persona: string;
   persona_version: number;
   reply_mode: ReplyMode;
+  group_mentions: GroupMentions;
   reasoning: ReasoningLevel;
   model_source: "site" | "provider" | null;
   site_model_id: string | null;
@@ -55,7 +61,7 @@ interface AgentDbRow {
 }
 
 const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
-       a.persona_version, a.reply_mode, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
+       a.persona_version, a.reply_mode, a.group_mentions, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
   from agents a
   join principals p on p.id = a.principal_id
@@ -79,6 +85,7 @@ function toAgent(r: AgentDbRow): AgentRow {
     persona: r.persona,
     personaVersion: r.persona_version,
     replyMode: r.reply_mode,
+    groupMentions: r.group_mentions,
     reasoning: r.reasoning,
     model,
     paused: r.paused,
@@ -193,6 +200,7 @@ export interface AgentPatch {
   field?: string;
   persona?: string;
   replyMode?: ReplyMode;
+  groupMentions?: GroupMentions;
   reasoning?: ReasoningLevel;
   model?: AgentModel;
 }
@@ -202,10 +210,10 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
   const next = { ...current, ...patch };
   const personaVersion = next.persona === current.persona ? current.personaVersion : current.personaVersion + 1;
   await t.query(
-    `update agents set intro = $2, field = $3, persona = $4, persona_version = $5, reply_mode = $6, reasoning = $7,
-            model_source = $8, site_model_id = $9, provider_id = $10, provider_model = $11
+    `update agents set intro = $2, field = $3, persona = $4, persona_version = $5, reply_mode = $6, group_mentions = $7,
+            reasoning = $8, model_source = $9, site_model_id = $10, provider_id = $11, provider_model = $12
       where principal_id = $1`,
-    [current.id, next.intro, next.field, next.persona, personaVersion, next.replyMode, next.reasoning, ...modelParams(next.model)],
+    [current.id, next.intro, next.field, next.persona, personaVersion, next.replyMode, next.groupMentions, next.reasoning, ...modelParams(next.model)],
   );
   if (next.name !== current.name) await t.query("update principals set display_name = $2 where id = $1", [current.id, next.name]);
   return { ...next, personaVersion };

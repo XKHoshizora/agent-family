@@ -11,7 +11,17 @@ import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
 import { ownedAgentOf } from "./runs.ts";
-import { agentLimit, assertModelChoice, countLiveAgents, lockAgent, modelParams, type AgentModel, type AgentRow, type ReplyMode } from "./store.ts";
+import {
+  agentLimit,
+  assertModelChoice,
+  countLiveAgents,
+  lockAgent,
+  modelParams,
+  type AgentModel,
+  type AgentRow,
+  type GroupMentions,
+  type ReplyMode,
+} from "./store.ts";
 import type { ReasoningLevel } from "../config.ts";
 
 /** The most of a reply's reasoning that is stored; the rest is cut (it is never shown to a model again). */
@@ -29,6 +39,7 @@ export interface NewAgent {
   field: string;
   persona: string;
   replyMode: ReplyMode;
+  groupMentions: GroupMentions;
   reasoning: ReasoningLevel;
   model: AgentModel;
 }
@@ -64,10 +75,10 @@ export async function createAgent(
   }
   const personaVersion = input.persona === "" ? 0 : 1;
   const created = await t.query<{ created_at: Date }>(
-    `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, reasoning,
+    `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
                          model_source, site_model_id, provider_id, provider_model)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) returning created_at`,
-    [id, input.intro, input.field, input.persona, personaVersion, input.replyMode, input.reasoning, ...modelParams(input.model)],
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) returning created_at`,
+    [id, input.intro, input.field, input.persona, personaVersion, input.replyMode, input.groupMentions, input.reasoning, ...modelParams(input.model)],
   );
   const conversation = await t.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [ownerId]);
   const conversationId = conversation.rows[0]!.id;
@@ -94,6 +105,7 @@ export async function createAgent(
     persona: input.persona,
     personaVersion,
     replyMode: input.replyMode,
+    groupMentions: input.groupMentions,
     reasoning: input.reasoning,
     model: input.model,
     paused: false,

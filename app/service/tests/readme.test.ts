@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { AUTH_BASE_PATH, AUTH_ENDPOINTS } from "../src/auth/auth.ts";
+import { signUp } from "./helpers/actors.ts";
+import { mustCreateAgent } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 
 /**
  * README.md is the client contract: its route reference has one heading per route (`#### \`METHOD /path\``),
  * and that list must be exactly what the app serves (`app.routeList`, with the Better Auth mount's wildcard
- * replaced by the endpoints it lets through). A route added, removed or renamed without the README fails here.
+ * replaced by the endpoints it lets through). A route added, removed or renamed without the README fails here. So does
+ * a field an Agent answers with that its shape does not name.
  */
 
 const { app } = useApp();
@@ -44,5 +47,17 @@ describe("README route reference", () => {
     const gets = new Set(app.routeList.filter((r) => r.method === "GET").map((r) => r.url));
     for (const r of app.routeList.filter((x) => x.method === "HEAD" && x.derived)) expect([r.url, gets.has(r.url)]).toEqual([r.url, true]);
     expect(README).toContain("Every `GET` route also answers `HEAD`");
+  });
+});
+
+describe("README wire shapes", () => {
+  it("the Agent shape names every field an Agent answers with", async () => {
+    const owner = await signUp(app, "reader");
+    const agent = await mustCreateAgent(app, owner);
+    const shape = README.match(/^\*\*Agent\*\* \(owner only\): `(\{[^`]*\})`/m)?.[1];
+    expect(shape).toBeDefined();
+    expect(Object.keys(agent).filter((key) => !shape!.includes(`"${key}"`))).toEqual([]);
+    expect(Object.keys(agent)).toContain("groupMentions");
+    expect(shape).toContain(`"groupMentions": "members" | "owner"`);
   });
 });

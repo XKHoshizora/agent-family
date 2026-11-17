@@ -33,6 +33,7 @@ describe("creating an Agent", () => {
       persona: "",
       personaVersion: 0,
       replyMode: "always",
+      groupMentions: "members",
       reasoning: "none",
       model: null,
       paused: false,
@@ -95,6 +96,11 @@ describe("creating an Agent", () => {
       { field: "x".repeat(21) },
       { persona: "x".repeat(20_001) },
       { replyMode: "sometimes" },
+      { groupMentions: "everyone" },
+      { groupMentions: "Owner" },
+      { groupMentions: "" },
+      { groupMentions: null },
+      { groupMentions: ["owner"] },
       { reasoning: "extreme" },
       { ownerId: owner.id },
       { model: { source: "site" } },
@@ -185,6 +191,37 @@ describe("reading and editing", () => {
     expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { persona: "p2" })).json.personaVersion).toBe(2);
     expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, {})).json).toMatchObject({ persona: "p2", personaVersion: 2 });
     expect((await sync(owner)).principals.find((p: any) => p.id === agent.id).displayName).toBe("New");
+  });
+
+  it("groupMentions: members by default, owner when asked on create, changed by PATCH; nothing else changes with it", async () => {
+    const owner = await signUp(app, "gemma");
+    const chosen = await mustCreateAgent(app, owner, { groupMentions: "owner" });
+    expect(chosen.groupMentions).toBe("owner");
+    expect((await api(app, owner, "GET", `/api/agents/${chosen.id}`)).json).toEqual(chosen);
+    const agent = await mustCreateAgent(app, owner, { persona: "p" });
+    expect(agent.groupMentions).toBe("members");
+
+    const patched = await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { groupMentions: "owner" });
+    expect(patched).toEqual({ status: 200, json: { ...agent, groupMentions: "owner" } });
+    expect((await api(app, owner, "GET", "/api/agents")).json.agents.map((a: any) => [a.id, a.groupMentions])).toEqual([
+      [chosen.id, "owner"],
+      [agent.id, "owner"],
+    ]);
+    // An edit of something else keeps it.
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { intro: "x" })).json).toMatchObject({ groupMentions: "owner", intro: "x" });
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { groupMentions: "members" })).json).toMatchObject({ groupMentions: "members", personaVersion: 1 });
+    expect((await db.query("select group_mentions from agents where principal_id = $1", [agent.id])).rows).toEqual([{ group_mentions: "members" }]);
+
+    for (const groupMentions of ["everyone", "", null, 1, ["owner"], "MEMBERS"]) {
+      expect([groupMentions, await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { groupMentions })]).toEqual([
+        groupMentions,
+        { status: 400, json: { error: "invalid_request" } },
+      ]);
+    }
+    expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json.groupMentions).toBe("members");
+    // A deleted Agent's setting is not edited either.
+    await api(app, owner, "DELETE", `/api/agents/${agent.id}`);
+    expect(await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { groupMentions: "owner" })).toEqual({ status: 409, json: { error: "agent_deleted" } });
   });
 
   it("refuses the handle, the owner and any unknown key (400), and over-long texts", async () => {

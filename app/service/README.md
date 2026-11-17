@@ -370,14 +370,18 @@ Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its
 id that does not exist, byte for byte (`tests/enumeration.test.ts`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
-"always" | "mention", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "model": {"source": "site", "id"} |
-{"source": "provider", "providerId", "model"} | null, "paused", "deleted", "conversationId", "createdAt"}`.
+"always" | "mention", "groupMentions": "members" | "owner", "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max",
+"model": {"source": "site", "id"} | {"source": "provider", "providerId", "model"} | null, "paused", "deleted",
+"conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `groupMentions` says who may
+call the Agent with `@` in a group it is in: `members` (any member) or `owner` (you only); an Agent cannot be in a group
+yet, so for now it is only stored. Like everything here, it is shown to nobody but you.
 
 #### `POST /api/agents`
 
 *Session: required.* Body (no other key): `handle` (`^[a-z0-9_]{3,24}$`, never changes), `name` (1–20 characters,
 the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `persona` (≤ 20 000 characters), `replyMode`
-(default `always`), `reasoning` (default `none`), `model` (default `null`). → 201 Agent.
+(default `always`), `groupMentions` (`members` or `owner`, default `members`), `reasoning` (default `none`), `model`
+(default `null`). → 201 Agent.
 
 - 409 `handle_taken` (any person's or Agent's handle); 403 `agent_limit` when your Agents that are not deleted are
   as many as `AGENT_TIERS` gives your tier (a tier it no longer names gets the `free` number; counted under the
@@ -438,10 +442,10 @@ for `GET /api/agents`.
 #### `PATCH /api/agents/:id`
 
 *Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
-`persona`, `replyMode`, `reasoning`, `model` (`null` clears it), under the rules of creation; the model and the
-reasoning level are checked together when either is sent. A `persona` that differs from the stored one raises
-`personaVersion` by one. → 200 Agent; 400 `invalid_request` for a value, model or reasoning level that does not fit;
-409 `agent_deleted`; 404 `not_found` unless yours.
+`persona`, `replyMode`, `groupMentions`, `reasoning`, `model` (`null` clears it), under the rules of creation; the
+model and the reasoning level are checked together when either is sent. A `persona` that differs from the stored one
+raises `personaVersion` by one. → 200 Agent; 400 `invalid_request` for a value, model or reasoning level that does not
+fit; 409 `agent_deleted`; 404 `not_found` unless yours.
 
 #### `POST /api/agents/:id/pause`
 

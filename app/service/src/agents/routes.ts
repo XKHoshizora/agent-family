@@ -15,6 +15,7 @@ import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal,
 import { interruptRuns } from "./runs.ts";
 import {
   assertModelChoice,
+  GROUP_MENTIONS,
   listOwnedAgents,
   lockOwnedAgent,
   readOwnedAgent,
@@ -36,6 +37,7 @@ const chosenModel = (providerId: z.ZodType<string>) =>
 const modelChoice = (providerId: z.ZodType<string>) => chosenModel(providerId).nullable();
 const model = modelChoice(uuidParam);
 const replyMode = z.enum(["always", "mention"]);
+const groupMentions = z.enum(GROUP_MENTIONS);
 const reasoning = z.enum(REASONING_LEVELS);
 const intro = agentIntro;
 const field = agentField;
@@ -52,6 +54,7 @@ const agentView = z.object({
   persona: z.string(),
   personaVersion: z.number(),
   replyMode,
+  groupMentions,
   reasoning,
   model: modelChoice(z.string()),
   paused: z.boolean(),
@@ -60,7 +63,7 @@ const agentView = z.object({
   createdAt: z.string(),
 });
 
-/** An Agent as its owner sees it. */
+/** An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown. */
 const toView = (a: AgentRow): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
@@ -71,6 +74,7 @@ const toView = (a: AgentRow): z.infer<typeof agentView> => ({
   persona: a.persona,
   personaVersion: a.personaVersion,
   replyMode: a.replyMode,
+  groupMentions: a.groupMentions,
   reasoning: a.reasoning,
   model: a.model,
   paused: a.paused,
@@ -120,6 +124,7 @@ export function registerAgentRoutes(
           field: field.optional(),
           persona: persona.optional(),
           replyMode: replyMode.optional(),
+          groupMentions: groupMentions.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -137,6 +142,7 @@ export function registerAgentRoutes(
         field: b.field ?? "",
         persona: b.persona ?? "",
         replyMode: b.replyMode ?? "always",
+        groupMentions: b.groupMentions ?? "members",
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,
       };
@@ -212,6 +218,7 @@ export function registerAgentRoutes(
           field: field.optional(),
           persona: persona.optional(),
           replyMode: replyMode.optional(),
+          groupMentions: groupMentions.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),

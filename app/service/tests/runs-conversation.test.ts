@@ -133,7 +133,7 @@ describe("lockAgent", () => {
     const s = await setup("lena");
     const locked = await whileLocked(s.dedicated, () => db.tx((t) => lockAgent(t, s.agent.id, s.other)));
     // The Agent as it is: its dedicated conversation is still what it says.
-    expect(locked).toMatchObject({ id: s.agent.id, ownerId: s.owner.id, conversationId: s.dedicated });
+    expect(locked).toMatchObject({ id: s.agent.id, ownerId: s.owner.id, conversationId: s.dedicated, groupMentions: "members" });
     expect(await waitsFor(s.other, () => db.tx((t) => lockAgent(t, s.agent.id, s.other)))).toBe(true);
     expect(await waitsFor(s.dedicated, () => db.tx((t) => lockAgent(t, s.agent.id)))).toBe(true);
     expect(await waitsFor(s.other, () => db.tx((t) => lockAgent(t, s.agent.id)))).toBe(false);

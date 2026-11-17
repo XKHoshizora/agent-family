@@ -31,6 +31,8 @@ describe("an Agent is invisible to everyone but its owner", () => {
     const routes: Array<[string, string, unknown?, Buffer?]> = [
       ["GET", "/api/agents/:id"],
       ["PATCH", "/api/agents/:id", { intro: "mine now" }],
+      ["PATCH", "/api/agents/:id", { groupMentions: "owner" }],
+      ["PATCH", "/api/agents/:id", { groupMentions: "nobody" }],
       ["PATCH", "/api/agents/:id", { handle: "stolen" }],
       ["POST", "/api/agents/:id/pause"],
       ["POST", "/api/agents/:id/resume"],
@@ -105,13 +107,19 @@ describe("an Agent is invisible to everyone but its owner", () => {
 
   it("the stranger's sync and the owner's friends never mention the Agent", async () => {
     const [owner, stranger, friend] = [await signUp(app, "olga"), await signUp(app, "sid"), await signUp(app, "fay")];
-    const agent = await mustCreateAgent(app, owner);
+    const agent = await mustCreateAgent(app, owner, { groupMentions: "owner" });
     await befriend(app, owner, friend);
     await befriend(app, stranger, friend);
     for (const who of [stranger, friend]) {
       const view = await api(app, who, "GET", "/api/sync");
       const text = JSON.stringify(view.json);
-      expect([who.handle, text.includes(agent.id), text.includes(agent.handle), text.includes(agent.conversationId)]).toEqual([who.handle, false, false, false]);
+      expect([who.handle, text.includes(agent.id), text.includes(agent.handle), text.includes(agent.conversationId), text.includes("groupMentions")]).toEqual([
+        who.handle,
+        false,
+        false,
+        false,
+        false,
+      ]);
     }
     const social = JSON.stringify((await api(app, owner, "GET", "/api/social")).json);
     expect(social).not.toContain(agent.id);
@@ -182,16 +190,18 @@ describe("an Agent is invisible to everyone but its owner", () => {
       await mine.waitFor((e) => isAgent(e) && count() > before);
     };
     await step(() => api(app, owner, "PATCH", `/api/agents/${agent.id}`, { intro: "x" }));
+    await step(() => api(app, owner, "PATCH", `/api/agents/${agent.id}`, { groupMentions: "owner" }));
     await step(() => api(app, owner, "POST", `/api/agents/${agent.id}/pause`));
     await step(() => api(app, owner, "POST", `/api/agents/${agent.id}/resume`));
     await step(() =>
       app.inject({ method: "PUT", url: `/api/agents/${agent.id}/avatar`, headers: { cookie: owner.cookie, "content-type": "image/png" }, payload: PNG }),
     );
     await step(() => api(app, owner, "DELETE", `/api/agents/${agent.id}`));
-    expect(mine.events.filter(isAgent)).toHaveLength(5);
+    expect(mine.events.filter(isAgent)).toHaveLength(6);
     // The stranger's own traffic arrives; the Agent's never does. A push of their own, sent after everything above, is
     // awaited first: by the time it is there, an `agent` push meant for them would have come too.
     await api(app, stranger, "PATCH", `/api/agents/${agent.id}`, { intro: "mine" });
+    await api(app, stranger, "PATCH", `/api/agents/${agent.id}`, { groupMentions: "members" });
     const own = await app.inject({ method: "PUT", url: "/api/me/avatar", headers: { cookie: stranger.cookie, "content-type": "image/png" }, payload: PNG });
     expect(own.statusCode).toBe(200);
     await theirs.next((e) => e.type === "principal" && e.id === stranger.id);
