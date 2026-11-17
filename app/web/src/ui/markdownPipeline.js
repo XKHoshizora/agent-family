@@ -252,7 +252,8 @@ function rehypeKatexBudgeted() {
     let output = 0;
     const walk = (parent) => {
       parent.children = parent.children.flatMap((node) => {
-        if (node.type !== "element") return [node];
+        // (Nothing is typeset inside a link: a link's content is its plain text, a formula there its source.)
+        if (node.type !== "element" || node.tagName === "a") return [node];
         const formula = formulaOf(node);
         if (!formula) {
           walk(node);
@@ -409,16 +410,48 @@ function cleanElement(node, within) {
   return [element(tag, props, cleanChildren(node.children, within, tag))];
 }
 
+/** The most characters of a link's text that are shown; a longer one ends with an ellipsis. */
+const LINK_TEXT_MAX = 200;
+/** White space and separators of every kind (no-break and wide spaces, line and paragraph separators, line ends). */
+const SPACES = /[\s\p{Z}]+/gu;
+/** A text that shows nothing: only format characters, controls, separators, marks and ignorables. */
+const SHOWS_NOTHING = /^[\p{Cf}\p{Cc}\p{Z}\p{Mn}\p{Me}\p{Default_Ignorable_Code_Point}]*$/u;
+
 /**
- * A link with a safe href, or its text alone (also inside another link, and for a footnote's in-page links). The
- * text's own title is dropped: the main thread shows the real address as the tooltip and the real host after the text.
+ * A link's content as one plain text on one line: the text of whatever is in it (emphasis and code give theirs, a
+ * formula its source, an image its alt text, a line break a space), without bidirectional controls, every run of
+ * white space and separators as one space, trimmed, cut at LINK_TEXT_MAX characters. A text that shows nothing is the
+ * address itself. So what a link shows is a string the main thread can compare with its address, and nothing in it
+ * can hide, stack, split or reorder what is read.
+ */
+function linkText(node, href) {
+  let text = "";
+  const stack = [node];
+  while (stack.length > 0) {
+    const item = stack.pop();
+    if (item.type === "text" || item.type === "raw") text += item.value;
+    else if (item.type !== "element") continue;
+    else if (item.tagName === "br") text += " ";
+    else if (item.tagName === "img") text += typeof item.properties?.alt === "string" ? item.properties.alt : "";
+    else for (let i = (item.children ?? []).length - 1; i >= 0; i -= 1) stack.push(item.children[i]);
+  }
+  text = withoutBidiControls(text).replace(SPACES, " ").trim();
+  if (SHOWS_NOTHING.test(text)) return href;
+  if (text.length <= LINK_TEXT_MAX) return text;
+  const characters = Array.from(text);
+  return characters.length > LINK_TEXT_MAX ? `${characters.slice(0, LINK_TEXT_MAX).join("")}…` : text;
+}
+
+/**
+ * A link with a safe href and its content as one plain text (`linkText`), or — without a safe href, inside another
+ * link, for a footnote's in-page links — its content alone. The text's own title is dropped: the main thread shows the
+ * real address as the tooltip and the real host after the text.
  */
 function link(node, within) {
   if (node.properties?.dataFootnoteBackref !== undefined) return [];
-  const children = cleanChildren(node.children, { ...within, link: true });
   const href = within.link ? null : safeHref(node.properties?.href);
-  if (!href) return children;
-  return [element("a", { href }, children)];
+  if (!href) return cleanChildren(node.children, { ...within, link: true });
+  return [element("a", { href }, [linkText(node, href)])];
 }
 
 /** An image is its alt text (or its URL when there is none), as a link to it: never an <img>, never fetched. */
@@ -491,6 +524,24 @@ export function treeSize(nodes) {
   return { elements, depth };
 }
 
+/** Takes bidirectional controls out of every string of a plain tree (texts and prop values), in place. */
+function withoutBidiControlsIn(tree) {
+  const stack = [{ children: tree }];
+  while (stack.length > 0) {
+    const { props, children } = stack.pop();
+    for (const [name, value] of Object.entries(props ?? {})) {
+      if (typeof value === "string") props[name] = withoutBidiControls(value);
+      else if (Array.isArray(value)) props[name] = value.map(withoutBidiControls);
+      else if (value !== null && typeof value === "object") for (const [key, part] of Object.entries(value)) value[key] = withoutBidiControls(part);
+    }
+    for (let i = 0; i < (children?.length ?? 0); i += 1) {
+      if (typeof children[i] === "string") children[i] = withoutBidiControls(children[i]);
+      else stack.push(children[i]);
+    }
+  }
+  return tree;
+}
+
 /**
  * An Agent's text as a plain tree of allow-listed elements: `{ tree, elements }` (the tree: text as strings, elements
  * as `{ tag, props?, children? }`), or `{ plain: true, reason }` — "complex" when the text is beyond a limit (shown
@@ -508,7 +559,9 @@ export function renderToTree(text, { limits, now, skipChecks = false } = {}) {
     // Counted before the tree is rebuilt (which walks it), then once more as it is returned.
     const before = sizeOf(hast, merged.treeElements, merged.treeDepth);
     if (before.elements > merged.treeElements || before.depth > merged.treeDepth) return { plain: true, reason: "complex" };
-    const tree = cleanChildren(hast.children, { katex: false, link: false });
+    // Bidirectional controls were taken out of the source; the parser may have made more (from character references,
+    // from maths): they are taken out of everything that is returned.
+    const tree = withoutBidiControlsIn(cleanChildren(hast.children, { katex: false, link: false }));
     const { elements, depth } = treeSize(tree);
     if (elements > merged.treeElements || depth > merged.treeDepth) return { plain: true, reason: "complex" };
     return { tree, elements };

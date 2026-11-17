@@ -45,3 +45,26 @@ export const LINK_CASES = [
   ["footnote-ish label", "[bank.example][r]\n\n[r]: https://evil.example/"],
   ["very long real host for the note", `[x.example](https://${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(57)}.example/)`],
 ];
+
+// The fourth review's forgeries (task-5-round3-review.md, Critical 1 (i)–(iii); rr4 links.mjs), verbatim: a link whose
+// text showed a trusted address and no host note. Rendered by tests/markdown-links.test.jsx.
+export const R4_LINK_CASES = [
+  ["(i) a bidi override as a character reference", "[https://&#x202E;evil.example/moc.elgoog.stnuocca](https://evil.example/moc.elgoog.stnuocca)"],
+  ["(i) the same, decimal", "[https://&#8238;evil.example/moc.elgoog](https://evil.example/moc.elgoog)"],
+  ["(i) the override as the whole host text", "[&#x202E;moc.elgoog](https://evil.example/)"],
+  [
+    "(ii) hidden text inside maths, equal through the decoded address",
+    "[$$\rlap{\phantom{\text{https://evil.example/}}}\text{https://google.com}$$](<https://evil.example/https://google.com%5Crlap%7B%5Cphantom%7B%5Ctext%7Bhttps://evil.example/%7D%7D%7D%5Ctext%7Bhttps://google.com%7Dhttps://evil.example/https://google.com>)",
+  ],
+  ["(iii) a line break splitting the visible host", "[https://accounts.google.com\n.evil.example/login](https://accounts.google.com.evil.example/login)"],
+  ["(iii) 300 no-break spaces", "[https://accounts.google.com" + "\u00a0".repeat(300) + ".evil.example/](https://accounts.google.com.evil.example/)"],
+  ["(iii) 300 em spaces", "[https://accounts.google.com" + "\u2003".repeat(300) + ".evil.example/](https://accounts.google.com.evil.example/)"],
+  ["(iii) 30 hard breaks", "[https://accounts.google.com" + "\\n".repeat(30) + ".evil.example/](https://accounts.google.com.evil.example/)"],
+  ["a tab in the host", "[https://accounts.google.com\t.evil.example/](https://accounts.google.com.evil.example/)"],
+  ["a percent-decoded address as the text", "[https://evil.example/google.com](https://evil.example/%67oogle.com)"],
+  ["the host alone as the text", "[google.com](https://google.com/x)"],
+  ["the host in capitals", "[GOOGLE.COM](https://google.com/x)"],
+  ["www. before the host", "[www.evil.example](https://evil.example/a)"],
+  ["a zero-width space in the host", "[goo\u200bgle.com](https://google.com/)"],
+  ["full-width address", "[ｈｔｔｐｓ://ｅｖｉｌ.ｅｘａｍｐｌｅ](https://evil.example/)"],
+];

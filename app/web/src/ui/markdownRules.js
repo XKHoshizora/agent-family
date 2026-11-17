@@ -17,10 +17,15 @@ export function safeHref(value) {
 
 /**
  * Bidirectional controls (embeddings, overrides, isolates, marks): removed from an Agent's text before anything shows
- * it, so that nothing it writes can reorder what surrounds it (a link's host note, the page's own text).
+ * it, so that nothing it writes can reorder what surrounds it (a link's host note, the page's own text). From the
+ * source, and again from every string of the tree made from it (a control can be written as a character reference,
+ * which only the parser turns into the character), in the worker and in the main thread's check. Written with escapes:
+ * never the invisible characters themselves.
  */
-const BIDI_CONTROLS = /[‪-‮⁦-⁩‎‏؜]/g;
+const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/g;
 export const withoutBidiControls = (text) => (typeof text === "string" ? text.replace(BIDI_CONTROLS, "") : "");
+const BIDI_CONTROL = new RegExp(BIDI_CONTROLS.source);
+export const hasBidiControls = (text) => BIDI_CONTROL.test(text);
 
 /** The most one text's tree may have: elements and their depth (beyond: the text is shown plain, with the note). */
 export const TREE_ELEMENTS = 3000;

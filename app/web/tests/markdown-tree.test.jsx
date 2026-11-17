@@ -9,7 +9,7 @@ import { AgentText, loadMarkdown } from "../src/ui/AgentText.jsx";
 import { RichTree } from "../src/ui/Markdown.jsx";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
 import { TREE_ELEMENTS } from "../src/ui/markdownRules.js";
-import { linkHost, shownHost, validateTree } from "../src/ui/markdownTree.js";
+import { shownHost, validateTree } from "../src/ui/markdownTree.js";
 import { SLOW_TEXT_NOTE } from "../src/ui/slowTexts.jsx";
 import { SilentWorker, settle, useWorkers } from "./markdown-worker.js";
 
@@ -83,6 +83,30 @@ describe("validateTree", () => {
     expect(performance.now() - started).toBeLessThan(1000);
   });
 
+  it("counts an element's props, a style's declarations and a node's keys before reading any of them", () => {
+    let reads = 0;
+    const counted = (n, value) => {
+      const object = {};
+      for (let i = 0; i < n; i += 1) {
+        Object.defineProperty(object, `k${i}`, {
+          enumerable: true,
+          get() {
+            reads += 1;
+            return value;
+          },
+        });
+      }
+      return object;
+    };
+    expect(validateTree([{ tag: "span", props: counted(51, "x"), children: ["x"] }]).ok).toBe(false);
+    expect(validateTree([{ tag: "span", props: { className: ["katex"], style: counted(21, "1em") } }]).ok).toBe(false);
+    expect(validateTree([Object.assign(counted(4, "x"), { tag: "p" })]).ok).toBe(false);
+    expect(reads).toBe(0);
+    const started = performance.now();
+    expect(validateTree([{ tag: "p", props: Object.fromEntries(Array.from({ length: 200000 }, (_, i) => [`k${i}`, "x"])) }]).ok).toBe(false);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("refuses a tree 10 000 deep without overflowing the stack; 60 deep is fine, 61 is not", () => {
     expect(validateTree(deep(10000)).ok).toBe(false);
     expect(validateTree(deep(60)).ok).toBe(true);
@@ -133,35 +157,7 @@ describe("RichTree", () => {
   });
 });
 
-describe("linkHost", () => {
-  it.each([
-    ["文档", "https://docs.example/a", "docs.example"],
-    ["文档", "https://www.docs.example/a", "docs.example"],
-    ["文档", "https://evil.example:8443/", "evil.example:8443"],
-    ["https://bank.example/", "https://evil.example/", "evil.example"],
-    ["bаnk.example", "https://bank.example/", "bank.example"],
-    ["https://apple.com/", "https://xn--80ak6aa92e.com/", "xn--80ak6aa92e.com"],
-  ])("%s → %s shows %s", (text, href, host) => {
-    expect(linkHost(text, href)).toEqual({ label: null, host });
-  });
-
-  it.each([
-    ["https://example.com/a", "https://example.com/a"],
-    ["https://example.com", "https://example.com/"],
-    ["example.com", "https://example.com/a"],
-    ["www.example.com", "https://example.com/a"],
-    ["example.com", "https://www.example.com/a"],
-    ["EXAMPLE.COM", "https://example.com/"],
-    ["https://example.com/文档", "https://example.com/%E6%96%87%E6%A1%A3"],
-    ["exa​mple.com", "https://example.com/"],
-  ])("%s is the address of %s: no host after it", (text, href) => {
-    expect(linkHost(text, href)).toEqual({ label: null, host: null });
-  });
-
-  it("a text that shows nothing is replaced by the address", () => {
-    expect(linkHost("​⁠ ", "https://a.example/x")).toEqual({ label: "https://a.example/x", host: null });
-  });
-
+describe("shownHost", () => {
   it("a host over 40 characters keeps its last 39", () => {
     const host = `${"a".repeat(50)}.example`;
     expect(shownHost(`https://${host}/`)).toBe(`…${host.slice(-39)}`);

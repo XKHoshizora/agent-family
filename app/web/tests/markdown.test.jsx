@@ -196,10 +196,10 @@ describe("what an Agent's Markdown renders to", () => {
     expectSafe(bubble);
   });
 
-  it("autolinked www. and bare URLs are links like any other, without the host repeated after them", async () => {
+  it("autolinked www. and bare URLs are links like any other; only a text that is exactly the address has no host after it", async () => {
     const bubble = await show("见 www.example.com 和 https://bare.example/path 以及 <https://angle.example>");
     expect(hrefs(bubble)).toEqual(["http://www.example.com/", "https://bare.example/path", "https://angle.example/"]);
-    for (const a of bubble.querySelectorAll("a")) expect(hostAfter(a), a.textContent).toBeNull();
+    expect([...bubble.querySelectorAll("a")].map(hostAfter)).toEqual(["（example.com）", null, null]);
     expectSafe(bubble);
   });
 
@@ -331,15 +331,22 @@ describe("every link shows where it goes", () => {
   it.each([
     ["the address itself", "[https://example.com/docs](https://example.com/docs)"],
     ["the address without its final slash", "[https://example.com](https://example.com/)"],
+    ["a bare autolink", "https://example.com/docs"],
+  ])("a link whose text is exactly its address shows no duplicate: %s", async (_, text) => {
+    const bubble = await show(text);
+    expect(hostAfter(bubble.querySelector("a"))).toBeNull();
+  });
+
+  // (Round 4: nothing but the exact address is exempt; these showed no host before.)
+  it.each([
     ["the host", "[example.com](https://example.com/b)"],
     ["the host with www.", "[www.example.com](https://example.com/b)"],
     ["the host without www.", "[example.com](https://www.example.com/b)"],
-    ["a bare autolink", "https://example.com/docs"],
     ["the address in another case", "[HTTPS://EXAMPLE.COM/](https://example.com/)"],
     ["the address with its path unencoded", "[https://example.com/文档](https://example.com/文档)"],
-  ])("a link whose text is its address shows no duplicate: %s", async (_, text) => {
+  ])("a link whose text only resembles its address shows its host: %s", async (_, text) => {
     const bubble = await show(text);
-    expect(hostAfter(bubble.querySelector("a"))).toBeNull();
+    expect(hostAfter(bubble.querySelector("a"))).toBe("（example.com）");
   });
 
   it("a link whose text shows nothing is labelled by its address", async () => {
