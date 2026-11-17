@@ -706,7 +706,14 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
      * more, not even by an answer already on its way.
      */
     dismissRun: (conversationId, agentId = null) => {
-      const failed = heldRun(conversationId, agentId)?.id ?? null;
+      const held = heldRun(conversationId, agentId);
+      const failed = held?.id ?? null;
+      // A group's reply that ended without failing (halted, its Agent taken out): the service keeps nothing to dismiss
+      // (and the Agent may be gone from the group), so the line is closed here only.
+      if (agentId && held && held.status !== "failed") {
+        setModel(dismissGroupRunOf(getModel(), conversationId, agentId, held.id));
+        return Promise.resolve({ ok: true, value: null });
+      }
       return attempt(() => (agentId ? api.dismissRun(conversationId, agentId) : api.dismissRun(conversationId)), {
         after: () => {
           if (failed === null) return;

@@ -959,8 +959,9 @@ describe("Agents in a group (batch 2C)", () => {
     expect(unavailableLines()).toHaveLength(0);
   });
 
-  it("halted, or taken out of the group while replying: the owner is told why, with nothing to retry", async () => {
-    const { transport } = await openGroup();
+  it("halted, or taken out of the group while replying: the owner is told why, with nothing to retry; closing it asks nothing", async () => {
+    const dismissRun = vi.fn(async () => ({ ok: true }));
+    const { transport } = await openGroup([], { api: { dismissRun } });
     await push(transport, groupRun(AG1, { run: runOf(R1, "cancelled", { error: "halted", retryable: true }) }));
     expect(statusLine().textContent).toContain("小助手：已被群成员叫停");
     expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
@@ -968,7 +969,10 @@ describe("Agents in a group (batch 2C)", () => {
     expect(statusLines()).toHaveLength(1);
     expect(statusLine().textContent).toContain("小助手：它已不在这个群里");
     expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
-    expect(within(statusLine()).getByRole("button", { name: "关闭提示" })).toBeTruthy();
+    // (Nothing failed: the service keeps nothing to dismiss, and the Agent may be gone from the group.)
+    await click(within(statusLine()).getByRole("button", { name: "关闭提示" }));
+    expect(statusLines()).toHaveLength(0);
+    expect(dismissRun).not.toHaveBeenCalled();
   });
 
   it("opening the group loads its Agents' replies; an Agent conversation does not", async () => {
