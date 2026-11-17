@@ -6,7 +6,7 @@ import { notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
-import { normaliseBaseUrl } from "./guard.ts";
+import { providerBaseUrl } from "./base-url.ts";
 import { KeyUnreadableError } from "./crypto.ts";
 import { modelHints } from "./hints.ts";
 import { ProviderCallError, toProviderCallError, type ProviderCallCode } from "./probe.ts";
@@ -150,17 +150,15 @@ export function registerProviderRoutes(
   const writeLimit = perPrincipalLimit(app, 20);
   const callLimit = perPrincipalLimit(app, 10);
 
+  /**
+   * An address as typed, checked: what is stored depends on the protocol too (`providerBaseUrl`), so the handlers make
+   * it; whether it may be one does not.
+   */
   const baseUrl = z
     .string()
     .max(1000)
-    .transform((raw, ctx) => {
-      const normalised = normaliseBaseUrl(raw, allowInsecureLocal);
-      if (normalised === null) {
-        ctx.addIssue({ code: "custom", message: "not an https URL a provider can have" });
-        return z.NEVER;
-      }
-      return normalised;
-    });
+    .refine((typed) => providerBaseUrl("openai_chat", typed, allowInsecureLocal) !== null, "not an https URL a provider can have");
+  const storedBaseUrl = (protocol: Protocol, typed: string): string => providerBaseUrl(protocol, typed, allowInsecureLocal)!;
   /** Models as given, with the conservative defaults filled in. */
   const withDefaults = (list: z.infer<typeof modelList>): ProviderModel[] =>
     list.map((m) => ({
@@ -209,7 +207,12 @@ export function registerProviderRoutes(
       await writeLimit(req, me.id);
       const b = req.body;
       const created = await db.tx((t) =>
-        createProvider(t, me.id, { name: b.name, protocol: b.protocol, baseUrl: b.baseUrl, apiKey: b.apiKey, models: withDefaults(b.models ?? []) }, secret),
+        createProvider(
+          t,
+          me.id,
+          { name: b.name, protocol: b.protocol, baseUrl: storedBaseUrl(b.protocol, b.baseUrl), apiKey: b.apiKey, models: withDefaults(b.models ?? []) },
+          secret,
+        ),
       );
       return reply.code(201).send(toView(created));
     },
@@ -247,7 +250,7 @@ export function registerProviderRoutes(
           req.params.id,
           {
             ...(b.name === undefined ? {} : { name: b.name }),
-            ...(b.baseUrl === undefined ? {} : { baseUrl: b.baseUrl }),
+            ...(b.baseUrl === undefined ? {} : { baseUrl: (protocol: Protocol) => storedBaseUrl(protocol, b.baseUrl!) }),
             ...(b.apiKey === undefined ? {} : { apiKey: b.apiKey }),
             ...(b.models === undefined ? {} : { models: withDefaults(b.models) }),
           },

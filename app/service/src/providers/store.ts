@@ -118,7 +118,7 @@ export async function listProviders(q: Queryable, ownerId: string): Promise<Prov
 export interface NewProvider {
   name: string;
   protocol: Protocol;
-  /** Already normalised (guard.ts `normaliseBaseUrl`). */
+  /** Already as stored (base-url.ts `providerBaseUrl`). */
   baseUrl: string;
   apiKey: string;
   models: ProviderModel[];
@@ -157,8 +157,11 @@ async function lockOwnedProvider(t: Tx, ownerId: string, id: string): Promise<Pr
 
 export interface ProviderPatch {
   name?: string;
-  /** Already normalised. */
-  baseUrl?: string;
+  /**
+   * The new address as stored, given the provider's protocol (which never changes): what the owner typed, through
+   * base-url.ts `providerBaseUrl`.
+   */
+  baseUrl?: (protocol: Protocol) => string;
   /** A new key, sealed again; absent: the stored one stays. */
   apiKey?: string;
   /** Replaces the list. */
@@ -181,12 +184,13 @@ function originOf(baseUrl: string): string | null {
  */
 export async function updateProvider(t: Tx, ownerId: string, id: string, patch: ProviderPatch, secret: string): Promise<ProviderRow> {
   const current = await lockOwnedProvider(t, ownerId, id);
-  if (patch.baseUrl !== undefined && patch.apiKey === undefined) {
-    const next = originOf(patch.baseUrl);
+  const nextBaseUrl = patch.baseUrl?.(current.protocol);
+  if (nextBaseUrl !== undefined && patch.apiKey === undefined) {
+    const next = originOf(nextBaseUrl);
     if (next === null || next !== originOf(current.baseUrl)) throw new AppError(400, "invalid_request");
   }
   const name = patch.name ?? current.name;
-  const baseUrl = patch.baseUrl ?? current.baseUrl;
+  const baseUrl = nextBaseUrl ?? current.baseUrl;
   const models = patch.models ?? current.models;
   const { rows } = await uniqueName(() =>
     patch.apiKey === undefined
