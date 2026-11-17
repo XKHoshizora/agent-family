@@ -361,16 +361,18 @@ describe("the service starting to close while a reply waits for its admission", 
 });
 
 describe("a second instance started while the first still answers (a deploy where old and new overlap)", () => {
-  it("the new one's recovery ends the old one's reply; the old one then posts nothing and records nothing more", async () => {
+  it("the new one's recovery ends the old one's reply; the old one then posts nothing and records nothing more, and tells its owner how the run stands", async () => {
     const before = scriptedGateway();
     const old = await start(before);
     const { owner, agent, conv } = await owned(old, "overlap");
+    const socket = await connect(old, owner);
     const hold = before.hang();
     await say(old, owner, conv, "你好");
     const running = old.agentWorker.runOnce();
     await hold.reached;
     const run = await latestRun(old, owner, conv);
     expect(run).toMatchObject({ status: "running" });
+    const runningAt = await socket.waitFor((e) => e.type === "run" && e.run.id === run.id && e.run.status === "running");
 
     // The new instance starts: its recovery ends the run as one the previous process left running.
     const after = scriptedGateway();
@@ -385,6 +387,48 @@ describe("a second instance started while the first still answers (a deploy wher
     expect(await statusOf(run.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
     expect(await records(run.id)).toEqual([{ outcome: "failed", source: "site", model: "fast", estimated: true, cost: "0", free: "0", balance: "0" }]);
     expect(after.calls).toHaveLength(0);
+    // Its sockets were told it was running; they are now told how it ended, so no "replying" stays shown.
+    expect((await socket.next((e) => e.type === "run" && e.run.id === run.id, { from: runningAt + 1, timeoutMs: 2000 })).run).toEqual({
+      id: run.id,
+      status: "failed",
+      error: "provider_unavailable",
+      retryable: true,
+    });
+  });
+});
+
+describe("a run's stop and silence flags", () => {
+  it("are forgotten when the stale-run sweep releases the run, and when finish fails", async () => {
+    const failing = { on: false };
+    const app = await start(scriptedGateway(), store.blobs, undefined, {
+      get pool() {
+        return db.pool;
+      },
+      query: ((...args: unknown[]) => (db.query as (...a: unknown[]) => unknown)(...args)) as Db["query"],
+      tx: (fn) => (failing.on ? Promise.reject(new Error("the database refused")) : db.tx(fn)),
+      close: async () => {},
+    });
+    const swept = await owned(app, "flagsswept");
+    await say(app, swept.owner, swept.conv, "你好");
+    const left = (await app.agentPort.claimNext())!;
+    await app.agentPort.begin(left);
+    expect((await api(app, swept.owner, "POST", `/api/agents/${swept.agent.id}/pause`)).status).toBe(200);
+    expect(app.agentPort.shouldStop(left)).toBe(true);
+    await db.query("update agent_runs set started_at = now() - interval '10 minutes' where id = $1", [left.id]);
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(app.agentPort.shouldStop(left)).toBe(false);
+
+    const thrown = await owned(app, "flagsthrown");
+    await say(app, thrown.owner, thrown.conv, "你好");
+    const ticket = (await app.agentPort.claimNext())!;
+    await app.agentPort.begin(ticket);
+    app.agentPort.requestStop(ticket.id);
+    expect(app.agentPort.shouldStop(ticket)).toBe(true);
+    failing.on = true;
+    await expect(app.agentPort.finish(ticket, { status: "stopped" }, null, NOTHING)).rejects.toThrow("the database refused");
+    failing.on = false;
+    expect(app.agentPort.shouldStop(ticket)).toBe(false);
+    expect(await statusOf(ticket.id)).toMatchObject({ status: "running" }); // for the sweep or the next start
   });
 });
 

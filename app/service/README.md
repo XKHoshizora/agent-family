@@ -1642,7 +1642,10 @@ instance or the next start. Queued replies stay queued for the next start.
 A deploy may start the new instance while the old one is still answering (`tests/runs-restart.test.ts`, "a second
 instance"). The new one's recovery then ends the old one's runs as above; when the old one's call finishes, `post` finds
 its run no longer `running` (read under the same locks recovery takes) and stores nothing, and `finish` leaves the run as
-recovery recorded it: no message, no second usage record (logged at warn). While both run, both workers take queued
+recovery recorded it: no message, no second usage record (logged at warn) — and pushes the run as it now stands (`run`)
+to the owner's sockets on the old instance, which were told it was running, so no "replying" stays shown there. (The
+same holds for a run the stale-run sweep or a stop released meanwhile.) A run's in-process stop and silence flags are
+forgotten when it ends, when it is released, and when its `finish` fails. While both run, both workers take queued
 runs; a reply the old instance takes after the new one has started is ended by the old instance's own stop (Shutdown,
 above) when it is stopped in the middle of it, or, if the old instance is killed before that, left `running` with
 nobody working on it: the stale-run sweep (below) releases it.

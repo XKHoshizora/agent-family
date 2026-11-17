@@ -292,11 +292,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // worker's runs.
   const draftRuns = new Set<string>();
   const staleRunSweep = {
-    async run(): Promise<number> {
-      const { released, announced } = await sweepStaleRuns(deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id));
-      for (const told of announced) agentPort.announce(told); // to the owner's sockets; a queued follow-up wakes the worker
-      return released;
-    },
+    run: (): Promise<number> => sweepStaleRuns(agentPort, deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id)),
   };
   app.decorate("staleRunSweep", staleRunSweep);
   let staleTimer: { stop(): Promise<void> } | undefined;

@@ -324,15 +324,37 @@ export class DbAgentPort implements AgentPort {
    * One transaction under `lockAgent`: settles the call (it leaves `running` in the same transaction, so its hold
    * never stops counting before its cost lands) — at no charge when it failed on our side (`busy`: the reply could not
    * be stored) — records how the run ended (`recorded`), and queues the follow-up by `followUpSeq`. Announced after
-   * commit; the run's flags are forgotten then (a delta still waiting keeps its own).
+   * commit. A run ended elsewhere meanwhile (another instance's recovery, the stale-run sweep, a stop of a run this
+   * process was not seen working on) is left as that recorded it, and its owner is told how it stands now, so no
+   * "replying" stays shown. The run's flags are forgotten in any case, also when this throws (a delta still waiting
+   * keeps its own).
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
+    let result: { ended: Announced; followUp: Announced | null; interrupted: boolean } | null | undefined;
+    try {
+      result = await this.record(run, end, usage, fallback, new Date());
+    } finally {
+      // An interrupted run is silenced here too, whether or not the pause's own call (`interruptRuns`) came first.
+      const flags = this.flags.get(run.id);
+      if (flags && result?.interrupted) flags.silenced = true;
+      this.flags.delete(run.id);
+    }
+    if (!result) return;
+    this.announce(result.ended);
+    if (result.followUp) this.announce(result.followUp);
+  }
+
+  /** `finish`'s transaction: what to announce once it has committed, or null for a run that no longer exists. */
+  private record(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }, now: Date) {
     const { db, config } = this.deps;
-    const now = new Date();
-    const result = await db.tx(async (t) => {
+    return db.tx(async (t): Promise<{ ended: Announced; followUp: Announced | null; interrupted: boolean } | null> => {
       const agent = await lockAgent(t, run.agentId);
       const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
-      if (state.rows[0]?.status !== "running") return null;
+      if (state.rows[0]?.status !== "running") {
+        const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
+        if (!current.rows[0]) return null;
+        return { ended: { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) }, followUp: null, interrupted: false };
+      }
       const posted = await t.query("select 1 from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
         run.conversationId,
         run.agentId,
@@ -352,13 +374,6 @@ export class DbAgentPort implements AgentPort {
       const followUp = next === null ? null : await queueRun(t, agent, next);
       return { ended, followUp, interrupted: state.rows[0].interrupted !== null };
     });
-    // An interrupted run is silenced here too, whether or not the pause's own call (`interruptRuns`) came first.
-    const flags = this.flags.get(run.id);
-    if (flags && result?.interrupted) flags.silenced = true;
-    this.flags.delete(run.id);
-    if (!result) return;
-    this.announce(result.ended);
-    if (result.followUp) this.announce(result.followUp);
   }
 
   /** `AgentPort.release`: the worker's run, ended as recovery ends one (`releaseRun`). */
@@ -405,7 +420,8 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * posted or cancelled run is followed up by the one rule (`followUpSeq`: queued, for the worker about to start); a
  * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything. Queued runs are
  * left as they are. Nothing is pushed (no socket can be open yet): a client learns the state from `GET …/run`. A run
- * that cannot be recovered is logged and left for the next start. Returns how many were recovered.
+ * that cannot be recovered is logged and left for the stale-run sweep or the next start. Returns how many were
+ * recovered. The same ending, while the service runs, is `DbAgentPort.releaseRun` (one transaction of `recoverRun`).
  */
 export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseLogger, "error" | "warn">): Promise<number> {
   const { rows } = await db.query<{ id: string; agent_id: string | null }>(
@@ -417,7 +433,7 @@ export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseL
       // Nothing is announced: no socket can be open yet, and the worker starts after this.
       if ((await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log))) !== null) recovered++;
     } catch (err) {
-      log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the next start");
+      log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the stale-run sweep or the next start releases it");
     }
   }
   return recovered;
@@ -467,18 +483,20 @@ export const staleAfterMs = (config: Pick<Config, "agentRunTimeoutMs">): number 
 /**
  * The stale-run sweep (README "Agents and runs", Recovery): every run — reply or draft — that is `running`, has been
  * since longer than `staleAfterMs`, and is not one this process is working on (`held`: its worker's runs and its drafts
- * in flight) is released exactly as start-up recovery releases one (`recoverRun`, each in a transaction of its own under
- * the same locks). Such a run's process died or stopped mid-call while another instance kept running (a deploy where two
- * overlap), or its `finish` failed. Every run is bounded well within `staleAfterMs`, so one that is still being worked
- * on elsewhere is past its time: `post` then refuses it (`RunNotRunning`) and nothing is recorded twice. A run that cannot
- * be released is logged and tried again by the next sweep. Returns the runs released and what to tell their owners.
+ * in flight) is released exactly as start-up recovery releases one (`port.releaseRun`: `recoverRun`, each in a
+ * transaction of its own under the same locks; its owner is told, a follow-up wakes the worker, and its flags are
+ * forgotten). Such a run's process died mid-call while another instance kept running (a deploy where two overlap), its
+ * stop could not write its end, or its `finish` failed. Every run is bounded well within `staleAfterMs`, so one that is
+ * still being worked on elsewhere is past its time: `post` then refuses it (`RunNotRunning`) and nothing is recorded
+ * twice. A run that cannot be released is logged and tried again by the next sweep. Returns how many were released.
  */
 export async function sweepStaleRuns(
+  port: Pick<DbAgentPort, "releaseRun">,
   db: Db,
   config: Config,
   log: Pick<FastifyBaseLogger, "error" | "warn">,
   held: (runId: string) => boolean,
-): Promise<{ released: number; announced: Announced[] }> {
+): Promise<number> {
   const { rows } = await db.query<{ id: string; agent_id: string | null }>(
     `select id, agent_id from agent_runs
       where status = 'running' and started_at < now() - ($1::bigint * interval '1 millisecond')
@@ -486,20 +504,17 @@ export async function sweepStaleRuns(
     [staleAfterMs(config)],
   );
   let released = 0;
-  const announced: Announced[] = [];
   for (const run of rows) {
     if (held(run.id)) continue;
     try {
-      const told = await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log));
-      if (told === null) continue;
+      if (!(await port.releaseRun(run.id, run.agent_id))) continue;
       released++;
-      announced.push(...told);
       log.warn({ runId: run.id }, "agent run: released by the stale-run sweep (left running by a process that is gone)");
     } catch (err) {
       log.error({ err, runId: run.id }, "agent run: the stale-run sweep could not release it; the next sweep tries again");
     }
   }
-  return { released, announced };
+  return released;
 }
 
 /**
