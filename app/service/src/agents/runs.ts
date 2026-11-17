@@ -577,26 +577,6 @@ export async function followUp(
   pending: number,
   config: Pick<Config, "agentRunsPerMinute">,
 ): Promise<FollowUp> {
-  return followUpWith(t, agent, conversationId, covers, pending, config);
-}
-
-/**
- * `followUp` as port-impl.ts calls it today, without the configuration: all of it but the owner's replies a minute,
- * which cannot be counted without `agentRunsPerMinute`; the notices it appends are stored, not handed back to be
- * published. Null when nothing is queued. To be replaced by `followUp` in port-impl.ts (`finish`, `recoverRun`).
- */
-export async function queueFollowUp(t: Tx, agent: AgentRow, conversationId: string, covers: number, pending: number): Promise<Announced | null> {
-  return (await followUpWith(t, agent, conversationId, covers, pending, null)).run;
-}
-
-async function followUpWith(
-  t: Tx,
-  agent: AgentRow,
-  conversationId: string,
-  covers: number,
-  pending: number,
-  config: Pick<Config, "agentRunsPerMinute"> | null,
-): Promise<FollowUp> {
   if (conversationId === agent.conversationId) return { run: await queueRun(t, agent, conversationId, pending), notices: [] };
   const { rows } = await t.query<{ sender_id: string; text: string | null }>(
     `select m.sender_id, m.body ->> 'text' as text from messages m join principals p on p.id = m.sender_id
@@ -612,7 +592,7 @@ async function followUpWith(
     if (spent) return { run: null, notices: spent.notice ? [spent.notice] : [] };
   }
   const by: TriggeredBy = asked ? "human" : "agent";
-  if (config !== null && (await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) {
+  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) {
     return { run: await rateLimitedInGroup(t, agent, conversationId, pending, by), notices: [] };
   }
   return { run: await queueRun(t, agent, conversationId, pending, by), notices: [] };
@@ -634,7 +614,7 @@ export interface Halted {
  * `agents_halted_seq` becomes the group's current seq, so Agents' messages call nobody until a person writes again. The
  * runs Agents' messages called for end: a queued one is `cancelled`, `halted` (it never reached a model); a running one
  * is marked `interrupted` `halted` — never posted, it ends `cancelled` with that reason and is settled as any; what a
- * person asked of it meanwhile still gets its follow-up (`queueFollowUp`). Runs a person called for are left alone. The
+ * person asked of it meanwhile still gets its follow-up (`followUp`). Runs a person called for are left alone. The
  * `agents_halted` notice is appended unless the group was halted already (no person has written since the last halt):
  * then nothing changes. Lock order: the group's row, then run rows; no `agents` or `accounts` row.
  */

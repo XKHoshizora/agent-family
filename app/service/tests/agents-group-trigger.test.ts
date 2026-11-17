@@ -1,8 +1,8 @@
-import type { InjectOptions } from "fastify";
+import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mentionedHandles } from "../src/agents/mentions.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
-import { followUp, maybeTrigger, triggerFromAgent, type FollowUp } from "../src/agents/runs.ts";
+import { maybeTrigger, triggerFromAgent } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { buildApp } from "../src/app.ts";
 import type { Config } from "../src/config.ts";
@@ -710,23 +710,12 @@ describe("POST /api/conversations/:id/agents/halt", () => {
 
 // --- follow-ups ------------------------------------------------------------------------------------------------
 
-/**
- * Ends the running run `runId` as `finish` records it — under its conversation's row, its Agent's, then its own — and
- * follows it up by the one rule (something noted beyond what it covered) through `followUp`, with `config`: what
- * `finish` and recovery pass once port-impl.ts calls `followUp` (it calls `queueFollowUp`, which has no configuration).
- */
-const endRun = (runId: string, config: Pick<Config, "agentRunsPerMinute">): Promise<FollowUp | null> =>
-  db.tx(async (t) => {
-    const of = (await t.query<{ agent_id: string; conversation_id: string }>("select agent_id, conversation_id from agent_runs where id = $1", [runId])).rows[0]!;
-    const agent = await lockAgent(t, of.agent_id, of.conversation_id);
-    const state = (
-      await t.query<{ covers: number; pending: number | null }>("select covers_seq::int as covers, pending_seq::int as pending from agent_runs where id = $1 for update", [
-        runId,
-      ])
-    ).rows[0]!;
-    await t.query("update agent_runs set status = 'done', finished_at = now() where id = $1", [runId]);
-    return state.pending !== null && state.pending > state.covers ? followUp(t, agent, of.conversation_id, state.covers, state.pending, config) : null;
-  });
+/** Ends the running run `runId` through `port`, as the worker ends one that answered: `finish`, which follows it up. */
+const endRun = async (port: FastifyInstance["agentPort"], runId: string): Promise<void> => {
+  const of = (await db.query<{ agent_id: string; owner_id: string; conversation_id: string }>("select agent_id, owner_id, conversation_id from agent_runs where id = $1", [runId]))
+    .rows[0]!;
+  await port.finish({ id: runId, agentId: of.agent_id, ownerId: of.owner_id, conversationId: of.conversation_id }, { status: "done" }, null, NOTHING);
+};
 
 describe("follow-ups in a group", () => {
   it("count toward the owner's replies a minute: continuous mentions while each reply runs never start more than AGENT_RUNS_PER_MINUTE; over it, the reusable failed run", async () => {
@@ -765,8 +754,8 @@ describe("follow-ups in a group", () => {
       expect(await started()).toBe(1);
       // Members keep mentioning it while each reply runs — a person and an Agent in turn — and each reply's end follows
       // up what was noted; once there is no reply under way, each further mention meets the limit at once.
+      const pushed = vi.spyOn(capped.realtime, "pushRun");
       const counts: number[] = [];
-      const followed: FollowUp[] = [];
       let last = 0;
       for (let i = 0; i < 7; i++) {
         const id = await active();
@@ -775,19 +764,20 @@ describe("follow-ups in a group", () => {
         } else {
           await db.query("update agent_runs set status = 'running', started_at = now() where id = $1", [id]);
           last = i % 2 === 0 ? await mention(w.third, `@anna 再说 ${i}`) : (await agentSays(alpha.id, w.g, `@anna 补充 ${i}`, config)).message.seq;
-          followed.push((await endRun(id, config))!);
+          await endRun(capped.agentPort, id);
         }
         counts.push(await started());
       }
       expect(counts).toEqual([2, 3, 3, 3, 3, 3, 3]);
-      // Two follow-ups were queued (a person's, then an Agent's); the third met the limit: the failed run, announced to the
-      // owner, a person's (a person's mention was noted on that reply).
-      expect(followed.map((f) => [f.run?.ownerId, f.run?.run.status, f.run?.run.error ?? null, f.notices])).toEqual([
-        [w.owner.id, "queued", null, []],
-        [w.owner.id, "queued", null, []],
-        [w.owner.id, "failed", "rate_limited", []],
+      // Two follow-ups were queued (a person's, then an Agent's); the third met the limit: the failed run, a person's (a
+      // person's mention was noted on that reply), announced to its owner by the reply's end, right after that reply.
+      const told = pushed.mock.calls.map(([ownerId, conversationId, run]) => [ownerId, conversationId, run.status, run.error ?? null]);
+      const firstLimited = told.findIndex((c) => c[3] === "rate_limited");
+      expect(told.slice(firstLimited - 1, firstLimited + 1)).toEqual([
+        [w.owner.id, w.g, "done", null],
+        [w.owner.id, w.g, "failed", "rate_limited"],
       ]);
-      const limited = followed[2]!.run!.run;
+      const limited = pushed.mock.calls[firstLimited]![2];
       expect(limited).toEqual({ id: limited.id, status: "failed", error: "rate_limited", retryable: true });
       expect((await runsOf(anna.id, w.g)).map((r) => [r.status, r.error, r.by])).toEqual([
         ["done", null, "human"],
@@ -865,8 +855,11 @@ describe("follow-ups in a group", () => {
     expect((await runsOf(b.id, w.g))[0]?.pending).not.toBeNull();
 
     // It ends having cost a point (600 000 input and 200 000 output tokens on `fast`): the budget is spent, and what was
-    // noted on it is not answered.
+    // noted on it is not answered. The group is told as the run ends, live.
+    const thirdSocket = await connect(app, w.third);
     await app.agentPort.finish(one, { status: "done" }, { inputTokens: 600_000, outputTokens: 200_000 }, NOTHING);
+    const told = await thirdSocket.next((x) => x.type === "message" && x.message.system?.event === "agent_budget_reached");
+    expect(told.message).toMatchObject({ senderId: null, text: "beta 已达到本次接话的点数上限，有人发言后继续。", system: { event: "agent_budget_reached", agentId: b.id } });
     expect((await db.query("select balance_micro::int as b from usage_records where run_id = $1", [one.id])).rows).toEqual([{ b: 1_000_000 }]);
     expect(await runsOf(b.id, w.g)).toEqual([expect.objectContaining({ status: "done", by: "agent" })]);
     expect((await noticesOf(w.g, "agent_budget_reached")).map((n) => [n.body.actorId, n.body.agentId])).toEqual([[b.id, b.id]]);
