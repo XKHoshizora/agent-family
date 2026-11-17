@@ -87,13 +87,19 @@ export async function leaveGroupsOfDeleted(deps: LeaveDeps, agentId?: string): P
   );
   let left = 0;
   for (const r of rows) {
+    let change: Change | null;
     try {
-      const change = await deps.db.tx((t) => leaveAfterDelete(t, r.conversation_id, r.agent_id, r.owner_id));
-      if (!change) continue;
-      deps.conversations.publish(change, deps.log);
-      left++;
+      change = await deps.db.tx((t) => leaveAfterDelete(t, r.conversation_id, r.agent_id, r.owner_id));
     } catch (err) {
       deps.log.error({ err, agentId: r.agent_id, conversationId: r.conversation_id }, "a deleted Agent could not leave a group; the next start tries again");
+      continue;
+    }
+    if (!change) continue;
+    left++;
+    try {
+      deps.conversations.publish(change, deps.log);
+    } catch (err) {
+      deps.log.error({ err, agentId: r.agent_id, conversationId: r.conversation_id }, "a deleted Agent left a group (committed), but announcing it failed");
     }
   }
   return left;

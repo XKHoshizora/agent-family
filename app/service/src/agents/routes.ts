@@ -302,7 +302,12 @@ export function registerAgentRoutes(
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
           app.realtime.pushAgentChanged(me.id, agent.id);
         }
-        if ("deleted" in change) await leaveGroupsOfDeleted({ db, conversations, log: req.log }, agent.id);
+        if ("deleted" in change) {
+          // The delete has committed: a failure of the leaving (even of its first query) is not the client's; the start-up sweep finishes it.
+          await leaveGroupsOfDeleted({ db, conversations, log: req.log }, agent.id).catch((err: unknown) =>
+            req.log.error({ err, agentId: agent.id }, "a deleted Agent's leaving of its groups failed; the next start finishes it"),
+          );
+        }
         return toView(agent);
       },
     );

@@ -354,6 +354,22 @@ describe("taking an Agent out of a group", () => {
     expect((await db.query("select 1 from agent_runs where agent_id = $1 and status in ('queued', 'running')", [y.id])).rowCount).toBe(0);
     expect(await runOf(ownChat)).toEqual({ status: "queued", error: null, interrupted: null, pending: null });
   });
+
+  it("a fellow member's socket gets no run push for the cancelled runs: no run frame, nothing of their details", async () => {
+    const { creator, owner, mia, g } = await world();
+    const x = await agentOf(owner);
+    await addOwn(owner, g, x);
+    const queued = await insertRun(x, owner, g, "queued");
+    const [ownerSocket, miaSocket] = [await connect(app, owner), await connect(app, mia)];
+
+    expect((await remove(creator, g, x.id)).status).toBe(200);
+    // The owner is told (the control: the push does happen), and mia has had the group's change by the time we look.
+    await ownerSocket.next((e) => e.type === "run" && e.run.id === queued);
+    await miaSocket.next((e) => e.type === "conversation" && e.id === g);
+    const frames = miaSocket.events.map((e) => JSON.stringify(e));
+    expect(miaSocket.events.filter((e) => e.type === "run")).toEqual([]);
+    expect(frames.filter((f) => f.includes(queued) || f.includes("retryable") || f.includes("agent_removed"))).toEqual([]);
+  });
 });
 
 describe("an owner leaving takes their Agents along", () => {
@@ -418,6 +434,20 @@ describe("an owner leaving takes their Agents along", () => {
     ]);
     expect([await isIn(g, x.id), await isIn(g, owner.id), await isIn(g, mia.id)]).toEqual([0, 0, 1]);
     expect(await runOf(queued)).toMatchObject({ status: "cancelled", error: "agent_removed" });
+  });
+
+  it("removal: the creator removing an owner whose Agent has a queued run cancels it, agent_removed, together with the removal (answered 200 only once both are there)", async () => {
+    const { creator, owner, g } = await world();
+    const x = await agentOf(owner);
+    await addOwn(owner, g, x);
+    const queued = await insertRun(x, owner, g, "queued");
+    const ownerSocket = await connect(app, owner);
+    const seq = await seqOf(g);
+
+    expect((await remove(creator, g, owner.id)).status).toBe(200);
+    expect(await notices(g, seq)).toHaveLength(2);
+    expect(await runOf(queued)).toEqual({ status: "cancelled", error: "agent_removed", interrupted: null, pending: null });
+    await ownerSocket.next((e) => e.type === "run" && e.run.id === queued && e.run.error === "agent_removed");
   });
 
   it("the creator's role passes to the earliest remaining person, never to an Agent", async () => {
@@ -528,6 +558,31 @@ describe("deleting an Agent", () => {
     } finally {
       await restarted.close();
     }
+  });
+
+  it("when the leaving's first query fails after the delete committed, the delete still answers 200, the Agent is deleted, and the sweep takes it out of the group", async () => {
+    const { owner, g } = await world();
+    const x = await agentOf(owner);
+    await addOwn(owner, g, x);
+    const real = app.deps.db; // the harness's `db` forwards to this; the routes call it
+    const query = real.query.bind(real);
+    const fault = vi.spyOn(real, "query").mockImplementation(((sql: unknown, ...rest: unknown[]) =>
+      typeof sql === "string" && sql.includes("join agents a on a.principal_id = ms.principal_id")
+        ? Promise.reject(new Error("injected: the leave-groups query fails"))
+        : (query as (...a: unknown[]) => unknown)(sql, ...rest)) as typeof real.query);
+    let res;
+    try {
+      res = await api(app, owner, "DELETE", `/api/agents/${x.id}`);
+      expect(fault).toHaveBeenCalled();
+    } finally {
+      fault.mockRestore();
+    }
+    expect(res.status).toBe(200);
+    expect((await db.query("select 1 from agents where principal_id = $1 and deleted_at is not null", [x.id])).rowCount).toBe(1);
+    expect(await isIn(g, x.id)).toBe(1);
+
+    expect(await leaveGroupsOfDeleted({ db, conversations: app.deps.conversations, log: app.log })).toBe(1);
+    expect(await isIn(g, x.id)).toBe(0);
   });
 
   it("while a deleted Agent is still listed in a group (between the delete and its leaving), it never replies there", async () => {

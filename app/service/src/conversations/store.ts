@@ -118,6 +118,26 @@ export async function currentMemberIds(q: Queryable, conversationId: string): Pr
   return rows.map((r) => r.principal_id);
 }
 
+/** A current member as `removeMember` weighs them: who they are and whose Agent, in join order. */
+export interface CurrentMember {
+  membershipId: string;
+  principalId: string;
+  kind: "human" | "agent";
+  /** The owner of an Agent; null for a person. */
+  ownerId: string | null;
+}
+
+export async function currentMembers(q: Queryable, conversationId: string): Promise<CurrentMember[]> {
+  const { rows } = await q.query<{ id: string; principal_id: string; kind: "human" | "agent"; owner_id: string | null }>(
+    `select ms.id, ms.principal_id, p.kind, p.owner_id
+       from memberships ms join principals p on p.id = ms.principal_id
+      where ms.conversation_id = $1 and ms.left_seq is null
+      order by ms.joined_seq, ms.id`,
+    [conversationId],
+  );
+  return rows.map((r) => ({ membershipId: r.id, principalId: r.principal_id, kind: r.kind, ownerId: r.owner_id }));
+}
+
 /** Type and (for direct chats) the pair, without locking: neither ever changes after creation. */
 export async function peekConversation(
   q: Queryable,

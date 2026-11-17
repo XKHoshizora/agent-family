@@ -8,6 +8,7 @@ import type { Change } from "./events.ts";
 import {
   MAX_GROUP_MEMBERS,
   currentMemberIds,
+  currentMembers,
   currentMembership,
   lockConversation,
   peekConversation,
@@ -97,15 +98,24 @@ export async function addMember(t: Tx, conversationId: string, actorId: string, 
   const { conversation } = await lockGroup(t, conversationId, actorId, targetId);
   if (await currentMembership(t, conversationId, targetId)) throw new AppError(409, "already_member");
   if (!(await mayAdd(t, actorId, targetId))) throw forbidden();
+  return seat(t, conversation, actorId, targetId);
+}
+
+/**
+ * The join step of `addMember` and `addAgent`, after their own checks, under the group's row: the 500 cap (403
+ * `forbidden`), the membership with `joined_seq` = the seq at this moment (the newcomer reads from the notice on), and
+ * the `member_joined` notice (actor: whoever added).
+ */
+async function seat(t: Tx, conversation: ConversationRow, actorId: string, principalId: string): Promise<Change> {
+  const conversationId = conversation.id;
   const before = await currentMemberIds(t, conversationId);
   if (before.length + 1 > MAX_GROUP_MEMBERS) throw forbidden();
-
   await t.query(
     `insert into memberships (conversation_id, principal_id, role, joined_seq) values ($1, $2, 'speaker', $3)`,
-    [conversationId, targetId, conversation.seq],
+    [conversationId, principalId, conversation.seq],
   );
-  const notice = await appendSystem(t, conversationId, { event: "member_joined", actorId, principalId: targetId });
-  return { messages: [notice], conversations: [{ conversationId, principalIds: [...before, targetId] }] };
+  const notice = await appendSystem(t, conversationId, { event: "member_joined", actorId, principalId });
+  return { messages: [notice], conversations: [{ conversationId, principalIds: [...before, principalId] }] };
 }
 
 /**
@@ -123,35 +133,7 @@ async function addAgent(t: Tx, conversationId: string, actorId: string, agentId:
   const { rows } = await t.query<{ deleted: boolean }>("select deleted_at is not null as deleted from agents where principal_id = $1 for update", [agentId]);
   if (rows[0]?.deleted !== false) throw forbidden();
   if (await currentMembership(t, conversationId, agentId)) throw new AppError(409, "already_member");
-  const before = await currentMemberIds(t, conversationId);
-  if (before.length + 1 > MAX_GROUP_MEMBERS) throw forbidden();
-
-  await t.query(
-    `insert into memberships (conversation_id, principal_id, role, joined_seq) values ($1, $2, 'speaker', $3)`,
-    [conversationId, agentId, conversation.seq],
-  );
-  const notice = await appendSystem(t, conversationId, { event: "member_joined", actorId, principalId: agentId });
-  return { messages: [notice], conversations: [{ conversationId, principalIds: [...before, agentId] }] };
-}
-
-/** A current member as `removeMember` weighs them: who they are and whose Agent, in join order. */
-interface CurrentMember {
-  membershipId: string;
-  principalId: string;
-  kind: "human" | "agent";
-  /** The owner of an Agent; null for a person. */
-  ownerId: string | null;
-}
-
-async function currentMembers(q: Queryable, conversationId: string): Promise<CurrentMember[]> {
-  const { rows } = await q.query<{ id: string; principal_id: string; kind: "human" | "agent"; owner_id: string | null }>(
-    `select ms.id, ms.principal_id, p.kind, p.owner_id
-       from memberships ms join principals p on p.id = ms.principal_id
-      where ms.conversation_id = $1 and ms.left_seq is null
-      order by ms.joined_seq, ms.id`,
-    [conversationId],
-  );
-  return rows.map((r) => ({ membershipId: r.id, principalId: r.principal_id, kind: r.kind, ownerId: r.owner_id }));
+  return seat(t, conversation, actorId, agentId);
 }
 
 /**
