@@ -1,6 +1,6 @@
 import React from "react";
 
-// The AI labs whose logo is vendored in public/logos/labs/<id>.svg (see public/logos/README.md). Keep this list and
+// The AI labs whose logo is vendored in public/logos/labs/<id>.svg (see logos-NOTICE.md). Keep this list and
 // the files in step: tests/lab-logo.test.jsx fails when one has no file or a file is not listed. A logo is shown only
 // through <img src>, never inlined, and only for an id from this fixed list: nothing from outside ever builds the path.
 export const LAB_LOGOS = Object.freeze([
@@ -62,12 +62,7 @@ export function labOfModel(name) {
   const lower = name.toLowerCase();
   const base = lower.slice(lower.lastIndexOf("/") + 1);
   for (const [re, lab] of RULES) {
-    if (re.test(base)) {
-      if (isLabLogo(lab)) return lab;
-      // Qwen's own logo, should it ever be vendored, is the closer match when Alibaba's is not.
-      if (lab === "alibaba" && isLabLogo("qwen")) return "qwen";
-      return null;
-    }
+    if (re.test(base)) return isLabLogo(lab) ? lab : null;
   }
   return null;
 }

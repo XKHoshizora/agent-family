@@ -596,11 +596,6 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   const forgetProvider = (providerId) => (error) => {
     if (error.status === 404) setModel(removeProvider(getModel(), providerId));
   };
-  /**
-   * A call to my provider (`action`: test | list): the service answers 200 either way, `{ok: false, error,
-   * upstreamStatus?}` when the provider failed. That failure resolves as a refused action's, with the provider's own
-   * HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
-   */
   /** One entry of a provider's model list as `/models/list` gives it, with only what it should hold. */
   const listedModel = (m) => {
     const known = m.known === true;
@@ -618,6 +613,11 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       added: m.added === true,
     };
   };
+  /**
+   * A call to my provider (`action`: test | list): the service answers 200 either way, `{ok: false, error,
+   * upstreamStatus?}` when the provider failed. That failure resolves as a refused action's, with the provider's own
+   * HTTP status as `upstreamStatus` when it answered with one (a 404 or 405: it has no model list).
+   */
   const providerCall = async (action, sent) => {
     const result = await attempt(() => sent, { text: providerText(action) });
     if (!result.ok || result.value?.ok !== false) return result;

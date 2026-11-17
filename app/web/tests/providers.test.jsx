@@ -523,9 +523,9 @@ describe("the models of a provider", () => {
     const app = await openProviders({ providers: [levels] });
     await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
     expect(modelRow("gpt-x").textContent).toContain("支持思考（低、高）");
-    await click(within(modelRow("gpt-x")).getByRole("button", { name: "改为全部档位" }));
+    await click(within(modelRow("gpt-x")).getByRole("button", { name: "改为全部档位：gpt-x" }));
     expect(modelRow("gpt-x").textContent).not.toContain("（低、高）");
-    expect(within(modelRow("gpt-x")).queryByRole("button", { name: "改为全部档位" })).toBeNull();
+    expect(within(modelRow("gpt-x")).queryByRole("button", { name: "改为全部档位：gpt-x" })).toBeNull();
     await click(within(modelRow("deep")).getByRole("button", { name: /高级/ }));
     fireEvent.click(within(modelRow("deep")).getByLabelText(/支持思考/));
     await flush();
@@ -701,6 +701,37 @@ describe("同步模型", () => {
     expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "gpt-6-sol", "claude-long", "house-blend", "o3-mini"]);
     expect(inSync().queryByRole("status")).toBeNull();
     expect(inSync().getByRole("button", { name: "添加全部" }).disabled).toBe(true);
+  });
+
+  it("添加全部 with text in the search box adds only the listed chat models that match, and its label says so", async () => {
+    await openSync();
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "claude" } });
+    await flush();
+    expect(inSync().queryByRole("button", { name: "添加全部" })).toBeNull();
+    await click(inSync().getByRole("button", { name: "添加全部匹配项" }));
+    expect(modelNames()).toEqual(["gpt-x", "plain", "tiny", "claude-long"]);
+    expect(inSync().getByRole("button", { name: "添加全部匹配项" }).disabled).toBe(true);
+    fireEvent.change(inSync().getByRole("searchbox", { name: "搜索模型" }), { target: { value: "" } });
+    await flush();
+    expect(inSync().getByRole("button", { name: "添加全部" }).disabled).toBe(false);
+  });
+
+  it("the 可能不是对话模型 toggle points at the group it opens", async () => {
+    await openSync();
+    const toggle = inSync().getByRole("button", { name: /可能不是对话模型/ });
+    await click(toggle);
+    const id = toggle.getAttribute("aria-controls");
+    expect(id).toBeTruthy();
+    expect(document.getElementById(id).getAttribute("aria-label")).toBe("可能不是对话模型");
+  });
+
+  it("the 改为全部档位 button names its model", async () => {
+    const levels = providerOf(P1, {
+      models: [{ name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000, reasoningLevels: ["low", "high"] }],
+    });
+    await openProviders({ providers: [levels] });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    expect(within(modelRow("gpt-x")).getByRole("button", { name: "改为全部档位：gpt-x" })).toBeTruthy();
   });
 
   it("shows at most 200 rows at a time; past them it asks to narrow down by searching", async () => {

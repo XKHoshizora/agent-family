@@ -13,7 +13,7 @@ const FORBIDDEN_TAGS = new Set(["script", "foreignobject", "image", "iframe", "o
 const NAME = String.raw`[A-Za-z_][\w:.-]*`;
 const TAG = new RegExp(String.raw`^<(/?)(${NAME})((?:\s+${NAME}(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(/?)>$`);
 const ATTR = new RegExp(String.raw`(${NAME})(?:\s*=\s*(?:"([^"]*)"|'([^']*)'))?`, "g");
-const KNOWN_ENTITY = /&(?:amp|lt|gt|quot|apos|#\d{1,7}|#x[0-9a-fA-F]{1,6});/g;
+const KNOWN_ENTITY = /&(?:amp|lt|gt|quot|apos);/g;
 
 /** Returns the list of problems with an SVG text (empty = accepted). `bytes` is the file's size on disk. */
 export function checkSvg(text, bytes = Buffer.byteLength(String(text))) {
@@ -22,6 +22,9 @@ export function checkSvg(text, bytes = Buffer.byteLength(String(text))) {
   if (bytes >= MAX_BYTES) problems.push(`too large (${bytes} bytes, limit ${MAX_BYTES})`);
   if (text.includes("\0")) problems.push("contains a NUL");
   if (/<!doctype|<!entity|<!\[cdata\[|<\?(?!xml\s)/i.test(text)) problems.push("contains a DOCTYPE, ENTITY, CDATA or processing instruction");
+  // A numeric character reference or a backslash could spell @import, url( or javascript: past the checks below.
+  if (text.includes("&#")) problems.push("contains a numeric character reference");
+  if (text.includes("\\")) problems.push("contains a backslash");
   if (/javascript\s*:/i.test(text)) problems.push("contains javascript:");
   if (/data\s*:/i.test(text)) problems.push("contains a data: URL");
   const bad = text.replace(KNOWN_ENTITY, "").match(/&/);

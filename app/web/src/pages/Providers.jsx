@@ -262,7 +262,7 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
       {model.levels && (
         <>
           <small className="muted">（{model.levels.map(levelLabel).join("、")}）</small>{" "}
-          <Btn small variant="text" onClick={() => onChange({ ...model, levels: null })}>改为全部档位</Btn>
+          <Btn small variant="text" aria-label={`改为全部档位：${model.name}`} onClick={() => onChange({ ...model, levels: null })}>改为全部档位</Btn>
         </>
       )}
     </>
@@ -407,7 +407,8 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
   // One budget of rows for both groups, the chat models first.
   const chatShown = chat.slice(0, SHOWN_ROWS);
   const othersShown = othersOpen ? others.slice(0, SHOWN_ROWS - chatShown.length) : [];
-  const toAdd = listed.filter((m) => m.chat && !have.has(m.name));
+  // With text in the search box only the chat models it lists are added; with none, every chat model.
+  const toAdd = listed.filter((m) => m.chat && !have.has(m.name) && matches(m));
 
   const addAll = () => {
     const room = MAX_MODELS - models.length;
@@ -448,7 +449,7 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
               <Search size={18} aria-hidden="true" />
               <input type="search" maxLength={100} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型" aria-label="搜索模型" />
             </label>
-            <Btn small disabled={full || toAdd.length === 0} onClick={addAll}>添加全部</Btn>
+            <Btn small disabled={full || toAdd.length === 0} onClick={addAll}>{needle ? "添加全部匹配项" : "添加全部"}</Btn>
           </div>
           {note && <p className="field-hint" role="status">{note}</p>}
           <ul className="member-rows sync-rows" aria-label="供应商的模型">{rows(chatShown)}</ul>
@@ -456,12 +457,12 @@ function SyncDialog({ provider, models, onAdd, onRemove, onDone, onClose, saving
           {chat.length === 0 && <p className="muted">{needle ? "没有找到匹配的对话模型。" : "供应商列出的都可能不是对话模型。"}</p>}
           {others.length > 0 && (
             <div className="sync-others">
-              <Btn small variant="text" aria-expanded={othersOpen} onClick={() => setOthersOpen(!othersOpen)}>
+              <Btn small variant="text" aria-expanded={othersOpen} aria-controls="sync-others-list" onClick={() => setOthersOpen(!othersOpen)}>
                 可能不是对话模型（{others.length}）
               </Btn>
               {othersOpen && (
                 <>
-                  <ul className="member-rows sync-rows" aria-label="可能不是对话模型">{rows(othersShown)}</ul>
+                  <ul id="sync-others-list" className="member-rows sync-rows" aria-label="可能不是对话模型">{rows(othersShown)}</ul>
                   {more(others.length - othersShown.length)}
                 </>
               )}

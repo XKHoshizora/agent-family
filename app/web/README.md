@@ -79,4 +79,4 @@ restart spec and the specs that need the model stub (Agents, providers, Markdown
   (`src/data/model.js` `STREAM_CHARS`). The chat list's preview of an Agent's message has its Markdown markers taken
   out by `src/ui/markdownPreview.js` (no library).
 
-- Lab logos (`public/logos/labs/*.svg`, shown only through `<img>` by `src/ui/LabLogo.jsx`): where they come from and their licence are in `public/logos/README.md`; `node scripts/check-logos.mjs` re-checks every file.
+- Lab logos (`public/logos/labs/*.svg`, shown only through `<img>` by `src/ui/LabLogo.jsx`): where they come from and their licence are in `logos-NOTICE.md`; `node scripts/check-logos.mjs` re-checks every file.
