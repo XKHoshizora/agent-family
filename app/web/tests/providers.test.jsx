@@ -287,18 +287,143 @@ describe("editing a provider", () => {
     expect(providerRow("我的 OpenAI").textContent).toContain("…9876");
   });
 
-  it("a new key alone replaces the saved one; the field is emptied once it is sent, even when refused", async () => {
-    const patchProvider = vi.fn(async () => {
-      throw apiError(503, "busy");
+});
+
+describe("a refused save that carried a new key", () => {
+  const KEY_NOT_SAVED = "上次填写的密钥没有保存，请重新填写；如果不想更换，点“保留原密钥”。";
+  const save = () => click(inMain().getByRole("button", { name: "保存" }));
+  const keyMessage = () => document.getElementById(keyBox().getAttribute("aria-describedby"))?.textContent;
+  /** Edits the provider; the first save is refused (busy), the next ones answer as the service would. */
+  const openRefusingOnce = async () => {
+    const patchProvider = vi.fn(async (_id, patch) => {
+      const { apiKey, ...rest } = patch;
+      return { ...providerOf(), ...rest, ...(apiKey ? { keyLast4: apiKey.slice(-4) } : {}) };
     });
-    await openEdit({ api: { patchProvider } });
+    patchProvider.mockRejectedValueOnce(apiError(503, "busy"));
+    await openProviders({ api: { patchProvider } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    return patchProvider;
+  };
+
+  it("key only: the field is emptied once sent; saving again sends nothing and points at the key until it is typed again", async () => {
+    // focusInvalid moves the focus on the next frame: here, at once.
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      callback(0);
+      return 0;
+    });
+    const patchProvider = await openRefusingOnce();
     fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
-    await click(inMain().getByRole("button", { name: "保存" }));
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
     expect(patchProvider).toHaveBeenCalledWith(P1, { apiKey: NEW_KEY });
     expect(keyBox().value).toBe("");
     expect(mainText()).toContain("服务现在有点忙，请稍后再试。");
-    expect(mainText()).toContain("刚才填写的密钥已经清空，请重新填写");
+    expect(keyBox().getAttribute("aria-invalid")).toBe("true");
+    expect(keyMessage()).toBe(KEY_NOT_SAVED);
     expect(document.documentElement.outerHTML).not.toContain(NEW_KEY);
+
+    // Saving again: no request, no "saved", still in the form, the key field focused with its message.
+    keyBox().blur();
+    expect(document.activeElement).not.toBe(keyBox());
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(toastText()).toBeNull();
+    expect(document.activeElement).toBe(keyBox());
+    expect(keyMessage()).toBe(KEY_NOT_SAVED);
+
+    fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
+    expect(inMain().queryByRole("button", { name: "保留原密钥" })).toBeNull();
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(2);
+    expect(patchProvider).toHaveBeenLastCalledWith(P1, { apiKey: NEW_KEY });
+    expect(toastText()).toBe("供应商已保存");
+    expect(providerRow("我的 OpenAI").textContent).toContain("…9876");
+  });
+
+  it("key plus a name change: the same rule; 保留原密钥 saves the other changes without the key", async () => {
+    const patchProvider = await openRefusingOnce();
+    type("名称", "工作用");
+    fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
+    await save();
+    expect(patchProvider).toHaveBeenCalledWith(P1, { name: "工作用", apiKey: NEW_KEY });
+    expect(keyMessage()).toBe(KEY_NOT_SAVED);
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(toastText()).toBeNull();
+
+    await click(inMain().getByRole("button", { name: "保留原密钥" }));
+    expect(keyBox().getAttribute("aria-invalid")).toBeNull();
+    expect(mainText()).not.toContain(KEY_NOT_SAVED);
+    expect(mainText()).toContain("已保存的密钥：…abcd");
+    expect(document.activeElement).toBe(keyBox());
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(2);
+    expect(patchProvider).toHaveBeenLastCalledWith(P1, { name: "工作用" });
+    expect(patchProvider.mock.calls[1][1]).not.toHaveProperty("apiKey");
+    expect(toastText()).toBe("供应商已保存");
+    expect(providerRow("工作用").textContent).toContain("…abcd");
+  });
+
+  it("an address on another origin still needs the key: 保留原密钥 is not offered", async () => {
+    const patchProvider = await openRefusingOnce();
+    type("接口地址", "https://other.example.com/v1");
+    fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(keyMessage()).toBe("接口地址换了域名，需要重新填写密钥。");
+    expect(inMain().queryByRole("button", { name: "保留原密钥" })).toBeNull();
+    await save();
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a connection test result never outlives what it tested", () => {
+  /** What the form's 测试连接 shows under its button (a refusal notice elsewhere in the form is not it). */
+  const result = () => inMain().getByRole("button", { name: /测试/ }).closest(".field").querySelector('[role="status"], [role="alert"]');
+  const openTested = async () => {
+    await openProviders();
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(inMain().getByRole("button", { name: "测试连接" }));
+    expect(result().textContent).toBe("连接成功，供应商正常回应。");
+  };
+
+  it("is cleared when the address is edited", async () => {
+    await openTested();
+    type("接口地址", "https://api.example.com/v2");
+    await flush();
+    expect(result()).toBeNull();
+  });
+
+  it("is cleared when the key is edited", async () => {
+    await openTested();
+    fireEvent.change(keyBox(), { target: { value: NEW_KEY } });
+    await flush();
+    expect(result()).toBeNull();
+  });
+
+  it("is cleared when the provider is saved, also when that save is refused", async () => {
+    const patchProvider = vi.fn(async () => {
+      throw apiError(503, "busy");
+    });
+    await openProviders({ api: { patchProvider } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(inMain().getByRole("button", { name: "测试连接" }));
+    expect(result().textContent).toBe("连接成功，供应商正常回应。");
+    type("名称", "工作用");
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(patchProvider).toHaveBeenCalledTimes(1);
+    expect(result()).toBeNull();
+  });
+
+  it("an answer that arrives after the address was edited is not shown", async () => {
+    const pending = deferred();
+    await openProviders({ api: { testProvider: vi.fn(() => pending.promise) } });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(inMain().getByRole("button", { name: "测试连接" }));
+    type("接口地址", "https://api.example.com/v2");
+    await act(async () => pending.resolve({ ok: true }));
+    await flush();
+    expect(result()).toBeNull();
   });
 });
 

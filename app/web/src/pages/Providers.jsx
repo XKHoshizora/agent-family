@@ -32,6 +32,8 @@ const PRIVACY_TEXT = "选用这个供应商模型的 Agent，你与它的对话�
 /** The service never sends a saved key to another origin than the one it was saved for. */
 const KEY_AGAIN = "接口地址换了域名，需要重新填写密钥。";
 const KEY_CLEARED = "为了安全，刚才填写的密钥已经清空，请重新填写。";
+/** Editing, after a refused save that carried a new key: saving again must not quietly keep the old one. */
+const KEY_NOT_SAVED = "上次填写的密钥没有保存，请重新填写；如果不想更换，点“保留原密钥”。";
 
 const chars = (text) => [...text].length;
 const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -120,17 +122,27 @@ function TestResult({ result }) {
   );
 }
 
-/** 测试连接 of a saved provider (its saved address and key), through the caller's `run` so it waits for the other actions. */
+/**
+ * 测试连接 of a saved provider (its saved address and key), through the caller's `run` so it waits for the other actions.
+ * `clear()` drops the result (and the answer of a test still on its way), once it may no longer be about what is shown.
+ */
 function useConnectionTest(providerId, run) {
   const { actions } = useStore();
   const [result, setResult] = useState(null);
-  const test = async () => {
+  const generation = useRef(0);
+  const clear = () => {
+    generation.current += 1;
     setResult(null);
+  };
+  const test = async () => {
+    clear();
+    const mine = generation.current;
     const res = await run("test", () => settled(actions.testProvider(providerId)), () => "");
+    if (generation.current !== mine) return;
     if (res.ok) setResult({ ok: true });
     else if (res.error?.code !== "busy_here") setResult({ ok: false, error: res.error?.error ?? null, text: refusalText(res.error) });
   };
-  return { result, test };
+  return { result, test, clear };
 }
 
 function ProviderRow({ provider, onEdit, onDelete }) {
@@ -288,7 +300,10 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
   latestModels.current = models;
   /** Whether something is typed in the key field, and what is wrong with it: never the key itself. */
   const [key, setKey] = useState({ given: false, problem: "" });
-  /** A request carried the key and was refused: the field was emptied, so it says to fill it in again. */
+  /**
+   * A request carried the key and was refused: the field was emptied, so it says to fill it in again. When editing,
+   * saving stays blocked until a key is typed or the owner chooses 保留原密钥 (never a silent "saved" without the key).
+   */
   const [keyCleared, setKeyCleared] = useState(false);
   const [touched, setTouched] = useState(false);
   const [refusal, setRefusal] = useState(null);
@@ -297,7 +312,7 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
   /** Names of the models whose 高级 is open. */
   const [open, setOpen] = useState(() => new Set());
   const [refreshNote, setRefreshNote] = useState(null);
-  const { result: testResult, test } = useConnectionTest(provider?.id ?? null, run);
+  const { result: testResult, test, clear: clearTest } = useConnectionTest(provider?.id ?? null, run);
 
   const editing = provider !== null;
   const address = f.baseUrl.trim();
@@ -306,8 +321,20 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
   // 测试连接 and 从供应商读取 use the saved address and key: not while new ones wait to be saved.
   const unsaved = addressChanged || key.given;
 
-  // Adding needs a key; editing keeps the saved one unless the address moved to another origin.
-  const keyError = key.given ? key.problem : editing ? (originChanged ? KEY_AGAIN : "") : keyCleared ? KEY_CLEARED : "请填写密钥";
+  // Adding needs a key. Editing keeps the saved one, unless the address moved to another origin, or a new key was
+  // refused and the owner has not yet said whether to type it again or keep the saved one.
+  const keyError = key.given
+    ? key.problem
+    : editing
+      ? originChanged
+        ? KEY_AGAIN
+        : keyCleared
+          ? KEY_NOT_SAVED
+          : ""
+      : keyCleared
+        ? KEY_CLEARED
+        : "请填写密钥";
+  const offerKeep = editing && keyCleared && !key.given && !originChanged;
   const contextErrors = Object.fromEntries(models.map((m) => [m.name, contextProblem(m.context)]));
   const errors = { name: nameProblem(f.name), baseUrl: addressProblem(f.baseUrl), key: keyError };
   const invalid = Object.values(errors).some(Boolean) || Object.values(contextErrors).some(Boolean);
@@ -326,11 +353,18 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     const value = event.target.value;
     setF((cur) => ({ ...cur, [field]: value }));
     if (field === "name" && refusal?.code === "name_taken") setRefusal(null);
+    if (field === "baseUrl") clearTest();
   };
   const onKey = (event) => {
     const value = event.target.value;
     setKey({ given: value.trim() !== "", problem: value.trim() ? keyFormatProblem(value) : "" });
     setKeyCleared(false);
+    clearTest();
+  };
+  /** The owner does not want to change the key after all: the saved one stays, and saving is possible again. */
+  const keepSavedKey = () => {
+    setKeyCleared(false);
+    keyRef.current?.focus();
   };
   /** The key leaves the page: the field is emptied (the request already holds it). */
   const dropKey = () => {
@@ -391,6 +425,7 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
     }
     const pending = run("save", () => settled(actions.patchProvider(provider.id, patch)), () => "");
     dropKey();
+    clearTest();
     const res = await pending;
     if (!res.ok) return refused(res.error, Boolean(apiKey));
     dispatch({ type: "toast", text: "供应商已保存" });
@@ -486,6 +521,11 @@ function ProviderForm({ provider = null, created = false, onBack, onCreated }) {
         <Field label="密钥" hint={keyHint} error={shown("key")}>
           <input ref={keyRef} type="password" defaultValue="" onChange={onKey} autoComplete="new-password" autoCapitalize="none" spellCheck={false} />
         </Field>
+        {offerKeep && (
+          <div className="member-actions">
+            <Btn small onClick={keepSavedKey}>保留原密钥</Btn>
+          </div>
+        )}
         {editing && (
           <div className="field">
             <div className="member-actions">
