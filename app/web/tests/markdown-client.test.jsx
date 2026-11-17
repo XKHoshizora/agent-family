@@ -141,6 +141,39 @@ describe("the deadline", () => {
   });
 });
 
+describe("a stored message the worker is too slow for", () => {
+  it("is plain with the note once the deadline passes, the worker ended; shown again (the conversation opened again, the page reloaded) it is plain with the note at once and never sent again; the next message gets a new worker", async () => {
+    const { workers } = useWorkers((n) => (n === 0 ? new SilentWorker() : new InProcessWorker()));
+    const slow = "# 很慢\n\n".repeat(900); // a storable text (under 8 000 characters)
+    const first = render(<AgentText text={slow} id="m7" />);
+    await settle();
+    expect(workers[0].sent.map((m) => m.text)).toEqual([slow]);
+    expect(first.container.querySelector(".md-note")).toBeNull();
+    await advance(DEADLINE_MS);
+    await settle();
+    expect(workers[0].terminated).toBe(true);
+    expect(first.container.textContent).toBe(`${slow}${SLOW_TEXT_NOTE}`);
+    expect(first.container.querySelector(".md")).toBeNull();
+    first.unmount();
+    // The conversation opened again: the note is there from the first render, nothing is asked.
+    const again = render(<AgentText text={slow} id="m7" />);
+    expect(again.container.textContent).toBe(`${slow}${SLOW_TEXT_NOTE}`);
+    await settle();
+    again.unmount();
+    // After a reload (a new client; the tab's memory of slow texts is what is left): the same.
+    const reloaded = useWorkers(() => new InProcessWorker());
+    const later = render(<AgentText text={slow} id="m7" />);
+    await settle();
+    expect(later.container.textContent).toBe(`${slow}${SLOW_TEXT_NOTE}`);
+    expect(reloaded.workers).toHaveLength(0);
+    // Another message is rendered by a new worker.
+    const other = render(<AgentText text="**快**" id="m8" />);
+    await settle();
+    expect(other.container.querySelector(".md strong").textContent).toBe("快");
+    expect([...workers, ...reloaded.workers].flatMap((w) => w.sent.map((m) => m.text))).toEqual([slow, "**快**"]);
+  });
+});
+
 describe("no worker: plain text, no note, and never the pipeline on this thread", () => {
   function expectNoPipelineRun(spies) {
     expect(spies.typesets).not.toHaveBeenCalled();
