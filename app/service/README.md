@@ -328,7 +328,9 @@ it ends:
   then.
 - **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when
   it reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
-  `estimated`, at the model's price. A call that failed (the provider's error, a stream it cut off midway, an answer
+  `estimated`, at the model's price — unless the operator has removed that site model from `SITE_MODELS` while the call
+  ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
+  (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
   with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
   before it failed is discarded and not counted, so with no usage reported it costs nothing. So does a reply that could not be stored for the service's own reasons (run
   error `busy`): its record keeps the true cost, all of it forgiven; and a run recovered at start-up (Agents and runs),

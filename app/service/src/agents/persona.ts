@@ -286,7 +286,7 @@ export interface DraftDeps {
   db: Db;
   config: Config;
   models: Pick<ModelGateway, "stream">;
-  log: Pick<FastifyBaseLogger, "error">;
+  log: Pick<FastifyBaseLogger, "error" | "warn">;
 }
 
 const UNAVAILABLE = { status: "failed", error: "provider_unavailable" } as const;
@@ -385,7 +385,7 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
   const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
   try {
     await db.tx(async (t) => {
-      await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date());
+      await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { log });
       await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
         started.runId,
         end.status,

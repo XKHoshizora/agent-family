@@ -34,9 +34,15 @@ const admitAt = (runId: string, owner: Actor, resolved: Resolved, now = NOON) =>
 function settleAt(
   runId: string,
   usage: { inputTokens: number; outputTokens: number } | null,
-  { fallback = NO_TEXT, outcome = "done" as Outcome, now = NOON, cfg = config() as Config } = {},
+  {
+    fallback = NO_TEXT,
+    outcome = "done" as Outcome,
+    now = NOON,
+    cfg = config() as Config,
+    log = undefined as { warn(details: Record<string, unknown>, msg: string): void } | undefined,
+  } = {},
 ) {
-  return db.tx((t) => settle(t, cfg, runId, usage, fallback, outcome, now));
+  return db.tx((t) => settle(t, cfg, runId, usage, fallback, outcome, now, log ? { log } : {}));
 }
 
 /** The refusal `p` rejects with, as plain data. */
@@ -395,16 +401,47 @@ describe("settlement", () => {
     expect(await record(run)).toMatchObject({ source: "site", model: "meter_free", cost_micro: "2000000", free_micro: "2000000" });
   });
 
-  it("a site model no longer configured cannot be priced: refused, unless the call cost nothing", async () => {
-    const { run } = await admitted("unconfigured");
+  it("a site model no longer configured cannot be priced: the call is settled at no charge, its true cost unknown (0, estimated), and logged", async () => {
+    const { owner, run } = await admitted("unconfigured");
     const without = { ...config(), siteModels: [] };
-    await expect(settleAt(run, FULL_USAGE, { cfg: without })).rejects.toThrow(/no longer configured/);
-    expect(await usageRecords(run)).toEqual([]);
-    await settleAt(run, null, { cfg: without, outcome: "failed" });
-    expect(await record(run)).toMatchObject({ source: "site", model: "meter_free", cost_micro: "0", estimated: true });
+    const warned: Array<[Record<string, unknown>, string]> = [];
+    const log = { warn: (details: Record<string, unknown>, msg: string) => void warned.push([details, msg]) };
+    await settleAt(run, FULL_USAGE, { cfg: without, log });
+    expect(await record(run)).toMatchObject({
+      source: "site",
+      model: "meter_free",
+      input_tokens: "10000",
+      output_tokens: "1000",
+      estimated: true,
+      cost_micro: "0",
+      free_micro: "0",
+      balance_micro: "0",
+      forgiven_micro: "0",
+      outcome: "done",
+    });
+    expect(await runRow(run)).toMatchObject({ hold: "0" });
+    expect(await freeUsage(owner.id)).toEqual([]);
+    expect(await ledger(owner.id)).toEqual([]);
+    expect(warned).toEqual([[{ runId: run, model: "meter_free" }, expect.stringMatching(/no longer configured/)]]);
+    // On the balance too: nothing is debited.
+    const paid = await signUp(app, "unconfigured_paid");
+    const paidAgent = await meteredAgent(app, db, paid, PAID);
+    await grant(db, paid.id, MAX_COST);
+    const paidRun = await runningRun(db, paid.id, paidAgent);
+    await admitAt(paidRun, paid, paidAgent.resolved);
+    await settleAt(paidRun, FULL_USAGE, { cfg: without, log });
+    expect(await record(paidRun)).toMatchObject({ cost_micro: "0", balance_micro: "0", estimated: true });
+    expect(await balanceOf(paid.id)).toBe(MAX_COST);
+    expect(warned).toHaveLength(2);
+
+    // A failed call that produced nothing costs nothing at any price: nothing unknown, nothing logged.
+    const { run: failed } = await admitted("unconfigured_failed");
+    await settleAt(failed, null, { cfg: without, outcome: "failed", log });
+    expect(await record(failed)).toMatchObject({ source: "site", model: "meter_free", cost_micro: "0", estimated: true });
+    expect(warned).toHaveLength(2);
     // No tokens at all cost nothing at any price, whatever the outcome (a run recovered at start-up with its reply posted).
     const { run: done } = await admitted("unconfigured_done");
-    await settleAt(done, null, { cfg: without, outcome: "done", fallback: NO_TEXT });
+    await settleAt(done, null, { cfg: without, outcome: "done", fallback: NO_TEXT, log });
     expect(await record(done)).toMatchObject({ source: "site", outcome: "done", cost_micro: "0", input_tokens: "0", output_tokens: "0" });
   });
 

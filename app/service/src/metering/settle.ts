@@ -27,7 +27,9 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  *   whole numbers of 0 or more: anything else throws before anything is read or written.
  * - Cost (`cost_micro`, the true cost): the tokens at the site model's configured price; 0 for a provider model, for a
  *   `failed` call that produced no output, for no tokens at all (a run recovered at start-up settles so), and for a
- *   run never admitted (no model recorded; nothing is charged).
+ *   run never admitted (no model recorded; nothing is charged). A call that cost something on a site model removed from
+ *   the configuration since cannot be priced: its true cost is unknown, so it is recorded as 0 and `estimated`, nothing
+ *   is charged, and that is logged (`log.warn`, with the run and the model).
  * - Charged: the cost up to the run's hold — never more than admission held; the part above it is forgiven. Then by
  *   `charge_to`: `free` grows the free allowance of the site day it is *now* (a call that started before midnight and
  *   ends after it uses the new day's allowance) by the charge, up to what is left of it, and the rest is forgiven too,
@@ -37,8 +39,7 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
  *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
- * settled already (`usage_records_run_id_key` holds that in the database too), and for a site model no longer
- * configured when its call cost something.
+ * settled already (`usage_records_run_id_key` holds that in the database too).
  */
 export async function settle(
   t: Tx,
@@ -48,7 +49,7 @@ export async function settle(
   fallback: { inputChars: number; outputChars: number },
   outcome: Outcome,
   now: Date,
-  { forgiveAll = false }: { forgiveAll?: boolean } = {},
+  { forgiveAll = false, log }: { forgiveAll?: boolean; log?: { warn(details: Record<string, unknown>, msg: string): void } } = {},
 ): Promise<void> {
   assertCount("settle: fallback.inputChars", fallback.inputChars);
   assertCount("settle: fallback.outputChars", fallback.outputChars);
@@ -71,10 +72,15 @@ export async function settle(
   const input = reported ? usage.inputTokens : fallback.inputChars;
   const output = reported ? usage.outputTokens : fallback.outputChars;
   let cost = 0n;
+  let priced = true;
   if (run.source === "site" && !(outcome === "failed" && output === 0) && input + output > 0) {
     const site = config.siteModels.find((m) => m.id === run.model);
-    if (!site) throw new Error(`settle: site model ${run.model} of run ${runId} is no longer configured`);
-    cost = costMicro(site, input, output);
+    if (site) {
+      cost = costMicro(site, input, output);
+    } else {
+      priced = false;
+      log?.warn({ runId, model: run.model }, "settle: the run's site model is no longer configured, so its cost is unknown: recorded as 0 and not charged");
+    }
   }
 
   let freeMicro = 0n;
@@ -104,7 +110,7 @@ export async function settle(
      values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      returning id::text`,
     [
-      run.owner_id, run.agent_id, runId, run.purpose, run.source, run.model, input, output, !reported,
+      run.owner_id, run.agent_id, runId, run.purpose, run.source, run.model, input, output, !reported || !priced,
       cost.toString(), freeMicro.toString(), balanceMicro.toString(), forgivenMicro.toString(), outcome,
     ],
   );

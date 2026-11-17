@@ -347,7 +347,7 @@ export class DbAgentPort implements AgentPort {
       ]);
       const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent });
       const ours = final.status === "failed" && final.error === "busy";
-      await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours });
+      await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours, log: this.deps.log });
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
       const updated = await t.query<RunRow>(
@@ -389,14 +389,14 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * left as they are. Nothing is pushed (no socket can be open yet): a client learns the state from `GET …/run`. A run
  * that cannot be recovered is logged and left for the next start. Returns how many were recovered.
  */
-export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseLogger, "error">): Promise<number> {
+export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseLogger, "error" | "warn">): Promise<number> {
   const { rows } = await db.query<{ id: string; agent_id: string | null }>(
     "select id, agent_id from agent_runs where status = 'running' order by started_at, id",
   );
   let recovered = 0;
   for (const run of rows) {
     try {
-      if (await db.tx((t) => recoverRun(t, config, run.id, run.agent_id))) recovered++;
+      if (await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log))) recovered++;
     } catch (err) {
       log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the next start");
     }
@@ -405,7 +405,7 @@ export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseL
 }
 
 /** One run of `recoverRuns`; false when it was no longer running. */
-async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null): Promise<boolean> {
+async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null, log: Pick<FastifyBaseLogger, "warn">): Promise<boolean> {
   // A reply has its Agent; a persona draft has none.
   const agent = agentId === null ? null : await lockAgent(t, agentId);
   const state = (await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [runId])).rows[0];
@@ -426,7 +426,7 @@ async function recoverRun(t: Tx, config: Config, runId: string, agentId: string 
       : UNAVAILABLE;
   // A run settled already had its hold released with its record.
   const settled = (await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0;
-  if (!settled) await settle(t, config, runId, null, NOTHING, end.status, new Date(), { forgiveAll: true });
+  if (!settled) await settle(t, config, runId, null, NOTHING, end.status, new Date(), { forgiveAll: true, log });
   const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
   await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [runId, end.status, error]);
   const next = agent !== null && end.status !== "failed" ? followUpSeq(state, agent) : null;
