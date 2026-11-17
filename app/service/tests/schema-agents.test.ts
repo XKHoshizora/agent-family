@@ -49,10 +49,36 @@ describe("agent, provider, metering and run tables", () => {
     const agent = await agentPrincipal(owner, "bot_a");
     await db.query(`insert into agents (principal_id) values ($1)`, [agent]);
     const { rows } = await db.query(
-      `select intro, field, persona, persona_version, reply_mode, reasoning, model_source, paused, deleted_at from agents`,
+      `select intro, field, persona, persona_version, reply_mode, group_mentions, reasoning, model_source, paused, deleted_at from agents`,
     );
     expect(rows).toEqual([
-      { intro: "", field: "", persona: "", persona_version: 0, reply_mode: "always", reasoning: "none", model_source: null, paused: false, deleted_at: null },
+      {
+        intro: "",
+        field: "",
+        persona: "",
+        persona_version: 0,
+        reply_mode: "always",
+        group_mentions: "members",
+        reasoning: "none",
+        model_source: null,
+        paused: false,
+        deleted_at: null,
+      },
+    ]);
+  });
+
+  test("group_mentions is 'members' or 'owner', never anything else or null", async () => {
+    const owner = await human("owner_gm");
+    const insert = async (handle: string, value: unknown) =>
+      db.query(`insert into agents (principal_id, group_mentions) values ($1, $2)`, [await agentPrincipal(owner, handle), value]);
+    await insert("gm_members", "members");
+    await insert("gm_owner", "owner");
+    await expect(insert("gm_nobody", "nobody")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(insert("gm_upper", "Owner")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(insert("gm_null", null)).rejects.toMatchObject({ code: "23502" });
+    expect((await db.query(`select group_mentions from agents order by group_mentions`)).rows).toEqual([
+      { group_mentions: "members" },
+      { group_mentions: "owner" },
     ]);
   });
 
@@ -137,14 +163,43 @@ describe("agent, provider, metering and run tables", () => {
     }
     const runSql = `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq) values ('reply', $1, $2, $3, $4, 1)`;
 
-    test("two active runs for one agent fail on the partial index; a done plus a queued succeed", async () => {
+    test("two active runs for one agent in one conversation fail on the partial index; a done plus a queued succeed", async () => {
       const { owner, agent, conversation } = await setup();
       await db.query(runSql, [conversation, agent, owner, "done"]);
       await db.query(runSql, [conversation, agent, owner, "queued"]);
       await rejectedWith(UNIQUE_VIOLATION, runSql, [conversation, agent, owner, "running"]);
+      await rejectedWith(UNIQUE_VIOLATION, runSql, [conversation, agent, owner, "queued"]);
       await db.query(`update agent_runs set status = 'failed' where status = 'queued'`);
       await db.query(runSql, [conversation, agent, owner, "running"]);
       await rejectedWith(CHECK_VIOLATION, runSql, [conversation, agent, owner, "sleeping"]);
+    });
+
+    test("one agent may have an active run in each of two conversations, and another agent one in the same conversation", async () => {
+      const { owner, agent, conversation } = await setup();
+      const group = (await db.query<{ id: string }>(`insert into conversations (type, creator_id) values ('group', $1) returning id`, [owner])).rows[0]!.id;
+      const other = await agentPrincipal(owner, "bot_h2");
+      await db.query(`insert into agents (principal_id) values ($1)`, [other]);
+      await db.query(runSql, [conversation, agent, owner, "running"]);
+      await db.query(runSql, [group, agent, owner, "running"]);
+      await db.query(runSql, [group, other, owner, "queued"]);
+      // Still one per agent and conversation: in the group too.
+      await rejectedWith(UNIQUE_VIOLATION, runSql, [group, agent, owner, "queued"]);
+      await rejectedWith(UNIQUE_VIOLATION, runSql, [group, other, owner, "running"]);
+      expect((await db.query(`select count(*)::int as n from agent_runs where status in ('queued', 'running')`)).rows).toEqual([{ n: 3 }]);
+      // Only the new index: the old one-per-agent index is gone.
+      const indexes = await db.query<{ indexname: string; indexdef: string }>(
+        `select indexname, indexdef from pg_indexes where tablename = 'agent_runs' and indexdef like '%UNIQUE%'`,
+      );
+      expect(indexes.rows.map((r) => r.indexname).sort()).toEqual(["agent_runs_one_active_per_agent_conversation", "agent_runs_pkey"]);
+    });
+
+    test("interrupted is null, agent_paused, agent_deleted or agent_removed", async () => {
+      const { owner, agent, conversation } = await setup();
+      const interrupted = `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, interrupted)
+                           values ('reply', $1, $2, $3, 'done', 1, $4)`;
+      for (const reason of [null, "agent_paused", "agent_deleted", "agent_removed"]) await db.query(interrupted, [conversation, agent, owner, reason]);
+      await rejectedWith(CHECK_VIOLATION, interrupted, [conversation, agent, owner, "agent_bored"]);
+      await rejectedWith(CHECK_VIOLATION, interrupted, [conversation, agent, owner, "agent_left"]);
     });
 
     test("a reply run needs both conversation and agent; a draft run has neither", async () => {
