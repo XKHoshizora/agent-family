@@ -396,6 +396,7 @@ describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
     ["provider move", ({ provider }) => json("PATCH", `/api/providers/${provider}`, { baseUrl: "https://evil.example.test/v1" })],
     ["provider delete", ({ provider }) => json("DELETE", `/api/providers/${provider}`)],
     ["provider test", ({ provider }) => json("POST", `/api/providers/${provider}/test`)],
+    ["provider test with a model", ({ provider }) => json("POST", `/api/providers/${provider}/test`, { model: "m" })],
     ["provider model list", ({ provider }) => json("POST", `/api/providers/${provider}/models/list`)],
     ["provider refresh", ({ provider }) => json("POST", `/api/providers/${provider}/models/refresh`)],
     ["run", ({ conv }) => json("GET", `/api/conversations/${conv}/run`)],

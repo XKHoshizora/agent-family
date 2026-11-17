@@ -313,7 +313,7 @@ describe("testing the connection", () => {
     for (const [protocol, headers] of Object.entries(expected)) {
       const p = await mustCreate(owner, { name: protocol, protocol, baseUrl: `${stub.baseUrl()}/`, apiKey: KEY });
       stub.requests.length = 0;
-      expect(await api(app, owner, "POST", `/api/providers/${p.id}/test`)).toEqual({ status: 200, json: { ok: true } });
+      expect(await api(app, owner, "POST", `/api/providers/${p.id}/test`)).toEqual({ status: 200, json: { ok: true, mode: "list", latencyMs: expect.any(Number) } });
       expect(stub.requests).toHaveLength(1);
       const [req] = stub.requests;
       expect([protocol, req!.method, req!.path]).toEqual([protocol, "GET", "/v1/models"]);
@@ -325,22 +325,23 @@ describe("testing the connection", () => {
     const owner = await signUp(app, "tom");
     const p = await mustCreate(owner, { baseUrl: stub.baseUrl() });
     const test = () => api(app, owner, "POST", `/api/providers/${p.id}/test`);
-    // The provider's HTTP status comes back as a string (and nothing else of its answer); a redirect is refused before
-    // its status is kept.
-    const cases: Array<[number, string, Record<string, string>, string, string | undefined]> = [
-      [401, '{"error":"bad key"}', {}, "provider_rejected", "401"],
-      [403, '{"error":"forbidden"}', {}, "provider_rejected", "403"],
-      [500, '{"error":"oops"}', {}, "provider_unavailable", "500"],
-      [404, '{"error":"no such path"}', {}, "provider_unavailable", "404"],
-      [405, '{"error":"method not allowed"}', {}, "provider_unavailable", "405"],
-      [429, '{"error":"slow down"}', {}, "provider_unavailable", "429"],
-      [200, "<html>not json</html>", { "content-type": "text/html" }, "provider_unavailable", "200"],
-      [302, "", { location: "https://127.0.0.1/" }, "provider_unavailable", undefined],
-      [201, '{"data":[]}', {}, "provider_unavailable", "201"],
+    // The provider's HTTP status comes back as a string, and in `detail` with what it said (provider-ux.test.ts); a
+    // redirect is refused before its status is kept.
+    const cases: Array<[number, string, Record<string, string>, string, string | undefined, string | undefined]> = [
+      [401, '{"error":"bad key"}', {}, "provider_rejected", "401", "bad key"],
+      [403, '{"error":"forbidden"}', {}, "provider_rejected", "403", "forbidden"],
+      [500, '{"error":"oops"}', {}, "provider_unavailable", "500", "oops"],
+      [404, '{"error":"no such path"}', {}, "provider_unavailable", "404", "no such path"],
+      [405, '{"error":"method not allowed"}', {}, "provider_unavailable", "405", "method not allowed"],
+      [429, '{"error":"slow down"}', {}, "provider_unavailable", "429", "slow down"],
+      [200, "<html>not json</html>", { "content-type": "text/html" }, "provider_unavailable", "200", "<html>not json</html>"],
+      [302, "", { location: "https://127.0.0.1/" }, "provider_unavailable", undefined, undefined],
+      [201, '{"data":[]}', {}, "provider_unavailable", "201", '{"data":[]}'],
     ];
-    for (const [status, body, headers, error, upstreamStatus] of cases) {
+    for (const [status, body, headers, error, upstreamStatus, message] of cases) {
       stub.answer(() => ({ status, body, headers }));
-      expect([status, await test()]).toEqual([status, { status: 200, json: { ok: false, error, ...(upstreamStatus === undefined ? {} : { upstreamStatus }) } }]);
+      const said = upstreamStatus === undefined ? {} : { upstreamStatus, detail: { upstreamStatus, message } };
+      expect([status, await test()]).toEqual([status, { status: 200, json: { ok: false, error, ...said } }]);
     }
     // (This app allows loopback for its stub, so the private addresses here are not loopback ones.)
     for (const baseUrl of ["https://10.0.0.5/v1", "https://169.254.169.254/latest", "https://[fd00::1]/v1"]) {
@@ -384,7 +385,7 @@ describe("testing the connection", () => {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ data: [{ id: "stub-model" }] }));
       }
-      expect([(await first).json, (await second).json]).toEqual([{ ok: true }, { ok: true }]);
+      expect([(await first).json, (await second).json]).toEqual([0, 0].map(() => ({ ok: true, mode: "list", latencyMs: expect.any(Number) })));
     } finally {
       await capped.close();
       server.closeAllConnections();
@@ -496,7 +497,11 @@ describe("listing the provider's models", () => {
     const res = await api(app, owner, "POST", `/api/providers/${p.id}/models/list`);
     expect(res).toEqual({
       status: 200,
-      json: { ok: true, listed: [listed("o3-mini"), listed("gpt-4o", true), listed("claude-sonnet-5-5"), listed("text-embedding-3-small"), listed("house-blend-v2")] },
+      json: {
+        ok: true,
+        listed: [listed("o3-mini"), listed("gpt-4o", true), listed("claude-sonnet-5-5"), listed("text-embedding-3-small"), listed("house-blend-v2")],
+        source: "upstream",
+      },
     });
     // Known to the catalogue: its display name, context and (from the lab) thinking levels; else guesses from the name.
     expect(res.json.listed[2]).toEqual({
@@ -550,7 +555,7 @@ describe("listing the provider's models", () => {
     expect(res.json.listed.map((m: any) => m.name)).toEqual(ids.slice(0, 500));
     // Past the first 1 000 entries nothing is looked at, even when none of those is a usable name.
     stub.answer(() => ({ status: 200, body: JSON.stringify({ data: [...Array.from({ length: 1000 }, () => ({ id: "" })), { id: "late" }] }) }));
-    expect(await api(app, owner, "POST", `/api/providers/${p.id}/models/list`)).toEqual({ status: 200, json: { ok: true, listed: [] } });
+    expect(await api(app, owner, "POST", `/api/providers/${p.id}/models/list`)).toEqual({ status: 200, json: { ok: true, listed: [], source: "upstream" } });
   });
 
   it("a failure is answered as 测试连接 answers it (a 200, ok false, the code and the provider's status), with the code refresh would give", async () => {
@@ -572,10 +577,14 @@ describe("listing the provider's models", () => {
       const [list, test, refresh] = [await call("models/list"), await call("test"), await call("models/refresh")];
       expect([status, list]).toEqual([status, test]);
       expect([status, list.status, list.json.ok, list.json.error]).toEqual([status, 200, false, refresh.json.error]);
-      expect(Object.keys(list.json).sort()).toEqual(status === 302 ? ["error", "ok"] : ["error", "ok", "upstreamStatus"]);
+      expect(Object.keys(list.json).sort()).toEqual(status === 302 ? ["error", "ok"] : ["detail", "error", "ok", "upstreamStatus"]);
     }
+    // (This host is in no catalogue: a 404 stays a failure. provider-catalog.test.ts has the catalogue's.)
     stub.answer(() => ({ status: 404, body: "{}" }));
-    expect(await call("models/list")).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "404" } });
+    expect(await call("models/list")).toEqual({
+      status: 200,
+      json: { ok: false, error: "provider_unavailable", upstreamStatus: "404", detail: { upstreamStatus: "404", message: "{}" } },
+    });
     const q = await mustCreate(owner, { name: "private", baseUrl: "https://192.168.0.10/v1" });
     expect(await call("models/list", q.id)).toEqual({ status: 200, json: { ok: false, error: "address_not_allowed" } });
     expect((await call("models/refresh", q.id)).json.error).toBe("address_not_allowed");

@@ -2,11 +2,13 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { PROTOCOLS, type Protocol } from "../config.ts";
-import { notFound } from "../errors.ts";
+import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
+import { ModelError } from "../models/gateway.ts";
 import { uuidParam, userText } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { providerBaseUrl } from "./base-url.ts";
+import { catalogueModels } from "./catalogue.ts";
 import { KeyUnreadableError } from "./crypto.ts";
 import { modelHints } from "./hints.ts";
 import { ProviderCallError, toProviderCallError, type ProviderCallCode } from "./probe.ts";
@@ -91,18 +93,46 @@ const providerView = z.object({
   models: z.array(modelView),
 });
 
+/** What the upstream said about a failed call (upstream-detail.ts): for the provider's owner, on these two routes only. */
+const detailView = z.object({
+  upstreamStatus: z.string().optional(),
+  message: z.string().nullable().optional(),
+  redacted: z.literal(true).optional(),
+});
 /** A call to the provider that failed, as `/test` and `/models/list` answer it (a 200). */
 const callFailure = z.object({
   ok: z.literal(false),
   error: z.enum(["provider_rejected", "provider_unavailable", "address_not_allowed"]),
   upstreamStatus: z.string().optional(),
+  detail: detailView.optional(),
 });
-/** That answer: the code and, when the provider answered with one, its HTTP status, the number only (a 404 or 405: it has no model list). */
+/**
+ * That answer: the code and, when the provider answered with one, its HTTP status, the number only (a 404 or 405: it has
+ * no model list); and, when the upstream answered, `detail`: its status again and its own error text, bounded, cleaned
+ * and never a piece of the key (`upstreamDetail`).
+ */
 const failed = (failure: ProviderCallError): z.infer<typeof callFailure> => ({
   ok: false,
   error: failure.code as ProviderCallCode,
   ...(failure.upstreamStatus === undefined ? {} : { upstreamStatus: String(failure.upstreamStatus) }),
+  ...(failure.detail === undefined || Object.keys(failure.detail).length === 0 ? {} : { detail: failure.detail }),
 });
+
+/** `POST /api/providers/:id/test`'s body: none, `{}` or `null` (the model list is asked for), or a model to say "hi" to. */
+const testBody = z.object({ model: modelName.optional() }).nullish();
+/** The test's call to a model: one short message, no thinking, a tiny answer, a short deadline. */
+export const CHAT_TEST = { text: "hi", maxOutputTokens: 16, timeoutMs: 15_000 } as const;
+const testPassed = z.object({ ok: z.literal(true), mode: z.enum(["chat", "list"]), latencyMs: z.number().int().min(0) });
+/** Milliseconds since `started` (a `performance.now()`), whole. */
+const since = (started: number): number => Math.max(0, Math.round(performance.now() - started));
+
+/** A failed test call as a provider call's failure: the gateway keeps only the code and the upstream's status. */
+function chatFailure(err: unknown): ProviderCallError {
+  if (err instanceof ModelError && err.code !== "thinking_exhausted") {
+    return new ProviderCallError(err.code, err.upstreamStatus, err.upstreamStatus === undefined ? undefined : { upstreamStatus: String(err.upstreamStatus) });
+  }
+  return new ProviderCallError("provider_unavailable");
+}
 const listedModel = z.object({
   name: z.string(),
   vision: z.boolean(),
@@ -142,7 +172,7 @@ export function registerProviderRoutes(
   app: FastifyInstance,
   { allowInsecureLocal, readLimit }: { allowInsecureLocal: boolean; readLimit: PrincipalLimit },
 ): void {
-  const { db, config, providerProbe } = app.deps;
+  const { db, config, providerProbe, models } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const secret = config.providerKeySecret;
 
@@ -278,13 +308,14 @@ export function registerProviderRoutes(
       schema: {
         params: idParams,
         querystring: empty,
-        body: noBody,
-        response: { 200: z.union([z.object({ ok: z.literal(true) }), callFailure]) },
+        body: testBody,
+        response: { 200: z.union([testPassed, callFailure]) },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       await callLimit(req, me.id);
+      const model = req.body?.model;
       let target;
       try {
         target = await callTarget(req.log, me.id, req.params.id);
@@ -292,14 +323,46 @@ export function registerProviderRoutes(
         if (err instanceof ProviderCallError) return failed(err);
         throw err;
       }
-      try {
-        await providerProbe.test(target);
-        return { ok: true as const };
-      } catch (err) {
-        const failure = toProviderCallError(err);
-        logFailure(req.log, req.params.id, target.protocol, failure);
-        return failed(failure);
+      const started = performance.now();
+      if (model === undefined) {
+        try {
+          await providerProbe.test(target);
+          return { ok: true as const, mode: "list" as const, latencyMs: since(started) };
+        } catch (err) {
+          const failure = toProviderCallError(err);
+          logFailure(req.log, req.params.id, target.protocol, failure);
+          return failed(failure);
+        }
       }
+      // One of its saved models; any name while it has none yet.
+      const saved = target.models.find((m) => m.name === model);
+      if (target.models.length > 0 && saved === undefined) throw new AppError(400, "invalid_request");
+      // A call through the gateway like a reply's, but nothing is metered or recorded: a provider costs no points.
+      const signal = AbortSignal.timeout(CHAT_TEST.timeoutMs);
+      try {
+        const events = models.stream({
+          protocol: target.protocol,
+          baseUrl: target.baseUrl,
+          apiKey: target.apiKey,
+          model,
+          system: "",
+          messages: [{ role: "user", parts: [{ type: "text", text: CHAT_TEST.text }] }],
+          reasoning: "none",
+          maxOutputTokens: CHAT_TEST.maxOutputTokens,
+          thinkingSwitch: saved?.reasoning === true,
+          upstreamId: `provider:${req.params.id}`,
+          signal,
+        });
+        for await (const event of events) if (event.type === "finish") break;
+      } catch (err) {
+        // A model that spent its 16 tokens thinking did answer: the connection works.
+        if (!(err instanceof ModelError && err.code === "thinking_exhausted")) {
+          const failure = chatFailure(err);
+          logFailure(req.log, req.params.id, target.protocol, failure);
+          return failed(failure);
+        }
+      }
+      return { ok: true as const, mode: "chat" as const, latencyMs: since(started) };
     },
   );
 
@@ -311,7 +374,9 @@ export function registerProviderRoutes(
         params: idParams,
         querystring: empty,
         body: noBody,
-        response: { 200: z.union([z.object({ ok: z.literal(true), listed: z.array(listedModel) }), callFailure]) },
+        response: {
+          200: z.union([z.object({ ok: z.literal(true), listed: z.array(listedModel), source: z.enum(["upstream", "catalogue"]) }), callFailure]),
+        },
       },
     },
     async (req) => {
@@ -324,19 +389,24 @@ export function registerProviderRoutes(
         if (err instanceof ProviderCallError) return failed(err);
         throw err;
       }
+      const saved = new Set(target.models.map((m) => m.name));
+      const listedOf = (names: string[]) =>
+        usableNames(names, target.apiKey)
+          .slice(0, MAX_LISTED_MODELS)
+          .map((name) => ({ name, ...modelHints(name), added: saved.has(name) }));
       let names: string[];
       try {
         names = await providerProbe.listModels(target);
       } catch (err) {
         const failure = toProviderCallError(err);
         logFailure(req.log, req.params.id, target.protocol, failure);
+        // No model list there (404, 405): the public catalogue's models of a provider at that very host, if it knows one.
+        const noList = failure.code === "provider_unavailable" && (failure.upstreamStatus === 404 || failure.upstreamStatus === 405);
+        const known = noList ? catalogueModels(target.baseUrl) : null;
+        if (known !== null) return { ok: true as const, listed: listedOf(known), source: "catalogue" as const };
         return failed(failure);
       }
-      const saved = new Set(target.models.map((m) => m.name));
-      const listed = usableNames(names, target.apiKey)
-        .slice(0, MAX_LISTED_MODELS)
-        .map((name) => ({ name, ...modelHints(name), added: saved.has(name) }));
-      return { ok: true as const, listed };
+      return { ok: true as const, listed: listedOf(names), source: "upstream" as const };
     },
   );
 

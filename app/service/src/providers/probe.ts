@@ -1,5 +1,6 @@
 import type { Protocol } from "../config.ts";
 import { AppError } from "../errors.ts";
+import { DETAIL_BODY_BYTES, readHead, upstreamDetail, type UpstreamDetail } from "./upstream-detail.ts";
 
 /**
  * Talking to a provider without generating anything: the connection test and the model list. Used by the provider
@@ -23,13 +24,27 @@ export interface ProviderProbe {
 
 export type ProviderCallCode = "provider_rejected" | "provider_unavailable" | "address_not_allowed";
 
-/** A failed call to a provider: a code for the owner and, for the log only, the upstream's HTTP status. */
+/**
+ * A failed call to a provider: a code for the owner and, for the log only, the upstream's HTTP status. `detail` is what
+ * the upstream said (upstream-detail.ts: bounded, cleaned, never a piece of the key), for the provider's owner on
+ * `/test` and `/models/list` only: it is held in a private field, so no log line, error body or serialised copy of the
+ * error ever carries it.
+ */
 export class ProviderCallError extends AppError {
+  readonly #detail: UpstreamDetail | undefined;
+
   constructor(
     code: ProviderCallCode,
     readonly upstreamStatus?: number,
+    detail?: UpstreamDetail,
   ) {
     super(code === "address_not_allowed" ? 400 : 502, code);
+    this.#detail = detail;
+  }
+
+  /** What the upstream said, for its owner's `/test` and `/models/list` answers only (never logged). */
+  get detail(): UpstreamDetail | undefined {
+    return this.#detail;
   }
 }
 
@@ -68,9 +83,15 @@ function namesIn(protocol: Protocol, json: unknown): unknown[] {
 /**
  * The default probe: one authenticated `GET {baseUrl}/models` in the protocol's own headers, through `fetch`
  * (always a `guardedFetch`). 401/403 → `provider_rejected`; anything but a 200 with JSON → `provider_unavailable`;
- * the guard's refusal → `address_not_allowed`. Nothing of the answer but the parsed names is kept.
+ * the guard's refusal → `address_not_allowed`. Of a failed answer, the first `DETAIL_BODY_BYTES` are read for the
+ * error's `detail` (`upstreamDetail`: bounded, cleaned, dropped when it holds a piece of the key) and nothing else kept;
+ * of a good one, only the parsed names.
  */
 export function createProviderProbe(fetch: typeof globalThis.fetch): ProviderProbe {
+  /** The failure for an upstream answer of `status` whose body was `body`. */
+  const failed = (p: ProbeTarget, status: number, body: string | null) =>
+    new ProviderCallError(status === 401 || status === 403 ? "provider_rejected" : "provider_unavailable", status, upstreamDetail(status, body, p.apiKey));
+
   async function listing(p: ProbeTarget): Promise<unknown> {
     let res: Response;
     try {
@@ -82,14 +103,17 @@ export function createProviderProbe(fetch: typeof globalThis.fetch): ProviderPro
     } catch (err) {
       throw toProviderCallError(err);
     }
-    if (res.status !== 200) {
-      await res.body?.cancel().catch(() => {});
-      throw new ProviderCallError(res.status === 401 || res.status === 403 ? "provider_rejected" : "provider_unavailable", res.status);
-    }
+    if (res.status !== 200) throw failed(p, res.status, await readHead(res));
+    let text: string;
     try {
-      return JSON.parse(await res.text());
+      text = await res.text();
     } catch {
       throw new ProviderCallError("provider_unavailable", res.status);
+    }
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw failed(p, res.status, text.slice(0, DETAIL_BODY_BYTES));
     }
   }
   return {

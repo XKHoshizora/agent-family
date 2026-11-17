@@ -32,7 +32,8 @@ describe("provider rate limits", () => {
       expect(await api(app, c, "POST", `/api/providers/${id}/models/list`)).toEqual({ status: 200, json: { ok: false, error: "address_not_allowed" } });
       expect(await api(app, c, "POST", `/api/providers/${id}/models/refresh`)).toEqual({ status: 400, json: { error: "address_not_allowed" } });
     }
-    expect((await api(app, c, "POST", `/api/providers/${id}/models/list`)).status).toBe(200); // 10
+    // A test with a model (a real call to it) counts the same.
+    expect(await api(app, c, "POST", `/api/providers/${id}/test`, { model: "m" })).toEqual({ status: 200, json: { ok: false, error: "address_not_allowed" } }); // 10
     expect(await api(app, c, "POST", `/api/providers/${id}/test`)).toEqual(limited);
     expect(await api(app, c, "POST", `/api/providers/${id}/models/list`)).toEqual(limited);
     expect(await api(app, c, "POST", `/api/providers/${id}/models/refresh`)).toEqual(limited);

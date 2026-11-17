@@ -427,6 +427,9 @@ function plausibleBody(route: RouteEntry, fx: Fixture): Record<string, unknown> 
       return providerBody({ name: `fz${n}`, models: [{ name: "m", reasoning: true, reasoningLevels: ["low", "high"] }] });
     case "PATCH /api/providers/:id":
       return { name: `fz${n}`, models: [{ name: "m", reasoning: true, reasoningLevels: ["low", "high"] }] };
+    case "POST /api/providers/:id/test":
+      // A real call to the fixture provider's model (the gateway here answers at once).
+      return { model: "m" };
     default:
       return {};
   }

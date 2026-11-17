@@ -22,6 +22,9 @@ const { app, db } = useApp({ env: SITE_ENV, allowInsecureLocal: true, logStream:
 const KEY = "sk-test-SECRET-1234567890";
 const NEEDLE = "SECRET-1234567890";
 const SECRET = "a-provider-key-secret-of-32-chars-or-more";
+/** A failure's `detail` when the upstream's answer held a piece of the key (provider-ux.test.ts): its text is dropped. */
+const redacted = (upstreamStatus: string) => ({ upstreamStatus, message: null, redacted: true });
+const LISTED = { ok: true, mode: "list", latencyMs: expect.any(Number) };
 
 /** The provider row a key is sealed for. */
 const ROW = { ownerId: "0b9d2a52-7a3e-4c43-9e0a-5f1f4f2b8c11", providerId: "6d1f0c8e-2b7a-4f6e-8a3d-9c5e1b2a7f40" } as const;
@@ -90,7 +93,7 @@ describe("a saved key moved to another provider's row", () => {
     const theirs = await create(other, "theirs", "sk-test-other-key-0002");
     await db.query("update providers set key_cipher = (select key_cipher from providers where id = $1) where id = any($2::uuid[])", [source, [mine, theirs]]);
 
-    expect(await api(app, owner, "POST", `/api/providers/${source}/test`)).toEqual({ status: 200, json: { ok: true } });
+    expect(await api(app, owner, "POST", `/api/providers/${source}/test`)).toEqual({ status: 200, json: LISTED });
     const sent = stub.requests.length;
     expect(await api(app, owner, "POST", `/api/providers/${mine}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
     expect(await api(app, other, "POST", `/api/providers/${theirs}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
@@ -153,12 +156,13 @@ describe("a provider's key never comes back", () => {
     const refreshed = await call("POST", `/api/providers/${id}/models/refresh`);
     expect(refreshed.status).toBe(200);
     expect(refreshed.json.listed).toEqual(["model-a"]);
-    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: true } });
+    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: LISTED });
+    // The upstream echoes the key: what it said is dropped, and the answer says so.
     mode = "reject";
-    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401" } });
+    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401", detail: redacted("401") } });
     expect(await call("POST", `/api/providers/${id}/models/refresh`)).toEqual({ status: 502, json: { error: "provider_rejected" } });
     mode = "html";
-    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500" } });
+    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500", detail: redacted("500") } });
     expect(await call("POST", `/api/providers/${id}/models/refresh`)).toEqual({ status: 502, json: { error: "provider_unavailable" } });
     // The key really was sent, every time, to the upstream and nowhere else.
     expect(stub.requests.length).toBe(6);
@@ -202,7 +206,7 @@ describe("a provider's key never comes back", () => {
     }
   });
 
-  it("the model list (models/list) answers names and hints only: never the key, the base URL or the upstream's text", async () => {
+  it("the model list (models/list) answers names and hints only: never the key, the base URL, or the upstream's text when it echoes the key", async () => {
     const owner = await signUp(app, "lister");
     const seen: string[] = [];
     const list = async (id: string) => {
@@ -222,11 +226,14 @@ describe("a provider's key never comes back", () => {
     const id = created.json.id as string;
 
     // A name that holds the key is never answered.
-    expect(await list(id)).toEqual({ status: 200, json: { ok: true, listed: [{ name: "model-a", vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false }] } });
+    expect(await list(id)).toEqual({
+      status: 200,
+      json: { ok: true, listed: [{ name: "model-a", vision: false, pdf: false, reasoning: false, chat: true, known: false, added: false }], source: "upstream" },
+    });
     mode = "reject";
-    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401" } });
+    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401", detail: redacted("401") } });
     mode = "html";
-    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500" } });
+    expect(await list(id)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500", detail: redacted("500") } });
     for (const r of stub.requests) expect(r.headers.authorization).toBe(`Bearer ${KEY}`);
     expect(stub.requests).toHaveLength(3);
 
