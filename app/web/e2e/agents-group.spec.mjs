@@ -262,6 +262,11 @@ function recordTraffic(context) {
       await Promise.all(reading);
       return [...bodies, ...frames].join("\n");
     },
+    /** The bodies of the service's answers (`/api/…`), each `url\nbody`, once every one has been read. */
+    async api() {
+      await Promise.all(reading);
+      return bodies.filter((b) => new URL(b.slice(0, b.indexOf("\n"))).pathname.startsWith("/api/"));
+    },
   };
 }
 
@@ -311,6 +316,9 @@ test("a member never receives the Agent's persona, its model or its thinking: no
   await annThinking.locator("summary").click();
   await expect(annThinking.locator(".thinking-text")).toHaveText(thought);
   await expect(agentMessagesWith(boChat, answerMark).locator("details.thinking")).toHaveCount(0);
+  // Which model and thinking level the reply used: a line under it for Ann (once its run is charged), none for Bo.
+  await expect(agentMessagesWith(annChat, answerMark).locator(".msg-via")).toHaveText(`${modelName} · 思考：中`);
+  await expect(agentMessagesWith(boChat, answerMark).locator(".msg-via")).toHaveCount(0);
   // The persona and the model were really in play: the model was given the persona, by that name, and it thought.
   const [call] = await modelStub.calls();
   expect(JSON.stringify(call.body)).toContain(personaMark);
@@ -339,6 +347,9 @@ test("a member never receives the Agent's persona, its model or its thinking: no
   await expect(bo.page.getByRole("listbox", { name: "选择要提及的成员" }).getByRole("option").filter({ hasText: agent.name })).toBeVisible();
   expect(await onPage(), "in the @ picker").toEqual([]);
   await bo.page.keyboard.press("Escape");
+  // A fresh load: the service's answers (/api/sync) carry the reply to Bo's browser too, and are looked at below.
+  await bo.page.reload();
+  await expect(bo.page.locator(".list-col .row-preview").filter({ hasText: answerMark })).toBeVisible();
 
   // Everything Bo's browser received: the reply came (the recording works), none of the secrets did.
   const received = await traffic.all();
@@ -356,6 +367,13 @@ test("a member never receives the Agent's persona, its model or its thinking: no
   expect(runs.length, "run pushes Bo received").toBeGreaterThan(0);
   for (const push of runs) expect(Object.keys(push).sort(), JSON.stringify(push)).toEqual(["agentId", "conversationId", "state", "type"]);
   expect(pushes.filter((p) => p?.type === "delta")).toEqual([]);
+  // Nothing Bo's browser received from the service carries a `via` (no frame, no answer), though the reply did come, once.
+  const replies = pushes.filter((p) => p?.type === "message" && p.message?.text?.includes(answerMark));
+  expect(replies.length, "pushes of the reply Bo received").toBe(1);
+  for (const frame of traffic.frames) expect(frame.includes('"via"'), frame).toBe(false);
+  const answers = await traffic.api();
+  expect(answers.some((b) => b.includes(answerMark)), "an answer of the service (its sync) carried the reply").toBe(true);
+  for (const body of answers) expect(body.includes('"via"'), body.slice(0, 200)).toBe(false);
 });
 
 // --- 4. Agents answering each other, and the brakes -------------------------------------------------------------------
