@@ -103,10 +103,12 @@ latest 80 messages, files included, by the service's estimate, plus the system t
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
 `MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
 `CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
-`ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal may store, default 2 GiB),
+`ATTACHMENT_MAX_BYTES` (the largest file one upload may carry, default 1 GiB; 1 MiB to 5 GiB, and never more than
+`ATTACHMENT_QUOTA_BYTES`, else start-up fails naming both), `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal
+may store in all, default 20 GiB),
 `SWEEP_INTERVAL_MINUTES` (how often the server runs the attachment sweep, whole minutes, default 15, `0` turns it off, at most 1440),
-`UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after 45 s without body bytes or
-15 min in all), `HTTP_BODY_TIMEOUT_MS` (the body deadline, default 30 s: a request with a body must have arrived
+`UPLOAD_IDLE_TIMEOUT_MS` / `UPLOAD_TOTAL_TIMEOUT_MS` (an upload is cut off after this long without body bytes, default
+45 s, or in all, default 60 minutes; see Attachments), `HTTP_BODY_TIMEOUT_MS` (the body deadline, default 30 s: a request with a body must have arrived
 whole this long after its head, or its connection is closed without an answer — armed on the HTTP server's own
 `request` event, so it holds whatever answers the request: a route, a refusal before any route (a foreign
 `Origin`, an undecodable path, an over-long parameter), an unknown route, and also when the answer already went
@@ -316,7 +318,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
-| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in — and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429 | owner |
+| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it | owner |
 | `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run`, `GET /api/conversations/:id/runs` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `POST /api/conversations/:id/agents/halt` | 20 (a budget of its own) | principal |
@@ -372,9 +374,10 @@ whose members are exactly the owner and the Agent. Everything here is the owner'
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
 `POST /api/friend-requests` (also for its owner). Only its owner puts it into a group, and only one the owner is a member
-of (`POST /api/conversations/:id/members`); for anybody else its id is refused there exactly as the id of a non-friend or
-an unknown principal is (403 `forbidden`), and among a new group's `memberIds` (`POST /api/conversations`) it is refused
-so for everyone, its owner included.
+of (`POST /api/conversations/:id/members`): for someone who is not a current member of that group the route is 404
+`not_found`, as for a group that does not exist, whatever the id; for a member who is not its owner its id is refused
+exactly as the id of a non-friend or an unknown principal is (403 `forbidden`). Among a new group's `memberIds`
+(`POST /api/conversations`) it is refused so (403) for everyone, its owner included.
 Its id is unknown to `GET`/`HEAD /api/principals/:id/avatar` for anybody but its owner and whoever shares a
 conversation with it now (see below), and to `PUT`/`DELETE /api/blocks/:principalId` for everyone, its owner included
 (an Agent cannot be blocked): the answer of an id that does not exist, byte for byte (`tests/enumeration.test.ts`).
@@ -387,8 +390,10 @@ An Agent is invisible to everyone but its owner and, while they share a group, t
 handle, intro, field, owner — nothing else. A member of a conversation the Agent is in finds it on the member list
 (`GET /api/conversations/:id/members`) and in the `principals` of `/api/sync`, message reads and searches with
 `ownerId`, `intro` and `field` (Wire shapes, Principal), and loads its avatar while both are current members of that
-conversation; once either membership ends, the avatar route answers as for an id that does not exist (old messages
-then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
+conversation. Like a person who left, an Agent that left a group stays named by its old messages there: whoever can
+still read them (a member who has since left too) gets its entry in those reads' `principals` — name, handle, intro,
+field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
+id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
 level, reply mode, `groupMentions`, provider, pause or persona proposals, in any response, push or error. Fellow members
 see a changed name, intro or field the next time they load principals, as for people; a changed avatar is pushed to
 them (`principal`).
@@ -487,6 +492,10 @@ message is, with everything before it in what the Agent is shown.
 #### `POST /api/agents/:id/resume`
 
 *Session: required.* Body: none or `{}`. Resumes it (idempotent). → 200 Agent; 409 `agent_deleted`; 404 `not_found` unless yours.
+Resuming a paused Agent first ends, in its own transaction, what its pause could not see — a reply another Agent's
+message in a group queued for it, or a mention noted, as the pause committed (Agents and runs, Pause and delete): such
+a queued reply is `cancelled` `agent_paused` (`run` pushed), a running one is never posted and ends `cancelled`
+`agent_paused`, and nothing noted on it is followed up. So nothing written before the resume is answered by it.
 
 #### `DELETE /api/agents/:id`
 
@@ -497,7 +506,8 @@ progress ends as on a pause, with `agent_deleted`). → 200 Agent; 404 `not_foun
 It also leaves every group it is in, before the answer: once the delete itself has committed, one transaction per group
 appends a `member_left` notice there (`actorId` you, `principalId` the Agent; pushed as any leaving) whose seq ends its
 membership. What it said there stays. Should that not happen — the service stopped in between, or a group's transaction
-failed — the next start does it before anything else (and a repeated delete tries again). Meanwhile, while it is still
+failed — the next start does it, right after recovering the runs the previous process left running and before the
+worker starts or any request is served (and a repeated delete tries again). Meanwhile, while it is still
 listed in a group, it replies nothing there: it is deleted, and every step of a reply refuses a deleted Agent.
 
 #### `PUT /api/agents/:id/avatar`
@@ -635,7 +645,7 @@ once, exactly as recovery releases one (Agents and runs, Recovery): `failed`, `p
 hold released at no charge (or, when its reply had been posted, `done` / `stopped` as its message says; `cancelled`
 when a pause had interrupted it); `run` is pushed. A run that has ended is left as it is. Idempotent. → 200
 `{"ok": true}`. In a group: a run of one of your Agents in that group, while you are a current member of it (the other
-members are pushed its state, `null` once it is stopped); a run of another member's Agent, of another conversation, or
+members are pushed its state: `null` once it is stopped, `"unavailable"` when it was released as `failed`); a run of another member's Agent, of another conversation, or
 an unknown id is the 404 of a run that does not exist, and a group you are not in that of a conversation that does not
 exist. Limit: 60 per minute with retry and dismiss.
 
@@ -644,8 +654,9 @@ exist. Limit: 60 per minute with retry and dismiss.
 *Session: required.* Body: none or `{}` in an Agent's own conversation (an `agentId` there plays no part: the
 conversation names its Agent); in a group `{"agentId"}`, one of your Agents (required there: 400 `invalid_request`
 without it). When the latest run failed, queues a new reply answering up to your last message — in a group, answering
-again exactly what the failed run covered (its messages, not your last one); the new run is a person's (`triggered_by`
-`human`: you asked for it). → 201 `{"run": Run}` (queued; also pushed). 409 `busy_run` while a reply is queued or
+again exactly what the failed run was to answer (its messages and what was noted on it while it ran, not your last
+one), called for by whoever called the failed run: one that another Agent's message called for (`triggered_by`
+`agent`) stays an Agent's, so a member's halt still ends it (Agents in a group). → 201 `{"run": Run}` (queued; also pushed). 409 `busy_run` while a reply is queued or
 running; 409 `agent_paused` / `agent_deleted`; 400 `invalid_request` when the latest run did not fail (or there is
 none) or the Agent has no model — in a group also when the Agent is not in the group now or its latest run there is
 from an earlier stay; so a reply cancelled by a halt (`halted`) or by the Agent's leaving (`agent_removed`) is not
@@ -680,14 +691,21 @@ under three brakes, each about Agents calling Agents — a person's mention is n
 - **The chain limit** (`AGENT_CHAIN_LIMIT`, 30): once the group's last that many messages that are not notices were all
   sent by Agents, an Agent's message calls nobody until a person writes; the first such message appends the
   `agent_chain_paused` notice (System notices), once per pause.
-- **The halt** (below): any member stops it at once; until a person writes again, Agents' messages call nobody.
+- **The halt** (below): any member stops it at once; until a person writes again, Agents' messages call nobody, and
+  what Agents' messages asked of a reply before the halt is never answered by a follow-up, even once a person has
+  written since.
 - **The chain budget** (`chainBudget`, per Agent, its owner's setting): once what its owner was charged for its replies
   in the group covering messages after the latest from a person reaches it, Agents' messages do not call it until a
-  person writes; the group is told once per chain (`agent_budget_reached`). A reply on a provider model costs no points,
-  so for such an Agent only the chain limit and the halt apply.
+  person writes; the group is told once per chain (`agent_budget_reached`). It is checked when an Agent's message would
+  call it and again as each of its replies ends, before a follow-up that only Agents' messages asked for (a reply is
+  charged only once it has ended): so a chain passes its budget by at most the reply that was under way. A reply on a
+  provider model costs no points, so for such an Agent only the chain limit and the halt apply.
 
-The owner's other limits hold throughout: replies started a minute (`AGENT_RUNS_PER_MINUTE`), running at once
-(`AGENT_MAX_CONCURRENT_RUNS`), and the free allowance or balance.
+The owner's other limits hold throughout, for every reply in a group — called by a person's mention, an Agent's, or a
+follow-up of what was noted while a reply ran: replies started a minute (`AGENT_RUNS_PER_MINUTE`; over it, the
+Agent's one `rate_limited` run in the group, Rate limits), running at once (`AGENT_MAX_CONCURRENT_RUNS`), and the free
+allowance or balance. So members who keep mentioning an Agent while it replies cannot keep it replying past its
+owner's limits.
 
 **A reply there** (Agents and runs: the worker, What the model is shown):
 
@@ -728,7 +746,8 @@ The owner's other limits hold throughout: replies started a minute (`AGENT_RUNS_
 Agent. Replies that Agents' messages called for end at once: a queued one is `cancelled` with error `halted` (`run`
 pushed to its owner), a running one is never posted and ends `cancelled`, `halted` (what it had said is discarded; what
 it used is settled; a reply already posted stays); what a person asked of such a reply meanwhile is still answered. Replies
-a person called for are left alone. An `agents_halted` notice from you is appended (and pushed). Idempotent: while the
+a person called for are left alone, but what Agents' messages asked of one before the halt (noted while it ran) gets no
+follow-up when it ends, even if a person has written since. An `agents_halted` notice from you is appended (and pushed). Idempotent: while the
 group is still halted (nobody has written since the last halt) it changes nothing and appends nothing. → 200
 `{"ok": true}`. 404 `not_found`, byte for byte as for an id that does not exist, unless it is a group you are a current
 member of (a direct chat and an Agent's own conversation too). Limit: 20 per minute, a budget of its own.
@@ -765,10 +784,11 @@ Agent cannot be pointed at their provider (400).
 
 **The address guard** (`src/providers/guard.ts`), at every call to a provider, before any connection: the URL must pass
 the `baseUrl` rules; the host name is looked up once, and the call is refused with `address_not_allowed` if any address
-it resolves to (or the address written in the URL) is not public: loopback, private (10/8, 172.16/12, 192.168/16,
-fc00::/7), link-local (169.254/16, fe80::/10, fec0::/10), carrier-grade NAT (100.64/10), unspecified or `0/8`,
-192.0.0/24, benchmarking (198.18/15), multicast (224/4, ff00::/8), reserved and broadcast (240/4), an IPv4-mapped
-form of one, or any IPv6 address that is not ordinary global unicast (only `2000::/3` is allowed, less Teredo
+it resolves to (or the address written in the URL) is not public: loopback (127/8), private (10/8, 172.16/12,
+192.168/16, fc00::/7), link-local (169.254/16, fe80::/10, fec0::/10), carrier-grade NAT (100.64/10), unspecified or
+`0/8`, IETF protocol assignments (192.0.0/24), documentation (192.0.2/24, 198.51.100/24, 203.0.113/24), the retired
+6to4 relay range (192.88.99/24), benchmarking (198.18/15), multicast (224/4, ff00::/8), reserved and broadcast
+(240/4), an IPv4-mapped form of one, or any IPv6 address that is not ordinary global unicast (only `2000::/3` is allowed, less Teredo
 `2001::/32`, 6to4 `2002::/16`, documentation `2001:db8::/32`, ORCHID `2001:10::/28` and `2001:20::/28` and
 benchmarking `2001:2::/48`; so NAT64, IPv4-translated, IPv4-compatible and discard `100::/64` are refused too). The connection then goes to exactly an
 address that was checked (the name stays the Host header and the TLS server name), so a name that resolves differently
@@ -1391,8 +1411,8 @@ The rules (types, names, limits, deadlines, cleanup) are under Attachments below
 `{"id", "name", "size", "inline"}`; send it with `POST /api/conversations/:id/messages`.
 Errors: 404 `not_found` and 403 `cannot_send` exactly as for a send (checked before the body is read and
 again after it is stored), 400 `invalid_request` (any other shape, a broken or stalled body), 413
-`too_large` (over 50 MB) or `{"error":"too_large","reason":"quota"}`, 429 `rate_limited` (60 per hour,
-3 at once).
+`too_large` (over `ATTACHMENT_MAX_BYTES`, default 1 GiB) or `{"error":"too_large","reason":"quota"}` (over
+`ATTACHMENT_QUOTA_BYTES` stored, default 20 GiB), 429 `rate_limited` (60 per hour, 3 at once).
 
 #### `GET /api/attachments/:id`
 
@@ -1511,7 +1531,7 @@ client can render its own:
 | `topic_reset` | `actorId` (the owner) | `POST /api/conversations/:id/topic`, in an Agent's conversation: what comes before it is no longer shown to the Agent's model |
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
-| `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached; once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
+| `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
 
 Clients must ignore fields and events they do not know: later batches add more.
 
@@ -1547,18 +1567,20 @@ In an Agent's own conversation `run` and `delta` go to the Agent's owner only, i
 pushes (`running` after your message, every `delta` before the reply's `message`, the `message` before `done`). Once a
 pause or delete of the Agent has answered, no further `delta` of the reply it interrupted is sent (its `cancelled`
 follows). In a group no `delta` is sent, and who gets what of a `run` is decided when it is delivered, against the
-database (`src/sync/hub.ts`, one read per delivery however many members): the Agent's owner gets the Run with
-`agentId` — also when they have just left the group with their Agent, so its last run there (`cancelled`,
-`agent_removed`) still ends what their client showed, once; their client drops the group at its `gone` anyway — and
-every other current member gets `agentId` and `state` only: the state of that Agent's latest run there now (Replies,
-In a group: `queued` or `running` → `"replying"`, `failed` → `"unavailable"`; `done`, `stopped`, `cancelled`, a failure
-its owner dismissed, or an Agent no longer in the group → `null`), never the Run, its id, `error`, `retryable` or
-`resetsAt`. Anybody else, a former member included, gets nothing. When its owner dismisses a failure the others are
-pushed `"state": null` (the owner is not told). The same state may come again unchanged (an Agent over its owner's
-replies a minute keeps one `rate_limited` run in a group, announced again at each mention): apply it as a state. None
-of this is stored or replayed: after a reconnect, `GET /api/conversations/:id/run` (an Agent's own conversation) says
-whether a reply is still under way (its text so far is not sent again; the posted message follows), and
-`GET /api/conversations/:id/runs` what a group shows.
+database (`src/sync/hub.ts`, one read per delivery however many members): the Agent's owner — the one the run's row
+names, as in an Agent's own conversation — gets the Run with `agentId`, every time it is announced, also when they have
+just left the group with their Agent, so its last run there (`cancelled`, `agent_removed`) still ends what their client
+showed (usually one frame after their `gone`; their client drops the group at its `gone` anyway), and every other
+current member gets `agentId` and `state` only: the state of that Agent's latest run there now (Replies, In a group:
+`queued` or `running` → `"replying"`, `failed` → `"unavailable"`; `done`, `stopped`, `cancelled`, a failure its owner
+dismissed, or an Agent no longer in the group → `null`), never the Run, its id, `error`, `retryable` or `resetsAt`.
+Anybody else, a former member included, gets nothing. When its owner dismisses a failure the others are pushed
+`"state": null` (the owner is not told). The same state may come again unchanged (an Agent over its owner's replies a
+minute keeps one `rate_limited` run in a group, announced again at each mention): apply it as a state. That read is
+tried once more when it fails; failing again, that one delivery is dropped for everyone (and logged), so a line may
+stay as it was until the next `run` of that Agent there or a reload. None of this is stored or replayed: after a
+reconnect, `GET /api/conversations/:id/run` (an Agent's own conversation) says whether a reply is still under way (its
+text so far is not sent again; the posted message follows), and `GET /api/conversations/:id/runs` what a group shows.
 
 ## Sync and realtime (`src/sync/`)
 
@@ -1708,16 +1730,30 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   group whose `covers_seq` is after the latest message from a person has reached `chainBudget`), when one
   `agent_budget_reached` notice about it is appended unless one was since a person last wrote. The called Agents'
   `agents` rows are read, not locked (the poster's is held already, and another's taken after it could be out of id
-  order: two Agents calling each other from two groups at once would deadlock); their runs in the group are written
-  only under the group's row, which this transaction holds.
-- A follow-up (Coalescing) in a group is a person's when a person's message among what it answers calls the Agent;
-  otherwise only Agents' messages called for it, and it is not queued while the group is halted.
+  order: two Agents calling each other from two groups at once would deadlock). The fold-or-insert decision needs no
+  target's row: the group's row, which this transaction holds, orders it with every other trigger, retry, follow-up
+  and halt there. A pause or delete of a called Agent that commits meanwhile takes that Agent's row, not the group's,
+  and cannot see the run this inserts or the mention it notes: a deleted Agent's run is ended by the worker without a
+  call (`begin`), and a paused one's by the worker while the Agent is still paused, or else by the resume, before the
+  Agent answers again (`runs.ts` `endWhatPauseMissed`; Pause and delete, below).
+- A follow-up (Coalescing) in a group (`runs.ts` `followUp`, from the worker's `finish` and from recovery) is a
+  person's when a person's message among what it answers calls the Agent (one its `groupMentions` lets call it).
+  Otherwise only Agents' messages called for it: it is an Agent's, and is not queued when the latest of them came at
+  or before the group's latest halt (`pending_seq` ≤ `agents_halted_seq`), even if a person has written since — what
+  Agents asked before a halt is not answered after it; nor once the Agent's chain budget is spent, which is checked
+  again here because the reply that just ended was settled after it was called (the `agent_budget_reached` notice is
+  appended unless one was since a person last wrote, and pushed after that reply's `run`). Either way it is a reply
+  started like any other: counted toward its owner's `AGENT_RUNS_PER_MINUTE` under the owner's `accounts` row (the last
+  lock, after `settle`'s), and over it recorded on the Agent's reusable `rate_limited` run in the group instead of
+  queued.
 - A halt (`POST /api/conversations/:id/agents/halt`) cancels the group's queued runs Agents called for (`halted`) and
   marks the running ones `interrupted` `halted`: never posted, they end `cancelled`, `halted`, settled as any.
 - What the group sees of it (`runs.ts` `groupRuns`, `runAudience`; Replies, In a group): nothing is stored per member.
   Every member's view is derived from the Agent's latest run in the group during its current stay (`covers_seq` after
   its `joined_seq`): its owner sees the run, everyone else its state. A retry in a group answers again what the failed
-  run covered; stop, retry and dismiss there lock the group's row first, as every writer of runs there does.
+  run was to answer (the greater of its `covers_seq` and `pending_seq`: one that recovery or a release failed is not
+  followed up) and keeps its `triggered_by`; stop, retry and dismiss there lock the group's row first, as every writer
+  of runs there does.
 
 **Coalescing.** Per Agent per conversation: an Agent has at most one queued or running run in each conversation (a
 unique index on the Agent and the run's conversation, migration `016_agents_in_groups.sql`), and a run's `covers_seq`
@@ -1727,8 +1763,12 @@ same conversation, answers everything noted — not one per message, and never t
 run of the Agent in another conversation is not touched (so an Agent could answer in its own conversation and in a group
 at once; the owner's limits on replies running and started bound them together). The one rule: a run that has ended is
 followed when something was noted on it and its Agent can still answer (not paused, not deleted, has a model) — however
-the run itself ended. (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a
-resume.)
+the run itself ended, except `cancelled` `agent_removed`, which is followed by nothing (what was noted on it is
+dropped) — and, at start-up recovery or a release, except a run that ends `failed` (its retry answers what was noted
+too). (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a resume.) In
+the Agent's own conversation the follow-up is its owner's and is queued whatever the owner's replies a minute (it
+answers what they wrote meanwhile). In a group it is decided as In a group (above) says: whose it is, the halt and the
+chain budget, and the owner's replies a minute — over it, the Agent's reusable `rate_limited` run there records it.
 
 **Pause and delete** end the Agent's active replies, in every conversation, for good, in their own transaction (under
 the Agent's lock): a queued run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it
@@ -1739,6 +1779,18 @@ even one that was already waiting to be delivered, however late it would be. Not
 is paused, and resuming queues nothing: what was written during the pause is answered only as part of the next reply a
 later message of the owner's starts. A message written after the resume while the interrupted reply is still ending is
 noted on it, and its follow-up answers it.
+
+One thing a pause cannot see: an Agent's message in a group reads the Agents it calls without locking them (In a
+group, above), so a pause that commits inside that message's transaction misses the run it then queues for the paused
+Agent and the mention its fold notes on a reply the pause interrupted. The worker ends such a run without a call while
+the Agent is still paused (`begin`). A resume ends the rest, in its own transaction under the Agent's lock
+(`runs.ts` `endWhatPauseMissed`), only when the Agent was paused: every queued run of it, in every conversation,
+becomes `cancelled` `agent_paused` (none can legitimately be queued while it is paused: a mention, a retry, a follow-up
+and recovery all refuse a paused Agent), announced; a running one the pause did not mark (the worker claimed it during
+the pause) is marked `interrupted` `agent_paused` and its call abandoned, so it ends `cancelled` `agent_paused`
+without posting; and nothing noted on a running run is followed up. Only a pause and a resume that both commit inside
+that one message's transaction (a few queries, against two requests of the owner's) could still let such a run
+through.
 
 **Leaving a group** (`group-leave.ts` `endRunsInGroup`, called by `conversations/groups.ts` `removeMember`) ends the
 Agent's active reply in that group, and only there, the same way, in the transaction that takes it out — removed by the
@@ -1902,7 +1954,7 @@ all of the above, attachments at their estimate.
 | The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
-| The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
+| The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
 | An empty answer (no visible text, no reasoning) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
@@ -1926,7 +1978,8 @@ died with that process — is ended without any model call, each in one transact
 
 In the same transaction its hold is released by a settlement on no tokens at all, which costs nothing (whatever the
 upstream reported died with the process); a run that already has its usage record gets no second one. A posted or
-cancelled run is followed up by the one rule above (the follow-up is queued for the worker); a failed one is not, since a
+cancelled run is followed up by the one rule above (the follow-up is queued for the worker; in a group under the same
+rules as at a reply's end, so a notice it appends is stored and read at the next sync); a failed one is not, since a
 retry answers everything. Queued runs stay queued and are answered once the worker starts. Nothing is pushed — no socket
 can be open yet — so a client learns the state from `GET /api/conversations/:id/run`. The worker's stop and pause flags
 live in the process: a new start has none. A run that cannot be recovered is logged and left for the stale-run sweep
@@ -1980,8 +2033,10 @@ retry, the worker's `begin`, `post` and `finish`, a follow-up, recovery, the sta
 the run's own conversation (`agent_runs.conversation_id`, which never changes), never another; the owner's writes to
 the Agent itself (edit, pause, resume, delete, avatar, proposals) lock its dedicated conversation. Where several
 `agents` or `accounts` rows are locked at once (a person's message in a group naming several Agents) they are taken in
-id order, the `accounts` rows after every run row; an Agent's message in a group holds only its own `agents` row and
-reads the others' (In a group, above); a halt locks the group's row and run rows only. Like the hub, the worker and its
+id order, the `accounts` rows after every run row; a run's end (`finish`, recovery) takes its owner's `accounts` row
+to settle and, for a follow-up in a group, to count the owner's replies a minute — the same row, last; an Agent's
+message in a group holds only its own `agents` row and reads the others' (In a group, above); a halt locks the group's
+row and run rows only; a resume, the dedicated conversation's row, the `agents` row and the Agent's run rows. Like the hub, the worker and its
 stop flags live in this process: run one instance. Two overlap only during a deploy, which is safe (Recovery, above).
 
 A group's membership changes keep to the same order (`conversations/groups.ts`): adding an Agent locks the group's row,
@@ -2060,11 +2115,17 @@ was stored — an upload that finishes after you were unfriended or removed is r
 server decides the type from the first bytes (the declared `Content-Type` and file name are ignored):
 `inline: true` only for PNG, JPEG, WebP and GIF. The name is for display only (NFC; path, control,
 bidi and zero-width characters removed; at most 120 characters; `file` when empty). Limits per
-principal: 50 MB per file (413 `too_large`, enforced while streaming), 60 uploads per hour and 3 at a time
-(429 `rate_limited`), 2 GiB stored in total, sent or not (413 `{"error": "too_large", "reason": "quota"}`).
-A client that sends no body bytes for 45 s, or is still sending after 15 minutes, is disconnected and
-its partial upload deleted. Until the upload's checks have passed, its body is under the 30-second body deadline
-every request starts with (see Configuration): a refused or signed-out upload cannot keep a connection busy.
+principal: 60 uploads per hour and 3 at a time (429 `rate_limited`). The largest file one upload may carry is
+`ATTACHMENT_MAX_BYTES` (default 1 GiB; allowed 1 MiB to 5 GiB, and never more than `ATTACHMENT_QUOTA_BYTES`): over
+it 413 `too_large`, enforced while streaming. Each person may store `ATTACHMENT_QUOTA_BYTES` of attachments in all
+(default 20 GiB), sent or not (413 `{"error": "too_large", "reason": "quota"}`). An upload is cut off after
+`UPLOAD_IDLE_TIMEOUT_MS` without body bytes (default 45 s) or `UPLOAD_TOTAL_TIMEOUT_MS` in all (default 60 minutes),
+and its partial upload deleted; the server-wide request timeout defaults to the upload total plus one minute. Uploads
+and downloads are streamed end to end (S3: multipart upload of 5 MiB parts, one in flight, about 10 MiB of memory per
+upload); downloads have no range support, so an interrupted one starts over. A blob an upload left behind is swept
+only after the upload total timeout plus a minute (Blobs nothing references, below). Until the upload's checks have
+passed, its body is under the 30-second body deadline every request starts with (see Configuration): a refused or
+signed-out upload cannot keep a connection busy.
 
 **Send.** `POST /api/conversations/:id/messages {"attachmentId": "…", "text"?: "caption", "clientTxn": "…"}`
 makes a `file` message (caption 0–8000 characters, the rules of message text — bidi overrides and isolates
