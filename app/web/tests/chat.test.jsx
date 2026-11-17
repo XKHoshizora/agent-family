@@ -347,9 +347,9 @@ describe("timeline", () => {
     const lines = () => [...document.querySelectorAll("li.msg-system > span")].map((x) => x.textContent);
     expect(lines()).toEqual([
       "Agent 已连续对话 30 条，已暂停互相接话，有人发言后继续。",
-      "小安 让 Agent 停止了接话",
-      "安的助手 已达到本次接话的点数上限，有人发言后继续。",
-      "你 让 Agent 停止了接话",
+      "小安让 Agent 停止了接话",
+      "安的助手已达到本次接话的点数上限，有人发言后继续。",
+      "你让 Agent 停止了接话",
     ]);
     expect(timeline().querySelector('[data-msg="m5"]')).toBeNull();
     expect(timeline().textContent).not.toContain("以后才有的通知");

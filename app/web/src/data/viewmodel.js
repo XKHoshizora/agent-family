@@ -3,6 +3,7 @@
 // Every avatar URL carries its principal's version (`avatarUrl(id, version)`), so a changed avatar shows at once.
 import { attachmentUrl, avatarUrl } from "../api/routes.js";
 import { ME } from "./identities.js";
+import { ownsAgent } from "./model.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 
@@ -144,10 +145,10 @@ export function noticeText(system, fallback, nameOf, where = {}) {
       text = `Agent 已连续对话 ${system.limit} 条，已暂停互相接话，有人发言后继续。`;
       break;
     case "agents_halted":
-      text = `${n(system.actorId)} 让 Agent 停止了接话`;
+      text = `${n(system.actorId)}让 Agent 停止了接话`;
       break;
     case "agent_budget_reached":
-      text = `${n(system.agentId)} 已达到本次接话的点数上限，有人发言后继续。`;
+      text = `${n(system.agentId)}已达到本次接话的点数上限，有人发言后继续。`;
       break;
     default:
       return null;
@@ -277,13 +278,14 @@ function groupRunRows(conv, slots) {
 }
 
 /**
- * Whether Agents of the group are talking to each other, or may be about to: a reply is being written, or the newest
- * message is an Agent's that @-mentions another Agent member (by its account name). It shows 让 Agent 停下.
+ * Whether Agents of the group are answering each other (not a reply a person asked for): the newest message is an
+ * Agent's (not a notice) and either @-mentions another Agent member (by its account name) or an Agent's reply is being
+ * written. It shows 让 Agent 停下.
  */
 function agentsTalking(model, conv, held, rows) {
-  if (rows.some((r) => r.kind === "replying")) return true;
   const last = held[held.length - 1];
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
+  if (rows.some((r) => r.kind === "replying")) return true;
   const handleOf = (id) => model.agents[id]?.handle ?? model.principals[id]?.handle;
   return conv.members.some(
     (m) => m.id !== last.senderId && model.principals[m.id]?.kind === "agent" && mentionsHandle(last.text, handleOf(m.id)),
@@ -476,7 +478,7 @@ export function toView(model, { now = Date.now() } = {}) {
     if (p.kind !== "agent" || agents[p.id]) continue;
     const owner = typeof p.ownerId === "string" ? p.ownerId : null;
     const conv = Object.values(model.conversations).find((c) => c.agentId === p.id);
-    const mine = owner === null ? Boolean(conv) : owner === meId;
+    const mine = ownsAgent(model, p.id);
     if (!mine) {
       agents[p.id] = othersAgentView(p, versions[p.id], owner);
       continue;
@@ -530,7 +532,10 @@ export function toView(model, { now = Date.now() } = {}) {
       lastPendingAt = p.at;
     }
 
-    const lastHeld = held.length > 0 ? timeOf(held[held.length - 1].createdAt) : null;
+    // (A notice this client does not know is hidden: it is no activity, as it is no preview.)
+    let lastShown = held.length - 1;
+    while (lastShown >= 0 && messages[lastShown].hidden) lastShown--;
+    const lastHeld = lastShown >= 0 ? timeOf(held[lastShown].createdAt) : null;
     const activity = Math.max(lastHeld ?? 0, lastPendingAt ?? 0) || timeOf(conv.createdAt) || 0;
     ranking.push({ id: conv.id, activity, index: conv.syncIndex ?? 0 });
     // The reply in progress: its run (none while its state is unknown), and its streamed text as one bubble while it

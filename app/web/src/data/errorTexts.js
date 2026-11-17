@@ -297,8 +297,8 @@ const RUN_FAILED = {
 };
 /** How a reply in a group ends that is not a failure of the owner's to fix: neither is retried (batch 2C). */
 const RUN_ENDED_IN_GROUP = {
-  halted: "已被群成员叫停",
-  agent_removed: "它已不在这个群里",
+  halted: "已被群成员叫停。",
+  agent_removed: "它已不在这个群里，这条回复没有发出。",
 };
 /** A site model's key and address are the site's: the owner can only wait or choose another model. */
 const SITE_MODEL_FAILED = "站点提供的这个模型暂时用不了，请稍后重试，或换一个模型。";

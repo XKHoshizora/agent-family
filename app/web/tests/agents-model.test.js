@@ -702,11 +702,16 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     expect(rows(s).map((r) => r.agentId)).toEqual([OAG, AG1]);
   });
 
-  it("Agents talking: a reply under way, or the newest message an Agent's that @-mentions another Agent of the group", () => {
+  it("Agents talking: the newest message an Agent's that @-mentions another Agent of the group, or an Agent's with a reply under way; never a person's", () => {
     const talking = (messages) => view(inGroup({ messages: [...BASE, ...messages] })).convs[G1].agentsTalking;
     expect(view(inGroup()).convs[G1].agentsTalking).toBe(false);
-    expect(view(put(inGroup(), memberPush("replying"))).convs[G1].agentsTalking).toBe(true);
+    // A reply under way after a person's message (an @-mention of an Agent, say) is the person's ask: no.
+    expect(view(put(inGroup(), memberPush("replying"))).convs[G1].agentsTalking).toBe(false);
+    expect(view(put(inGroup({ messages: [...BASE, wire(G1, 3, ANN, "@annbot 你好")] }), memberPush("replying"))).convs[G1].agentsTalking).toBe(false);
     expect(view(put(inGroup(), memberPush("unavailable"))).convs[G1].agentsTalking).toBe(false);
+    // An Agent's newest message and a reply under way (whatever it says): Agents answering each other.
+    expect(view(put(inGroup({ messages: [...BASE, wire(G1, 3, OAG, "好的")] }), memberPush("replying"))).convs[G1].agentsTalking).toBe(true);
+    expect(view(put(inGroup({ messages: [...BASE, wire(G1, 3, OAG, "好的")] }), memberPush("unavailable"))).convs[G1].agentsTalking).toBe(false);
     expect(talking([wire(G1, 3, OAG, "问问 @helper 吧")])).toBe(true);
     expect(talking([wire(G1, 3, OAG, "@HELPER，你来")])).toBe(true);
     expect(talking([wire(G1, 3, AG1, "@annbot")])).toBe(true);

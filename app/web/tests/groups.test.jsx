@@ -264,7 +264,7 @@ describe("adding members", () => {
     expect(addMember).toHaveBeenCalledWith(G1, DORA);
     expect(toastText()).toBe("已添加朵拉");
     // the refetched group has her now, so nobody is left to add
-    expect(dialog().textContent).toContain("没有可以添加的好友");
+    expect(dialog().textContent).toContain("没有可以添加的好友或 Agent");
     fireEvent.click(dialogButton("完成"));
     await flush();
     expect(inMain().getByText("共 4 位成员")).toBeTruthy();
@@ -410,13 +410,13 @@ describe("Agents in a group (batch 2C)", () => {
     const { env } = await openApp({ sync: withAgents(members), social: social(), api: { addMember }, handlers });
     await openProfile();
     await click(button("添加成员"));
-    expect(dialog().textContent).not.toContain("没有可以添加的好友");
+    expect(dialog().textContent).not.toContain("没有可以添加的好友或 Agent");
     expect(namesIn("可添加的 Agent")).toEqual(["小助手"]);
     await click(within(dialog()).getByRole("button", { name: "添加" }));
     expect(addMember).toHaveBeenCalledWith(G1, AG1);
     expect(within(dialog()).queryByRole("heading", { name: "我的 Agent" })).toBeNull();
     expect(within(dialog()).queryByRole("list", { name: "可添加的 Agent" })).toBeNull();
-    expect(dialog().textContent).toContain("没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。");
+    expect(dialog().textContent).toContain("没有可以添加的好友或 Agent：你的好友都已在群里，或与你有拉黑关系，你的 Agent 也都已在群里。");
   });
 
   it("an Agent's row carries the Agent tag, its owner, and its intro · field; 共 N 位成员 counts everyone, the chat header people and Agents", async () => {

@@ -446,7 +446,7 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .member-rows li:has(.member-actions > [aria-expanded]) { align-items: flex-start; }
 .member-actions > .btn[aria-expanded="true"] { background: var(--purple-soft); color: var(--purple-dark); }
 .member-actions > .btn[aria-expanded] svg { vertical-align: -2px; margin-left: 3px; }
-.member-rows .member-body > div[id] { margin-top: 8px; padding: 8px 12px 10px; background: var(--purple-tint); border-radius: 10px; }
+.member-rows .member-body > .model-panel { margin-top: 8px; padding: 8px 12px 10px; background: var(--purple-tint); border-radius: 10px; }
 /* A row of actions under a field (帮我起草 and the persona's count, 测试连接): what sits beside a button is centred on it. */
 .field > .member-actions { align-items: center; }
 .kv { border-top: 1px solid var(--line); margin: 8px 0; }

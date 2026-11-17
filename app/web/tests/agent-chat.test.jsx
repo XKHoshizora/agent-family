@@ -943,7 +943,7 @@ describe("Agents in a group (batch 2C)", () => {
     expect(line.textContent).toContain("小助手：服务出了点问题，这次没有回复，也没有扣费。可以重试。");
     expect(within(line).getByRole("button", { name: "关闭提示" })).toBeTruthy();
     const muted = unavailableLines();
-    expect(muted.map((li) => li.textContent)).toEqual(["安的助手 暂时无法回复"]);
+    expect(muted.map((li) => li.textContent)).toEqual(["安的助手暂时无法回复"]);
     expect(muted[0].classList.contains("run-status")).toBe(false);
     expect(within(muted[0]).queryByRole("button")).toBeNull();
     await click(within(line).getByRole("button", { name: "重试" }));
@@ -963,11 +963,11 @@ describe("Agents in a group (batch 2C)", () => {
     const dismissRun = vi.fn(async () => ({ ok: true }));
     const { transport } = await openGroup([], { api: { dismissRun } });
     await push(transport, groupRun(AG1, { run: runOf(R1, "cancelled", { error: "halted", retryable: true }) }));
-    expect(statusLine().textContent).toContain("小助手：已被群成员叫停");
+    expect(statusLine().textContent).toContain("小助手：已被群成员叫停。");
     expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
     await push(transport, groupRun(AG1, { run: runOf(R2, "cancelled", { error: "agent_removed" }) }));
     expect(statusLines()).toHaveLength(1);
-    expect(statusLine().textContent).toContain("小助手：它已不在这个群里");
+    expect(statusLine().textContent).toContain("小助手：它已不在这个群里，这条回复没有发出。");
     expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
     // (Nothing failed: the service keeps nothing to dismiss, and the Agent may be gone from the group.)
     await click(within(statusLine()).getByRole("button", { name: "关闭提示" }));
@@ -996,19 +996,21 @@ describe("Agents in a group (batch 2C)", () => {
     expect(replyingRows()).toHaveLength(1);
   });
 
-  it("让 Agent 停下: for every member while an Agent replies, or when an Agent's newest message calls another; it asks the group", async () => {
+  it("让 Agent 停下: for every member when Agents answer each other (an Agent's newest message calls another, or an Agent's reply is under way after an Agent's message), not for a reply a person asked for; it asks the group", async () => {
     const halt = deferred();
     const { transport, api } = await openGroup([wire(G1, 1, ANN, "@annbot 你好")], { api: { haltAgents: vi.fn(() => halt.promise) } });
     expect(haltButton()).toBeNull();
+    // A person's @-mention and the reply being written to it: nothing to halt.
     await push(transport, groupRun(OAG, { state: "replying" }));
-    expect(haltButton()).toBeTruthy();
-    // Above the composer, below the messages.
-    expect(haltButton().compareDocumentPosition(document.querySelector(".composer")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(haltButton().compareDocumentPosition(timeline()) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(replyingRows()).toHaveLength(1);
+    expect(haltButton()).toBeNull();
     await push(transport, { type: "message", message: wire(G1, 2, OAG, "问问 @helper 吧") });
     await push(transport, groupRun(OAG, { state: null }));
     expect(replyingRows()).toHaveLength(0);
     expect(haltButton()).toBeTruthy();
+    // Above the composer, below the messages.
+    expect(haltButton().compareDocumentPosition(document.querySelector(".composer")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(haltButton().compareDocumentPosition(timeline()) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
     await click(haltButton());
     expect(api.haltAgents).toHaveBeenCalledWith(G1);
     expect(haltButton().disabled).toBe(true);
@@ -1019,7 +1021,7 @@ describe("Agents in a group (batch 2C)", () => {
     expect(haltButton().disabled).toBe(false);
     await push(transport, { type: "message", message: notice(G1, 3, "Mei 让 Agent 停止了接话", { event: "agents_halted", actorId: ME_ID }) });
     expect(haltButton()).toBeNull();
-    expect(timeline().textContent).toContain("你 让 Agent 停止了接话");
+    expect(timeline().textContent).toContain("你让 Agent 停止了接话");
   });
 
   it("让 Agent 停下 stays away when no Agent calls another; a refusal says why", async () => {

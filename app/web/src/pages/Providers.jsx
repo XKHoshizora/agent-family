@@ -42,7 +42,7 @@ const KEY_KEPT = "没有改动，原来的密钥保持不变";
 /** Create mode shows no model section: this one line says what comes next. */
 const CREATE_MODELS_HINT = "保存后从供应商的模型列表里挑选模型。";
 /** In the 同步模型 dialog, after a list request that failed (the sentence of the edit form's hint). */
-const FAILED_BY_HAND = "有的供应商不提供模型列表，这时请手动添加。";
+const FAILED_BY_HAND = "有的供应商不提供模型列表。关闭这个窗口后，可以在下面手动添加模型。";
 
 const chars = (text) => [...text].length;
 const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
@@ -293,7 +293,7 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
           {tooSmall && " · 上下文太小，Agent 不能使用"}
         </p>
         {open && (
-          <div id={panelId}>
+          <div id={panelId} className="model-panel">
             <fieldset className="checks">
               <legend className="sr-only">{model.name} 能做什么</legend>
               <label>
@@ -322,7 +322,7 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
         )}
       </div>
       <div className="member-actions">
-        <Btn small aria-label={open ? `收起：${model.name}` : `高级设置：${model.name}`} aria-expanded={open} aria-controls={panelId} onClick={onToggle}>
+        <Btn small aria-label={open ? `收起：${model.name}` : `高级设置：${model.name}`} aria-expanded={open} aria-controls={open ? panelId : undefined} onClick={onToggle}>
           {open ? "收起" : "高级"}
           <ChevronDown size={14} aria-hidden="true" style={open ? { transform: "rotate(180deg)" } : undefined} />
         </Btn>

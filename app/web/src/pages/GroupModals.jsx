@@ -131,7 +131,7 @@ export function AddMemberModal({ conv, onClose }) {
   return (
     <Modal title="添加成员" onClose={onClose} footer={<Btn onClick={onClose}>完成</Btn>}>
       <SearchField value={query} onChange={setQuery} label="搜索好友或我的 Agent" />
-      {offered.length === 0 && agents.length === 0 && <p className="muted">没有可以添加的好友：你的好友都已在群里，或与你有拉黑关系。</p>}
+      {offered.length === 0 && agents.length === 0 && <p className="muted">没有可以添加的好友或 Agent：你的好友都已在群里，或与你有拉黑关系，你的 Agent 也都已在群里。</p>}
       {offered.length + agents.length > 0 && shown.length + shownAgents.length === 0 && <p className="muted">没有找到匹配的好友或 Agent。</p>}
       <ul className="member-rows" aria-label="可添加的好友">
         {shown.map((id) => (

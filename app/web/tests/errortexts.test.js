@@ -150,11 +150,11 @@ describe("the sentences batch 2A names", () => {
   });
 
   it("an Agent's reply in a group that was halted, or whose Agent was taken out: why, and nothing to retry", () => {
-    expect(runFailureText({ id: "r", status: "cancelled", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停");
-    expect(runFailureText({ id: "r", status: "cancelled", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里");
+    expect(runFailureText({ id: "r", status: "cancelled", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停。");
+    expect(runFailureText({ id: "r", status: "cancelled", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里，这条回复没有发出。");
     // (Should either come as a failure, it reads the same.)
-    expect(runFailureText({ id: "r", status: "failed", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停");
-    expect(runFailureText({ id: "r", status: "failed", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里");
+    expect(runFailureText({ id: "r", status: "failed", error: "halted", retryable: false }, NOW)).toBe("已被群成员叫停。");
+    expect(runFailureText({ id: "r", status: "failed", error: "agent_removed", retryable: false }, NOW)).toBe("它已不在这个群里，这条回复没有发出。");
   });
 
   it("provider_in_use names the Agents that use it", () => {

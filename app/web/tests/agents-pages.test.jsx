@@ -825,6 +825,23 @@ describe("where an Agent replies (batch 2C)", () => {
     expect(sectionShown()).toContain("消息");
     expect(chatTitle()).toBe("周末小组");
   });
+
+  it("the line on when it replies in groups follows 群里谁可以叫它", async () => {
+    const members = [ME_ID, ANN, AG1].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, groupMentions: "owner" })], extra: [group(G1, { members })] });
+    await openRow("小助手");
+    await click(inMain().getByRole("tab", { name: "参与的会话" }));
+    expect(mainText()).toContain("只有你 @ 它时回复。");
+    expect(mainText()).not.toContain("群成员 @ 它时回复");
+  });
+
+  it("with 所有群成员 it says 群成员 @ 它时回复", async () => {
+    const members = [ME_ID, ANN, AG1].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, groupMentions: "members" })], extra: [group(G1, { members })] });
+    await openRow("小助手");
+    await click(inMain().getByRole("tab", { name: "参与的会话" }));
+    expect(mainText()).toContain("群成员 @ 它时回复。");
+  });
 });
 
 describe("someone else's Agent (batch 2C)", () => {

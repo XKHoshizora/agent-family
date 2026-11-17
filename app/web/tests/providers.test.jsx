@@ -272,7 +272,7 @@ describe("adding a provider", () => {
     await click(inMain().getByRole("button", { name: "保存并选择模型" }));
     expect(mainText()).toContain("已添加。请选择要使用的模型。");
     expect(within(dialog()).getByRole("alert").textContent).toBe("暂时连不上供应商，或它没有给出可用的回答，请稍后再试。");
-    expect(dialog().textContent).toContain("有的供应商不提供模型列表，这时请手动添加。");
+    expect(dialog().textContent).toContain("有的供应商不提供模型列表。关闭这个窗口后，可以在下面手动添加模型。");
     await click(within(dialog()).getByRole("button", { name: "完成" }));
     expect(dialog()).toBeNull();
     // Edit mode: the manual path (moved here from the old create form) saves the model.

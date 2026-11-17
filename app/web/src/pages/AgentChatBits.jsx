@@ -163,7 +163,7 @@ export function GroupUnavailable({ agentId }) {
   const { state } = useStore();
   return (
     <li className="msg-system run-unavailable">
-      <span>{nameOf(state, agentId)} 暂时无法回复</span>
+      <span>{nameOf(state, agentId)}暂时无法回复</span>
     </li>
   );
 }

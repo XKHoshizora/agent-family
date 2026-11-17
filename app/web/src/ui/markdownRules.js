@@ -114,7 +114,7 @@ export const APP_CLASSES = new Set(
   form-actions group-avatar grow head-actions human-input icon-btn identity-line info-lines inline kv kv-row lab-logo lead
   list-col list-head list-note list-title main-col md md-code md-copy md-host md-link md-note md-plain md-table md-text
   member-actions member-body member-rows mention-empty mention-heading mention-picker menu menu-anchor messages mine
-  mini-kv modal modal-backdrop modal-body modal-foot modal-head modal-wide msg msg-action msg-divider msg-foot msg-main msg-meta
+  mini-kv modal modal-backdrop modal-body modal-foot modal-head modal-wide model-panel msg msg-action msg-divider msg-foot msg-main msg-meta
   msg-system muted n2 n3 n4 notice notice-actions notice-body notice-ok notice-pause notice-sub notice-warn only-mobile
   order-list owner pad page page-body pills plain-list profile-head proposal-persona quick-bar radio-cards rail
   rail-bottom rail-icon rail-item rail-me rail-nav readonly reason receipt rel-rows reply-chip row row-actions row-body

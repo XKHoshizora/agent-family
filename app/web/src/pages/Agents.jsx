@@ -92,7 +92,7 @@ function Conversations({ agent }) {
   return (
     <>
       <p className="muted">这是你和它的专属会话：只有你们两个成员，只包含其中的消息与附件。</p>
-      {groups.length > 0 && <p className="muted">它也在下面这些群里：只看得到它进群之后的消息与附件，群成员 @ 它时回复。</p>}
+      {groups.length > 0 && <p className="muted">它也在下面这些群里：只看得到它进群之后的消息与附件，{agent.groupMentions === "owner" ? "只有你 @ 它时回复" : "群成员 @ 它时回复"}。</p>}
       <ul className="member-rows">
         {id && (
           <li>

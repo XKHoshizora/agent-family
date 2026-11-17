@@ -89,6 +89,15 @@ describe("conversations", () => {
     expect(v.convs[G1].at).toBe("09:20");
   });
 
+  it("a notice this client does not know shows nothing and is no activity: no jump up the list, no time change", () => {
+    const base = [wire(D1, 1, ANN, "a", { createdAt: at(10) }), wire(G1, 1, ANN, "b", { createdAt: at(20) })];
+    const unknown = notice(G1, 2, "以后才有的通知", { event: "from_the_future" });
+    const v = toView(model({ conversations: [direct(D1, ANN, { lastSeq: 1 }), group(G1, { lastSeq: 2 })], messages: [wire(D1, 1, ANN, "a", { createdAt: at(50) }), base[1], { ...unknown, createdAt: at(55) }] }), { now: NOW });
+    // D1 (09:50) is newer than G1's last visible message (09:20); the hidden notice at 09:55 does not lift G1.
+    expect(v.order).toEqual([D1, G1]);
+    expect(v.convs[G1].at).toBe("09:20");
+  });
+
   it("formats times like the prototype: today HH:MM, 昨天, then dates", () => {
     expect(formatAt(new Date(2026, 10, 16, 8, 5).getTime(), NOW)).toBe("08:05");
     expect(formatAt(new Date(2026, 10, 15, 23, 0).getTime(), NOW)).toBe("昨天");
@@ -193,9 +202,9 @@ describe("messages", () => {
     const v = toView(M.applySync(M.initial(), sync), { now: NOW });
     expect(v.convs[G1].messages.map((m) => [m.text, Boolean(m.hidden)])).toEqual([
       ["Agent 已连续对话 30 条，已暂停互相接话，有人发言后继续。", false],
-      ["小安 让 Agent 停止了接话", false],
-      ["你 让 Agent 停止了接话", false],
-      ["安的助手 已达到本次接话的点数上限，有人发言后继续。", false],
+      ["小安让 Agent 停止了接话", false],
+      ["你让 Agent 停止了接话", false],
+      ["安的助手已达到本次接话的点数上限，有人发言后继续。", false],
       ["缺了上限", false],
       ["不认识的 Agent", false],
       ["", true],
