@@ -62,7 +62,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // instead). Each is announced to its own Agent's owner.
       const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
-        const [rendered] = await toWireFor(t, me.id, [sent.message]);
+        const [rendered] = await toWireFor(t, me.id, [sent.message], config);
         if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
         const triggered = sent.duplicate ? [] : await maybeTrigger(t, sent.lock, sent.message, config);
         return { ...sent, wire: rendered, triggered };
@@ -85,7 +85,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await requirePrincipal(req);
       const { before, limit = 50 } = req.query;
-      const page = await listMessages(db, me.id, req.params.id, { before, limit });
+      const page = await listMessages(db, me.id, req.params.id, { before, limit }, config);
       if (!page) throw notFound();
       return page;
     },
@@ -102,7 +102,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
-      const message = await getMessage(db, me.id, req.params.id, req.params.seq);
+      const message = await getMessage(db, me.id, req.params.id, req.params.seq, config);
       if (!message) throw notFound();
       return { message, principals: await principalsOf(db, [message]) };
     },
@@ -135,7 +135,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await searcher(req);
       const { q, before, limit = 20 } = req.query;
-      const page = await search(me, (t) => searchConversation(t, me, req.params.id, { q, before, limit }));
+      const page = await search(me, (t) => searchConversation(t, me, req.params.id, { q, before, limit }, config));
       if (!page) throw notFound();
       return page;
     },
@@ -153,7 +153,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await searcher(req);
       const { q, before, limit = 20 } = req.query;
-      return search(me, (t) => searchAll(t, me, { q, before, limit }));
+      return search(me, (t) => searchAll(t, me, { q, before, limit }, config));
     },
   );
 

@@ -53,7 +53,7 @@ const positions = z
 const catchUpResponse = z.object({ messages: z.array(wireMessageSchema), gone: z.array(z.string()), more: z.boolean() });
 
 function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
-  const { db } = app.deps;
+  const { db, config } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const ticketLimit = perPrincipalLimit(app, 30);
   const syncLimit = perPrincipalLimit(app, 60);
@@ -66,7 +66,7 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
     async (req) => {
       const me = await requirePrincipal(req);
       await syncLimit(req, me.id);
-      const view = await syncView(db, me.id);
+      const view = await syncView(db, me.id, config);
       return { me: { id: me.id, handle: me.handle, displayName: me.displayName, avatarVersion: me.avatarVersion, email: me.email }, ...view };
     },
   );
@@ -93,7 +93,7 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
     async (req) => {
       const me = await requirePrincipal(req);
       await catchUpLimit(req, me.id);
-      return catchUp(db, me.id, req.body.positions);
+      return catchUp(db, me.id, req.body.positions, config);
     },
   );
 
@@ -116,9 +116,9 @@ function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
  * `GET /api/ws`. The ticket store and the hub live in this process (single instance; see README).
  */
 export async function registerSync(app: FastifyInstance): Promise<void> {
-  const { db, conversations, social, reads } = app.deps;
+  const { db, config, conversations, social, reads } = app.deps;
   const tickets = createTicketStore();
-  const hub = new Hub({ db, conversations, social, reads, log: app.log });
+  const hub = new Hub({ db, config, conversations, social, reads, log: app.log });
   hub.start();
   const offSessionEnded = onSessionEnded(app, (_principalId, sessionId) => {
     tickets.revokeSession(sessionId);

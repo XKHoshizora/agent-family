@@ -99,7 +99,8 @@ export async function admit(
 /**
  * `admit` for the run `runId`, which must be `running`, belong to `ownerId` and be neither admitted nor settled yet (a
  * hold taken after its usage record would never be released): locks the run row, admits, and records on it the call's
- * `source` and `model` (`resolved.name`) with its `charge_to` and `hold_micro` — what settlement goes by — all in the
+ * `source` and `model` (`resolved.name`) with its `charge_to` and `hold_micro` — what settlement goes by — and the
+ * reasoning level the call is sent at (`resolved.reasoning`: what its reply's `via` shows its owner), all in the
  * caller's transaction. A refusal throws (402 `no_quota`) and writes nothing.
  */
 export async function admitRun(
@@ -107,7 +108,7 @@ export async function admitRun(
   config: Pick<Config, "freeDailyMicro" | "siteTimezone">,
   runId: string,
   ownerId: string,
-  resolved: Pick<Resolved, "source" | "name" | "tier" | "price" | "call">,
+  resolved: Pick<Resolved, "source" | "name" | "tier" | "price" | "call" | "reasoning">,
   inputTokensEstimate: number,
   now: Date,
 ): Promise<Admission> {
@@ -122,12 +123,13 @@ export async function admitRun(
     throw new Error(`admitRun: ${runId} is already settled`);
   }
   const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now);
-  await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5 where id = $1", [
+  await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5, reasoning = $6 where id = $1", [
     runId,
     resolved.source,
     resolved.name,
     admission.chargeTo,
     admission.holdMicro.toString(),
+    resolved.reasoning,
   ]);
   return admission;
 }

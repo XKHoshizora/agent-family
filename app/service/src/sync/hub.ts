@@ -1,6 +1,7 @@
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyBaseLogger } from "fastify";
 import { runAudience, type GroupRunState, type RunAudience, type WireRun } from "../agents/runs.ts";
+import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, peekConversation } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
@@ -65,6 +66,8 @@ type Task =
   | { kind: "membership"; principalIds: string[] }
   | { kind: "read"; marker: ReadMarker }
   | { kind: "push"; principalId: string; event: PushEvent; wanted?: () => boolean }
+  /** The Agent's reply at `seq`, again, to `principalId` (its run's owner) once its run is charged. */
+  | { kind: "charged"; principalId: string; seq: number }
   /**
    * Run `runId` of the conversation: `run` to the owner its row names (none: the owner is not told), its state to a
    * group's others.
@@ -78,6 +81,8 @@ interface Queue {
 
 export interface HubDeps {
   db: Queryable;
+  /** The site models' labels, read when a message is rendered (`via`). */
+  config: Pick<Config, "siteModels">;
   conversations: ConversationEvents;
   social: SocialEvents;
   reads: ReadEvents;
@@ -92,7 +97,9 @@ export interface HubDeps {
  * conversation's events in commit order. Every decision about who receives what is made against the
  * database when the event is delivered, never from a cached member list:
  * - messages: rendered per reader with `toWireForReaders`, which shows a message (and its quote) only to
- *   readers who can see it now, and an Agent's reasoning in a group only to that Agent's owner;
+ *   readers who can see it now, and an Agent's reasoning in a group, and `via`, only to that Agent's owner; an Agent's
+ *   reply goes once more to its run's owner when that run has been charged (`pushChargedReply`), so that it carries its
+ *   `via`;
  * - membership changes: `conversation` to the affected principals who are current members now, `gone`
  *   to those who are not (more than once, when a change announced before they left is delivered after
  *   it) — so after `gone` nothing more of that conversation reaches them until they are added again, except
@@ -206,6 +213,18 @@ export class Hub {
   ): void {
     const event: PushEvent = { type: "delta", conversationId, runId, ...delta };
     this.enqueue(conversationId, { kind: "push", principalId: ownerId, event, ...(wanted ? { wanted } : {}) });
+  }
+
+  /**
+   * Once the run that posted an Agent's reply has been charged (`DbAgentPort.finish`, or the release of a run whose reply
+   * had been posted): the reply at `seq` once more, to `ownerId`'s sockets only, rendered for them when it is delivered
+   * like every message, so that it now carries its `via` — what that needs (the run's usage record) is written when the
+   * run ends, after the reply's first push was announced, which may have been rendered before it. Pushed only when the
+   * rendering carries `via` (the owner can still see the reply and still owns its Agent). Through the conversation's
+   * queue, in order with its other pushes (before the run's end); nobody else is pushed anything.
+   */
+  pushChargedReply(conversationId: string, ownerId: string, seq: number): void {
+    this.enqueue(conversationId, { kind: "charged", principalId: ownerId, seq });
   }
 
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */
@@ -334,7 +353,23 @@ export class Hub {
         return Promise.resolve();
       case "run":
         return this.announceRun(task);
+      case "charged":
+        return this.pushCharged(conversationId, task.principalId, task.seq);
     }
+  }
+
+  /** `pushChargedReply`'s delivery: the reply as `principalId` may read it now, when that carries `via`. */
+  private async pushCharged(conversationId: string, principalId: string, seq: number): Promise<void> {
+    const [reader] = this.connectedAmong([principalId]);
+    if (!reader) return;
+    const { rows } = await this.deps.db.query<MessageRow>(
+      // A raw row: it leaves this function only through toWireForReaders, which applies the visibility rule.
+      `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.seq = $2`,
+      [conversationId, seq],
+    );
+    if (!rows[0]) return;
+    const [message] = (await toWireForReaders(this.deps.db, [reader], [toStored(rows[0])], this.deps.config)).get(reader) ?? [];
+    if (message?.via) this.push(reader, { type: "message", message });
   }
 
   /**
@@ -393,7 +428,7 @@ export class Hub {
           where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 order by m.seq`,
         [conversationId, after, toSeq],
       );
-      const perReader = await toWireForReaders(this.deps.db, readers, rows.map(toStored));
+      const perReader = await toWireForReaders(this.deps.db, readers, rows.map(toStored), this.deps.config);
       for (const [reader, messages] of perReader) for (const message of messages) this.push(reader, { type: "message", message });
     }
     this.fanned.delete(conversationId);

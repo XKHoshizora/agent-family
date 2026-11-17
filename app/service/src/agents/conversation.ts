@@ -146,7 +146,7 @@ export interface AgentReply {
  * that is no longer `running`, or is not a run of this Agent in this conversation (`RunNotRunning`: another instance's
  * recovery ended it, read under the same locks recovery takes). The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
- * nothing.
+ * nothing; by it, too, its owner's copy of the message names the run's model, level and charge (`via`, messages/read.ts).
  *
  * In the Agent's own conversation: the text follows the rules of message text (`cleanModelText`: what a send would
  * refuse is removed); a persona proposal in it (`parseProposalBlock`: the reply's text only, never its reasoning) is

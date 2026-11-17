@@ -2,7 +2,7 @@ import { VISIBLE_JOIN, type ConversationType } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
 import { mentionedIn, readPrincipals, type SyncPrincipal } from "../messages/principals.ts";
-import { toWireFor } from "../messages/read.ts";
+import { toWireFor, type ReadConfig } from "../messages/read.ts";
 import { canDirectSendMany, type DirectRefusal } from "../social/relations.ts";
 
 /** How many of the newest visible messages per conversation `GET /api/sync` returns. */
@@ -179,7 +179,7 @@ export async function syncConversation(db: Db, me: string, conversationId: strin
 }
 
 /** Everything the web client loads at start: the caller's current conversations and what they may read of them. */
-export async function syncView(db: Db, me: string): Promise<SyncView> {
+export async function syncView(db: Db, me: string, config: ReadConfig): Promise<SyncView> {
   return onSnapshot(db, async (t) => {
     const out = await conversationEntries(t, me);
 
@@ -201,7 +201,7 @@ export async function syncView(db: Db, me: string): Promise<SyncView> {
       recentOf.set(m.conversationId, list);
     }
     const ordered = out.flatMap((c) => (recentOf.get(c.id) ?? []).sort((x, y) => x.seq - y.seq));
-    const messages = await toWireFor(t, me, ordered);
+    const messages = await toWireFor(t, me, ordered, config);
 
     const mentioned = new Set<string>([me.toLowerCase()]);
     for (const c of out) for (const m of c.members) mentioned.add(m.id);
@@ -242,7 +242,7 @@ function allot(backlogs: Array<{ id: string; missed: number }>, budget: number):
  * not a current member of are only listed in `gone`, whatever the reason; conversations the caller is in
  * but sent no position for are not looked at.
  */
-export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string, number>): Promise<CatchUp> {
+export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string, number>, config: ReadConfig): Promise<CatchUp> {
   if (positions.size === 0) return { messages: [], gone: [], more: false };
   const ids = [...positions.keys()];
 
@@ -289,6 +289,6 @@ export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string,
         order by p.ord, m.seq`,
       [me, wanted.map((b) => b.id), wanted.map((b) => positions.get(b.id)!), wanted.map((b) => take.get(b.id)!)],
     );
-    return { messages: await toWireFor(t, me, rows.map(toStored)), gone, more };
+    return { messages: await toWireFor(t, me, rows.map(toStored), config), gone, more };
   });
 }

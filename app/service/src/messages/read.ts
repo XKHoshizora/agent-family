@@ -1,8 +1,16 @@
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
+import { formatPoints } from "../accounts/store.ts";
+import type { Config, ReasoningLevel } from "../config.ts";
 import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
+
+/**
+ * What rendering a message needs of the configuration: the site models, whose labels `via` names them by when a message
+ * is read (README "Wire shapes").
+ */
+export type ReadConfig = Pick<Config, "siteModels">;
 
 export const QUOTE_MAX_CHARS = 200;
 
@@ -68,13 +76,49 @@ function toWireProposal(r: ProposalRow): WireProposal {
   };
 }
 
+type WireVia = NonNullable<WireMessage["via"]>;
+
 /**
- * Module-private on purpose: it renders whatever quote and proposal it is handed, and the reasoning when told to. Every
- * exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether `visibleQuote`
- * is; shows a proposal to the Agent's owner only; and `withReasoning` only when this reader may read the reasoning
- * (`toWireForReaders`): otherwise the field is absent, so the message is exactly as one stored without any.
+ * What the visibility query of `toWireForReaders` reads of the run that posted a message, for the reader who owns the
+ * Agent that sent it (every column null for anyone else, and when any of the run's records is missing).
  */
-function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal: ProposalRow | null, withReasoning: boolean): WireMessage {
+interface ViaRow {
+  via_source: "site" | "provider" | null;
+  via_model: string | null;
+  via_reasoning: ReasoningLevel | null;
+  /** Micro-points charged for the run (free allowance plus balance), as text. */
+  via_points: string | null;
+}
+
+/**
+ * `via` from what the query read: a site model by its id and its configured label now (its id when it is no longer
+ * configured; never its upstream name, address, key variable or prices), a provider model by the name its owner saved.
+ */
+function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
+  if (r.via_source === null || r.via_model === null || r.via_reasoning === null || r.via_points === null) return null;
+  const id = r.via_model;
+  const model: WireVia["model"] =
+    r.via_source === "site" ? { source: "site", id, label: config.siteModels.find((m) => m.id === id)?.label ?? id } : { source: "provider", model: id };
+  return { model, reasoning: r.via_reasoning, points: formatPoints(BigInt(r.via_points)) };
+}
+
+/** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
+const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+/**
+ * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told
+ * to. Every exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether
+ * `visibleQuote` is; shows a proposal and `via` to the Agent's owner only; and `withReasoning` only when this reader may
+ * read the reasoning (`toWireForReaders`): otherwise each field is absent, so the message is exactly as one stored
+ * without any.
+ */
+function toWire(
+  msg: StoredMessage,
+  visibleQuote: StoredMessage | null,
+  proposal: ProposalRow | null,
+  withReasoning: boolean,
+  via: WireVia | null,
+): WireMessage {
   const wire: WireMessage = {
     conversationId: msg.conversationId,
     seq: msg.seq,
@@ -114,6 +158,7 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal
     if (msg.body.stopped === true) wire.stopped = true;
     if (msg.body.truncated === true) wire.truncated = true;
     if (proposal) wire.proposal = toWireProposal(proposal);
+    if (via) wire.via = via;
   }
   return wire;
 }
@@ -126,32 +171,53 @@ function toWire(msg: StoredMessage, visibleQuote: StoredMessage | null, proposal
  * Agent's owner. An Agent's reasoning, per reader in the same query that decides visibility: in an Agent's own
  * conversation to whoever may see the message (its owner); in a group only when the reader owns the Agent that sent it
  * (the sender principal's `owner_id` as it is when the message is read); nowhere else (a direct chat has no Agent). For
- * every other reader the field is absent (`toWire`). Both visibility decisions go through VISIBLE_JOIN, so an owner who
- * left the group reads nothing of it; at most three queries however many readers and messages there are.
+ * every other reader the field is absent (`toWire`). The same reader, and only they, gets `via` on an Agent's reply in
+ * either place: what the run that posted it (`client_txn` = the run's id, a run of that Agent in that conversation) was
+ * admitted on — source, model, reasoning level — and charged (its usage record), read in that same query by one more
+ * join, which looks only when the reader owns the sender; absent when the reply has no run, or a record of it is gone.
+ * Both visibility decisions go through VISIBLE_JOIN, so an owner who left the group reads nothing of it; at most three
+ * queries however many readers and messages there are. `config`: the site models' labels, read now.
  */
 export async function toWireForReaders(
   q: Queryable,
   readerIds: string[],
   msgs: StoredMessage[],
+  config: ReadConfig,
 ): Promise<Map<string, WireMessage[]>> {
   const readers = [...new Set(readerIds.map((id) => id.toLowerCase()))];
   const out = new Map<string, WireMessage[]>(readers.map((r) => [r, []]));
   if (readers.length === 0 || msgs.length === 0) return out;
 
-  const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean }>(
+  const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean } & ViaRow>(
     `select r.reader_id, m.id,
-            coalesce(c.type = 'agent' or (c.type = 'group' and sender.owner_id = r.reader_id), false) as with_reasoning
+            coalesce(c.type = 'agent' or (c.type = 'group' and sender.owner_id = r.reader_id), false) as with_reasoning,
+            via.source as via_source, via.model as via_model, via.reasoning as via_reasoning, via.points as via_points
        from unnest($1::uuid[]) as r (reader_id)
        cross join messages m ${visibleJoin("r.reader_id")}
        join conversations c on c.id = m.conversation_id
        left join principals sender on sender.id = m.sender_id
+       left join lateral (
+         select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points
+           from agent_runs run
+           join usage_records u on u.run_id = run.id
+          where sender.owner_id = r.reader_id and m.kind = 'text'
+            and run.id = case when m.client_txn ~ $3 then m.client_txn::uuid end
+            and run.agent_id = m.sender_id and run.conversation_id = m.conversation_id and run.purpose = 'reply'
+            and run.source is not null and run.model is not null and run.reasoning is not null
+       ) via on true
       where m.id = any($2::bigint[])`,
-    [readers, msgs.map((m) => m.id)],
+    [readers, msgs.map((m) => m.id), RUN_ID_TEXT],
   );
   const visible = new Set(shown.rows.map((r) => `${r.reader_id}|${r.id}`));
   const shownToAnyone = new Set(shown.rows.map((r) => r.id));
   /** reader|message pairs whose reasoning this reader is sent. */
   const reasoningFor = new Set(shown.rows.filter((r) => r.with_reasoning === true).map((r) => `${r.reader_id}|${r.id}`));
+  /** reader|message → what the run that posted it used, for the owner of the Agent that sent it. */
+  const viaFor = new Map<string, WireVia>();
+  for (const r of shown.rows) {
+    const via = toWireVia(r, config);
+    if (via) viaFor.set(`${r.reader_id}|${r.id}`, via);
+  }
 
   const quoting = msgs.filter((m) => typeof m.body.replyToSeq === "number" && shownToAnyone.has(m.id));
   const quotes = new Map<string, StoredMessage>();
@@ -179,15 +245,17 @@ export async function toWireForReaders(
     const list = out.get(reader)!;
     for (const m of msgs) {
       if (!visible.has(`${reader}|${m.id}`)) continue;
-      list.push(toWire(m, quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null, proposalFor(reader, m), reasoningFor.has(`${reader}|${m.id}`)));
+      const key = `${reader}|${m.id}`;
+      const quote = quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null;
+      list.push(toWire(m, quote, proposalFor(reader, m), reasoningFor.has(key), viaFor.get(key) ?? null));
     }
   }
   return out;
 }
 
 /** `toWireForReaders` for one reader: the subset of `msgs` they can see, quotes resolved for them. */
-export async function toWireFor(q: Queryable, readerId: string, msgs: StoredMessage[]): Promise<WireMessage[]> {
-  return (await toWireForReaders(q, [readerId], msgs)).get(readerId.toLowerCase())!;
+export async function toWireFor(q: Queryable, readerId: string, msgs: StoredMessage[], config: ReadConfig): Promise<WireMessage[]> {
+  return (await toWireForReaders(q, [readerId], msgs, config)).get(readerId.toLowerCase())!;
 }
 
 export interface MessagePage {
@@ -209,6 +277,7 @@ export async function listMessages(
   readerId: string,
   conversationId: string,
   { before, limit }: { before?: number; limit: number },
+  config: ReadConfig,
 ): Promise<MessagePage | null> {
   const { rows } = await q.query<MessageRow | { [K in keyof MessageRow]: null }>(
     `select ${MESSAGE_COLUMNS}
@@ -225,7 +294,7 @@ export async function listMessages(
   if (rows.length === 0) return null; // not a current member
   const found = rows.filter((r): r is MessageRow => r.id !== null);
   const page = found.slice(0, limit).reverse().map(toStored);
-  const messages = await toWireFor(q, readerId, page);
+  const messages = await toWireFor(q, readerId, page, config);
   return {
     messages,
     nextBefore: found.length > limit ? page[0]!.seq : null,
@@ -234,13 +303,13 @@ export async function listMessages(
 }
 
 /** One visible message, or null (not a member, not visible, or not there — indistinguishable). */
-export async function getMessage(q: Queryable, readerId: string, conversationId: string, seq: number): Promise<WireMessage | null> {
+export async function getMessage(q: Queryable, readerId: string, conversationId: string, seq: number, config: ReadConfig): Promise<WireMessage | null> {
   const { rows } = await q.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m ${VISIBLE_JOIN} where m.conversation_id = $2 and m.seq = $3`,
     [readerId, conversationId, seq],
   );
   if (!rows[0]) return null;
-  const [wire] = await toWireFor(q, readerId, [toStored(rows[0])]);
+  const [wire] = await toWireFor(q, readerId, [toStored(rows[0])], config);
   return wire ?? null;
 }
 

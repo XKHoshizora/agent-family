@@ -75,9 +75,14 @@ describe("a reply", () => {
       expect(runPushes(s, conv).map((e) => e.run.status)).toEqual(["queued", "running", "done"]);
       expect(deltaText(s, conv)).toBe(reply);
       const posted = s.events.filter((e) => e.type === "message" && e.message.senderId === agent.id);
-      expect(posted.map((e) => e.message.text)).toEqual([reply]);
-      // The message arrives before the run is announced done (the client swaps its bubble for the message).
+      // Pushed when it is posted, and to its owner once more when its run is charged, now with its `via`.
+      expect(posted.map((e) => e.message.text)).toEqual([reply, reply]);
+      expect(posted.map((e) => e.message.seq)).toEqual([posted[0]!.message.seq, posted[0]!.message.seq]);
+      expect(posted[1]!.message.via).toEqual({ model: { source: "site", id: "fast", label: "Fast" }, reasoning: "none", points: expect.any(String) });
+      // The message arrives before the run is announced done (the client swaps its bubble for the message), and so
+      // does its charged copy.
       expect(s.events.indexOf(posted[0]!)).toBeLessThan(done);
+      expect(s.events.indexOf(posted[1]!)).toBeLessThan(done);
       // The Agent's read marker moved to the owner's message when it started.
       expect(s.events).toContainEqual({ type: "read", conversationId: conv, principalId: agent.id, seq: sent.json.message.seq });
     }

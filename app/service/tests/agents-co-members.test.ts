@@ -50,6 +50,7 @@ const HIDDEN_KEYS = [
   "run",
   "agent",
   "agentId",
+  "via",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 
@@ -77,15 +78,37 @@ async function seat(conv: string, principalId: string): Promise<void> {
   );
 }
 
-/** A text message from `senderId` in `conv` (with `reasoning`, as an Agent's reply stores it), written straight into the table; returns its seq. */
-async function postAs(conv: string, senderId: string, text: string, reasoning?: string): Promise<number> {
+/**
+ * A text message from `senderId` in `conv` (with `reasoning`, as an Agent's reply stores it), written straight into the
+ * table, posted by run `runId` when given (`client_txn`, as `postAsAgent` writes it); returns its seq.
+ */
+async function postAs(conv: string, senderId: string, text: string, reasoning?: string, runId?: string): Promise<number> {
   const { rows } = await db.query<{ seq: string }>(
     `with c as (update conversations set seq = seq + 1 where id = $1 returning seq)
-     insert into messages (conversation_id, seq, sender_id, kind, body)
-     select $1, c.seq, $2, 'text', jsonb_strip_nulls(jsonb_build_object('text', $3::text, 'reasoning', $4::text)) from c returning seq`,
-    [conv, senderId, text, reasoning ?? null],
+     insert into messages (conversation_id, seq, sender_id, kind, body, client_txn)
+     select $1, c.seq, $2, 'text', jsonb_strip_nulls(jsonb_build_object('text', $3::text, 'reasoning', $4::text)), $5 from c returning seq`,
+    [conv, senderId, text, reasoning ?? null, runId ?? null],
   );
   return Number(rows[0]!.seq);
+}
+
+/**
+ * A reply run of `agentId` in `conv` that ended `done`, called on its owner's provider model `model` at `reasoning`, and
+ * its usage record (a provider call costs nothing); returns its id.
+ */
+async function providerRun(conv: string, agentId: string, ownerId: string, model: string, reasoning: string): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, reasoning, started_at, finished_at)
+     select 'reply', $1, $2, $3, 'done', c.seq, 'provider', $4, $5, now(), now() from conversations c where c.id = $1 returning id`,
+    [conv, agentId, ownerId, model, reasoning],
+  );
+  const id = rows[0]!.id;
+  await db.query(
+    `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, input_tokens, output_tokens, outcome)
+     values ($1, $2, $3, 'reply', 'provider', $4, 10, 10, 'done')`,
+    [ownerId, agentId, id, model],
+  );
+  return id;
 }
 
 /**
@@ -124,7 +147,9 @@ async function world() {
   const g = await group(app, owner, "team", [mia, ned]);
   await befriend(app, mia, sam);
   await seat(g, agent.id);
-  const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning);
+  // Said as a reply its owner's provider model gave there at a thinking level (its owner's `via`).
+  const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high");
+  const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
 
   // The owner's view really holds every hidden value (so their absence below means something).
@@ -171,8 +196,10 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
 
   it("and nothing else: no response a fellow member gets carries its persona, model, provider, settings, pause, proposals, runs, private chat or the thinking of its replies there", async () => {
     const { owner, mia, agent, dedicated, provider, g, agentSeq, quoteSeq } = await world();
-    // Its owner does read the thinking stored with its message in the group (so its absence below means something).
-    expect((await api(app, owner, "GET", `/api/conversations/${g}/messages/${agentSeq}`)).json.message.reasoning).toBe(HIDDEN.groupReasoning);
+    // Its owner does read the thinking stored with its message in the group, and which model and level gave it (so
+    // their absence below means something).
+    const ownersCopy = (await api(app, owner, "GET", `/api/conversations/${g}/messages/${agentSeq}`)).json.message;
+    expect([ownersCopy.reasoning, ownersCopy.via]).toEqual([HIDDEN.groupReasoning, { model: { source: "provider", model: HIDDEN.model }, reasoning: "high", points: "0" }]);
     const bodies: Array<[string, unknown]> = [];
     const read = async (label: string, method: "GET" | "POST", url: string, body?: unknown) => {
       const res = await api(app, mia, method, url, body);

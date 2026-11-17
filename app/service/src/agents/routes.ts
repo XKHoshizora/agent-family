@@ -380,7 +380,7 @@ export function registerAgentRoutes(
       await writeLimit(req, me.id);
       const { notice, wire } = await db.tx(async (t) => {
         const notice = await resetTopic(t, me.id, req.params.id);
-        const [wire] = await toWireFor(t, me.id, [notice]);
+        const [wire] = await toWireFor(t, me.id, [notice], config);
         if (!wire) throw new Error("resetTopic: the owner cannot read the notice just written");
         return { notice, wire };
       });

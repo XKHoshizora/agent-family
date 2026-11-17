@@ -97,7 +97,8 @@ describe("a proposal in a reply", () => {
     const reply = await lastFromAgent(owner, conv, agent.id);
     expect(reply.text).toBe("好的，我整理好了：");
     expect(reply.proposal).toEqual({ id: expect.any(String), status: "open", persona: NEW_PERSONA, intro: "温柔的日程助手", field: "日程" });
-    const pushed = s.events.find((e) => e.type === "message" && e.message.senderId === agent.id);
+    // Its last push (once its run was charged, before its `done`) is the message as history shows it.
+    const pushed = s.events.filter((e) => e.type === "message" && e.message.senderId === agent.id).at(-1);
     expect(pushed!.message).toEqual(reply);
     // The owner's other tabs are told to look again at their cards.
     expect(s.events).toContainEqual({ type: "agent", id: agent.id });
@@ -125,8 +126,8 @@ describe("a proposal in a reply", () => {
     const reply = await lastFromAgent(owner, conv, agent.id);
     expect(reply.text).toBe("前面的话。后面的话。");
     const row = (await db.query<MessageRow>("select m.* from messages m where conversation_id = $1 and seq = $2", [conv, reply.seq])).rows[0]!;
-    const [forOwner] = await toWireFor(db, owner.id, [toStored(row)]);
-    const [forAgent] = await toWireFor(db, agent.id, [toStored(row)]);
+    const [forOwner] = await toWireFor(db, owner.id, [toStored(row)], app.deps.config);
+    const [forAgent] = await toWireFor(db, agent.id, [toStored(row)], app.deps.config);
     expect(forOwner!.proposal).toMatchObject({ status: "open", persona: NEW_PERSONA });
     expect(forAgent).toBeDefined();
     expect(forAgent).not.toHaveProperty("proposal");

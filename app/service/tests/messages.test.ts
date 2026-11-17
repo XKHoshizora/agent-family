@@ -404,7 +404,7 @@ describe("fan-out rendering", () => {
         return (db.query as (...a: unknown[]) => unknown)(...args);
       }) as Queryable["query"],
     };
-    const out = await toWireForReaders(counted, [b.id, d.id, o.id, a.id.toUpperCase()], [pre, quotingMsg]);
+    const out = await toWireForReaders(counted, [b.id, d.id, o.id, a.id.toUpperCase()], [pre, quotingMsg], app.deps.config);
     expect(queries).toBeLessThanOrEqual(2); // bounded, however many readers and messages
 
     expect([...out.keys()].sort()).toEqual([a.id, b.id, d.id, o.id].sort());
@@ -429,13 +429,13 @@ describe("fan-out rendering", () => {
     await say(a, g, "while out", { replyToSeq: 2 }); // seq 4
     const whileOut = await stored(g, 4);
 
-    let out = await toWireForReaders(db, [b.id, c.id], [whileOut]);
+    let out = await toWireForReaders(db, [b.id, c.id], [whileOut], app.deps.config);
     expect(out.get(b.id)).toEqual([]);
     expect(out.get(c.id)![0]!.replyTo).toMatchObject({ seq: 2, visible: true, text: "first stay" });
 
     await add(a, g, b); // seq 5
     await say(a, g, "after", { replyToSeq: 2 }); // seq 6
-    out = await toWireForReaders(db, [b.id, c.id], [whileOut, await stored(g, 6)]);
+    out = await toWireForReaders(db, [b.id, c.id], [whileOut, await stored(g, 6)], app.deps.config);
     expect(out.get(b.id)!.map((m) => m.seq)).toEqual([6]);
     expect(out.get(b.id)![0]!.replyTo).toEqual({ seq: 2, visible: false });
     expect(JSON.stringify(out.get(b.id))).not.toContain("first stay");

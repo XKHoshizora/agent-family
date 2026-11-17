@@ -487,6 +487,8 @@ describe("a reply's thinking in a group is its Agent's owner's only", () => {
   const OWNERS_THOUGHT = `${THINK.owner} ${THINK.only}`;
   /** The keys of a message no reader is shown anything only its owner may see of. */
   const PLAIN_KEYS = ["conversationId", "createdAt", "kind", "senderId", "seq", "text"];
+  /** The keys its owner reads of their own Agent's reply: its thinking, and which model and level gave it (`via`). */
+  const OWNERS_KEYS = [...PLAIN_KEYS, "reasoning", "via"].sort();
 
   /**
    * The owner (owen) and ned each have an Agent in mia's group; each answered mia with thinking, and ned quoted the owner's
@@ -535,7 +537,7 @@ describe("a reply's thinking in a group is its Agent's owner's only", () => {
       // Absent, not null or empty: the same keys as a message without thinking.
       const keys = Object.keys(m).sort();
       const shown = "reasoning" in m;
-      expect([who.handle, where, m.seq, keys]).toEqual([who.handle, where, m.seq, shown ? [...PLAIN_KEYS, "reasoning"].sort() : PLAIN_KEYS]);
+      expect([who.handle, where, m.seq, keys]).toEqual([who.handle, where, m.seq, shown ? OWNERS_KEYS : PLAIN_KEYS]);
     }
     return replies.map((m) => [m.seq, "reasoning" in m ? m.reasoning : "absent"]);
   }
@@ -595,7 +597,15 @@ describe("a reply's thinking in a group is its Agent's owner's only", () => {
     for (const who of everyone(w)) {
       const events = w.sockets.get(who)!.events;
       const pushed = events.filter((e) => e.type === "message").map((e) => e.message);
-      expect([who.handle, thoughtsIn(w, who, "push", pushed)]).toEqual([who.handle, expectedFor(w, who)]);
+      // Its owner is pushed their Agent's reply once more when its run is charged (with its `via`); everyone else once.
+      const owns = (seq: number) => (seq === w.mine && who === w.owner) || (seq === w.theirs && who === w.ned);
+      for (const seq of [w.mine, w.theirs]) {
+        const frames = pushed.filter((m) => m.conversationId === w.g && m.seq === seq);
+        expect([who.handle, seq, frames.length]).toEqual([who.handle, seq, owns(seq) ? 2 : 1]);
+        expect([who.handle, seq, new Set(frames.map((m) => m.reasoning ?? "absent")).size]).toEqual([who.handle, seq, 1]);
+      }
+      const latest = [...new Map(pushed.map((m) => [`${m.conversationId}|${m.seq}`, m])).values()];
+      expect([who.handle, thoughtsIn(w, who, "push", latest)]).toEqual([who.handle, expectedFor(w, who)]);
       // Nothing else that reached this socket carries any: not the quote, not the other reply, not a run push.
       const elsewhere = events.filter((e) => !(e.type === "message" && (e.message.seq === w.mine || e.message.seq === w.theirs) && e.message.conversationId === w.g));
       expect([who.handle, noThought(elsewhere)]).toEqual([who.handle, true]);

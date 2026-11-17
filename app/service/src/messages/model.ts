@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { REASONING_LEVELS } from "../config.ts";
 import type { Tx } from "../db.ts";
 
 export type MessageKind = "text" | "file" | "system";
@@ -172,6 +173,22 @@ export const wireMessageSchema = z.object({
       persona: z.string(),
       intro: z.string().optional(),
       field: z.string().optional(),
+    })
+    .optional(),
+  /**
+   * An Agent's reply, to the Agent's owner only (absent for everyone else): what the run that posted it used — the
+   * model (a site model's id and its label now, the id when it is no longer configured; a provider model's name), the
+   * reasoning level it was sent — and what the owner was charged for it (points: free allowance plus balance, `"0"` on a
+   * provider). Absent when the reply has no run (the greeting) or the run's records are not all there.
+   */
+  via: z
+    .object({
+      model: z.union([
+        z.object({ source: z.literal("site"), id: z.string(), label: z.string() }),
+        z.object({ source: z.literal("provider"), model: z.string() }),
+      ]),
+      reasoning: z.enum(REASONING_LEVELS),
+      points: z.string(),
     })
     .optional(),
   createdAt: z.string(),

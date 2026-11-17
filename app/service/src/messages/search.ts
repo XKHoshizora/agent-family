@@ -2,7 +2,7 @@ import { VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Db, Queryable, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
-import { toWireFor } from "./read.ts";
+import { toWireFor, type ReadConfig } from "./read.ts";
 
 /** Searches one principal may have running at once, both routes together; one more is 429 `rate_limited`. */
 export const MAX_CONCURRENT_SEARCHES = 2;
@@ -61,6 +61,7 @@ export async function searchConversation(
   readerId: string,
   conversationId: string,
   { q: term, before, limit }: SearchOptions & { before?: number },
+  config: ReadConfig,
 ): Promise<ConversationSearchPage | null> {
   const { rows } = await q.query<MessageRow | { [K in keyof MessageRow]: null }>(
     `select ${MESSAGE_COLUMNS}
@@ -79,7 +80,7 @@ export async function searchConversation(
   if (rows.length === 0) return null; // not a current member
   const found = rows.filter((r): r is MessageRow => r.id !== null);
   const page = found.slice(0, limit).map(toStored);
-  const messages = await toWireFor(q, readerId, page);
+  const messages = await toWireFor(q, readerId, page, config);
   return {
     messages,
     nextBefore: found.length > limit ? page[page.length - 1]!.seq : null,
@@ -138,6 +139,7 @@ export async function searchAll(
   q: Queryable,
   readerId: string,
   { q: term, before, limit }: SearchOptions & { before?: SearchCursor },
+  config: ReadConfig,
 ): Promise<GlobalSearchPage> {
   const { rows } = await q.query<MessageRow & { created_at_text: string }>(
     `select ${MESSAGE_COLUMNS}, ${CREATED_AT_TEXT} as created_at_text
@@ -150,7 +152,7 @@ export async function searchAll(
   );
   const pageRows = rows.slice(0, limit);
   const last = pageRows[pageRows.length - 1];
-  const messages = await toWireFor(q, readerId, pageRows.map(toStored));
+  const messages = await toWireFor(q, readerId, pageRows.map(toStored), config);
   return {
     messages,
     nextBefore:

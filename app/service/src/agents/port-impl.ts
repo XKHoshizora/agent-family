@@ -34,7 +34,7 @@ export interface AgentPortDeps {
   config: Config;
   /** Where attachments are read from for what the model is shown (`buildContext`). */
   blobs: BlobStore;
-  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged">;
+  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged" | "pushChargedReply">;
   conversations: ConversationEvents;
   reads: ReadEvents;
   log: Pick<FastifyBaseLogger, "error" | "warn">;
@@ -383,8 +383,9 @@ export class DbAgentPort implements AgentPort {
    * halt and the chain budget). Announced after commit, and the notices the follow-up appended are published after the
    * run's end. A run ended elsewhere meanwhile (another instance's recovery, the stale-run sweep, a stop of a run this
    * process was not seen working on) is left as that recorded it, and its owner is told how it stands now, so no
-   * "replying" stays shown. The run's flags are forgotten in any case, also when this throws (a delta still waiting
-   * keeps its own).
+   * "replying" stays shown. A run whose reply was posted is pushed that reply once more, to its owner only, before its
+   * end (`Hub.pushChargedReply`): now that the run is charged, the reply carries its `via`. The run's flags are forgotten
+   * in any case, also when this throws (a delta still waiting keeps its own).
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
     let result: Recorded | null | undefined;
@@ -398,6 +399,7 @@ export class DbAgentPort implements AgentPort {
       this.flags.delete(run.id);
     }
     if (!result) return;
+    if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
     if (result.followUp) this.announce(result.followUp);
     // A notice its follow-up appended (a chain budget spent): the group is told after the run's end.
@@ -414,9 +416,9 @@ export class DbAgentPort implements AgentPort {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
         if (!current.rows[0]) return null;
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
-        return { ended, followUp: null, notices: [], interrupted: false };
+        return { ended, followUp: null, notices: [], interrupted: false, reply: null };
       }
-      const posted = await t.query("select 1 from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
+      const posted = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
         run.conversationId,
         run.agentId,
         run.id,
@@ -439,7 +441,13 @@ export class DbAgentPort implements AgentPort {
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent, final);
       const followed = next === null ? null : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, config);
-      return { ended, followUp: followed?.run ?? null, notices: followed?.notices ?? [], interrupted: state.rows[0].interrupted !== null };
+      return {
+        ended,
+        followUp: followed?.run ?? null,
+        notices: followed?.notices ?? [],
+        interrupted: state.rows[0].interrupted !== null,
+        reply: posted.rows[0] ? Number(posted.rows[0].seq) : null,
+      };
     });
   }
 
@@ -452,8 +460,9 @@ export class DbAgentPort implements AgentPort {
    * Ends run `runId` (a reply, or a persona draft) that will not be finished where it was begun — this process is
    * closing, or nobody is working on it — exactly as recovery at start-up ends one (`recoverRun`, in a transaction of
    * its own under the locks `finish` takes, on the run's own conversation), then tells its owner (and a follow-up queued
-   * by the one rule wakes the worker), publishes the notices its follow-up appended, and forgets its flags. False when it
-   * was no longer running. Rejects, changing nothing, when it cannot be written.
+   * by the one rule wakes the worker), publishes the notices its follow-up appended, and forgets its flags; a run whose
+   * reply had been posted pushes that reply once more to its owner, first (`Hub.pushChargedReply`, as `finish` does).
+   * False when it was no longer running. Rejects, changing nothing, when it cannot be written.
    */
   async releaseRun(runId: string): Promise<boolean> {
     const { db, config, log } = this.deps;
@@ -464,6 +473,8 @@ export class DbAgentPort implements AgentPort {
       this.flags.delete(runId);
     }
     if (recovered === null) return false;
+    const { charged } = recovered;
+    if (charged !== null) this.deps.realtime.pushChargedReply(charged.conversationId, charged.ownerId, charged.seq);
     for (const a of recovered.told) this.announce(a);
     if (recovered.notices.length > 0) this.deps.conversations.publish({ messages: recovered.notices, conversations: [] }, log);
     return true;
@@ -477,12 +488,16 @@ interface Recorded {
   /** Notices its follow-up appended (runs.ts `followUp`), to publish. */
   notices: StoredMessage[];
   interrupted: boolean;
+  /** The seq of the reply the run posted, to push again to its owner now that it is charged; null when none. */
+  reply: number | null;
 }
 
-/** What `recoverRun` leaves to do once it has committed: runs to announce, notices to publish. */
+/** What `recoverRun` leaves to do once it has committed: runs to announce, notices to publish, a charged reply to push. */
 interface Recovered {
   told: Announced[];
   notices: StoredMessage[];
+  /** The reply the run had posted, now charged (`Hub.pushChargedReply`); null when it posted none. */
+  charged: { conversationId: string; ownerId: string; seq: number } | null;
 }
 
 export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
@@ -545,8 +560,8 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
     reply === null
       ? null
       : (
-          await t.query<{ stopped: boolean | null }>(
-            "select (body ->> 'stopped') = 'true' as stopped from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3",
+          await t.query<{ stopped: boolean | null; seq: string }>(
+            "select (body ->> 'stopped') = 'true' as stopped, seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3",
             [reply.conversationId, reply.agent.id, runId],
           )
         ).rows[0];
@@ -565,12 +580,16 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
       where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId, end.status, error, droppedOnEnd(end)],
   );
-  if (reply === null) return { told: [], notices: [] };
+  if (reply === null) return { told: [], notices: [], charged: null };
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
   const followed = next === null ? null : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, config);
-  return { told: followed?.run ? [ended, followed.run] : [ended], notices: followed?.notices ?? [] };
+  return {
+    told: followed?.run ? [ended, followed.run] : [ended],
+    notices: followed?.notices ?? [],
+    charged: posted ? { conversationId, ownerId: agent.ownerId, seq: Number(posted.seq) } : null,
+  };
 }
 
 /** How long a run must have been `running` before the stale-run sweep may release it: twice the run's time limit (the
