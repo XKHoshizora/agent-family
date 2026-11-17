@@ -73,6 +73,7 @@ start-up with a message naming the variable. Values in the right column are for 
 | `PROVIDER_DEFAULT_CONTEXT_TOKENS`, `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` | A provider model's context when its owner gives none (1000–2000000, default 16000) and the output limit of every call to a provider model (1–1000000, default 2048); the first must be larger than the second. | defaults |
 | `PROVIDER_MAX_CONCURRENT_CALLS` | Calls to model providers and site models in flight at once in the whole service (1–1000, default 64); one more is refused as `provider_unavailable`. | default |
 | `AGENT_MAX_RUNS_IN_FLIGHT` | Agent replies the service runs at once, all users together (1–64, default 8); further ones wait queued. Memory: each reply holds up to 20 MiB of attachments, in up to about five copies at its peak (the bytes, their base64 text, the request body with that text, and its encoded bytes), so the worst case is this × 20 MiB × 5 — about 800 MiB at the default; size the container for it or lower the value. | default |
+| `AGENT_CHAIN_LIMIT` | In a group, once its last this many messages that are not notices were all sent by Agents, an Agent's message calls no other Agent until a person writes, and the group is told once (2–500, default 30). The owners' per-minute, concurrency and points limits, each Agent's `chainBudget` and any member's halt brake Agent-to-Agent talk too. | default |
 
 ## Must hold
 

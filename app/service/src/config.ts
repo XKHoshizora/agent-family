@@ -158,6 +158,8 @@ const envSchema = z.object({
   PROVIDER_MAX_CONCURRENT_CALLS: wholeNumber(64, 1, 1000),
   /** Replies the worker runs at once in the whole service (each holds its attachments in memory and an outbound call). */
   AGENT_MAX_RUNS_IN_FLIGHT: wholeNumber(8, 1, 64),
+  /** After this many messages in a row from Agents in a group (notices aside), an Agent's message calls no other Agent. */
+  AGENT_CHAIN_LIMIT: wholeNumber(30, 2, 500),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -250,6 +252,11 @@ export interface Config {
   providerMaxConcurrentCalls: number;
   /** Replies the worker runs at once in the whole service (src/agents/runtime/worker.ts). */
   agentMaxRunsInFlight: number;
+  /**
+   * When the group's last this many messages that are not notices were all sent by Agents, an Agent's message calls no
+   * other Agent until a person writes (src/agents/runs.ts `triggerFromAgent`).
+   */
+  agentChainLimit: number;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -385,6 +392,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     providerDefaultMaxOutputTokens: e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS,
     providerMaxConcurrentCalls: e.PROVIDER_MAX_CONCURRENT_CALLS,
     agentMaxRunsInFlight: e.AGENT_MAX_RUNS_IN_FLIGHT,
+    agentChainLimit: e.AGENT_CHAIN_LIMIT,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

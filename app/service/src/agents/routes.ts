@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { formatPoints, MICRO_PER_POINT, parsePoints } from "../accounts/store.ts";
 import { REASONING_LEVELS } from "../config.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
@@ -21,6 +22,7 @@ import {
   readOwnedAgent,
   setAgentState,
   updateAgent,
+  type AgentPatch,
   type AgentRow,
 } from "./store.ts";
 
@@ -44,6 +46,20 @@ const field = agentField;
 const persona = agentPersona;
 const proposalParams = z.object({ id: uuidParam, proposalId: uuidParam });
 
+/** `chainBudget`'s bounds and default, in micro-points: 1 to 100 000 points, 50 unless its owner says otherwise. */
+const CHAIN_BUDGET_MIN = MICRO_PER_POINT;
+const CHAIN_BUDGET_MAX = 100_000n * MICRO_PER_POINT;
+const DEFAULT_CHAIN_BUDGET = 50n * MICRO_PER_POINT;
+/**
+ * `chainBudget` as a request gives it: a decimal string of points (no sign, no exponent, at most 6 fraction digits, as
+ * money is on the wire) from 1 to 100 000; micro-points once parsed.
+ */
+const chainBudget = z
+  .string()
+  .regex(/^[0-9]{1,6}(?:\.[0-9]{1,6})?$/)
+  .transform((s) => parsePoints(s)!)
+  .refine((micro) => micro >= CHAIN_BUDGET_MIN && micro <= CHAIN_BUDGET_MAX);
+
 const agentView = z.object({
   id: z.string(),
   handle: z.string(),
@@ -55,6 +71,7 @@ const agentView = z.object({
   personaVersion: z.number(),
   replyMode,
   groupMentions,
+  chainBudget: z.string(),
   reasoning,
   model: modelChoice(z.string()),
   paused: z.boolean(),
@@ -75,6 +92,7 @@ const toView = (a: AgentRow): z.infer<typeof agentView> => ({
   personaVersion: a.personaVersion,
   replyMode: a.replyMode,
   groupMentions: a.groupMentions,
+  chainBudget: formatPoints(a.chainBudgetMicro),
   reasoning: a.reasoning,
   model: a.model,
   paused: a.paused,
@@ -125,6 +143,7 @@ export function registerAgentRoutes(
           persona: persona.optional(),
           replyMode: replyMode.optional(),
           groupMentions: groupMentions.optional(),
+          chainBudget: chainBudget.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -143,6 +162,7 @@ export function registerAgentRoutes(
         persona: b.persona ?? "",
         replyMode: b.replyMode ?? "always",
         groupMentions: b.groupMentions ?? "members",
+        chainBudgetMicro: b.chainBudget ?? DEFAULT_CHAIN_BUDGET,
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,
       };
@@ -219,6 +239,7 @@ export function registerAgentRoutes(
           persona: persona.optional(),
           replyMode: replyMode.optional(),
           groupMentions: groupMentions.optional(),
+          chainBudget: chainBudget.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -231,7 +252,11 @@ export function registerAgentRoutes(
       const agent = await db.tx(async (t) => {
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
-        const patch = Object.fromEntries(Object.entries(req.body).filter(([, v]) => v !== undefined));
+        const { chainBudget: budget, ...fields } = req.body;
+        const patch: AgentPatch = {
+          ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
+          ...(budget === undefined ? {} : { chainBudgetMicro: budget }),
+        };
         const next = { ...current, ...patch };
         if ("model" in patch || "reasoning" in patch) await assertModelChoice(t, me.id, next.model, next.reasoning, config);
         return updateAgent(t, current, patch);

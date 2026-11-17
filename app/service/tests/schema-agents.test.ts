@@ -49,7 +49,8 @@ describe("agent, provider, metering and run tables", () => {
     const agent = await agentPrincipal(owner, "bot_a");
     await db.query(`insert into agents (principal_id) values ($1)`, [agent]);
     const { rows } = await db.query(
-      `select intro, field, persona, persona_version, reply_mode, group_mentions, reasoning, model_source, paused, deleted_at from agents`,
+      `select intro, field, persona, persona_version, reply_mode, group_mentions, reasoning, model_source, paused, deleted_at,
+              chain_budget_micro::text as chain_budget_micro from agents`,
     );
     expect(rows).toEqual([
       {
@@ -63,8 +64,27 @@ describe("agent, provider, metering and run tables", () => {
         model_source: null,
         paused: false,
         deleted_at: null,
+        chain_budget_micro: "50000000",
       },
     ]);
+  });
+
+  test("chain_budget_micro is from 1 to 100 000 points in micro-points, never null", async () => {
+    const owner = await human("owner_cb");
+    const insert = async (handle: string, value: unknown) =>
+      db.query(`insert into agents (principal_id, chain_budget_micro) values ($1, $2)`, [await agentPrincipal(owner, handle), value]);
+    await insert("cb_low", "1000000");
+    await insert("cb_high", "100000000000");
+    for (const [handle, value] of [["cb_under", "999999"], ["cb_zero", "0"], ["cb_over", "100000000001"], ["cb_minus", "-1"]] as const) {
+      await expect(insert(handle, value)).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    }
+    await expect(insert("cb_null", null)).rejects.toMatchObject({ code: "23502" });
+  });
+
+  test("conversations.agents_halted_seq is null until a halt sets it", async () => {
+    const owner = await human("owner_hs");
+    const { rows } = await db.query(`insert into conversations (type, creator_id) values ('group', $1) returning agents_halted_seq`, [owner]);
+    expect(rows).toEqual([{ agents_halted_seq: null }]);
   });
 
   test("group_mentions is 'members' or 'owner', never anything else or null", async () => {
@@ -193,13 +213,27 @@ describe("agent, provider, metering and run tables", () => {
       expect(indexes.rows.map((r) => r.indexname).sort()).toEqual(["agent_runs_one_active_per_agent_conversation", "agent_runs_pkey"]);
     });
 
-    test("interrupted is null, agent_paused, agent_deleted or agent_removed", async () => {
+    test("interrupted is null, agent_paused, agent_deleted, agent_removed or halted", async () => {
       const { owner, agent, conversation } = await setup();
       const interrupted = `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, interrupted)
                            values ('reply', $1, $2, $3, 'done', 1, $4)`;
-      for (const reason of [null, "agent_paused", "agent_deleted", "agent_removed"]) await db.query(interrupted, [conversation, agent, owner, reason]);
+      for (const reason of [null, "agent_paused", "agent_deleted", "agent_removed", "halted"]) await db.query(interrupted, [conversation, agent, owner, reason]);
       await rejectedWith(CHECK_VIOLATION, interrupted, [conversation, agent, owner, "agent_bored"]);
       await rejectedWith(CHECK_VIOLATION, interrupted, [conversation, agent, owner, "agent_left"]);
+      await rejectedWith(CHECK_VIOLATION, interrupted, [conversation, agent, owner, "Halted"]);
+    });
+
+    test("triggered_by is 'human' unless set to 'agent', never anything else or null", async () => {
+      const { owner, agent, conversation } = await setup();
+      await db.query(runSql, [conversation, agent, owner, "done"]);
+      const by = `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by)
+                  values ('reply', $1, $2, $3, 'done', 1, $4)`;
+      await db.query(by, [conversation, agent, owner, "agent"]);
+      await db.query(by, [conversation, agent, owner, "human"]);
+      await rejectedWith(CHECK_VIOLATION, by, [conversation, agent, owner, "bot"]);
+      await rejectedWith(CHECK_VIOLATION, by, [conversation, agent, owner, "Agent"]);
+      await expect(db.query(by, [conversation, agent, owner, null])).rejects.toMatchObject({ code: "23502" });
+      expect((await db.query(`select triggered_by from agent_runs order by triggered_by`)).rows.map((r) => r.triggered_by)).toEqual(["agent", "human", "human"]);
     });
 
     test("a reply run needs both conversation and agent; a draft run has neither", async () => {
