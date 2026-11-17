@@ -49,7 +49,6 @@ export interface AgentWorker {
 
 type Interruption = "stop" | "timeout" | "shutdown";
 
-
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const { port, models, log } = opts;
   const inFlight = new Set<Promise<void>>();
