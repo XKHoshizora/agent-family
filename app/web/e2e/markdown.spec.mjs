@@ -182,7 +182,8 @@ test("a conversation of many long replies opened again costs what is in view: fa
   await createAgentUi(ann.page, { name: other, persona: "你回答。" });
   let chat = await createAgentUi(ann.page, { name, persona: "你回答。" });
   for (let i = 0; i < REPLIES; i += 1) {
-    await modelStub.reply(longReply(i), { chunkSize: 4000 });
+    // (Little usage reported, so the suite's small free allowance lasts all these replies.)
+    await modelStub.reply(longReply(i), { chunkSize: 4000, usage: { input: 1, output: 1 } });
     await sendText(ann.page, name, `第 ${i} 问 ${uniq(4)}`);
     const reply = agentMessagesWith(chat, `第 ${i} 篇`);
     await expect(reply).toHaveCount(1);
