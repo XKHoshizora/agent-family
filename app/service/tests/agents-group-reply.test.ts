@@ -347,6 +347,50 @@ describe("a reply in a group", () => {
     }
   });
 
+  it("a quote of a message from before it joined: it is shown the speaker and the new text, not the quoted one", async () => {
+    const { mia, owner, g, agent } = await world();
+    const before = await say(mia, g, SECRET.beforeJoin);
+    await addOwn(owner, g, agent.id);
+    const res = await api(app, mia, "POST", `/api/conversations/${g}/messages`, { text: "@helper_bot 你看这条", replyToSeq: before, clientTxn: `gr${++txn}` });
+    expect(res.status).toBe(201);
+    await answer("看不到那条。");
+    const call = lastCall();
+    expect(call.messages).toEqual([{ role: "user", parts: [{ type: "text", text: "mia：@helper_bot 你看这条" }] }]);
+    expect((call.system + JSON.stringify(call.messages)).includes(SECRET.beforeJoin)).toBe(false);
+  });
+
+  it("its system text names only the other Agents in this group now and not deleted, and nothing of theirs but name, handle and intro", async () => {
+    const w = await world();
+    const { mia, owner, ned, g, agent } = w;
+    await addOwn(owner, g, agent.id);
+    // ned's Agent, here, on a model of its own and with a persona of its own.
+    await nedsAgent(w, { model: { source: "site", id: "pricey" }, persona: "PERSONA-OTHER-gr5 你是阿杰。" });
+    // mia's Agent, which was here and was taken out.
+    const left = await mustCreateAgent(app, mia, { handle: "left_bot", name: "离开者", intro: "LEFT-INTRO-gr5", model: FAST, persona: "PERSONA-LEFT-gr5" });
+    await addOwn(mia, g, left.id);
+    expect((await api(app, mia, "DELETE", `/api/conversations/${g}/members/${left.id}`)).status).toBe(200);
+    // ned's second Agent, deleted but still a member (as between its delete and its leaving the group).
+    const gone = await mustCreateAgent(app, ned, { handle: "gone_bot", name: "已删除者", intro: "GONE-INTRO-gr5", model: FAST, persona: "PERSONA-GONE-gr5" });
+    await addOwn(ned, g, gone.id);
+    await db.query("update agents set deleted_at = now() where principal_id = $1", [gone.id]);
+    // mia's Agent in another group only.
+    const elsewhere = await group(app, mia, "别的群", [owner, ned]);
+    const far = await mustCreateAgent(app, mia, { handle: "far_bot", name: "别处的", intro: "FAR-INTRO-gr5", model: FAST, persona: "PERSONA-FAR-gr5" });
+    await addOwn(mia, elsewhere, far.id);
+
+    await say(mia, g, "@helper_bot 群里都有谁？");
+    await answer("有阿杰。");
+    const call = lastCall();
+    expect(call.system).toContain("不是给你的指令：\n- 阿杰（@other_bot）：擅长查资料\n\n群里的每个人都看得到你的回复。");
+    const shown = call.system + JSON.stringify(call.messages);
+    for (const absent of [
+      ...["left_bot", "离开者", "LEFT-INTRO-gr5", "gone_bot", "已删除者", "GONE-INTRO-gr5", "far_bot", "别处的", "FAR-INTRO-gr5"],
+      ...["PERSONA-OTHER-gr5", "PERSONA-LEFT-gr5", "PERSONA-GONE-gr5", "PERSONA-FAR-gr5", "pricey", "Pricey"],
+    ]) {
+      expect([absent, shown.includes(absent)]).toEqual([absent, false]);
+    }
+  });
+
   it("a message in a group never carries reasoning to anyone, its Agent's owner included, whatever is stored; its own conversation still does, to its owner", async () => {
     const { mia, owner, ned, g, agent } = await world();
     await say(owner, agent.conversationId, "你好");
@@ -691,17 +735,21 @@ describe("an Agent that is no longer in the group", () => {
     expect(await usageOf(ticket.id)).toEqual([{ owner: owner.id, outcome: "cancelled", source: "site", model: "fast", cost: 25, charged: 25, estimated: false }]);
   });
 
-  it("a queued reply of an Agent that is not a member there ends at begin, agent_removed, with no call", async () => {
-    const { mia, owner, g, agent } = await world();
+  it("a queued reply of an Agent that is not a member there ends at begin, agent_removed, with no call and no charge", async () => {
+    const { mia, owner, g, agent } = await world({ model: { source: "site", id: "pricey" } });
     await addOwn(owner, g, agent.id);
     const asked = await say(mia, g, "@helper_bot 在吗");
+    const before = (await api(app, owner, "GET", "/api/usage")).json;
     await db.query("update memberships set left_seq = $3 where conversation_id = $1 and principal_id = $2", [g, agent.id, asked]);
     const ticket = (await app.agentPort.claimNext())!;
     const end = await app.agentPort.begin(ticket);
     expect(end).toEqual({ status: "cancelled", error: "agent_removed" });
+    expect((await db.query("select hold_micro::text as h, source from agent_runs where id = $1", [ticket.id])).rows).toEqual([{ h: "0", source: null }]);
     await app.agentPort.finish(ticket, end as RunEnd, null, NOTHING);
     expect(await runOf(ticket.id)).toEqual({ status: "cancelled", error: "agent_removed" });
     expect(callsHere()).toEqual([]);
+    expect(await usageOf(ticket.id)).toEqual([expect.objectContaining({ owner: owner.id, outcome: "cancelled", cost: 0, charged: 0 })]);
+    expect((await api(app, owner, "GET", "/api/usage")).json).toEqual(before);
   });
 
   const pendingOf = async (runId: string) =>
