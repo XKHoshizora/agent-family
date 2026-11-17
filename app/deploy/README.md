@@ -41,14 +41,19 @@ docker exec <container> node dist/cli.js attachments:sweep      # by hand only; 
 
 ## Environment
 
-Required: `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET`. An invalid value stops the service at start-up with a
-message naming the variable. Values in the right column are for the acceptance environment.
+Required: `DATABASE_URL`, `APP_ORIGIN`, `AUTH_SECRET`, `PROVIDER_KEY_SECRET`. An invalid value stops the service at
+start-up with a message naming the variable. Values in the right column are for the acceptance environment.
 
 | Variable | Meaning | Acceptance value |
 | --- | --- | --- |
 | `DATABASE_URL` | Postgres connection string. Needs the extensions `citext`, `pgcrypto`, `pg_trgm`. | the acceptance database |
 | `APP_ORIGIN` | The public origin users type, no path (`https://…`). Used for the Origin check, cookies (`Secure` when https), mail links, HSTS (https only). | the public https URL |
 | `AUTH_SECRET` | Signs sessions and tokens; at least 32 characters; keep it stable (changing it signs everyone out). | a long random string |
+| `PROVIDER_KEY_SECRET` | Encrypts the API keys people save for their own model providers; at least 32 characters. **Back it up with the database**: a database restored without it (or with another value) cannot open those keys — each provider then fails until its owner saves the key again. Keep it stable. | a long random string, other than `AUTH_SECRET` |
+| `SITE_MODELS` | The models the site offers (JSON array; see `app/service/README.md`, Configuration). Each names in `apiKeyEnv` another variable that holds its upstream key — set that variable too; it may not be one of the variables in this table (start-up fails naming the model). Default: none. | the acceptance models, each with its key variable |
+| `FREE_DAILY_POINTS`, `SITE_TIMEZONE` | The free daily allowance of site-model use in whole points (default 200), and the time zone whose midnight starts a new day of it (default `Asia/Shanghai`). | defaults |
+| `AGENT_TIERS` | JSON: how many Agents each account tier may own; must contain `free`. Default `{"free":20}`. | default |
+| `HOST` | The address the server listens on (default `0.0.0.0`, every interface). | default |
 | `PORT` | Listening port. Image default `3000`. | what the platform routes to (often injected) |
 | `WEB_DIST` | Directory of the web build. Image default `/app/web`; leave it. Unset serves only the API. | `/app/web` |
 | `CLIENT_IP_HEADER` | Header your proxy sets to the real client address, replacing any client value. Rate limits count per address; without it every request looks like the proxy. | `x-real-ip` |
@@ -64,7 +69,7 @@ message naming the variable. Values in the right column are for the acceptance e
 | `HTTP_BODY_TIMEOUT_MS` | A request with a body must have arrived whole within this long (default 30000); an upload is released from it once it is admitted and then follows the upload deadlines. | default |
 | `HTTP_CONNECTION_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_KEEP_ALIVE_TIMEOUT_MS` | Server-wide socket idle (120000), whole request (upload total + 60000), keep-alive idle (72000). Must exceed the upload deadlines. Keep the proxy's idle timeout above the keep-alive value. | defaults |
 | `DB_STATEMENT_TIMEOUT_MS`, `DB_ACQUIRE_TIMEOUT_MS`, `SEARCH_STATEMENT_TIMEOUT_MS` | Database limits: statement (30000), wait for a pool connection (10000), one search (3000). Past them: 503 `busy`. | defaults |
-| `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_RUNS_PER_MINUTE`, `AGENT_RUN_TIMEOUT_MS` | Agent replies: running at once per person, further ones wait (1–100, default 2); started per person a minute (1–10000, default 20); how long one may take, its attachment reading included, in ms (1000–3600000, default 120000). | defaults |
+| `AGENT_MAX_CONCURRENT_RUNS`, `AGENT_RUNS_PER_MINUTE`, `AGENT_RUN_TIMEOUT_MS` | Model calls per person: running at once, replies and persona drafts together — further replies wait, a further draft is refused; a draft and a reply that start at the same moment may briefly run one over (1–100, default 2); replies started a minute (1–10000, default 20); how long a call may take, in ms (1000–3600000, default 120000) — a reply first reads its attachments, which may take that long too, then calls the model, so one reply can take up to about twice the value. | defaults |
 | `PROVIDER_DEFAULT_CONTEXT_TOKENS`, `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` | A provider model's context when its owner gives none (1000–2000000, default 16000) and the output limit of every call to a provider model (1–1000000, default 2048); the first must be larger than the second. | defaults |
 | `PROVIDER_MAX_CONCURRENT_CALLS` | Calls to model providers and site models in flight at once in the whole service (1–1000, default 64); one more is refused as `provider_unavailable`. | default |
 
@@ -72,21 +77,27 @@ message naming the variable. Values in the right column are for the acceptance e
 
 - **One replica.** Realtime delivery and several limits live in one process's memory; a second instance
   would not see the first one's sockets (see `app/service/README.md`, Sync and realtime). No cluster mode.
+  A deploy that starts the new container while the old one still runs is safe: the new one's start-up ends the old
+  one's Agent replies in progress (they fail retryable), and when the old one's model call finishes it posts and
+  charges nothing more (`app/service/README.md`, Agents and runs, Recovery). Replies under way at that moment are lost
+  and must be retried; queued ones are answered by the new container.
 - **TLS terminates at the proxy** in front; the service speaks plain HTTP on `PORT` and must be reachable
   only through that proxy (otherwise a client could forge `CLIENT_IP_HEADER`). The proxy must pass WebSocket
   upgrades on `/api/ws`.
 - **Same origin.** Users reach both the pages and `/api` at `APP_ORIGIN`; the Content-Security-Policy of the
   pages allows nothing else.
-- The server sweeps unsent uploads itself (`SWEEP_INTERVAL_MINUTES`); `attachments:sweep` is only for running it by hand. Back up the database (and the bucket).
+- The server sweeps unsent uploads itself (`SWEEP_INTERVAL_MINUTES`); `attachments:sweep` is only for running it by hand. Back up the database (and the bucket), and keep `PROVIDER_KEY_SECRET` with the backups.
 
 ## Backup and restore
 
-Two things hold all state: the Postgres database and the attachment store (the bucket, or `BLOB_DIR`).
+Two things hold all state: the Postgres database and the attachment store (the bucket, or `BLOB_DIR`); a third
+must travel with them: `PROVIDER_KEY_SECRET`, which the providers' saved keys in the database are encrypted under.
 
 - Database: `pg_dump -Fc -d <db> -f af.dump`, restore into an empty database with
   `pg_restore --no-owner -d <newdb> af.dump` (the dump carries the three extensions).
 - Attachments: copy every object to the new bucket under the same key (or copy `BLOB_DIR`).
-- Start the service against the restored pair with the **same `AUTH_SECRET`** and the new `APP_ORIGIN`.
+- Start the service against the restored pair with the **same `AUTH_SECRET`** and **the same `PROVIDER_KEY_SECRET`**
+  (without it the providers' saved keys cannot be opened) and the new `APP_ORIGIN`.
 
 Take the database dump first and the objects second: an object without a row is swept later, a row without an
 object is a broken attachment. Rehearsed on the acceptance environment on 2026-11-16
