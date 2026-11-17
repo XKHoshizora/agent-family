@@ -163,7 +163,7 @@ export function registerAgentRoutes(
       const { name, intro: givenIntro, field: givenField, model: chosen } = req.body;
       const closing = new AbortController();
       const drafting = draftPersona(
-        { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns, release: (runId) => app.agentPort.releaseRun(runId, null) },
+        { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns, release: (runId) => app.agentPort.releaseRun(runId) },
         me.id,
         { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
         closing.signal,

@@ -12,6 +12,7 @@ export interface RunTicket {
   readonly id: string;
   readonly agentId: string;
   readonly ownerId: string;
+  /** The run's own conversation (`agent_runs.conversation_id`), not necessarily the Agent's dedicated one. */
   readonly conversationId: string;
 }
 
@@ -37,14 +38,15 @@ export type RunErrorCode = "provider_rejected" | "provider_unavailable" | "addre
 
 /**
  * How a run ends, as the worker saw it. `finish` records what is true under the Agent's lock: a reply that was posted
- * stands (`done`, or `stopped` by its owner), and a run its Agent's pause or delete interrupted is `cancelled` with that
- * reason — the worker cannot tell an owner's stop from a pause, and a refused post looks the same. `cancelled` with no
- * error from `begin`: everything the reply was to answer is before a new topic its owner started.
+ * stands (`done`, or `stopped` by its owner), and a run its Agent's pause, delete or removal from the run's conversation
+ * (`agent_removed`) interrupted is `cancelled` with that reason — the worker cannot tell an owner's stop from a pause,
+ * and a refused post looks the same. `cancelled` with no error from `begin`: everything the reply was to answer is
+ * before a new topic its owner started.
  */
 export type RunEnd =
   | { readonly status: "done" }
   | { readonly status: "stopped" }
-  | { readonly status: "cancelled"; readonly error?: "agent_paused" | "agent_deleted" }
+  | { readonly status: "cancelled"; readonly error?: "agent_paused" | "agent_deleted" | "agent_removed" }
   | { readonly status: "failed"; readonly error: RunErrorCode; readonly resetsAt?: string };
 
 /**
@@ -109,10 +111,10 @@ export interface AgentPort {
    */
   emit(run: RunTicket, delta: Delta): void;
   /**
-   * Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause or delete
-   * interrupted the run, or the run is no longer running (another instance's recovery ended it; `finish` then leaves it
-   * as that recorded it); "empty", storing nothing, when nothing of it is left to show (a reply stopped or cut inside a
-   * persona block it never finished, with nothing before it).
+   * Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause, delete or
+   * removal from the run's conversation interrupted the run, or the run is no longer running (another instance's
+   * recovery ended it; `finish` then leaves it as that recorded it); "empty", storing nothing, when nothing of it is
+   * left to show (a reply stopped or cut inside a persona block it never finished, with nothing before it).
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
   /**

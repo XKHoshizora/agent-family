@@ -113,9 +113,9 @@ export interface AgentReply {
 }
 
 /**
- * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` — the
- * conversation row, then the `agents` row, the locks pause and delete take — so once a pause or delete has committed,
- * nothing more is posted: 409 `agent_paused` / `agent_deleted`, also for a run that pause or delete marked
+ * The one way an Agent's reply becomes a message (besides the fixed greeting at creation): under `lockAgent` on the
+ * run's conversation — its row, then the `agents` row, which pause and delete lock too — so once a pause or delete has
+ * committed, nothing more is posted: 409 `agent_paused` / `agent_deleted`, also for a run that pause or delete marked
  * `interrupted` after the Agent was resumed. Nor is a run posted that is no longer `running` (`RunNotRunning`: another
  * instance's recovery ended it, read under the same locks recovery takes). The message is the Agent's, kind `text`, with
  * `client_txn` = the run's id, so posting a run's reply again returns the stored message (`duplicate`) and stores
@@ -127,7 +127,8 @@ export interface AgentReply {
  * cut (`truncated`) loses everything from its first `<af-` on (`withoutUnfinishedBlock`: it ended inside a block it
  * never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules of message
  * text, is cut at 32 000 characters (no mark) and is stored only when there is some. Null, storing nothing, when there
- * is nothing to show: no visible text and no reasoning.
+ * is nothing to show: no visible text and no reasoning. Any conversation but the Agent's dedicated one is refused (it
+ * throws): the only one an Agent posts in so far.
  */
 export async function postAsAgent(
   t: Tx,
@@ -136,7 +137,7 @@ export async function postAsAgent(
   runId: string,
   reply: AgentReply,
 ): Promise<{ message: StoredMessage; duplicate: boolean } | null> {
-  const agent = await lockAgent(t, agentId);
+  const agent = await lockAgent(t, agentId, conversationId);
   if (agent.conversationId !== conversationId) throw new Error(`postAsAgent: ${conversationId} is not the conversation of Agent ${agentId}`);
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
@@ -191,7 +192,7 @@ export async function postAsAgent(
 export async function resetTopic(t: Tx, ownerId: string, conversationId: string): Promise<StoredMessage> {
   const agentId = await ownedAgentOf(t, ownerId, conversationId);
   if (!agentId) throw notFound();
-  const agent = await lockAgent(t, agentId);
+  const agent = await lockAgent(t, agentId, conversationId);
   if (agent.deleted) throw new AppError(403, "cannot_send", { reason: "agent_deleted" });
   return appendSystem(t, conversationId, { event: "topic_reset", actorId: ownerId });
 }

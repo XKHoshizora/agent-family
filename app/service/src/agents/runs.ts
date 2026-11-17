@@ -9,8 +9,10 @@ import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
- * dismiss and the latest run of a conversation. The worker's side is `port-impl.ts`. Lock order everywhere: the
- * conversation row → the `agents` row (`lockAgent`) → the run row → the `accounts` row.
+ * dismiss and the latest run of a conversation. The worker's side is `port-impl.ts`. A run belongs to one conversation
+ * (`conversation_id`), and everything here acts on that one: an Agent has at most one queued or running run per
+ * conversation, and a message is folded only into the active run of its own conversation. Lock order everywhere: the
+ * run's conversation row → the `agents` row (`lockAgent`) → the run row → the `accounts` row.
  */
 
 export const RUN_STATUSES = ["queued", "running", "done", "failed", "stopped", "cancelled"] as const;
@@ -60,6 +62,7 @@ export function toWireRun(r: RunRow): WireRun {
 /** A run to push to its owner after the transaction that changed it commits. */
 export interface Announced {
   ownerId: string;
+  /** The run's own conversation. */
   conversationId: string;
   run: WireRun;
 }
@@ -105,22 +108,29 @@ async function startedLastMinute(t: Tx, ownerId: string): Promise<number> {
   return rows[0]!.n;
 }
 
-/** Why an Agent's reply was cut short by the Agent itself. */
-export type Interruption = "agent_paused" | "agent_deleted";
+/**
+ * Why an Agent's running reply was cut short (`agent_runs.interrupted`): by the Agent's pause or delete, or because the
+ * Agent left the run's conversation (`agent_removed`).
+ */
+export type Interruption = "agent_paused" | "agent_deleted" | "agent_removed";
 
 /**
- * In the pause's (or delete's) own transaction, which holds `lockAgent`: the Agent's active reply ends for good. A
- * queued one is cancelled at once (it never reached a model: nothing to settle). A running one is marked
- * `interrupted`: `postAsAgent` refuses it and `finish` records it `cancelled` with that reason — even if the Agent is
- * resumed before the worker notices — and what was noted on it (`pending_seq`) is dropped: nothing written before the
- * pause gets a follow-up. Whatever is noted on it from now on came after a resume (nothing is noted while the Agent
- * is paused) and is followed up as usual (`finish`). Returns the cancelled runs to announce and the running ones to
- * stop.
+ * In the pause's (or delete's) own transaction, which holds `lockAgent`: the Agent's active replies, in every
+ * conversation, end for good. A queued one is cancelled at once (it never reached a model: nothing to settle). A
+ * running one is marked `interrupted`: `postAsAgent` refuses it and `finish` records it `cancelled` with that reason —
+ * even if the Agent is resumed before the worker notices — and what was noted on it (`pending_seq`) is dropped: nothing
+ * written before the pause gets a follow-up. Whatever is noted on it from now on came after a resume (nothing is noted
+ * while the Agent is paused) and is followed up as usual (`finish`). Returns the cancelled runs to announce, each with
+ * its own conversation, and the running ones to stop.
  */
-export async function interruptRuns(t: Tx, agent: AgentRow, reason: Interruption): Promise<{ cancelled: Announced[]; running: string[] }> {
-  const queued = await t.query<RunRow>(
+export async function interruptRuns(
+  t: Tx,
+  agent: AgentRow,
+  reason: Exclude<Interruption, "agent_removed">,
+): Promise<{ cancelled: Announced[]; running: string[] }> {
+  const queued = await t.query<RunRow & { conversation_id: string }>(
     `update agent_runs as r set status = 'cancelled', error = $2, finished_at = now()
-      where r.agent_id = $1 and r.status = 'queued' returning ${RUN_COLUMNS}`,
+      where r.agent_id = $1 and r.status = 'queued' returning ${RUN_COLUMNS}, r.conversation_id`,
     [agent.id, reason],
   );
   const running = await t.query<{ id: string }>(
@@ -128,43 +138,44 @@ export async function interruptRuns(t: Tx, agent: AgentRow, reason: Interruption
     [agent.id, reason],
   );
   return {
-    cancelled: queued.rows.map((r) => ({ ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(r) })),
+    cancelled: queued.rows.map((r) => ({ ownerId: agent.ownerId, conversationId: r.conversation_id, run: toWireRun(r) })),
     running: running.rows.map((r) => r.id),
   };
 }
 
-/** Queues a reply of the locked Agent answering up to `coversSeq`. */
-export async function queueRun(t: Tx, agent: AgentRow, coversSeq: number): Promise<Announced> {
+/** Queues a reply of the locked Agent in `conversationId` answering up to `coversSeq` (a seq of that conversation). */
+export async function queueRun(t: Tx, agent: AgentRow, conversationId: string, coversSeq: number): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
     `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, covers_seq)
      values ('reply', $1, $2, $3, 'queued', $4) returning ${RUN_COLUMNS}`,
-    [agent.conversationId, agent.id, agent.ownerId, coversSeq],
+    [conversationId, agent.id, agent.ownerId, coversSeq],
   );
-  return { ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(rows[0]!) };
+  return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
 
 /**
- * A reply the owner's `agentRunsPerMinute` refused: recorded `failed`, `rate_limited` (retryable), covering
- * `coversSeq`, so the owner sees it and can retry. It never reached a model: no hold, no usage record, and it is not
- * active (it takes no concurrency slot, and the Agent's one active run stays free).
+ * A reply in `conversationId` the owner's `agentRunsPerMinute` refused: recorded `failed`, `rate_limited` (retryable),
+ * covering `coversSeq`, so the owner sees it and can retry. It never reached a model: no hold, no usage record, and it
+ * is not active (it takes no concurrency slot, and the Agent's one active run there stays free).
  */
-async function recordRateLimited(t: Tx, agent: AgentRow, coversSeq: number): Promise<Announced> {
+async function recordRateLimited(t: Tx, agent: AgentRow, conversationId: string, coversSeq: number): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
     `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at)
      values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now()) returning ${RUN_COLUMNS}`,
-    [agent.conversationId, agent.id, agent.ownerId, coversSeq],
+    [conversationId, agent.id, agent.ownerId, coversSeq],
   );
-  return { ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(rows[0]!) };
+  return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
 
 /**
  * The trigger (spec 6.5): in the send transaction, after `message` was stored (not a repeat), under the send's locks.
  * Only a message from the owner in an Agent conversation counts, and nothing happens when the Agent is paused, deleted
  * or has no model, or answers only when called (`replyMode` `mention`) and the text calls it neither by `@handle` nor
- * by `@name`. With a reply already active the message is folded into it: a queued one now covers it, a running one
- * notes it in `pending_seq` (one follow-up answers everything that came meanwhile). Otherwise a reply is queued —
- * unless the owner has started `agentRunsPerMinute` in the last minute: then a `failed` run, `rate_limited`, is recorded
- * instead (`recordRateLimited`; the message stays sent). Returns the run to announce after commit, or null.
+ * by `@name`. With a reply of the Agent already active in this conversation the message is folded into it: a queued
+ * one now covers it, a running one notes it in `pending_seq` (one follow-up answers everything that came meanwhile); a
+ * reply active in another conversation is not touched. Otherwise a reply is queued here — unless the owner has started
+ * `agentRunsPerMinute` in the last minute: then a `failed` run, `rate_limited`, is recorded instead
+ * (`recordRateLimited`; the message stays sent). Returns the run to announce after commit, or null.
  */
 export async function maybeTrigger(
   t: Tx,
@@ -173,23 +184,24 @@ export async function maybeTrigger(
   config: Pick<Config, "agentRunsPerMinute">,
 ): Promise<Announced | null> {
   if (lock.conversation.type !== "agent" || message.kind === "system") return null;
-  const found = await t.query<{ agent_id: string }>("select agent_id from agent_conversations where conversation_id = $1", [lock.conversation.id]);
+  const conversationId = lock.conversation.id;
+  const found = await t.query<{ agent_id: string }>("select agent_id from agent_conversations where conversation_id = $1", [conversationId]);
   if (!found.rows[0]) return null;
-  const agent = await lockAgent(t, found.rows[0].agent_id);
+  const agent = await lockAgent(t, found.rows[0].agent_id, conversationId);
   if (message.senderId !== agent.ownerId || agent.paused || agent.deleted || agent.model === null) return null;
   const text = typeof message.body.text === "string" ? message.body.text : "";
   if (agent.replyMode === "mention" && !mentions(text, agent)) return null;
 
   const folded = await t.query(
     `update agent_runs
-        set covers_seq = case when status = 'queued' then greatest(covers_seq, $2) else covers_seq end,
-            pending_seq = case when status = 'running' then greatest(pending_seq, $2) else pending_seq end
-      where agent_id = $1 and status in ('queued', 'running')`,
-    [agent.id, message.seq],
+        set covers_seq = case when status = 'queued' then greatest(covers_seq, $3) else covers_seq end,
+            pending_seq = case when status = 'running' then greatest(pending_seq, $3) else pending_seq end
+      where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
+    [agent.id, conversationId, message.seq],
   );
   if (folded.rowCount) return null;
-  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return recordRateLimited(t, agent, message.seq);
-  return queueRun(t, agent, message.seq);
+  if ((await startedLastMinute(t, agent.ownerId)) >= config.agentRunsPerMinute) return recordRateLimited(t, agent, conversationId, message.seq);
+  return queueRun(t, agent, conversationId, message.seq);
 }
 
 /**
@@ -201,7 +213,7 @@ export async function maybeTrigger(
 export async function retryRun(t: Tx, ownerId: string, conversationId: string, config: Pick<Config, "agentRunsPerMinute">): Promise<Announced> {
   const agentId = await ownedAgentOf(t, ownerId, conversationId);
   if (!agentId) throw notFound();
-  const agent = await lockAgent(t, agentId);
+  const agent = await lockAgent(t, agentId, conversationId);
   if (agent.deleted) throw new AppError(409, "agent_deleted");
   if (agent.paused) throw new AppError(409, "agent_paused");
   const latest = await latestRun(t, conversationId);
@@ -213,34 +225,28 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, c
     [conversationId, ownerId],
   );
   if (last.rows[0]?.seq == null) throw new AppError(400, "invalid_request");
-  return queueRun(t, agent, Number(last.rows[0].seq));
+  return queueRun(t, agent, conversationId, Number(last.rows[0].seq));
 }
 
 /**
  * `POST …/runs/:runId/stop`: a queued run is stopped at once (it never reached a model: nothing to settle); a running
- * one is reported, with its Agent, so the caller can flag it for the worker working on it, or release it when nobody
- * here is; a finished one is left as it is. 404 unless the run is of the caller's Agent conversation.
+ * one is reported, so the caller can flag it for the worker working on it, or release it when nobody here is; a
+ * finished one is left as it is. 404 unless the run is of the caller's Agent conversation.
  */
-export async function stopRun(
-  t: Tx,
-  ownerId: string,
-  conversationId: string,
-  runId: string,
-): Promise<{ stopped: Announced | null; running: boolean; agentId: string }> {
-  const agentId = await ownedAgentOf(t, ownerId, conversationId);
-  if (!agentId) throw notFound();
+export async function stopRun(t: Tx, ownerId: string, conversationId: string, runId: string): Promise<{ stopped: Announced | null; running: boolean }> {
+  if (!(await ownedAgentOf(t, ownerId, conversationId))) throw notFound();
   const { rows } = await t.query<{ status: RunStatus }>("select status from agent_runs where id = $1 and conversation_id = $2 for update", [
     runId,
     conversationId,
   ]);
   const status = rows[0]?.status;
   if (status === undefined) throw notFound();
-  if (status !== "queued") return { stopped: null, running: status === "running", agentId };
+  if (status !== "queued") return { stopped: null, running: status === "running" };
   const stopped = await t.query<RunRow>(
     `update agent_runs as r set status = 'stopped', finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId],
   );
-  return { stopped: { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) }, running: false, agentId };
+  return { stopped: { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) }, running: false };
 }
 
 /** `POST …/runs/dismiss`: the latest run, if it failed, is no longer shown by `GET …/run`. 404 unless the caller's. */

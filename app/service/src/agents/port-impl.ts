@@ -165,9 +165,9 @@ export class DbAgentPort implements AgentPort {
     return run;
   }
 
-  /** Locks the Agent (its conversation row, then its `agents` row), then the run's row, and reads both. */
+  /** Locks the run's conversation row, then the Agent's `agents` row (`lockAgent`), then the run's row, and reads them. */
   private async lockRun(t: Tx, run: RunTicket): Promise<{ agent: AgentRow; state: RunState }> {
-    const agent = await lockAgent(t, run.agentId);
+    const agent = await lockAgent(t, run.agentId, run.conversationId);
     const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
     // Ended elsewhere meanwhile (another instance's recovery, or the stale-run sweep): nothing more of it is done here.
     if (state.rows[0]?.status !== "running") throw new RunNotRunning(run.id, state.rows[0]?.status ?? null);
@@ -314,7 +314,7 @@ export class DbAgentPort implements AgentPort {
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
       return "posted";
     } catch (err) {
-      if (err instanceof AppError && (err.code === "agent_paused" || err.code === "agent_deleted")) return "refused";
+      if (err instanceof AppError && (err.code === "agent_paused" || err.code === "agent_deleted" || err.code === "agent_removed")) return "refused";
       if (err instanceof RunNotRunning) {
         this.deps.log.warn({ runId: run.id, status: err.status }, "agent run: ended elsewhere while it was answered (another instance's recovery); its reply is not posted");
         return "refused";
@@ -324,13 +324,13 @@ export class DbAgentPort implements AgentPort {
   }
 
   /**
-   * One transaction under `lockAgent`: settles the call (it leaves `running` in the same transaction, so its hold
-   * never stops counting before its cost lands) — at no charge when it failed on our side (`busy`: the reply could not
-   * be stored) — records how the run ended (`recorded`), and queues the follow-up by `followUpSeq`. Announced after
-   * commit. A run ended elsewhere meanwhile (another instance's recovery, the stale-run sweep, a stop of a run this
-   * process was not seen working on) is left as that recorded it, and its owner is told how it stands now, so no
-   * "replying" stays shown. The run's flags are forgotten in any case, also when this throws (a delta still waiting
-   * keeps its own).
+   * One transaction under `lockAgent` on the run's conversation: settles the call (it leaves `running` in the same
+   * transaction, so its hold never stops counting before its cost lands) — at no charge when it failed on our side
+   * (`busy`: the reply could not be stored) — records how the run ended (`recorded`), and queues the follow-up by
+   * `followUpSeq`, in the run's conversation. Announced after commit. A run ended elsewhere meanwhile (another
+   * instance's recovery, the stale-run sweep, a stop of a run this process was not seen working on) is left as that
+   * recorded it, and its owner is told how it stands now, so no "replying" stays shown. The run's flags are forgotten in
+   * any case, also when this throws (a delta still waiting keeps its own).
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
     let result: { ended: Announced; followUp: Announced | null; interrupted: boolean } | null | undefined;
@@ -351,7 +351,7 @@ export class DbAgentPort implements AgentPort {
   private record(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }, now: Date) {
     const { db, config } = this.deps;
     return db.tx(async (t): Promise<{ ended: Announced; followUp: Announced | null; interrupted: boolean } | null> => {
-      const agent = await lockAgent(t, run.agentId);
+      const agent = await lockAgent(t, run.agentId, run.conversationId);
       const state = await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [run.id]);
       if (state.rows[0]?.status !== "running") {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
@@ -374,28 +374,28 @@ export class DbAgentPort implements AgentPort {
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent);
-      const followUp = next === null ? null : await queueRun(t, agent, next);
+      const followUp = next === null ? null : await queueRun(t, agent, run.conversationId, next);
       return { ended, followUp, interrupted: state.rows[0].interrupted !== null };
     });
   }
 
   /** `AgentPort.release`: the worker's run, ended as recovery ends one (`releaseRun`). */
   async release(run: RunTicket): Promise<void> {
-    await this.releaseRun(run.id, run.agentId);
+    await this.releaseRun(run.id);
   }
 
   /**
-   * Ends run `runId` (a reply of `agentId`, or a persona draft: null) that will not be finished where it was begun —
-   * this process is closing, or nobody is working on it — exactly as recovery at start-up ends one (`recoverRun`, in a
-   * transaction of its own under the locks `finish` takes), then tells its owner (and a follow-up queued by the one
-   * rule wakes the worker) and forgets its flags. False when it was no longer running. Rejects, changing nothing, when
-   * it cannot be written.
+   * Ends run `runId` (a reply, or a persona draft) that will not be finished where it was begun — this process is
+   * closing, or nobody is working on it — exactly as recovery at start-up ends one (`recoverRun`, in a transaction of
+   * its own under the locks `finish` takes, on the run's own conversation), then tells its owner (and a follow-up queued
+   * by the one rule wakes the worker) and forgets its flags. False when it was no longer running. Rejects, changing
+   * nothing, when it cannot be written.
    */
-  async releaseRun(runId: string, agentId: string | null): Promise<boolean> {
+  async releaseRun(runId: string): Promise<boolean> {
     const { db, config, log } = this.deps;
     let told: Announced[] | null;
     try {
-      told = await db.tx((t) => recoverRun(t, config, runId, agentId, log));
+      told = await db.tx((t) => recoverRun(t, config, runId, log));
     } finally {
       this.flags.delete(runId);
     }
@@ -412,10 +412,11 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
 /**
  * Recovery at start-up, before the worker starts (README "Agents and runs"; spec 6.4, 6.5): every run the previous
  * process left `running` — its call, if it had one, died with it — is ended without a model call, each in a
- * transaction of its own under the locks `finish` takes (the Agent's conversation and `agents` rows, then the run's,
- * then the account's; a persona draft has no Agent: its run row, then the account). A draft has no message either, so
- * it always ends as the last case:
- * - its reply had been posted (the stop fell between post and finish): `done`, or `stopped` when the message says so;
+ * transaction of its own under the locks `finish` takes (the run's own conversation row and the Agent's `agents` row,
+ * then the run's, then the account's; a persona draft has no Agent: its run row, then the account). A draft has no
+ * message either, so it always ends as the last case:
+ * - its reply had been posted in its conversation (the stop fell between post and finish): `done`, or `stopped` when
+ *   the message says so;
  * - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
  * - else `failed`, `provider_unavailable`, retryable.
  * In the same transaction its hold is released by a settlement that costs nothing (whatever the upstream reported died
@@ -427,14 +428,12 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * recovered. The same ending, while the service runs, is `DbAgentPort.releaseRun` (one transaction of `recoverRun`).
  */
 export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseLogger, "error" | "warn">): Promise<number> {
-  const { rows } = await db.query<{ id: string; agent_id: string | null }>(
-    "select id, agent_id from agent_runs where status = 'running' order by started_at, id",
-  );
+  const { rows } = await db.query<{ id: string }>("select id from agent_runs where status = 'running' order by started_at, id");
   let recovered = 0;
   for (const run of rows) {
     try {
       // Nothing is announced: no socket can be open yet, and the worker starts after this.
-      if ((await db.tx((t) => recoverRun(t, config, run.id, run.agent_id, log))) !== null) recovered++;
+      if ((await db.tx((t) => recoverRun(t, config, run.id, log))) !== null) recovered++;
     } catch (err) {
       log.error({ err, runId: run.id }, "agent run: could not be recovered at start-up; it stays running until the stale-run sweep or the next start releases it");
     }
@@ -443,21 +442,31 @@ export async function recoverRuns(db: Db, config: Config, log: Pick<FastifyBaseL
 }
 
 /**
- * One run of `recoverRuns` (and of `sweepStaleRuns`): null when it was no longer running, else what to tell its owner —
- * the run as it ended and the follow-up queued, if any (a draft has no conversation: nothing).
+ * One run of `recoverRuns` (and of `sweepStaleRuns`, `releaseRun`): null when it was no longer running (or does not
+ * exist), else what to tell its owner — the run as it ended and the follow-up queued, if any, both in the run's own
+ * conversation (a draft has no conversation: nothing). The run's Agent and conversation are read from its row first (they
+ * never change), so that the locks are taken in their order: that conversation's row and the `agents` row, then the
+ * run's.
  */
-async function recoverRun(t: Tx, config: Config, runId: string, agentId: string | null, log: Pick<FastifyBaseLogger, "warn">): Promise<Announced[] | null> {
-  // A reply has its Agent; a persona draft has none.
-  const agent = agentId === null ? null : await lockAgent(t, agentId);
+async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<FastifyBaseLogger, "warn">): Promise<Announced[] | null> {
+  const of = (
+    await t.query<{ agent_id: string | null; conversation_id: string | null }>("select agent_id, conversation_id from agent_runs where id = $1", [runId])
+  ).rows[0];
+  if (!of) return null;
+  // A reply has its Agent and conversation; a persona draft has neither.
+  const reply =
+    of.agent_id !== null && of.conversation_id !== null
+      ? { agent: await lockAgent(t, of.agent_id, of.conversation_id), conversationId: of.conversation_id }
+      : null;
   const state = (await t.query<RunState>(`select ${RUN_STATE} from agent_runs where id = $1 for update`, [runId])).rows[0];
   if (state?.status !== "running") return null;
   const posted =
-    agent === null
+    reply === null
       ? null
       : (
           await t.query<{ stopped: boolean | null }>(
             "select (body ->> 'stopped') = 'true' as stopped from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3",
-            [agent.conversationId, agent.id, runId],
+            [reply.conversationId, reply.agent.id, runId],
           )
         ).rows[0];
   const end: RunEnd = posted
@@ -473,10 +482,11 @@ async function recoverRun(t: Tx, config: Config, runId: string, agentId: string 
     `update agent_runs as r set status = $2, error = $3, finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId, end.status, error],
   );
-  if (agent === null) return [];
-  const ended: Announced = { ownerId: agent.ownerId, conversationId: agent.conversationId, run: toWireRun(updated.rows[0]!) };
+  if (reply === null) return [];
+  const { agent, conversationId } = reply;
+  const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent) : null;
-  return next === null ? [ended] : [ended, await queueRun(t, agent, next)];
+  return next === null ? [ended] : [ended, await queueRun(t, agent, conversationId, next)];
 }
 
 /** How long a run must have been `running` before the stale-run sweep may release it: twice the run's time limit (the
@@ -487,11 +497,12 @@ export const staleAfterMs = (config: Pick<Config, "agentRunTimeoutMs">): number 
  * The stale-run sweep (README "Agents and runs", Recovery): every run — reply or draft — that is `running`, has been
  * since longer than `staleAfterMs`, and is not one this process is working on (`held`: its worker's runs and its drafts
  * in flight) is released exactly as start-up recovery releases one (`port.releaseRun`: `recoverRun`, each in a
- * transaction of its own under the same locks; its owner is told, a follow-up wakes the worker, and its flags are
- * forgotten). Such a run's process died mid-call while another instance kept running (a deploy where two overlap), its
- * stop could not write its end, or its `finish` failed. Every run is bounded well within `staleAfterMs`, so one that is
- * still being worked on elsewhere is past its time: `post` then refuses it (`RunNotRunning`) and nothing is recorded
- * twice. A run that cannot be released is logged and tried again by the next sweep. Returns how many were released.
+ * transaction of its own under the same locks, on the run's own conversation; its owner is told, a follow-up wakes the
+ * worker, and its flags are forgotten). Such a run's process died mid-call while another instance kept running (a
+ * deploy where two overlap), its stop could not write its end, or its `finish` failed. Every run is bounded well within
+ * `staleAfterMs`, so one that is still being worked on elsewhere is past its time: `post` then refuses it
+ * (`RunNotRunning`) and nothing is recorded twice. A run that cannot be released is logged and tried again by the next
+ * sweep. Returns how many were released.
  */
 export async function sweepStaleRuns(
   port: Pick<DbAgentPort, "releaseRun">,
@@ -500,8 +511,8 @@ export async function sweepStaleRuns(
   log: Pick<FastifyBaseLogger, "error" | "warn">,
   held: (runId: string) => boolean,
 ): Promise<number> {
-  const { rows } = await db.query<{ id: string; agent_id: string | null }>(
-    `select id, agent_id from agent_runs
+  const { rows } = await db.query<{ id: string }>(
+    `select id from agent_runs
       where status = 'running' and started_at < now() - ($1::bigint * interval '1 millisecond')
       order by started_at, id`,
     [staleAfterMs(config)],
@@ -510,7 +521,7 @@ export async function sweepStaleRuns(
   for (const run of rows) {
     if (held(run.id)) continue;
     try {
-      if (!(await port.releaseRun(run.id, run.agent_id))) continue;
+      if (!(await port.releaseRun(run.id))) continue;
       released++;
       log.warn({ runId: run.id }, "agent run: released by the stale-run sweep (left running by a process that is gone)");
     } catch (err) {

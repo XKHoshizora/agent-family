@@ -1502,30 +1502,36 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
 or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
-ignored). A message that comes while a run is active is folded into it (Coalescing, below). Otherwise a `queued` run is
-inserted covering the message (`covers_seq`), unless the owner has started `AGENT_RUNS_PER_MINUTE` (20) replies in the
-last minute: then the run is inserted already `failed`, error `rate_limited` (retryable), covering the message — the
-message is still sent, nothing is called, held or charged (no usage record), the run is never active (it takes no
-concurrency slot and leaves the Agent free for the next message) and, having started nothing, it is not counted
-toward the limit itself. That count is taken under the owner's `accounts` row lock, the last of the lock order, so two
-messages to two of the owner's Agents at the same moment are counted one after the other and the limit is exact. The
-`run` push and (for a queued run) the worker's wake-up follow the commit.
+ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
+below). Otherwise a `queued` run is inserted in that conversation covering the message (`covers_seq`), unless the owner
+has started `AGENT_RUNS_PER_MINUTE` (20) replies in the last minute: then the run is inserted already `failed`, error
+`rate_limited` (retryable), covering the message — the message is still sent, nothing is called, held or charged (no
+usage record), the run is never active (it takes no concurrency slot and leaves the Agent free for the next message)
+and, having started nothing, it is not counted toward the limit itself. That count is taken under the owner's
+`accounts` row lock, the last of the lock order, so two messages to two of the owner's Agents at the same moment are
+counted one after the other and the limit is exact. The `run` push and (for a queued run) the worker's wake-up follow
+the commit.
 
-**Coalescing.** An Agent has at most one queued or running run (a unique index). A message that comes while one is
-queued is covered by it; while one is running, it is noted (`pending_seq`), and when that run ends one follow-up run
-answers everything noted — not one per message, and never two replies at once. The one rule: a run that has ended is
+**Coalescing.** Per Agent per conversation: an Agent has at most one queued or running run in each conversation (a
+unique index on the Agent and the run's conversation, migration `016_agents_in_groups.sql`), and a run's `covers_seq`
+and `pending_seq` are seqs of its own conversation. A message that comes while one is queued in that conversation is
+covered by it; while one is running there, it is noted (`pending_seq`), and when that run ends one follow-up run, in the
+same conversation, answers everything noted — not one per message, and never two replies at once in one conversation. A
+run of the Agent in another conversation is not touched (so an Agent could answer in its own conversation and in a group
+at once; the owner's limits on replies running and started bound them together). The one rule: a run that has ended is
 followed when something was noted on it and its Agent can still answer (not paused, not deleted, has a model) — however
 the run itself ended. (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a
 resume.)
 
-**Pause and delete** end the Agent's active reply for good, in their own transaction (under the Agent's lock): a queued
-run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it has no usage record); a
-running one is marked `interrupted` with that reason, and what was noted on it is dropped. A marked run is never posted
-and ends `cancelled`, even if the Agent is resumed before the worker notices; its call is abandoned and no further
-`delta` of it is pushed once the request has answered — not even one that was already waiting to be delivered, however
-late it would be. Nothing is queued or noted while the Agent is paused, and resuming queues nothing: what was written
-during the pause is answered only as part of the next reply a later message of the owner's starts. A message written
-after the resume while the interrupted reply is still ending is noted on it, and its follow-up answers it.
+**Pause and delete** end the Agent's active replies, in every conversation, for good, in their own transaction (under
+the Agent's lock): a queued run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it
+has no usage record), announced with its own conversation; a running one is marked `interrupted` with that reason, and
+what was noted on it is dropped. A marked run is never posted and ends `cancelled`, even if the Agent is resumed before
+the worker notices; its call is abandoned and no further `delta` of it is pushed once the request has answered — not
+even one that was already waiting to be delivered, however late it would be. Nothing is queued or noted while the Agent
+is paused, and resuming queues nothing: what was written during the pause is answered only as part of the next reply a
+later message of the owner's starts. A message written after the resume while the interrupted reply is still ending is
+noted on it, and its follow-up answers it.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
 (2) runs running, replies and persona drafts together (further replies wait queued), at most `AGENT_MAX_RUNS_IN_FLIGHT`
@@ -1667,8 +1673,8 @@ holds at most one record per run).
 When the app is ready, before the worker starts, every run the previous process left `running` — its call, if it had one,
 died with that process — is ended without any model call, each in one transaction under the locks `finish` takes:
 
-- its reply had been posted (the service stopped between post and finish): `done` (`stopped` when the message is
-  marked so), with that one message;
+- its reply had been posted in its conversation (the service stopped between post and finish): `done` (`stopped`
+  when the message is marked so), with that one message;
 - else, its Agent's pause or delete had interrupted it: `cancelled` with that reason;
 - else `failed`, `provider_unavailable`, retryable: nothing is called again on its own (spec 6.5); the owner retries.
   A persona draft (`POST /api/agents/draft-persona`; no Agent, so locked from its run row) always ends so.
@@ -1713,19 +1719,23 @@ whose request is under way): those are never touched, however old. Unlike at sta
 is past its own limits: its `post` is refused (the run is no longer `running`) and nothing is recorded twice. So a run
 left behind by a process that is gone — a deploy's old instance killed mid-call, or whose stop could not write its runs'
 end, a `finish` that failed — is released
-within about twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then it is stuck: the
-Agent's conversation shows it replying and the Agent answers nothing more (an Agent has one queued or running run at
-most), it occupies one of the owner's `AGENT_MAX_CONCURRENT_RUNS` slots, and, if it was admitted, its hold still counts
-against the owner's allowance or balance.
+within about twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then it is stuck: its
+conversation shows it replying and the Agent answers nothing more there (an Agent has one queued or running run per
+conversation at most), it occupies one of the owner's `AGENT_MAX_CONCURRENT_RUNS` slots, and, if it was admitted, its
+hold still counts against the owner's allowance or balance.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
 (`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,
 `emit`, `post`, `finish`, `release`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
 fails when a file there imports `db.ts`, `pg` or any `store.ts`. It is the shape an external Agent's connection would have.
 
-Lock order of every write here: the conversation row → the `agents` row → the run row → the `accounts` row. Like the
-hub, the worker and its stop flags live in this process: run one instance. Two overlap only during a deploy, which is
-safe (Recovery, above).
+Lock order of every write here: one conversation row → the `agents` row → the run row → the `accounts` row
+(`store.ts` `lockAgent`). The conversation is the one the write acts in: whatever acts for a run — the trigger, a
+retry, the worker's `begin`, `post` and `finish`, a follow-up, recovery, the stale-run sweep, a stop's release — locks
+the run's own conversation (`agent_runs.conversation_id`, which never changes), never another; the owner's writes to
+the Agent itself (edit, pause, resume, delete, avatar, proposals) lock its dedicated conversation. Like the hub, the
+worker and its stop flags live in this process: run one instance. Two overlap only during a deploy, which is safe
+(Recovery, above).
 
 ## Metering (`src/metering/`)
 

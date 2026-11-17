@@ -27,6 +27,7 @@ export interface AgentRow {
   model: AgentModel;
   paused: boolean;
   deleted: boolean;
+  /** The Agent's dedicated conversation with its owner (`agent_conversations`). */
   conversationId: string;
   createdAt: Date;
 }
@@ -94,15 +95,22 @@ export function modelParams(model: AgentModel): [string | null, string | null, s
 }
 
 /**
- * Locks the Agent's conversation row, then its `agents` row (`for update`): the order every writer uses
- * (pair lock → conversation → agents → accounts). Pause, resume, delete and `postAsAgent` go through it, so
- * the row it returns cannot change until the transaction ends. 404 for an unknown Agent. Whose Agent it is
- * is not checked here: `lockOwnedAgent` does that for the owner's routes.
+ * Locks one conversation row, then the Agent's `agents` row (`for update`): the order every writer uses (pair lock →
+ * one conversation → agents → run rows → accounts). The conversation is the one the caller acts in — whatever acts for
+ * a run passes the run's own (`agent_runs.conversation_id`) — and by default the Agent's dedicated conversation, which
+ * the owner's routes on the Agent itself (edit, pause, resume, delete, avatar, proposals) take. Pause, resume, delete
+ * and `postAsAgent` go through it, so the row it returns cannot change until the transaction ends. 404 for an unknown
+ * Agent (or conversation). Whose Agent it is is not checked here: `lockOwnedAgent` does that for the owner's routes;
+ * nor whether the Agent is in that conversation: its caller knows why it acts there.
  */
-export async function lockAgent(t: Tx, agentId: string): Promise<AgentRow> {
-  const found = await t.query<{ conversation_id: string }>("select conversation_id from agent_conversations where agent_id = $1", [agentId]);
-  if (!found.rows[0]) throw notFound();
-  await lockConversation(t, found.rows[0].conversation_id);
+export async function lockAgent(t: Tx, agentId: string, conversationId?: string): Promise<AgentRow> {
+  let target = conversationId;
+  if (target === undefined) {
+    const found = await t.query<{ conversation_id: string }>("select conversation_id from agent_conversations where agent_id = $1", [agentId]);
+    if (!found.rows[0]) throw notFound();
+    target = found.rows[0].conversation_id;
+  }
+  if (!(await lockConversation(t, target))) throw notFound();
   const { rows } = await t.query<AgentDbRow>(`${SELECT} where a.principal_id = $1 for update of a`, [agentId]);
   if (!rows[0]) throw notFound();
   return toAgent(rows[0]);
