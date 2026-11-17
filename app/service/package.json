@@ -27,7 +27,8 @@
     "tier:set": "tsx src/cli.ts tier:set",
     "tier:set:prod": "node --enable-source-maps dist/cli.js tier:set",
     "models:list": "tsx src/cli.ts models:list",
-    "models:list:prod": "node --enable-source-maps dist/cli.js models:list"
+    "models:list:prod": "node --enable-source-maps dist/cli.js models:list",
+    "catalog:update": "node scripts/update-model-catalog.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.105",
