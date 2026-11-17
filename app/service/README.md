@@ -627,8 +627,10 @@ Agent cannot be pointed at their provider (400).
 the `baseUrl` rules; the host name is looked up once, and the call is refused with `address_not_allowed` if any address
 it resolves to (or the address written in the URL) is not public: loopback, private (10/8, 172.16/12, 192.168/16,
 fc00::/7), link-local (169.254/16, fe80::/10, fec0::/10), carrier-grade NAT (100.64/10), unspecified or `0/8`,
-192.0.0/24, benchmarking (198.18/15), multicast (224/4, ff00::/8), reserved and broadcast (240/4), or an IPv4-mapped,
-IPv4-compatible, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`) or 6to4 form of one. The connection then goes to exactly an
+192.0.0/24, benchmarking (198.18/15), multicast (224/4, ff00::/8), reserved and broadcast (240/4), an IPv4-mapped
+form of one, or any IPv6 address that is not ordinary global unicast (only `2000::/3` is allowed, less Teredo
+`2001::/32`, 6to4 `2002::/16`, documentation `2001:db8::/32`, ORCHID `2001:10::/28` and `2001:20::/28` and
+benchmarking `2001:2::/48`; so NAT64, IPv4-translated, IPv4-compatible and discard `100::/64` are refused too). The connection then goes to exactly an
 address that was checked (the name stays the Host header and the TLS server name), so a name that resolves differently
 a moment later changes nothing. Redirects are never followed (any 3xx is `provider_unavailable`), and a call is given up
 (`provider_unavailable`) after a set time without progress (until the headers, from the headers to the first byte of

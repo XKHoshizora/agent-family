@@ -88,25 +88,30 @@ const embedded = (high: number, low: number): number => ((high << 16) | low) >>>
 
 function publicV6(g: number[]): boolean {
   const zero = (from: number, to: number) => g.slice(from, to).every((x) => x === 0);
-  if (zero(0, 6)) return publicV4(embedded(g[6]!, g[7]!)); // ::/96: ::, ::1 and IPv4-compatible, by the IPv4 inside
-  if (zero(0, 5) && g[5] === 0xffff) return publicV4(embedded(g[6]!, g[7]!)); // ::ffff:0:0/96 IPv4-mapped
-  if (g[0] === 0x64 && g[1] === 0xff9b) {
-    if (zero(2, 6)) return publicV4(embedded(g[6]!, g[7]!)); // 64:ff9b::/96 NAT64
-    if (g[2] === 1) return false; // 64:ff9b:1::/48 local-use NAT64
-  }
-  if (g[0] === 0x2002) return publicV4(embedded(g[1]!, g[2]!)); // 2002::/16 6to4
+  // IPv4-mapped ::ffff:0:0/96: judged by the IPv4 address inside.
+  if (zero(0, 5) && g[5] === 0xffff) return publicV4(embedded(g[6]!, g[7]!));
+  // One rule for the rest: only global unicast 2000::/3 minus the special ranges inside it. Everything outside it is
+  // refused, which covers ::/96 (unspecified, loopback, IPv4-compatible), ::ffff:0:0:0/96 (IPv4-translated),
+  // 64:ff9b::/96 and 64:ff9b:1::/48 (NAT64), 100::/64 (discard), fc00::/7, fe80::/10, fec0::/10 and ff00::/8.
   const first = g[0]!;
-  if ((first & 0xfe00) === 0xfc00) return false; // fc00::/7 unique local
-  if ((first & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
-  if ((first & 0xffc0) === 0xfec0) return false; // fec0::/10 site-local (deprecated, may still route inside)
-  if ((first & 0xff00) === 0xff00) return false; // ff00::/8 multicast
+  if ((first & 0xe000) !== 0x2000) return false;
+  if (first === 0x2002) return false; // 2002::/16 6to4 (embeds an IPv4 address)
+  if (first === 0x2001) {
+    const second = g[1]!;
+    if (second === 0) return false; // 2001::/32 Teredo
+    if (second === 0x0db8) return false; // 2001:db8::/32 documentation
+    if ((second & 0xfff0) === 0x0010) return false; // 2001:10::/28 ORCHID
+    if ((second & 0xfff0) === 0x0020) return false; // 2001:20::/28 ORCHIDv2
+    if (second === 2 && g[2] === 0) return false; // 2001:2::/48 benchmarking
+  }
   return true;
 }
 
 /**
  * Whether `address` (IPv4 or IPv6 text) is a public internet address: not loopback, private, link-local,
- * carrier-grade NAT, unspecified, multicast, reserved or benchmarking, nor an IPv4-mapped, IPv4-compatible,
- * NAT64 or 6to4 form of one of those. Anything that does not parse as an address is not public.
+ * carrier-grade NAT, unspecified, multicast, reserved or benchmarking, nor an IPv4-mapped form of one of those.
+ * An IPv6 address is public only inside 2000::/3 and outside its special ranges (Teredo, 6to4, documentation,
+ * ORCHID, benchmarking); NAT64, IPv4-translated and IPv4-compatible forms are refused outright. Anything that does not parse as an address is not public.
  */
 export function isPublicAddress(address: string): boolean {
   const v4 = parseIPv4(address);
