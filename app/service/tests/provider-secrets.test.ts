@@ -100,10 +100,10 @@ describe("a provider's key never comes back", () => {
     expect(refreshed.json.listed).toEqual(["model-a"]);
     expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: true } });
     mode = "reject";
-    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected" } });
+    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_rejected", upstreamStatus: "401" } });
     expect(await call("POST", `/api/providers/${id}/models/refresh`)).toEqual({ status: 502, json: { error: "provider_rejected" } });
     mode = "html";
-    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable" } });
+    expect(await call("POST", `/api/providers/${id}/test`)).toEqual({ status: 200, json: { ok: false, error: "provider_unavailable", upstreamStatus: "500" } });
     expect(await call("POST", `/api/providers/${id}/models/refresh`)).toEqual({ status: 502, json: { error: "provider_unavailable" } });
     // The key really was sent, every time, to the upstream and nowhere else.
     expect(stub.requests.length).toBe(6);

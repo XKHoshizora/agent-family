@@ -662,9 +662,12 @@ so no Agent can take it in the meantime.
 *Session: required.* Body: none or `{}`. One authenticated `GET {baseUrl}/models` through the guard, the key in the protocol's own header
 (`Authorization: Bearer` for the OpenAI protocols; `x-api-key` and `anthropic-version: 2023-06-01` for Anthropic;
 `x-goog-api-key` for Gemini). → 200 `{"ok": true}`, or `{"ok": false, "error": "provider_rejected" | "provider_unavailable" |
-"address_not_allowed"}`: 401 or 403 is `provider_rejected`; anything else that is not a 200 with a JSON body
-`provider_unavailable`. Only the code is passed on: nothing of the provider's answer reaches you or the log, which
-records the provider id, protocol, code and the provider's HTTP status.
+"address_not_allowed", "upstreamStatus"?: "<HTTP status>"}`: 401 or 403 is `provider_rejected`; anything else that is not
+a 200 with a JSON body `provider_unavailable`. `upstreamStatus` is the provider's HTTP status as a string (`"404"`),
+present when it answered with one (not for a refused address, an unreachable host, a timeout or a redirect): a 404 or 405
+means the provider has no model list there — a client can say so, as chat may still work (only the model list then has to
+be typed in). Only the code and that number are passed on: nothing else of the provider's answer reaches you or the log,
+which records the provider id, protocol, code and the provider's HTTP status.
 
 #### `POST /api/providers/:id/models/refresh`
 

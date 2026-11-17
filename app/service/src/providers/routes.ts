@@ -192,7 +192,11 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
         response: {
           200: z.union([
             z.object({ ok: z.literal(true) }),
-            z.object({ ok: z.literal(false), error: z.enum(["provider_rejected", "provider_unavailable", "address_not_allowed"]) }),
+            z.object({
+              ok: z.literal(false),
+              error: z.enum(["provider_rejected", "provider_unavailable", "address_not_allowed"]),
+              upstreamStatus: z.string().optional(),
+            }),
           ]),
         },
       },
@@ -208,7 +212,9 @@ export function registerProviderRoutes(app: FastifyInstance, { allowInsecureLoca
       } catch (err) {
         const failure = toProviderCallError(err);
         logFailure(req.log, req.params.id, target.protocol, failure);
-        return { ok: false as const, error: failure.code as ProviderCallCode };
+        // The provider's HTTP status, the number only (a 404 or 405: it has no model list, though chat may work).
+        const status = failure.upstreamStatus === undefined ? {} : { upstreamStatus: String(failure.upstreamStatus) };
+        return { ok: false as const, error: failure.code as ProviderCallCode, ...status };
       }
     },
   );

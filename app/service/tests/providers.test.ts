@@ -297,19 +297,22 @@ describe("testing the connection", () => {
     const owner = await signUp(app, "tom");
     const p = await mustCreate(owner, { baseUrl: stub.baseUrl() });
     const test = () => api(app, owner, "POST", `/api/providers/${p.id}/test`);
-    const cases: Array<[number, string, Record<string, string>, string]> = [
-      [401, '{"error":"bad key"}', {}, "provider_rejected"],
-      [403, '{"error":"forbidden"}', {}, "provider_rejected"],
-      [500, '{"error":"oops"}', {}, "provider_unavailable"],
-      [404, '{"error":"no such path"}', {}, "provider_unavailable"],
-      [429, '{"error":"slow down"}', {}, "provider_unavailable"],
-      [200, "<html>not json</html>", { "content-type": "text/html" }, "provider_unavailable"],
-      [302, "", { location: "https://127.0.0.1/" }, "provider_unavailable"],
-      [201, '{"data":[]}', {}, "provider_unavailable"],
+    // The provider's HTTP status comes back as a string (and nothing else of its answer); a redirect is refused before
+    // its status is kept.
+    const cases: Array<[number, string, Record<string, string>, string, string | undefined]> = [
+      [401, '{"error":"bad key"}', {}, "provider_rejected", "401"],
+      [403, '{"error":"forbidden"}', {}, "provider_rejected", "403"],
+      [500, '{"error":"oops"}', {}, "provider_unavailable", "500"],
+      [404, '{"error":"no such path"}', {}, "provider_unavailable", "404"],
+      [405, '{"error":"method not allowed"}', {}, "provider_unavailable", "405"],
+      [429, '{"error":"slow down"}', {}, "provider_unavailable", "429"],
+      [200, "<html>not json</html>", { "content-type": "text/html" }, "provider_unavailable", "200"],
+      [302, "", { location: "https://127.0.0.1/" }, "provider_unavailable", undefined],
+      [201, '{"data":[]}', {}, "provider_unavailable", "201"],
     ];
-    for (const [status, body, headers, error] of cases) {
+    for (const [status, body, headers, error, upstreamStatus] of cases) {
       stub.answer(() => ({ status, body, headers }));
-      expect([status, await test()]).toEqual([status, { status: 200, json: { ok: false, error } }]);
+      expect([status, await test()]).toEqual([status, { status: 200, json: { ok: false, error, ...(upstreamStatus === undefined ? {} : { upstreamStatus }) } }]);
     }
     // (This app allows loopback for its stub, so the private addresses here are not loopback ones.)
     for (const baseUrl of ["https://10.0.0.5/v1", "https://169.254.169.254/latest", "https://[fd00::1]/v1"]) {
