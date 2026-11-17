@@ -40,6 +40,14 @@ export const PROTOCOLS = ["openai_chat", "openai_responses", "anthropic", "gemin
 export type Protocol = (typeof PROTOCOLS)[number];
 export const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+/** The levels that think: every level but `none`. */
+export type ThinkingLevel = Exclude<ReasoningLevel, "none">;
+/**
+ * Tokens of thinking a call at each level may use on top of its reply's own output limit (`REASONING_ALLOWANCE_TOKENS`;
+ * how the sum is bounded: `outputLimit` in src/models/resolve.ts).
+ */
+export type ReasoningAllowance = Readonly<Record<ThinkingLevel, number>>;
+export const DEFAULT_REASONING_ALLOWANCE: ReasoningAllowance = { low: 2000, medium: 6000, high: 12000, xhigh: 24000, max: 48000 };
 
 /** The service's own secrets: a site model's `apiKeyEnv` may not name one (its value would be sent upstream as a key). */
 export const SERVICE_SECRET_VARIABLES = ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID"] as const;
@@ -61,6 +69,11 @@ export interface SiteModel {
   vision: boolean;
   pdf: boolean;
   reasoning: ReasoningLevel[];
+  /**
+   * Chat Completions only: the upstream thinks unless told not to, and takes the common switch for it (`thinking:
+   * {type: "enabled" | "disabled"}`, src/models/gateway.ts). Absent: false, nothing of it is sent.
+   */
+  thinkingSwitch?: boolean;
 }
 
 const siteModelSchema = z.strictObject({
@@ -78,7 +91,28 @@ const siteModelSchema = z.strictObject({
   vision: z.boolean(),
   pdf: z.boolean(),
   reasoning: z.array(z.enum(REASONING_LEVELS)),
+  thinkingSwitch: z.boolean().optional(),
 });
+
+const allowanceTokens = z.number().int().min(0).max(200_000);
+/** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */
+const reasoningAllowanceSchema = z
+  .strictObject({
+    low: allowanceTokens.optional(),
+    medium: allowanceTokens.optional(),
+    high: allowanceTokens.optional(),
+    xhigh: allowanceTokens.optional(),
+    max: allowanceTokens.optional(),
+  })
+  .transform(
+    (v): ReasoningAllowance => ({
+      low: v.low ?? DEFAULT_REASONING_ALLOWANCE.low,
+      medium: v.medium ?? DEFAULT_REASONING_ALLOWANCE.medium,
+      high: v.high ?? DEFAULT_REASONING_ALLOWANCE.high,
+      xhigh: v.xhigh ?? DEFAULT_REASONING_ALLOWANCE.xhigh,
+      max: v.max ?? DEFAULT_REASONING_ALLOWANCE.max,
+    }),
+  );
 
 /** Parses a JSON-valued variable; on failure adds one issue (the variable's name comes from the schema key). */
 function jsonVariable<T extends z.ZodType>(schema: T, fallback: z.output<T>) {
@@ -154,6 +188,8 @@ const envSchema = z.object({
   PROVIDER_DEFAULT_CONTEXT_TOKENS: wholeNumber(16_000, 1_000, 2_000_000),
   /** The output limit every call to a provider model gets, in tokens. */
   PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS: wholeNumber(2048, 1, 1_000_000),
+  /** JSON object: the thinking allowance of each level, added to a call's output limit at that level. */
+  REASONING_ALLOWANCE_TOKENS: jsonVariable(reasoningAllowanceSchema, DEFAULT_REASONING_ALLOWANCE),
   /** Calls to providers and site models in flight at once in the whole service (src/providers/guard.ts). */
   PROVIDER_MAX_CONCURRENT_CALLS: wholeNumber(64, 1, 1000),
   /** Replies the worker runs at once in the whole service (each holds its attachments in memory and an outbound call). */
@@ -252,6 +288,11 @@ export interface Config {
   /** For a provider model that does not say: its context window and its maximum output, in tokens. */
   providerDefaultContextTokens: number;
   providerDefaultMaxOutputTokens: number;
+  /**
+   * Tokens of thinking a call at each level but `none` may use on top of its reply's output limit; what the call is
+   * sent and held for (src/models/resolve.ts `outputLimit`).
+   */
+  reasoningAllowanceTokens: ReasoningAllowance;
   /** Calls through the address guard (to providers and site models) in flight at once in the whole service. */
   providerMaxConcurrentCalls: number;
   /** Replies the worker runs at once in the whole service (src/agents/runtime/worker.ts). */
@@ -406,6 +447,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentRunTimeoutMs: e.AGENT_RUN_TIMEOUT_MS,
     providerDefaultContextTokens: e.PROVIDER_DEFAULT_CONTEXT_TOKENS,
     providerDefaultMaxOutputTokens: e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS,
+    reasoningAllowanceTokens: e.REASONING_ALLOWANCE_TOKENS,
     providerMaxConcurrentCalls: e.PROVIDER_MAX_CONCURRENT_CALLS,
     agentMaxRunsInFlight: e.AGENT_MAX_RUNS_IN_FLIGHT,
     agentChainLimit: e.AGENT_CHAIN_LIMIT,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { draftDeadlineMs, loadConfig } from "../src/config.ts";
+import { DEFAULT_REASONING_ALLOWANCE, draftDeadlineMs, loadConfig } from "../src/config.ts";
 
 const base = {
   DATABASE_URL: "postgres://x/y",
@@ -208,5 +208,26 @@ describe("agent and metering configuration", () => {
   test("SITE_TIMEZONE must be an IANA zone", () => {
     expect(loadConfig({ ...base, SITE_TIMEZONE: "Europe/Berlin" }).siteTimezone).toBe("Europe/Berlin");
     expect(() => loadConfig({ ...base, SITE_TIMEZONE: "Mars/Olympus" })).toThrow(/SITE_TIMEZONE/);
+  });
+
+  test("REASONING_ALLOWANCE_TOKENS: a level's thinking allowance, 0–200 000 each; a level left out keeps its default", () => {
+    expect(loadConfig(base).reasoningAllowanceTokens).toEqual({ low: 2000, medium: 6000, high: 12000, xhigh: 24000, max: 48000 });
+    expect(loadConfig({ ...base, REASONING_ALLOWANCE_TOKENS: "" }).reasoningAllowanceTokens).toEqual(DEFAULT_REASONING_ALLOWANCE);
+    expect(loadConfig({ ...base, REASONING_ALLOWANCE_TOKENS: '{"low":0,"max":200000}' }).reasoningAllowanceTokens).toEqual({
+      low: 0,
+      medium: 6000,
+      high: 12000,
+      xhigh: 24000,
+      max: 200000,
+    });
+    for (const bad of ['{"high":-1}', '{"high":200001}', '{"high":1.5}', '{"high":"9"}', '{"none":100}', '{"huge":1}', "[]", "12000", "nope"]) {
+      expect(() => loadConfig({ ...base, REASONING_ALLOWANCE_TOKENS: bad }), bad).toThrow(/REASONING_ALLOWANCE_TOKENS/);
+    }
+  });
+
+  test("SITE_MODELS: thinkingSwitch is optional (absent: not sent) and a boolean", () => {
+    expect(loadConfig(withModels([model])).siteModels[0]).not.toHaveProperty("thinkingSwitch");
+    expect(loadConfig(withModels([{ ...model, thinkingSwitch: true }])).siteModels[0]!.thinkingSwitch).toBe(true);
+    expect(() => loadConfig(withModels([{ ...model, thinkingSwitch: "yes" }]))).toThrow(/SITE_MODELS/);
   });
 });
