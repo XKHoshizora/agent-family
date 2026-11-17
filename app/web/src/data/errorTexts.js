@@ -276,6 +276,9 @@ const RUN_FAILED = {
   agent_paused: "它已暂停，这次没有回复。",
   agent_deleted: "它已删除，这次没有回复。",
 };
+/** A site model's key and address are the site's: the owner can only wait or choose another model. */
+const SITE_MODEL_FAILED = "站点提供的这个模型暂时用不了，请稍后重试，或换一个模型。";
+const SITE_MODEL_CODES = ["provider_rejected", "provider_unavailable", "address_not_allowed"];
 const RUN_CANCELLED = {
   agent_paused: "它已暂停，这次回复已取消。",
   agent_deleted: "它已删除，这次回复已取消。",
@@ -283,12 +286,14 @@ const RUN_CANCELLED = {
 
 /**
  * The status line of a reply that failed or was cancelled (`Run`): why, in Chinese; "" when nothing went wrong (done,
- * stopped, running, or cancelled because a new topic left it nothing to answer).
+ * stopped, running, or cancelled because a new topic left it nothing to answer). `source` is where the Agent's model
+ * comes from ("site" | "provider"; unknown: as for a provider): a site model's key or address is not the owner's to fix.
  */
-export function runFailureText(run, now = Date.now()) {
+export function runFailureText(run, now = Date.now(), source = null) {
   if (!run) return "";
   if (run.status === "failed") {
     if (run.error === "no_quota") return noQuotaText({ resetsAt: run.resetsAt ?? null }, now);
+    if (source === "site" && SITE_MODEL_CODES.includes(run.error)) return SITE_MODEL_FAILED;
     return RUN_FAILED[run.error] ?? "这次没有回复成功。";
   }
   if (run.status === "cancelled") return RUN_CANCELLED[run.error] ?? "";

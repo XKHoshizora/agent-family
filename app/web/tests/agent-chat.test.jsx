@@ -7,6 +7,8 @@ import { act, cleanup, fireEvent, screen, within } from "@testing-library/react"
 import {
   A1,
   AG1,
+  ANN,
+  D1,
   ME_ID,
   MODELS,
   P1,
@@ -16,6 +18,7 @@ import {
   agentPrincipal,
   apiError,
   deferred,
+  direct,
   fakeFile,
   notice,
   providerOf,
@@ -38,6 +41,7 @@ const STRAY = "00000000-0000-4000-8000-0000000000e9";
 const PID = "00000000-0000-4000-8000-0000000000f7";
 const SITE_FREE = { source: "site", id: "free-1" }; // no vision
 const SITE_PAID = { source: "site", id: "paid-1" }; // vision
+const PROVIDER_MODEL = { source: "provider", providerId: P1, model: "gpt-x" }; // no vision
 
 const PAUSE_TEXT = "已暂停全部会话：它不会有新回复。与「停止生成」不同，这不是只中断一次回复。恢复后，暂停期间收到的消息不会补上回复。";
 const DELETED_TEXT = "这个 Agent 已删除，聊天记录仍可查看";
@@ -50,7 +54,7 @@ const BASE = [wire(A1, 1, AG1, "你好，我是小助手"), wire(A1, 2, ME_ID, "
  * The app with my Agent 小助手 and its conversation open. `agent`: fields of its record; `conv`: of its conversation;
  * `run`: what `GET .../run` answers; `api`: route fakes; `handlers`: the sync engine's other answers.
  */
-async function openAgentChat({ agent = {}, conv = {}, messages = BASE, run = null, api = {}, handlers = {}, providers = [] } = {}) {
+async function openAgentChat({ agent = {}, conv = {}, messages = BASE, run = null, api = {}, handlers = {}, providers = [], extra = [] } = {}) {
   const record = agentOf(AG1, { model: SITE_FREE, ...agent });
   const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
   const conversation = agentConv(A1, AG1, {
@@ -60,7 +64,7 @@ async function openAgentChat({ agent = {}, conv = {}, messages = BASE, run = nul
     canSend: record.deleted ? { ok: false, reason: "agent_deleted" } : { ok: true },
     ...conv,
   });
-  const sync = () => syncOf([conversation], messages, [...PRINCIPALS, agentPrincipal()]);
+  const sync = () => syncOf([conversation, ...extra], messages, [...PRINCIPALS, agentPrincipal()]);
   const app = await openApp({
     sync,
     api: {
@@ -317,7 +321,8 @@ describe("the status line of a failed reply", () => {
   ];
   for (const [code, retryable, extra, sentence] of CASES) {
     it(`${code}${extra.resetsAt ? " (free model)" : ""}: its sentence, 重试 ${retryable ? "shown" : "hidden"}, a dismiss control`, async () => {
-      const { transport } = await openAgentChat();
+      // (A model of my provider: the sentences that send me to my settings are mine to act on.)
+      const { transport } = await openAgentChat({ agent: { model: PROVIDER_MODEL } });
       await runPush(transport, runOf(R1, "failed", { error: code, retryable, ...extra }));
       expect(statusLines()).toHaveLength(1);
       const line = statusLine();
@@ -332,6 +337,22 @@ describe("the status line of a failed reply", () => {
       expect(line.nextElementSibling.getAttribute("aria-hidden")).toBe("true");
     });
   }
+
+  it("a site model's key, address or outage is not mine to check: one sentence, 重试 only when retryable", async () => {
+    const SITE = "站点提供的这个模型暂时用不了，请稍后重试，或换一个模型。";
+    const { transport } = await openAgentChat({ agent: { model: SITE_FREE } });
+    for (const [id, code, retryable] of [
+      [R1, "provider_rejected", false],
+      [R2, "provider_unavailable", true],
+      [STRAY, "address_not_allowed", false],
+    ]) {
+      await runPush(transport, runOf(id, "failed", { error: code, retryable }));
+      expect(statusLines(), code).toHaveLength(1);
+      expect(statusLine().textContent, code).toContain(SITE);
+      expect(statusLine().textContent, code).not.toMatch(/检查密钥|检查地址/);
+      expect(within(statusLine()).queryByRole("button", { name: "重试" }) !== null, code).toBe(retryable);
+    }
+  });
 
   it("no_quota links to Settings → 用量与余额", async () => {
     const { transport } = await openAgentChat({ api: { getUsage: vi.fn(() => new Promise(() => {})) } });
@@ -539,17 +560,67 @@ describe("the proposal card", () => {
     expect(cardButton("确认")).toBeNull();
   });
 
-  it("修改后确认 opens the text in an editor and confirms with the edited values", async () => {
+  it("修改后确认 opens the text in an editor and confirms with the values I changed, only those", async () => {
     const { api } = await openAgentChat({ messages: [...BASE, proposed("open")] });
     await click(cardButton("修改后确认"));
     const editor = within(dialog());
     expect(editor.getByLabelText("人格文档").value).toBe("你是一位耐心的旅行规划师。");
+    expect(editor.getByLabelText("擅长领域").value).toBe("旅行");
     fireEvent.change(editor.getByLabelText("人格文档"), { target: { value: "你是一位细心的旅行规划师。" } });
     fireEvent.change(editor.getByLabelText("简介"), { target: { value: "规划你的下一次旅行" } });
     await click(editor.getByRole("button", { name: "确认" }));
-    expect(api.confirmProposal).toHaveBeenCalledWith(AG1, PID, { persona: "你是一位细心的旅行规划师。", intro: "规划你的下一次旅行", field: "旅行" });
+    expect(api.confirmProposal).toHaveBeenCalledWith(AG1, PID, { persona: "你是一位细心的旅行规划师。", intro: "规划你的下一次旅行" });
     expect(dialog()).toBeNull();
     expect(card().textContent).toContain("已采用");
+  });
+
+  it("an editor confirmed unchanged sends no edits (white space around the persona is no change)", async () => {
+    const { api } = await openAgentChat({ messages: [...BASE, proposed("open")] });
+    await click(cardButton("修改后确认"));
+    fireEvent.change(within(dialog()).getByLabelText("人格文档"), { target: { value: "  你是一位耐心的旅行规划师。\n" } });
+    await click(within(dialog()).getByRole("button", { name: "确认" }));
+    expect(api.confirmProposal).toHaveBeenCalledWith(AG1, PID, {});
+  });
+
+  it("an over-long 简介 the Agent proposed does not block a confirm that changes only the persona", async () => {
+    const long = "很".repeat(41);
+    const { api } = await openAgentChat({ messages: [...BASE, proposed("open", { intro: long })] });
+    await click(cardButton("修改后确认"));
+    fireEvent.change(within(dialog()).getByLabelText("人格文档"), { target: { value: "新的人格" } });
+    await click(within(dialog()).getByRole("button", { name: "确认" }));
+    expect(api.confirmProposal).toHaveBeenCalledWith(AG1, PID, { persona: "新的人格" });
+    // Changed, it is checked like any value I write.
+    cleanup();
+    const again = await openAgentChat({ messages: [...BASE, proposed("open", { intro: long })] });
+    await click(cardButton("修改后确认"));
+    fireEvent.change(within(dialog()).getByLabelText("简介"), { target: { value: `${long}了` } });
+    await click(within(dialog()).getByRole("button", { name: "确认" }));
+    expect(again.api.confirmProposal).not.toHaveBeenCalled();
+    expect(dialog().textContent).toContain("简介不超过 40 个字");
+  });
+
+  it("while the editor's confirm is on its way, the card's 确认 and 放弃 wait too", async () => {
+    const answer = deferred();
+    const { api } = await openAgentChat({ messages: [...BASE, proposed("open")], api: { confirmProposal: vi.fn(() => answer.promise) } });
+    await click(cardButton("修改后确认"));
+    fireEvent.change(within(dialog()).getByLabelText("人格文档"), { target: { value: "新的人格" } });
+    await click(within(dialog()).getByRole("button", { name: "确认" }));
+    const actionsRow = within(card().querySelector(".card-actions"));
+    for (const name of ["确认", "修改后确认", "放弃"]) expect(actionsRow.getByRole("button", { name }).disabled, name).toBe(true);
+    expect(within(dialog()).getByRole("button", { name: "处理中…" }).disabled).toBe(true);
+    await act(async () => answer.resolve(agentOf(AG1, { model: SITE_FREE, persona: "新的人格", personaVersion: 2 })));
+    await flush();
+    expect(api.confirmProposal).toHaveBeenCalledTimes(1);
+    expect(card().textContent).toContain("已采用");
+  });
+
+  it("while the card's 确认 is on its way, 修改后确认 and 放弃 wait too", async () => {
+    const answer = deferred();
+    await openAgentChat({ messages: [...BASE, proposed("open")], api: { confirmProposal: vi.fn(() => answer.promise) } });
+    await click(cardButton("确认"));
+    for (const name of ["处理中…", "修改后确认", "放弃"]) expect(cardButton(name).disabled, name).toBe(true);
+    await act(async () => answer.resolve(agentOf(AG1, { model: SITE_FREE, persona: "x", personaVersion: 2 })));
+    await flush();
   });
 
   it("the editor refuses an empty persona and sends nothing", async () => {
@@ -632,6 +703,36 @@ describe("the image hint", () => {
     cleanup();
     await openAgentChat({ agent: { model: null } });
     await pick([fakeFile("a.png", 5, "image/png")]);
+    expect(hint()).toBeNull();
+  });
+
+  it("goes once that image's upload settles: sent, or refused", async () => {
+    const image = { id: "00000000-0000-4000-8000-00000000f001", name: "a.png", size: 5, inline: true };
+    let upload = deferred();
+    const sendMessage = vi.fn(async () => ({ message: wire(A1, 3, ME_ID, "", { kind: "file", attachment: image }), duplicate: false }));
+    await openAgentChat({ agent: { model: SITE_FREE }, api: { uploadAttachment: vi.fn(() => upload.promise), sendMessage } });
+    await pick([fakeFile("a.png", 5, "image/png")]);
+    expect(hint()).not.toBeNull();
+    await act(async () => upload.resolve(image));
+    await flush();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(hint()).toBeNull();
+
+    upload = deferred();
+    await pick([fakeFile("b.png", 5, "image/png")]);
+    expect(hint()).not.toBeNull();
+    await act(async () => upload.reject(apiError(415, "unsupported_media_type")));
+    await flush();
+    expect(hint()).toBeNull();
+  });
+
+  it("goes when another conversation is opened, and does not come back with this one", async () => {
+    await openAgentChat({ agent: { model: SITE_FREE }, extra: [direct(D1, ANN)] });
+    await pick([fakeFile("a.png", 5, "image/png")]);
+    expect(hint()).not.toBeNull();
+    await click(screen.getByText("小安", { selector: ".list-col .row-name" }));
+    expect(hint()).toBeNull();
+    await click(screen.getByText("小助手", { selector: ".list-col .row-name" }));
     expect(hint()).toBeNull();
   });
 

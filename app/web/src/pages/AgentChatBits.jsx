@@ -119,7 +119,9 @@ function useMounted() {
  * refusal says why here.
  */
 export function RunStatusLine({ conv, run }) {
-  const { dispatch, actions } = useStore();
+  const { state, dispatch, actions } = useStore();
+  // (A site model's key and address are the site's: its sentence does not send me to my settings.)
+  const source = state.agents[conv.agentId]?.model?.source ?? null;
   const mounted = useMounted();
   // (A reset time reads 今天 / 明天 from now: kept current while the line is shown.)
   const now = useNow();
@@ -163,7 +165,7 @@ export function RunStatusLine({ conv, run }) {
           </span>
         }
       >
-        {runFailureText(run, now)}
+        {runFailureText(run, now, source)}
         {note && <span className="notice-sub">{note}</span>}
       </Notice>
     </li>
@@ -225,8 +227,12 @@ function foldedText(text) {
   return head === text ? null : `${head}…`;
 }
 
-/** The proposal opened in an editor: confirmed with the edited persona (and the 简介 / 擅长领域 it proposes). */
-function ProposalEditor({ proposal, onClose, onConfirm }) {
+/**
+ * The proposal opened in an editor (its 简介 / 擅长领域 only when it proposes them). Confirming sends only what I changed
+ * (nothing changed: no edits), and only that is checked: a value the Agent proposed is the proposal's, not mine.
+ * `busy` is the card's: one decision at a time, from the card or from here.
+ */
+function ProposalEditor({ proposal, busy, onClose, onConfirm }) {
   const mounted = useMounted();
   const hasIntro = typeof proposal.intro === "string";
   const hasField = typeof proposal.field === "string";
@@ -234,13 +240,16 @@ function ProposalEditor({ proposal, onClose, onConfirm }) {
   const [intro, setIntro] = useState(proposal.intro ?? "");
   const [field, setField] = useState(proposal.field ?? "");
   const [tried, setTried] = useState(false);
-  const [busy, setBusy] = useState(false);
   const [refusal, setRefusal] = useState(null);
+  const edits = {};
   const body = persona.replace(/\0/g, "").trim();
+  if (body !== (proposal.persona ?? "")) edits.persona = body;
+  if (hasIntro && intro.trim() !== proposal.intro) edits.intro = intro.trim();
+  if (hasField && field.trim() !== proposal.field) edits.field = field.trim();
   const errors = {
-    persona: !body ? "人格文档不能为空" : chars(body) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
-    intro: chars(intro.trim()) > INTRO_MAX ? `简介不超过 ${INTRO_MAX} 个字` : "",
-    field: chars(field.trim()) > FIELD_MAX ? `擅长领域不超过 ${FIELD_MAX} 个字` : "",
+    persona: !("persona" in edits) ? "" : !body ? "人格文档不能为空" : chars(body) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
+    intro: "intro" in edits && chars(edits.intro) > INTRO_MAX ? `简介不超过 ${INTRO_MAX} 个字` : "",
+    field: "field" in edits && chars(edits.field) > FIELD_MAX ? `擅长领域不超过 ${FIELD_MAX} 个字` : "",
   };
   const shown = (key) => (tried ? errors[key] : "");
   const submit = async () => {
@@ -249,14 +258,9 @@ function ProposalEditor({ proposal, onClose, onConfirm }) {
       focusInvalid();
       return;
     }
-    const edits = { persona: body };
-    if (hasIntro) edits.intro = intro.trim();
-    if (hasField) edits.field = field.trim();
-    setBusy(true);
     setRefusal(null);
     const res = await onConfirm(edits);
     if (!mounted.current) return;
-    setBusy(false);
     if (res.ok) onClose();
     else setRefusal(res.text);
   };
@@ -268,8 +272,8 @@ function ProposalEditor({ proposal, onClose, onConfirm }) {
       footer={
         <>
           <Btn onClick={onClose}>取消</Btn>
-          <Btn variant="primary" disabled={busy} onClick={submit}>
-            {busy ? "处理中…" : "确认"}
+          <Btn variant="primary" disabled={busy !== null} onClick={submit}>
+            {busy === "edit" ? "处理中…" : "确认"}
           </Btn>
         </>
       }
@@ -317,19 +321,22 @@ export function ProposalCard({ msg, conv }) {
   // A deleted Agent's proposals can no longer be decided (an open one is then only "not confirmed").
   const decidable = open && !publishBlock(state, conv);
   const [label, tone] = open && !decidable ? ["未确认", "muted"] : PROPOSAL_STATUS[p.status] ?? [p.status, "muted"];
-  const decide = async (key, pending) => {
+  /** One decision at a time, from the card or its editor: `busy` names it ("confirm" | "discard" | "edit"). */
+  const pending = async (key, request) => {
     setBusy(key);
-    setRefusal(null);
-    const res = await pending;
-    if (!mounted.current) return res;
-    setBusy(null);
-    if (!res.ok) setRefusal(res.text);
+    const res = await request;
+    if (mounted.current) setBusy(null);
     return res;
+  };
+  const decide = async (key, request) => {
+    setRefusal(null);
+    const res = await pending(key, request);
+    if (mounted.current && !res.ok) setRefusal(res.text);
   };
   const confirm = () => decide("confirm", actions.confirmProposal(conv.agentId, p.id));
   const discard = () => decide("discard", actions.discardProposal(conv.agentId, p.id));
   // (The editor says its own refusal; a card that went stale or was superseded meanwhile closes it.)
-  const confirmEdited = (edits) => actions.confirmProposal(conv.agentId, p.id, edits);
+  const confirmEdited = (edits) => pending("edit", actions.confirmProposal(conv.agentId, p.id, edits));
   return (
     <div className="card proposal-card">
       <div className="card-head">
@@ -379,7 +386,7 @@ export function ProposalCard({ msg, conv }) {
           {refusal}
         </p>
       )}
-      {editing && decidable && <ProposalEditor proposal={p} onClose={() => setEditing(false)} onConfirm={confirmEdited} />}
+      {editing && decidable && <ProposalEditor proposal={p} busy={busy} onClose={() => setEditing(false)} onConfirm={confirmEdited} />}
     </div>
   );
 }

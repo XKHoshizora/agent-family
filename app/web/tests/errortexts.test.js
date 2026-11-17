@@ -192,4 +192,19 @@ describe("the sentences batch 2A names", () => {
     expect(runFailureText(failed("agent_paused"), NOW)).toBe("它已暂停，这次没有回复。");
     expect(runFailureText(failed("agent_deleted"), NOW)).toBe("它已删除，这次没有回复。");
   });
+
+  it("a site model's key or address is not the owner's to check: its own sentence; a provider's (or unknown) as before", () => {
+    const failed = (error) => ({ id: "r", status: "failed", error, retryable: false });
+    const SITE = "站点提供的这个模型暂时用不了，请稍后重试，或换一个模型。";
+    for (const code of ["provider_rejected", "provider_unavailable", "address_not_allowed"]) {
+      expect(runFailureText(failed(code), NOW, "site"), code).toBe(SITE);
+      expect(runFailureText(failed(code), NOW, "provider"), code).toBe(runFailureText(failed(code), NOW));
+      expect(runFailureText(failed(code), NOW, null), code).not.toBe(SITE);
+    }
+    expect(runFailureText(failed("provider_rejected"), NOW, "provider")).toBe("供应商拒绝了密钥，这次没有回复。请到设置里检查密钥。");
+    // The other codes read the same whatever the model.
+    for (const code of ["context_too_small", "busy", "rate_limited", "no_quota"]) {
+      expect(runFailureText(failed(code), NOW, "site"), code).toBe(runFailureText(failed(code), NOW, "provider"));
+    }
+  });
 });

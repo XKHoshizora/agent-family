@@ -19,10 +19,10 @@ export const TEXT_LIMIT = 8000;
 const DRAFT_SAVE_MS = 300;
 
 /**
- * `onFiles(files)` hears every file handed over to be sent (picked or pasted); `note` is a line under the composer (the
- * image hint of an Agent conversation).
+ * `sendFiles(files)` sends what is picked or pasted (the chat's, which also hears it; else the composer's own);
+ * `note` is a line under the composer (the image hint of an Agent conversation).
  */
-export function Composer({ conv, block, replyTo, setReplyTo, onFiles, note = null }) {
+export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThrough = null, note = null }) {
   const { state, actions } = useStore();
   const [text, setText] = useState(() => state.drafts?.[conv.id] ?? "");
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -119,15 +119,15 @@ export function Composer({ conv, block, replyTo, setReplyTo, onFiles, note = nul
     }
     if(e.key==="Enter" && !e.shiftKey) {e.preventDefault();send();}
   };
-  const sendFiles = useSendFiles(conv, block);
+  const ownSend = useSendFiles(conv, block);
+  const sendFiles = sendThrough ?? ownSend;
   // The same file input can pick the same file again; the pick is handed over and forgotten.
-  const picked = e => { const list = [...e.target.files]; e.target.value = ""; onFiles?.(list); sendFiles(list); };
+  const picked = e => { const list = [...e.target.files]; e.target.value = ""; sendFiles(list); };
   const paste = e => {
     const images = [...(e.clipboardData?.files ?? [])].filter(f => f.type.startsWith("image/"));
     if (images.length === 0) return;
     // Text on the clipboard as well (copied from a page or a document): it still pastes into the box.
     if (!e.clipboardData.getData?.("text/plain")) e.preventDefault();
-    onFiles?.(images);
     sendFiles(images);
   };
   const sendNote = tooLong ? `消息最多 ${TEXT_LIMIT} 字，当前 ${length} 字，请删减后再发送` : invisible ? "消息里没有看得见的文字，无法发送" : null;

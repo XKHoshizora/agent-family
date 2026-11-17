@@ -89,16 +89,25 @@ export function ChatView({ conv }) {
   const paused = agentChat && !block && Boolean(agent ? agent.paused : conv.agent?.paused);
   /** What changes at the end of the list besides messages: the bubble growing, the status line coming or going. */
   const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${failedRun?.id ?? ""}`;
-  // An image picked or pasted here while the Agent's model cannot see images: one line under the composer says so.
-  const [imagePicked, setImagePicked] = useState(false);
-  const noteFiles = useCallback(
-    (files) => {
-      if (agentChat && !block && [...files].some((file) => file.type?.startsWith("image/"))) setImagePicked(true);
+  // Files picked, pasted or dropped are sent the same way (nothing is uploaded where sending is held). An image on its
+  // way to an Agent whose model cannot see images gets one line under the composer, until its upload settles (sent or
+  // refused) or another conversation is opened: `imagesSending` counts those in flight here.
+  const sendFiles = useSendFiles(conv, block);
+  const [imagesSending, setImagesSending] = useState({ convId: null, n: 0 });
+  const sendAndNote = useCallback(
+    (list) => {
+      const images = sendFiles(list).filter(({ file }) => file.type?.startsWith("image/"));
+      if (!agentChat || images.length === 0) return;
+      const convId = conv.id;
+      setImagesSending((s) => ({ convId, n: (s.convId === convId ? s.n : 0) + images.length }));
+      const settled = () => setImagesSending((s) => (s.convId === convId ? { convId, n: Math.max(0, s.n - 1) } : s));
+      for (const { done } of images) done.then(settled, settled);
     },
-    [agentChat, block],
+    [sendFiles, agentChat, conv.id],
   );
-  const imageHint = imagePicked && seesImages(state, agent?.model) === false ? IMAGE_HINT : null;
-  const providerNeeded = imagePicked && agent?.model?.source === "provider" && !state.providers[agent.model.providerId] ? agent.model.providerId : null;
+  const imagePending = imagesSending.convId === conv.id && imagesSending.n > 0;
+  const imageHint = imagePending && seesImages(state, agent?.model) === false ? IMAGE_HINT : null;
+  const providerNeeded = imagePending && agent?.model?.source === "provider" && !state.providers[agent.model.providerId] ? agent.model.providerId : null;
   // (A provider's model is looked up in my providers, read once when they are not held here.)
   useEffect(() => {
     if (providerNeeded) actions.loadProviders();
@@ -111,7 +120,7 @@ export function ChatView({ conv }) {
   useEffect(() => {
     setSearching(false);
     setQuery("");
-    setImagePicked(false);
+    setImagesSending({ convId: null, n: 0 });
   }, [conv.id]);
 
   useEffect(() => {
@@ -291,8 +300,7 @@ export function ChatView({ conv }) {
     return () => clearTimeout(timer);
   }, [conv.id, conv.unread, newestSeq, q, detached, attention, pane, actions]);
 
-  // Files dropped anywhere on the chat are sent like picked ones (nothing is uploaded where sending is held).
-  const sendFiles = useSendFiles(conv, block);
+  // Files dropped anywhere on the chat are sent like picked ones (`sendAndNote`).
   const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
   const dropHandlers = {
     onDragOver: (e) => {
@@ -307,9 +315,7 @@ export function ChatView({ conv }) {
       if (!hasFiles(e)) return;
       e.preventDefault();
       setDropping(false);
-      const files = droppedFiles(e.dataTransfer);
-      noteFiles(files);
-      sendFiles(files);
+      sendAndNote(droppedFiles(e.dataTransfer));
     },
   };
 
@@ -384,7 +390,7 @@ export function ChatView({ conv }) {
       </ol>
 
       {paused && <Notice tone="pause">{AGENT_PAUSED_TEXT}</Notice>}
-      <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} onFiles={noteFiles} note={imageHint} />
+      <Composer conv={conv} block={block} replyTo={replyTo} setReplyTo={setReplyTo} sendFiles={sendAndNote} note={imageHint} />
       {agentChat && (
         <p className="sr-only" aria-live="polite">
           {announcement}
