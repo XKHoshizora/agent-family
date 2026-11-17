@@ -848,12 +848,20 @@ export function applyRun(state, conversationId, run, { ordered = true, since } =
  */
 export const STREAM_CHARS = 20000;
 
-/** `kept` with `added` after it, up to STREAM_CHARS (never ending in half a surrogate pair); `kept` itself when full. */
-function streamedUpTo(kept, added) {
-  if (!added || kept.length >= STREAM_CHARS) return kept;
-  const whole = kept + added.slice(0, STREAM_CHARS - kept.length);
-  const last = whole.charCodeAt(whole.length - 1);
-  return whole.length === STREAM_CHARS && added.length > STREAM_CHARS - kept.length && last >= 0xd800 && last <= 0xdbff ? whole.slice(0, -1) : whole;
+/**
+ * `kept` with `added` after it: `[text, cut]`. Up to STREAM_CHARS, never ending in half a surrogate pair; `cut` when
+ * something of `added` was dropped. Once `wasCut`, nothing is added any more (not even where the cut left room for
+ * one more unit: the text would go on after a gap).
+ */
+function streamedUpTo(kept, added, wasCut) {
+  if (wasCut) return [kept, true];
+  if (!added) return [kept, false];
+  const room = STREAM_CHARS - kept.length;
+  if (added.length <= room) return [kept + added, false];
+  let take = added.slice(0, room);
+  const last = take.charCodeAt(take.length - 1);
+  if (last >= 0xd800 && last <= 0xdbff) take = take.slice(0, -1);
+  return [kept + take, true];
 }
 
 /**
@@ -870,9 +878,11 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
   const addReasoning = typeof reasoning === "string" ? reasoning : "";
   if (!addText && !addReasoning) return state;
   const prev = state.streams[runId] ?? { text: "", reasoning: "" };
-  const next = { text: streamedUpTo(prev.text, addText), reasoning: streamedUpTo(prev.reasoning, addReasoning) };
-  if (prev.cut || next.text.length < prev.text.length + addText.length) next.cut = true;
-  if (prev.reasoningCut || next.reasoning.length < prev.reasoning.length + addReasoning.length) next.reasoningCut = true;
+  const [nextText, cut] = streamedUpTo(prev.text, addText, Boolean(prev.cut));
+  const [nextReasoning, reasoningCut] = streamedUpTo(prev.reasoning, addReasoning, Boolean(prev.reasoningCut));
+  const next = { text: nextText, reasoning: nextReasoning };
+  if (cut) next.cut = true;
+  if (reasoningCut) next.reasoningCut = true;
   if (next.text === prev.text && next.reasoning === prev.reasoning && next.cut === prev.cut && next.reasoningCut === prev.reasoningCut) return state;
   return { ...state, streams: { ...state.streams, [runId]: next } };
 }

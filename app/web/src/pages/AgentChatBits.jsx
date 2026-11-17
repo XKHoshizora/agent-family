@@ -34,8 +34,11 @@ export const isReplying = (run) => Boolean(run) && (run.status === "queued" || r
 
 export { AgentText, StreamingAgentText, loadMarkdown } from "../ui/AgentText.jsx";
 
-/** Ends a reply being written (or its thinking) of which only the first part is kept and shown (model.js STREAM_CHARS). */
-export const STREAM_CUT_NOTE = "（内容较长，回复完成后显示完整结果）";
+/**
+ * Ends a reply being written (or its thinking) of which only the first part is kept and shown (model.js STREAM_CHARS).
+ * It promises nothing about the stored reply: the service keeps a reply's first part only, too.
+ */
+export const STREAM_CUT_NOTE = "（内容较长，仅显示开头部分）";
 const StreamCutNote = () => <span className="md-note">{STREAM_CUT_NOTE}</span>;
 
 /** The model's thinking: folded above the answer, opened only by the reader. `cut`: more came than is shown (a stream). */

@@ -153,7 +153,7 @@ describe("the streaming bubble", () => {
   });
 
   it("a very long reply: the bubble keeps its first 20 000 characters and says so; later pieces touch nothing in it", async () => {
-    const NOTE = "（内容较长，回复完成后显示完整结果）";
+    const NOTE = "（内容较长，仅显示开头部分）";
     // (No Markdown worker here: the text stays the plain text it is, so what is in the bubble is exactly what was kept.)
     useWorkers(() => {
       throw new Error("no worker");
@@ -203,7 +203,7 @@ describe("the streaming bubble", () => {
     const thinking = () => bubbleLi().querySelector("details .thinking-text");
     expect(thinking().textContent).toBe("想".repeat(20000));
     await deltaPush(transport, { reasoning: "再想" });
-    expect(thinking().textContent).toBe(`${"想".repeat(20000)}（内容较长，回复完成后显示完整结果）`);
+    expect(thinking().textContent).toBe(`${"想".repeat(20000)}（内容较长，仅显示开头部分）`);
     expect(thinking().querySelector(".md-note")).not.toBeNull();
   });
 

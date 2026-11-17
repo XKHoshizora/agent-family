@@ -131,6 +131,20 @@ describe("a reply's stream (Review Focus 1 and 2)", () => {
     expect(view(s).convs[A1].stream.cut).toBe(true);
   });
 
+  it("once cut, nothing is appended, even where the cut left room (the fifth review: the text ended …aaZ)", () => {
+    let s = M.applyRun(loaded(), A1, runOf(R1, "running"));
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "a".repeat(19999), reasoning: "想".repeat(19999) });
+    s = M.applyDelta(s, { conversationId: A1, runId: R1, text: "😀MIDDLE", reasoning: "😀MIDDLE" });
+    expect(s.streams[R1]).toEqual({ text: "a".repeat(19999), reasoning: "想".repeat(19999), cut: true, reasoningCut: true });
+    expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "Zlater", reasoning: "Zlater" })).toBe(s);
+    // A pair that ends exactly at the limit is whole: kept.
+    let t = M.applyRun(loaded(), A1, runOf(R1, "running"));
+    t = M.applyDelta(t, { conversationId: A1, runId: R1, text: "a".repeat(19998) + "😀" });
+    expect(t.streams[R1]).toEqual({ text: "a".repeat(19998) + "😀", reasoning: "" });
+    t = M.applyDelta(t, { conversationId: A1, runId: R1, text: "b" });
+    expect(t.streams[R1]).toEqual({ text: "a".repeat(19998) + "😀", reasoning: "", cut: true });
+  });
+
   it("a delta for a queued run, another conversation's run, or a conversation not held is ignored", () => {
     let s = M.applyRun(loaded({ extra: [agentConv(A2, AG2)] }), A1, runOf(R1, "queued"));
     expect(M.applyDelta(s, { conversationId: A1, runId: R1, text: "x" })).toBe(s);
