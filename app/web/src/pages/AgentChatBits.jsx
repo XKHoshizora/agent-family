@@ -43,12 +43,15 @@ export { AgentText, StreamingAgentText, loadMarkdown } from "../ui/AgentText.jsx
 export const STREAM_CUT_NOTE = "（内容较长，仅显示开头部分）";
 const StreamCutNote = () => <span className="md-note">{STREAM_CUT_NOTE}</span>;
 
-/** The model's thinking: folded above the answer, opened only by the reader. `cut`: more came than is shown (a stream). */
-export function Thinking({ text, cut = false }) {
+/**
+ * The model's thinking: folded above the answer, opened only by the reader. `cut`: more came than is shown (a stream);
+ * `summary`: its header (思考过程; while a reply is still thinking, 正在思考… and its seconds).
+ */
+export function Thinking({ text, cut = false, summary = "思考过程" }) {
   if (!text) return null;
   return (
     <details className="thinking">
-      <summary>思考过程</summary>
+      <summary>{summary}</summary>
       <div className="thinking-text">
         {text}
         {cut && <StreamCutNote />}
@@ -57,34 +60,126 @@ export function Thinking({ text, cut = false }) {
   );
 }
 
-/** A reply before any of its text: three dots and 正在回复…. */
-function Writing() {
+const Dots = () => (
+  <span className="dots" aria-hidden="true">
+    <i />
+    <i />
+    <i />
+  </span>
+);
+
+/** A reply before any of its text: three dots and what it is doing (正在回复…; the dots alone when that is said above). */
+function Writing({ text = "正在回复…" }) {
   return (
     <>
-      <span className="dots" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>{" "}
-      正在回复…
+      <Dots />
+      {text && ` ${text}`}
     </>
+  );
+}
+
+/** What a reply that thinks says before its text: 正在思考…, then the whole seconds it has been thinking. */
+export const thinkingLine = (seconds) => (seconds > 0 ? `正在思考… ${seconds} 秒` : "正在思考…");
+
+/**
+ * The whole seconds since `since` (a time, ms), kept current once a second (at each whole second) while `counting`;
+ * no timer otherwise, nor once the component has gone.
+ */
+export function useThinkingSeconds(since, counting) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!counting) return undefined;
+    let timer = null;
+    const tick = () => {
+      const t = Date.now();
+      setNow(t);
+      const into = (((t - since) % 1000) + 1000) % 1000;
+      timer = setTimeout(tick, 1000 - into);
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [since, counting]);
+  return Math.max(0, Math.floor((now - since) / 1000));
+}
+
+/** What the thinking section of a reply that is done thinking says: 思考了 and its whole seconds (at least 1). */
+export const thoughtFor = (ms) => `思考了 ${Math.max(1, Math.floor(ms / 1000))} 秒`;
+
+/**
+ * When this page saw each reply's moments (by run id), for its thinking seconds: `start` (first seen), `thinkFrom` (its
+ * first piece of thinking) and `textAt` (its first piece of text) — each a time, null before it, or false when it
+ * happened while its bubble was not shown (a time this page did not see). The service's run carries no times; these
+ * survive leaving the conversation and coming back (the bubble is made again), for the newest RUN_CLOCKS_KEPT replies.
+ */
+const runClocks = new Map();
+const RUN_CLOCKS_KEPT = 50;
+function runClock(runId) {
+  let clock = runClocks.get(runId);
+  if (clock === undefined) {
+    clock = { start: Date.now(), thinkFrom: null, textAt: null };
+    runClocks.set(runId, clock);
+    if (runClocks.size > RUN_CLOCKS_KEPT) runClocks.delete(runClocks.keys().next().value);
+  }
+  return clock;
+}
+
+/**
+ * Notes the first piece of a reply's thinking and of its text as this bubble sees them: at the moment it sees one, if
+ * it saw the reply without it before (in this showing); otherwise it came while the bubble was not shown (false).
+ */
+function useRunClock(runId, reasoning, text) {
+  const clock = runClock(runId);
+  const watched = useRef({ runId, reasoning: false, text: false });
+  if (watched.current.runId !== runId) watched.current = { runId, reasoning: false, text: false };
+  const seen = watched.current;
+  if (!reasoning) seen.reasoning = true;
+  else if (clock.thinkFrom === null) clock.thinkFrom = seen.reasoning ? Date.now() : false;
+  if (!text) seen.text = true;
+  else if (clock.textAt === null) clock.textAt = seen.text ? Date.now() : false;
+  return clock;
+}
+
+/**
+ * The thinking of a reply being written, under `summary`. Open by itself while `streaming` (its thinking comes, none of
+ * its text yet), folded by itself once its text starts — unless the reader opened or closed it meanwhile: from then on
+ * it is as the reader left it.
+ */
+function LiveThinking({ text, cut, summary, streaming }) {
+  const [mine, setMine] = useState(null);
+  const open = mine ?? streaming;
+  if (!text) return null;
+  // (A toggle that is not what was rendered is the reader's; the ones this sets itself match it.)
+  const toggled = (event) => {
+    if (event.currentTarget.open !== open) setMine(event.currentTarget.open);
+  };
+  return (
+    <details className="thinking" open={open} onToggle={toggled}>
+      <summary>{summary}</summary>
+      <div className="thinking-text">
+        {text}
+        {cut && <StreamCutNote />}
+      </div>
+    </details>
   );
 }
 
 /**
  * 停止生成 for a reply of mine: the reply of an Agent conversation, or (`agentId`) of my Agent in a group. The button stays
  * disabled from the press until that run ends (a new run has its own button); a stop that could not be sent says why.
+ * `onStopping(true)` at the press, `onStopping(false)` when the stop could not be sent.
  */
-function StopButton({ conversationId, agentId = null, runId }) {
+function StopButton({ conversationId, agentId = null, runId, onStopping = null }) {
   const { dispatch, actions } = useStore();
   const [stopping, setStopping] = useState(null);
   const stop = async () => {
     setStopping(runId);
+    onStopping?.(true);
     const res = await (agentId ? actions.stopRun(conversationId, agentId) : actions.stopRun(conversationId));
     if (res.ok) return;
     // The reply ended meanwhile (nothing to stop), or it is not there any more: nothing to say.
     if (res.error?.code === "no_run" || res.error?.status === 404) return;
     setStopping(null);
+    onStopping?.(false);
     dispatch({ type: "toast", text: res.text });
   };
   return (
@@ -95,15 +190,38 @@ function StopButton({ conversationId, agentId = null, runId }) {
 }
 
 /**
- * The reply being written, at the end of the list: its text so far (or 正在回复… before the first piece, and for a reply
- * that was already under way when this page connected, whose text is not sent again), its thinking, and 停止生成. A
- * very long reply shows its first part only, and says so under it; the stored reply shows what the service kept.
- * Busy for assistive technology while it grows: the stored reply that replaces it is announced instead (ChatView).
+ * The reply being written, at the end of the list: its text so far, revealed a little at every frame (ui/reveal.js;
+ * the text received is kept as it comes, model.js), its thinking, and 停止生成. Before the first piece of its text — and
+ * for a reply that was already under way when this page connected, whose text is not sent again — it says 正在回复…, or
+ * for an Agent that thinks (its reasoning level is not none) 正在思考… and the whole seconds since this page first saw
+ * the reply. While such a reply's thinking streams, that line heads its thinking instead (counted from its first piece),
+ * open; once its text starts the thinking folds (unless the reader opened or closed it meanwhile) under 思考了 N 秒 —
+ * from its first piece of thinking (or from the reply's start, if that was not seen here) to its first piece of text; 思考过程
+ * when this page did not see when its text started. The stored reply's thinking reads 思考过程 as ever. A press of
+ * 停止生成 (until a stop that could not be sent) and a run that is not running any more show everything received at
+ * once. A very long reply shows its first part only, and says so under it (what is left of that part is revealed
+ * within a moment); the stored reply shows what the service kept, and replaces the bubble the moment it arrives,
+ * revealed or not. Busy for assistive technology while it grows: the stored reply that replaces it is announced
+ * instead (ChatView).
  */
 export function StreamBubble({ conv }) {
   const { state } = useStore();
   const run = conv.run;
   const text = conv.stream?.text ?? "";
+  const reasoning = conv.stream?.reasoning ?? "";
+  const thinks = (state.agents[conv.agentId]?.reasoning ?? "none") !== "none";
+  const thinking = thinks && !text;
+  const clock = useRunClock(run.id, reasoning, text);
+  const since = clock.thinkFrom || clock.start;
+  const seconds = useThinkingSeconds(since, thinking);
+  const [stopped, setStopped] = useState(null);
+  const line = thinking ? thinkingLine(seconds) : null;
+  let summary = "思考过程";
+  if (thinking) summary = line;
+  else if (thinks && clock.textAt) summary = thoughtFor(clock.textAt - since);
+  // (While its thinking streams, the line heads it: the bubble keeps the dots only; so it does for the frame before
+  // the first characters of the text of a reply that thought.)
+  const waiting = <Writing text={thinking ? (reasoning ? "" : line) : undefined} />;
   return (
     <li className="msg theirs streaming" aria-busy="true">
       <Avatar id={conv.agentId} size={40} />
@@ -112,19 +230,26 @@ export function StreamBubble({ conv }) {
           <strong>{nameOf(state, conv.agentId)}</strong>
           <Tag>Agent</Tag>
         </div>
-        <Thinking text={conv.stream?.reasoning} cut={conv.stream?.reasoningCut} />
+        <LiveThinking key={run.id} text={reasoning} cut={conv.stream?.reasoningCut} summary={summary} streaming={thinking} />
         <div className="bubble">
           {text ? (
             <>
-              <StreamingAgentText text={text} />
+              <StreamingAgentText
+                key={run.id}
+                text={text}
+                paced
+                ended={Boolean(conv.stream.cut)}
+                all={stopped === run.id || run.status !== "running"}
+                placeholder={thinks ? <Writing text="" /> : waiting}
+              />
               {conv.stream.cut && <StreamCutNote />}
             </>
           ) : (
-            <Writing />
+            waiting
           )}
         </div>
         <div className="msg-foot">
-          <StopButton key={run.id} conversationId={conv.id} runId={run.id} />
+          <StopButton key={run.id} conversationId={conv.id} runId={run.id} onStopping={(on) => setStopped(on ? run.id : null)} />
         </div>
       </div>
     </li>

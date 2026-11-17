@@ -1,4 +1,5 @@
-// An Agent's text in its bubble, stored or being written. It is shown as plain text at once (as a person's message is),
+// An Agent's text in its bubble, stored or being written. It is shown as plain text at once (as a person's message is;
+// a reply being written in its own bubble is revealed a little at every frame instead, ui/reveal.js),
 // and as Markdown once the Markdown worker's tree for it has come back and been checked (markdownClient.js): no
 // spinner, nothing moves but the change from plain to rich. Nothing here parses, typesets or highlights. Shown plain:
 // while the tree is coming; for a text not near the visible part of its conversation, or pushed out of the
@@ -12,7 +13,8 @@ import { ChunkBoundary } from "./ChunkBoundary.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
 import { inFrame, useMarkdownView } from "./markdownView.jsx";
-import { PlainWithNote } from "./slowTexts.jsx";
+import { useReveal } from "./reveal.js";
+import { PlainWithNote, SLOW_TEXT_NOTE } from "./slowTexts.jsx";
 
 /** A reply being written asks for its tree at most this often, in milliseconds. */
 export const STREAM_EVERY_MS = 300;
@@ -175,14 +177,61 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
 });
 
 /**
- * The text of a reply being written. Every piece is shown at once; the tree is asked for at most every
- * STREAM_EVERY_MS, one request at a time, and a tree is taken only if the text has not changed while it was made (a
- * stale one is dropped) and is shown at an animation frame, like every tree. Until the next tree, the text that came
- * after the taken one is shown after it, plain. After STREAM_LATE_MAX late answers in a row the rest of the reply is
- * plain (with the note). The stored message that replaces this is rendered on its own.
+ * Which text this is: the same number while each text extends the one before (a reply growing by its pieces), the
+ * next one when it does not. Checked once per new text, never per frame.
  */
-export function StreamingAgentText({ text }) {
-  const shown = useMemo(() => withoutBidiControls(text), [text]);
+function useEpoch(text) {
+  const held = useRef({ text: "", epoch: 0 });
+  return useMemo(() => {
+    const prev = held.current;
+    if (text === prev.text) return prev.epoch;
+    const epoch = text.startsWith(prev.text) ? prev.epoch : prev.epoch + 1;
+    held.current = { text, epoch };
+    return epoch;
+  }, [text]);
+}
+
+/**
+ * `source` from `from` to `to`, as one text node this keeps itself: while the text is the same (`epoch`) and only grows
+ * at its end, what was added is appended to the node (work for the characters added, however long the text is); any
+ * other change sets the node's text once.
+ */
+function PlainTail({ source, from, to, epoch }) {
+  const host = useRef(null);
+  const held = useRef(null);
+  useLayoutEffect(() => {
+    const span = host.current;
+    let node = span.firstChild;
+    if (!node) node = span.appendChild(document.createTextNode(""));
+    const h = held.current;
+    if (h && h.epoch === epoch && h.from === from && to >= h.to) {
+      if (to > h.to) node.appendData(source.slice(h.to, to));
+    } else {
+      node.data = source.slice(from, to);
+    }
+    held.current = { epoch, from, to };
+  }, [source, from, to, epoch]);
+  return <span ref={host} />;
+}
+
+/** A taken tree, shown again only when it changes (not at every frame of a reply being revealed). */
+const StreamRich = memo(Rich);
+
+/**
+ * The text of a reply being written. Without `paced` every piece is shown at once; with it, a prefix of the text
+ * received that grows at every frame (ui/reveal.js: `ended` — nothing more will come, the rest within a moment; `all`
+ * — everything received now), with `placeholder` shown until its first characters. The tree is asked for what is shown,
+ * at most every STREAM_EVERY_MS, one request at a time, and is shown at an animation frame, like every tree. A tree is
+ * taken only if what is shown still is the text it was made for — unpaced, unchanged; paced, the same text grown by
+ * the frames since (any other text is a stale tree, dropped). Until the next tree, what is shown after the taken one is
+ * shown after it, plain. After STREAM_LATE_MAX late answers in a row the rest of the reply is plain (with the note).
+ * The stored message that replaces this is rendered on its own.
+ */
+export function StreamingAgentText({ text, paced = false, ended = false, all = false, placeholder = null }) {
+  const received = useMemo(() => withoutBidiControls(text), [text]);
+  const epoch = useEpoch(received);
+  const upTo = useReveal(received, epoch, { paced, ended, all });
+  const shown = upTo === received.length ? received : received.slice(0, upTo);
   const client = markdownClient();
   const view = useMarkdownView();
   const host = useRef(null);
@@ -191,7 +240,8 @@ export function StreamingAgentText({ text }) {
   const [taken, setTaken] = useState(null);
   const [plainRest, setPlainRest] = useState(false);
   const run = useRef(null);
-  run.current ??= { mounted: true, asking: false, cooling: false, again: false, late: 0, stopped: false, asked: null, timer: null, leave: null };
+  run.current ??= { mounted: true, asking: false, cooling: false, again: false, late: 0, stopped: false, asked: null, timer: null, leave: null, epoch };
+  run.current.epoch = epoch;
 
   useEffect(() => {
     const r = run.current;
@@ -212,14 +262,17 @@ export function StreamingAgentText({ text }) {
         return;
       }
       const asked = latest.current;
-      if (asked === r.asked) return;
+      if (asked === r.asked || asked === "") return;
+      const askedIn = r.epoch;
       Object.assign(r, { asking: true, cooling: true, again: false, asked });
       r.timer = setTimeout(() => {
         r.cooling = false;
         if (r.again) ask();
       }, STREAM_EVERY_MS);
       loadMarkdown();
-      const wanted = () => r.mounted && latest.current === asked;
+      // (Paced, what is shown grows at every frame: the same text grown is still this one.)
+      const current = paced ? () => r.epoch === askedIn && latest.current.length >= asked.length : () => latest.current === asked;
+      const wanted = () => r.mounted && current();
       client.request(asked, { wanted, priority: () => -1, remember: false }).then((answer) => {
         r.asking = false;
         if (!r.mounted) return;
@@ -236,45 +289,63 @@ export function StreamingAgentText({ text }) {
           }
         } else {
           r.late = 0;
-          // Taken only if the text is still the one it was made for (a stale tree is dropped). A tree is shown at a
-          // frame; what has come by then is shown after it, plain, like everything that comes after a taken tree.
+          // Taken only if what is shown is still the text it was made for (a stale tree is dropped). A tree is shown
+          // at a frame; what has come by then is shown after it, plain, like everything after a taken tree.
           r.leave?.();
           r.leave = null;
+          const still = paced ? () => r.epoch === askedIn : () => latest.current.startsWith(asked);
           const take = () => {
-            if (r.mounted && latest.current.startsWith(asked)) setTaken({ text: asked, result: answer });
+            if (r.mounted && still()) setTaken({ text: asked, result: answer, epoch: askedIn });
           };
-          if (latest.current === asked && answer.tree) r.leave = inFrame(answer.elements, () => view.distance(host.current), take);
-          else if (latest.current === asked) take();
+          if (current() && answer.tree) r.leave = inFrame(answer.elements, () => view.distance(host.current), take);
+          else if (current()) take();
         }
         if (r.again && !r.cooling) ask();
       });
     };
     ask();
-  }, [client, view, shown]);
+  }, [client, view, shown, paced]);
 
-  const current = taken && shown.startsWith(taken.text) ? taken : null;
+  // (What is shown extends the taken text while it is the same text: no comparison of the texts here, at every frame.)
+  const current = taken && taken.epoch === epoch && taken.text.length <= shown.length ? taken : null;
   const granted = useBudget(view, host, current?.result ?? null, 0, false);
-  let body = shown;
+  // A reply being revealed grows at every frame: the list keeps it in view as it grows (once per frame at most).
+  const grown = useRef(upTo);
+  useLayoutEffect(() => {
+    if (paced && grown.current !== upTo) view.changed();
+    grown.current = upTo;
+  }, [view, paced, upTo]);
+
+  let rich = null;
+  let note = false;
+  let from = 0;
   let kind = "plain";
   if (plainRest) {
-    body = <PlainWithNote text={shown} />;
+    note = true;
     kind = "note";
   } else if (current?.result.plain) {
-    body = plainOf(shown, current.result);
-    kind = withNote(current.result) ? "note" : "plain";
+    note = withNote(current.result);
+    kind = note ? "note" : "plain";
   } else if (current?.result.tree && granted) {
-    body = (
-      <>
-        <Rich tree={current.result.tree} plain={current.text} view={view} />
-        {shown.slice(current.text.length)}
-      </>
-    );
+    rich = <StreamRich key="rich" tree={current.result.tree} plain={current.text} view={view} />;
+    from = current.text.length;
     kind = "rich";
   }
   useShownKind(view, kind);
+  const waiting = upTo === 0 && placeholder !== null;
   return (
     <div className="md-text" ref={host}>
-      {body}
+      {waiting
+        ? placeholder
+        : [
+            rich,
+            <PlainTail key="tail" source={received} from={from} to={upTo} epoch={epoch} />,
+            note ? (
+              <span key="note" className="md-note">
+                {SLOW_TEXT_NOTE}
+              </span>
+            ) : null,
+          ]}
     </div>
   );
 }

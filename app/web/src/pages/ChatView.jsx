@@ -25,7 +25,10 @@ import { Search, Menu, ChevronLeft, X } from "../icons.js";
 import { Composer } from "./Composer.jsx";
 import { droppedFiles, useSendFiles } from "./useSendFiles.js";
 
-/** This close to the bottom the list counts as "at the newest message" and follows new ones. */
+/**
+ * This close to the bottom, scrolled to, the list counts as "at the newest message" again and follows new ones. It
+ * stops following only when the person scrolls up (never because what is in it grew).
+ */
 const BOTTOM_SLACK_PX = 48;
 /** This close to the top, the page of older messages is loaded. */
 const TOP_SLACK_PX = 120;
@@ -196,8 +199,10 @@ export function ChatView({ conv }) {
     }
   }, [conv.id, firstId, last?.id, messages.length, detached, tail]);
 
-  // An Agent's text shown rich once its tree has come (or plain again) changes its height: a list that was at the newest
-  // message stays there. (Scrolled up, the browser keeps what is on screen in place.)
+  // An Agent's text shown rich once its tree has come (or plain again), and a reply being revealed at every frame,
+  // change its height: a list that was at the newest message stays there — one read of its height, then the scroll (its
+  // position read back after it costs no layout). Scrolled up: nothing is read, and the browser keeps what is on screen
+  // in place.
   const keepNewestInView = () => {
     const list = listRef.current;
     if (!list || detached || !atBottom.current || showHits) return;
@@ -292,17 +297,31 @@ export function ChatView({ conv }) {
     jumpTo(conv.id, hit.seq);
   }
 
+  /**
+   * The list scrolled. Following the newest messages stops only when the person scrolls up (its position went up and is
+   * not the very end: the browser moving it up to a shorter list's end is not the person), and starts again when they
+   * come back within BOTTOM_SLACK_PX of the end; content that grew under it changes neither. The scroll of the list's own
+   * follow (where it was put, still following) is not measured.
+   */
   function onScroll() {
     const list = listRef.current;
-    const bottom = list.scrollHeight - list.scrollTop - list.clientHeight <= BOTTOM_SLACK_PX;
-    if (bottom && !atBottom.current) {
-      readFailed.current = null;
-      setAttention((n) => n + 1);
+    const top = list.scrollTop;
+    const own = atBottom.current && !detached && top === lastTop.current;
+    let bottom = own;
+    if (!own) {
+      const gap = list.scrollHeight - top - list.clientHeight;
+      bottom = gap <= BOTTOM_SLACK_PX;
+      const up = top < lastTop.current && gap > 1;
+      if (bottom && !up && !atBottom.current) {
+        readFailed.current = null;
+        setAttention((n) => n + 1);
+      }
+      // (A detached window never counts as "at the newest message": when it joins them the view must stay where it is.)
+      if (detached || up) atBottom.current = false;
+      else if (bottom) atBottom.current = true;
     }
-    // (A detached window never counts as "at the newest message": when it joins them the view must stay where it is.)
-    atBottom.current = bottom && !detached;
-    lastTop.current = list.scrollTop;
-    if (list.scrollTop <= TOP_SLACK_PX) loadOlder({ byScroll: true });
+    lastTop.current = top;
+    if (top <= TOP_SLACK_PX) loadOlder({ byScroll: true });
     if (bottom) loadNewer({ byScroll: true });
   }
 

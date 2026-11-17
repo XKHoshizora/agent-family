@@ -239,7 +239,10 @@ describe("reading", () => {
     const { api, transport } = await openApp();
     await openChat("小安");
     await elapse(600);
-    const list = tallList(1000);
+    // (At the end, then scrolled up by the person.)
+    const list = tallList(2400);
+    fireEvent.scroll(list);
+    list.scrollTop = 1000;
     fireEvent.scroll(list);
     await push(transport, { type: "message", message: wire(D1, 4, ANN, "还在吗") });
     await elapse(2000);
@@ -479,7 +482,10 @@ describe("older history", () => {
   it("scrolled up: a message arriving does not move the list; at the bottom it follows", async () => {
     const { transport } = await openApp();
     await openChat("周末小组");
-    const list = tallList(1000);
+    // (At the end, then scrolled up by the person.)
+    const list = tallList(2400);
+    fireEvent.scroll(list);
+    list.scrollTop = 1000;
     fireEvent.scroll(list);
     await push(transport, { type: "message", message: wire(G1, 41, BO, "新的一条") });
     expect(list.scrollTop).toBe(1000);
