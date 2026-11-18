@@ -3,11 +3,11 @@ import { useStore } from "../data/store.jsx";
 import { formatPoints, pointsReached } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
-import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
+import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat } from "./AgentForm.jsx";
 import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
 import { convSubtitle, convTitle, isMyAgent, myAgents } from "../state/selectors.js";
-import { useAction } from "./useAction.js";
+import { refusalText, settled, useAction } from "./useAction.js";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
 const groupMentionsLabel = (agent) => (GROUP_MENTIONS.find(([id]) => id === agent.groupMentions) ?? GROUP_MENTIONS[0])[1];

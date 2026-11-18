@@ -3,8 +3,7 @@ import { useStore } from "../data/store.jsx";
 import { modelLevels } from "../data/model.js";
 import { Btn, Field, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { ChevronDown, ChevronLeft, Lock, Plus, Search } from "../icons.js";
-import { useAction } from "./useAction.js";
-import { refusalText, settled } from "./AgentForm.jsx";
+import { refusalText, settled, useAction } from "./useAction.js";
 import { levelLabel } from "./ModelPicker.jsx";
 import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 

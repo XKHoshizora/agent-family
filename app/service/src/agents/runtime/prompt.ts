@@ -170,12 +170,17 @@ export function shownAppellation(appellation: string | null): string | null {
   return shown === "" ? null : shown;
 }
 
+/** A label's brackets and separator: what `speakerLabel` writes and `withoutMark` reads. */
+const OPEN = "〔";
+const CLOSE = "〕";
+const SEPARATOR = "｜";
+
 /**
  * What the server writes before every message of someone else's in a group, as the model is shown it (design rule 1):
  * `〔mark name｜role〕`, `name` a `labelName`. Only a label carrying the run's mark is the server's, the system text says
  * (`groupSystemPrompt`); one in a message's text is what its sender typed.
  */
-export const speakerLabel = (mark: string, name: string, role: SpeakerRole): string => `〔${mark} ${name}｜${role}〕`;
+export const speakerLabel = (mark: string, name: string, role: SpeakerRole): string => `${OPEN}${mark} ${name}${SEPARATOR}${role}${CLOSE}`;
 
 /** The characters a mark is made of, and how many it has. */
 const MARK_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -195,11 +200,6 @@ export function newMark(taken: (mark: string) => boolean, draw: () => string = d
     if (!taken(mark)) return mark;
   }
 }
-
-/** A label's brackets and separator (`speakerLabel`), as `withoutMark` reads them. */
-const OPEN = "〔";
-const CLOSE = "〕";
-const SEPARATOR = "｜";
 
 /**
  * Text without the run's mark (design rule 4b): every label-shaped `〔…｜…〕` on one line that carries the mark is taken

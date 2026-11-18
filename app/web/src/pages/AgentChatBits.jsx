@@ -11,8 +11,7 @@ import { nameOf, ownerOf, publishBlock } from "../state/selectors.js";
 import { GrowingText, StreamingAgentText } from "../ui/AgentText.jsx";
 import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
-import { refusalText, settled } from "./AgentForm.jsx";
-import { useAction, useNow } from "./useAction.js";
+import { refusalText, settled, useAction, useNow } from "./useAction.js";
 import { RotateCw, Sparkles, Square, X } from "../icons.js";
 
 /** The pause notice of a paused Agent (as on its detail page). */

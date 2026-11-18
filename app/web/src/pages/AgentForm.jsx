@@ -61,8 +61,6 @@ export const othersBudgetSent = (f) =>
 /** What a create or a save sends of 别人 @ 每天最多花 (`othersBudgetSent`): nothing (undefined) unless group members may call it. */
 const othersBudgetToSend = (f) => (f.groupMentions === "members" ? othersBudgetSent(f) : undefined);
 
-export { refusalText, settled };
-
 /** Opens an Agent's conversation, or waits for it to arrive when this client does not hold it yet. */
 export function openAgentChat(state, dispatch, actions, conversationId) {
   if (!conversationId) {
