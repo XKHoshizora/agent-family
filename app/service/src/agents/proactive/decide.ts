@@ -7,10 +7,9 @@ import type { Db, Queryable, Tx } from "../../db.ts";
 import { AppError } from "../../errors.ts";
 import type { Answer, Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
-import { blockedEitherWay } from "../../social/relations.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
-import { judgeable, NOBODY, optionsFor, PICK, quietKey, requestFor, type Option } from "./candidates.ts";
+import { judgeable, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Option } from "./candidates.ts";
 import { afterProactive, afterQuiet, NO_STATE, thresholdNow, type GroupState } from "./threshold.ts";
 
 /**
@@ -60,11 +59,13 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
 
   const message = await judgeable(db, conversationId, seq);
   if (message === null || (await decidedAlready(db, conversationId, seq))) return noneTriggered();
-  const options = await optionsFor(db, conversationId, message.senderId);
+  const options = await optionsFor(db, conversationId, seq, message.senderId);
   if (options.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);
   if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
-  const { state, questions } = await requestFor(db, conversationId, seq, options, config.proactive);
+  const request = await requestFor(db, conversationId, seq, options, config.proactive);
+  if (request === null) return noneTriggered();
+  const { state, questions } = request;
 
   let answers: Map<string, Answer> | null = null;
   try {
@@ -196,7 +197,7 @@ async function settle(t: Tx, j: Judged): Promise<Triggered> {
   // Touched: the Agents a quiet answer raises (`afterQuiet` does from `quietSmall.at` on), and the winner.
   const raised = j.options.filter((o) => (j.quiet.get(o.agentId) ?? 0) >= P.quietSmall.at).map((o) => o.agentId);
   const touched = [...new Set([...raised, ...(j.winner ? [j.winner.option.agentId] : [])])].sort();
-  const agents = await lockOptions(t, conversationId, touched, still.senderId);
+  const agents = await lockOptions(t, conversationId, seq, touched, still.senderId);
   const states = await lockStates(t, conversationId, [...agents.keys()]);
 
   const notices: StoredMessage[] = [];
@@ -229,11 +230,11 @@ async function settle(t: Tx, j: Judged): Promise<Triggered> {
 }
 
 /**
- * Each of `ids` (in id order) locked (`lockAgent`; the caller holds the group's row), kept while it is still an option:
- * a current member with proactive replies on, not paused or deleted, with a model, its owner and the sender with no
- * block between them. One no longer found at all (`lockAgent`'s 404, a query that failed nothing) is gone: no option.
+ * Each of `ids` (in id order) locked (`lockAgent`; the caller holds the group's row), kept while it may still answer the
+ * message at `seq` from `senderId` unasked (`mayAnswerUnasked`, read now that it is locked). One no longer found at all
+ * (`lockAgent`'s 404, a query that failed nothing) is gone: no option.
  */
-async function lockOptions(t: Tx, conversationId: string, ids: readonly string[], senderId: string): Promise<Map<string, AgentRow>> {
+async function lockOptions(t: Tx, conversationId: string, seq: number, ids: readonly string[], senderId: string): Promise<Map<string, AgentRow>> {
   if (ids.length === 0) return new Map();
   const locked: AgentRow[] = [];
   for (const id of ids) {
@@ -244,12 +245,12 @@ async function lockOptions(t: Tx, conversationId: string, ids: readonly string[]
     }
   }
   const { rows } = await t.query<{ id: string }>(
-    `select m.principal_id as id from memberships m join principals p on p.id = m.principal_id
-      where m.conversation_id = $1 and m.left_seq is null and m.principal_id = any($2::uuid[]) and not ${blockedEitherWay("p.owner_id", "$3::uuid")}`,
-    [conversationId, ids, senderId],
+    `select p.id from memberships m join principals p on p.id = m.principal_id join agents a on a.principal_id = p.id
+      where m.conversation_id = $1 and p.id = any($2::uuid[]) and ${mayAnswerUnasked("$4", "$3::uuid")}`,
+    [conversationId, ids, senderId, seq],
   );
-  const members = new Set(rows.map((r) => r.id));
-  return new Map(locked.filter((a) => members.has(a.id) && a.proactive && !a.paused && !a.deleted && a.model !== null).map((a) => [a.id, a]));
+  const options = new Set(rows.map((r) => r.id));
+  return new Map(locked.filter((a) => options.has(a.id)).map((a) => [a.id, a]));
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
-import { MAX_AGENT_OPTIONS } from "../src/agents/proactive/candidates.ts";
+import { MAX_AGENT_OPTIONS, optionsFor, requestFor } from "../src/agents/proactive/candidates.ts";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
 import { actOnTriggered, noneTriggered, triggerFromAgent, type Caller, type Triggered } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
@@ -398,6 +398,32 @@ describe("what the judgement model is asked", () => {
     expect(described).toContain(cut);
     expect(Array.from(cut)).toHaveLength(200);
     expect(questions.find((q) => q.type === "noul")?.instructions).toBe(quietText("小厨群成员 Agent"));
+  });
+
+  it("an Agent that joined at or after the message is no option for it; with no other option the judge is not asked", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    await say(w.member, w.g, "早");
+    const asked = await say(w.member, w.g, "今晚做什么菜好？");
+    // Put in while people were still being waited for: its stay begins at the message.
+    await agentOf(w.third, "dave_bot", w.g);
+    await decide(w.g, asked);
+    expect(offered()).toEqual(["anna", "nobody"]);
+    expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：早\nmember：今晚做什么菜好？");
+
+    // The late one alone: nobody to ask about.
+    await db.query("update agents set proactive = false where principal_id = $1", [anna.id]);
+    expect(await decide(w.g, asked)).toEqual(noneTriggered());
+    expect(judge.calls).toHaveLength(1);
+  });
+
+  it("no line of the transcript to show (every option joined at the message or after): no request", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const asked = await say(w.member, w.g, "今晚做什么菜好？");
+    const [option] = await optionsFor(db, w.g, asked, w.member.id);
+    expect(option?.agentId).toBe(anna.id);
+    expect(await requestFor(db, w.g, asked, [{ ...option!, joinedSeq: asked }], app.deps.config.proactive)).toBeNull();
   });
 
   it("an Agent that joined after earlier messages narrows the transcript for everyone; once it is no option, it widens again", async () => {

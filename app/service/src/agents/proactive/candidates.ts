@@ -69,8 +69,8 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
 }
 
 /**
- * Whether `text` names an Agent by `@handle` — any Agent, in the group or not (`judgeable`; the send route tells the
- * scheduler so). One query, only when the text has a handle.
+ * Whether `text` names an Agent by `@handle` — any Agent, in the group or not: such a message is no one to judge
+ * (`judgeable`, the decision's first read). One query, only when the text has a handle.
  */
 export async function namesAnAgent(q: Queryable, text: string): Promise<boolean> {
   const handles = mentionedHandles(text);
@@ -80,12 +80,23 @@ export async function namesAnAgent(q: Queryable, text: string): Promise<boolean>
 }
 
 /**
- * The Agents that may answer `senderId`'s message in the group unasked: its current Agent members with proactive replies
- * on, not paused or deleted, with a model, whose owner has no block with the sender in either direction (the sender may
- * be the owner). At most `MAX_AGENT_OPTIONS`: beyond that, those judged here least recently (`agent_group_state.judged_at`,
- * never first) take the places. Keyed and returned in id order.
+ * SQL: whether Agent `p` (a `principals` alias, with its `agents` row `a` and its `memberships` row `m` in the group) may
+ * answer unasked the message at seq `seq` from person `sender` (parameter positions, spliced in): a current member since
+ * before that message (an Agent answers nothing from before it joined), with proactive replies on, not paused or deleted,
+ * with a model, whose owner has no block with the sender in either direction (the sender may be the owner). Read when
+ * the options are offered (`optionsFor`) and again under their locks (decide.ts).
  */
-export async function optionsFor(q: Queryable, conversationId: string, senderId: string): Promise<Option[]> {
+export const mayAnswerUnasked = (seq: string, sender: string): string =>
+  `m.left_seq is null and m.joined_seq < ${seq} and p.kind = 'agent'
+   and a.proactive and not a.paused and a.deleted_at is null and a.model_source is not null
+   and not ${blockedEitherWay("p.owner_id", sender)}`;
+
+/**
+ * The Agents that may answer unasked `senderId`'s message at `seq` in the group (`mayAnswerUnasked`). At most
+ * `MAX_AGENT_OPTIONS`: beyond that, those judged here least recently (`agent_group_state.judged_at`, never first) take
+ * the places. Keyed and returned in id order.
+ */
+export async function optionsFor(q: Queryable, conversationId: string, seq: number, senderId: string): Promise<Option[]> {
   const { rows } = await q.query<{ id: string; handle: string; name: string; intro: string; field: string; joined_seq: string }>(
     `select x.* from (
        select p.id, p.handle::text as handle, p.display_name as name, a.intro, a.field, m.joined_seq::text as joined_seq
@@ -93,13 +104,11 @@ export async function optionsFor(q: Queryable, conversationId: string, senderId:
          join principals p on p.id = m.principal_id
          join agents a on a.principal_id = p.id
          left join agent_group_state s on s.agent_id = p.id and s.conversation_id = m.conversation_id
-        where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent'
-          and a.proactive and not a.paused and a.deleted_at is null and a.model_source is not null
-          and not ${blockedEitherWay("p.owner_id", "$2::uuid")}
+        where m.conversation_id = $1 and ${mayAnswerUnasked("$3", "$2::uuid")}
         order by s.judged_at nulls first, p.id
-        limit $3) x
+        limit $4) x
       order by x.id`,
-    [conversationId, senderId, MAX_AGENT_OPTIONS],
+    [conversationId, senderId, seq, MAX_AGENT_OPTIONS],
   );
   return rows.map((r, i) => {
     const name = labelName(r.name, r.handle);
@@ -125,6 +134,7 @@ export interface JudgeRequest {
  * came before it joined), oldest first, each `{name}：{text}` (an Agent's `{name}（Agent）：{text}`; a file `[文件] {caption
  * or name}`), the name a label's (`labelName`), the text on one line and cut at `transcriptChars` characters — then one
  * choice over the options and `nobody`, and a quiet question about each option that sent one of the messages shown.
+ * Null when there is no line to show (nothing is asked about descriptions alone).
  */
 export async function requestFor(
   q: Queryable,
@@ -132,7 +142,7 @@ export async function requestFor(
   seq: number,
   options: readonly Option[],
   P: Pick<ProactiveConfig, "transcriptMessages" | "transcriptChars">,
-): Promise<JudgeRequest> {
+): Promise<JudgeRequest | null> {
   const after = Math.max(...options.map((o) => o.joinedSeq));
   const { rows } = await q.query<{ sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
     `select m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
@@ -143,6 +153,7 @@ export async function requestFor(
       limit $4`,
     [conversationId, after, seq, P.transcriptMessages],
   );
+  if (rows.length === 0) return null;
   const lines = rows.reverse().map((r) => {
     const text = r.kind === "file" ? `[文件] ${r.text || r.file || ""}` : (r.text ?? "");
     return `${labelName(r.name, r.handle)}${r.sender_kind === "agent" ? "（Agent）" : ""}：${cut(text, P.transcriptChars)}`;
