@@ -81,6 +81,30 @@ describe("agent, provider, metering and run tables", () => {
     await expect(insert("cb_null", null)).rejects.toMatchObject({ code: "23502" });
   });
 
+  test("proactive is off, proactive_level normal and proactive_budget_micro 20 points by default; the level is one of three, the budget from 1 to 100 000 points", async () => {
+    const owner = await human("owner_pr");
+    const insert = async (handle: string, column: string, value: unknown) =>
+      db.query(`insert into agents (principal_id, ${column}) values ($1, $2)`, [await agentPrincipal(owner, handle), value]);
+    await db.query(`insert into agents (principal_id) values ($1)`, [await agentPrincipal(owner, "pr_default")]);
+    expect(
+      (await db.query(`select proactive, proactive_level, proactive_budget_micro::text as budget from agents`)).rows,
+    ).toEqual([{ proactive: false, proactive_level: "normal", budget: "20000000" }]);
+    for (const level of ["less", "normal", "more"]) await insert(`pr_${level}`, "proactive_level", level);
+    await insert("pr_low", "proactive_budget_micro", "1000000");
+    await insert("pr_high", "proactive_budget_micro", "100000000000");
+    for (const [handle, column, value] of [
+      ["pr_bad_level", "proactive_level", "most"],
+      ["pr_under", "proactive_budget_micro", "999999"],
+      ["pr_zero", "proactive_budget_micro", "0"],
+      ["pr_over", "proactive_budget_micro", "100000000001"],
+    ] as const) {
+      await expect(insert(handle, column, value)).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    }
+    for (const [n, column] of ["proactive", "proactive_level", "proactive_budget_micro"].entries()) {
+      await expect(insert(`pr_null_${n}`, column, null)).rejects.toMatchObject({ code: "23502" });
+    }
+  });
+
   test("others_budget_micro is 20 points by default, from 1 to 100 000 points in micro-points, or null for no limit", async () => {
     const owner = await human("owner_ob");
     const insert = async (handle: string, value: unknown) =>

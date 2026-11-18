@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { formatPoints, MICRO_PER_POINT, parsePoints } from "../accounts/store.ts";
-import { REASONING_LEVELS } from "../config.ts";
+import { PROACTIVE_LEVELS, REASONING_LEVELS } from "../config.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
@@ -15,7 +15,7 @@ import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
-import { endWhatPauseMissed, interruptRuns, othersSpentToday, othersSpentTodayOf, siteToday } from "./runs.ts";
+import { endWhatPauseMissed, interruptRuns, siteToday, spentTodayOf } from "./runs.ts";
 import { hasVerticalSpace } from "./runtime/prompt.ts";
 import {
   appellationEntriesOf,
@@ -80,6 +80,24 @@ const othersBudget = chainBudget.nullable();
 const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
 
 /**
+ * The owner's settings for proactive replies (an Agent answering in a group nobody called it in): `proactive`, how
+ * readily (`proactiveLevel`), and the most it pays in a site day for them (`proactiveBudget`: as `chainBudget`, never
+ * `null`: there is no unlimited setting; 20 points unless its owner says otherwise).
+ */
+const proactiveLevel = z.enum(PROACTIVE_LEVELS);
+const proactiveBudget = chainBudget;
+const DEFAULT_PROACTIVE_BUDGET = 20n * MICRO_PER_POINT;
+
+/**
+ * 409 `proactive_unavailable` when `proactive` turns on (`on`) while the judgement model is not configured. An Agent
+ * that already is proactive stays so when the configuration goes away (it is inert); edits of its other fields, and
+ * turning it off, are never refused.
+ */
+function assertProactiveAvailable(config: { judge: unknown }, on: boolean | undefined): void {
+  if (on === true && config.judge === null) throw new AppError(409, "proactive_unavailable");
+}
+
+/**
  * What an Agent calls its owner or someone else (`ownerAppellation`, the body of `PUT …/appellations/:principalId`):
  * one-line user text (`userText`: trimmed, 1 to 20 characters, no control character, NUL included, and no lone
  * surrogate), and no other vertical space either (`hasVerticalSpace`: the line and paragraph separators). An empty one
@@ -101,6 +119,9 @@ const agentView = z.object({
   groupMentions,
   chainBudget: z.string(),
   othersBudget: z.string().nullable(),
+  proactive: z.boolean(),
+  proactiveLevel,
+  proactiveBudget: z.string(),
   ownerAppellation: z.string().nullable(),
   appellations: z.array(
     z.object({
@@ -112,6 +133,7 @@ const agentView = z.object({
     }),
   ),
   othersSpentToday: z.string(),
+  proactiveSpentToday: z.string(),
   reasoning,
   model: modelChoice(z.string()),
   paused: z.boolean(),
@@ -122,10 +144,11 @@ const agentView = z.object({
 
 /**
  * An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown,
- * what other people's calls on it have spent today of the owner's points (`spentMicro`, runs.ts `othersSpentToday`), and
+ * what other people's calls on it and its proactive replies have spent today of the owner's points (`spent`, runs.ts
+ * `spentTodayOf`), and
  * what it calls its owner and the people and Agents the owner named (`ownerAppellation`, `appellations`).
  */
-const toView = (a: AgentRow, spentMicro: bigint, appellations: AppellationEntry[]): z.infer<typeof agentView> => ({
+const toView = (a: AgentRow, spent: { others: bigint; proactive: bigint }, appellations: AppellationEntry[]): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
   name: a.name,
@@ -138,9 +161,13 @@ const toView = (a: AgentRow, spentMicro: bigint, appellations: AppellationEntry[
   groupMentions: a.groupMentions,
   chainBudget: formatPoints(a.chainBudgetMicro),
   othersBudget: a.othersBudgetMicro === null ? null : formatPoints(a.othersBudgetMicro),
+  proactive: a.proactive,
+  proactiveLevel: a.proactiveLevel,
+  proactiveBudget: formatPoints(a.proactiveBudgetMicro),
   ownerAppellation: a.ownerAppellation,
   appellations,
-  othersSpentToday: formatPoints(spentMicro),
+  othersSpentToday: formatPoints(spent.others),
+  proactiveSpentToday: formatPoints(spent.proactive),
   reasoning: a.reasoning,
   model: a.model,
   paused: a.paused,
@@ -164,9 +191,9 @@ export function registerAgentRoutes(
 ): { endDrafts(): Promise<void> } {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
-  /** The owner's view of `agent`, with what other people's calls have spent today, read now (runs.ts `othersSpentToday`). */
+  /** The owner's view of `agent`, with what other people's calls and its proactive replies have spent today, read now (runs.ts `spentTodayOf`). */
   const viewOf = async (agent: AgentRow) =>
-    toView(agent, await othersSpentToday(db, agent.id, siteToday(config)), (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
+    toView(agent, (await spentTodayOf(db, [agent.id], siteToday(config))).get(agent.id)!, (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -196,6 +223,9 @@ export function registerAgentRoutes(
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
           othersBudget: othersBudget.optional(),
+          proactive: z.boolean().optional(),
+          proactiveLevel: proactiveLevel.optional(),
+          proactiveBudget: proactiveBudget.optional(),
           ownerAppellation: ownerAppellation.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
@@ -207,6 +237,7 @@ export function registerAgentRoutes(
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
       const b = req.body;
+      assertProactiveAvailable(config, b.proactive);
       const input = {
         handle: b.handle,
         name: b.name,
@@ -218,6 +249,9 @@ export function registerAgentRoutes(
         chainBudgetMicro: b.chainBudget ?? DEFAULT_CHAIN_BUDGET,
         // `null` is no limit: only an absent key takes the default.
         othersBudgetMicro: b.othersBudget === undefined ? DEFAULT_OTHERS_BUDGET : b.othersBudget,
+        proactive: b.proactive ?? false,
+        proactiveLevel: b.proactiveLevel ?? "normal",
+        proactiveBudgetMicro: b.proactiveBudget ?? DEFAULT_PROACTIVE_BUDGET,
         ownerAppellation: b.ownerAppellation ?? null,
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,
@@ -225,7 +259,7 @@ export function registerAgentRoutes(
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
       // A new Agent has had no reply yet (nothing spent) and its owner has named nobody.
-      return reply.code(201).send(toView(agent, 0n, []));
+      return reply.code(201).send(toView(agent, { others: 0n, proactive: 0n }, []));
     },
   );
 
@@ -268,9 +302,9 @@ export function registerAgentRoutes(
       await readLimit(req, me.id);
       const agents = await listOwnedAgents(db, me.id);
       const ids = agents.map((a) => a.id);
-      const spent = await othersSpentTodayOf(db, ids, siteToday(config));
+      const spent = await spentTodayOf(db, ids, siteToday(config));
       const named = await appellationEntriesOf(db, ids);
-      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? 0n, named.get(a.id)!)) };
+      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? { others: 0n, proactive: 0n }, named.get(a.id)!)) };
     },
   );
 
@@ -302,6 +336,9 @@ export function registerAgentRoutes(
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
           othersBudget: othersBudget.optional(),
+          proactive: z.boolean().optional(),
+          proactiveLevel: proactiveLevel.optional(),
+          proactiveBudget: proactiveBudget.optional(),
           ownerAppellation: ownerAppellation.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
@@ -315,12 +352,14 @@ export function registerAgentRoutes(
       const agent = await db.tx(async (t) => {
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
-        const { chainBudget: budget, othersBudget: others, ...fields } = req.body;
+        assertProactiveAvailable(config, req.body.proactive);
+        const { chainBudget: budget, othersBudget: others, proactiveBudget: proactiveBudgetPoints, ...fields } = req.body;
         const patch: AgentPatch = {
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
           ...(budget === undefined ? {} : { chainBudgetMicro: budget }),
           // `null` is no limit, and changes it like any value.
           ...(others === undefined ? {} : { othersBudgetMicro: others }),
+          ...(proactiveBudgetPoints === undefined ? {} : { proactiveBudgetMicro: proactiveBudgetPoints }),
         };
         const next = { ...current, ...patch };
         if ("model" in patch || "reasoning" in patch) await assertModelChoice(t, me.id, next.model, next.reasoning, config);

@@ -15,6 +15,7 @@ export type ErrorCode =
   | "agent_limit"
   | "agent_paused"
   | "agent_deleted"
+  | "proactive_unavailable"
   | "busy_run"
   | "provider_in_use"
   | "address_not_allowed"

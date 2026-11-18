@@ -40,6 +40,9 @@ export const PROTOCOLS = ["openai_chat", "openai_responses", "anthropic", "gemin
 export type Protocol = (typeof PROTOCOLS)[number];
 export const REASONING_LEVELS = ["none", "low", "medium", "high", "xhigh", "max"] as const;
 export type ReasoningLevel = (typeof REASONING_LEVELS)[number];
+/** How readily an Agent answers unprompted (`agents.proactive_level`; the keys of `ProactiveConfig.base`). */
+export const PROACTIVE_LEVELS = ["less", "normal", "more"] as const;
+export type ProactiveLevel = (typeof PROACTIVE_LEVELS)[number];
 /** The levels that think: every level but `none`. */
 export type ThinkingLevel = Exclude<ReasoningLevel, "none">;
 /**

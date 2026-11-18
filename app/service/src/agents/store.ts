@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import { REASONING_LEVELS, type ReasoningLevel } from "../config.ts";
+import { REASONING_LEVELS, type ProactiveLevel, type ReasoningLevel } from "../config.ts";
 import { lockConversation } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
@@ -38,6 +38,12 @@ export interface AgentRow {
    * (lane `others`; `othersBudget`, runs.ts `othersBudgetSpent`); null for no limit. The owner's setting.
    */
   othersBudgetMicro: bigint | null;
+  /** Whether it may answer in a group without being called, when the judgement model picks it. The owner's setting. */
+  proactive: boolean;
+  /** How readily it does (`less`, `normal`, `more`). The owner's setting. */
+  proactiveLevel: ProactiveLevel;
+  /** The most its owner pays, in micro-points, in a site day for such replies (lane `proactive`). The owner's setting. */
+  proactiveBudgetMicro: bigint;
   /** What it calls its owner (1–20 characters, one line); null: by name. The owner's setting. */
   ownerAppellation: string | null;
   reasoning: ReasoningLevel;
@@ -63,6 +69,9 @@ interface AgentDbRow {
   group_mentions: GroupMentions;
   chain_budget_micro: string;
   others_budget_micro: string | null;
+  proactive: boolean;
+  proactive_level: ProactiveLevel;
+  proactive_budget_micro: string;
   owner_appellation: string | null;
   reasoning: ReasoningLevel;
   model_source: "site" | "provider" | null;
@@ -77,7 +86,7 @@ interface AgentDbRow {
 
 const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
        a.persona_version, a.reply_mode, a.group_mentions, a.chain_budget_micro::text,
-       a.others_budget_micro::text, a.owner_appellation, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
+       a.others_budget_micro::text, a.proactive, a.proactive_level, a.proactive_budget_micro::text, a.owner_appellation, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
   from agents a
   join principals p on p.id = a.principal_id
@@ -104,6 +113,9 @@ function toAgent(r: AgentDbRow): AgentRow {
     groupMentions: r.group_mentions,
     chainBudgetMicro: BigInt(r.chain_budget_micro),
     othersBudgetMicro: r.others_budget_micro === null ? null : BigInt(r.others_budget_micro),
+    proactive: r.proactive,
+    proactiveLevel: r.proactive_level,
+    proactiveBudgetMicro: BigInt(r.proactive_budget_micro),
     ownerAppellation: r.owner_appellation,
     reasoning: r.reasoning,
     model,
@@ -222,6 +234,9 @@ export interface AgentPatch {
   groupMentions?: GroupMentions;
   chainBudgetMicro?: bigint;
   othersBudgetMicro?: bigint | null;
+  proactive?: boolean;
+  proactiveLevel?: ProactiveLevel;
+  proactiveBudgetMicro?: bigint;
   ownerAppellation?: string | null;
   reasoning?: ReasoningLevel;
   model?: AgentModel;
@@ -234,7 +249,8 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
   await t.query(
     `update agents set intro = $2, field = $3, persona = $4, persona_version = $5, reply_mode = $6, group_mentions = $7,
             reasoning = $8, model_source = $9, site_model_id = $10, provider_id = $11, provider_model = $12, chain_budget_micro = $13,
-            others_budget_micro = $14, owner_appellation = $15
+            others_budget_micro = $14, owner_appellation = $15, proactive = $16, proactive_level = $17,
+            proactive_budget_micro = $18
       where principal_id = $1`,
     [
       current.id,
@@ -249,6 +265,9 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
       next.chainBudgetMicro.toString(),
       next.othersBudgetMicro === null ? null : next.othersBudgetMicro.toString(),
       next.ownerAppellation,
+      next.proactive,
+      next.proactiveLevel,
+      next.proactiveBudgetMicro.toString(),
     ],
   );
   if (next.name !== current.name) await t.query("update principals set display_name = $2 where id = $1", [current.id, next.name]);

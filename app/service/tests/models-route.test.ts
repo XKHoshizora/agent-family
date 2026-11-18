@@ -23,6 +23,7 @@ describe("GET /api/models", () => {
         { id: "thinker", label: "Thinker", tier: "paid", vision: true, pdf: true, reasoning: ["low", "medium"], contextTokens: 200000 },
       ],
       providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 },
+      proactiveAvailable: false,
     });
     const serialised = `${JSON.stringify(res.headers)}${res.body}`;
     for (const secret of ["api.example.test", "fast-1", "think-1", "UPSTREAM_TEST_KEY", SITE_ENV.UPSTREAM_TEST_KEY, "MicroPerToken", "maxOutputTokens\":4096", "baseUrl", "apiKeyEnv", "protocol"]) {
@@ -34,7 +35,7 @@ describe("GET /api/models", () => {
     const bare = await buildApp({ config: { ...app.deps.config, siteModels: [] }, db }, { agentWorker: false, answerFloor: NO_ANSWER_FLOOR, staleRunSweep: false });
     try {
       const owner = await signUp(bare, "nomodels");
-      expect(await api(bare, owner, "GET", "/api/models")).toEqual({ status: 200, json: { siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 } } });
+      expect(await api(bare, owner, "GET", "/api/models")).toEqual({ status: 200, json: { siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 }, proactiveAvailable: false } });
     } finally {
       await bare.close();
     }
