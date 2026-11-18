@@ -20,6 +20,8 @@ afterEach(() => {
 });
 
 const RANDOM = "6a0d4c2e-1b3f-4a5e-9c7d-8e9f0a1b2c3d";
+/** Text no appellation may hold besides a line break: NUL, another control character, a lone surrogate (made from code points). */
+const UNSTORABLE = [0, 7, 9, 0xd800, 0xdc00].flatMap((cp) => [String.fromCharCode(cp), `a${String.fromCharCode(cp)}b`]);
 
 const put = (who: Actor, agentId: string, target: string, appellation: unknown) =>
   api(app, who, "PUT", `/api/agents/${agentId}/appellations/${target}`, { appellation });
@@ -58,10 +60,10 @@ describe("ownerAppellation", () => {
     expect((await view(owner, created.id)).ownerAppellation).toBeNull();
   });
 
-  it("is 400 when empty, only spaces, over 20 characters, across lines, or not text — in create and in edit", async () => {
+  it("is 400 when empty, only spaces, over 20 characters, across lines, holding NUL, another control character or a lone surrogate, or not text — in create and in edit", async () => {
     const owner = await signUp(app, "own");
     const agent = await mustCreateAgent(app, owner);
-    for (const value of ["", "   ", "一".repeat(21), "a\nb", "a\rb", "a b", "a\u0085b", "a\u000bb", 5, {}]) {
+    for (const value of ["", "   ", "一".repeat(21), "a\nb", "a\rb", "a\u2028b", "a\u0085b", "a\u000bb", ...UNSTORABLE, 5, {}]) {
       expect([value, (await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { ownerAppellation: value })).status]).toEqual([value, 400]);
       const body = { handle: `bad_${randomUUID().slice(0, 8)}`, name: "B", ownerAppellation: value };
       expect([value, (await api(app, owner, "POST", "/api/agents", body)).status]).toEqual([value, 400]);
@@ -100,10 +102,11 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     const removed = await remove(w.owner, w.agent.id, w.mia.id);
     expect(removed.status).toBe(200);
     expect(targetsOf(removed.json)).toEqual([other.id]);
-    // Removing what is not there is no error.
-    expect(targetsOf((await remove(w.owner, w.agent.id, w.mia.id)).json)).toEqual([other.id]);
-    expect((await remove(w.owner, w.agent.id, RANDOM)).status).toBe(200);
-    expect((await remove(w.owner, w.agent.id, "not-an-id")).status).toBe(200);
+    // Taking back what is not there is 404, for a target it never named as for an id that is nobody's or no id at all.
+    for (const target of [w.mia.id, RANDOM, RANDOM.toUpperCase(), "00000000-0000-0000-0000-000000000000", "not-an-id"]) {
+      expect([target, await remove(w.owner, w.agent.id, target)]).toEqual([target, { status: 404, json: { error: "not_found" } }]);
+    }
+    expect(targetsOf(await view(w.owner, w.agent.id))).toEqual([other.id]);
   });
 
   it("accepts a friend in no shared group, a group member who is no friend, and someone else's Agent in the group", async () => {
@@ -119,9 +122,9 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     expect(targetsOf(await view(w.owner, w.agent.id))).toHaveLength(3);
   });
 
-  it("is 400 for text that is empty, only spaces, over 20 characters, across lines, or not text; nothing is stored", async () => {
+  it("is 400 for text that is empty, only spaces, over 20 characters, across lines, holding NUL, another control character or a lone surrogate, or not text; nothing is stored", async () => {
     const w = await world();
-    for (const value of ["", "  ", "一".repeat(21), "a\nb", "a b", 7, null, undefined]) {
+    for (const value of ["", "  ", "一".repeat(21), "a\nb", "a\u2029b", ...UNSTORABLE, 7, null, undefined]) {
       expect([value, (await put(w.owner, w.agent.id, w.mia.id, value)).status]).toEqual([value, 400]);
     }
     expect((await api(app, w.owner, "PUT", `/api/agents/${w.agent.id}/appellations/${w.mia.id}`, { appellation: "好", extra: 1 })).status).toBe(400);
@@ -158,8 +161,14 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
       ["an Agent in no shared group", outsideAgent.id],
       ["a member of a group the Agent has left", stranger.id],
       ["a malformed id", "not-a-uuid"],
+      ["a malformed id longer than any id", "x".repeat(65)],
     ];
     for (const [label, target] of targets) expect([label, await raw("PUT", w.owner, w.agent.id, target)]).toEqual([label, reference]);
+    // Removing what is no id at all is the same 404, however long it is.
+    for (const target of ["not-a-uuid", "x".repeat(65)]) expect([target, await raw("DELETE", w.owner, w.agent.id, target)]).toEqual([target, reference]);
+    // Longer than the router takes a path segment: what it answers for any such segment, an Agent's id too.
+    const overlong = "x".repeat(300);
+    expect(await raw("PUT", w.owner, w.agent.id, overlong)).toEqual(await raw("PUT", w.owner, overlong, RANDOM));
 
     // Not the caller's Agent: the same as an Agent that does not exist, even for a target that qualifies for its owner.
     const noAgent = await raw("PUT", w.mia, RANDOM, w.mia.id);

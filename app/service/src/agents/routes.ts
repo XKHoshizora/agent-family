@@ -10,7 +10,7 @@ import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
 import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
 import { swapAvatarKey } from "../principals/store.ts";
-import { agentName, uuidParam } from "../schemas.ts";
+import { agentName, userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
@@ -35,8 +35,11 @@ import {
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
-/** The target is any text here (at most an id's length): one that is no id is 404 like any id that is nobody's, not 400. */
-const appellationParams = z.object({ id: uuidParam, principalId: z.string().max(64) });
+/**
+ * The target is any text here (as long as the router takes a path segment): one that is no id is 404 (`editAppellations`),
+ * never 400, which would tell it apart from an id the Agent's owner may not name.
+ */
+const appellationParams = z.object({ id: uuidParam, principalId: z.string() });
 
 /** A model as a request names it (`providerId` is normalised to lower case), and as a response shows it. */
 const chosenModel = (providerId: z.ZodType<string>) =>
@@ -77,14 +80,12 @@ const othersBudget = chainBudget.nullable();
 const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
 
 /**
- * What an Agent calls its owner or someone else (`ownerAppellation`, `appellations`): text of 1 to 20 characters once
- * trimmed, on one line (no line break or other vertical space, as `hasVerticalSpace` says). An empty one is not a way
- * to clear `ownerAppellation`: `null` is.
+ * What an Agent calls its owner or someone else (`ownerAppellation`, the body of `PUT …/appellations/:principalId`):
+ * one-line user text (`userText`: trimmed, 1 to 20 characters, no control character, NUL included, and no lone
+ * surrogate), and no other vertical space either (`hasVerticalSpace`: the line and paragraph separators). An empty one
+ * is not a way to clear `ownerAppellation`: `null` is.
  */
-const appellationSchema = z
-  .string()
-  .trim()
-  .refine((s) => [...s].length >= 1 && [...s].length <= 20 && !hasVerticalSpace(s));
+const appellationSchema = userText(1, 20, { singleLine: true }).refine((s) => !hasVerticalSpace(s), "one line");
 const ownerAppellation = appellationSchema.nullable();
 
 const agentView = z.object({
@@ -381,27 +382,27 @@ export function registerAgentRoutes(
 
   /**
    * An edit of the owner's appellations for the Agent, under `lockOwnedAgent` (so the count that caps them cannot be
-   * outrun): refused for a deleted Agent; when `apply` says it changed something, the owner's sockets are told after
-   * commit (`agent`) and nobody else is — the people named are not. `apply` gets the target as an id, or null when the
-   * request's is no id at all.
+   * outrun): refused for a deleted Agent; a target that is no id at all, whatever its length, is 404 `not_found` — as
+   * an id that is nobody's is for a `PUT`, never a 400, which would tell them apart; when `apply` says it changed
+   * something, the owner's sockets are told after commit (`agent`) and nobody else is — the people named are not.
    */
   const editAppellations = async (
     ownerId: string,
     params: { id: string; principalId: string },
-    apply: (t: Tx, agent: AgentRow, target: string | null) => Promise<boolean>,
+    apply: (t: Tx, agent: AgentRow, target: string) => Promise<boolean>,
   ) => {
     const target = uuidParam.safeParse(params.principalId);
     const { agent, changed } = await db.tx(async (t) => {
       const current = await lockOwnedAgent(t, ownerId, params.id);
       if (current.deleted) throw deletedError();
-      return { agent: current, changed: await apply(t, current, target.success ? target.data : null) };
+      if (!target.success) throw notFound();
+      return { agent: current, changed: await apply(t, current, target.data) };
     });
     if (changed) app.realtime.pushAgentChanged(ownerId, agent.id);
     return viewOf(agent);
   };
 
-  // What the Agent calls someone (store.ts `setAppellation` says who may be named): insert or replace. A target that is
-  // no id at all is 404, as one that does not exist is — never a 400, which would tell them apart.
+  // What the Agent calls someone (store.ts `setAppellation` says who may be named): insert or replace.
   api.put(
     "/api/agents/:id/appellations/:principalId",
     {
@@ -416,21 +417,23 @@ export function registerAgentRoutes(
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
       return editAppellations(me.id, req.params, async (t, agent, target) => {
-        if (target === null) throw notFound();
         await setAppellation(t, agent, target, req.body.appellation);
         return true;
       });
     },
   );
 
-  // Takes a name back: 200 with the Agent also when there was none.
+  // Takes a name back: 404 when the Agent called them nothing (as an Agent route answers any path that names nothing).
   api.delete(
     "/api/agents/:id/appellations/:principalId",
     { schema: { params: appellationParams, querystring: empty, response: { 200: agentView } } },
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      return editAppellations(me.id, req.params, async (t, agent, target) => target !== null && (await removeAppellation(t, agent.id, target)));
+      return editAppellations(me.id, req.params, async (t, agent, target) => {
+        if (!(await removeAppellation(t, agent.id, target))) throw notFound();
+        return true;
+      });
     },
   );
 
