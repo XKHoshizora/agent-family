@@ -103,6 +103,31 @@ describe("agent, provider, metering and run tables", () => {
     ]);
   });
 
+  test("owner_appellation is null or 1 to 20 characters; agent_appellations are one per target, never for the Agent itself, and go with either end", async () => {
+    const owner = await human("owner_ap");
+    const insert = async (handle: string, value: unknown) =>
+      db.query(`insert into agents (principal_id, owner_appellation) values ($1, $2)`, [await agentPrincipal(owner, handle), value]);
+    await insert("ap_null", null);
+    await insert("ap_one", "一");
+    await insert("ap_twenty", "一".repeat(20));
+    await expect(insert("ap_empty", "")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(insert("ap_long", "一".repeat(21))).rejects.toMatchObject({ code: CHECK_VIOLATION });
+
+    const agent = await agentPrincipal(owner, "ap_bot");
+    await db.query(`insert into agents (principal_id) values ($1)`, [agent]);
+    const target = await human("target_ap");
+    const name = (principalId: string, appellation: string) =>
+      db.query(`insert into agent_appellations (agent_id, principal_id, appellation) values ($1, $2, $3)`, [agent, principalId, appellation]);
+    await name(target, "好友");
+    await rejectedWith(UNIQUE_VIOLATION, `insert into agent_appellations (agent_id, principal_id, appellation) values ($1, $2, 'x')`, [agent, target]);
+    await expect(name(owner, "")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(name(owner, "一".repeat(21))).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(name(agent, "自己")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await rejectedWith(FOREIGN_KEY_VIOLATION, `insert into agent_appellations (agent_id, principal_id, appellation) values ($1, $2, 'x')`, [owner, target]);
+    await db.query(`delete from principals where id = $1`, [target]);
+    expect((await db.query(`select 1 from agent_appellations`)).rowCount).toBe(0);
+  });
+
   test("conversations.agents_halted_seq is null until a halt sets it", async () => {
     const owner = await human("owner_hs");
     const { rows } = await db.query(`insert into conversations (type, creator_id) values ('group', $1) returning agents_halted_seq`, [owner]);

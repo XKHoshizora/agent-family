@@ -43,6 +43,7 @@ export interface NewAgent {
   groupMentions: GroupMentions;
   chainBudgetMicro: bigint;
   othersBudgetMicro: bigint | null;
+  ownerAppellation: string | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
 }
@@ -79,8 +80,8 @@ export async function createAgent(
   const personaVersion = input.persona === "" ? 0 : 1;
   const created = await t.query<{ created_at: Date }>(
     `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
-                         model_source, site_model_id, provider_id, provider_model, chain_budget_micro, others_budget_micro)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning created_at`,
+                         model_source, site_model_id, provider_id, provider_model, chain_budget_micro, others_budget_micro, owner_appellation)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) returning created_at`,
     [
       id,
       input.intro,
@@ -93,6 +94,7 @@ export async function createAgent(
       ...modelParams(input.model),
       input.chainBudgetMicro.toString(),
       input.othersBudgetMicro === null ? null : input.othersBudgetMicro.toString(),
+      input.ownerAppellation,
     ],
   );
   const conversation = await t.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [ownerId]);
@@ -123,6 +125,7 @@ export async function createAgent(
     groupMentions: input.groupMentions,
     chainBudgetMicro: input.chainBudgetMicro,
     othersBudgetMicro: input.othersBudgetMicro,
+    ownerAppellation: input.ownerAppellation,
     reasoning: input.reasoning,
     model: input.model,
     paused: false,

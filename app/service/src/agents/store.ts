@@ -38,6 +38,8 @@ export interface AgentRow {
    * (lane `others`; `othersBudget`, runs.ts `othersBudgetSpent`); null for no limit. The owner's setting.
    */
   othersBudgetMicro: bigint | null;
+  /** What it calls its owner (1–20 characters, one line); null: by name. The owner's setting. */
+  ownerAppellation: string | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
   paused: boolean;
@@ -61,6 +63,7 @@ interface AgentDbRow {
   group_mentions: GroupMentions;
   chain_budget_micro: string;
   others_budget_micro: string | null;
+  owner_appellation: string | null;
   reasoning: ReasoningLevel;
   model_source: "site" | "provider" | null;
   site_model_id: string | null;
@@ -74,7 +77,7 @@ interface AgentDbRow {
 
 const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
        a.persona_version, a.reply_mode, a.group_mentions, a.chain_budget_micro::text,
-       a.others_budget_micro::text, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
+       a.others_budget_micro::text, a.owner_appellation, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
   from agents a
   join principals p on p.id = a.principal_id
@@ -101,6 +104,7 @@ function toAgent(r: AgentDbRow): AgentRow {
     groupMentions: r.group_mentions,
     chainBudgetMicro: BigInt(r.chain_budget_micro),
     othersBudgetMicro: r.others_budget_micro === null ? null : BigInt(r.others_budget_micro),
+    ownerAppellation: r.owner_appellation,
     reasoning: r.reasoning,
     model,
     paused: r.paused,
@@ -218,6 +222,7 @@ export interface AgentPatch {
   groupMentions?: GroupMentions;
   chainBudgetMicro?: bigint;
   othersBudgetMicro?: bigint | null;
+  ownerAppellation?: string | null;
   reasoning?: ReasoningLevel;
   model?: AgentModel;
 }
@@ -229,7 +234,7 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
   await t.query(
     `update agents set intro = $2, field = $3, persona = $4, persona_version = $5, reply_mode = $6, group_mentions = $7,
             reasoning = $8, model_source = $9, site_model_id = $10, provider_id = $11, provider_model = $12, chain_budget_micro = $13,
-            others_budget_micro = $14
+            others_budget_micro = $14, owner_appellation = $15
       where principal_id = $1`,
     [
       current.id,
@@ -243,6 +248,7 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
       ...modelParams(next.model),
       next.chainBudgetMicro.toString(),
       next.othersBudgetMicro === null ? null : next.othersBudgetMicro.toString(),
+      next.ownerAppellation,
     ],
   );
   if (next.name !== current.name) await t.query("update principals set display_name = $2 where id = $1", [current.id, next.name]);
@@ -259,4 +265,80 @@ export async function setAgentState(t: Tx, agent: AgentRow, change: { paused: bo
   if (agent.paused === change.paused) return false;
   await t.query("update agents set paused = $2 where principal_id = $1", [agent.id, change.paused]);
   return true;
+}
+
+/** How many people and Agents one Agent may have an appellation for. */
+export const MAX_APPELLATIONS = 100;
+
+/** An appellation as the owner's view lists it: its target as they are now. */
+export interface AppellationEntry {
+  principalId: string;
+  kind: "human" | "agent";
+  handle: string;
+  name: string;
+  appellation: string;
+}
+
+/**
+ * The appellations of each of `agentIds`, by target handle (every row: a target that no longer qualifies stays listed);
+ * an Agent without any has an empty list.
+ */
+export async function appellationEntriesOf(q: Queryable, agentIds: readonly string[]): Promise<Map<string, AppellationEntry[]>> {
+  const found = new Map<string, AppellationEntry[]>(agentIds.map((id) => [id, []]));
+  if (agentIds.length === 0) return found;
+  const { rows } = await q.query<AppellationEntry & { agent_id: string }>(
+    `select aa.agent_id, p.id as "principalId", p.kind, p.handle::text as handle, p.display_name as name, aa.appellation
+       from agent_appellations aa join principals p on p.id = aa.principal_id
+      where aa.agent_id = any($1::uuid[])
+      order by p.handle, p.id`,
+    [agentIds],
+  );
+  for (const { agent_id, ...entry } of rows) found.get(agent_id)?.push(entry);
+  return found;
+}
+
+/** What the Agent calls each person or Agent its owner named, by principal id: every stored row (who is present is the reader's to filter). */
+export async function appellationsFor(q: Queryable, agentId: string): Promise<Map<string, string>> {
+  const { rows } = await q.query<{ principal_id: string; appellation: string }>(
+    "select principal_id, appellation from agent_appellations where agent_id = $1",
+    [agentId],
+  );
+  return new Map(rows.map((r) => [r.principal_id, r.appellation]));
+}
+
+/**
+ * Sets (or replaces) what the locked, undeleted `agent` calls `targetId`. The target is a person or an Agent that is
+ * neither the Agent nor its owner and is the owner's friend or a current member of a group (not closed) the Agent is
+ * in; anything else, a principal that does not exist included, is 404 `not_found`. 409 `too_many` for a target that
+ * would be the 101st; replacing one of the 100 is fine.
+ */
+export async function setAppellation(t: Tx, agent: AgentRow, targetId: string, appellation: string): Promise<void> {
+  const qualifies = await t.query(
+    `select 1 from principals p
+      where p.id = $1 and p.id <> $2 and p.id <> $3
+        and (exists (select 1 from friendships f where f.a_id = least($3::uuid, p.id) and f.b_id = greatest($3::uuid, p.id))
+             or exists (select 1 from memberships tm
+                          join memberships am on am.conversation_id = tm.conversation_id
+                          join conversations c on c.id = tm.conversation_id
+                         where tm.principal_id = p.id and tm.left_seq is null and am.principal_id = $2 and am.left_seq is null
+                           and c.type = 'group' and c.closed_at is null))`,
+    [targetId, agent.id, agent.ownerId],
+  );
+  if (!qualifies.rowCount) throw notFound();
+  const { rows } = await t.query<{ n: number; has: boolean }>(
+    "select count(*)::int as n, coalesce(bool_or(principal_id = $2), false) as has from agent_appellations where agent_id = $1",
+    [agent.id, targetId],
+  );
+  if (!rows[0]!.has && rows[0]!.n >= MAX_APPELLATIONS) throw new AppError(409, "too_many");
+  await t.query(
+    `insert into agent_appellations (agent_id, principal_id, appellation) values ($1, $2, $3)
+     on conflict (agent_id, principal_id) do update set appellation = excluded.appellation`,
+    [agent.id, targetId, appellation],
+  );
+}
+
+/** Removes what `agentId` calls `targetId`; false when there was no such row. */
+export async function removeAppellation(t: Tx, agentId: string, targetId: string): Promise<boolean> {
+  const { rowCount } = await t.query("delete from agent_appellations where agent_id = $1 and principal_id = $2", [agentId, targetId]);
+  return (rowCount ?? 0) > 0;
 }

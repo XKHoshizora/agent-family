@@ -33,6 +33,19 @@ describe("Agent write rate limit", () => {
     expect((await createAgent(app, b)).status).toBe(201);
   });
 
+  it("counts setting and removing an appellation in the same budget as editing the Agent, refused ones too", async () => {
+    const a = await signUp(app, "rate_e");
+    const agent = await mustCreateAgent(app, a); // 1
+    for (let i = 2; i <= 28; i++) expect((await api(app, a, "PATCH", `/api/agents/${agent.id}`, { intro: `v${i}` })).status).toBe(200);
+    // Refused for its target, and still counted.
+    expect((await api(app, a, "PUT", `/api/agents/${agent.id}/appellations/${randomUUID()}`, { appellation: "称" })).status).toBe(404); // 29
+    expect((await api(app, a, "DELETE", `/api/agents/${agent.id}/appellations/${randomUUID()}`)).status).toBe(200); // 30
+    const limited = { status: 429, json: { error: "rate_limited" } };
+    expect(await api(app, a, "PUT", `/api/agents/${agent.id}/appellations/${randomUUID()}`, { appellation: "称" })).toEqual(limited);
+    expect(await api(app, a, "DELETE", `/api/agents/${agent.id}/appellations/${randomUUID()}`)).toEqual(limited);
+    expect(await api(app, a, "PATCH", `/api/agents/${agent.id}`, { intro: "x" })).toEqual(limited);
+  });
+
   it("allows 5 persona drafts a minute per principal, a budget of their own", async () => {
     const [c, d] = [await signUp(app, "rate_c"), await signUp(app, "rate_d")];
     const draft = (who: typeof c) => api(app, who, "POST", "/api/agents/draft-persona", { name: "x", model: { source: "site", id: "nope" } });

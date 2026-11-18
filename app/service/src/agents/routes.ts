@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { formatPoints, MICRO_PER_POINT, parsePoints } from "../accounts/store.ts";
 import { REASONING_LEVELS } from "../config.ts";
+import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
@@ -15,20 +16,27 @@ import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
 import { endWhatPauseMissed, interruptRuns, othersSpentToday, othersSpentTodayOf, siteToday } from "./runs.ts";
+import { hasVerticalSpace } from "./runtime/prompt.ts";
 import {
+  appellationEntriesOf,
   assertModelChoice,
   GROUP_MENTIONS,
   listOwnedAgents,
   lockOwnedAgent,
   readOwnedAgent,
+  removeAppellation,
   setAgentState,
+  setAppellation,
   updateAgent,
   type AgentPatch,
   type AgentRow,
+  type AppellationEntry,
 } from "./store.ts";
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
+/** The target is any text here (at most an id's length): one that is no id is 404 like any id that is nobody's, not 400. */
+const appellationParams = z.object({ id: uuidParam, principalId: z.string().max(64) });
 
 /** A model as a request names it (`providerId` is normalised to lower case), and as a response shows it. */
 const chosenModel = (providerId: z.ZodType<string>) =>
@@ -68,6 +76,17 @@ const chainBudget = z
 const othersBudget = chainBudget.nullable();
 const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
 
+/**
+ * What an Agent calls its owner or someone else (`ownerAppellation`, `appellations`): text of 1 to 20 characters once
+ * trimmed, on one line (no line break or other vertical space, as `hasVerticalSpace` says). An empty one is not a way
+ * to clear `ownerAppellation`: `null` is.
+ */
+const appellationSchema = z
+  .string()
+  .trim()
+  .refine((s) => [...s].length >= 1 && [...s].length <= 20 && !hasVerticalSpace(s));
+const ownerAppellation = appellationSchema.nullable();
+
 const agentView = z.object({
   id: z.string(),
   handle: z.string(),
@@ -81,6 +100,10 @@ const agentView = z.object({
   groupMentions,
   chainBudget: z.string(),
   othersBudget: z.string().nullable(),
+  ownerAppellation: z.string().nullable(),
+  appellations: z.array(
+    z.object({ principalId: z.string(), kind: z.enum(["human", "agent"]), handle: z.string(), name: z.string(), appellation: z.string() }),
+  ),
   othersSpentToday: z.string(),
   reasoning,
   model: modelChoice(z.string()),
@@ -92,9 +115,10 @@ const agentView = z.object({
 
 /**
  * An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown,
- * and what other people's calls on it have spent today of the owner's points (`spentMicro`, runs.ts `othersSpentToday`).
+ * what other people's calls on it have spent today of the owner's points (`spentMicro`, runs.ts `othersSpentToday`), and
+ * what it calls its owner and the people and Agents the owner named (`ownerAppellation`, `appellations`).
  */
-const toView = (a: AgentRow, spentMicro: bigint): z.infer<typeof agentView> => ({
+const toView = (a: AgentRow, spentMicro: bigint, appellations: AppellationEntry[]): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
   name: a.name,
@@ -107,6 +131,8 @@ const toView = (a: AgentRow, spentMicro: bigint): z.infer<typeof agentView> => (
   groupMentions: a.groupMentions,
   chainBudget: formatPoints(a.chainBudgetMicro),
   othersBudget: a.othersBudgetMicro === null ? null : formatPoints(a.othersBudgetMicro),
+  ownerAppellation: a.ownerAppellation,
+  appellations,
   othersSpentToday: formatPoints(spentMicro),
   reasoning: a.reasoning,
   model: a.model,
@@ -132,7 +158,8 @@ export function registerAgentRoutes(
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   /** The owner's view of `agent`, with what other people's calls have spent today, read now (runs.ts `othersSpentToday`). */
-  const viewOf = async (agent: AgentRow) => toView(agent, await othersSpentToday(db, agent.id, siteToday(config)));
+  const viewOf = async (agent: AgentRow) =>
+    toView(agent, await othersSpentToday(db, agent.id, siteToday(config)), (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -162,6 +189,7 @@ export function registerAgentRoutes(
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
           othersBudget: othersBudget.optional(),
+          ownerAppellation: ownerAppellation.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -183,13 +211,14 @@ export function registerAgentRoutes(
         chainBudgetMicro: b.chainBudget ?? DEFAULT_CHAIN_BUDGET,
         // `null` is no limit: only an absent key takes the default.
         othersBudgetMicro: b.othersBudget === undefined ? DEFAULT_OTHERS_BUDGET : b.othersBudget,
+        ownerAppellation: b.ownerAppellation ?? null,
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,
       };
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
-      // A new Agent has had no reply yet: nothing spent.
-      return reply.code(201).send(toView(agent, 0n));
+      // A new Agent has had no reply yet (nothing spent) and its owner has named nobody.
+      return reply.code(201).send(toView(agent, 0n, []));
     },
   );
 
@@ -231,8 +260,10 @@ export function registerAgentRoutes(
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
       const agents = await listOwnedAgents(db, me.id);
-      const spent = await othersSpentTodayOf(db, agents.map((a) => a.id), siteToday(config));
-      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? 0n)) };
+      const ids = agents.map((a) => a.id);
+      const spent = await othersSpentTodayOf(db, ids, siteToday(config));
+      const named = await appellationEntriesOf(db, ids);
+      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? 0n, named.get(a.id)!)) };
     },
   );
 
@@ -264,6 +295,7 @@ export function registerAgentRoutes(
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
           othersBudget: othersBudget.optional(),
+          ownerAppellation: ownerAppellation.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -346,6 +378,61 @@ export function registerAgentRoutes(
   stateRoute("post", "/api/agents/:id/pause", { paused: true });
   stateRoute("post", "/api/agents/:id/resume", { paused: false });
   stateRoute("delete", "/api/agents/:id", { deleted: true });
+
+  /**
+   * An edit of the owner's appellations for the Agent, under `lockOwnedAgent` (so the count that caps them cannot be
+   * outrun): refused for a deleted Agent; when `apply` says it changed something, the owner's sockets are told after
+   * commit (`agent`) and nobody else is — the people named are not. `apply` gets the target as an id, or null when the
+   * request's is no id at all.
+   */
+  const editAppellations = async (
+    ownerId: string,
+    params: { id: string; principalId: string },
+    apply: (t: Tx, agent: AgentRow, target: string | null) => Promise<boolean>,
+  ) => {
+    const target = uuidParam.safeParse(params.principalId);
+    const { agent, changed } = await db.tx(async (t) => {
+      const current = await lockOwnedAgent(t, ownerId, params.id);
+      if (current.deleted) throw deletedError();
+      return { agent: current, changed: await apply(t, current, target.success ? target.data : null) };
+    });
+    if (changed) app.realtime.pushAgentChanged(ownerId, agent.id);
+    return viewOf(agent);
+  };
+
+  // What the Agent calls someone (store.ts `setAppellation` says who may be named): insert or replace. A target that is
+  // no id at all is 404, as one that does not exist is — never a 400, which would tell them apart.
+  api.put(
+    "/api/agents/:id/appellations/:principalId",
+    {
+      schema: {
+        params: appellationParams,
+        querystring: empty,
+        body: z.strictObject({ appellation: appellationSchema }),
+        response: { 200: agentView },
+      },
+    },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await writeLimit(req, me.id);
+      return editAppellations(me.id, req.params, async (t, agent, target) => {
+        if (target === null) throw notFound();
+        await setAppellation(t, agent, target, req.body.appellation);
+        return true;
+      });
+    },
+  );
+
+  // Takes a name back: 200 with the Agent also when there was none.
+  api.delete(
+    "/api/agents/:id/appellations/:principalId",
+    { schema: { params: appellationParams, querystring: empty, response: { 200: agentView } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await writeLimit(req, me.id);
+      return editAppellations(me.id, req.params, async (t, agent, target) => target !== null && (await removeAppellation(t, agent.id, target)));
+    },
+  );
 
   const staleProposal = () => new AppError(409, "stale_proposal");
 

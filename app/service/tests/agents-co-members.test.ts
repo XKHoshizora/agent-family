@@ -32,6 +32,9 @@ const HIDDEN = {
   privateReply: "PRIVATE-REPLY-zq7",
   providerName: "Vendor zq7",
   model: "model-zq7-hidden",
+  /** What the Agent calls its owner, and what it calls mia: the owner's settings. */
+  ownerAppellation: "OWNERNAME-zq7",
+  appellation: "NAMED-zq7",
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
@@ -43,6 +46,8 @@ const HIDDEN_KEYS = [
   "groupMentions",
   "othersBudget",
   "othersSpentToday",
+  "ownerAppellation",
+  "appellations",
   "paused",
   "deleted",
   "provider",
@@ -140,7 +145,7 @@ async function world() {
   expect(await app.agentWorker.runOnce()).toBe(true);
 
   const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ name: HIDDEN.providerName, models: [{ name: HIDDEN.model }] }))).json.id as string;
-  const patched = await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { model: { source: "provider", providerId: provider, model: HIDDEN.model }, replyMode: "mention" });
+  const patched = await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { model: { source: "provider", providerId: provider, model: HIDDEN.model }, replyMode: "mention", ownerAppellation: HIDDEN.ownerAppellation });
   expect(patched.status).toBe(200);
   const avatar = await app.inject({ method: "PUT", url: `/api/agents/${agent.id}/avatar`, headers: { cookie: owner.cookie, "content-type": "image/png" }, payload: PNG });
   expect(avatar.statusCode).toBe(200);
@@ -149,6 +154,7 @@ async function world() {
   const g = await group(app, owner, "team", [mia, ned]);
   await befriend(app, mia, sam);
   await seat(g, agent.id);
+  expect((await api(app, owner, "PUT", `/api/agents/${agent.id}/appellations/${mia.id}`, { appellation: HIDDEN.appellation })).status).toBe(200);
   // Said as a reply its owner's provider model gave there at a thinking level (its owner's `via`).
   const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high");
   const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
@@ -162,6 +168,8 @@ async function world() {
     groupMentions: "owner",
     othersBudget: "20",
     othersSpentToday: "0",
+    ownerAppellation: HIDDEN.ownerAppellation,
+    appellations: [{ principalId: mia.id, appellation: HIDDEN.appellation }],
     paused: true,
     model: { model: HIDDEN.model },
   });

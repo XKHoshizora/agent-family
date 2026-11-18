@@ -89,6 +89,10 @@ const VERTICAL_RUN = new RegExp(`[${VERTICAL_SPACE}]+`, "gu");
  */
 const oneLine = (text: string): string => text.replace(VERTICAL_RUN, " ").trim();
 
+const HAS_VERTICAL_SPACE = new RegExp(`[${VERTICAL_SPACE}]`, "u");
+/** Whether `text` holds a line break or any other vertical space: what an appellation (agents/routes.ts) must not. */
+export const hasVerticalSpace = (text: string): boolean => HAS_VERTICAL_SPACE.test(text);
+
 // --- who speaks in a group: the label and the run's mark ------------------------------------------------------------
 
 /**
