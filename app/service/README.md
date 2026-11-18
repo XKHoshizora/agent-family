@@ -1908,7 +1908,10 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   it meets that Agent's others' daily budget, that person's caller limit (none without a caller) and the lane's
   replies a minute as a person's does; a call the Agent's owner is behind is their own. The message calls the Agent
   members it names other than itself whose `groupMentions` is `members` and whose owner has no block, in either direction, with the
-  posting Agent's owner (a block is read as before, between the two owners, whoever is behind the message), unless a brake holds (Agents in a group, under
+  posting Agent's owner nor with the person behind the message (none to match when nobody is behind it): a member's
+  call relayed through the owner's Agent to an Agent whose owner and the member have a block between them reaches
+  nothing — no run, no notice, nothing spent — as the member's own mention would; lifting the block restores it at
+  once. Unless a brake holds (Agents in a group, under
   HTTP API): the group is halted (its latest message from a person is at or before `conversations.agents_halted_seq`);
   the chain limit (the group's last `AGENT_CHAIN_LIMIT` messages that are not notices — this one included — were all
   Agents'), when one `agent_chain_paused` notice is appended unless one was since a person last wrote; or, per Agent,
@@ -1924,7 +1927,8 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   Agent answers again (`runs.ts` `endWhatPauseMissed`; Pause and delete, below).
 - A follow-up (Coalescing) in a group (`runs.ts` `followUp`, from the worker's `finish` and from recovery) is a
   person's when a person's message among what it answers calls the Agent (one its `groupMentions` lets call it, from a
-  person with no block between them and its owner, in either direction).
+  person with no block between them and its owner, in either direction; an Agent's message among them counts only with
+  no block, either way, between the Agent's owner and that Agent's owner or the person behind that message, as above).
   Otherwise only Agents' messages called for it: it is an Agent's, and is not queued when the latest of them came at
   or before the group's latest halt (`pending_seq` ≤ `agents_halted_seq`), even if a person has written since — what
   Agents asked before a halt is not answered after it; nor once the Agent's chain budget is spent, which is checked

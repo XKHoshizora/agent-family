@@ -371,6 +371,63 @@ describe("a run's lane and who called for it", () => {
     expect(await laneOf(carl.id, w.g)).toEqual([["own", w.owner.id]]);
   });
 
+  it.each([
+    ["the called Agent's owner has blocked the person behind it", "third", "member"],
+    ["the person behind it has blocked the called Agent's owner", "member", "third"],
+  ] as const)(
+    "a call relayed through someone else's Agent reaches nothing when %s; the relaying Agent's owner's own call does; lifting the block restores it",
+    async (_what, blocker, blocked) => {
+      const w = await world();
+      await agentOf(w.owner, "alpha", w.g);
+      const beta = await agentOf(w.third, "beta", w.g);
+      expect((await api(app, w[blocker], "PUT", `/api/blocks/${w[blocked].id}`)).status).toBe(200);
+      const notices = async () => Number((await db.query("select count(*) n from messages where conversation_id = $1 and kind = 'system'", [w.g])).rows[0].n);
+      const relay = async (who: Actor, text: string) => {
+        await say(who, w.g, text);
+        gateway.reply("@beta 你看看");
+        expect(await app.agentWorker.runOnce()).toBe(true);
+      };
+
+      // The member asks the owner's Alpha, whose reply names the third's Beta: as if the member had named Beta — no run,
+      // no notice, nothing spent.
+      const before = await notices();
+      await relay(w.member, "@alpha 问问 beta");
+      expect(await laneOf(beta.id, w.g)).toEqual([]);
+      expect(await notices()).toBe(before);
+      // The owner's own call through Alpha does reach Beta (no block between the owner and the third).
+      await relay(w.owner, "@alpha 问问 beta");
+      expect(await laneOf(beta.id, w.g)).toEqual([["others", w.owner.id]]);
+      // Once the block is lifted, the member's call relayed so reaches Beta again.
+      await settleAll();
+      expect((await api(app, w[blocker], "DELETE", `/api/blocks/${w[blocked].id}`)).status).toBe(200);
+      await relay(w.member, "@alpha 再问问 beta");
+      expect(await laneOf(beta.id, w.g)).toEqual([
+        ["others", w.owner.id],
+        ["others", w.member.id],
+      ]);
+    },
+  );
+
+  it("a relayed call noted on a reply under way no longer counts for its follow-up once a block stands between the person behind it and the Agent's owner", async () => {
+    const w = await world();
+    await agentOf(w.owner, "alpha", w.g);
+    const beta = await agentOf(w.third, "beta", w.g);
+    await say(w.third, w.g, "@beta 一");
+    const one = await claim(beta.id, w.g);
+    // While Beta's reply runs, the member asks the owner's Alpha to ask it: Alpha's message is noted on Beta's reply.
+    await say(w.member, w.g, "@alpha 问问 beta");
+    gateway.reply("@beta 你看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await db.query("select pending_seq from agent_runs where id = $1", [one.id])).rows[0].pending_seq).not.toBeNull();
+    // Then Beta's owner blocks the member: the follow-up is still queued, but the member's relayed call is not its caller.
+    expect((await api(app, w.third, "PUT", `/api/blocks/${w.member.id}`)).status).toBe(200);
+    await finish(one);
+    expect(await laneOf(beta.id, w.g)).toEqual([
+      ["own", w.third.id],
+      ["others", null],
+    ]);
+  });
+
   it("a reply nobody called for names nobody: what it calls is others', with no caller", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);

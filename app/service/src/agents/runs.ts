@@ -288,7 +288,8 @@ export function callerOf(ownerId: string, personId: string | null): Caller {
  * (`postedBy`, that run's caller and lane) when that run is not its owner's own — so a member's call relayed through the
  * owner's Agent stays the member's, and what a reply nobody called for relays is nobody's (`null`) — otherwise (the run
  * is its owner's own, or no run posted the message) the Agent's owner. `followUp` reads the same rule from the stored
- * messages (the posting run is the one the message's `client_txn` names).
+ * messages (the posting run is the one the message's `client_txn` names). A block, either way, between that person and
+ * a named Agent's owner keeps the call off that Agent (`triggerFromAgent`, `followUp`), as between the two owners.
  */
 export function behindAgentMessage(ownerId: string, postedBy: Caller | null): string | null {
   return postedBy !== null && postedBy.lane !== "own" ? postedBy.id : ownerId;
@@ -735,8 +736,11 @@ async function chainBudgetSpent(
  * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
  * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
  * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
- * paused, with a model, `groupMentions` `members`, and of an owner with no block between them and the poster's owner, in either
- * direction (neither calls the other's Agents, through their own Agent no more than themselves). Their `agents` rows are read, not locked: the poster's is held
+ * paused, with a model, `groupMentions` `members`, and of an owner with no block, in either direction, between them and
+ * the poster's owner, nor between them and the person behind the message (`behindAgentMessage`; none when nobody is) —
+ * neither of two people calls the other's Agents, through their own Agent or someone else's no more than themselves: a
+ * member's call relayed through the owner's Agent to an Agent whose owner and the member have a block between them
+ * reaches nothing, as the member's own mention would. Their `agents` rows are read, not locked: the poster's is held
  * already, and locking another's after it could take two Agents' rows out of id order — two Agents calling each other
  * from two groups at once would deadlock. The fold-or-insert decision needs no target's row: the group's row, which
  * this transaction holds, orders it with every other trigger, retry, follow-up and halt in this group (the one-active-run
@@ -776,6 +780,9 @@ export async function triggerFromAgent(
   const own = poster.handle.toLowerCase();
   const handles = mentionedHandles(textOf(message)).filter((h) => h !== own);
   if (handles.length === 0) return noneTriggered();
+  const behind = behindAgentMessage(poster.ownerId, postedBy);
+  // A block, either way, between a target's owner and the poster's owner or the person behind the message (none to
+  // match when nobody is: `$5` null) keeps the target out.
   const { rows: targets } = await t.query<{ id: string; owner_id: string; budget: string; others_budget: string | null }>(
     `select p.id, p.owner_id, a.chain_budget_micro::text as budget, a.others_budget_micro::text as others_budget
        from memberships m
@@ -783,9 +790,11 @@ export async function triggerFromAgent(
        join agents a on a.principal_id = p.id
       where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
         and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
-        and not exists (select 1 from blocks b where (b.blocker_id = p.owner_id and b.blocked_id = $4) or (b.blocker_id = $4 and b.blocked_id = p.owner_id))
+        and not exists (select 1 from blocks b
+                         where (b.blocker_id = p.owner_id and b.blocked_id in ($4::uuid, $5::uuid))
+                            or (b.blocked_id = p.owner_id and b.blocker_id in ($4::uuid, $5::uuid)))
       order by p.id`,
-    [conversationId, handles, poster.id, poster.ownerId],
+    [conversationId, handles, poster.id, poster.ownerId, behind],
   );
   if (targets.length === 0) return noneTriggered();
 
@@ -802,7 +811,6 @@ export async function triggerFromAgent(
     return { ...noneTriggered(), notices: [await appendSystem(t, conversationId, { event: "agent_chain_paused", actorId: poster.id, limit })] };
   }
 
-  const behind = behindAgentMessage(poster.ownerId, postedBy);
   const dayStart = today(config);
   const told: Pick<Triggered, "notices" | "budgetReached"> = { notices: [], budgetReached: [] };
   const called: RunAgent[] = [];
@@ -854,8 +862,8 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [], budgetReached: [] };
  * `rate_limited` run in the group records it instead (`rateLimitedInGroup`), so a member who keeps mentioning an Agent
  * while it replies cannot keep it replying past its owner's limit. Its lane and caller come from what it
  * answers, not from the run that ended: the messages in (covers, pending] that call the Agent — a person's, as above,
- * or another Agent's while its `groupMentions` lets members call it (with no block between that Agent's owner and the
- * Agent's owner, as for a person), which is the call of the person behind that message by the rule of
+ * or another Agent's while its `groupMentions` lets members call it (with no block, either way, between the Agent's
+ * owner and that Agent's owner, nor the person behind that message), which is the call of the person behind it by the rule of
  * `behindAgentMessage` (the caller of the run that posted it — the run its `client_txn` names — when that run is not its
  * owner's own, else that Agent's owner) — make it its owner's own when the owner is behind one of them, else the
  * earliest caller's (a message nobody is behind, relayed from a reply nobody called for, names no one: the earliest that
@@ -876,18 +884,21 @@ export async function followUp(
   const owners = callerOf(agent.ownerId, agent.ownerId);
   if (conversationId === agent.conversationId) return { ...NO_FOLLOW_UP, run: await queueRun(t, agent, conversationId, pending, "human", owners) };
   // The person behind each message (`behindAgentMessage`): its sender; for an Agent's message, the caller of the run that
-  // posted it (the run its `client_txn` names) unless that run is its owner's own (or there is none: the owner). A block
-  // is read, as ever, between the Agent's owner and the sender, or the sending Agent's owner.
+  // posted it (the run its `client_txn` names) unless that run is its owner's own (or there is none: the owner). A
+  // message does not count when there is a block, either way, between the Agent's owner and the sender or the sending
+  // Agent's owner, or the person behind it (nobody behind it matches no block).
   const { rows } = await t.query<{ kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null }>(
-    `select p.kind, m.sender_id, m.body ->> 'text' as text,
-            case when r.lane <> 'own' then r.caller_id else coalesce(p.owner_id, p.id) end as caller_id
+    `select p.kind, m.sender_id, m.body ->> 'text' as text, bh.caller_id
        from messages m
        join principals p on p.id = m.sender_id
        left join agent_runs r
          on p.kind = 'agent' and r.id = (case when m.client_txn ~ $6 then m.client_txn end)::uuid
         and r.agent_id = m.sender_id and r.conversation_id = m.conversation_id and r.purpose = 'reply'
+       cross join lateral (select case when r.lane <> 'own' then r.caller_id else coalesce(p.owner_id, p.id) end as caller_id) bh
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5
-        and not exists (select 1 from blocks b where (b.blocker_id = $4 and b.blocked_id = coalesce(p.owner_id, p.id)) or (b.blocker_id = coalesce(p.owner_id, p.id) and b.blocked_id = $4))
+        and not exists (select 1 from blocks b
+                         where (b.blocker_id = $4 and b.blocked_id in (coalesce(p.owner_id, p.id), bh.caller_id))
+                            or (b.blocked_id = $4 and b.blocker_id in (coalesce(p.owner_id, p.id), bh.caller_id)))
       order by m.seq`,
     [conversationId, covers, pending, agent.ownerId, agent.id, RUN_ID_TEXT],
   );
