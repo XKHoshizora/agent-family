@@ -150,6 +150,9 @@ export function noticeText(system, fallback, nameOf, where = {}) {
     case "agent_budget_reached":
       text = `${n(system.agentId)}已达到本次接话的点数上限，有人发言后继续。`;
       break;
+    case "agent_daily_budget_reached":
+      text = `「${n(system.agentId)}」今天的额度已用完`;
+      break;
     default:
       return null;
   }
@@ -195,6 +198,21 @@ export function replyPoints(value) {
   const scaled = BigInt(whole + (decimals + "0000").slice(0, 4)) + (Number(decimals[4] ?? "0") >= 5 ? 1n : 0n);
   const digits = scaled.toString().padStart(5, "0");
   return formatPoints(`${digits.slice(0, -4)}.${digits.slice(-4)}`);
+}
+
+/** A decimal string of points in micro-points (six decimals), or null when it is not a non-negative decimal string. */
+function microPoints(value) {
+  const parts = typeof value === "string" ? /^(\d+)(?:\.(\d+))?$/.exec(value) : null;
+  if (!parts) return null;
+  const [, whole, decimals = ""] = parts;
+  return BigInt(whole + (decimals + "000000").slice(0, 6));
+}
+
+/** Whether `spent` has reached `budget` (both decimal strings of points), compared on the digits (no float maths). */
+export function pointsReached(spent, budget) {
+  const a = microPoints(spent);
+  const b = microPoints(budget);
+  return a !== null && b !== null && a >= b;
 }
 
 const VIA_LEVELS = new Set(["none", "low", "medium", "high", "xhigh", "max"]);
@@ -431,6 +449,9 @@ function agentView(a, version, loaded) {
     groupMentions: a.groupMentions === "owner" ? "owner" : "members",
     /** 一次接话最多花费: decimal points as the service says them (its default when it says nothing). */
     chainBudget: typeof a.chainBudget === "string" ? a.chainBudget : "50",
+    /** 别人 @ 每天最多花 (decimal points, null = unlimited) and what they spent today: only when the service says them. */
+    ...(a.othersBudget === null || typeof a.othersBudget === "string" ? { othersBudget: a.othersBudget } : {}),
+    ...(typeof a.othersSpentToday === "string" ? { othersSpentToday: a.othersSpentToday } : {}),
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),

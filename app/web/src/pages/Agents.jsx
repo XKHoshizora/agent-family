@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { formatPoints } from "../data/viewmodel.js";
+import { formatPoints, pointsReached } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
 import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat, refusalText, settled } from "./AgentForm.jsx";
@@ -11,6 +11,20 @@ import { useAction } from "./useAction.js";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
 const groupMentionsLabel = (agent) => (GROUP_MENTIONS.find(([id]) => id === agent.groupMentions) ?? GROUP_MENTIONS[0])[1];
+
+/** 别人 @ 每天最多花 with today's spend: only for my Agent that others may call, when the service says its budget. */
+function othersRows(agent) {
+  if (agent.othersBudget === undefined || agent.groupMentions !== "members") return [];
+  const spentToday = agent.othersSpentToday ?? "0";
+  const spent = formatPoints(spentToday);
+  const text =
+    agent.othersBudget === null
+      ? `今天别人 @ 已花 ${spent} 点（不限）`
+      : pointsReached(spentToday, agent.othersBudget)
+        ? "今天别人 @ 的额度已用完，调高后立即恢复。"
+        : `今天别人 @ 已花 ${spent} / ${formatPoints(agent.othersBudget)} 点`;
+  return [["别人 @ 每天最多花", text]];
+}
 
 /** The status tag of an Agent; none while its record is not loaded (its model is not known yet). */
 function StatusTag({ agent, long = false }) {
@@ -246,6 +260,7 @@ function AgentDetail({ agent }) {
                     ["私聊回复方式", agent.privateReply],
                     ["群里谁可以叫它", groupMentionsLabel(agent)],
                     ["一次接话最多花费", `${formatPoints(agent.chainBudget ?? CHAIN_BUDGET_DEFAULT)} 点`],
+                    ...othersRows(agent),
                   ]}
                 />
                 <Reason>人格文档只影响它如何回复，不授予任何权限。</Reason>

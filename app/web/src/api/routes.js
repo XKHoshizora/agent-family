@@ -69,12 +69,12 @@ export function socketUrl(ticket) {
 
 // ───────── Agents (owner only; app/service/README.md "Agents")
 export const listAgents = () => request("GET", "/api/agents"); // → {agents: [Agent]}, oldest first, deleted ones included
-/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, reasoning?, model?} → Agent */
+/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, othersBudget?, reasoning?, model?} → Agent */
 export const createAgent = (body) => request("POST", "/api/agents", body);
 export const getAgent = (agentId) => request("GET", `/api/agents/${seg(agentId)}`);
 /**
- * patch: any of {name, intro, field, persona, replyMode, groupMentions, chainBudget, reasoning, model} (`model: null`
- * clears it; `chainBudget` is a decimal string of points) → Agent
+ * patch: any of {name, intro, field, persona, replyMode, groupMentions, chainBudget, othersBudget, reasoning, model} (`model: null`
+ * clears it; `chainBudget` is a decimal string of points; `othersBudget` too, or `null` for unlimited) → Agent
  */
 export const patchAgent = (agentId, patch) => request("PATCH", `/api/agents/${seg(agentId)}`, patch);
 export const pauseAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/pause`);

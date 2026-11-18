@@ -215,6 +215,33 @@ describe("messages", () => {
     expect(lastPreview(v, { ...v.convs[G1], messages: v.convs[G1].messages.slice(0, 7) })).toBe("不认识的 Agent");
   });
 
+  it("the notice that an Agent's daily budget for others' calls is used up names the Agent, and falls back for an unknown one", () => {
+    const BOT = "00000000-0000-4000-8000-0000000000b9";
+    const ev = (seq, system, text) => notice(G1, seq, text, system);
+    const sync = syncOf(
+      [group(G1, { lastSeq: 2 })],
+      [
+        ev(1, { event: "agent_daily_budget_reached", actorId: ANN, agentId: BOT }, "服务端句子1"),
+        ev(2, { event: "agent_daily_budget_reached", actorId: ANN, agentId: "00000000-0000-4000-8000-0000000000ef" }, "不认识的 Agent"),
+      ],
+      [...PRINCIPALS, { ...agentPrincipal(BOT, "annbot", "安的助手"), ownerId: ANN }],
+    );
+    const v = toView(M.applySync(M.initial(), sync), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => [m.text, Boolean(m.hidden)])).toEqual([
+      ["「安的助手」今天的额度已用完", false],
+      ["不认识的 Agent", false],
+    ]);
+  });
+
+  it("my Agent carries the daily budget for others' calls and today's spend as the service says them; absent stays absent", () => {
+    const withBudget = (extra) =>
+      toView(M.applyAgents(M.applySync(M.initial(), syncOf([agentConv(A1, AG1)], [], [...PRINCIPALS, agentPrincipal(AG1)])), [agentOf(AG1, extra)]), { now: NOW }).agents[AG1];
+    expect(withBudget({ othersBudget: "35.5", othersSpentToday: "3.5" })).toMatchObject({ othersBudget: "35.5", othersSpentToday: "3.5" });
+    expect(withBudget({ othersBudget: null, othersSpentToday: "0" })).toMatchObject({ othersBudget: null, othersSpentToday: "0" });
+    expect(withBudget({})).not.toHaveProperty("othersBudget");
+    expect(withBudget({})).not.toHaveProperty("othersSpentToday");
+  });
+
   it("a sender nobody has named here is 已退出的成员 (in the timeline and the list preview)", () => {
     const GONE = "00000000-0000-4000-8000-0000000000a9";
     const v = toView(model({ conversations: [group(G1, { lastSeq: 2 })], messages: [wire(G1, 1, ANN, "在吗"), wire(G1, 2, GONE, "我先走了")] }), { now: NOW });

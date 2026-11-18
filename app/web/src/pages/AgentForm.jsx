@@ -44,6 +44,13 @@ export function chainBudgetOf(text) {
   return kept ? `${points}.${kept}` : points;
 }
 
+/** 别人 @ 每天最多花 when nothing else is said, in points (the service's default); an amount is checked like the chain budget. */
+export const OTHERS_BUDGET_DEFAULT = "20";
+
+/** The sent value of 别人 @ 每天最多花 for the form's fields: the default, the amount typed (null if wrong), or null for 不限. */
+const othersBudgetSent = (f) =>
+  f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? chainBudgetOf(f.othersAmount) : OTHERS_BUDGET_DEFAULT;
+
 /** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
 export async function settled(pending) {
   const result = await pending;
@@ -89,6 +96,9 @@ const recordFields = (a) => ({
   replyMode: a?.replyMode ?? "always",
   groupMentions: a?.groupMentions ?? "members",
   chainBudget: chainBudgetOf(a?.chainBudget) ?? CHAIN_BUDGET_DEFAULT,
+  // The service's value as a choice and an amount: "20" (or nothing) is the default, null is 不限, anything else 自己填.
+  othersChoice: a?.othersBudget === null ? "unlimited" : typeof a?.othersBudget === "string" && a.othersBudget !== OTHERS_BUDGET_DEFAULT ? "custom" : "default",
+  othersAmount: typeof a?.othersBudget === "string" ? a.othersBudget : OTHERS_BUDGET_DEFAULT,
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
 });
@@ -98,6 +108,7 @@ const storedValue = (key, f) => {
   if (key === "persona") return personaOf(f.persona);
   if (key === "name" || key === "intro" || key === "field") return f[key].trim();
   if (key === "chainBudget") return chainBudgetOf(f.chainBudget) ?? f.chainBudget.trim();
+  if (key === "othersAmount") return chainBudgetOf(f.othersAmount) ?? f.othersAmount.trim();
   return f[key];
 };
 
@@ -175,6 +186,8 @@ export function AgentForm({ agent = null }) {
     field: chars(field) > 20 ? "擅长领域不超过 20 个字" : "",
     persona: chars(persona) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
     chainBudget: chainBudgetOf(f.chainBudget) === null ? CHAIN_BUDGET_WRONG : "",
+    // Only while it is asked for (calls from members, 自己填).
+    othersAmount: f.groupMentions === "members" && f.othersChoice === "custom" && chainBudgetOf(f.othersAmount) === null ? CHAIN_BUDGET_WRONG : "",
   };
   const invalid = Object.values(errors).some(Boolean);
   const shown = (key) => (touched ? errors[key] : "");
@@ -247,6 +260,8 @@ export function AgentForm({ agent = null }) {
     body.replyMode = f.replyMode;
     body.groupMentions = f.groupMentions;
     body.chainBudget = chainBudgetOf(f.chainBudget);
+    // Said only when others may call it (otherwise the service keeps its default).
+    if (f.groupMentions === "members") body.othersBudget = othersBudgetSent(f);
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -285,6 +300,9 @@ export function AgentForm({ agent = null }) {
     const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
     const patch = {};
     for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions", "chainBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
+    // 别人 @ 每天最多花: only while others may call it, and only when it differs from the record's.
+    const othersTouched = edited.current.has("othersChoice") || edited.current.has("othersAmount");
+    if (othersTouched && f.groupMentions === "members" && othersBudgetSent(f) !== othersBudgetSent(record)) patch.othersBudget = othersBudgetSent(f);
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -462,6 +480,23 @@ export function AgentForm({ agent = null }) {
         >
           <input value={f.chainBudget} onChange={set("chainBudget")} inputMode="decimal" autoComplete="off" />
         </Field>
+        {f.groupMentions === "members" && (
+          <>
+            <Field label="别人 @ 每天最多花">
+              <select value={f.othersChoice} onChange={set("othersChoice")}>
+                <option value="default">{OTHERS_BUDGET_DEFAULT} 点（默认）</option>
+                <option value="custom">自己填</option>
+                <option value="unlimited">不限</option>
+              </select>
+            </Field>
+            {f.othersChoice === "custom" && (
+              <Field label="每天最多花（点）" error={shown("othersAmount")}>
+                <input value={f.othersAmount} onChange={set("othersAmount")} inputMode="decimal" autoComplete="off" />
+              </Field>
+            )}
+            {f.othersChoice === "unlimited" && <Notice tone="warn">群里任何人都能让它回复，花的是你的点。</Notice>}
+          </>
+        )}
         <Notice tone="info">
           {agent
             ? "修改从它的下一次回复起生效。"
