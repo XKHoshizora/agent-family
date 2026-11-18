@@ -597,6 +597,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (agent?.conversationId) request({ conversation: agent.conversationId });
   };
   const agentWrite = (action, agentId, after) => ({ after, refetch: refetchAgent(agentId), text: agentText(action), onFail: staleAgent(agentId) });
+  /** An appellation write: its 400 and 404 are about the person named, so only an Agent deleted elsewhere makes the picture stale. */
+  const appellationWrite = (agentId) => ({
+    ...agentWrite("appellation", agentId, (agent) => setModel(applyAgent(getModel(), agent))),
+    onFail: (error) => {
+      if (error.code === "agent_deleted") request({ agent: agentId });
+    },
+  });
   const providerWrite = (action, after, onFail) => ({ after, refetch: () => agentActions.loadProviders(), text: providerText(action), onFail });
   const forgetProvider = (providerId) => (error) => {
     if (error.status === 404) setModel(removeProvider(getModel(), providerId));
@@ -666,6 +673,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     pauseAgent: (agentId) => attempt(() => api.pauseAgent(agentId), agentWrite("pause", agentId, agentChanged)),
     resumeAgent: (agentId) => attempt(() => api.resumeAgent(agentId), agentWrite("resume", agentId, agentChanged)),
     deleteAgent: (agentId) => attempt(() => api.deleteAgent(agentId), agentWrite("delete", agentId, agentChanged)),
+    /** How the Agent addresses `principalId` (set, or removed): the Agent's view as the service answers it is kept. */
+    setAppellation: (agentId, principalId, appellation) =>
+      attempt(() => api.putAppellation(agentId, principalId, { appellation }), appellationWrite(agentId)),
+    removeAppellation: (agentId, principalId) => attempt(() => api.deleteAppellation(agentId, principalId), appellationWrite(agentId)),
     /** Uploads the Agent's new avatar; on success its URL gets the next version at once. */
     uploadAgentAvatar: (agentId, file) =>
       attempt(() => api.uploadAgentAvatar(agentId, file), agentWrite("avatar", agentId, () => setModel(bumpAvatar(getModel(), 0, agentId)))),

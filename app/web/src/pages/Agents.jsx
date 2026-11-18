@@ -26,6 +26,15 @@ function othersRows(agent) {
   return [["别人 @ 每天最多花", text]];
 }
 
+/** 它怎么称呼你 and how many others it has an appellation for: only in the owner's view of the Agent (mine), when set. */
+function appellationRows(agent) {
+  const others = agent.appellations?.length ?? 0;
+  return [
+    ...(agent.ownerAppellation ? [["它怎么称呼你", agent.ownerAppellation]] : []),
+    ...(others > 0 ? [["它怎么称呼别人", `${others} 个`]] : []),
+  ];
+}
+
 /** The status tag of an Agent; none while its record is not loaded (its model is not known yet). */
 function StatusTag({ agent, long = false }) {
   if (agent.deleted) return <Tag tone="muted">已删除</Tag>;
@@ -261,6 +270,7 @@ function AgentDetail({ agent }) {
                     ["群里谁可以叫它", groupMentionsLabel(agent)],
                     ["一次接话最多花费", `${formatPoints(agent.chainBudget ?? CHAIN_BUDGET_DEFAULT)} 点`],
                     ...othersRows(agent),
+                    ...appellationRows(agent),
                   ]}
                 />
                 <Reason>人格文档只影响它如何回复，不授予任何权限。</Reason>

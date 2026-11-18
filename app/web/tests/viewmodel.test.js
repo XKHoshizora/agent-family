@@ -242,6 +242,16 @@ describe("messages", () => {
     expect(withBudget({})).not.toHaveProperty("othersSpentToday");
   });
 
+  it("my Agent carries how it addresses me and the others as the service says them; absent stays absent (someone else's view has neither)", () => {
+    const view = (extra) =>
+      toView(M.applyAgents(M.applySync(M.initial(), syncOf([agentConv(A1, AG1)], [], [...PRINCIPALS, agentPrincipal(AG1)])), [agentOf(AG1, extra)]), { now: NOW }).agents[AG1];
+    const entry = { principalId: ANN, kind: "human", handle: "ann", name: "小安", appellation: "安姐" };
+    expect(view({ ownerAppellation: "老板", appellations: [entry] })).toMatchObject({ ownerAppellation: "老板", appellations: [entry] });
+    expect(view({ ownerAppellation: null, appellations: [] })).toMatchObject({ ownerAppellation: null, appellations: [] });
+    expect(view({})).not.toHaveProperty("ownerAppellation");
+    expect(view({})).not.toHaveProperty("appellations");
+  });
+
   it("a sender nobody has named here is 已退出的成员 (in the timeline and the list preview)", () => {
     const GONE = "00000000-0000-4000-8000-0000000000a9";
     const v = toView(model({ conversations: [group(G1, { lastSeq: 2 })], messages: [wire(G1, 1, ANN, "在吗"), wire(G1, 2, GONE, "我先走了")] }), { now: NOW });

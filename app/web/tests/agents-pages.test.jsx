@@ -12,6 +12,7 @@ import {
   AG1,
   AG2,
   ANN,
+  BO,
   D1,
   G1,
   ME_ID,
@@ -1204,5 +1205,314 @@ describe("contacts: 我的 Agent", () => {
     expect(rowNames()).toEqual(["小助手"]);
     fireEvent.change(box, { target: { value: "小安" } });
     expect(rowNames()).toEqual(["小安"]);
+  });
+});
+
+describe("称呼 (how an Agent addresses its owner and others)", () => {
+  const OAG = "00000000-0000-4000-8000-0000000000b9";
+  const DORA_P = Object.values(PEOPLE).find((p) => p.displayName === "朵拉");
+  const FIELD = "它怎么称呼你";
+  const ANN_ENTRY = { principalId: ANN, kind: "human", handle: "ann", name: "小安", appellation: "安姐" };
+  const BOT_ENTRY = { principalId: OAG, kind: "agent", handle: "annbot", name: "安的助手", appellation: "小助理" };
+  const record = (extra = {}) => agentOf(AG1, { model: SITE_MODEL, ownerAppellation: null, appellations: [], ...extra });
+  // Me, my Agent, 小安, 阿波 and 小安's Agent in one group; 朵拉 is only a friend of mine.
+  const MEMBERS = [ME_ID, AG1, ANN, BO, OAG].map((id, i) => ({ id, role: "speaker", isCreator: i === 0 }));
+  const annBot = { ...agentPrincipal(OAG, "annbot", "安的助手"), ownerId: ANN };
+  const world = (rec, api = {}, extra = {}) => ({
+    agents: [rec],
+    extra: [group(G1, { members: MEMBERS })],
+    others: [annBot],
+    social: { ...emptySocial(), friends: [PEOPLE[ANN], DORA_P] },
+    api,
+    ...extra,
+  });
+  const openEdit = async (rec, api = {}, extra = {}) => {
+    const app = await openAgents(world(rec, api, extra));
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    return app;
+  };
+  const section = () => inMain().getByRole("group", { name: "称呼" });
+  const ownerBox = () => inMain().getByLabelText(FIELD);
+  const rows = () => [...section().querySelectorAll(".appellation-rows li:not(.rows-empty)")];
+  const rowOfName = (name) => rows().find((li) => li.textContent.includes(name));
+  const rowInput = (name) => within(rowOfName(name)).getByLabelText(`给${name}的称呼`);
+  const save = () => click(inMain().getByRole("button", { name: "保存" }));
+  const answering = (rec, extra) => vi.fn(async () => ({ ...rec, ...extra }));
+
+  describe("它怎么称呼你", () => {
+    it("the create form shows only this field, with its placeholder and hint, and nothing of the list", async () => {
+      await openAgents({});
+      await openCreate();
+      expect(inMain().getByText("称呼", { selector: "legend, h3, h4" })).toBeTruthy();
+      expect(ownerBox().getAttribute("placeholder")).toBe("留空就用你的名字");
+      expect(ownerBox().closest(".field").textContent).toContain("最多 20 个字。只影响它怎么叫你，不影响它把谁当主人。");
+      expect(mainText()).not.toContain("它怎么称呼别人");
+      expect(mainText()).not.toContain("添加称呼");
+    });
+
+    it("creating: sent trimmed when filled in, not at all when empty", async () => {
+      const createAgent = vi.fn(async () => agentOf(AG1));
+      await openAgents({ api: { createAgent } });
+      await openCreate();
+      type("名称", "MyBot");
+      await chooseModel("小模型 · 免费");
+      await click(createButton());
+      expect(createAgent.mock.calls[0][0]).not.toHaveProperty("ownerAppellation");
+      await openCreate();
+      type("名称", "MyBot");
+      type(FIELD, "  老板  ");
+      await chooseModel("小模型 · 免费");
+      await click(createButton());
+      expect(createAgent.mock.calls[1][0]).toMatchObject({ ownerAppellation: "老板" });
+    });
+
+    it("is refused inline above 20 characters (counted as characters, not code units), before any request", async () => {
+      const createAgent = vi.fn(async () => agentOf(AG1));
+      await openAgents({ api: { createAgent } });
+      await openCreate();
+      type("名称", "MyBot");
+      await chooseModel("小模型 · 免费");
+      type(FIELD, "𠮷".repeat(21));
+      await click(createButton());
+      expect(ownerBox().closest(".field").textContent).toContain("称呼最多 20 个字，不能换行。");
+      expect(ownerBox().getAttribute("aria-invalid")).toBe("true");
+      expect(createAgent).not.toHaveBeenCalled();
+      type(FIELD, `  ${"𠮷".repeat(20)}  `);
+      expect(ownerBox().closest(".field").textContent).not.toContain("称呼最多");
+      await click(createButton());
+      expect(createAgent.mock.calls[0][0]).toMatchObject({ ownerAppellation: "𠮷".repeat(20) });
+    });
+
+    it("editing: opens with the stored value; sent only when changed, null when cleared", async () => {
+      const rec = record({ ownerAppellation: "老板" });
+      const patchAgent = vi.fn(async (_id, patch) => ({ ...rec, ...patch }));
+      await openEdit(rec, { patchAgent });
+      expect(ownerBox().value).toBe("老板");
+      type(FIELD, " 老板 ");
+      type("简介", "新简介");
+      await save();
+      expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      type(FIELD, "大哥");
+      await save();
+      expect(patchAgent.mock.calls[1][1]).toEqual({ ownerAppellation: "大哥" });
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      type(FIELD, "  ");
+      await save();
+      expect(patchAgent.mock.calls[2][1]).toEqual({ ownerAppellation: null });
+    });
+
+    it("editing with none stored: leaving it empty sends nothing", async () => {
+      const patchAgent = vi.fn(async (_id, patch) => ({ ...record(), ...patch }));
+      await openEdit(record(), { patchAgent });
+      expect(ownerBox().value).toBe("");
+      type(FIELD, "   ");
+      type("简介", "新简介");
+      await save();
+      expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+    });
+
+    it("changed elsewhere while I have not touched it shows the new value; one I touched keeps my text and says that saving overwrites it", async () => {
+      const rec = record({ ownerAppellation: "老板" });
+      const patchAgent = vi.fn(async (_id, patch) => ({ ...rec, ...patch }));
+      const app = await openEdit(rec, { patchAgent });
+      const elsewhere = async (fields) => {
+        app.transport.handlers.agent = () => ({ ...rec, ...fields });
+        await push(app.transport, { type: "agent", id: AG1 });
+        await flush();
+      };
+      await elsewhere({ ownerAppellation: "大哥" });
+      expect(ownerBox().value).toBe("大哥");
+      expect(mainText()).not.toContain("刚刚在别处有改动");
+      type(FIELD, "我的叫法");
+      await elsewhere({ ownerAppellation: "老大" });
+      expect(ownerBox().value).toBe("我的叫法");
+      expect(mainText()).toContain("刚刚在别处有改动");
+      await save();
+      expect(patchAgent.mock.calls[0][1]).toEqual({ ownerAppellation: "我的叫法" });
+    });
+
+    it("the Agent's page shows it when set, and no row when not", async () => {
+      await openAgents(world(record({ ownerAppellation: "老板" })));
+      await openRow("小助手");
+      expect(document.querySelector(".main-col .kv").textContent).toContain("它怎么称呼你老板");
+      cleanup();
+      await openAgents(world(record()));
+      await openRow("小助手");
+      expect(document.querySelector(".main-col .kv").textContent).not.toContain("它怎么称呼你");
+    });
+  });
+
+  describe("它怎么称呼别人", () => {
+    it("lists each stored entry with name, @handle and an Agent badge for Agents; the Agent's page counts them", async () => {
+      const rec = record({ appellations: [ANN_ENTRY, BOT_ENTRY] });
+      await openAgents(world(rec));
+      await openRow("小助手");
+      expect(document.querySelector(".main-col .kv").textContent).toContain("它怎么称呼别人2 个");
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      expect(section().textContent).toContain("它怎么称呼别人");
+      expect(rows()).toHaveLength(2);
+      expect(rowOfName("小安").textContent).toContain("@ann");
+      expect(rowOfName("小安").querySelector(".tag")).toBeNull();
+      expect(rowInput("小安").value).toBe("安姐");
+      expect(rowOfName("安的助手").textContent).toContain("@annbot");
+      expect(rowOfName("安的助手").querySelector(".tag").textContent).toBe("Agent");
+      expect(rowInput("安的助手").value).toBe("小助理");
+      expect(within(rowOfName("小安")).getByRole("button", { name: "移除" })).toBeTruthy();
+    });
+
+    it("says so when there is none, and the Agent's page has no such row", async () => {
+      await openAgents(world(record()));
+      await openRow("小助手");
+      expect(document.querySelector(".main-col .kv").textContent).not.toContain("它怎么称呼别人");
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      expect(section().textContent).toContain("还没有给别人设称呼。");
+      expect(rows()).toHaveLength(0);
+    });
+
+    it("an entry whose target is no longer a friend or a member is still listed and can be removed", async () => {
+      const GONE = "00000000-0000-4000-8000-0000000000a9";
+      const gone = { principalId: GONE, kind: "human", handle: "gone", name: "老朋友", appellation: "老哥" };
+      const rec = record({ appellations: [gone] });
+      const deleteAppellation = vi.fn(async () => ({ ...rec, appellations: [] }));
+      await openEdit(rec, { deleteAppellation });
+      expect(rowOfName("老朋友").textContent).toContain("@gone");
+      expect(rowInput("老朋友").value).toBe("老哥");
+      await click(within(rowOfName("老朋友")).getByRole("button", { name: "移除" }));
+      expect(deleteAppellation).toHaveBeenCalledWith(AG1, GONE);
+      expect(section().textContent).toContain("还没有给别人设称呼。");
+    });
+
+    it("添加称呼 opens a picker of my friends and the people and Agents of its groups, less itself, me and those listed, sorted by name", async () => {
+      const rec = record({ appellations: [BOT_ENTRY] });
+      await openEdit(rec);
+      expect(inMain().queryByLabelText("选择好友或群成员")).toBeNull();
+      await click(inMain().getByRole("button", { name: "添加称呼" }));
+      const picker = inMain().getByLabelText("选择好友或群成员");
+      const options = within(picker).getAllByRole("option").map((o) => o.textContent);
+      expect(options[0]).toBe("选择好友或群成员");
+      // 小安 is both a friend and a member: once. 安的助手 is listed already; 小助手 is the Agent; Mei is me.
+      const names = options.slice(1);
+      expect(names.slice().sort()).toEqual(["小安 @ann", "朵拉 @dora", "阿波 @bo"].sort());
+      expect(names).toEqual(names.slice().sort((a, b) => a.localeCompare(b, "zh")));
+      expect(inMain().getByPlaceholderText("称呼")).toBeTruthy();
+    });
+
+    it("an Agent not yet listed shows its badge in the picker", async () => {
+      await openEdit(record());
+      await click(inMain().getByRole("button", { name: "添加称呼" }));
+      expect(within(inMain().getByLabelText("选择好友或群成员")).getByRole("option", { name: "安的助手 @annbot · Agent" })).toBeTruthy();
+    });
+
+    it("chosen and named, it is saved by PUT and the list is the view the service answers with", async () => {
+      const rec = record();
+      const putAppellation = vi.fn(async () => ({ ...rec, appellations: [ANN_ENTRY] }));
+      await openEdit(rec, { putAppellation });
+      await click(inMain().getByRole("button", { name: "添加称呼" }));
+      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "  安姐  " } });
+      await click(inMain().getByRole("button", { name: "保存称呼" }));
+      expect(putAppellation).toHaveBeenCalledWith(AG1, ANN, { appellation: "安姐" });
+      expect(rows()).toHaveLength(1);
+      expect(rowInput("小安").value).toBe("安姐");
+      expect(inMain().queryByLabelText("选择好友或群成员")).toBeNull();
+    });
+
+    it("does not send an empty or too long appellation: the error is said in the section", async () => {
+      const putAppellation = vi.fn(async () => record());
+      await openEdit(record(), { putAppellation });
+      await click(inMain().getByRole("button", { name: "添加称呼" }));
+      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "字".repeat(21) } });
+      await click(inMain().getByRole("button", { name: "保存称呼" }));
+      expect(section().textContent).toContain("称呼最多 20 个字，不能换行。");
+      expect(putAppellation).not.toHaveBeenCalled();
+    });
+
+    it("a stored one is edited in place: saved on blur or Enter when it changed, never when it did not", async () => {
+      const rec = record({ appellations: [ANN_ENTRY] });
+      const putAppellation = vi.fn(async (_id, _pid, body) => ({ ...rec, appellations: [{ ...ANN_ENTRY, appellation: body.appellation }] }));
+      await openEdit(rec, { putAppellation });
+      fireEvent.focus(rowInput("小安"));
+      fireEvent.blur(rowInput("小安"));
+      await flush();
+      expect(putAppellation).not.toHaveBeenCalled();
+      fireEvent.change(rowInput("小安"), { target: { value: "安安" } });
+      fireEvent.blur(rowInput("小安"));
+      await flush();
+      expect(putAppellation).toHaveBeenCalledTimes(1);
+      expect(putAppellation).toHaveBeenLastCalledWith(AG1, ANN, { appellation: "安安" });
+      fireEvent.change(rowInput("小安"), { target: { value: " 小安姐 " } });
+      fireEvent.keyDown(rowInput("小安"), { key: "Enter" });
+      await flush();
+      expect(putAppellation).toHaveBeenLastCalledWith(AG1, ANN, { appellation: "小安姐" });
+      // Enter here never saves the Agent's form: it is still open.
+      expect(inMain().getByRole("button", { name: "保存" })).toBeTruthy();
+    });
+
+    it("emptied, a row goes back to what is stored and sends nothing (移除 is how it goes)", async () => {
+      const rec = record({ appellations: [ANN_ENTRY] });
+      const putAppellation = vi.fn(async () => rec);
+      await openEdit(rec, { putAppellation });
+      fireEvent.change(rowInput("小安"), { target: { value: "  " } });
+      fireEvent.blur(rowInput("小安"));
+      await flush();
+      expect(putAppellation).not.toHaveBeenCalled();
+      expect(rowInput("小安").value).toBe("安姐");
+    });
+
+    it("移除 calls DELETE and the list is the view the service answers with", async () => {
+      const rec = record({ appellations: [ANN_ENTRY, BOT_ENTRY] });
+      const deleteAppellation = vi.fn(async () => ({ ...rec, appellations: [BOT_ENTRY] }));
+      await openEdit(rec, { deleteAppellation });
+      await click(within(rowOfName("小安")).getByRole("button", { name: "移除" }));
+      expect(deleteAppellation).toHaveBeenCalledWith(AG1, ANN);
+      expect(rows().map((li) => li.textContent.includes("安的助手"))).toEqual([true]);
+    });
+
+    it("a refusal is said under its own row: 400, 404 and too_many with their sentences, anything else the generic one", async () => {
+      const rec = record({ appellations: [ANN_ENTRY, BOT_ENTRY] });
+      const refuse = (status, code) => async () => {
+        throw apiError(status, code);
+      };
+      const putAppellation = vi.fn(refuse(404, "not_found"));
+      await openEdit(rec, { putAppellation });
+      const say = async (name, text) => {
+        fireEvent.change(rowInput(name), { target: { value: `新${name}` } });
+        fireEvent.blur(rowInput(name));
+        await flush();
+        expect(rowOfName(name).textContent).toContain(text);
+      };
+      await say("小安", "现在不能给这个人设称呼：对方需要是你的好友，或者和它在同一个群里。");
+      // Only that row.
+      expect(rowOfName("安的助手").textContent).not.toContain("现在不能");
+      putAppellation.mockImplementation(refuse(400, "invalid_request"));
+      await say("安的助手", "称呼最多 20 个字，不能换行。");
+      putAppellation.mockImplementation(refuse(409, "too_many"));
+      await say("小安", "一个 Agent 最多设 100 个称呼。");
+      putAppellation.mockImplementation(refuse(500, "internal"));
+      await say("小安", "操作没有成功，请稍后再试。");
+      expect(toastText()).toBeNull();
+    });
+
+    it("a refused addition keeps the picker open with the sentence", async () => {
+      const putAppellation = vi.fn(async () => {
+        throw apiError(409, "too_many");
+      });
+      await openEdit(record(), { putAppellation });
+      await click(inMain().getByRole("button", { name: "添加称呼" }));
+      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "安姐" } });
+      await click(inMain().getByRole("button", { name: "保存称呼" }));
+      expect(section().textContent).toContain("一个 Agent 最多设 100 个称呼。");
+      expect(inMain().getByLabelText("选择好友或群成员")).toBeTruthy();
+    });
+  });
+
+  it("nothing of it on the page of an Agent whose view has neither key", async () => {
+    await openAgents(world(agentOf(AG1, { model: SITE_MODEL })));
+    await openRow("小助手");
+    expect(document.querySelector(".main-col .kv").textContent).not.toContain("它怎么称呼");
   });
 });

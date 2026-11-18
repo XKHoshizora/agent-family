@@ -1,9 +1,10 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { commonErrorText } from "../data/errorTexts.js";
-import { HANDLE_PATTERN, agentName as agentNameProblem, handle as handleProblem } from "../auth/validation.js";
+import { HANDLE_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, handle as handleProblem } from "../auth/validation.js";
 import { Btn, Field, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
 import { ChevronLeft, Lock } from "../icons.js";
+import { AgentAppellations } from "./AgentAppellations.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
 import { LEVELS, ModelPicker, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
 import { useAction } from "./useAction.js";
@@ -108,6 +109,7 @@ const recordFields = (a) => ({
   // The service's value as a choice and an amount: "20" (or nothing) is the default, null is 不限, anything else 自己填.
   othersChoice: a?.othersBudget === null ? "unlimited" : typeof a?.othersBudget === "string" && a.othersBudget !== OTHERS_BUDGET_DEFAULT ? "custom" : "default",
   othersAmount: typeof a?.othersBudget === "string" ? a.othersBudget : OTHERS_BUDGET_DEFAULT,
+  ownerAppellation: a?.ownerAppellation ?? "",
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
 });
@@ -124,7 +126,7 @@ const keysOf = (setting) => (setting === "othersBudget" ? OTHERS_KEYS : [setting
 /** A setting as it would be stored (the text fields trimmed, points as sent), to compare with the record's. */
 const storedValue = (setting, f) => {
   if (setting === "persona") return personaOf(f.persona);
-  if (setting === "name" || setting === "intro" || setting === "field") return f[setting].trim();
+  if (setting === "name" || setting === "intro" || setting === "field" || setting === "ownerAppellation") return f[setting].trim();
   if (setting === "chainBudget") return budgetOf(f.chainBudget) ?? f.chainBudget.trim();
   if (setting === "othersBudget") return othersBudgetSent(f);
   return f[setting];
@@ -197,6 +199,7 @@ export function AgentForm({ agent = null }) {
   const intro = f.intro.trim();
   const field = f.field.trim();
   const persona = personaOf(f.persona);
+  const ownerAppellation = f.ownerAppellation.trim();
   const errors = {
     name: agentNameProblem(f.name),
     handle: agent ? "" : handleProblem(f.handle),
@@ -204,6 +207,7 @@ export function AgentForm({ agent = null }) {
     field: chars(field) > 20 ? "擅长领域不超过 20 个字" : "",
     persona: chars(persona) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
     chainBudget: budgetProblem(f.chainBudget),
+    ownerAppellation: appellationProblem(f.ownerAppellation),
     // Only while it is asked for (calls from members, 自己填).
     othersAmount: f.groupMentions === "members" && f.othersChoice === "custom" ? budgetProblem(f.othersAmount) : "",
   };
@@ -283,6 +287,7 @@ export function AgentForm({ agent = null }) {
     // Said only when others may call it (otherwise the service keeps its default), and never for a wrong amount.
     const othersBudget = othersBudgetToSend(f);
     if (othersBudget !== undefined) body.othersBudget = othersBudget;
+    if (ownerAppellation) body.ownerAppellation = ownerAppellation;
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -324,6 +329,8 @@ export function AgentForm({ agent = null }) {
     // 别人 @ 每天最多花: only while others may call it, never a wrong amount (`othersBudgetToSend`).
     const othersBudget = othersBudgetToSend(f);
     if (mine("othersBudget") && othersBudget !== undefined) patch.othersBudget = othersBudget;
+    // 它怎么称呼你: cleared (emptied) is null, which the service reads as none.
+    if (mine("ownerAppellation")) patch.ownerAppellation = ownerAppellation || null;
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -521,6 +528,14 @@ export function AgentForm({ agent = null }) {
             {f.othersChoice === "unlimited" && <Notice tone="warn">群里任何人都能让它回复，花的是你的点。</Notice>}
           </>
         )}
+        <fieldset className="form-section">
+          <legend>称呼</legend>
+          <Field label="它怎么称呼你" hint="最多 20 个字。只影响它怎么叫你，不影响它把谁当主人。" error={shown("ownerAppellation")}>
+            <input value={f.ownerAppellation} onChange={set("ownerAppellation")} autoComplete="off" placeholder="留空就用你的名字" />
+          </Field>
+          {/* An Agent must exist to name others for it. */}
+          {agent && <AgentAppellations agent={agent} />}
+        </fieldset>
         <Notice tone="info">
           {agent
             ? "修改从它的下一次回复起生效。"

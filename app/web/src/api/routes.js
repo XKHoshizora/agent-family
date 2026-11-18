@@ -72,17 +72,21 @@ export function socketUrl(ticket) {
 
 // ───────── Agents (owner only; app/service/README.md "Agents")
 export const listAgents = () => request("GET", "/api/agents"); // → {agents: [Agent]}, oldest first, deleted ones included
-/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, othersBudget?, reasoning?, model?} → Agent */
+/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, othersBudget?, ownerAppellation?, reasoning?, model?} → Agent */
 export const createAgent = (body) => request("POST", "/api/agents", body);
 export const getAgent = (agentId) => request("GET", `/api/agents/${seg(agentId)}`);
 /**
- * patch: any of {name, intro, field, persona, replyMode, groupMentions, chainBudget, othersBudget, reasoning, model} (`model: null`
- * clears it; `chainBudget` is a decimal string of points; `othersBudget` too, or `null` for unlimited) → Agent
+ * patch: any of {name, intro, field, persona, replyMode, groupMentions, chainBudget, othersBudget, ownerAppellation, reasoning,
+ * model} (`model: null` clears it; `chainBudget` is a decimal string of points; `othersBudget` too, or `null` for unlimited;
+ * `ownerAppellation` 1–20 characters, or `null` to clear) → Agent
  */
 export const patchAgent = (agentId, patch) => request("PATCH", `/api/agents/${seg(agentId)}`, patch);
 export const pauseAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/pause`);
 export const resumeAgent = (agentId) => request("POST", `/api/agents/${seg(agentId)}/resume`);
 export const deleteAgent = (agentId) => request("DELETE", `/api/agents/${seg(agentId)}`);
+/** How the Agent addresses another person or Agent (a friend of mine, or in a group it is in). body: {appellation} (1–20 characters) → Agent */
+export const putAppellation = (agentId, principalId, body) => request("PUT", `/api/agents/${seg(agentId)}/appellations/${seg(principalId)}`, body);
+export const deleteAppellation = (agentId, principalId) => request("DELETE", `/api/agents/${seg(agentId)}/appellations/${seg(principalId)}`);
 /** Replaces the Agent's avatar with the image file (the rules of my own avatar) → {ok: true} */
 export const uploadAgentAvatar = (agentId, file) =>
   requestBytes("PUT", `/api/agents/${seg(agentId)}/avatar`, file, file.type && file.type.startsWith("image/") ? file.type : "application/octet-stream");

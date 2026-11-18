@@ -464,6 +464,9 @@ function agentView(a, version, loaded) {
     /** 别人 @ 每天最多花 (decimal points, null = unlimited) and what they spent today: only when the service says them. */
     ...(a.othersBudget === null || typeof a.othersBudget === "string" ? { othersBudget: a.othersBudget } : {}),
     ...(typeof a.othersSpentToday === "string" ? { othersSpentToday: a.othersSpentToday } : {}),
+    /** How it addresses me and the others: only the owner's view has these (absent, never defaulted, otherwise). */
+    ...(typeof a.ownerAppellation === "string" || a.ownerAppellation === null ? { ownerAppellation: a.ownerAppellation } : {}),
+    ...(Array.isArray(a.appellations) ? { appellations: a.appellations } : {}),
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),

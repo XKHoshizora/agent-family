@@ -65,6 +65,17 @@ export function agentName(value) {
   return "";
 }
 
+export const APPELLATION_WRONG = "称呼最多 20 个字，不能换行。";
+
+/**
+ * What an Agent calls its owner or someone else, as the service takes it: trimmed, on one line, at most 20 code points. An
+ * empty one is not wrong here (for the owner it means none: the caller decides what it means).
+ */
+export function appellation(value) {
+  const v = value.trim();
+  return [...v].length > 20 || LINE_BREAKING.test(v) ? APPELLATION_WRONG : "";
+}
+
 export function handle(value) {
   if (!value) return "请输入账号名";
   if (!HANDLE_PATTERN.test(value)) return "账号名为 3 到 24 位小写字母、数字或下划线";

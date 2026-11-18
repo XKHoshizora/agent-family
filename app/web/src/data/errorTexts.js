@@ -2,6 +2,8 @@
 // Input: the route's ApiError ({code, status, reason, resetsAt, agents}) or the actions' error object of the same
 // fields. Each route lists the codes the service documents for it (app/service/README.md); anything else is generic.
 
+import { APPELLATION_WRONG } from "../auth/validation.js";
+
 const GENERIC = "操作没有成功，请稍后再试。";
 
 /** Codes any route can answer. */
@@ -170,6 +172,13 @@ const AGENT = {
     not_found: AGENT_NOT_FOUND,
     invalid_request: "填写的内容有误，或所选模型、思考程度不可用。",
   },
+  // The Agent's appellations of others (a 404 is the target, who cannot be named now: not a friend nor in a group it is in).
+  appellation: {
+    invalid_request: APPELLATION_WRONG,
+    not_found: "现在不能给这个人设称呼：对方需要是你的好友，或者和它在同一个群里。",
+    too_many: "一个 Agent 最多设 100 个称呼。",
+    agent_deleted: AGENT_DELETED,
+  },
   pause: { agent_deleted: AGENT_DELETED, not_found: AGENT_NOT_FOUND },
   resume: { agent_deleted: AGENT_DELETED, not_found: AGENT_NOT_FOUND },
   delete: { not_found: AGENT_NOT_FOUND },
@@ -200,7 +209,7 @@ const AGENT = {
 };
 
 /**
- * Why an Agent action was refused. action: create | edit | pause | resume | delete | avatar | draft | confirm | discard.
+ * Why an Agent action was refused. action: create | edit | appellation | pause | resume | delete | avatar | draft | confirm | discard.
  * `now` places a `no_quota` reset time.
  */
 export function agentErrorText(action, error, now = Date.now()) {
