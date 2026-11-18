@@ -8,7 +8,7 @@ import { lockAgent } from "../src/agents/store.ts";
 import type { Config } from "../src/config.ts";
 import { lockConversation } from "../src/conversations/store.ts";
 import type { Db } from "../src/db.ts";
-import { MAX_CHOICE_OPTIONS, type Answer, type Judge, type Question } from "../src/judge/client.ts";
+import { JudgeError, MAX_CHOICE_OPTIONS, type Answer, type Judge, type Question } from "../src/judge/client.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -604,10 +604,14 @@ describe("a judgement that fails", () => {
     expect(Date.now() - started).toBeLessThan(3000);
     expect(await runsOf(anna.id, w.g)).toEqual([]);
     expect(await stateOf(anna.id, w.g)).toEqual(UNTOUCHED);
+    // Why, coarsely: an error that is no JudgeError (the client's own say why), then the time all channels had.
     expect(lines.filter((l) => l.metric === "judge_failed")).toEqual([
-      { level: "info", metric: "judge_failed", conversationId: w.g },
-      { level: "info", metric: "judge_failed", conversationId: w.g },
+      { level: "info", metric: "judge_failed", reason: "network", conversationId: w.g },
+      { level: "info", metric: "judge_failed", reason: "timeout", conversationId: w.g },
     ]);
+    judge.answer(() => new JudgeError("auth"));
+    await decide(w.g, await say(w.member, w.g, "第三次"));
+    expect(lines.filter((l) => l.metric === "judge_failed").at(-1)).toEqual({ level: "info", metric: "judge_failed", reason: "auth", conversationId: w.g });
   });
 
   it("answers only the quiet questions: nobody replies, and what they say is applied", async () => {

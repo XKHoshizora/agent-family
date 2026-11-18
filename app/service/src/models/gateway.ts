@@ -6,7 +6,7 @@ import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
 import { hasVisibleText } from "../schemas.ts";
 import { guardedFetch } from "../providers/guard.ts";
-import { createProviderProbe, PROBE_GUARD, ProviderCallError, type ProviderCallCode } from "../providers/probe.ts";
+import { createProviderProbe, keyRefused, PROBE_GUARD, ProviderCallError, type ProviderCallCode } from "../providers/probe.ts";
 import type { Slots } from "../slots.ts";
 import { ChatReasoningTap, ThinkTags } from "./chat-reasoning.ts";
 
@@ -343,7 +343,7 @@ function toModelError(err: unknown): ModelError {
     if (e instanceof ProviderCallError) return new ModelError(e.code as ModelErrorCode, e.upstreamStatus);
     if (e instanceof AppError && e.code === "address_not_allowed") return new ModelError("address_not_allowed");
     if (APICallError.isInstance(e) && e.statusCode !== undefined && e.statusCode >= 300) {
-      return new ModelError(e.statusCode === 401 || e.statusCode === 403 ? "provider_rejected" : "provider_unavailable", e.statusCode);
+      return new ModelError(keyRefused(e.statusCode) ? "provider_rejected" : "provider_unavailable", e.statusCode);
     }
   }
   return new ModelError("provider_unavailable");

@@ -1,4 +1,4 @@
-import type { Answer, Judge, Question } from "../../src/judge/client.ts";
+import { askable, type Answer, type Judge, type Question } from "../../src/judge/client.ts";
 
 /** What a scripted answer says: a number answers a `noul` question, an object of option → probability a `choice`. */
 export type ScriptedAnswers = Record<string, number | Record<string, number>>;
@@ -44,7 +44,8 @@ export interface ScriptedJudge extends Judge {
 
 /**
  * A judgement model for rule tests, injected as `Deps.judge`. As the real client does, a key the script leaves out, or
- * answers with the wrong kind of value, or with nothing valid, is left out of the map.
+ * answers with the wrong kind of value, or with nothing valid, is left out of the map, and nothing is asked (no call is
+ * recorded) when no question could be sent (`askable`).
  */
 export function scriptedJudge(): ScriptedJudge {
   let script: JudgeScript = () => ({});
@@ -56,9 +57,9 @@ export function scriptedJudge(): ScriptedJudge {
       return judge;
     },
     async ask(state, questions, signal) {
-      calls.push({ state, questions });
       signal?.throwIfAborted();
-      if (questions.length === 0) return new Map();
+      if (!questions.some(askable)) return new Map();
+      calls.push({ state, questions });
       const result = script(state, questions);
       if (result === "hang") {
         await new Promise<never>((_, reject) => {

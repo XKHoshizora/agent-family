@@ -1,5 +1,6 @@
 import type { Config } from "../config.ts";
-import { guardedFetch } from "../providers/guard.ts";
+import { guardedFetch, GuardGaveUp } from "../providers/guard.ts";
+import { keyRefused } from "../providers/probe.ts";
 import { createSlots } from "../slots.ts";
 
 /**
@@ -16,10 +17,18 @@ export type Question =
 /** What a question was answered. A probability is always a finite number in [0, 1]. */
 export type Answer = { type: "noul"; p: number } | { type: "choice"; probabilities: ReadonlyMap<string, number> };
 
-/** No channel gave an answer (any reason: the upstream, the network, the time, a key not set). */
+/**
+ * Why a channel gave no answer, coarsely (to count, never with any text of it): the upstream refused the key (401, 403:
+ * `auth`) or answered another status (`status`); no answer in time (`timeout`); an answer over the size cap
+ * (`oversize`) or not of the protocol's shape (`shape`); the key's variable not set (`key_unset`); anything else on the
+ * way — the connection, the address, no place among the calls in flight (`network`).
+ */
+export type JudgeFailure = "auth" | "status" | "timeout" | "oversize" | "shape" | "key_unset" | "network";
+
+/** No channel gave an answer; `reason` is why the last one tried did not. */
 export class JudgeError extends Error {
-  constructor(message = "the judgement model gave no answer") {
-    super(message);
+  constructor(readonly reason: JudgeFailure) {
+    super("the judgement model gave no answer");
     this.name = "JudgeError";
   }
 }
@@ -27,8 +36,8 @@ export class JudgeError extends Error {
 export interface Judge {
   /**
    * Asks `questions` about `state` in one call. A key whose answer is missing or malformed is left out of the map (the
-   * caller reads that as "no answer"). Rejects with a `JudgeError` when every channel failed, and with the signal's
-   * reason when `signal` aborts.
+   * caller reads that as "no answer"); so is a question that cannot be sent (`askable`), and a key asked again after the
+   * first. Rejects with a `JudgeError` when every channel failed, and with the signal's reason when `signal` aborts.
    */
   ask(state: string, questions: readonly Question[], signal?: AbortSignal): Promise<Map<string, Answer>>;
 }
@@ -44,14 +53,15 @@ const isProbability = (v: unknown): v is number => typeof v === "number" && Numb
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Whether `q` can be sent at all: a choice needs 1 to `MAX_CHOICE_OPTIONS` options, each with a name. */
-function askable(q: Question): boolean {
+export function askable(q: Question): boolean {
   if (q.type === "noul") return true;
   const names = Object.keys(q.options);
   return names.length > 0 && names.length <= MAX_CHOICE_OPTIONS && names.every((n) => n !== "");
 }
 
+/** The request's body: each question under its key, in an object with no prototype (a key is only ever a key). */
 function bodyOf(model: string, state: string, questions: readonly Question[]): string {
-  const sent: Record<string, unknown> = {};
+  const sent: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const q of questions) {
     sent[q.key] =
       q.type === "noul"
@@ -102,11 +112,16 @@ export function createJudge(
     ...(opts.allowInsecureLocal === true ? { allowInsecureLocal: true } : {}),
   });
 
-  /** One attempt at one channel: the answers, or null for any failure. */
-  async function attempt(channel: { url: string; apiKeyEnv: string }, body: string, questions: readonly Question[], signal?: AbortSignal) {
+  /** One attempt at one channel: the answers, or why there are none. */
+  async function attempt(
+    channel: { url: string; apiKeyEnv: string },
+    body: string,
+    questions: readonly Question[],
+    signal?: AbortSignal,
+  ): Promise<Map<string, Answer> | JudgeFailure> {
     // The key is read now, as a site model's is, and never kept.
     const key = env[channel.apiKeyEnv];
-    if (key === undefined || key === "") return null;
+    if (key === undefined || key === "") return "key_unset";
     const bound = AbortSignal.timeout(config.timeoutMs);
     try {
       const res = await fetch(channel.url, {
@@ -117,27 +132,37 @@ export function createJudge(
       });
       if (res.status !== 200) {
         await res.body?.cancel().catch(() => {});
-        return null;
+        return keyRefused(res.status) ? "auth" : "status";
       }
-      return parse(await res.text(), questions);
-    } catch {
-      return null;
+      return parse(await res.text(), questions) ?? "shape";
+    } catch (err) {
+      // This attempt's time, or the guard's wait for progress, ran out; or the guard's size cap; or anything else.
+      if (bound.aborted || (err instanceof GuardGaveUp && err.gaveUp === "stalled")) return "timeout";
+      return err instanceof GuardGaveUp ? "oversize" : "network";
     }
   }
 
   return {
     async ask(state, questions, signal) {
       signal?.throwIfAborted();
-      const sendable = questions.filter(askable);
+      // What can be sent, each key once (the first question asked under it).
+      const keys = new Set<string>();
+      const sendable = questions.filter((q) => {
+        if (!askable(q) || keys.has(q.key)) return false;
+        keys.add(q.key);
+        return true;
+      });
       if (sendable.length === 0) return new Map();
       const body = bodyOf(config.model, state, sendable);
+      let failure: JudgeFailure = "network";
       for (const channel of config.channels) {
         const answers = await attempt(channel, body, sendable, signal);
         // The caller gave up: that is its abort, not a channel's failure, and no other channel is tried.
         signal?.throwIfAborted();
-        if (answers !== null) return answers;
+        if (typeof answers !== "string") return answers;
+        failure = answers;
       }
-      throw new JudgeError();
+      throw new JudgeError(failure);
     },
   };
 }

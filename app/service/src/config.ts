@@ -79,13 +79,16 @@ export interface SiteModel {
   thinkingSwitch?: boolean;
 }
 
+/** What names the environment variable holding an upstream's key (`apiKeyEnv`). */
+const keyVariable = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name");
+
 const siteModelSchema = z.strictObject({
   id: z.string().min(1).max(64),
   label: z.string().min(1).max(100),
   tier: z.enum(["free", "paid"]),
   protocol: z.enum(PROTOCOLS),
   baseUrl: z.url(),
-  apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name"),
+  apiKeyEnv: keyVariable,
   model: z.string().min(1),
   inputMicroPerToken: z.number().int().min(0),
   outputMicroPerToken: z.number().int().min(0),
@@ -113,7 +116,7 @@ const judgeSchema = z.strictObject({
     .array(
       z.strictObject({
         url: z.url(),
-        apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name"),
+        apiKeyEnv: keyVariable,
       }),
     )
     .min(1)
@@ -165,7 +168,7 @@ const proactiveSchema = z.strictObject({
   perSenderHour: positive(120, 100_000),
 });
 
-const allowanceTokens =z.number().int().min(0).max(200_000);
+const allowanceTokens = z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */
 const reasoningAllowanceSchema = z
   .strictObject({
@@ -184,6 +187,19 @@ const reasoningAllowanceSchema = z
       max: v.max ?? DEFAULT_REASONING_ALLOWANCE.max,
     }),
   );
+
+/**
+ * The variable `apiKeyEnv` that `what` (a site model, a judgement channel) reads its upstream key from: it is sent
+ * upstream as a key, so never one of the service's own secrets (compared ignoring case, as Windows does for variable
+ * names); and it must be set. Start-up refuses otherwise, naming `what` and the variable.
+ */
+function checkKeyVariable(what: string, apiKeyEnv: string, env: Record<string, string | undefined>): void {
+  if ((SERVICE_SECRET_VARIABLES as readonly string[]).includes(apiKeyEnv.toUpperCase())) {
+    throw new Error(`Invalid configuration: ${what} names ${apiKeyEnv} as its apiKeyEnv, one of the service's own variables; put its key in a variable of its own`);
+  }
+  const key = env[apiKeyEnv];
+  if (key === undefined || key === "") throw new Error(`Invalid configuration: ${what} needs the environment variable ${apiKeyEnv} (its apiKeyEnv), which is not set`);
+}
 
 /** Parses a JSON-valued variable; on failure adds one issue (the variable's name comes from the schema key). */
 function jsonVariable<T extends z.ZodType>(schema: T, fallback: z.output<T>) {
@@ -493,36 +509,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       );
     }
   }
-  for (const m of e.SITE_MODELS) {
-    // The variable is sent upstream as the model's key: never one of the service's own secrets (compared ignoring case,
-    // as Windows does for variable names).
-    if ((SERVICE_SECRET_VARIABLES as readonly string[]).includes(m.apiKeyEnv.toUpperCase())) {
-      throw new Error(
-        `Invalid configuration: SITE_MODELS: model "${m.id}" names ${m.apiKeyEnv} as its apiKeyEnv, one of the service's own variables; put its key in a variable of its own`,
-      );
-    }
-    const key = env[m.apiKeyEnv];
-    if (key === undefined || key === "") {
-      throw new Error(`Invalid configuration: SITE_MODELS: model "${m.id}" needs the environment variable ${m.apiKeyEnv} (its apiKeyEnv), which is not set`);
-    }
-  }
+  for (const m of e.SITE_MODELS) checkKeyVariable(`SITE_MODELS: model "${m.id}"`, m.apiKeyEnv, env);
   for (const channel of e.JUDGE?.channels ?? []) {
-    // A site model's address rule, and its refusal for a key variable that is not set. The URL stays a full URL (its
-    // path matters), only normalised as a site model's is.
-    const normalised = /[?#]/.test(channel.url) ? null : normaliseBaseUrl(channel.url, false);
-    if (normalised === null) {
+    // A site model's address rule. The URL is the endpoint itself, not a base URL: kept exactly as given, its path too.
+    if (/[?#]/.test(channel.url) || normaliseBaseUrl(channel.url, false) === null) {
       throw new Error("Invalid configuration: JUDGE: a channel has a url that is not an https URL (no credentials, query or fragment)");
     }
-    channel.url = normalised;
-    if ((SERVICE_SECRET_VARIABLES as readonly string[]).includes(channel.apiKeyEnv.toUpperCase())) {
-      throw new Error(
-        `Invalid configuration: JUDGE: a channel names ${channel.apiKeyEnv} as its apiKeyEnv, one of the service's own variables; put its key in a variable of its own`,
-      );
-    }
-    const key = env[channel.apiKeyEnv];
-    if (key === undefined || key === "") {
-      throw new Error(`Invalid configuration: JUDGE: a channel needs the environment variable ${channel.apiKeyEnv} (its apiKeyEnv), which is not set`);
-    }
+    checkKeyVariable("JUDGE: a channel", channel.apiKeyEnv, env);
   }
   const duplicate = e.SITE_MODELS.find((m, i) => e.SITE_MODELS.findIndex((o) => o.id === m.id) !== i);
   if (duplicate) throw new Error(`Invalid configuration: SITE_MODELS: id "${duplicate.id}" appears more than once`);

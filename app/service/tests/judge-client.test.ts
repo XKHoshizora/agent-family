@@ -2,6 +2,7 @@ import http from "node:http";
 import type net from "node:net";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createJudge, JudgeError, type Question } from "../src/judge/client.ts";
+import { scriptedJudge } from "./helpers/judge.ts";
 
 const n = (p: number) => ({ type: "noul" as const, p });
 
@@ -241,23 +242,25 @@ describe("the judgement client", () => {
     expect(await make([dead.url, good.url], { timeoutMs: 1000 }).ask("s", [Q[0]!])).toEqual(new Map([["need", n(0.5)]]));
   });
 
-  test("the caller's signal aborting rejects promptly, without trying the next channel", async () => {
+  test("the caller's signal aborting rejects promptly with its reason, not a JudgeError, without trying the next channel", async () => {
     const hang = await stub(() => {});
     const next = await stub(answering({ need: { noul: 0.5 } }));
     const ctl = new AbortController();
+    const why = new Error("the caller gave up");
     const started = Date.now();
     const pending = make([hang.url, next.url], { timeoutMs: 30_000 }).ask("s", [Q[0]!], ctl.signal);
-    setTimeout(() => ctl.abort(), 100);
-    await expect(pending).rejects.toBeDefined();
+    setTimeout(() => ctl.abort(why), 100);
+    await expect(pending).rejects.toBe(why);
     expect(Date.now() - started).toBeLessThan(2000);
     expect(next.seen).toHaveLength(0);
   });
 
-  test("an already aborted signal makes no request", async () => {
+  test("an already aborted signal makes no request, and rejects with its reason", async () => {
     const a = await stub(answering({ need: { noul: 0.5 } }));
     const ctl = new AbortController();
-    ctl.abort();
-    await expect(make([a.url]).ask("s", [Q[0]!], ctl.signal)).rejects.toBeDefined();
+    const why = new Error("aborted before");
+    ctl.abort(why);
+    await expect(make([a.url]).ask("s", [Q[0]!], ctl.signal)).rejects.toBe(why);
     expect(a.seen).toHaveLength(0);
   });
 
@@ -277,11 +280,99 @@ describe("the judgement client", () => {
     expect(a.seen).toHaveLength(0);
   });
 
-  test("an answer larger than the cap is a failure", async () => {
-    const big = await stub((_r, res) => {
+  test("an answer larger than the cap is a failure, its length declared or not (streamed)", async () => {
+    const body = JSON.stringify({ answers: { need: { noul: 0.5 } }, pad: "x".repeat(200_000) });
+    const declared = await stub((_r, res) => {
       res.writeHead(200);
-      res.end(JSON.stringify({ answers: { need: { noul: 0.5 } }, pad: "x".repeat(200_000) }));
+      res.end(body);
     });
-    await expect(make([big.url]).ask("s", [Q[0]!])).rejects.toBeInstanceOf(JudgeError);
+    const streamed = await stub((_r, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      // No content-length: chunked, each piece well under the cap, together over it.
+      for (let i = 0; i < body.length; i += 8192) res.write(body.slice(i, i + 8192));
+      res.end();
+    });
+    for (const url of [declared.url, streamed.url]) {
+      const err = await make([url]).ask("s", [Q[0]!]).then(() => null, (e: unknown) => e);
+      expect([url, err instanceof JudgeError && err.reason]).toEqual([url, "oversize"]);
+    }
+  });
+
+  test("a question key is sent as given, even __proto__, and a key asked twice is sent once", async () => {
+    const a = await stub(answering({ ["__proto__"]: { noul: 0.3 }, need: { noul: 0.6 } }));
+    const proto: Question = { key: "__proto__", type: "noul", instructions: "原型" };
+    const got = await make([a.url]).ask("s", [proto, Q[0]!, { ...Q[0]!, instructions: "又问一次" }]);
+    expect(Object.keys(JSON.parse(a.seen[0]!.body).questions)).toEqual(["__proto__", "need"]);
+    expect(JSON.parse(a.seen[0]!.body).questions.need.instructions).toBe("它应该现在回复吗");
+    expect(got).toEqual(
+      new Map([
+        ["__proto__", n(0.3)],
+        ["need", n(0.6)],
+      ]),
+    );
+  });
+});
+
+describe("why no channel answered (JudgeError.reason), coarse and text-free", () => {
+  const failing = (status: number) =>
+    stub((_r, res) => {
+      res.writeHead(status);
+      res.end("no");
+    });
+
+  const reasonOf = async (urls: string[], extra: { timeoutMs?: number } = {}, env?: Record<string, string>) => {
+    const judge = env
+      ? createJudge({ model: "m", channels: urls.map((url) => ({ url, apiKeyEnv: "JUDGE_KEY_A" })), timeoutMs: extra.timeoutMs ?? 4000, dailyLimit: 10 }, { allowInsecureLocal: true, env })
+      : make(urls, extra);
+    const err = await judge.ask("s", [Q[0]!]).then(() => null, (e: unknown) => e);
+    expect(err).toBeInstanceOf(JudgeError);
+    return (err as JudgeError).reason;
+  };
+
+  test("401 and 403 are auth; any other status is status", async () => {
+    expect(await reasonOf([(await failing(401)).url])).toBe("auth");
+    expect(await reasonOf([(await failing(403)).url])).toBe("auth");
+    expect(await reasonOf([(await failing(500)).url])).toBe("status");
+    expect(await reasonOf([(await failing(204)).url])).toBe("status");
+  });
+
+  test("an answer that is not JSON, or not { answers }, is shape", async () => {
+    for (const text of ["not json {", JSON.stringify({ nothing: true })]) {
+      const bad = await stub((_r, res) => {
+        res.writeHead(200);
+        res.end(text);
+      });
+      expect(await reasonOf([bad.url])).toBe("shape");
+    }
+  });
+
+  test("no answer in time is timeout; a key variable not set is key_unset; nobody listening is network", async () => {
+    expect(await reasonOf([(await stub(() => {})).url], { timeoutMs: 500 })).toBe("timeout");
+    expect(await reasonOf([(await failing(500)).url], {}, {})).toBe("key_unset");
+    const dead = await stub(() => {});
+    await dead.close();
+    expect(await reasonOf([dead.url], { timeoutMs: 1000 })).toBe("network");
+  });
+
+  test("the reason is the last channel's", async () => {
+    const [unauthorised, broken] = [await failing(401), await failing(500)];
+    expect(await reasonOf([unauthorised.url, broken.url])).toBe("status");
+    expect(await reasonOf([broken.url, unauthorised.url])).toBe("auth");
+  });
+
+  test("its message names none of it", async () => {
+    const err = await make([(await failing(401)).url]).ask("s", [Q[0]!]).then(() => null, (e: unknown) => e);
+    expect((err as Error).message).toBe("the judgement model gave no answer");
+  });
+});
+
+describe("the scripted judgement model (tests/helpers/judge.ts)", () => {
+  test("like the client, it records no call when nothing it is asked could be sent", async () => {
+    const judge = scriptedJudge();
+    expect(await judge.ask("s", [])).toEqual(new Map());
+    expect(await judge.ask("s", [{ key: "pick", type: "choice", instructions: "i", options: {} }])).toEqual(new Map());
+    expect(judge.calls).toEqual([]);
+    await judge.ask("s", [Q[0]!]);
+    expect(judge.calls).toHaveLength(1);
   });
 });

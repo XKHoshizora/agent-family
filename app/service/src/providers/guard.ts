@@ -208,6 +208,17 @@ export interface GuardOptions {
 export const addressNotAllowed = (): AppError => new AppError(400, "address_not_allowed");
 export const providerUnavailable = (): AppError => new AppError(502, "provider_unavailable");
 
+/**
+ * `provider_unavailable` for a call the guard itself gave up on, saying why (`gaveUp`): the answer passed
+ * `maxResponseBytes`, or `timeoutMs` passed without progress. Answered and logged as any `provider_unavailable`; a caller
+ * that counts its failures by kind reads why (the judgement client's `JudgeError.reason`).
+ */
+export class GuardGaveUp extends AppError {
+  constructor(readonly gaveUp: "oversize" | "stalled") {
+    super(502, "provider_unavailable");
+  }
+}
+
 /** `promise`, or the signal's reason as soon as it aborts. */
 function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason);
@@ -281,7 +292,8 @@ const NULL_BODY_STATUS = new Set([204, 205]);
  * `provider_unavailable` at once); the host is resolved once and every address checked (`checkedAddresses`); the
  * connection is made to exactly those addresses (the name stays the Host and TLS SNI); redirects are never followed
  * (any 3xx is `provider_unavailable`); the request is aborted after `timeoutMs` without progress (re-armed when the
- * headers arrive and at every body chunk) and when the body passes `maxResponseBytes` (`provider_unavailable`).
+ * headers arrive and at every body chunk) and when the body passes `maxResponseBytes` (`provider_unavailable`, as
+ * `GuardGaveUp` saying which).
  * Refusals are `AppError(400, "address_not_allowed")` and happen before any connection. Errors never carry the
  * upstream's body or headers, nor the request's. An abort by the caller's own `signal` passes through as that abort
  * and closes the connection at once, whether or not the body is being read.
@@ -323,10 +335,13 @@ export function guardedFetch(opts: GuardOptions): typeof fetch {
         finish();
       }, opts.timeoutMs);
     };
-    /** The caller's own abort stays that abort; the guard's errors stay; anything else is `provider_unavailable`. */
+    /**
+     * The caller's own abort stays that abort; the guard's errors stay; no progress in time is `GuardGaveUp` `stalled`;
+     * anything else is `provider_unavailable`.
+     */
     const failure = (err: unknown): unknown => {
       if (!timedOut && init.signal?.aborted) return init.signal.reason;
-      return err instanceof AppError ? err : providerUnavailable();
+      return err instanceof AppError ? err : timedOut ? new GuardGaveUp("stalled") : providerUnavailable();
     };
 
     /** The upstream body, counted and timed. */
@@ -344,7 +359,7 @@ export function guardedFetch(opts: GuardOptions): typeof fetch {
                 return;
               }
               received += value.byteLength;
-              if (received > opts.maxResponseBytes) throw providerUnavailable();
+              if (received > opts.maxResponseBytes) throw new GuardGaveUp("oversize");
               arm();
               controller.enqueue(value);
             } catch (err) {
@@ -378,7 +393,7 @@ export function guardedFetch(opts: GuardOptions): typeof fetch {
       arm(); // the headers are progress: the first body chunk gets a full `timeoutMs`
       if (res.status >= 300 && res.status < 400) throw providerUnavailable();
       const declared = res.headers.get("content-length");
-      if (declared !== null && Number(declared) > opts.maxResponseBytes) throw providerUnavailable();
+      if (declared !== null && Number(declared) > opts.maxResponseBytes) throw new GuardGaveUp("oversize");
       const headers = new Headers(res.headers as unknown as HeadersInit);
       if (res.body === null || NULL_BODY_STATUS.has(res.status)) {
         finish();

@@ -55,6 +55,9 @@ export function toProviderCallError(err: unknown): ProviderCallError {
   return new ProviderCallError("provider_unavailable");
 }
 
+/** Whether an upstream's HTTP status says it refused the key (401, 403): `provider_rejected`, the judgement's `auth`. */
+export const keyRefused = (status: number): boolean => status === 401 || status === 403;
+
 /** The guard a probe goes through (`guardedFetch` options): a model list is small, and an upstream that stalls is given up on. */
 export const PROBE_GUARD = { maxResponseBytes: 2 * 1024 * 1024, timeoutMs: 15_000 } as const;
 
@@ -90,7 +93,7 @@ function namesIn(protocol: Protocol, json: unknown): unknown[] {
 export function createProviderProbe(fetch: typeof globalThis.fetch): ProviderProbe {
   /** The failure for an upstream answer of `status` whose body was `body`. */
   const failed = (p: ProbeTarget, status: number, body: string | null) =>
-    new ProviderCallError(status === 401 || status === 403 ? "provider_rejected" : "provider_unavailable", status, upstreamDetail(status, body, p.apiKey));
+    new ProviderCallError(keyRefused(status) ? "provider_rejected" : "provider_unavailable", status, upstreamDetail(status, body, p.apiKey));
 
   async function listing(p: ProbeTarget): Promise<unknown> {
     let res: Response;

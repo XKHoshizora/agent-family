@@ -5,7 +5,7 @@ import { lockConversation } from "../../conversations/store.ts";
 import { appendSystem } from "../../conversations/system.ts";
 import type { Db, Queryable, Tx } from "../../db.ts";
 import { AppError } from "../../errors.ts";
-import type { Answer, Judge } from "../../judge/client.ts";
+import { JudgeError, type Answer, type Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
@@ -68,11 +68,14 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   const { state, questions } = request;
 
   let answers: Map<string, Answer> | null = null;
+  // Each channel is tried for at most `timeoutMs`; nothing waits longer than all of them together.
+  const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
   try {
-    // Each channel is tried for at most `timeoutMs`; nothing waits longer than all of them together.
-    answers = await judge.ask(state, questions, AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length)));
-  } catch {
-    log.info({ metric: "judge_failed", conversationId }, "the judgement model gave no answer: no Agent replies unasked");
+    answers = await judge.ask(state, questions, deadline);
+  } catch (err) {
+    // Why, coarsely (`JudgeError.reason`; out of all the channels' time together: `timeout`).
+    const reason = err instanceof JudgeError ? err.reason : deadline.aborted ? "timeout" : "network";
+    log.info({ metric: "judge_failed", reason, conversationId }, "the judgement model gave no answer: no Agent replies unasked");
   }
   await counted(db, day, conversationId, options);
   if (answers === null) return noneTriggered();

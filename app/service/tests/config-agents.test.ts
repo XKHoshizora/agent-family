@@ -285,6 +285,21 @@ describe("the judgement model's configuration", () => {
     expect(loadConfig(withJudge(judge)).judge).toEqual(judge);
   });
 
+  test("a channel's url is the endpoint itself: its path is kept exactly as given, a trailing slash too", () => {
+    for (const url of ["https://h.example.test/v1/systemone/", "https://h.example.test/v1/systemone"]) {
+      const one = { model: "m", channels: [{ url, apiKeyEnv: "JUDGE_KEY_A" }] };
+      expect(loadConfig(withJudge(one)).judge!.channels[0]!.url).toBe(url);
+    }
+  });
+
+  test("a key variable may not be one of the service's own (in any case): start-up refuses", () => {
+    for (const own of ["DATABASE_URL", "database_url", "AUTH_SECRET"]) {
+      const value = { model: "m", channels: [{ url: "https://h.example.test/v1/systemone", apiKeyEnv: own }] };
+      // Each is set, so only the rule can refuse it.
+      expect(() => loadConfig(withJudge(value, { database_url: "a-lower-case-variable" })), own).toThrow(new RegExp(`JUDGE: a channel names ${own}`));
+    }
+  });
+
   test("timeout and daily limit default; one channel is enough", () => {
     const one = { model: "m", channels: [judge.channels[0]] };
     expect(loadConfig(withJudge(one)).judge).toEqual({ model: "m", channels: [judge.channels[0]], timeoutMs: 4000, dailyLimit: 20_000 });
