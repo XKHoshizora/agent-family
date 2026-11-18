@@ -526,6 +526,27 @@ describe("providers, usage and site models", () => {
     expect(s.siteModels).toEqual([{ id: "free-1", label: "免费模型", tier: "free", vision: false, pdf: false, reasoning: ["low"], contextTokens: 32000 }]);
     expect(s.providerDefaults).toEqual({ contextTokens: 16000, maxOutputTokens: 2048 });
   });
+
+  it("applyModels keeps whether the site can judge for proactive replies: only a true counts, and the view says it", () => {
+    const answer = (extra) => ({ siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 }, ...extra });
+    expect(view(M.initial()).proactiveAvailable).toBe(false);
+    expect(view(M.applyModels(M.initial(), answer({ proactiveAvailable: true }))).proactiveAvailable).toBe(true);
+    expect(view(M.applyModels(M.initial(), answer({ proactiveAvailable: "yes" }))).proactiveAvailable).toBe(false);
+    expect(view(M.applyModels(M.applyModels(M.initial(), answer({ proactiveAvailable: true })), answer())).proactiveAvailable).toBe(false);
+  });
+
+  it("an Agent's proactive settings come only as the service says them, and a malformed one is not kept", () => {
+    const agentOfView = (fields) => Object.values(view(M.applyAgent(M.initial(), { id: "00000000-0000-4000-8000-0000000000a1", handle: "h", name: "n", ...fields })).agents)[0];
+    expect(agentOfView({})).not.toHaveProperty("proactive");
+    expect(agentOfView({ proactive: true, proactiveLevel: "more", proactiveBudget: "20", proactiveSpentToday: "1.5" })).toMatchObject({
+      proactive: true,
+      proactiveLevel: "more",
+      proactiveBudget: "20",
+      proactiveSpentToday: "1.5",
+    });
+    const odd = agentOfView({ proactive: "yes", proactiveLevel: "loud", proactiveBudget: 20, proactiveSpentToday: null });
+    for (const key of ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday"]) expect(odd).not.toHaveProperty(key);
+  });
 });
 
 describe("an Agent's reply in a group (batch 2C)", () => {

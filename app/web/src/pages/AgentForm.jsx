@@ -26,6 +26,14 @@ const chars = (text) => [...text].length;
 export const CHAIN_BUDGET_DEFAULT = "50";
 /** 别人 @ 每天最多花 when nothing else is said, in points (the service's default). */
 export const OTHERS_BUDGET_DEFAULT = "20";
+/** 主动回复每天最多花 when nothing else is said, in points (the service's default); its amount is a budget like the others. */
+const PROACTIVE_BUDGET_DEFAULT = "20";
+/** 话多话少, by the service's `proactiveLevel` (the second is the default). */
+export const PROACTIVE_LEVELS = [
+  ["less", "少说"],
+  ["normal", "适中"],
+  ["more", "多说"],
+];
 // A budget's amount, either of them, as the service takes it.
 const BUDGET_MIN = 1;
 const BUDGET_MAX = 100000;
@@ -99,6 +107,9 @@ const recordFields = (a) => ({
   // The service's value as a choice and an amount: "20" (or nothing) is the default, null is 不限, anything else 自己填.
   othersChoice: a?.othersBudget === null ? "unlimited" : typeof a?.othersBudget === "string" && a.othersBudget !== OTHERS_BUDGET_DEFAULT ? "custom" : "default",
   othersAmount: typeof a?.othersBudget === "string" ? a.othersBudget : OTHERS_BUDGET_DEFAULT,
+  proactive: a?.proactive === true,
+  proactiveLevel: PROACTIVE_LEVELS.some(([id]) => id === a?.proactiveLevel) ? a.proactiveLevel : "normal",
+  proactiveBudget: budgetOf(a?.proactiveBudget) ?? PROACTIVE_BUDGET_DEFAULT,
   ownerAppellation: a?.ownerAppellation ?? "",
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
@@ -117,7 +128,7 @@ const keysOf = (setting) => (setting === "othersBudget" ? OTHERS_KEYS : [setting
 const storedValue = (setting, f) => {
   if (setting === "persona") return personaOf(f.persona);
   if (setting === "name" || setting === "intro" || setting === "field" || setting === "ownerAppellation") return f[setting].trim();
-  if (setting === "chainBudget") return budgetOf(f.chainBudget) ?? f.chainBudget.trim();
+  if (setting === "chainBudget" || setting === "proactiveBudget") return budgetOf(f[setting]) ?? f[setting].trim();
   if (setting === "othersBudget") return othersBudgetSent(f);
   return f[setting];
 };
@@ -136,6 +147,7 @@ export function AgentForm({ agent = null }) {
   const sources = useModelSources();
   const formRef = useRef(null);
   const personaId = useId();
+  const proactiveId = useId();
   const [random] = useState(randomPart);
   const [f, setF] = useState(() => ({ ...recordFields(agent), handle: agent ? "" : suggestHandle("", random) }));
   const [handleTyped, setHandleTyped] = useState(false);
@@ -185,6 +197,10 @@ export function AgentForm({ agent = null }) {
   const levels = choice?.levels ?? ["none"];
   const reasoning = levels.includes(f.reasoning) ? f.reasoning : "none";
 
+  // 主动参与群聊 is offered (and sent) only while the site has a judgement model; its level and amount only while it is on.
+  const proactiveOffered = state.proactiveAvailable === true;
+  const proactiveAsked = proactiveOffered && f.proactive;
+
   const name = f.name.trim();
   const intro = f.intro.trim();
   const field = f.field.trim();
@@ -200,6 +216,8 @@ export function AgentForm({ agent = null }) {
     ownerAppellation: appellationProblem(f.ownerAppellation),
     // Only while it is asked for (calls from members, 自己填).
     othersAmount: f.groupMentions === "members" && f.othersChoice === "custom" ? budgetProblem(f.othersAmount) : "",
+    // Only while the site can judge and the switch is on.
+    proactiveBudget: proactiveAsked ? budgetProblem(f.proactiveBudget) : "",
   };
   const invalid = Object.values(errors).some(Boolean);
   const shown = (key) => (touched ? errors[key] : "");
@@ -222,6 +240,11 @@ export function AgentForm({ agent = null }) {
   };
   /** The box a budget's amount is typed in (`budgetOf`). */
   const budgetBox = (key) => <input value={f[key]} onChange={set(key)} inputMode="decimal" autoComplete="off" />;
+  const setProactive = (event) => {
+    const value = event.target.checked;
+    edited.current.add("proactive");
+    setF((cur) => ({ ...cur, proactive: value }));
+  };
   const setName = (event) => {
     const value = event.target.value;
     edited.current.add("name");
@@ -277,6 +300,8 @@ export function AgentForm({ agent = null }) {
     // Said only when others may call it (otherwise the service keeps its default), and never for a wrong amount.
     const othersBudget = othersBudgetToSend(f);
     if (othersBudget !== undefined) body.othersBudget = othersBudget;
+    // Said only when it is on (off is the service's default).
+    if (proactiveAsked) Object.assign(body, { proactive: true, proactiveLevel: f.proactiveLevel, proactiveBudget: budgetOf(f.proactiveBudget) });
     if (ownerAppellation) body.ownerAppellation = ownerAppellation;
     body.reasoning = reasoning;
     body.model = choice.model;
@@ -319,6 +344,11 @@ export function AgentForm({ agent = null }) {
     // 别人 @ 每天最多花: only while others may call it, never a wrong amount (`othersBudgetToSend`).
     const othersBudget = othersBudgetToSend(f);
     if (mine("othersBudget") && othersBudget !== undefined) patch.othersBudget = othersBudget;
+    // 主动参与群聊: only while the site can judge; its level and amount only while it is on.
+    if (proactiveOffered) {
+      if (mine("proactive")) patch.proactive = f.proactive;
+      if (f.proactive) for (const key of ["proactiveLevel", "proactiveBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
+    }
     // 它怎么称呼你: cleared (emptied) is null, which the service reads as none.
     if (mine("ownerAppellation")) patch.ownerAppellation = ownerAppellation || null;
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
@@ -516,6 +546,31 @@ export function AgentForm({ agent = null }) {
               </Field>
             )}
             {f.othersChoice === "unlimited" && <Notice tone="warn">群里任何人都能让它回复，花的是你的点。</Notice>}
+          </>
+        )}
+        {proactiveOffered && (
+          <>
+            <div className="field">
+              <label className="check">
+                <input type="checkbox" role="switch" checked={f.proactive} onChange={setProactive} aria-describedby={`${proactiveId}-hint`} />
+                主动参与群聊
+              </label>
+              <p id={`${proactiveId}-hint`} className="field-hint">打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。</p>
+            </div>
+            {f.proactive && (
+              <>
+                <Field label="话多话少">
+                  <select value={f.proactiveLevel} onChange={set("proactiveLevel")}>
+                    {PROACTIVE_LEVELS.map(([id, label]) => (
+                      <option key={id} value={id}>{label}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="主动回复每天最多花" error={shown("proactiveBudget")}>
+                  {budgetBox("proactiveBudget")}
+                </Field>
+              </>
+            )}
           </>
         )}
         <fieldset className="form-section">

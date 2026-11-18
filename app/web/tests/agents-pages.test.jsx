@@ -1606,3 +1606,235 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
     });
   });
 });
+
+describe("主动参与群聊 (proactive replies)", () => {
+  const SWITCH = "主动参与群聊";
+  const LEVEL = "话多话少";
+  const AMOUNT = "主动回复每天最多花";
+  const HELPER = "打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。";
+  const WRONG = "请填写 1 到 100000 之间的点数（最多 6 位小数）";
+  const UNAVAILABLE = "现在还不能打开主动参与：站点没有配置判断模型。";
+  const ON_SITE = { ...MODELS, proactiveAvailable: true };
+  const OFF_SITE = { ...MODELS, proactiveAvailable: false };
+  const box = () => inMain().getByLabelText(SWITCH);
+  const kv = () => document.querySelector(".main-col .kv").textContent;
+  const proactive = (fields = {}) => ({ proactive: true, proactiveLevel: "normal", proactiveBudget: "20", proactiveSpentToday: "0", ...fields });
+  const save = () => click(inMain().getByRole("button", { name: "保存" }));
+
+  const createOn = async (models, choose = () => {}) => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent }, models });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    choose();
+    await click(createButton());
+    return createAgent;
+  };
+  const openEditOf = async (fields, models = ON_SITE) => {
+    const record = agentOf(AG1, { model: SITE_MODEL, ...fields });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    const app = await openAgents({ agents: [record], api: { patchAgent }, models });
+    // A refusal makes the Agent be fetched again: it is still the record.
+    app.transport.handlers.agent = () => record;
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    return { app, patchAgent, record };
+  };
+
+  it("the site has no judgement model: nothing on the form, nothing sent on create or edit", async () => {
+    await openAgents({ models: OFF_SITE });
+    await openCreate();
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    cleanup();
+    const createAgent = await createOn(OFF_SITE);
+    for (const key of ["proactive", "proactiveLevel", "proactiveBudget"]) expect(createAgent.mock.calls[0][0]).not.toHaveProperty(key);
+    cleanup();
+    const { patchAgent } = await openEditOf(proactive({ proactive: false }), OFF_SITE);
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    type("简介", "新简介");
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+  });
+
+  it("an answer without the flag is read as no judgement model", async () => {
+    await openAgents({ models: MODELS });
+    await openCreate();
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+  });
+
+  it("creating: the switch is off by default, with its helper; level and amount appear only while it is on", async () => {
+    await openAgents({ models: ON_SITE });
+    await openCreate();
+    expect(box().checked).toBe(false);
+    expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(HELPER);
+    expect(screen.queryByLabelText(LEVEL)).toBeNull();
+    expect(screen.queryByLabelText(AMOUNT)).toBeNull();
+    fireEvent.click(box());
+    expect(within(inMain().getByLabelText(LEVEL)).getAllByRole("option").map((o) => [o.value, o.textContent])).toEqual([
+      ["less", "少说"],
+      ["normal", "适中"],
+      ["more", "多说"],
+    ]);
+    expect(inMain().getByLabelText(LEVEL).value).toBe("normal");
+    expect(inMain().getByLabelText(AMOUNT).value).toBe("20");
+    // A typed amount only: no 不限 choice.
+    expect(inMain().getByLabelText(AMOUNT).tagName).toBe("INPUT");
+    fireEvent.click(box());
+    expect(screen.queryByLabelText(LEVEL)).toBeNull();
+  });
+
+  it("creating: off sends nothing about it, even after the level or amount was changed and the switch turned off again", async () => {
+    const createAgent = await createOn(ON_SITE, () => {
+      fireEvent.click(box());
+      fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "more" } });
+      type(AMOUNT, "abc");
+      fireEvent.click(box());
+    });
+    expect(createAgent).toHaveBeenCalledTimes(1);
+    for (const key of ["proactive", "proactiveLevel", "proactiveBudget"]) expect(createAgent.mock.calls[0][0]).not.toHaveProperty(key);
+  });
+
+  it("creating: on with the defaults sends proactive, normal and 20", async () => {
+    const createAgent = await createOn(ON_SITE, () => fireEvent.click(box()));
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ proactive: true, proactiveLevel: "normal", proactiveBudget: "20" });
+  });
+
+  it("creating: the level and the amount typed are sent", async () => {
+    const createAgent = await createOn(ON_SITE, () => {
+      fireEvent.click(box());
+      fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+      type(AMOUNT, " 035.50 ");
+    });
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ proactive: true, proactiveLevel: "less", proactiveBudget: "35.5" });
+  });
+
+  it("each wrong amount is refused inline like the chain budget, while the switch is on", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent }, models: ON_SITE });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    fireEvent.click(box());
+    for (const value of ["0", "100001", "abc", "", "1.1234567"]) {
+      type(AMOUNT, value);
+      await click(createButton());
+      expect(inMain().getByLabelText(AMOUNT).closest(".field").textContent, value).toContain(WRONG);
+      expect(inMain().getByLabelText(AMOUNT).getAttribute("aria-invalid"), value).toBe("true");
+    }
+    expect(createAgent).not.toHaveBeenCalled();
+    type(AMOUNT, "99.999999");
+    expect(inMain().getByLabelText(AMOUNT).closest(".field").textContent).not.toContain(WRONG);
+  });
+
+  it("creating: 409 proactive_unavailable is said inline", async () => {
+    const createAgent = vi.fn(async () => {
+      throw apiError(409, "proactive_unavailable");
+    });
+    await openAgents({ api: { createAgent }, models: ON_SITE });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    fireEvent.click(box());
+    await click(createButton());
+    expect(mainText()).toContain(UNAVAILABLE);
+    expect(toastText()).toBeNull();
+  });
+
+  it("editing: opens on what is stored", async () => {
+    await openEditOf(proactive({ proactiveLevel: "more", proactiveBudget: "35" }));
+    expect(box().checked).toBe(true);
+    expect(inMain().getByLabelText(LEVEL).value).toBe("more");
+    expect(inMain().getByLabelText(AMOUNT).value).toBe("35");
+    cleanup();
+    await openEditOf(proactive({ proactive: false }));
+    expect(box().checked).toBe(false);
+    expect(screen.queryByLabelText(LEVEL)).toBeNull();
+  });
+
+  it("editing: turning it on sends only { proactive: true }", async () => {
+    const { patchAgent } = await openEditOf(proactive({ proactive: false }));
+    fireEvent.click(box());
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ proactive: true });
+  });
+
+  it("editing: only the level, only the level; only the amount, only the amount", async () => {
+    const { patchAgent } = await openEditOf(proactive({ proactiveBudget: "35" }));
+    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ proactiveLevel: "less" });
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    type(AMOUNT, "40");
+    await save();
+    expect(patchAgent.mock.calls[1][1]).toEqual({ proactiveBudget: "40" });
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+  });
+
+  it("editing: 35.0 against the stored 35 sends nothing", async () => {
+    const { patchAgent } = await openEditOf(proactive({ proactiveBudget: "35" }));
+    type(AMOUNT, "35.0");
+    type("简介", "新简介");
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+  });
+
+  it("editing: turning it off sends only { proactive: false }, whatever was typed in the amount meanwhile", async () => {
+    const { patchAgent } = await openEditOf(proactive());
+    type(AMOUNT, "abc");
+    fireEvent.click(box());
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ proactive: false });
+  });
+
+  it("editing: 409 proactive_unavailable is said inline", async () => {
+    const { patchAgent } = await openEditOf(proactive({ proactive: false }));
+    patchAgent.mockImplementation(async () => {
+      throw apiError(409, "proactive_unavailable");
+    });
+    fireEvent.click(box());
+    await save();
+    expect(mainText()).toContain(UNAVAILABLE);
+    expect(toastText()).toBeNull();
+    expect(box().checked).toBe(true);
+  });
+
+  it("editing: a change made elsewhere to a setting I did not touch shows; one I touched stays, with the notice", async () => {
+    const CHANGED = "这个 Agent 的配置刚刚在别处有改动，保存会用你这里的内容覆盖你改过的几项。";
+    const { app, patchAgent, record } = await openEditOf(proactive({ proactive: false }));
+    const elsewhere = async (fields) => {
+      app.transport.handlers.agent = () => ({ ...record, ...fields });
+      await push(app.transport, { type: "agent", id: AG1 });
+      await flush();
+    };
+    await elsewhere(proactive({ proactiveLevel: "more" }));
+    expect(box().checked).toBe(true);
+    expect(inMain().getByLabelText(LEVEL).value).toBe("more");
+    expect(mainText()).not.toContain(CHANGED);
+    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+    await elsewhere(proactive({ proactiveLevel: "normal" }));
+    expect(inMain().getByLabelText(LEVEL).value).toBe("less");
+    expect(mainText()).toContain(CHANGED);
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ proactiveLevel: "less" });
+  });
+
+  it("the Agent's page: no row while it is off or the service says nothing; spend and budget; the used-up line, compared as numbers", async () => {
+    const show = async (extra) => {
+      await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, ...extra })], models: ON_SITE });
+      await openRow("小助手");
+      return kv();
+    };
+    expect(await show({})).not.toContain(SWITCH);
+    cleanup();
+    expect(await show(proactive({ proactive: false }))).not.toContain(SWITCH);
+    cleanup();
+    expect(await show(proactive({ proactiveLevel: "less", proactiveSpentToday: "3.5" }))).toContain("主动参与群聊少说 · 今天主动回复已花 3.5 / 20 点");
+    cleanup();
+    expect(await show(proactive({ proactiveLevel: "more", proactiveBudget: "20.5", proactiveSpentToday: "20.499999" }))).toContain("多说 · 今天主动回复已花 20.499999 / 20.5 点");
+    cleanup();
+    expect(await show(proactive({ proactiveSpentToday: "20" }))).toContain("主动参与群聊今天主动回复的额度已用完，调高后立即恢复。");
+    cleanup();
+    expect(await show(proactive({ proactiveBudget: "0.3", proactiveSpentToday: "0.300000" }))).toContain("今天主动回复的额度已用完，调高后立即恢复。");
+  });
+});

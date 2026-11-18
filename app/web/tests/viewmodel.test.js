@@ -699,3 +699,23 @@ describe("expiryText", () => {
     expect(formatMessageTitle(undefined)).toBe("");
   });
 });
+
+describe("the notice that an Agent was asked to be quiet (agent_quieted)", () => {
+  it("names the Agent, and falls back for an unknown one", () => {
+    const BOT = "00000000-0000-4000-8000-0000000000b9";
+    const ev = (seq, system, text) => notice(G1, seq, text, system);
+    const sync = syncOf(
+      [group(G1, { lastSeq: 2 })],
+      [
+        ev(1, { event: "agent_quieted", actorId: ANN, agentId: BOT }, "服务端句子1"),
+        ev(2, { event: "agent_quieted", actorId: ANN, agentId: "00000000-0000-4000-8000-0000000000ef" }, "不认识的 Agent"),
+      ],
+      [...PRINCIPALS, { ...agentPrincipal(BOT, "annbot", "安的助手"), ownerId: ANN }],
+    );
+    const v = toView(M.applySync(M.initial(), sync), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => [m.text, Boolean(m.hidden)])).toEqual([
+      ["「安的助手」暂时不主动发言，需要时可以 @ 它", false],
+      ["不认识的 Agent", false],
+    ]);
+  });
+});

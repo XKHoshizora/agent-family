@@ -155,6 +155,7 @@ export function noQuotaText(details, now = Date.now()) {
 
 const AGENT_DELETED = "这个 Agent 已删除。";
 const AGENT_NOT_FOUND = "找不到这个 Agent。";
+const PROACTIVE_UNAVAILABLE = "现在还不能打开主动参与：站点没有配置判断模型。";
 const MODEL_FAILED = {
   provider_rejected: "供应商拒绝了这个密钥，请检查密钥是否正确。",
   provider_unavailable: "暂时连不上供应商，或它没有给出可用的回答，请稍后再试。",
@@ -165,11 +166,13 @@ const AGENT = {
   create: {
     handle_taken: "这个账号名已被占用，请换一个。",
     agent_limit: "你的 Agent 数量已达到当前档位的上限。",
+    proactive_unavailable: PROACTIVE_UNAVAILABLE,
     invalid_request: "填写的内容有误：账号名需 3–24 位小写字母、数字或下划线，名称 1–20 个字；所选模型或思考程度也可能不可用。",
   },
   edit: {
     agent_deleted: AGENT_DELETED,
     not_found: AGENT_NOT_FOUND,
+    proactive_unavailable: PROACTIVE_UNAVAILABLE,
     invalid_request: "填写的内容有误，或所选模型、思考程度不可用。",
   },
   // The Agent's appellations of others (a 404 of a setting is the target, who cannot be named now: not a friend nor in a

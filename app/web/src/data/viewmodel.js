@@ -153,6 +153,9 @@ export function noticeText(system, fallback, nameOf, where = {}) {
     case "agent_daily_budget_reached":
       text = `「${n(system.agentId)}」今天的额度已用完`;
       break;
+    case "agent_quieted":
+      text = `「${n(system.agentId)}」暂时不主动发言，需要时可以 @ 它`;
+      break;
     default:
       return null;
   }
@@ -437,6 +440,7 @@ function personView(p, version) {
 }
 
 /** The prototype's two private-reply choices, by the service's `replyMode`. */
+const PROACTIVE_LEVELS = ["less", "normal", "more"];
 const PRIVATE_REPLY = { always: "收到消息时回复", mention: "仅在我点名时回复" };
 
 /**
@@ -464,6 +468,11 @@ function agentView(a, version, loaded) {
     /** 别人 @ 每天最多花 (decimal points, null = unlimited) and what they spent today: only when the service says them. */
     ...(a.othersBudget === null || typeof a.othersBudget === "string" ? { othersBudget: a.othersBudget } : {}),
     ...(typeof a.othersSpentToday === "string" ? { othersSpentToday: a.othersSpentToday } : {}),
+    /** 主动参与群聊 with its level, daily budget and today's spend (decimal points): only the owner's view has these. */
+    ...(typeof a.proactive === "boolean" ? { proactive: a.proactive } : {}),
+    ...(PROACTIVE_LEVELS.includes(a.proactiveLevel) ? { proactiveLevel: a.proactiveLevel } : {}),
+    ...(typeof a.proactiveBudget === "string" ? { proactiveBudget: a.proactiveBudget } : {}),
+    ...(typeof a.proactiveSpentToday === "string" ? { proactiveSpentToday: a.proactiveSpentToday } : {}),
     /** How it addresses me and the others: only the owner's view has these (absent, never defaulted, otherwise). */
     ...(typeof a.ownerAppellation === "string" || a.ownerAppellation === null ? { ownerAppellation: a.ownerAppellation } : {}),
     ...(Array.isArray(a.appellations) ? { appellations: a.appellations } : {}),
@@ -514,7 +523,7 @@ function usageView(u) {
 
 /**
  * @returns {{people, agents, convs, order, relations, blocks, drafts, account, loaded, providers, usage, siteModels,
- *   providerDefaults, avatarVersions}} — merged by the store with the UI state (nav, toast) and `connection`.
+ *   providerDefaults, proactiveAvailable, avatarVersions}} — merged by the store with the UI state (nav, toast) and `connection`.
  */
 export function toView(model, { now = Date.now() } = {}) {
   const meId = model.me?.id ?? null;
@@ -686,6 +695,7 @@ export function toView(model, { now = Date.now() } = {}) {
     usage: usageView(model.usage),
     siteModels: model.siteModels ?? [],
     providerDefaults: model.providerDefaults ?? null,
+    proactiveAvailable: model.proactiveAvailable === true,
     /** principal id (the real one, mine too) → the version in its avatar URL; for an avatar of someone nobody names. */
     avatarVersions: versions,
   };

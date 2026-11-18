@@ -79,6 +79,8 @@ export function initial() {
     usage: null,
     /** The site's models from `GET /api/models`: [{id, label, tier, vision, pdf, reasoning, contextTokens}]. */
     siteModels: [],
+    /** Whether the site has a judgement model, so proactive replies can be turned on (`GET /api/models`). */
+    proactiveAvailable: false,
     /** What a provider model gets when its entry says nothing: {contextTokens, maxOutputTokens}, or null before it. */
     providerDefaults: null,
     /** conversation id → its latest run (see the header), or null when there is none to show. */
@@ -1276,5 +1278,5 @@ export function applyModels(state, answer) {
     }));
   const d = answer.providerDefaults;
   const providerDefaults = d && typeof d === "object" ? { contextTokens: d.contextTokens, maxOutputTokens: d.maxOutputTokens } : state.providerDefaults;
-  return { ...state, siteModels, providerDefaults };
+  return { ...state, siteModels, providerDefaults, proactiveAvailable: answer.proactiveAvailable === true };
 }
