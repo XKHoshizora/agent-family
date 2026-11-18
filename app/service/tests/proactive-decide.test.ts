@@ -309,6 +309,11 @@ describe("who replies unasked", () => {
       expect([leaveOut, await decide(w.g, said)]).toEqual([leaveOut, noneTriggered()]);
     }
     expect(await runsOf(anna.id, w.g)).toEqual([]);
+    // Each is logged, with no more than where.
+    expect(lines.filter((l) => l.metric === "judge_partial")).toEqual([
+      { level: "info", metric: "judge_partial", conversationId: w.g },
+      { level: "info", metric: "judge_partial", conversationId: w.g },
+    ]);
     // The whole answer: anna replies.
     judge.answer(partial(() => false));
     expect((await decide(w.g, await say(w.member, w.g, "最后一问"))).runs).toHaveLength(1);
@@ -583,6 +588,7 @@ describe("a judgement that fails", () => {
     expect(triggered.runs).toEqual([]);
     expect(triggered.notices.map((n) => n.body.event)).toEqual(["agent_quieted"]);
     expect(await stateOf(anna.id, w.g)).toMatchObject({ quiet_half_life_s: 3600, quiet_at: expect.any(Date) });
+    expect(lines.filter((l) => l.metric === "judge_partial")).toEqual([{ level: "info", metric: "judge_partial", conversationId: w.g }]);
   });
 });
 
@@ -668,6 +674,45 @@ describe("after it has spoken unasked", () => {
     for (let i = 0; i < 6; i++) await say(w.third, w.g, `闲聊${i}`);
     expect((await decide(w.g, await say(w.member, w.g, "问五"))).runs).toHaveLength(1);
     expect((await proactiveRuns(anna.id, w.g)).length).toBe(3);
+  });
+
+  it("its surcharge is stamped again from what is left of it after time and others' messages, plus a step", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    judge.answer(byName({ anna: 0.95 }));
+    expect((await decide(w.g, await say(w.member, w.g, "问一"))).runs).toHaveLength(1);
+    await settleAndAge();
+    // Four messages by others since (the question among them): the 0.1 has halved, whatever the few seconds did.
+    for (let i = 0; i < 3; i++) await say(w.third, w.g, `闲聊${i}`);
+    const second = await say(w.member, w.g, "问二");
+    expect((await decide(w.g, second)).runs).toHaveLength(1);
+    const state = await stateOf(anna.id, w.g);
+    expect(state.surcharge_seq).toBe(second);
+    expect(state.surcharge).toBeCloseTo(0.1 * 0.5 + 0.1, 5);
+  });
+
+  it("its owner's level sets the base: 0.6 does not pass at less (0.80), and does at more (0.50)", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { proactiveLevel: "less" });
+    judge.answer(byName({ anna: 0.6 }));
+    expect(await decide(w.g, await say(w.member, w.g, "问一"))).toEqual(noneTriggered());
+    expect((await api(app, w.owner, "PATCH", `/api/agents/${anna.id}`, { proactiveLevel: "more" })).status).toBe(200);
+    expect((await decide(w.g, await say(w.member, w.g, "问二"))).runs).toHaveLength(1);
+  });
+
+  it("a message leads to one proactive reply at most, even when it is decided twice", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    judge.answer(byName({ anna: 0.99 }));
+    const asked = await say(w.member, w.g, "今晚吃什么？");
+    expect((await decide(w.g, asked)).runs).toHaveLength(1);
+    // Nothing else would stop it now: the reply is over, out of the fuse, and 0.99 is over the surcharged threshold.
+    await settleAndAge();
+    expect(await decide(w.g, asked)).toEqual(noneTriggered());
+    expect((await proactiveRuns(anna.id, w.g)).length).toBe(1);
+    expect(lines.filter((l) => l.reason === "already_decided")).toEqual([
+      { level: "debug", metric: "proactive_skipped", reason: "already_decided", agentId: anna.id, conversationId: w.g },
+    ]);
   });
 
   it("its proactive run counts in its owner's others' minute", async () => {
@@ -773,6 +818,111 @@ describe("what happens while the judgement is out", () => {
     expect(await decide(w.g, asked, {}, judgeAfter(off))).toEqual(noneTriggered());
     expect(judge.calls).toHaveLength(1);
     expect([await runsOf(anna.id, w.g), await runsOf(bob.id, w.g)]).toEqual([[], []]);
+  });
+
+  it("the winner no longer found meanwhile: it is no option, and the rest of the decision stands", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const bob = await agentOf(w.member, "bob_bot", w.g);
+    await agentSays(bob.id, w.g, "我说两句");
+    judge.answer(byName({ anna: 0.9 }, { bob_bot: 0.95 }));
+    const asked = await say(w.third, w.g, "bob 别说了；有人会做饭吗？");
+    // `lockAgent` finds no such Agent once its row is gone (it reads the Agent through its own conversation).
+    const gone = () => db.query("delete from agent_conversations where agent_id = $1", [anna.id]);
+    const triggered = await decide(w.g, asked, {}, judgeAfter(gone));
+    expect(triggered.runs).toEqual([]);
+    expect(triggered.notices.map((n) => n.body.agentId)).toEqual([bob.id]);
+    expect(await runsOf(anna.id, w.g)).toEqual([]);
+  });
+});
+
+// --- locks, calls and halts ---------------------------------------------------------------------------------------------
+
+describe("the rows it locks, and a proactive reply someone asks for or halts before it begins", () => {
+  const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : 1);
+  /** Until some session of this database waits for a lock. */
+  const someoneWaits = async () => {
+    for (let i = 0; i < 100; i++) {
+      const { rows } = await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
+      if (rows[0]!.n > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("nobody waited for a lock");
+  };
+
+  it("its threshold rows are locked in id order before any is written: waiting on one, it holds none another may want", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const bob = await agentOf(w.member, "bob_bot", w.g);
+    const [low, high] = [anna, bob].sort(byId);
+    const who = (a: { id: string }) => (a.id === anna.id ? "anna" : "bob_bot");
+    // The lower id replies, the higher (which spoke) is asked to be quiet: two rows to write.
+    await agentSays(high!.id, w.g, "我先说两句");
+    judge.answer(byName({ [who(low!)]: 0.9 }, { [who(high!)]: 0.95 }));
+    const asked = await say(w.third, w.g, "别插话了；有人懂吗？");
+    const holder = await db.pool.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("set local lock_timeout = '5s'");
+      const hold = (id: string) => holder.query("select 1 from agent_group_state where agent_id = $1 and conversation_id = $2 for update", [id, w.g]);
+      // Once the call is counted, as the decision begins, another transaction holds the lower id's row …
+      const hooked = { query: db.query, tx: async (fn: Parameters<Db["tx"]>[0]) => (await hold(low!.id), db.tx(fn)), pool: db.pool, close: db.close } as unknown as Db;
+      const deciding = decideProactive({ db: hooked, judge, config: app.deps.config, log }, w.g, asked);
+      await someoneWaits();
+      // … and then wants the higher's: the decision, waiting for the lower one, must not hold it (that would deadlock).
+      await hold(high!.id);
+      await holder.query("commit");
+      const triggered = await deciding;
+      expect(triggered.runs.map((r) => r.conversationId)).toEqual([w.g]);
+      expect((await proactiveRuns(low!.id, w.g)).length).toBe(1);
+      expect((await stateOf(high!.id, w.g)).quiet).toBeCloseTo(0.33, 6);
+    } finally {
+      await holder.query("rollback").catch(() => {});
+      holder.release();
+    }
+  });
+
+  it("a mention folded into its queued run takes it over: a member's makes it others' with that caller, the owner's its own; the surcharge stays", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    judge.answer(byName({ anna: 0.99 }));
+    await decide(w.g, await say(w.third, w.g, "今晚吃什么？"));
+    const mention = await say(w.member, w.g, "@anna 对，就问你");
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, lane: "others", caller: w.member.id, by: "human", covers: mention }]);
+    expect((await stateOf(anna.id, w.g)).surcharge).toBeCloseTo(0.1, 6);
+
+    await settleAndAge();
+    await decide(w.g, await say(w.third, w.g, "那明天呢？"));
+    const own = await say(w.owner, w.g, "@anna 我也想知道");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toEqual({ status: "queued", error: null, lane: "own", caller: w.owner.id, by: "human", covers: own });
+  });
+
+  it("a halt cancels a queued proactive run and interrupts a running one, and leaves one a mention took over", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const bob = await agentOf(w.member, "bob_bot", w.g);
+    const carl = await agentOf(w.third, "carl_bot", w.g);
+    judge.answer(byName({ anna: 0.9 }));
+    await decide(w.g, await say(w.member, w.g, "做饭的问题"));
+    judge.answer(byName({ bob_bot: 0.9 }));
+    await decide(w.g, await say(w.member, w.g, "旅行的问题"));
+    await db.query("update agent_runs set status = 'running', started_at = now() where agent_id = $1", [bob.id]);
+    judge.answer(byName({ carl_bot: 0.9 }));
+    await decide(w.g, await say(w.member, w.g, "第三个问题"));
+    await say(w.owner, w.g, "@carl_bot 就你了");
+    const ends = async (agentId: string) =>
+      (await db.query("select status, error, interrupted, lane from agent_runs where agent_id = $1 and conversation_id = $2", [agentId, w.g])).rows;
+    expect([await ends(anna.id), await ends(bob.id), await ends(carl.id)]).toEqual([
+      [{ status: "queued", error: null, interrupted: null, lane: "proactive" }],
+      [{ status: "running", error: null, interrupted: null, lane: "proactive" }],
+      [{ status: "queued", error: null, interrupted: null, lane: "others" }],
+    ]);
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    expect([await ends(anna.id), await ends(bob.id), await ends(carl.id)]).toEqual([
+      [{ status: "cancelled", error: "halted", interrupted: null, lane: "proactive" }],
+      [{ status: "running", error: null, interrupted: "halted", lane: "proactive" }],
+      [{ status: "queued", error: null, interrupted: null, lane: "others" }],
+    ]);
   });
 });
 

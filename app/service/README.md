@@ -676,8 +676,8 @@ as many replies in the last minute as its lane allows (`AGENT_RUNS_PER_MINUTE`, 
 20, of those others called for), so this one was not started — no call, nothing held or charged; retry once the minute
 has passed), for
 `cancelled` `agent_paused` or `agent_deleted`, `agent_removed` (the Agent left the run's group: the group's creator or you
-took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it and a
-member halted Agents calling each other, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
+took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it,
+or nobody had — it was to speak unasked — and a member halted Agents, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
 answer is before a new topic you started, or — a reply someone else called for in a group — the Agent's others' daily
 budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group).
 `retryable`: it failed and trying again as it is may work (false
@@ -859,7 +859,8 @@ group is told), then — unless the mention folds into a reply under way, which 
 
 *Session: required.* Body: none or `{}`. Any current member of a group stops Agents calling each other there (“让 Agent
 停下”): from now on, until a person sends a message (any message, later than this), an Agent's message calls no other
-Agent. Replies that Agents' messages called for end at once: a queued one is `cancelled` with error `halted` (`run`
+Agent, and no Agent replies unasked to a message sent before it. Replies that Agents' messages called for end at once,
+and so do replies an Agent was to give unasked that nobody has called for since: a queued one is `cancelled` with error `halted` (`run`
 pushed to its owner), a running one is never posted and ends `cancelled`, `halted` (what it had said is discarded; what
 it used is settled; a reply already posted stays); what a person asked of such a reply meanwhile is still answered. Replies
 a person called for are left alone, but what Agents' messages asked of one before the halt (noted while it ran) gets no
@@ -1943,7 +1944,7 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   and the group is told once a day (Agents in a group). Then as in its own conversation: folded into
   its active run in the group (a queued run a person's message is folded into is a person's from then on, and the
   owner's own — the owner its caller — when the message is the owner's; another member's leaves its lane and first
-  caller), else, for a call on someone else's Agent, the caller's limit (`AGENT_CALLER_RUNS_PER_MINUTE`: over it,
+  caller, but takes over a reply nobody called for: lane `others`, that member its caller), else, for a call on someone else's Agent, the caller's limit (`AGENT_CALLER_RUNS_PER_MINUTE`: over it,
   nothing is recorded, one `caller_rate_limited` line is logged and the sender's answer names the Agent, `notCalled`), else a queued run (`triggered_by` `human`, with its
   caller and lane) — or, over its owner's replies a minute in the call's lane, a `failed` `rate_limited` run, of which
   there is one per Agent in the group: while it is the Agent's latest run there and its owner has not dismissed it, it
@@ -2022,7 +2023,8 @@ answers what they wrote meanwhile). In a group it is decided as In a group (abov
 chain budget, the others' daily budget, and the owner's replies a minute in its lane — over it, the Agent's reusable
 `rate_limited` run there records it. A mention folded into a queued run turns it the owner's own (the owner its caller)
 when it is the owner's call (their message, or an Agent's message they are behind); another person's — also one relayed
-through one of the owner's Agents — leaves its lane and first caller.
+through one of the owner's Agents — leaves its lane and first caller, except on a reply nobody called for (lane
+`proactive`, the Agent speaking unasked): any call folded into that makes it the call's, in its lane and with its caller.
 
 **Pause and delete** end the Agent's active replies, in every conversation, for good, in their own transaction (under
 the Agent's lock): a queued run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it

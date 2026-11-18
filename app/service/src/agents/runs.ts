@@ -403,13 +403,15 @@ async function recordRateLimited(t: Tx, agent: RunAgent, conversationId: string,
 /**
  * SQL `set` items: what a run takes on of a call recorded on it (folded in, or covered by a reused `rate_limited` run),
  * when `when` (SQL) holds: whose message called (`triggeredBy`, a parameter position) — a person's makes it a person's —
- * and who (`lane`, `caller`) — an `own` call makes it its owner's own, that caller its caller —, else it keeps them. So
- * a member's call relayed through one of the owner's Agents does not make it the owner's.
+ * and who (`lane`, `caller`) — an `own` call makes it its owner's own, that caller its caller; any call makes a reply
+ * nobody had called for (`proactive`) that call's, in its lane and with its caller (it is no longer unasked: not held to
+ * the proactive budget or the fuse, not ended by a halt) —, else it keeps them. So a member's call relayed through one of
+ * the owner's Agents does not make it the owner's.
  */
 const takesOnCall = (when: string, triggeredBy: string, lane: string, caller: string): string =>
   `triggered_by = case when ${when} and ${triggeredBy} = 'human' then 'human' else triggered_by end,
-   lane = case when ${when} and ${lane} = 'own' then 'own' else lane end,
-   caller_id = case when ${when} and ${lane} = 'own' then ${caller}::uuid else caller_id end`;
+   lane = case when ${when} and (${lane} = 'own' or lane = 'proactive') then ${lane}::text else lane end,
+   caller_id = case when ${when} and (${lane} = 'own' or lane = 'proactive') then ${caller}::uuid else caller_id end`;
 
 /**
  * `recordRateLimited` in a group (plan ruling 7): one such run per Agent there, not one per mention. When the Agent's
@@ -520,7 +522,8 @@ interface Call {
  * Agent's active run in the group — a queued one now covers it, becomes a person's when a person's message is folded
  * in, and its owner's own (`lane` `own`, the owner its caller) when the call is its owner's own (the owner's message, or
  * an Agent's message the owner is behind, `behindAgentMessage`), else keeps its caller and lane — so a member's call
- * relayed through one of the owner's Agents does not make it the owner's; a running one notes it (`pending_seq`), and
+ * relayed through one of the owner's Agents does not make it the owner's — unless nobody had called for it (lane
+ * `proactive`): then it is this call's, in its lane (`takesOnCall`); a running one notes it (`pending_seq`), and
  * stays as it is: its follow-up answers what was noted, in a lane of its own (`followUp`). A mention folded so is never
  * refused by the limits below (a spent others' daily budget refused it before it came here). Failing that, a call on
  * someone else's Agent (any lane but `own`) first meets its caller's limit (`calledLastMinute`; a call with no caller
@@ -1035,10 +1038,12 @@ export interface Halted {
 /**
  * `POST /api/conversations/:id/agents/halt` (ruling 11), by `actorId`: unless the conversation is a group, 404 before
  * any lock; then under the group's row (`lockForWrite`: 404 unless a current member of an open conversation)
- * `agents_halted_seq` becomes the group's current seq, so Agents' messages call nobody until a person writes again. The
- * runs Agents' messages called for end: a queued one is `cancelled`, `halted` (it never reached a model); a running one
- * is marked `interrupted` `halted` — never posted, it ends `cancelled` with that reason and is settled as any; what a
- * person asked of it meanwhile still gets its follow-up (`followUp`). Runs a person called for are left alone. The
+ * `agents_halted_seq` becomes the group's current seq, so Agents' messages call nobody until a person writes again (and,
+ * batch 2D, no Agent replies unasked to a message before it). The runs Agents' messages called for end, and so do the
+ * replies nobody called for (lane `proactive`; one a call was folded into is that call's, `takesOnCall`): a queued one is
+ * `cancelled`, `halted` (it never reached a model); a running one is marked `interrupted` `halted` — never posted, it
+ * ends `cancelled` with that reason and is settled as any; what a person asked of it meanwhile still gets its follow-up
+ * (`followUp`). Runs a person called for are left alone. The
  * `agents_halted` notice is appended unless the group was halted already (no person has written since the last halt):
  * then nothing changes. Lock order: the group's row, then run rows; no `agents` or `accounts` row.
  */
@@ -1049,12 +1054,12 @@ export async function haltAgents(t: Tx, conversationId: string, actorId: string)
   await t.query("update conversations set agents_halted_seq = greatest(coalesce(agents_halted_seq, 0), $2) where id = $1", [conversationId, lock.conversation.seq]);
   const queued = await t.query<RunRow & { owner_id: string }>(
     `update agent_runs as r set status = 'cancelled', error = 'halted', finished_at = now()
-      where r.conversation_id = $1 and r.status = 'queued' and r.triggered_by = 'agent' returning ${RUN_COLUMNS}, r.owner_id`,
+      where r.conversation_id = $1 and r.status = 'queued' and (r.triggered_by = 'agent' or r.lane = 'proactive') returning ${RUN_COLUMNS}, r.owner_id`,
     [conversationId],
   );
   const running = await t.query<{ id: string }>(
     `update agent_runs set interrupted = 'halted'
-      where conversation_id = $1 and status = 'running' and triggered_by = 'agent' and interrupted is null returning id`,
+      where conversation_id = $1 and status = 'running' and (triggered_by = 'agent' or lane = 'proactive') and interrupted is null returning id`,
     [conversationId],
   );
   return {
