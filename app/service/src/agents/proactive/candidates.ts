@@ -64,12 +64,19 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
   const r = rows[0];
   if (!r || r.type !== "group" || r.closed || r.seq === null || Number(r.seq) !== seq || r.kind !== "human" || r.sender_id === null) return null;
   if (r.halted !== null && Number(r.halted) >= seq) return null;
-  const handles = mentionedHandles(r.text ?? "");
-  if (handles.length > 0) {
-    const named = await q.query("select 1 from principals where kind = 'agent' and handle = any($1::citext[]) limit 1", [handles]);
-    if (named.rowCount) return null;
-  }
+  if (await namesAnAgent(q, r.text ?? "")) return null;
   return { senderId: r.sender_id };
+}
+
+/**
+ * Whether `text` names an Agent by `@handle` — any Agent, in the group or not (`judgeable`; the send route tells the
+ * scheduler so). One query, only when the text has a handle.
+ */
+export async function namesAnAgent(q: Queryable, text: string): Promise<boolean> {
+  const handles = mentionedHandles(text);
+  if (handles.length === 0) return false;
+  const named = await q.query("select 1 from principals where kind = 'agent' and handle = any($1::citext[]) limit 1", [handles]);
+  return Boolean(named.rowCount);
 }
 
 /**

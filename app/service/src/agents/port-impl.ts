@@ -25,6 +25,7 @@ import {
 } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
+import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
 import {
@@ -56,6 +57,8 @@ export interface AgentPortDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn" | "info">;
   /** How a candidate for a group run's mark is drawn (`loadContext`, `newMark`); default prompt.ts `drawMark`. Tests fix it. */
   drawMark?: () => string;
+  /** The proactive scheduler (proactive/scheduler.ts), when there is one: an Agent's post drops the judgement waiting there. */
+  proactive?: Pick<ProactiveScheduler, "cancelled"> | null;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -426,7 +429,8 @@ export class DbAgentPort implements AgentPort {
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
    * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`;
    * never in a group, where nothing proposes). In a group the reply loses the run's mark — the port's own copy, kept from
-   * `begin` (`RunFlags.mark`). "refused" for the Agent's state or a mark on the run — paused, deleted,
+   * `begin` (`RunFlags.mark`) — and, once posted, drops the proactive judgement waiting there (`deps.proactive`).
+   * "refused" for the Agent's state or a mark on the run — paused, deleted,
    * out of the run's group (`agent_removed`), halted — and also when the run is no longer `running` (`RunNotRunning`:
    * another instance's recovery ended it while this one answered); `finish` then finds it ended and leaves it as that
    * recovery recorded it.
@@ -443,6 +447,9 @@ export class DbAgentPort implements AgentPort {
       if (!duplicate) this.deps.conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, this.deps.log);
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
       actOnTriggered(triggered, { announce: (called) => this.announce(called), log: this.deps.log, realtime: this.deps.realtime });
+      // The group moved on: a judgement waiting there for a person's message is dropped (the decision would refuse that
+      // message now). Nothing ever waits in the Agent's own conversation.
+      if (!duplicate) this.deps.proactive?.cancelled(run.conversationId);
       return "posted";
     } catch (err) {
       if (err instanceof AppError && REFUSED.has(err.code)) return "refused";

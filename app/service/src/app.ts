@@ -21,6 +21,9 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
+import { decideProactive } from "./agents/proactive/decide.ts";
+import { createProactiveScheduler, type ProactiveScheduler } from "./agents/proactive/scheduler.ts";
+import { actOnTriggered } from "./agents/runs.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
 import { createAgentWorker, SHUTDOWN_GRACE_MS, within, type AgentWorker } from "./agents/runtime/worker.ts";
@@ -69,6 +72,11 @@ export interface Deps {
   models: ModelGateway;
   /** The judgement model (src/judge/client.ts); null when `JUDGE` is not configured. Tests inject a scripted one. */
   judge: Judge | null;
+  /**
+   * When a person's message in a group is judged for an unasked reply (src/agents/proactive/scheduler.ts); built with the
+   * reply worker's port, and null without a judgement model (and in tests unless they ask, `BuildOptions.proactive`).
+   */
+  proactive: ProactiveScheduler | null;
 }
 
 /** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
@@ -123,6 +131,11 @@ export interface BuildOptions {
    * (`app.staleRunSweep.run()` still sweeps by hand), or shorter delays.
    */
   staleRunSweep?: false | { initialDelayMs?: number; intervalMs?: number };
+  /**
+   * The proactive scheduler (`Deps.proactive`), built when the judgement model is configured, waiting
+   * `PROACTIVE.debounceMs`. Tests: `false` builds none, `{ delayMs }` a shorter wait.
+   */
+  proactive?: false | { delayMs?: number };
 }
 
 /**
@@ -166,6 +179,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     providerProbe: overrides.providerProbe ?? createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...insecureLocal, calls: providerCalls })),
     models: overrides.models ?? createModelGateway({ ...insecureLocal, calls: providerCalls }),
     judge: overrides.judge !== undefined ? overrides.judge : config.judge ? createJudge(config.judge, insecureLocal) : null,
+    // Built with the reply worker's port, below.
+    proactive: null,
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
@@ -273,6 +288,35 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // process left running are recovered and then the worker starts. It stops when the app starts closing, before the hub
   // and the database: calls in flight are abandoned and their runs ended here as recovery would end them, within
   // SHUTDOWN_GRACE_MS (what could not be written by then is left running, for the stale-run sweep or the next start).
+  //
+  // Proactive replies (batch 2D): once people in a group stop writing, the scheduler has the group's latest message
+  // judged (`decideProactive`) and acts on the outcome as the send route does on a mention's — notices published, runs
+  // announced (a queued one wakes the worker). Only with a judgement model. It stops when the app closes, before the
+  // database: what a decision in flight then decides is dropped, and the stop waits for it within SHUTDOWN_GRACE_MS.
+  const proactiveAsked = options.proactive === false ? null : (options.proactive ?? {});
+  deps.proactive =
+    overrides.proactive !== undefined
+      ? overrides.proactive
+      : proactiveAsked === null || deps.judge === null || config.judge === null
+        ? null
+        : createProactiveScheduler({
+            decide: (conversationId, seq) => decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log }, conversationId, seq),
+            act: (_conversationId, triggered) => {
+              if (triggered.notices.length > 0) deps.conversations.publish({ messages: triggered.notices, conversations: [] }, app.log);
+              actOnTriggered(triggered, { announce: (run) => agentPort.announce(run), log: app.log, realtime: app.realtime });
+            },
+            delayMs: proactiveAsked.delayMs ?? config.proactive.debounceMs,
+            log: app.log,
+          });
+  const proactive = deps.proactive;
+  if (proactive) {
+    app.addHook("onClose", async () => {
+      proactive.close();
+      if (!(await within(proactive.idle(), SHUTDOWN_GRACE_MS))) {
+        app.log.warn(`a proactive judgement was still in flight ${SHUTDOWN_GRACE_MS} ms after the stop; what it decides is dropped`);
+      }
+    });
+  }
   const agentPort = createAgentPort({
     db: deps.db,
     config,
@@ -281,6 +325,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     conversations: deps.conversations,
     reads: deps.reads,
     log: app.log,
+    proactive,
   });
   const agentWorker = createAgentWorker({
     port: agentPort,
