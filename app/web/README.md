@@ -27,19 +27,23 @@ errors and the XSS probe (`support/fixtures.mjs`).
 `E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
 `TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced) and empties every table but
 `pgmigrations`, starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
-speaking OpenAI Chat Completions and Anthropic Messages, streamed, scripted by the specs), then starts one service on
+speaking OpenAI Chat Completions and Anthropic Messages, streamed, scripted by the specs) and the judgement stub
+(`support/judge-stub.mjs`: a local stand-in for the judgement model of proactive replies, answering by fixed rules on the
+message judged — 川菜 picks the first Agent, 别插话 asks it to be quiet, anything else picks nobody — and recording what it
+was asked), then starts one service on
 `http://127.0.0.1:8911` (`E2E_PORT`, bound with `HOST=127.0.0.1`, so it is not reachable from the network) that serves
 `dist/` with a random `AUTH_SECRET`, a fixed fake `PROVIDER_KEY_SECRET`, a temporary `BLOB_DIR`, `RATE_LIMIT_SCALE=1000`,
-`SWEEP_INTERVAL_MINUTES=0`, `FREE_DAILY_POINTS=1` and two site models (one free, one paid) that are the stub. That service
+`SWEEP_INTERVAL_MINUTES=0`, `FREE_DAILY_POINTS=1`, two site models (one free, one paid) that are the model stub, and the
+judgement stub as its judgement model (`E2E_JUDGE`, so `proactiveAvailable` is true; `PROACTIVE={"debounceMs":300}`). That service
 is the test-only entry `app/service/tests/helpers/e2e-server.ts`, run with `tsx` (`NODE_ENV=test`, and only on a
 database named `…_e2e`): the production entry (`dist/server.js`) cannot call a plain-http loopback address, by design.
 Invites, mail and points come from the service CLI (`invite:create`, `inbox:list`, `credits:grant`). The restart spec
-stops and starts that process, and the specs script the stub, through a control endpoint of the runner (127.0.0.1, random
-port and token). Teardown stops the service and the stub and deletes the temporary directory; a service left by a
+stops and starts that process, and the specs script the model stub and read the judgement stub, through a control endpoint
+of the runner (127.0.0.1, random port and token). Teardown stops the service and the stubs and deletes the temporary directory; a service left by a
 crashed run is stopped by the next run. `E2E_SHOTS=1` also saves the acceptance screenshots
 (`docs/acceptance/batch2a/shots/`, 1440×900 and 390×844) of this run's own seeded data. The service log is
 `e2e/test-results/service.log`; failures keep traces and screenshots in `e2e/test-results/`, the HTML report is in
-`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored. `e2e/agents-group.spec.mjs` covers an owner's Agent in a group (add, @-call, one whole reply charged to its owner, what other members never receive), Agents calling each other with 让 Agent 停下 and the chain limit, a failed reply, leaving, removal and deletion, then message times, the two-step provider form, a model's 高级 panel and the paced reveal; with `E2E_SHOTS=1` its screenshots go to `docs/acceptance/batch2c/shots/`. Its chain-limit test restarts the service with `AGENT_CHAIN_LIMIT=3` through the runner's control endpoint (`restartService({…})` in `e2e/support/control.mjs`, and `restartService({})` back to the normal configuration; only the local suite can). `e2e/support/db.mjs` is the local suite's direct database helper (refused unless the database is `af_e2e`): `backdateMessage(conversationId, seq, days)` moves a message into the past, for what no person can do in the app.
+`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored. `e2e/agents-group.spec.mjs` covers an owner's Agent in a group (add, @-call, one whole reply charged to its owner, what other members never receive), Agents calling each other with 让 Agent 停下 and the chain limit, a failed reply, leaving, removal and deletion, then message times, the two-step provider form, a model's 高级 panel and the paced reveal; with `E2E_SHOTS=1` its screenshots go to `docs/acceptance/batch2c/shots/`. Its chain-limit test restarts the service with `AGENT_CHAIN_LIMIT=3` through the runner's control endpoint (`restartService({…})` in `e2e/support/control.mjs`, and `restartService({})` back to the normal configuration; only the local suite can). `e2e/agents-proactive.spec.mjs` covers proactive replies: an owner turns 主动参与群聊 on in the Agent form, a member's message without @ gets the Agent's reply on both pages, the owner's model line under it ends ` · 主动回复` while the member sees no line and receives no word of it, 别插话 brings the `agent_quieted` notice, and chit-chat gets no reply; no other spec turns the switch on, so in no other spec is the judgement stub ever asked. `e2e/support/db.mjs` is the local suite's direct database helper (refused unless the database is `af_e2e`): `backdateMessage(conversationId, seq, days)` moves a message into the past, for what no person can do in the app.
 
 **Remote mode.** `E2E_BASE_URL=https://… E2E_INVITE_CMD="…" E2E_INBOX_CMD="… {email}" npm run e2e` starts nothing
 and talks to that origin. The invite code is the last line of `E2E_INVITE_CMD`'s output that is a 20-character code;

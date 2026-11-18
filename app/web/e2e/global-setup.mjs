@@ -1,6 +1,6 @@
-// Local mode: build, fresh af_e2e, the model stub, one service on 127.0.0.1:E2E_PORT whose site models are the stub;
-// the returned function is the global teardown (stops the service and the stub, removes the run's temp files). Remote
-// mode: nothing to start (the specs that need the stub skip themselves).
+// Local mode: build, fresh af_e2e, the model stub and the judgement stub, one service on 127.0.0.1:E2E_PORT whose site
+// models and judgement model are the stubs; the returned function is the global teardown (stops the service and the
+// stubs, removes the run's temp files). Remote mode: nothing to start (the specs that need the stubs skip themselves).
 import { REMOTE } from "./support/env.mjs";
 import { startLocalSystem } from "./support/system.mjs";
 

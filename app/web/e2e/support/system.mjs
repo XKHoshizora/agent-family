@@ -1,7 +1,8 @@
 // The local system under test, run from the Playwright runner process: build the client and the service, give
-// the af_e2e database a fresh start, start the model stub (model-stub.mjs), run ONE service process that serves the
-// built client and whose site models are the stub, and let test workers stop and start that process and script the
-// stub through a small control endpoint (127.0.0.1, random port, random token).
+// the af_e2e database a fresh start, start the model stub (model-stub.mjs) and the judgement stub (judge-stub.mjs), run
+// ONE service process that serves the built client, whose site models are the model stub and whose judgement model is
+// the judgement stub, and let test workers stop and start that process and script or read the stubs through a small
+// control endpoint (127.0.0.1, random port, random token).
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +12,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { startJudgeStub } from "./judge-stub.mjs";
 import { startModelStub } from "./model-stub.mjs";
 import { BASE_URL, E2E_DATABASE, E2E_PROVIDER_KEY_SECRET, OUTPUT_DIR, PORT, SERVICE_DIR, WEB_DIR, cliEnv, e2eDatabaseUrl, serviceEnv } from "./env.mjs";
 
@@ -28,6 +30,14 @@ const TSX_LOADER = pathToFileURL(createRequire(path.join(SERVICE_DIR, "package.j
 
 /** The upstream key of the site models (the stub takes any): a fixed fake value. */
 const STUB_KEY = "e2e-site-model-key-not-real";
+/** The judgement stub's key (it takes any): a fixed fake value. */
+const JUDGE_STUB_KEY = "e2e-judge-key-not-real";
+
+/**
+ * The judgement model (`JUDGE`): one channel, the judgement stub. The service takes it from E2E_JUDGE (its address is
+ * plain http on 127.0.0.1, which JUDGE refuses; app/service/tests/helpers/e2e-server.ts).
+ */
+const judge = (url) => ({ model: "e2e-judge", channels: [{ url, apiKeyEnv: "E2E_STUB_JUDGE_KEY" }] });
 
 /**
  * The site's two models, both the stub: a free one and a paid one. Prices are micro-points per token: input is cheap, so
@@ -211,9 +221,10 @@ function createService(env) {
 /**
  * For the workers: POST /stop and POST /start (restart spec), answered once the step is done; POST /restart with a JSON
  * body `{env}` (the service's `restart`: e.g. a small AGENT_CHAIN_LIMIT for one spec, `{}` for the base again); POST
- * /stub/<command> with a JSON body, the model stub's `control` (model-stub.mjs), answered with its JSON.
+ * /stub/<command> with a JSON body, the model stub's `control` (model-stub.mjs), and POST /judge/<command>, the judgement
+ * stub's (judge-stub.mjs), each answered with its JSON.
  */
-function startControl(service, stub) {
+function startControl(service, stub, judgeStub) {
   const token = randomBytes(24).toString("hex");
   let queue = Promise.resolve();
   const server = http.createServer((req, res) => {
@@ -222,13 +233,15 @@ function startControl(service, stub) {
       return;
     }
     const failed = (err) => res.writeHead(500, { "content-type": "text/plain" }).end(String(err?.message ?? err));
-    if (req.url.startsWith("/stub/")) {
+    const stubbed = req.url.startsWith("/stub/") ? [stub, "/stub/"] : req.url.startsWith("/judge/") ? [judgeStub, "/judge/"] : null;
+    if (stubbed) {
+      const [target, prefix] = stubbed;
       const parts = [];
       req.on("data", (c) => parts.push(c));
       req.on("end", () => {
         try {
           const raw = Buffer.concat(parts).toString("utf8");
-          const answer = stub.control(req.url.slice("/stub/".length), raw ? JSON.parse(raw) : {});
+          const answer = target.control(req.url.slice(prefix.length), raw ? JSON.parse(raw) : {});
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(answer));
         } catch (err) {
           failed(err);
@@ -284,6 +297,7 @@ export async function startLocalSystem() {
   await freshDatabase();
 
   const stub = await startModelStub();
+  const judgeStub = await startJudgeStub();
   const service = createService(
     serviceEnv({
       // The test-only entry starts only so, and only on af_e2e (e2e-server.ts).
@@ -303,6 +317,11 @@ export async function startLocalSystem() {
       SWEEP_INTERVAL_MINUTES: "0",
       E2E_SITE_MODELS: JSON.stringify(siteModels(stub.baseUrl)),
       E2E_STUB_MODEL_KEY: STUB_KEY,
+      // Proactive replies (agents-proactive.spec.mjs): the judgement stub, and a short wait after a message before it is
+      // judged. No other spec turns an Agent's proactive replies on, so for them nothing is ever asked.
+      E2E_JUDGE: JSON.stringify(judge(judgeStub.url)),
+      E2E_STUB_JUDGE_KEY: JUDGE_STUB_KEY,
+      PROACTIVE: JSON.stringify({ debounceMs: 300 }),
       // Small, so a few replies use it up (agents.spec.mjs).
       FREE_DAILY_POINTS: "1",
       // tsx compiles the service's TypeScript with the service's own settings.
@@ -312,10 +331,11 @@ export async function startLocalSystem() {
   let control;
   try {
     await service.start();
-    control = await startControl(service, stub);
+    control = await startControl(service, stub, judgeStub);
   } catch (err) {
     await service.stop();
     await stub.close();
+    await judgeStub.close();
     throw err;
   }
   // Workers are started after global setup and inherit these.
@@ -327,6 +347,7 @@ export async function startLocalSystem() {
     await control.close();
     await service.stop();
     await stub.close();
+    await judgeStub.close();
     rmSync(RUN_DIR, { recursive: true, force: true });
   };
 }
