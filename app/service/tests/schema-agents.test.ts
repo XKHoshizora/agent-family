@@ -236,6 +236,28 @@ describe("agent, provider, metering and run tables", () => {
       expect((await db.query(`select triggered_by from agent_runs order by triggered_by`)).rows.map((r) => r.triggered_by)).toEqual(["agent", "human", "human"]);
     });
 
+    test("lane is 'own' unless set to 'others' or 'proactive', never anything else or null; caller_id is a principal, or null once it is gone", async () => {
+      const { owner, agent, conversation } = await setup();
+      await db.query(runSql, [conversation, agent, owner, "done"]);
+      const lane = `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, lane, caller_id)
+                    values ('reply', $1, $2, $3, 'done', 1, $4, $5)`;
+      const caller = await human("caller_h");
+      await db.query(lane, [conversation, agent, owner, "others", caller]);
+      await db.query(lane, [conversation, agent, owner, "proactive", null]);
+      await rejectedWith(CHECK_VIOLATION, lane, [conversation, agent, owner, "x", owner]);
+      await rejectedWith(CHECK_VIOLATION, lane, [conversation, agent, owner, "Own", owner]);
+      await expect(db.query(lane, [conversation, agent, owner, null, owner])).rejects.toMatchObject({ code: "23502" });
+      await rejectedWith(FOREIGN_KEY_VIOLATION, lane, [conversation, agent, owner, "others", "6a0d4c2e-1b3f-4a5e-9c7d-8e9f0a1b2c3d"]);
+      const rows = async () => (await db.query(`select lane, caller_id from agent_runs order by lane`)).rows;
+      expect(await rows()).toEqual([
+        { lane: "others", caller_id: caller },
+        { lane: "own", caller_id: null },
+        { lane: "proactive", caller_id: null },
+      ]);
+      await db.query(`delete from principals where id = $1`, [caller]);
+      expect((await rows())[0]).toEqual({ lane: "others", caller_id: null });
+    });
+
     test("a reply run needs both conversation and agent; a draft run has neither", async () => {
       const { owner, agent, conversation } = await setup();
       await rejectedWith(CHECK_VIOLATION, `insert into agent_runs (purpose, owner_id, status) values ('reply', $1, 'queued')`, [owner]);

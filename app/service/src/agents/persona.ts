@@ -326,8 +326,9 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
   const inputChars = estimateTokens(system) + estimateTokens(data);
 
   const started = await db.tx(async (t) => {
+    // The owner's own call, in the owner's own lane.
     const inserted = await t.query<{ id: string }>(
-      "insert into agent_runs (purpose, owner_id, status, started_at) values ('draft', $1, 'running', now()) returning id",
+      "insert into agent_runs (purpose, owner_id, status, started_at, caller_id, lane) values ('draft', $1, 'running', now(), $1, 'own') returning id",
       [ownerId],
     );
     const runId = inserted.rows[0]!.id;
