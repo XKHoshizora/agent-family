@@ -90,13 +90,23 @@ export interface GroupScene {
   more: boolean;
   /**
    * The roster (owner-marker design rule 8): who is in the group now besides the Agent, at most `GROUP_PEOPLE_NAMED`,
-   * in the order it lists them (agents/context.ts `withRoster`) — each one's name and handle (shown as their label shows
-   * them, `labelName`), who they are to the Agent (by account, as on their label), and what its owner wants them called
-   * (as stored, shown by `shownAppellation`; null: by name).
+   * in the order it lists them (agents/context.ts `withRoster`).
    */
-  people: ReadonlyArray<{ name: string; handle: string; role: SpeakerRole; appellation: string | null }>;
+  people: readonly GroupPerson[];
   /** There are more people and Agents in it than `people` names. */
   morePeople: boolean;
+}
+
+/**
+ * Someone in a group as its system text shows them: their name and handle (shown as their label shows them,
+ * `labelName`), who they are to the Agent (by account, as on their label), and what its owner wants them called (as
+ * stored, shown by `shownAppellation`; null: by name).
+ */
+export interface GroupPerson {
+  name: string;
+  handle: string;
+  role: SpeakerRole;
+  appellation: string | null;
 }
 
 /** Every vertical space, as the body of a pattern's character class (unicode mode): what can start a line. */

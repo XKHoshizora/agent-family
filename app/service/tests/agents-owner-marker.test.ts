@@ -456,7 +456,7 @@ describe("the roster in a group's system text", () => {
 
 describe("who the roster lists", () => {
   const person = (id: string, over: Partial<Member> = {}): Member => ({ id, name: `名${id}`, handle: id, role: "群成员", appellation: null, ...over });
-  const loaded = (members: Member[], present = members.length): LoadedScene => ({ title: null, agents: [], more: false, members, present });
+  const loaded = (members: Member[], inGroup = members.length): LoadedScene => ({ title: null, agents: [], more: false, members, inGroup });
   const ids = (scene: GroupScene): string[] => scene.people.map((p) => p.handle);
 
   it("its owner; whoever has an appellation, by join order; whoever spoke, the latest first; then everyone else by join order — each once, as the group's own read has them", () => {
@@ -533,6 +533,31 @@ describe("in a group, the model is given a roster", () => {
     for (const absent of ["成员26", "成员35", "成员99", "不在群里"]) expect([absent, call.system.includes(absent)]).toEqual([absent, false]);
     // The messages' labels carry the same mark.
     expect(textsOf(call.messages)).toEqual(["〔k7f2ab zoe｜群成员〕我先说", "〔k7f2ab ned｜群成员〕我也说", "〔k7f2ab mia｜群成员〕@helper_bot 群里都有谁？"]);
+  });
+
+  it("lists neither someone who spoke and has left nor an Agent that spoke and was deleted — their messages keep their labels — and says nobody more is there", async () => {
+    const { mia, ned, g } = await world();
+    const other = await mustCreateAgent(app, ned, { handle: "other_bot", name: "阿杰", model: FAST, persona: "你是阿杰。" });
+    await addOwn(ned, g, other.id);
+    await say(mia, g, "@other_bot 你好");
+    await answer("阿杰在。");
+    await say(ned, g, "我先走了");
+    await db.query("update memberships set left_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2", [g, ned.id]);
+    // Deleted, it is leaving: still a member until it has left.
+    await db.query("update agents set deleted_at = now() where principal_id = $1", [other.id]);
+    await say(mia, g, "@helper_bot 谁还在？");
+    await answer("主人和 mia。");
+
+    const call = lastCall();
+    const m = markOf(call);
+    expect(textsOf(call.messages)).toEqual([
+      `〔${m} mia｜群成员〕@other_bot 你好`,
+      `〔${m} 阿杰｜Agent〕阿杰在。`,
+      `〔${m} ned｜群成员〕我先走了`,
+      `〔${m} mia｜群成员〕@helper_bot 谁还在？`,
+    ]);
+    expect(call.system).toContain(`\n\n${rosterBlock([`- 〔${m} owen｜你的主人〕`, `- 〔${m} mia｜群成员〕`])}\n\n群里现在没有别的 Agent。`);
+    expect(call.system).not.toContain(MORE_PEOPLE);
   });
 
   it("its owner's line says what to call them only once its owner set that; a member's line what the owner set for them", async () => {

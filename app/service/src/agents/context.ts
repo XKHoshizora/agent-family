@@ -18,6 +18,7 @@ import {
   shownAppellation,
   speakerLabel,
   withoutMark,
+  type GroupPerson,
   type GroupScene,
   type SpeakerRole,
 } from "./runtime/prompt.ts";
@@ -46,7 +47,7 @@ import {
  * write to the conversation ever waits for a file. The choosing is the pure plan in `runtime/context.ts`.
  */
 
-/** Messages read per query, newest first, until the budget is passed. */
+/** In the Agent's own conversation, messages read per query, newest first, until the budget is passed. */
 const PAGE = 200;
 /** In a group, the most of its latest messages a reply is shown (with `AGENT_GROUP_CONTEXT_TOKENS`, `ContextRun.group`). */
 export const GROUP_CONTEXT_MESSAGES = 80;
@@ -196,21 +197,16 @@ async function topicStart(q: Queryable, agentId: string, conversationId: string)
 }
 
 /**
- * Someone who said something in a group: their account, their name and handle (a label shows them as `labelName`
- * does), and who they are to the Agent (`speakerRole`).
+ * Someone in a group now as its roster may list them (`withRoster`): their account, and the person the roster shows
+ * (`GroupPerson`: name, handle, who they are to the Agent, `speakerRole`, and what its owner wants them called).
  */
-export interface Speaker {
-  id: string;
-  name: string;
-  handle: string;
-  role: SpeakerRole;
-}
+export type Member = GroupPerson & { id: string };
 
 /**
- * Someone in a group now as its roster may list them (`withRoster`): who, and what the Agent's owner wants it to call
- * them (null: nothing set).
+ * Someone who said something in a group: a `Member` but for what they are called, which only the group's read knows
+ * (`withRoster`).
  */
-export type Member = Speaker & { appellation: string | null };
+export type Speaker = Omit<Member, "appellation">;
 
 /** A message as loaded: its entry, its seq, and where it belongs (`answers`). */
 interface Loaded {
@@ -278,7 +274,7 @@ const inGroupNow = (ms: string): string =>
  * that proposed a persona is its text followed by the proposal as the block it was written in (`renderProposalBlock`):
  * the Agent's own output, so it can revise what it proposed; it counts toward the budget like any text and is never
  * read for a block again. (A reply in a group never proposes: nothing is looked up there.)
- * `read`: how many messages the query returned; `more`: as many as `limit` (there may be older ones).
+ * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
   q: Queryable,
@@ -286,7 +282,7 @@ async function loadPage(
   from: number,
   before: number | null,
   limit: number,
-): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean; read: number }> {
+): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
   const group = run.group !== null;
   const { rows } = await q.query<MessageRow>(
     `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
@@ -345,7 +341,7 @@ async function loadPage(
         : null;
     return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null, speaker }];
   });
-  return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === limit, read: rows.length };
+  return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === limit };
 }
 
 /**
@@ -398,8 +394,8 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
  * with `draw`): one that occurs in no message, quote, name or file name loaded and nowhere in `system("", speakers)` —
  * the system text with the mark left out, its roster included — so that only the labels (`shown`) and the system text
  * carry it. What is read is chosen before that, by the budget `system("", [])` leaves and with no label counted: in the
- * Agent's own conversation that is the budget the system text leaves; a group's latest `maxMessages` are one page
- * (`GROUP_CONTEXT_MESSAGES` < `PAGE`), so no budget cuts its reading short. Either way nothing that could be shown is
+ * Agent's own conversation that is the budget the system text leaves; a group's latest `maxMessages` are read as one
+ * page, whatever the budget, so no budget cuts its reading short. Either way nothing that could be shown is
  * left unread; the budget used after reading (`budget`) is the one the final system text leaves.
  */
 export async function loadContext(
@@ -421,17 +417,14 @@ export async function loadContext(
   let oldest = Number.POSITIVE_INFINITY;
   let more = true;
   let before: number | null = null;
-  let read = 0;
   while (more) {
-    const limit = run.group === null ? PAGE : Math.min(PAGE, run.group.maxMessages - read);
-    const page = await loadPage(q, run, from, before, limit);
+    // A group's latest `maxMessages` are one page, read whatever the budget; what is older is not read: it counts as
+    // more left unread.
+    const page = await loadPage(q, run, from, before, run.group === null ? PAGE : run.group.maxMessages);
     loaded.push(...page.loaded);
-    read += page.read;
     more = page.more;
     if (page.oldest !== null) oldest = page.oldest;
-    // A group's messages before its latest `maxMessages` are not read: they count as more left unread.
-    if (more && run.group !== null && read >= run.group.maxMessages) break;
-    if (more && pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), reading)) break;
+    if (more && (run.group !== null || pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), reading))) break;
     before = page.oldest;
   }
   const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
@@ -468,7 +461,7 @@ export interface LoadedScene extends Omit<GroupScene, "people" | "morePeople"> {
    */
   members: Member[];
   /** How many are in the group now besides the Agent (more than `members` when not all were read). */
-  present: number;
+  inGroup: number;
 }
 
 /**
@@ -496,18 +489,19 @@ export async function loadGroupScene(
       limit $3`,
     [conversationId, agent.id, GROUP_AGENTS_NAMED + 1],
   );
-  // Everyone in the group now but the Agent is counted and numbered; its owner and those with an appellation are all
-  // read, of the others the first by join order.
-  const people = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent"; appellation: string | null; present: number }>(
-    `select id, name, handle, kind, appellation, present
-       from (select p.id, p.display_name as name, p.handle::text as handle, p.kind, aa.appellation, m.joined_seq,
-                    (count(*) over ())::int as present,
-                    row_number() over (partition by (p.id = $3 or aa.principal_id is not null) order by m.joined_seq, p.id) as nth
+  // Everyone in the group now but the Agent is counted and numbered; its owner and those with an appellation (`always`)
+  // are all read, of the others the first by join order.
+  const people = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent"; appellation: string | null; in_group: number }>(
+    `select id, name, handle, kind, appellation, in_group
+       from (select p.id, p.display_name as name, p.handle::text as handle, p.kind, aa.appellation, m.joined_seq, k.always,
+                    (count(*) over ())::int as in_group,
+                    row_number() over (partition by k.always order by m.joined_seq, p.id) as nth
                from memberships m
                join principals p on p.id = m.principal_id
                left join agent_appellations aa on aa.agent_id = $2 and aa.principal_id = p.id
+               cross join lateral (values (p.id = $3 or aa.appellation is not null)) k(always)
               where m.conversation_id = $1 and ${inGroupNow("m")} and p.id <> $2) r
-      where id = $3 or appellation is not null or nth <= $4
+      where always or nth <= $4
       order by joined_seq, id`,
     [conversationId, agent.id, agent.ownerId, GROUP_PEOPLE_NAMED],
   );
@@ -522,7 +516,7 @@ export async function loadGroupScene(
       role: speakerRole(r.id, r.kind, agent.ownerId),
       appellation: r.id === agent.ownerId ? agent.ownerAppellation : r.appellation,
     })),
-    present: people.rows[0]?.present ?? 0,
+    inGroup: people.rows[0]?.in_group ?? 0,
   };
 }
 
@@ -534,7 +528,7 @@ export async function loadGroupScene(
  * read with the group is listed as read there (so with their appellation); a speaker who was not has none.
  */
 export function withRoster(scene: LoadedScene, speakers: readonly Speaker[]): GroupScene {
-  const { members, present, ...rest } = scene;
+  const { members, inGroup, ...rest } = scene;
   const read = new Map(members.map((m) => [m.id, m]));
   const listed = new Map<string, Member>();
   const list = (m: Member): void => {
@@ -545,7 +539,7 @@ export function withRoster(scene: LoadedScene, speakers: readonly Speaker[]): Gr
   for (const s of speakers) list(read.get(s.id) ?? { ...s, appellation: null });
   for (const m of members) list(m);
   const people = [...listed.values()].slice(0, GROUP_PEOPLE_NAMED);
-  return { ...rest, people, morePeople: present > people.length };
+  return { ...rest, people, morePeople: inGroup > people.length };
 }
 
 /**
