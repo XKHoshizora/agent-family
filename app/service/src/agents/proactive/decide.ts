@@ -8,7 +8,7 @@ import { AppError } from "../../errors.ts";
 import type { Answer, Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
-import { noneTriggered, overLaneLimit, proactiveSpentToday, queueRun, siteToday, type RunLimits, type Triggered } from "../runs.ts";
+import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
 import { judgeable, NOBODY, optionsFor, PICK, quietKey, requestFor, type Option } from "./candidates.ts";
 import { afterProactive, afterQuiet, NO_STATE, thresholdNow, type GroupState } from "./threshold.ts";
@@ -346,7 +346,7 @@ async function whyNot(
     [agent.id, conversationId, P.fuse.perSeconds],
   );
   if (fuse.rows[0]!.recent > 0 || fuse.rows[0]!.hour >= P.fuse.perHour) return "fuse";
-  if ((await proactiveSpentToday(t, agent.id, siteToday(config))) >= agent.proactiveBudgetMicro) return "budget";
+  if (await proactiveBudgetSpent(t, agent, config)) return "budget";
   if (await overLaneLimit(t, agent.ownerId, "proactive", config)) return "owner_minute";
   return null;
 }

@@ -4,6 +4,7 @@ import { buildApp } from "../src/app.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { createAgent, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
+import { paidReply } from "./helpers/metering.ts";
 
 /**
  * The owner's settings for proactive replies (README "Agents"): `proactive`, `proactiveLevel`, `proactiveBudget`, and
@@ -121,18 +122,8 @@ describe("proactive settings", () => {
     const owner = await signUp(app, "pro_spent");
     const agent = await mustCreateAgent(app, owner);
     const yesterday = new Date(siteToday(app.deps.config).getTime() - 3_600_000);
-    const paid = async (lane: string, micro: number, at: Date | null) => {
-      const run = await db.query<{ id: string }>(
-        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at, lane)
-         values ('reply', $1, $2, $3, 'done', 0, 'site', 'fast', 'balance', now(), $4) returning id`,
-        [agent.conversationId, agent.id, owner.id, lane],
-      );
-      await db.query(
-        `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome, created_at)
-         values ($1, $2, $3, 'reply', 'site', 'fast', $4, $4, 'done', coalesce($5::timestamptz, now()))`,
-        [owner.id, agent.id, run.rows[0]!.id, micro, at],
-      );
-    };
+    const paid = (lane: "own" | "others" | "proactive", micro: number, at: Date | null) =>
+      paidReply(db, { agentId: agent.id, ownerId: owner.id, conversationId: agent.conversationId, lane, micro, at });
     await paid("proactive", 3_000_000, null);
     await paid("proactive", 500_000, null);
     await paid("others", 7_000_000, null);

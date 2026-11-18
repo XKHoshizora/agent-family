@@ -14,6 +14,7 @@ import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
+import { paidReply } from "./helpers/metering.ts";
 import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
 /**
@@ -759,16 +760,7 @@ describe("a winner that cannot speak now: nobody replies, not the runner-up, and
       "budget",
       async (w, anna) => {
         expect((await api(app, w.owner, "PATCH", `/api/agents/${anna.id}`, { proactiveBudget: "1" })).status).toBe(200);
-        const run = await db.query<{ id: string }>(
-          `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at, lane)
-           values ('reply', $1, $2, $3, 'done', 0, 'site', 'fast', 'balance', now(), 'proactive') returning id`,
-          [anna.conversationId, anna.id, w.owner.id],
-        );
-        await db.query(
-          `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome)
-           values ($1, $2, $3, 'reply', 'site', 'fast', 1000000, 1000000, 'done')`,
-          [w.owner.id, anna.id, run.rows[0]!.id],
-        );
+        await paidReply(db, { agentId: anna.id, ownerId: w.owner.id, conversationId: anna.conversationId, lane: "proactive", micro: 1_000_000 });
       },
     ],
     ["its owner's others' minute full", "owner_minute", (w, anna) => runAt(anna.conversationId, anna.id, w.owner.id, "others", "30 seconds", app.deps.config.agentOthersRunsPerMinute)],

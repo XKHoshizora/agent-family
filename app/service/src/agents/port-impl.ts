@@ -33,8 +33,8 @@ import {
   followUp,
   followUpOf,
   noneTold,
-  othersBudgetRefusesAdmission,
   pushBudgetReached,
+  refusedAtAdmission,
   RUN_COLUMNS,
   toWireRun,
   type Announced,
@@ -70,11 +70,12 @@ const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
 /** The Agent is no longer a member of the run's group: nothing is called or posted there. */
 const REMOVED: RunEnd = { status: "cancelled", error: "agent_removed" };
 /**
- * Someone else's call found the Agent's others' daily budget spent as it was admitted (runs.ts
- * `othersBudgetRefusesAdmission`): no call, nothing held or charged — nothing failed and there is nothing to retry, as
- * for such a call refused when it was made (of which nothing is recorded); the group is told by the budget's notice.
+ * Refused as it was admitted (runs.ts `refusedAtAdmission`): someone else's call found the Agent's others' daily budget
+ * spent, or a reply nobody asked for found its owner's switch off or its proactive budget spent. No call, nothing held or
+ * charged — nothing failed and there is nothing to retry, as for such a call refused when it was made (of which nothing
+ * is recorded); the group is told only by the others' budget's notice.
  */
-const OTHERS_BUDGET_SPENT: RunEnd = { status: "cancelled" };
+const REFUSED_AT_ADMISSION: RunEnd = { status: "cancelled" };
 
 /** Why `postAsAgent` refuses a run's reply (409): the Agent's state, or what interrupted the run. */
 const REFUSED: ReadonlySet<string> = new Set(["agent_paused", "agent_deleted", "agent_removed", "halted"]);
@@ -288,14 +289,16 @@ export class DbAgentPort implements AgentPort {
    *    is still `running`, unadmitted, and its caller ends it (the worker: `release`).
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when
    *    `closing` has aborted by the time the locks are held, the transaction rolls back and `begin` rejects with its
-   *    reason, admitting nothing (as in step 2). A run someone else called for (lane `others`) then meets the Agent's
-   *    others' daily budget again (runs.ts `othersBudgetRefusesAdmission`: replies settled while it waited queued may
-   *    have reached it since it was called): spent, it ends `cancelled` with no
-   *    error (`OTHERS_BUDGET_SPENT`) — no call, nothing held or charged — and the budget's notice, if this appended it,
-   *    is published to the group after commit, the Agent pushed to its owner. What step 1 took on (noted on the run
-   *    after its claim) is handed back as noted — `covers_seq` back to what it covered before, `pending_seq` at least
-   *    what it took on — so `finish`'s follow-up answers it as any: the owner's own mention is queued as theirs (the
-   *    owner's calls are never refused by this budget), someone else's meets the budget again and is not queued.
+   *    reason, admitting nothing (as in step 2). Then what its lane is held to is read again (runs.ts
+   *    `refusedAtAdmission`; replies settled while it waited queued may have spent a budget since): a run someone else
+   *    called for (lane `others`) meets the Agent's others' daily budget, and a reply nobody asked for (`proactive`) its
+   *    owner's switch and its proactive budget. Refused, it ends `cancelled` with no error (`REFUSED_AT_ADMISSION`) — no
+   *    call, nothing held or charged — and the others' budget's notice, if this appended it, is published to the group
+   *    after commit, the Agent pushed to its owner (a reply nobody asked for tells nobody). What step 1 took on (noted on
+   *    the run after its claim) is handed back as noted — `covers_seq` back to what it covered before, `pending_seq` at
+   *    least what it took on — so `finish`'s follow-up answers it as any: the owner's own mention is queued as theirs (the
+   *    owner's calls are never refused by these), someone else's meets the others' budget again and is not queued once
+   *    it is spent.
    *    Otherwise
    *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
    *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
@@ -376,11 +379,11 @@ export class DbAgentPort implements AgentPort {
       // The service may have started closing while this waited for the locks: then nothing is admitted (thrown, so the
       // transaction rolls back) and the run is left running, unadmitted, for the caller to end (the worker: `release`).
       if (closing?.aborted) throw closing.reason;
-      // Someone else's call meets the Agent's others' daily budget once more: replies settled while it waited count now.
-      // Refused, what step 1 took on (noted on it after its claim — its owner's mention, say) is handed back as noted, so
-      // `finish`'s follow-up answers it by the usual rule: its owner's own is queued; someone else's meets the budget again
-      // and is simply not queued (no second notice that day), so nothing loops.
-      const told = await othersBudgetRefusesAdmission(t, run.conversationId, agent, state.lane, config);
+      // What its lane is held to, once more: replies settled while it waited count now, and its owner may have turned a
+      // reply nobody asked for off. Refused, what step 1 took on (noted on it after its claim — its owner's mention, say)
+      // is handed back as noted, so `finish`'s follow-up answers it by the usual rule: its owner's own is queued; someone
+      // else's meets the others' budget again and is simply not queued (no second notice that day), so nothing loops.
+      const told = await refusedAtAdmission(t, run.conversationId, agent, state.lane, config);
       if (told) {
         if (first.covers > first.coveredBefore) {
           await t.query("update agent_runs set covers_seq = $2, pending_seq = greatest(coalesce(pending_seq, 0), $3) where id = $1", [
@@ -389,7 +392,7 @@ export class DbAgentPort implements AgentPort {
             first.covers,
           ]);
         }
-        return { end: OTHERS_BUDGET_SPENT, told };
+        return { end: REFUSED_AT_ADMISSION, told };
       }
       const { resolved, loaded, covers } = first;
       try {
@@ -407,7 +410,7 @@ export class DbAgentPort implements AgentPort {
       };
     });
     if ("end" in result) {
-      // The others' daily budget's notice, if this appended it, goes to the group; the Agent to its owner.
+      // The others' daily budget's notice, if the admission's refusal appended it, goes to the group; the Agent to its owner.
       if (result.told) this.tell(result.told);
       return result.end;
     }

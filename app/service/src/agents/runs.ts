@@ -585,22 +585,6 @@ async function reachAgents(
 }
 
 /**
- * What calls by people other than its owner have spent today of the owner's points on Agent `agentId` (`dayStart`: when
- * the site day began, `siteDayStart`): what its replies in lane `others` were charged (`free_micro + balance_micro`) by
- * the usage records written since then — settled charges only. A reply being written counts once it is settled, not
- * before: its hold is the most it can cost (its whole output limit), which on a paid model can alone pass a budget it
- * will not come near. Its owner's own replies (`own`) and those nobody called for (`proactive`) do not count.
- */
-export async function othersSpentToday(q: Queryable, agentId: string, dayStart: Date): Promise<bigint> {
-  return (await spentTodayOf(q, [agentId], dayStart)).get(agentId)?.others ?? 0n;
-}
-
-/** The same for lane `proactive` (replies nobody called for; the owner's `proactiveBudget`). */
-export async function proactiveSpentToday(q: Queryable, agentId: string, dayStart: Date): Promise<bigint> {
-  return (await spentTodayOf(q, [agentId], dayStart)).get(agentId)?.proactive ?? 0n;
-}
-
-/**
  * What each of `agentIds` was charged since `dayStart` for its replies in the two lanes that have a daily budget
  * (`others`, `proactive`), settled charges only, both in one statement (an owner's list of Agents).
  */
@@ -622,6 +606,29 @@ export async function spentTodayOf(
   return new Map(rows.map((r) => [r.id, { others: BigInt(r.others), proactive: BigInt(r.proactive) }]));
 }
 
+/** The lanes with a daily budget of their own: other people's calls (`othersBudget`), replies nobody called for (`proactiveBudget`). */
+type BudgetedLane = "others" | "proactive";
+
+/**
+ * Whether Agent `agentId`'s daily budget for its replies in `lane` (`budget`) is spent: what they were charged today
+ * (`spentTodayOf`, the site day beginning at `dayStart`) has reached it — never while it is null (no limit; nothing is
+ * read then). Replies in the other lanes never count. Settled charges only: a reply being written counts once it is
+ * settled, not before — its hold is the most it can cost (its whole output limit), which on a paid model can alone pass
+ * a budget it will not come near — so the day's real spend can pass the budget by the replies under way when it is
+ * reached.
+ */
+async function laneBudgetSpent(q: Queryable, agentId: string, lane: BudgetedLane, budget: bigint | null, dayStart: Date): Promise<boolean> {
+  if (budget === null) return false;
+  return ((await spentTodayOf(q, [agentId], dayStart)).get(agentId)?.[lane] ?? 0n) >= budget;
+}
+
+/**
+ * Whether `agent`'s proactive budget (its owner's `proactiveBudget`) is spent today (`laneBudgetSpent`): checked before a
+ * reply nobody asked for is queued (agents/proactive/decide.ts) and again as it is admitted (`refusedAtAdmission`).
+ */
+export const proactiveBudgetSpent = (q: Queryable, agent: Pick<AgentRow, "id" | "proactiveBudgetMicro">, config: Pick<Config, "siteTimezone">): Promise<boolean> =>
+  laneBudgetSpent(q, agent.id, "proactive", agent.proactiveBudgetMicro, siteToday(config));
+
 /**
  * Whether the conversation was told since `dayStart` that Agent `agentId`'s others' daily budget is spent (a notice's
  * sender is its `actorId`: here the Agent).
@@ -638,10 +645,9 @@ async function toldBudgetReachedSince(t: Tx, conversationId: string, agentId: st
 
 /**
  * The others' daily budget of `agent` (its owner's `othersBudget`) for a call on it in `conversationId` by someone other
- * than its owner (lane `others`; the caller checks the lane): spent once what such calls were charged today
- * (`othersSpentToday`, the site day beginning at `dayStart`) has reached it — never while it is null (no limit; nothing
- * is read then). Replies being written count only once settled, so the day's real spend can pass the budget by the
- * replies under way when it is reached: at most the owner's places for others' replies (`agentMaxConcurrentOthersRuns`).
+ * than its owner (lane `others`; the caller checks the lane): spent once what such calls were charged today has reached
+ * it (`laneBudgetSpent`, the site day beginning at `dayStart`). The day's real spend can pass it by the replies under
+ * way when it is reached: at most the owner's places for others' replies (`agentMaxConcurrentOthersRuns`).
  * Once spent, the conversation is told by an `agent_daily_budget_reached` notice about the Agent,
  * appended now unless one about it was today already (once a site day per conversation and Agent): `notice` is the one
  * appended, else null. The caller holds the conversation's row lock (`appendSystem`).
@@ -652,8 +658,7 @@ export async function othersBudgetSpent(
   agent: Pick<AgentRow, "id" | "othersBudgetMicro">,
   dayStart: Date,
 ): Promise<{ spent: boolean; notice: StoredMessage | null }> {
-  const budget = agent.othersBudgetMicro;
-  if (budget === null || (await othersSpentToday(t, agent.id, dayStart)) < budget) return { spent: false, notice: null };
+  if (!(await laneBudgetSpent(t, agent.id, "others", agent.othersBudgetMicro, dayStart))) return { spent: false, notice: null };
   if (await toldBudgetReachedSince(t, conversationId, agent.id, dayStart)) return { spent: true, notice: null };
   return { spent: true, notice: await appendSystem(t, conversationId, { event: "agent_daily_budget_reached", actorId: agent.id, agentId: agent.id }) };
 }
@@ -685,20 +690,26 @@ async function refusedByOthersBudget(
 
 /**
  * At admission (`DbAgentPort.begin`, in the transaction that admits the call, under the run's conversation row, its
- * Agent's and its own): whether `agent`'s others' daily budget refuses its run in `lane` (only `others` ever is) in
- * `conversationId` after all. Read again there because replies of the Agent's settled while this one waited queued may
- * have reached it since it was called (`othersSpentToday`: settlement, in `finish`, takes the same Agent row lock, so
- * each admission sees what was settled before it): an Agent called in several groups at once does not start one more
- * reply in each once the first have spent it. Null when it does not refuse; else what the refusal told (`othersBudgetSpent`): the notice
- * appended, if any, and the Agent's owner to push it to.
+ * Agent's and its own): whether `agent`'s run in `lane` in `conversationId` is refused after all, by what its lane is
+ * held to that may have changed while it waited queued — read again there because replies of the Agent's settled since
+ * may have spent a budget (settlement, in `finish`, takes the same Agent row lock, so each admission sees what was
+ * settled before it): an Agent called, or picked, in several groups at once does not start one more reply in each once
+ * the first have spent it.
+ * - `others`: its others' daily budget (`othersBudgetSpent`); the group is told as when a call is refused;
+ * - `proactive` (a reply nobody asked for): its owner has turned proactive replies off since, or its proactive budget is
+ *   spent (`proactiveBudgetSpent`); nobody is told — a notice about a reply nobody asked for would be noise;
+ * - `own`: never.
+ * Null when it is not refused; else what the refusal told: the notice appended, if any, and the Agent's owner to push it
+ * to.
  */
-export async function othersBudgetRefusesAdmission(
+export async function refusedAtAdmission(
   t: Tx,
   conversationId: string,
-  agent: Pick<AgentRow, "id" | "ownerId" | "othersBudgetMicro">,
+  agent: Pick<AgentRow, "id" | "ownerId" | "othersBudgetMicro" | "proactive" | "proactiveBudgetMicro">,
   lane: Lane,
   config: Pick<Config, "siteTimezone">,
 ): Promise<Told | null> {
+  if (lane === "proactive") return !agent.proactive || (await proactiveBudgetSpent(t, agent, config)) ? noneTold() : null;
   const told = noneTold();
   return (await refusedByOthersBudget(t, conversationId, agent, lane, siteToday(config), told)) ? told : null;
 }

@@ -76,6 +76,29 @@ export async function runningRun(db: Db, ownerId: string, agent?: Pick<MeteredAg
   return rows[0]!.id;
 }
 
+/**
+ * A finished reply of Agent `agentId` (its owner `ownerId`) in `conversationId`, in `lane`, on the site model `fast`,
+ * settled with `micro` charged to its owner's balance; its usage record written at `at` (now unless given). Returns the
+ * run's id.
+ */
+export async function paidReply(
+  db: Db,
+  r: { agentId: string; ownerId: string; conversationId: string; lane: "own" | "others" | "proactive"; micro: number | bigint; at?: Date | null },
+): Promise<string> {
+  const run = await db.query<{ id: string }>(
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at, lane)
+     values ('reply', $1, $2, $3, 'done', 0, 'site', 'fast', 'balance', now(), $4) returning id`,
+    [r.conversationId, r.agentId, r.ownerId, r.lane],
+  );
+  const id = run.rows[0]!.id;
+  await db.query(
+    `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome, created_at)
+     values ($1, $2, $3, 'reply', 'site', 'fast', $4, $4, 'done', coalesce($5::timestamptz, now()))`,
+    [r.ownerId, r.agentId, id, r.micro.toString(), r.at ?? null],
+  );
+  return id;
+}
+
 /** What the operator's `credits:grant` does: a ledger entry under the account lock. */
 export function grant(db: Db, ownerId: string, micro: bigint): Promise<bigint> {
   return db.tx(async (t) => {

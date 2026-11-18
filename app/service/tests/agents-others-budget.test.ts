@@ -7,6 +7,7 @@ import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { paidReply } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
@@ -115,16 +116,7 @@ const noticesOf = async (conv: string) =>
  * written at `at` (now unless given).
  */
 async function paid(agent: Agent, conv: string, lane: "own" | "others" | "proactive", micro: number, at: Date | null = null): Promise<void> {
-  const run = await db.query<{ id: string }>(
-    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at, lane)
-     values ('reply', $1, $2, $3, 'done', 0, 'site', 'fast', 'balance', now(), $4) returning id`,
-    [conv, agent.id, agent.ownerId, lane],
-  );
-  await db.query(
-    `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome, created_at)
-     values ($1, $2, $3, 'reply', 'site', 'fast', $4, $4, 'done', coalesce($5::timestamptz, now()))`,
-    [agent.ownerId, agent.id, run.rows[0]!.id, micro, at],
-  );
+  await paidReply(db, { agentId: agent.id, ownerId: agent.ownerId, conversationId: conv, lane, micro, at });
 }
 
 /** A finished reply of `agent` that someone other than its owner called for, charged `micro` (at `at`: now unless given). */
