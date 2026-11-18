@@ -4,7 +4,8 @@ import { ME } from "../data/identities.js";
 import { appellation as appellationProblem } from "../auth/validation.js";
 import { entity } from "../state/selectors.js";
 import { friendIds } from "../state/social.js";
-import { Btn, Tag } from "../ui/primitives.jsx";
+import { Btn, Tag, composing } from "../ui/primitives.jsx";
+import { refusalText, settled, useAction } from "./useAction.js";
 
 /**
  * Whom the owner may still name for this Agent, composed from what the app holds: my friends and the members (people
@@ -26,29 +27,41 @@ function candidatesFor(state, agent, entries) {
     .sort((a, b) => a.name.localeCompare(b.name, "zh") || (a.principalId < b.principalId ? -1 : 1));
 }
 
-/** Runs one write of a row: `pending` says it is running; its refusal's sentence is kept in `error` (cleared on success). */
+/**
+ * The writes of one row, one at a time (`useAction`, which does not toast here): `pending` says one is running, `error` is
+ * the sentence of the last refusal, shown under the row. `valid` says whether a typed appellation is one (and shows why not).
+ */
 function useWrite() {
-  const [pending, setPending] = useState(false);
+  const { busy, run } = useAction();
   const [error, setError] = useState("");
-  const running = useRef(false);
-  const write = async (call) => {
-    if (running.current) return null;
-    running.current = true;
-    setPending(true);
-    const res = await call();
-    running.current = false;
-    setPending(false);
-    setError(res.ok ? "" : res.text);
-    return res;
+  const valid = (typed) => {
+    const problem = appellationProblem(typed);
+    setError(problem);
+    return !problem;
   };
-  return { pending, error, setError, write };
+  /** Runs `call` (an action); true when the service took it. A refusal is kept for the row; a success needs nothing (the row is replaced). */
+  const write = async (call) => {
+    setError("");
+    const res = await run("write", () => settled(call()), () => "");
+    if (!res.ok && res.error?.code !== "busy_here") setError(refusalText(res.error));
+    return res.ok;
+  };
+  return { pending: busy !== null, error, valid, write };
 }
+
+/** Enter saves a row (`save`), never the Agent's form it sits in; Enter that confirms an input method's candidate is not Enter. */
+const enterSaves = (save) => (event) => {
+  if (event.key !== "Enter" || composing(event)) return;
+  event.preventDefault();
+  save();
+};
 
 /** One stored appellation: the target, the appellation saved when I leave the box or press Enter, and 移除. */
 function Row({ agentId, entry }) {
   const { actions } = useStore();
-  const { pending, error, setError, write } = useWrite();
+  const { pending, error, valid, write } = useWrite();
   const [text, setText] = useState(entry.appellation);
+  const removeButton = useRef(null);
   const label = `给${entry.name}的称呼`;
 
   const commit = async () => {
@@ -58,18 +71,11 @@ function Row({ agentId, entry }) {
       setText(entry.appellation);
       return;
     }
-    const problem = appellationProblem(typed);
-    if (problem) {
-      setError(problem);
-      return;
-    }
-    await write(() => actions.setAppellation(agentId, entry.principalId, typed));
+    if (valid(typed)) await write(() => actions.setAppellation(agentId, entry.principalId, typed));
   };
-  const onKeyDown = (event) => {
-    if (event.key !== "Enter") return;
-    // (The row is inside the Agent's form: Enter here saves the row, never the form.)
-    event.preventDefault();
-    commit();
+  // Leaving the box for 移除 drops the edit: only the removal is sent.
+  const blur = (event) => {
+    if (event.relatedTarget !== removeButton.current) commit();
   };
 
   return (
@@ -78,11 +84,19 @@ function Row({ agentId, entry }) {
         <span>
           <strong>{entry.name}</strong> {entry.kind === "agent" && <Tag>Agent</Tag>} <small>@{entry.handle}</small>
         </span>
-        <input aria-label={label} value={text} onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={onKeyDown} readOnly={pending} autoComplete="off" />
+        <input aria-label={label} value={text} onChange={(e) => setText(e.target.value)} onBlur={blur} onKeyDown={enterSaves(commit)} readOnly={pending} autoComplete="off" />
         {error && <p className="field-msg" role="alert">{error}</p>}
       </div>
       <div className="member-actions">
-        <Btn small disabled={pending} onClick={() => write(() => actions.removeAppellation(agentId, entry.principalId))}>移除</Btn>
+        <Btn
+          ref={removeButton}
+          small
+          disabled={pending}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => write(() => actions.removeAppellation(agentId, entry.principalId))}
+        >
+          移除
+        </Btn>
       </div>
     </li>
   );
@@ -91,19 +105,14 @@ function Row({ agentId, entry }) {
 /** 添加称呼's row: the person to name (a picker) and the appellation, saved by its own button. */
 function AddRow({ agentId, candidates, onDone }) {
   const { actions } = useStore();
-  const { pending, error, setError, write } = useWrite();
+  const { pending, error, valid, write } = useWrite();
   const [target, setTarget] = useState("");
   const [text, setText] = useState("");
   const typed = text.trim();
 
   const save = async () => {
-    const problem = appellationProblem(typed);
-    if (problem) {
-      setError(problem);
-      return;
-    }
-    const res = await write(() => actions.setAppellation(agentId, target, typed));
-    if (res?.ok) onDone();
+    if (!target || !typed || !valid(typed)) return;
+    if (await write(() => actions.setAppellation(agentId, target, typed))) onDone();
   };
 
   return (
@@ -117,7 +126,7 @@ function AddRow({ agentId, candidates, onDone }) {
             </option>
           ))}
         </select>
-        <input value={text} onChange={(e) => setText(e.target.value)} autoComplete="off" placeholder="称呼" />
+        <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={enterSaves(save)} autoComplete="off" placeholder="称呼" />
         {error && <p className="field-msg" role="alert">{error}</p>}
       </div>
       <div className="member-actions">

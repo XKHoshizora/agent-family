@@ -504,7 +504,6 @@ form.page-body .notice { max-width: var(--field-w); box-sizing: border-box; }
 /* A titled group of a form's fields (称呼). */
 .form-section { border: 0; padding: 0; margin: 18px 0 0; min-width: 0; }
 .form-section > legend { font-size: 17px; font-weight: 700; padding: 0; margin-bottom: 4px; }
-.appellation-rows { max-width: var(--field-w); }
 .appellation-rows .member-body > input, .appellation-rows .member-body > select { margin-top: 6px; }
 .field label, .field-label { font-weight: 600; font-size: 14px; }
 .field input, .field select, .field textarea, .human-input input {

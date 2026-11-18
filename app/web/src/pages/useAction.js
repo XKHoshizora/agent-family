@@ -1,5 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { commonErrorText } from "../data/errorTexts.js";
+
+/** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for `run`). */
+export async function settled(pending) {
+  const result = await pending;
+  if (!result.ok) throw result;
+  return result.value;
+}
+
+/** The sentence of a refusal thrown by `settled` (or of anything else that went wrong). */
+export const refusalText = (error) => error?.text ?? commonErrorText(error);
 
 /**
  * Runs one action at a time per key and says which is running (`busy`), so its button shows the pending state.

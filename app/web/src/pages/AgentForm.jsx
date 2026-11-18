@@ -7,7 +7,7 @@ import { ChevronLeft, Lock } from "../icons.js";
 import { AgentAppellations } from "./AgentAppellations.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
 import { LEVELS, ModelPicker, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
-import { useAction } from "./useAction.js";
+import { refusalText, settled, useAction } from "./useAction.js";
 
 /** The prototype's two private-reply choices, by the service's `replyMode`. */
 export const REPLY_MODES = [
@@ -61,15 +61,7 @@ export const othersBudgetSent = (f) =>
 /** What a create or a save sends of 别人 @ 每天最多花 (`othersBudgetSent`): nothing (undefined) unless group members may call it. */
 const othersBudgetToSend = (f) => (f.groupMentions === "members" ? othersBudgetSent(f) : undefined);
 
-/** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
-export async function settled(pending) {
-  const result = await pending;
-  if (!result.ok) throw result;
-  return result.value;
-}
-
-/** The sentence of a refusal thrown by `settled` (or of anything else that went wrong). */
-export const refusalText = (error) => error?.text ?? commonErrorText(error);
+export { refusalText, settled };
 
 /** Opens an Agent's conversation, or waits for it to arrive when this client does not hold it yet. */
 export function openAgentChat(state, dispatch, actions, conversationId) {

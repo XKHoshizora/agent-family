@@ -519,6 +519,12 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
     expect(myAgents(v).map((a) => a.id)).toEqual([AG1]);
   });
 
+  it("never carries how an Agent addresses its owner and others, even if its entry says so", () => {
+    const v = toView(sharedModel(annBot({ ownerAppellation: "老板", appellations: [{ principalId: ANN, appellation: "安姐" }] })), { now: NOW });
+    expect(v.agents[OAG]).not.toHaveProperty("ownerAppellation");
+    expect(v.agents[OAG]).not.toHaveProperty("appellations");
+  });
+
   it("an owner nobody has named here is unknown (主人：未知); an Agent with no owner and no conversation of mine is not mine", () => {
     const stranger = toView(sharedModel(annBot({ ownerId: STRANGER })), { now: NOW });
     expect(ownerOf(stranger, OAG)).toBe(STRANGER);

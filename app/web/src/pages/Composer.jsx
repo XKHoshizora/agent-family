@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { entity, isAgent, nameOf, ownerOf, senderName } from "../state/selectors.js";
-import { Avatar, Btn, IconBtn } from "../ui/primitives.jsx";
+import { Avatar, Btn, IconBtn, composing } from "../ui/primitives.jsx";
 import { useSendFiles } from "./useSendFiles.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
 import { Smile, Image, Paperclip, AtSign, X } from "../icons.js";
@@ -113,7 +113,7 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     setReplyTo(null);setMention(null);setEmojiOpen(false);
   };
   const keyDown = e => {
-    if(e.nativeEvent.isComposing || e.keyCode===229) return;
+    if(composing(e)) return;
     if(e.key==="Escape") {setMention(null);setEmojiOpen(false);return;}
     if(mention && !e.shiftKey && ["ArrowDown","ArrowUp","Enter","Tab"].includes(e.key)) {
       if(e.key==="Tab" && !matches.length) {setMention(null);return;}
