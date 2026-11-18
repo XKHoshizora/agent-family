@@ -293,7 +293,10 @@ export interface Config {
   agentRunsPerMinute: number;
   /** Replies one owner's Agents may start per minute that anyone else called for (every lane but `own`), counted together. */
   agentOthersRunsPerMinute: number;
-  /** Replies one person may call for per minute on other people's Agents, themselves or through their own Agents. */
+  /**
+   * Replies one person may call for per minute on other people's Agents, themselves or through an Agent's message they are
+   * behind (src/agents/runs.ts `behindAgentMessage`).
+   */
   agentCallerRunsPerMinute: number;
   /** A reply still running after this long is ended; also the most the reading of its attachments may take. */
   agentRunTimeoutMs: number;

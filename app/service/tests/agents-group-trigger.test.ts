@@ -71,12 +71,15 @@ const say = async (who: Actor, conv: string, text: string, extra: object = {}): 
   return sent.json.message.seq as number;
 };
 
-/** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
+/**
+ * The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does — posted
+ * by no run, so its owner is behind it.
+ */
 const agentSays = (agentId: string, conv: string, text: string, config: RunLimits & Pick<Config, "agentChainLimit"> = app.deps.config) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, config)) };
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, config)) };
   });
 
 interface RunView {
@@ -560,7 +563,7 @@ describe("an Agent's message in a group", () => {
         const poster = await lockAgent(t, agentId, conv);
         await meet();
         const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-        return triggerFromAgent(t, conv, message, poster, app.deps.config);
+        return triggerFromAgent(t, conv, message, poster, null, app.deps.config);
       });
     const [inG, inG2] = await bounded(Promise.all([holdingThenCalling(a.id, w.g, "@beta 一起"), holdingThenCalling(b.id, g2, "@alpha 一起")]));
     expect([inG.runs.map((r) => r.ownerId), inG2.runs.map((r) => r.ownerId)]).toEqual([[w.member.id], [w.owner.id]]);

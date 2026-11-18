@@ -77,12 +77,15 @@ const say = async (who: Actor, conv: string, text: string): Promise<number> => {
   return sent.json.message.seq as number;
 };
 
-/** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
+/**
+ * The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does — posted
+ * by no run, so its owner is behind it.
+ */
 const agentSays = (agentId: string, conv: string, text: string) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, app.deps.config)) };
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, app.deps.config)) };
   });
 
 /** The Agent's runs in `conv`, oldest first. */
@@ -255,6 +258,19 @@ describe("the others' daily budget", () => {
     expect(await runsOf(anna.id, g2)).toEqual([]);
     expect((await noticesOf(g2)).map((n) => n.agentId)).toEqual([anna.id]);
     expect(pushed.mock.calls).toEqual([[w.owner.id, anna.id]]);
+  });
+
+  it("a member's call relayed by the owner's Agent meets the other Agent's budget: refused, and the group told", async () => {
+    const w = await world();
+    await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g, { othersBudget: "2" });
+    await paidOthers(carl, w.g, 2 * POINT);
+    const before = await runsOf(carl.id, w.g);
+    await say(w.member, w.g, "@anna 问问 carlbot");
+    gateway.reply("@carlbot 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await runsOf(carl.id, w.g)).toEqual(before);
+    expect((await noticesOf(w.g)).map((n) => n.agentId)).toEqual([carl.id]);
   });
 
   it("a follow-up others asked for is not queued once it is spent; its owner's is", async () => {

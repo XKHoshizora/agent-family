@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import { postAsAgent } from "../src/agents/conversation.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
@@ -11,11 +12,14 @@ import { scriptedGateway } from "./helpers/models.ts";
 
 /**
  * Who called for each run, and its lane (`agent_runs.caller_id`, `lane`; the limits plan, Task 1): `own` when the Agent's
- * owner called for it — themselves, or through one of their own Agents — and `others` when someone else did, with who
- * (an Agent's call is its owner's). The limits read these two columns (Task 2, at the end): an owner's replies a minute
- * are counted apart in their own lane and in the others', and one person's calls on other people's Agents have a limit
- * of their own. As in agents-group-trigger.test.ts, an Agent is put into a group by inserting its membership row, and
- * an Agent's own message is stored and handed to `triggerFromAgent` in one transaction, as `postAsAgent` does.
+ * owner called for it — themselves, or through an Agent's message they are behind — and `others` when someone else did,
+ * with who. An Agent's message is the call of the person behind it: the caller of the run that posted it when that run is
+ * not its owner's own (a member's call relayed through the owner's Agent stays the member's), else its owner. The limits
+ * read these two columns (Task 2, at the end): an owner's replies a minute are counted apart in their own lane and in
+ * the others', and one person's calls on other people's Agents have a limit of their own. As in
+ * agents-group-trigger.test.ts, an Agent is put into a group by inserting its membership row, and an Agent's own message
+ * is stored and handed to `triggerFromAgent` in one transaction, as `postAsAgent` does — posted by no run, so its owner
+ * is behind it; the relays go through the worker (`runOnce`), whose run posts the message.
  */
 
 const gateway = scriptedGateway();
@@ -65,12 +69,15 @@ const say = async (who: Actor, conv: string, text: string, on: FastifyInstance =
   return sent.json.message.seq as number;
 };
 
-/** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
+/**
+ * The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does — posted
+ * by no run, so its owner is behind it.
+ */
 const agentSays = (agentId: string, conv: string, text: string, on: FastifyInstance = app) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, on.deps.config)) };
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, on.deps.config)) };
   });
 
 /** The Agent's runs in `conv`, oldest first: each one's lane and who called for it. */
@@ -306,6 +313,99 @@ describe("a run's lane and who called for it", () => {
     ]);
   });
 
+  it("a member's call relayed by the owner's Agent to another of the owner's Agents stays the member's", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    await say(w.member, w.g, "@anna 问问 carlbot");
+    gateway.reply("@carlbot 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await laneOf(anna.id, w.g)).toEqual([["others", w.member.id]]);
+    expect(await laneOf(carl.id, w.g)).toEqual([["others", w.member.id]]);
+  });
+
+  it("relayed into the other Agent's queued run of someone else's, it stays that run's; the owner's own minute is untouched", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    await say(w.member, w.g, "@anna 问问 carlbot");
+    await say(w.third, w.g, "@carlbot 你好");
+    // The owner's replies of their own lane started in the last minute, as the limit counts them.
+    const ownMinute = async () =>
+      Number(
+        (
+          await db.query(
+            "select count(*) n from agent_runs where owner_id = $1 and purpose = 'reply' and lane = 'own' and created_at > now() - interval '1 minute' and error is distinct from 'rate_limited'",
+            [w.owner.id],
+          )
+        ).rows[0].n,
+      );
+    expect(await ownMinute()).toBe(0);
+    gateway.reply("@carlbot 你也看看");
+    // The worker takes Anna's reply (the older), which names Carl: folded into his queued reply, the third's.
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const relayed = (await db.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2", [w.g, anna.id])).rows[0]!;
+    expect(await laneOf(carl.id, w.g)).toEqual([["others", w.third.id]]);
+    expect((await db.query("select covers_seq::text as covers from agent_runs where agent_id = $1", [carl.id])).rows).toEqual([{ covers: relayed.seq }]);
+    expect(await ownMinute()).toBe(0);
+  });
+
+  it("the owner's call relayed by their Agent to another of theirs is the owner's own", async () => {
+    const w = await world();
+    await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    await say(w.owner, w.g, "@anna 问问 carlbot");
+    gateway.reply("@carlbot 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await laneOf(carl.id, w.g)).toEqual([["own", w.owner.id]]);
+  });
+
+  it("the owner's call on someone else's Agent that names one of the owner's Agents is the owner's own", async () => {
+    const w = await world();
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    const beta = await agentOf(w.third, "beta", w.g);
+    await say(w.owner, w.g, "@beta 问问 carlbot");
+    gateway.reply("@carlbot 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await laneOf(beta.id, w.g)).toEqual([["others", w.owner.id]]);
+    expect(await laneOf(carl.id, w.g)).toEqual([["own", w.owner.id]]);
+  });
+
+  it("a reply nobody called for names nobody: what it calls is others', with no caller", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    await say(w.third, w.g, "开始吧");
+    // A running reply of Anna's in lane others with no caller (a follow-up whose callers it can no longer see, `followUp`).
+    const run = await db.query<{ id: string }>(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, started_at, lane)
+       select 'reply', $1, $2, $3, 'running', seq, now(), 'others' from conversations where id = $1 returning id`,
+      [w.g, anna.id, w.owner.id],
+    );
+    const posted = await db.tx((t) =>
+      postAsAgent(t, anna.id, w.g, run.rows[0]!.id, { text: "@carlbot 你看看", reasoning: "", stopped: false, truncated: false }, app.deps.config),
+    );
+    expect(posted?.triggered.runs).toHaveLength(1);
+    expect(await laneOf(carl.id, w.g)).toEqual([["others", null]]);
+  });
+
+  it("a follow-up answering a relayed call takes the relayed caller", async () => {
+    const w = await world();
+    await agentOf(w.owner, "anna", w.g);
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    await say(w.third, w.g, "@carlbot 一");
+    const one = await claim(carl.id, w.g);
+    // While Carl's reply runs, the member asks Anna to ask him: her message is noted on his reply.
+    await say(w.member, w.g, "@anna 问问 carlbot");
+    gateway.reply("@carlbot 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await finish(one);
+    expect(await laneOf(carl.id, w.g)).toEqual([
+      ["others", w.third.id],
+      ["others", w.member.id],
+    ]);
+  });
+
   it("is never on the wire: a run's owner and the other members see no lane and no caller", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
@@ -473,6 +573,24 @@ describe("replies a minute by lane, and one caller's limit on other people's Age
     // The same, as an Agent's message hands it to the trigger: nothing to announce, the refused call to log.
     const again = await agentSays(mia.id, w.g, "@tess 再看看", limited);
     expect([again.runs, again.callerLimited]).toEqual([[], [{ callerId: w.member.id, agentId: tess.id, conversationId: w.g }]]);
+  });
+
+  it("a member's call relayed by an owner's Agent to a third person's Agent is the member's call, not the owner's", async () => {
+    const w = await crowd();
+    await agentOf(w.owner, "anna", w.g, limited);
+    const tess = await agentOf(w.third, "tess", w.g, limited);
+    lines.length = 0;
+    // The member's one call of the minute on someone else's Agent.
+    await say(w.member, w.g, "@anna 问问 tess", limited);
+    gateway.reply("@tess 你也看看");
+    expect(await limited.agentWorker.runOnce()).toBe(true);
+    // Relayed, Anna's call on Tess is the member's second: it starts nothing, and is logged as theirs.
+    expect(await statusOf(tess.id, w.g)).toEqual([]);
+    expect(callerLimited()).toEqual([{ metric: "caller_rate_limited", callerId: w.member.id, agentId: tess.id, conversationId: w.g }]);
+    // The owner's own call on someone else's Agent this minute is still theirs to make.
+    await say(w.owner, w.g, "@tess 我来问", limited);
+    expect(await statusOf(tess.id, w.g)).toEqual([["queued", null]]);
+    expect(await laneOf(tess.id, w.g)).toEqual([["others", w.owner.id]]);
   });
 
   it("a call folded into a run under way does not count, and its follow-up is not refused", async () => {

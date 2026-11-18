@@ -11,7 +11,7 @@ import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
-import { noneTriggered, ownedAgentOf, triggerFromAgent, type RunLimits, type Triggered } from "./runs.ts";
+import { noneTriggered, ownedAgentOf, triggerFromAgent, type Lane, type RunLimits, type Triggered } from "./runs.ts";
 import {
   agentLimit,
   assertModelChoice,
@@ -167,8 +167,10 @@ export interface AgentReply {
  * owner's decision of 2026-11-18, replacing plan ruling 2): every member reads the message, but its reasoning is sent
  * only to the owner of the Agent that sent it (messages/read.ts `toWireForReaders`), since a model's thinking often
  * restates its persona. Then the text is cut at 8 000 characters as above, and the message may call other Agents there,
- * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row): `triggered` is what to
- * announce and publish after commit (nothing for a repeat, or in the Agent's own conversation).
+ * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row), as the call of the person
+ * behind it (`behindAgentMessage`): this run's caller when the run is not its owner's own — a member's call relayed
+ * through the Agent stays the member's — else the Agent's owner. `triggered` is what to announce and publish after
+ * commit (nothing for a repeat, or in the Agent's own conversation).
  *
  * Null, storing nothing, when there is nothing to show: no visible text and, in its own conversation, no reasoning kept;
  * in a group no visible text (its members would be shown an empty message), whatever reasoning there is.
@@ -191,8 +193,8 @@ export async function postAsAgent(
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
   // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts); nor a run of another
   // conversation's, here.
-  const run = await t.query<{ status: string; interrupted: string | null }>(
-    "select status, interrupted from agent_runs where id = $1 and agent_id = $2 and conversation_id = $3",
+  const run = await t.query<{ status: string; interrupted: string | null; lane: Lane; caller_id: string | null }>(
+    "select status, interrupted, lane, caller_id from agent_runs where id = $1 and agent_id = $2 and conversation_id = $3",
     [runId, agentId, conversationId],
   );
   if (run.rows[0]?.status !== "running") throw new RunNotRunning(runId, run.rows[0]?.status ?? null);
@@ -229,8 +231,10 @@ export async function postAsAgent(
   if (proposalId !== null) body.proposalId = proposalId;
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
-  // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group.
-  const triggered = own ? noneTriggered() : await triggerFromAgent(t, conversationId, message, agent, config);
+  // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who
+  // is behind its message there is decided by this run's caller and lane (read above; a running run's never change).
+  const postedBy = { id: run.rows[0].caller_id, lane: run.rows[0].lane };
+  const triggered = own ? noneTriggered() : await triggerFromAgent(t, conversationId, message, agent, postedBy, config);
   return { message, duplicate: false, triggered };
 }
 

@@ -103,7 +103,7 @@ function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
 }
 
 /** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
-const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+export const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
 
 /**
  * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told

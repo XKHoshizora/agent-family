@@ -7,6 +7,7 @@ import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import type { StoredMessage } from "../messages/model.ts";
+import { RUN_ID_TEXT } from "../messages/read.ts";
 import { mentionedHandles } from "./mentions.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
@@ -231,7 +232,8 @@ async function overLaneLimit(t: Tx, ownerId: string, lane: Lane, config: RunLimi
 
 /**
  * Calls person `callerId` has made in the last minute on other people's Agents (`agentCallerRunsPerMinute`),
- * themselves or through their own Agents, whoever's Agents they were: the replies they are the caller of that are not
+ * themselves or through an Agent's message they are behind (`behindAgentMessage`: their own Agents', or another's
+ * relaying their call), whoever's Agents they were: the replies they are the caller of that are not
  * their owner's own (so a call on one of their own Agents never counts). A run an owner's limit refused
  * (`rate_limited`) started nothing and is not counted; nor is a mention folded into a reply under way, which starts
  * none. Counted under the caller's `accounts` row lock (`reachAgents` takes it with the owners', in id order), so two
@@ -260,20 +262,36 @@ export type TriggeredBy = "human" | "agent";
 
 /**
  * A run's lane (`agent_runs.lane`), which the limits read: `own` when the Agent's owner called for it — themselves, or
- * through one of their own Agents; so is every reply in the Agent's own conversation, a retry and a persona draft —
- * `others` when someone else did, `proactive` when nobody did (batch 2D: nothing here records it).
+ * through an Agent's message they are behind (`behindAgentMessage`); so is every reply in the Agent's own conversation, a
+ * retry and a persona draft — `others` when someone else did, `proactive` when nobody did (batch 2D: nothing here
+ * records it).
  */
 export type Lane = "own" | "others" | "proactive";
 
 /**
- * Who called for a run (`agent_runs.caller_id`: the person behind it, an Agent's call being its owner's; nobody for a
- * follow-up in a group none of whose callers it can see any more, `followUp`), and its lane.
+ * Who called for a run (`agent_runs.caller_id`: the person behind it, an Agent's call being that of the person behind
+ * its message, `behindAgentMessage`; nobody for a follow-up in a group none of whose callers it can see any more,
+ * `followUp`, and for what is relayed from a reply nobody called for), and its lane.
  */
 export type Caller = { id: string | null; lane: Lane };
 
-/** The call person `personId` makes on an Agent of `ownerId`'s: the owner's own, or someone else's. */
-export function callerOf(ownerId: string, personId: string): Caller {
+/**
+ * The call person `personId` makes on an Agent of `ownerId`'s: the owner's own, or someone else's. Nobody (`null`: a
+ * call relayed from a reply nobody called for) is someone else: `others`, with no caller.
+ */
+export function callerOf(ownerId: string, personId: string | null): Caller {
   return { id: personId, lane: personId === ownerId ? "own" : "others" };
+}
+
+/**
+ * The person behind an Agent's message — whose call it is on the Agents it names: the caller of the run that posted it
+ * (`postedBy`, that run's caller and lane) when that run is not its owner's own — so a member's call relayed through the
+ * owner's Agent stays the member's, and what a reply nobody called for relays is nobody's (`null`) — otherwise (the run
+ * is its owner's own, or no run posted the message) the Agent's owner. `followUp` reads the same rule from the stored
+ * messages (the posting run is the one the message's `client_txn` names).
+ */
+export function behindAgentMessage(ownerId: string, postedBy: Caller | null): string | null {
+  return postedBy !== null && postedBy.lane !== "own" ? postedBy.id : ownerId;
 }
 
 /**
@@ -444,11 +462,13 @@ export function logCallerLimited(log: Pick<FastifyBaseLogger, "info">, limited: 
  * In a group, under its row lock: the message at `seq` reaches each of `agents` (in id order; whether each may be
  * called is decided already, the others' daily budget included), called for by `caller(agent)`. It is folded into the
  * Agent's active run in the group — a queued one now covers it, becomes a person's when a person's message is folded
- * in, and its owner's own (`lane` `own`, the owner its caller) when its owner's call is, else keeps its caller and lane;
- * a running one notes it (`pending_seq`), and stays as it is: its follow-up answers what was noted, in a lane of its own
- * (`followUp`). A mention folded so is never refused by the limits below (a spent others' daily budget refused it
- * before it came here). Failing that, a call on someone else's Agent (any lane but `own`) first meets
- * its caller's limit (`calledLastMinute`): over it, nothing at all — the call is returned in `callerLimited`, to log.
+ * in, and its owner's own (`lane` `own`, the owner its caller) when the call is its owner's own (the owner's message, or
+ * an Agent's message the owner is behind, `behindAgentMessage`), else keeps its caller and lane — so a member's call
+ * relayed through one of the owner's Agents does not make it the owner's; a running one notes it (`pending_seq`), and
+ * stays as it is: its follow-up answers what was noted, in a lane of its own (`followUp`). A mention folded so is never
+ * refused by the limits below (a spent others' daily budget refused it before it came here). Failing that, a call on
+ * someone else's Agent (any lane but `own`) first meets its caller's limit (`calledLastMinute`; a call with no caller
+ * has none to meet): over it, nothing at all — the call is returned in `callerLimited`, to log.
  * Then the owner's replies a minute in the call's lane decide (`overLaneLimit`): a reply is queued, or the reusable
  * `rate_limited` run records it (`rateLimitedInGroup`). The owners' `accounts` rows, and the caller's when they call
  * someone else's Agent, are locked once the run rows are done with, all of them in id order, before any is counted
@@ -714,18 +734,24 @@ async function chainBudgetSpent(
  * - the chain budget (ruling 12), per Agent: what its owner was charged for its replies in this group covering
  *   messages after a person's latest has reached its `chainBudget` → it is not called, and an `agent_budget_reached`
  *   notice about it is appended unless one was since a person last wrote;
- * - the others' daily budget, per Agent of an owner other than the poster's: once it is spent (`othersBudgetSpent`, read
- *   from the row read above, not locked) → it is not called, and an `agent_daily_budget_reached` notice about it is
- *   appended unless one was today (its owner is returned, to push the Agent to).
+ * - the others' daily budget, per Agent the call is not its owner's own on (see below): once it is spent
+ *   (`othersBudgetSpent`, read from the row read above, not locked) → it is not called, and an
+ *   `agent_daily_budget_reached` notice about it is appended unless one was today (its owner is returned, to push the
+ *   Agent to).
  * The rest are reached as a person's message reaches them (`reachAgents`), as an Agent's (`triggered_by` `agent`),
- * called for by the poster's owner (`callerOf`: its own when they are the target's owner too) — so a call on someone
- * else's Agent counts toward that owner's caller limit, as their own call would.
+ * called for by the person behind the message (`behindAgentMessage`, from `postedBy`, the caller and lane of the run that
+ * posted it; null when no run did): the caller of that run when it is not its owner's own, else the poster's owner —
+ * `callerOf`, the target's owner's own when they are that person. So a member's call relayed through the owner's Agent
+ * stays the member's — held to the target's others' daily budget, the member's caller limit and the others' lane — and a
+ * call on someone else's Agent counts toward the caller limit of the person behind it, as their own call would; what a
+ * reply nobody called for relays is others', with no caller (no caller limit; the budget and the others' lane hold).
  */
 export async function triggerFromAgent(
   t: Tx,
   conversationId: string,
   message: StoredMessage,
   poster: AgentRow,
+  postedBy: Caller | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
 ): Promise<Triggered> {
   const own = poster.handle.toLowerCase();
@@ -757,6 +783,7 @@ export async function triggerFromAgent(
     return { ...noneTriggered(), notices: [await appendSystem(t, conversationId, { event: "agent_chain_paused", actorId: poster.id, limit })] };
   }
 
+  const behind = behindAgentMessage(poster.ownerId, postedBy);
   const dayStart = today(config);
   const told: Pick<Triggered, "notices" | "budgetReached"> = { notices: [], budgetReached: [] };
   const called: RunAgent[] = [];
@@ -767,11 +794,11 @@ export async function triggerFromAgent(
       continue;
     }
     const agent = { id: target.id, ownerId: target.owner_id, othersBudgetMicro: target.others_budget === null ? null : BigInt(target.others_budget) };
-    const others = callerOf(agent.ownerId, poster.ownerId).lane === "others";
+    const others = callerOf(agent.ownerId, behind).lane === "others";
     if (others && (await refusedByOthersBudget(t, conversationId, agent, dayStart, told))) continue;
     called.push(agent);
   }
-  const reached = await reachAgents(t, conversationId, called, message.seq, "agent", (agent) => callerOf(agent.ownerId, poster.ownerId), config);
+  const reached = await reachAgents(t, conversationId, called, message.seq, "agent", (agent) => callerOf(agent.ownerId, behind), config);
   return { ...reached, notices: [...reached.notices, ...told.notices], budgetReached: [...reached.budgetReached, ...told.budgetReached] };
 }
 
@@ -808,11 +835,16 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [], budgetReached: [] };
  * `rate_limited` run in the group records it instead (`rateLimitedInGroup`), so a member who keeps mentioning an Agent
  * while it replies cannot keep it replying past its owner's limit. Its lane and caller come from what it
  * answers, not from the run that ended: the messages in (covers, pending] that call the Agent — a person's, as above,
- * or another Agent's while its `groupMentions` lets members call it, which is that Agent's owner's call (with no block
- * between them and the Agent's owner, as for a person) — make it its owner's own when the owner or one of the owner's
- * Agents is among them, else the earliest caller's. When none of them is left (a block since, or the Agent no longer
- * lets members call it) it is others', with no caller: a call its owner no longer allows does not ride the owner's own
- * lane.
+ * or another Agent's while its `groupMentions` lets members call it (with no block between that Agent's owner and the
+ * Agent's owner, as for a person), which is the call of the person behind that message by the rule of
+ * `behindAgentMessage` (the caller of the run that posted it — the run its `client_txn` names — when that run is not its
+ * owner's own, else that Agent's owner) — make it its owner's own when the owner is behind one of them, else the
+ * earliest caller's (a message nobody is behind, relayed from a reply nobody called for, names no one: the earliest that
+ * names someone). When none of them is left (a block since, or the Agent no longer lets members call it) it is others',
+ * with no caller: a call its owner no longer allows does not ride the owner's own lane. An Agent's mention that was
+ * refused when it was posted (the group halted, the chain limit, the Agent's chain budget) is not told apart here — the
+ * stored messages do not say so, and the halt's history and the charges as they were then are not kept — so it counts
+ * like any other; it can make a follow-up its owner's own only when the owner was behind that message.
  */
 export async function followUp(
   t: Tx,
@@ -824,14 +856,21 @@ export async function followUp(
 ): Promise<FollowUp> {
   const owners = callerOf(agent.ownerId, agent.ownerId);
   if (conversationId === agent.conversationId) return { ...NO_FOLLOW_UP, run: await queueRun(t, agent, conversationId, pending, "human", owners) };
-  // The person behind each message: its sender, or an Agent's owner.
-  const { rows } = await t.query<{ kind: "human" | "agent"; sender_id: string; caller_id: string; text: string | null }>(
-    `select p.kind, m.sender_id, coalesce(p.owner_id, p.id) as caller_id, m.body ->> 'text' as text
-       from messages m join principals p on p.id = m.sender_id
+  // The person behind each message (`behindAgentMessage`): its sender; for an Agent's message, the caller of the run that
+  // posted it (the run its `client_txn` names) unless that run is its owner's own (or there is none: the owner). A block
+  // is read, as ever, between the Agent's owner and the sender, or the sending Agent's owner.
+  const { rows } = await t.query<{ kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null }>(
+    `select p.kind, m.sender_id, m.body ->> 'text' as text,
+            case when r.lane <> 'own' then r.caller_id else coalesce(p.owner_id, p.id) end as caller_id
+       from messages m
+       join principals p on p.id = m.sender_id
+       left join agent_runs r
+         on p.kind = 'agent' and r.id = (case when m.client_txn ~ $6 then m.client_txn end)::uuid
+        and r.agent_id = m.sender_id and r.conversation_id = m.conversation_id and r.purpose = 'reply'
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5
         and not exists (select 1 from blocks b where (b.blocker_id = $4 and b.blocked_id = coalesce(p.owner_id, p.id)) or (b.blocker_id = coalesce(p.owner_id, p.id) and b.blocked_id = $4))
       order by m.seq`,
-    [conversationId, covers, pending, agent.ownerId, agent.id],
+    [conversationId, covers, pending, agent.ownerId, agent.id, RUN_ID_TEXT],
   );
   const handle = agent.handle.toLowerCase();
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
@@ -839,9 +878,10 @@ export async function followUp(
     (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && mentionedHandles(r.text ?? "").includes(handle),
   );
   const asked = calls.some((r) => r.kind === "human");
-  const first = calls[0];
-  const caller: Caller =
-    first === undefined ? { id: null, lane: "others" } : calls.some((r) => r.caller_id === agent.ownerId) ? owners : callerOf(agent.ownerId, first.caller_id);
+  // None of them (or none that names someone): others', with no caller.
+  const caller: Caller = calls.some((r) => r.caller_id === agent.ownerId)
+    ? owners
+    : callerOf(agent.ownerId, calls.find((r) => r.caller_id !== null)?.caller_id ?? null);
   if (!asked) {
     if (await haltedSince(t, conversationId, pending)) return NO_FOLLOW_UP;
     // The chain budget again, now that the reply that just ended is settled: it may have spent it.

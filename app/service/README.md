@@ -91,8 +91,8 @@ it may not be more than `AGENT_MAX_CONCURRENT_RUNS`, or the service refuses to s
 limits; counted from the stored runs and not scaled by `RATE_LIMIT_SCALE`; 1–10 000, default 20),
 `AGENT_OTHERS_RUNS_PER_MINUTE` (replies one owner's Agents may start a minute that anyone else called for, all callers
 together, counted apart from the owner's own and likewise not scaled; 1–10 000, default 20),
-`AGENT_CALLER_RUNS_PER_MINUTE` (calls one person, themselves or through their own Agents, may make a minute on other
-people's Agents; counted and not scaled likewise; 1–10 000, default 5), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
+`AGENT_CALLER_RUNS_PER_MINUTE` (calls one person, themselves or through an Agent's message they are behind, may make a
+minute on other people's Agents; counted and not scaled likewise; 1–10 000, default 5), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
 for a reply also the reading of its attachments before the call, each in turn: so a reply may take up to about twice it
 in all; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
 context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
@@ -332,8 +332,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
-| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | Counted for you in two lanes, each from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`: 20 for the replies you called for yourself — your own lane: your messages to your Agents, in their conversations and in groups, your Agents' calls on each other, retries, follow-ups that answer you (`AGENT_RUNS_PER_MINUTE`) — and 20 together for every reply someone else called for on your Agents (`AGENT_OTHERS_RUNS_PER_MINUTE`), so that others' mentions cannot use up your own minute. A run is `own` when you, or one of your Agents for you, called for it, else `others` (a third lane, `proactive`, is for replies nobody called for; nothing starts one yet), and keeps its lane; neither lane nor caller is ever on the wire. Over the count of its lane a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it; one in a group counts in the lane of what it answers (Agents and runs, In a group) | owner |
-| Calls on other people's Agents (a mention in a group that would start a reply of an Agent whose owner is someone else, made by a person or by one of their Agents) | 5 together per person (`AGENT_CALLER_RUNS_PER_MINUTE`), counted from the stored runs under the caller's account lock, so exactly, and not scaled by `RATE_LIMIT_SCALE`; calls on the caller's own Agents never count. Over it the mention starts nothing and nothing of it is recorded — no run, no `rate_limited` run, no notice to the group or to the Agent's owner (the message is sent as any), only one log line (Metrics in the log). A mention folded into a reply already under way starts nothing, so it is neither counted nor refused. It is checked after the Agent's others' daily budget (Agents in a group) and before the owner's replies a minute | caller |
+| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | Counted for you in two lanes, each from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`: 20 for the replies you called for yourself — your own lane: your messages to your Agents, in their conversations and in groups, your Agents' calls on each other that you are behind, retries, follow-ups that answer you (`AGENT_RUNS_PER_MINUTE`) — and 20 together for every reply someone else called for on your Agents (`AGENT_OTHERS_RUNS_PER_MINUTE`), so that others' mentions cannot use up your own minute. A run is `own` when you called for it — yourself, or through an Agent's message you are behind — else `others` (a third lane, `proactive`, is for replies nobody called for; nothing starts one yet), and keeps its lane. An Agent's message is the call of whoever called for the reply that posted it, unless that reply was its owner's own: then its owner's (Agents and runs, In a group); so a member's call that one of your Agents relays to another of yours is the member's, not yours. Neither lane nor caller is ever on the wire. Over the count of its lane a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it; one in a group counts in the lane of what it answers (Agents and runs, In a group) | owner |
+| Calls on other people's Agents (a mention in a group that would start a reply of an Agent whose owner is someone else, made by a person or by an Agent's message they are behind: their own Agent's, or one relaying their call) | 5 together per person (`AGENT_CALLER_RUNS_PER_MINUTE`), counted from the stored runs under the caller's account lock, so exactly, and not scaled by `RATE_LIMIT_SCALE`; calls on the caller's own Agents never count. Over it the mention starts nothing and nothing of it is recorded — no run, no `rate_limited` run, no notice to the group or to the Agent's owner (the message is sent as any), only one log line (Metrics in the log). A mention folded into a reply already under way starts nothing, so it is neither counted nor refused. It is checked after the Agent's others' daily budget (Agents in a group) and before the owner's replies a minute | caller |
 | `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run`, `GET /api/conversations/:id/runs` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `POST /api/conversations/:id/agents/halt` | 20 (a budget of its own) | principal |
@@ -738,8 +738,9 @@ under three brakes, each about Agents calling Agents — a person's mention is n
   provider model costs no points, so for such an Agent only the chain limit and the halt apply.
 
 **The others' daily budget** (`othersBudget`, per Agent, its owner's setting) is of another kind: it is about whose
-points are spent, and it holds against people's mentions too. A call on an Agent by anyone but its owner — a member, or a
-member's Agent, whose call is that member's — spends the owner's points. Once what those replies cost today (what they
+points are spent, and it holds against people's mentions too. A call on an Agent by anyone but its owner — a member, or
+an Agent's message a member is behind (the member's own Agent's, or one of the owner's Agents relaying the member's
+call), whose call is that member's — spends the owner's points. Once what those replies cost today (what they
 were charged, free allowance and balance, plus what the running ones hold) has reached `othersBudget` (default 20
 points; `null`: no limit, which the owner is warned of: anyone in the group can have the Agent reply on their points),
 the next such call is not answered: no model call, nothing held or charged, and not even a fold into a reply of the
@@ -1895,11 +1896,15 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   there is one per Agent in the group: while it is the Agent's latest run there and its owner has not dismissed it, it
   covers every further mention over the limit (announced again) instead of a new one being recorded. The owners'
   `accounts` rows are locked last, all in id order.
-- *An Agent's message* (`postAsAgent`'s transaction): the same, as an Agent's (`triggered_by` `agent`, its owner the
-  caller, so a call on an Agent of someone else's meets that Agent's others' daily budget, the caller's limit and the
-  lane's replies a minute as a person's does), for the Agent
+- *An Agent's message* (`postAsAgent`'s transaction): the same, as an Agent's (`triggered_by` `agent`), called for by
+  the person behind the message (`runs.ts` `behindAgentMessage`): the caller of the run that posted it (the run whose id
+  is the message's `client_txn`) when that run is not its owner's own, else the Agent's owner — so a member's call that
+  the owner's Agent relays, to another of the owner's Agents or to someone else's, stays the member's, and what a reply
+  nobody called for relays is nobody's (`others`, no caller). A call on an Agent of someone other than the person behind
+  it meets that Agent's others' daily budget, that person's caller limit (none without a caller) and the lane's
+  replies a minute as a person's does; a call the Agent's owner is behind is their own. The message calls the Agent
   members it names other than itself whose `groupMentions` is `members` and whose owner has no block, in either direction, with the
-  posting Agent's owner, unless a brake holds (Agents in a group, under
+  posting Agent's owner (a block is read as before, between the two owners, whoever is behind the message), unless a brake holds (Agents in a group, under
   HTTP API): the group is halted (its latest message from a person is at or before `conversations.agents_halted_seq`);
   the chain limit (the group's last `AGENT_CHAIN_LIMIT` messages that are not notices — this one included — were all
   Agents'), when one `agent_chain_paused` notice is appended unless one was since a person last wrote; or, per Agent,
@@ -1924,9 +1929,13 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   started like any other: counted toward its owner's replies a minute in its lane under the owner's `accounts` row (the
   last lock, after `settle`'s), and over it recorded on the Agent's reusable `rate_limited` run in the group instead of
   queued. Its lane and caller come from the messages it answers, not from the run that ended: the owner's own when the
-  owner, or one of their Agents, is among those that called the Agent, else `others` with the earliest caller; when
-  none of them can call it any more (a block since, or `groupMentions` changed) it is `others` with no caller, so a call
-  its owner no longer allows does not ride the owner's own lane. A follow-up in lane `others` is not queued once the
+  owner is behind one of those that called the Agent (their own message, or an Agent's message they are behind by the
+  rule above, read from the run its `client_txn` names), else `others` with the earliest caller (the earliest that
+  names one); when none of them can call it any more (a block since, or `groupMentions` changed) it is `others` with no
+  caller, so a call its owner no longer allows does not ride the owner's own lane. An Agent's mention that was refused
+  when it was posted (halt, chain limit, chain budget) is not told apart from one that was not: nothing stored says so
+  (the halt's history and the charges of the time are not kept); it counts like the others, so it can make a follow-up
+  the owner's own only when the owner was behind that message. A follow-up in lane `others` is not queued once the
   Agent's others' daily budget is spent, checked again here because the reply that just ended is settled by now (the
   notice, once a day, and the owner pushed their Agent); the caller's limit does not apply to it: what it answers was
   folded into a reply under way, which is never refused.
@@ -1954,7 +1963,8 @@ the Agent's own conversation the follow-up is its owner's and is queued whatever
 answers what they wrote meanwhile). In a group it is decided as In a group (above) says: whose it is, the halt and the
 chain budget, the others' daily budget, and the owner's replies a minute in its lane — over it, the Agent's reusable
 `rate_limited` run there records it. A mention folded into a queued run turns it the owner's own (the owner its caller)
-when it is the owner's call; another person's leaves its lane and first caller.
+when it is the owner's call (their message, or an Agent's message they are behind); another person's — also one relayed
+through one of the owner's Agents — leaves its lane and first caller.
 
 **Pause and delete** end the Agent's active replies, in every conversation, for good, in their own transaction (under
 the Agent's lock): a queued run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it
