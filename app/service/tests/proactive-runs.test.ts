@@ -214,7 +214,7 @@ describe("read again as it is admitted", () => {
     expect(await runsOf(anna.id, w.g)).toEqual([{ status: "cancelled", error: null, lane: "proactive" }]);
   });
 
-  it("a mention its owner made between the claim and the refused admission is answered, as the owner's own", async () => {
+  it("a mention its owner made after the claim, the switch turned off meanwhile, is answered, as the owner's own", async () => {
     const w = await world();
     const anna = await agentIn(w.owner, "anna", w.g);
     const judged = await say(w.third, w.g, "今晚做什么菜好？");
@@ -243,26 +243,31 @@ describe("read again as it is admitted", () => {
 });
 
 describe("a mention noted between its claim and its beginning", () => {
-  it("is not taken into the reply nobody asked for: that answers what it was judged on, as nobody's call, and the mention is followed up in its caller's lane", async () => {
+  it("ends the reply nobody asked for there, quietly — no call, no charge — and the mention is answered once, by the follow-up, in its caller's lane", async () => {
     const w = await world();
     const anna = await agentIn(w.owner, "anna", w.g);
     const judged = await say(w.third, w.g, "今晚做什么菜好？");
     await unasked(anna, w.g, judged);
     const ticket = await app.agentPort.claimNext();
     const asked = await say(w.member, w.g, "@anna 对，就问你");
-    const prepared = await app.agentPort.begin(ticket!);
-    expect(prepared).toHaveProperty("call");
-    const row = async () =>
-      (await db.query("select lane, caller_id as caller, covers_seq::int as covers, pending_seq::int as pending from agent_runs where id = $1", [ticket!.id])).rows[0];
-    expect(await row()).toEqual({ lane: "proactive", caller: null, covers: judged, pending: asked });
-    await app.agentPort.finish(ticket!, { status: "done" }, null, NOTHING);
+    const calls = gateway.calls.length;
+    const end = await app.agentPort.begin(ticket!);
+    expect(end).toEqual({ status: "cancelled" });
+    await app.agentPort.finish(ticket!, end as RunEnd, null, NOTHING);
+    expect(gateway.calls.length).toBe(calls);
+    expect(await chargedFor(ticket!.id)).toBe("0");
+    gateway.reply("番茄炒蛋。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls + 1);
     const runs = await db.query("select status, lane, caller_id as caller, covers_seq::int as covers from agent_runs where agent_id = $1 and conversation_id = $2 order by created_at, id", [
       anna.id,
       w.g,
     ]);
     expect(runs.rows).toEqual([
-      { status: "done", lane: "proactive", caller: null, covers: judged },
-      { status: "queued", lane: "others", caller: w.member.id, covers: asked },
+      { status: "cancelled", lane: "proactive", caller: null, covers: judged },
+      { status: "done", lane: "others", caller: w.member.id, covers: asked },
     ]);
+    const replies = await db.query("select count(*)::int as n from messages where conversation_id = $1 and sender_id = $2", [w.g, anna.id]);
+    expect(replies.rows[0].n).toBe(1);
   });
 });

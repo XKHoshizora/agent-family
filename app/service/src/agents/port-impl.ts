@@ -70,12 +70,13 @@ const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
 /** The Agent is no longer a member of the run's group: nothing is called or posted there. */
 const REMOVED: RunEnd = { status: "cancelled", error: "agent_removed" };
 /**
- * Refused as it was admitted (runs.ts `refusedAtAdmission`): someone else's call found the Agent's others' daily budget
- * spent, or a reply nobody asked for found its owner's switch off or its proactive budget spent. No call, nothing held or
- * charged — nothing failed and there is nothing to retry, as for such a call refused when it was made (of which nothing
- * is recorded); the group is told only by the others' budget's notice.
+ * Ended quietly before any call: refused as it was admitted (runs.ts `refusedAtAdmission`: someone else's call found the
+ * Agent's others' daily budget spent, or a reply nobody asked for found its owner's switch off or its proactive budget
+ * spent), or a reply nobody asked for that someone called after its claim (`begin`'s first step). No call, nothing held
+ * or charged — nothing failed and there is nothing to retry, as for such a call refused when it was made (of which
+ * nothing is recorded); the group is told only by the others' budget's notice.
  */
-const REFUSED_AT_ADMISSION: RunEnd = { status: "cancelled" };
+const ENDED_QUIETLY: RunEnd = { status: "cancelled" };
 
 /** Why `postAsAgent` refuses a run's reply (409): the Agent's state, or what interrupted the run. */
 const REFUSED: ReadonlySet<string> = new Set(["agent_paused", "agent_deleted", "agent_removed", "halted"]);
@@ -270,9 +271,11 @@ export class DbAgentPort implements AgentPort {
    *
    * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one in a group its Agent is no
    *    longer a member of (`cancelled`, `agent_removed`) and one whose model does not resolve (`failed`,
-   *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). Otherwise the run
-   *    takes on what came meanwhile (`covers_seq` = max(covers, pending)) — unless nobody asked for it (lane `proactive`):
-   *    what was noted on it stays noted, for its follow-up — and what the model may be shown is read: the
+   *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). A reply nobody asked
+   *    for (lane `proactive`) that a mention was noted on since its claim ends here quietly (`ENDED_QUIETLY`): the moment
+   *    for an unasked remark has passed, and its follow-up answers the mention, noted still, in the caller's lane.
+   *    Otherwise the run takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be
+   *    shown is read: the
    *    system text — its own conversation's (`systemPrompt`, with what the Agent calls its owner), or the group's
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
    *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
@@ -293,7 +296,7 @@ export class DbAgentPort implements AgentPort {
    *    reason, admitting nothing (as in step 2). Then what its lane is held to is read again (runs.ts
    *    `refusedAtAdmission`; replies settled while it waited queued may have spent a budget since): a run someone else
    *    called for (lane `others`) meets the Agent's others' daily budget, and a reply nobody asked for (`proactive`) its
-   *    owner's switch and its proactive budget. Refused, it ends `cancelled` with no error (`REFUSED_AT_ADMISSION`) — no
+   *    owner's switch and its proactive budget. Refused, it ends `cancelled` with no error (`ENDED_QUIETLY`) — no
    *    call, nothing held or charged — and the others' budget's notice, if this appended it, is published to the group
    *    after commit, the Agent pushed to its owner (a reply nobody asked for tells nobody). What step 1 took on (noted on
    *    the run after its claim) is handed back as noted — `covers_seq` back to what it covered before, `pending_seq` at
@@ -318,6 +321,9 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
+      // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
+      // stays noted, so its follow-up answers the call in the caller's lane.
+      if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
 
       let resolved;
       try {
@@ -330,12 +336,10 @@ export class DbAgentPort implements AgentPort {
       }
       if (!resolved) return { end: UNAVAILABLE };
 
-      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back). A reply
-      // nobody asked for (lane `proactive`) takes nothing on: a mention noted on it stays noted, and its follow-up answers
-      // it in the caller's lane — it is no reply nobody asked for, nor charged to the proactive budget, nor ended by a halt.
+      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back).
       const coveredBefore = Number(state.covers_seq ?? 0);
-      const covers = state.lane === "proactive" ? coveredBefore : Math.max(coveredBefore, Number(state.pending_seq ?? 0));
-      if (state.lane !== "proactive") await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
+      const covers = Math.max(coveredBefore, Number(state.pending_seq ?? 0));
+      await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
@@ -395,7 +399,7 @@ export class DbAgentPort implements AgentPort {
             first.covers,
           ]);
         }
-        return { end: REFUSED_AT_ADMISSION, told };
+        return { end: ENDED_QUIETLY, told };
       }
       const { resolved, loaded, covers } = first;
       try {

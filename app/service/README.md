@@ -2110,8 +2110,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
       `cancelled`, `agent_removed`, a model that no longer resolves `failed`
       (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
-      run takes on what was noted meanwhile — unless nobody had asked for it (lane `proactive`): a mention noted on it
-      stays noted, for its follow-up to answer in the caller's lane (Proactive replies) — and what the model may be shown is read from
+      run takes on what was noted meanwhile — but a reply nobody had asked for (lane `proactive`) with a mention noted on
+      it since its claim ends here instead, `cancelled` with no error, no call and nothing held or charged, and its
+      follow-up answers the mention in the caller's lane (Proactive replies) — and what the model may be shown is read from
       the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
       the owner's in it (in a group: of anyone else's), no model is called: when everything the run was to answer is
       before a new topic, it ends
@@ -2581,8 +2582,9 @@ Agent's message) is taken over by that call (`runs.ts` `takesOnCall`): it covers
 caller and `triggered_by`. It is no longer unasked: it leaves the proactive budget and the fuse, counts in the limits as a
 reply that call started would, is not told that nobody called it, its `via` has no `proactive`, and a halt ends it only
 when an Agent's message called it. Its surcharge stays. One already `running` notes the mention like any reply under way
-(its follow-up answers it, in the call's lane) and stays a proactive reply — also when the mention came between the
-worker's claim and the run's beginning, which a proactive reply does not take on (Agents and runs, the worker's `begin`).
+(its follow-up answers it, in the call's lane) and stays a proactive reply; but when the mention came between the
+worker's claim and the run's beginning, the moment for an unasked remark has passed: the run ends there, `cancelled`,
+with no call and no charge, and the follow-up alone answers the mention (Agents and runs, the worker's `begin`).
 
 **A halt** (`POST /api/conversations/:id/agents/halt`) ends proactive replies as it ends the replies Agents' messages
 called for: a queued one is `cancelled` `halted`, a running one is never posted and ends `cancelled` `halted`, settled on
