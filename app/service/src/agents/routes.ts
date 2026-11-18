@@ -416,10 +416,7 @@ export function registerAgentRoutes(
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      return editAppellations(me.id, req.params, async (t, agent, target) => {
-        await setAppellation(t, agent, target, req.body.appellation);
-        return true;
-      });
+      return editAppellations(me.id, req.params, (t, agent, target) => setAppellation(t, agent, target, req.body.appellation));
     },
   );
 

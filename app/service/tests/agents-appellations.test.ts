@@ -251,6 +251,14 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     await put(w.owner, w.agent.id, RANDOM, "x");
     await put(w.owner, w.agent.id, w.mia.id, "");
     expect(agentChanged).not.toHaveBeenCalled();
+    // Nor does one that sets what is already there (trimmed, it is the same text).
+    expect((await put(w.owner, w.agent.id, w.mia.id, "米亚")).status).toBe(200);
+    expect((await put(w.owner, w.agent.id, w.mia.id, " 米亚 ")).status).toBe(200);
+    expect((await put(w.owner, w.agent.id, w.mia.id, "亚亚")).json.appellations).toMatchObject([{ principalId: w.mia.id, appellation: "亚亚" }]);
+    expect(agentChanged.mock.calls).toEqual([
+      [w.owner.id, w.agent.id],
+      [w.owner.id, w.agent.id],
+    ]);
   });
 });
 

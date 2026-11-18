@@ -310,9 +310,9 @@ export async function appellationsFor(q: Queryable, agentId: string): Promise<Ma
  * Sets (or replaces) what the locked, undeleted `agent` calls `targetId`. The target is a person or an Agent that is
  * neither the Agent nor its owner and is the owner's friend or a current member of a group (not closed) the Agent is
  * in; anything else, a principal that does not exist included, is 404 `not_found`. 409 `too_many` for a target that
- * would be the 101st; replacing one of the 100 is fine.
+ * would be the 101st; replacing one of the 100 is fine. False when it was called so already: nothing changed.
  */
-export async function setAppellation(t: Tx, agent: AgentRow, targetId: string, appellation: string): Promise<void> {
+export async function setAppellation(t: Tx, agent: AgentRow, targetId: string, appellation: string): Promise<boolean> {
   const qualifies = await t.query(
     `select 1 from principals p
       where p.id = $1 and p.id <> $2 and p.id <> $3
@@ -330,11 +330,13 @@ export async function setAppellation(t: Tx, agent: AgentRow, targetId: string, a
     [agent.id, targetId],
   );
   if (!rows[0]!.has && rows[0]!.n >= MAX_APPELLATIONS) throw new AppError(409, "too_many");
-  await t.query(
+  const { rowCount } = await t.query(
     `insert into agent_appellations (agent_id, principal_id, appellation) values ($1, $2, $3)
-     on conflict (agent_id, principal_id) do update set appellation = excluded.appellation`,
+     on conflict (agent_id, principal_id) do update set appellation = excluded.appellation
+       where agent_appellations.appellation <> excluded.appellation`,
     [agent.id, targetId, appellation],
   );
+  return (rowCount ?? 0) > 0;
 }
 
 /** Removes what `agentId` calls `targetId`; false when there was no such row. */
