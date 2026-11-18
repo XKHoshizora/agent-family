@@ -171,9 +171,10 @@ that called no Agent, it waits until nobody has written there for `PROACTIVE.deb
 judged once and acts on the outcome as on a mention's (notices published, runs announced). A message that called an
 Agent — one the trigger acted on or refused — cancels the wait, and so does an Agent's post there; any other message
 replaces the one waiting, also one naming an Agent by `@handle` that the trigger ignored, whose decision then refuses it.
-At most 8 decisions are in flight at once, all groups together (Proactive replies, When a message is judged). In memory,
-in this process; built only when the judgement model is configured (`JUDGE`), else null and nothing is read or timed for
-it. `proactive` (tests only): `false` builds none, `{ delayMs }` waits less.
+At most 8 decisions are in flight at once, all groups together, and at most `PROACTIVE.perGroupHour` of one group and
+`PROACTIVE.perSenderHour` of one sender's messages start within an hour (Proactive replies, When a message is judged). In
+memory, in this process; built only when the judgement model is configured (`JUDGE`), else null and nothing is read or
+timed for it. `proactive` (tests only): `false` builds none, `{ delayMs }` waits less.
 
 ## Deployment
 
@@ -719,8 +720,8 @@ after `rate_limited`, which a retry within the same minute meets again as 429). 
 current stay** (a run covering a message after it last joined; nothing is stored per member). Its owner sees that Run.
 Every other current member sees only a **state**: `"replying"` (the run is `queued` or `running`), `"unavailable"`
 (`failed`, and its owner has not dismissed it — never why, nor the run, its id, `error`, `retryable` or `resetsAt`), or
-`null` (nothing to show: `done`, `stopped`, `cancelled`, a failure its owner dismissed, no run in this stay, or the
-Agent is no longer in the group). Show `"replying"` as “某某正在回复…” and `"unavailable"` as “某某暂时无法回复”. Stop,
+`null` (nothing to show: `done`, `stopped`, `cancelled`, a failure its owner dismissed, a failed reply nobody had asked
+for — Proactive replies —, no run in this stay, or the Agent is no longer in the group). Show `"replying"` as “某某正在回复…” and `"unavailable"` as “某某暂时无法回复”. Stop,
 retry and dismiss of a group run are its Agent's owner's; for anybody else they answer exactly as for a run (or an
 Agent) that does not exist. `GET …/run` is not a group's: there it is the 404 of an unknown id.
 
@@ -2108,7 +2109,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
       `cancelled`, `agent_removed`, a model that no longer resolves `failed`
       (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
-      run takes on what was noted meanwhile, and what the model may be shown is read from
+      run takes on what was noted meanwhile — unless nobody had asked for it (lane `proactive`): a mention noted on it
+      stays noted, for its follow-up to answer in the caller's lane (Proactive replies) — and what the model may be shown is read from
       the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
       the owner's in it (in a group: of anyone else's), no model is called: when everything the run was to answer is
       before a new topic, it ends
@@ -2128,14 +2130,16 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
       the first step, with no call; when the service has started closing by the time the locks are held, the
       transaction rolls back and nothing is admitted (the closing service ends the run, Shutdown below;
-      `tests/runs-restart.test.ts`). A reply someone else called for (lane `others`) then meets the Agent's others'
-      daily budget once more (`runs.ts` `othersBudgetRefusesAdmission`: what replies settled while it waited were
-      charged counts now; settlement takes the Agent's lock too): spent, it ends `cancelled` with no error,
-      with no call and nothing held or charged, the group told by `agent_daily_budget_reached` once a day (published
-      after commit) and the owner pushed their Agent (Agents in a group). What the first step took on (mentions noted
-      on the run after its claim) is handed back as noted, so the run's end follows it up as any (Coalescing): the
-      owner's own mention is answered — the owner's calls are never refused by this budget — and someone else's meets
-      the budget again and is not queued (no second notice that day); nothing loops. Otherwise the call is admitted on its input
+      `tests/runs-restart.test.ts`). Then what its lane is held to is read once more (`runs.ts` `refusedAtAdmission`:
+      what replies settled while it waited were charged counts now; settlement takes the Agent's lock too): a reply
+      someone else called for (lane `others`) meets the Agent's others' daily budget, and a reply nobody asked for
+      (`proactive`) its owner's switch (`proactive`) and its proactive budget. Refused, it ends `cancelled` with no error,
+      with no call and nothing held or charged; the others' budget tells the group by `agent_daily_budget_reached` once a
+      day (published after commit) and pushes the owner their Agent (Agents in a group), a reply nobody asked for tells
+      nobody. What the first step took on (mentions noted on the run after its claim) is handed back as noted, so the
+      run's end follows it up as any (Coalescing): the owner's own mention is answered — the owner's calls are never
+      refused by these — and someone else's meets the others' budget again and is not queued once it is spent (no second
+      notice that day); nothing loops. Otherwise the call is admitted on its input
       estimate (Metering; `no_quota` ends it `failed` before any call) and the Agent's read marker moves to what the run
       covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)
@@ -2411,8 +2415,9 @@ In a group), and an Agent's message is never answered unasked (Agents do not tal
 - `model` (1–200 characters), sent with every request.
 - `channels`: one or two, tried in that order (the second only when the first gave no usable answer, as for the official
   service and a relay). `url`: the address requests are POSTed to, under a site model's `baseUrl` rule (`https`, no
-  credentials, a plain host name or address, no query or fragment, else start-up fails; stored as a site model's is:
-  lower-case host, no default port, no trailing slash; the address guard checks where it points at every call).
+  credentials, a plain host name or address, no query or fragment, else start-up fails; the address guard checks where
+  it points at every call). It is the endpoint itself, not a base URL: kept exactly as given, its path and a trailing
+  slash included.
   `apiKeyEnv`: the name of another variable that holds the channel's key, so the JSON carries no secret; start-up fails
   naming it when it is unset or empty, or when it is one of the service's own (`DATABASE_URL`, `AUTH_SECRET`,
   `PROVIDER_KEY_SECRET`, `S3_SECRET_ACCESS_KEY`, `S3_ACCESS_KEY_ID`, case ignored). The key is read at each call.
@@ -2442,6 +2447,8 @@ calibrated on the real judgement model (`docs/acceptance/batch2d/calibration.md`
 | `quietBig` | `{"at": 0.8, "raise": 0.33, "halfLifeS": 3600}` (the same ranges) | The same for a sure quiet answer, which also tells the group (`agent_quieted`) |
 | `cap` | 0.98 (0–1) | The highest a threshold goes |
 | `fuse` | `{"perSeconds": 10, "perHour": 30}` (1–3 600, 1–100 000) | At most one proactive reply of an Agent in a group within this many seconds, and this many within an hour |
+| `perGroupHour` | 120 (1–100 000) | Judgements started within any hour about one group, at most; beyond, its messages are not judged until the hour slides on |
+| `perSenderHour` | 120 (1–100 000) | The same about the messages of one sender, in all groups together, so no account can use up the site's `dailyLimit` |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
 (`POST /api/conversations/:id/messages`, text or file; not a repeated `clientTxn`), the send route notes it after
@@ -2454,8 +2461,13 @@ paused, deleted or without a model, `groupMentions` `owner`, a block, or folded 
 decision then refuses. An Agent's post in the group drops the wait too (the group moved on). A group is never decided
 twice at once: a message noted while its decision is in flight waits for that to settle, then for a fresh wait. At most 8
 decisions are in flight, all groups together (`MAX_DECISIONS_AT_ONCE`, a constant: each holds a database connection while
-it reads); a group whose wait ends while 8 are waits its turn, oldest first. A note about a message no newer than the one
-waiting or being decided changes nothing. All of it lives in this process's memory (one instance, Deployment): a restart
+it reads); a group whose wait ends while 8 are waits its turn, oldest first. No group and no sender may use up the site's
+judgements of the day: when a group's wait ends (or its turn comes), and `perGroupHour` decisions about that group, or
+`perSenderHour` about messages of the sender of the one it waits with (in any group), have started within the last hour,
+its decision is skipped — neither queued nor judged — and `judge_capped` is logged, once an hour for each group and each
+sender (Log). A decision counts as it starts; what the caps count is forgotten an hour after a group or sender was last
+counted or logged, so it holds nothing of those long gone, and all of it when the scheduler is closed. A note about a
+message no newer than the one waiting or being decided changes nothing. All of it lives in this process's memory (one instance, Deployment): a restart
 loses the waits, which means nobody replies to those messages. When the service stops, the scheduler is closed first:
 nothing more is judged, and what a decision still in flight decides is dropped (the stop waits for it within
 `SHUTDOWN_GRACE_MS`).
@@ -2466,9 +2478,10 @@ nothing more is judged, and what a decision still in flight decides is dropped (
    open group, the message is its latest that is not a notice and a person sent it, Agents were not halted at or after
    it (`agents_halted_seq`), and its text (a file's caption) names no Agent by `@handle` — any Agent, in the group or not.
    And it has led to no proactive reply yet (no `agent_group_state` row of the group has `surcharge_seq` at or after it).
-   The options (`optionsFor`): the group's current Agent members with `proactive` on, not paused or deleted, with a
-   model, whose owner and the sender have no block between them in either direction (the owner's own message counts).
-   None: nothing more happens, nothing is asked or counted. At most 253 (a choice is sent with at most 254 options, one of
+   The options (`optionsFor`, `mayAnswerUnasked`): the group's current Agent members that joined before the message (an
+   Agent answers nothing from before its stay began), with `proactive` on, not paused or deleted, with a model, whose
+   owner and the sender have no block between them in either direction (the owner's own message counts). None: nothing
+   more happens, nothing is asked or counted. At most 253 (a choice is sent with at most 254 options, one of
    them `nobody`); beyond that, those judged least recently in this group (`judged_at`, never judged first) take the
    places. They are keyed `a1`, `a2`, … in Agent id order. Then the site's judgements today (`judge_usage`): at
    `dailyLimit`, nothing is asked. Then the request (`requestFor`), which is all the judgement model is ever shown —
@@ -2478,7 +2491,7 @@ nothing more is judged, and what a decision still in flight decides is dropped (
      what came before it joined; an Agent that joined just now shortens it for all), oldest first; each `{name}：{text}`,
      an Agent's `{name}（Agent）：{text}`, a file's `[文件] {caption, or its name}`; the name is the sender's display name
      cleaned as a label's (`labelName`; the handle when nothing is left), the text is put on one line and cut at
-     `transcriptChars` characters.
+     `transcriptChars` characters. With no line to show, nothing is asked (never on descriptions alone).
    - One choice question, key `pick`: “群里有几个 AI 助手。记录里标着“（Agent）”的是它们说过的话。最新这条消息如果需要某个
      AI 助手主动来回答，应该由谁回答？”; its options each Agent's `{name}：{intro}；擅长：{field}` (on one line, at most 200
      characters) and `nobody`: “不需要任何 AI 助手回答：真人之间的闲聊、客套、道谢，已经有人回答了，或者不属于上面任何一位擅长的事”.
@@ -2489,13 +2502,15 @@ nothing more is judged, and what a decision still in flight decides is dropped (
    (`judge_usage` + 1) and every option is stamped as judged now (`judged_at`), each in a statement of its own.
 3. *Settle.* Only answers to the questions asked are read. The winner is the Agent option with the highest `pick`
    probability (a tie: the lowest id); `nobody`'s own probability is not compared — the winner's threshold decides —, and
-   there is no winner unless `pick` gives a probability for every option asked, `nobody` included. When the winner is
+   there is no winner unless `pick` gives a probability for every option asked, `nobody` included, and they add up to
+   between 0.9 and 1.1 (a choice's sum to 1; an answer far from that is no answer). When the winner is
    under the lowest threshold there is (the least of `cap` and the three `base` values) and no quiet answer reaches
    `quietSmall.at`, nothing comes of the judgement and nothing is locked: the usual case. Otherwise, in one transaction
    under the group's row (the lock a send takes): the message is checked again as in phase 1 — a message of anyone's
    since, a halt or the group closed, and nothing at all is done, quiet answers included —; each Agent this touches (those
    a quiet answer raises, and the winner) is locked (`lockAgent`, in id order) and kept only while it is still an option;
-   their `agent_group_state` rows are locked, in id order (every writer of those rows takes them in that order); the quiet
+   their `agent_group_state` rows are locked, in id order (every writer of those rows takes them in that order;
+   `state.ts`); the quiet
    answers are applied (Asked to be quiet, below); and the winner replies unless one of the reasons below holds: a
    `queued` run covering the message, `triggered_by` `human`, lane `proactive`, no caller, and its surcharge raised at
    once, stamped with the message's seq. After commit the outcome is acted on as a send acts on a mention's: its notices
@@ -2509,11 +2524,12 @@ are checked in the order of the table.
 | Case | Log |
 |---|---|
 | No judgement model (`JUDGE` unset) | nothing: no scheduler |
-| The message called an Agent or names one by `@handle`; a message (anyone's, an Agent's included) came after it, a halt, or the group was closed before it was decided; it already led to a proactive reply; no Agent of the group is an option (`proactive` off, paused, deleted, without a model, or a block between its owner and the sender) | nothing |
+| `perGroupHour` decisions about the group, or `perSenderHour` about the sender's messages, have started within the hour | `judge_capped`, once an hour for each group and each sender |
+| The message called an Agent or names one by `@handle`; a message (anyone's, an Agent's included) came after it, a halt, or the group was closed before it was decided; it already led to a proactive reply; no Agent of the group is an option (`proactive` off, paused, deleted, without a model, joined at or after the message, or a block between its owner and the sender); no line of the transcript to show | nothing |
 | Agents were halted at or after the message (`POST …/agents/halt`): no message from before a halt is judged; a person's next message is, as usual | nothing |
 | The site's judgements of the site day have reached `dailyLimit` | `judge_daily_limit`, once per process and site day |
-| The judgement failed: every channel erred, timed out, answered a status other than 200, or a body that is not `{"answers": {…}}` | `judge_failed` |
-| `pick` unanswered, or without a probability (a number from 0 to 1) for one of its options | `judge_partial` (quiet answers still apply) |
+| The judgement failed: every channel erred, timed out, answered a status other than 200, or a body that is not `{"answers": {…}}` | `judge_failed`, with why |
+| `pick` unanswered, without a probability (a number from 0 to 1) for one of its options, or its probabilities over the options asked adding up to less than 0.9 or more than 1.1 | `judge_partial` (quiet answers still apply) |
 | The winner's probability is under the lowest threshold there is | `under_threshold` (debug), and no transaction |
 | The message led to a proactive reply meanwhile (another decision of it won the race) | `already_decided` (debug) |
 | The hush rule: this message asked the winner to be quiet, if only a little (its quiet answer is at least `quietSmall.at`): the judgement tends to pick the very Agent a mild complaint is about | `hushed` |
@@ -2522,6 +2538,7 @@ are checked in the order of the table.
 | The fuse: a proactive reply of the winner in the group within `fuse.perSeconds`, or `fuse.perHour` of them within the hour | `fuse` |
 | Its proactive budget is spent: what its replies in lane `proactive` were charged since the site day began, settled charges only, has reached `proactiveBudget` | `budget` |
 | Its owner has started `AGENT_OTHERS_RUNS_PER_MINUTE` replies in the last minute outside their own lane (proactive replies count with others' calls, Rate limits; checked under the owner's `accounts` row, the lock order's last) | `owner_minute` |
+| Queued, but before it began its owner turned `proactive` off, or replies of it settled meanwhile spent its proactive budget (read again as it is admitted, Agents and runs) | nothing: the run ends `cancelled`, with no call, no charge and no notice |
 
 **The threshold** (`threshold.ts`, pure arithmetic). The winner replies when its probability is at least `min(cap,
 base[proactiveLevel] + surcharge now + quiet now)`, read for its Agent and this group:
@@ -2535,7 +2552,8 @@ base[proactiveLevel] + surcharge now + quiet now)`, read for its Agent and this 
   0.85, at most 0.90; the extra halves every 2 minutes or 4 messages of others. A follow-up question (calibrated median
   0.96) still passes; a topic it merely touches waits until it has been quiet a while.
 - *The quiet raise* (Asked to be quiet, below), which decays with time alone.
-- A stored value that is not a finite number of at least 0 counts as 0, and a stamp in the future as no time passed.
+- A stored value that is not a finite number of at least 0 counts as 0, and a stamp in the future as no time passed; a
+  half-life or a halving count that is not a positive number halves nothing (a threshold is never NaN).
 
 `agent_group_state` (migration `026_agent_group_state.sql`), one row per Agent and group it was ever an option in:
 `agent_id` (the Agent's principal) and `conversation_id` (the key; both cascade), `surcharge` (≥ 0), `surcharge_at`,
@@ -2560,7 +2578,8 @@ Agent's message) is taken over by that call (`runs.ts` `takesOnCall`): it covers
 caller and `triggered_by`. It is no longer unasked: it leaves the proactive budget and the fuse, counts in the limits as a
 reply that call started would, is not told that nobody called it, its `via` has no `proactive`, and a halt ends it only
 when an Agent's message called it. Its surcharge stays. One already `running` notes the mention like any reply under way
-(its follow-up answers it, in the call's lane) and stays a proactive reply.
+(its follow-up answers it, in the call's lane) and stays a proactive reply — also when the mention came between the
+worker's claim and the run's beginning, which a proactive reply does not take on (Agents and runs, the worker's `begin`).
 
 **A halt** (`POST /api/conversations/:id/agents/halt`) ends proactive replies as it ends the replies Agents' messages
 called for: a queued one is `cancelled` `halted`, a running one is never posted and ends `cancelled` `halted`, settled on
@@ -2578,10 +2597,15 @@ replies unasked, and mentions are untouched. Judgements are never charged to any
 (other fields, such as `type`, `choice` or `confidence`, are ignored), each `p` a finite number from 0 to 1; a key or an
 option answered otherwise counts as unanswered. One attempt per channel, in order, each bounded by `timeoutMs` (in all,
 and without progress), its answer at most 64 KiB; any failure — a status, the network, the time, the body, the key's
-variable unset at that moment — goes on to the next channel, and after the last the call has failed. It goes through the
-address guard (Model providers) with slots of its own: at most 32 judgement calls in flight in the process (one more
-fails at once). A choice question with no option or more than 254 is not sent. Nothing of it is logged, and no error
-carries the key, the address, the state, a question or an answer.
+variable unset at that moment — goes on to the next channel, and after the last the call has failed: `JudgeError`, whose
+`reason` says coarsely why the last channel tried gave no answer — `auth` (401 or 403), `status` (any other status but
+200), `timeout`, `oversize`, `shape` (not `{"answers": {…}}`), `key_unset`, `network` (anything else: the connection, the
+address, no place among the calls in flight). The caller giving up (its signal) is its own abort, never a `JudgeError`,
+and no further channel is tried. It goes through the address guard (Model providers) with slots of its own: at most 32
+judgement calls in flight in the process (one more fails at once). A choice question with no option or more than 254 is
+not sent, nor a question whose key was asked already (the first is); the questions are sent in an object with no
+prototype, so any key is only a key. Nothing of it is logged, and no error carries the key, the address, the state, a
+question or an answer.
 
 **The owner's settings** (`POST /api/agents`, `PATCH /api/agents/:id`; the Agent shape, Agents): `proactive` (default
 false), `proactiveLevel` (`less`, `normal`, `more`: which `base` it starts from; default `normal`), `proactiveBudget`
@@ -2589,9 +2613,11 @@ false), `proactiveLevel` (`less`, `normal`, `more`: which `base` it starts from;
 is unset is 409 `proactive_unavailable` — on a create before anything is written, on an edit once the Agent is found
 yours and not deleted (so for anybody else it stays the 404). The level and the budget are accepted whether it is on or
 off. The owner's view adds `proactiveSpentToday`: what its proactive replies were charged since the site day began,
-settled charges only, so the day's spend can pass the budget by the replies already queued or running when it is reached
-(at most one per group: `active_run`). Over the budget it stops silently — nothing in the group; the owner's page shows
-the spend — and raising the budget lets it speak again at once, since every decision reads it. Each reply's model call
+settled charges only. The decision reads the budget before queueing a reply, and the worker reads it — and the switch —
+again as the reply is admitted (Agents and runs), so a reply queued before it was spent, or before its owner lowered it
+or turned `proactive` off, ends there; the day's spend can pass the budget only by the replies already running when it
+is reached (at most one per group: `active_run`). Over the budget it stops silently — nothing in the group; the owner's
+page shows the spend — and raising the budget lets it speak again at once, since every decision reads it. Each reply's model call
 is its owner's, as any reply's (Metering); on a provider model it costs no points, so the budget never holds there, while
 the fuse and the owner's minute do. `GET /api/models` answers `proactiveAvailable` (whether `JUDGE` is configured).
 
@@ -2607,8 +2633,10 @@ a group reply's (Agents in a group, A reply there).
 are its owner's alone); that a reply was unasked: it is an ordinary reply of the Agent's, and only its owner's copy
 carries `via.proactive: true` (Wire shapes, `via`; read from the run's lane when the message is read, so a reply a
 mention took over has none); a run's lane, caller or `triggered_by` (never on the wire; everyone but the owner gets a
-`run`'s `state` only); and anything of the judgement — the request, the answers, the state rows, `judge_usage` — which no
-answer, push or log line carries. What every member does see is the `agent_quieted` notice, which by its nature tells
+`run`'s `state` only), and a reply nobody asked for that failed (`no_quota`, a provider's error, ended by recovery): the
+others are told its state as `null`, never `"unavailable"`, in the push and in `GET …/runs`, while its owner sees the
+failure as any failure of theirs (the row is not dismissed); and anything of the judgement — the request, the answers,
+the state rows, `judge_usage` — which no answer, push or log line carries. What every member does see is the `agent_quieted` notice, which by its nature tells
 that the Agent speaks unasked there (the design chose to have it); it names nobody who asked.
 
 **Log.** JSON lines with a `metric` field, carrying ids and reasons only, never a message's text. The production log is
@@ -2620,10 +2648,16 @@ at `info`, so the two `debug` lines show only when the level is lowered.
   owners' budgets are low for how often their Agents are picked; `owner_minute`: their minute for others is full; `fuse`
   should practically never appear — it guards against the judgement misbehaving, so look at what is being picked;
   `hushed` counts mild complaints about the very Agent picked.
-- `{ "metric": "judge_failed", "conversationId" }` (info): no channel answered in time. Often: the upstream is down or
-  slow (`timeoutMs`), a key is wrong, or a channel's address is refused.
-- `{ "metric": "judge_partial", "conversationId" }` (info): an answer without the pick, or missing one of its options —
-  the upstream answers in another shape than the client's.
+- `{ "metric": "judge_failed", "reason", "conversationId" }` (info): no channel answered; `reason` is the client's
+  (`JudgeError.reason`: `auth`, `status`, `timeout`, `oversize`, `shape`, `key_unset`, `network`; `timeout` too when
+  all the channels' time together ran out). `auth`: a key is wrong; `timeout`: the upstream is slow (`timeoutMs`);
+  `network`: down, or a channel's address refused; `shape`/`oversize`: it answers in another protocol.
+- `{ "metric": "judge_partial", "conversationId" }` (info): an answer without the pick, missing one of its options, or
+  whose probabilities do not add up to about 1 — the upstream answers in another shape than the client's.
+- `{ "metric": "judge_capped", "scope": "group" | "sender", "conversationId", "senderId"? }` (info), once an hour for each
+  group (`scope` `group`) and each sender (`sender`, with `senderId`): their judgements of the hour are used up
+  (`perGroupHour`, `perSenderHour`), and their messages are not judged until the hour slides on. Often from one group
+  or one account: someone writing a great deal (or a script).
 - `{ "metric": "judge_daily_limit" }` (info), once per process and site day: `dailyLimit` is reached, and until the next
   site day nobody replies unasked.
 - A decision that fails for the service's own reasons (the database) is logged at `error` with the group's id, and
