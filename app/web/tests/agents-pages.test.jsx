@@ -1491,6 +1491,24 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       expect(rows().map((li) => li.textContent.includes("安的助手"))).toEqual([true]);
     });
 
+    it("移除 that answers 404 (taken back elsewhere already) is as done: no sentence, the Agent is fetched again and the row goes", async () => {
+      const rec = record({ appellations: [ANN_ENTRY, BOT_ENTRY] });
+      const deleteAppellation = vi.fn(async () => {
+        throw apiError(404, "not_found");
+      });
+      const app = await openEdit(rec, { deleteAppellation });
+      const fetched = vi.fn(() => ({ ...rec, appellations: [BOT_ENTRY] }));
+      app.transport.handlers.agent = fetched;
+      await click(within(rowOfName("小安")).getByRole("button", { name: "移除" }));
+      await flush();
+      expect(deleteAppellation).toHaveBeenCalledWith(AG1, ANN);
+      expect(fetched).toHaveBeenCalled();
+      expect(rows().map((li) => li.textContent.includes("安的助手"))).toEqual([true]);
+      expect(section().textContent).not.toContain("现在不能给这个人设称呼");
+      expect(section().querySelector('[role="alert"]')).toBeNull();
+      expect(toastText()).toBeNull();
+    });
+
     it("a refusal is said under its own row: 400, 404 and too_many with their sentences, anything else the generic one", async () => {
       const rec = record({ appellations: [ANN_ENTRY, BOT_ENTRY] });
       const refuse = (status, code) => async () => {

@@ -56,7 +56,10 @@ const enterSaves = (save) => (event) => {
   save();
 };
 
-/** What a row says in place of the name of an Agent the service no longer shows (it is in no group with this one now). */
+/**
+ * What a row says in place of the name of an Agent the service no longer shows: someone else's, in no group with this
+ * one now, or a deleted one.
+ */
 const GONE_AGENT = "已不在同一个群里的 Agent";
 
 /** One stored appellation: the target, the appellation saved when I leave the box or press Enter, and 移除. */

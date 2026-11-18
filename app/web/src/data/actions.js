@@ -676,7 +676,16 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** How the Agent addresses `principalId` (set, or removed): the Agent's view as the service answers it is kept. */
     setAppellation: (agentId, principalId, appellation) =>
       attempt(() => api.putAppellation(agentId, principalId, { appellation }), appellationWrite(agentId)),
-    removeAppellation: (agentId, principalId) => attempt(() => api.deleteAppellation(agentId, principalId), appellationWrite(agentId)),
+    /**
+     * Takes it back. A 404 says it is gone already (taken back elsewhere): what was asked is so, and nothing is said —
+     * the Agent is fetched again, so its row goes too.
+     */
+    removeAppellation: async (agentId, principalId) => {
+      const res = await attempt(() => api.deleteAppellation(agentId, principalId), appellationWrite(agentId));
+      if (res.ok || res.error.status !== 404) return res;
+      request({ agent: agentId });
+      return { ok: true, value: null };
+    },
     /** Uploads the Agent's new avatar; on success its URL gets the next version at once. */
     uploadAgentAvatar: (agentId, file) =>
       attempt(() => api.uploadAgentAvatar(agentId, file), agentWrite("avatar", agentId, () => setModel(bumpAvatar(getModel(), 0, agentId)))),

@@ -172,7 +172,8 @@ const AGENT = {
     not_found: AGENT_NOT_FOUND,
     invalid_request: "填写的内容有误，或所选模型、思考程度不可用。",
   },
-  // The Agent's appellations of others (a 404 is the target, who cannot be named now: not a friend nor in a group it is in).
+  // The Agent's appellations of others (a 404 of a setting is the target, who cannot be named now: not a friend nor in a
+  // group it is in; a removal's 404 is no refusal, actions.js `removeAppellation` takes it as done).
   appellation: {
     invalid_request: APPELLATION_WRONG,
     not_found: "现在不能给这个人设称呼：对方需要是你的好友，或者和它在同一个群里。",
