@@ -1717,7 +1717,8 @@ describe("Agents in a group (batch 2C)", () => {
     await send("@annbot 五");
     await send("@someone 六");
     expect(within(storedLi(4)).getByText(tooOften("安的助手、小助手"))).toBeTruthy();
-    expect(within(storedLi(6)).getByText(tooOften("有的 Agent"))).toBeTruthy();
+    // A name not known: no 「」 (they are for real names).
+    expect(within(storedLi(6)).getByText("你 @ 得太频繁了，有的 Agent 这次没有收到，稍后再试。")).toBeTruthy();
     expect(lines()).toEqual(["m3", "m4", "m6"]);
     // My message pushed to me as to every member (it carries nothing of it) keeps the line.
     await push(transport, { type: "message", message: wire(G1, 3, ME_ID, "@annbot 三") });

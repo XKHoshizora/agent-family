@@ -255,12 +255,12 @@ function kindOf(kind, attachment) {
 
 /**
  * The line under my message some of whose calls on other people's Agents my own calls a minute stopped (`agentIds`):
- * their names joined with 、, or 有的 Agent while a name is not known.
+ * their names joined with 、 in 「」, or 有的 Agent (no 「」: they are for real names) while a name is not known.
  */
 function notCalledText(agentIds, nameOf) {
   const names = agentIds.map(nameOf);
-  const who = names.every((name) => typeof name === "string" && name !== "") ? names.join("、") : "有的 Agent";
-  return `你 @ 得太频繁了，「${who}」这次没有收到，稍后再试。`;
+  const who = names.every((name) => typeof name === "string" && name !== "") ? `「${names.join("、")}」` : "有的 Agent ";
+  return `你 @ 得太频繁了，${who}这次没有收到，稍后再试。`;
 }
 
 function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, keepsOwners }) {
