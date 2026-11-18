@@ -57,6 +57,9 @@ const budgetProblem = (text) => (budgetOf(text) === null ? BUDGET_WRONG : "");
 export const othersBudgetSent = (f) =>
   f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? budgetOf(f.othersAmount) ?? undefined : OTHERS_BUDGET_DEFAULT;
 
+/** What a create or a save sends of 别人 @ 每天最多花 (`othersBudgetSent`): nothing (undefined) unless group members may call it. */
+const othersBudgetToSend = (f) => (f.groupMentions === "members" ? othersBudgetSent(f) : undefined);
+
 /** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
 export async function settled(pending) {
   const result = await pending;
@@ -109,12 +112,22 @@ const recordFields = (a) => ({
   model: modelKey(a?.model ?? null),
 });
 
-/** A field of the form as it would be stored (the text fields trimmed, points as sent), to compare with the record. */
-const storedValue = (key, f) => {
-  if (key === "persona") return personaOf(f.persona);
-  if (key === "name" || key === "intro" || key === "field") return f[key].trim();
-  if (key === "chainBudget" || key === "othersAmount") return budgetOf(f[key]) ?? f[key].trim();
-  return f[key];
+/**
+ * What the form edits of a record, setting by setting: each setting is the form key of its name, but 别人 @ 每天最多花
+ * (`othersBudget`), which the form holds as a choice and an amount. Whether I changed a setting, whether it changed
+ * elsewhere and whether it is sent are decided per setting, never per key.
+ */
+const OTHERS_KEYS = ["othersChoice", "othersAmount"];
+const settingOf = (key) => (OTHERS_KEYS.includes(key) ? "othersBudget" : key);
+const keysOf = (setting) => (setting === "othersBudget" ? OTHERS_KEYS : [setting]);
+
+/** A setting as it would be stored (the text fields trimmed, points as sent), to compare with the record's. */
+const storedValue = (setting, f) => {
+  if (setting === "persona") return personaOf(f.persona);
+  if (setting === "name" || setting === "intro" || setting === "field") return f[setting].trim();
+  if (setting === "chainBudget") return budgetOf(f.chainBudget) ?? f.chainBudget.trim();
+  if (setting === "othersBudget") return othersBudgetSent(f);
+  return f[setting];
 };
 
 /**
@@ -122,8 +135,8 @@ const storedValue = (key, f) => {
  * its reasoning level, and the persona (with 帮我起草) in place of the role. Refusals are shown in the form, never toasted.
  *
  * Editing sends only the fields the owner changed. While the form is open the record may change elsewhere (another
- * device, a confirmed persona proposal): a field the owner has not touched then shows the new value; a field they have
- * touched keeps their text, and a notice says that saving overwrites it.
+ * device, a confirmed persona proposal): a setting the owner has not touched then shows the new value; a setting they
+ * have touched keeps their text, and a notice says that saving overwrites it.
  */
 export function AgentForm({ agent = null }) {
   const { state, dispatch, actions } = useStore();
@@ -145,7 +158,7 @@ export function AgentForm({ agent = null }) {
   const [draftNote, setDraftNote] = useState(null);
   const [confirmDraft, setConfirmDraft] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  /** The fields the owner changed (typed, chosen, drafted); only these are ever sent when editing. */
+  /** The settings the owner changed (typed, chosen, drafted: `settingOf`); only these are ever sent when editing. */
   const edited = useRef(new Set());
   /** The record's fields as this form last saw them, to tell what changed elsewhere. */
   const record = recordFields(agent);
@@ -162,17 +175,17 @@ export function AgentForm({ agent = null }) {
     const now = JSON.parse(recordKey);
     const before = seen.current;
     seen.current = now;
-    const changed = Object.keys(now).filter((key) => now[key] !== before[key]);
-    const theirs = changed.filter((key) => !edited.current.has(key));
+    const changed = [...new Set(Object.keys(now).map(settingOf))].filter((setting) => storedValue(setting, now) !== storedValue(setting, before));
+    const theirs = changed.filter((setting) => !edited.current.has(setting));
     if (theirs.length > 0) {
       setF((cur) => {
         const next = { ...cur };
-        for (const key of theirs) next[key] = now[key];
+        for (const setting of theirs) for (const key of keysOf(setting)) next[key] = now[key];
         return next;
       });
     }
-    // A field I changed that now differs from the record (my own save brings back what I typed: no notice).
-    if (changed.some((key) => edited.current.has(key) && storedValue(key, current.current) !== now[key])) setChangedElsewhere(true);
+    // A setting I changed that now differs from the record (my own save brings back what I typed: no notice).
+    if (changed.some((setting) => edited.current.has(setting) && storedValue(setting, current.current) !== storedValue(setting, now))) setChangedElsewhere(true);
   }, [recordKey, editing]);
 
   const options = choiceList(sources, agent?.model ?? null, agent?.reasoning ?? "none");
@@ -210,7 +223,7 @@ export function AgentForm({ agent = null }) {
 
   const set = (key) => (event) => {
     const value = event.target.value;
-    edited.current.add(key);
+    edited.current.add(settingOf(key));
     setF((cur) => ({ ...cur, [key]: value }));
   };
   /** The box a budget's amount is typed in (`budgetOf`). */
@@ -268,8 +281,8 @@ export function AgentForm({ agent = null }) {
     body.groupMentions = f.groupMentions;
     body.chainBudget = budgetOf(f.chainBudget);
     // Said only when others may call it (otherwise the service keeps its default), and never for a wrong amount.
-    const othersBudget = othersBudgetSent(f);
-    if (f.groupMentions === "members" && othersBudget !== undefined) body.othersBudget = othersBudget;
+    const othersBudget = othersBudgetToSend(f);
+    if (othersBudget !== undefined) body.othersBudget = othersBudget;
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -305,13 +318,12 @@ export function AgentForm({ agent = null }) {
   const save = async () => {
     // Only what I changed, and only where it differs from the record as it is now: a field I did not touch is never
     // sent, so a change made elsewhere meanwhile is not overwritten by the value this form opened with.
-    const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
+    const mine = (setting) => edited.current.has(setting) && storedValue(setting, f) !== storedValue(setting, record);
     const patch = {};
     for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions", "chainBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
-    // 别人 @ 每天最多花: only while others may call it, only when it differs from the record's, never a wrong amount.
-    const othersTouched = edited.current.has("othersChoice") || edited.current.has("othersAmount");
-    const othersBudget = othersBudgetSent(f);
-    if (othersTouched && f.groupMentions === "members" && othersBudget !== undefined && othersBudget !== othersBudgetSent(record)) patch.othersBudget = othersBudget;
+    // 别人 @ 每天最多花: only while others may call it, never a wrong amount (`othersBudgetToSend`).
+    const othersBudget = othersBudgetToSend(f);
+    if (mine("othersBudget") && othersBudget !== undefined) patch.othersBudget = othersBudget;
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;

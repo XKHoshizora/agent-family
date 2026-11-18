@@ -868,6 +868,63 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
     expect(patchAgent.mock.calls[2][1]).toEqual({ groupMentions: "owner" });
   });
 
+  describe("while the record changes elsewhere", () => {
+    const CHANGED_ELSEWHERE = "这个 Agent 的配置刚刚在别处有改动，保存会用你这里的内容覆盖你改过的几项。";
+    const record = (fields = {}) => agentOf(AG1, { model: SITE_MODEL, othersBudget: "35", othersSpentToday: "0", ...fields });
+    const openEdit = async () => {
+      const patchAgent = vi.fn(async (_id, patch) => ({ ...record(), ...patch }));
+      const app = await openAgents({ agents: [record()], api: { patchAgent } });
+      await openRow("小助手");
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      return { app, patchAgent };
+    };
+    const changeElsewhere = async (app, fields) => {
+      app.transport.handlers.agent = () => record(fields);
+      await push(app.transport, { type: "agent", id: AG1 });
+      await flush();
+    };
+    const save = () => click(inMain().getByRole("button", { name: "保存" }));
+
+    it("untouched, it shows the new value and is not sent back", async () => {
+      const { app, patchAgent } = await openEdit();
+      await changeElsewhere(app, { othersBudget: "50" });
+      expect([box().value, amount().value]).toEqual(["custom", "50"]);
+      await changeElsewhere(app, { othersBudget: null });
+      expect(box().value).toBe("unlimited");
+      type("简介", "新简介");
+      expect(mainText()).not.toContain(CHANGED_ELSEWHERE);
+      await save();
+      expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ intro: "新简介" }]);
+    });
+
+    it("the choice I made stays when the amount changes elsewhere: the notice says so, and saving sends mine", async () => {
+      const { app, patchAgent } = await openEdit();
+      fireEvent.change(box(), { target: { value: "unlimited" } });
+      await changeElsewhere(app, { othersBudget: "50" });
+      expect(box().value).toBe("unlimited");
+      expect(mainText()).toContain(CHANGED_ELSEWHERE);
+      await save();
+      expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ othersBudget: null }]);
+    });
+
+    it("the amount I typed stays when the choice changes elsewhere: the notice says so, and saving sends mine", async () => {
+      const { app, patchAgent } = await openEdit();
+      type(AMOUNT, "40");
+      await changeElsewhere(app, { othersBudget: null });
+      expect([box().value, amount().value]).toEqual(["custom", "40"]);
+      expect(mainText()).toContain(CHANGED_ELSEWHERE);
+      await save();
+      expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ othersBudget: "40" }]);
+    });
+
+    it("my own save coming back says nothing", async () => {
+      const { app } = await openEdit();
+      fireEvent.change(box(), { target: { value: "unlimited" } });
+      await changeElsewhere(app, { othersBudget: null });
+      expect(mainText()).not.toContain(CHANGED_ELSEWHERE);
+    });
+  });
+
   it("the Agent's page: today's spend against the budget, the used-up line, or unlimited; nothing for 仅我 or when the service says nothing", async () => {
     const show = async (extra) => {
       await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, ...extra })] });
