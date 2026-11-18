@@ -436,10 +436,10 @@ describe("replies a minute by lane, and one caller's limit on other people's Age
     const g2 = await group(limited, w.third, "elsewhere", [w.member, w.fourth]);
     const tess = await agentOf(w.third, "tess", g2, limited);
     for (let round = 0; round < 8; round++) {
-      await db.query("delete from agent_runs");
+      await db.query("delete from agent_runs where agent_id = any($1::uuid[])", [[anna.id, tess.id]]);
       lines.length = 0;
       await Promise.all([say(w.member, w.g, `@anna ${round}`, limited), say(w.member, g2, `@tess ${round}`, limited)]);
-      const started = (await db.query<{ agent_id: string }>("select agent_id from agent_runs")).rows.map((r) => r.agent_id);
+      const started = (await db.query<{ agent_id: string }>("select agent_id from agent_runs where agent_id = any($1::uuid[])", [[anna.id, tess.id]])).rows.map((r) => r.agent_id);
       // Exactly one started; the other is only logged.
       expect([round, started.length, callerLimited().length]).toEqual([round, 1, 1]);
       expect([anna.id, tess.id]).toContain(started[0]);
