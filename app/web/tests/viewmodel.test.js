@@ -603,6 +603,22 @@ describe("someone else's Agent in a group I am in (batch 2C)", () => {
     expect(lastPreview(mineLast, mineLast.convs[G1])).toBe("小助手：我的回答");
   });
 
+  it("a reply's via keeps proactive only when it is strictly true, and only on my own Agents' replies", () => {
+    const SOL = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "medium", points: "6.9" };
+    const members = [...MEMBERS, { id: AG1, role: "speaker", isCreator: false }];
+    const messages = [
+      wire(G1, 1, AG1, "主动", { via: { ...SOL, proactive: true } }),
+      wire(G1, 2, AG1, "假", { via: { ...SOL, proactive: false } }),
+      wire(G1, 3, AG1, "字符串", { via: { ...SOL, proactive: "yes" } }),
+      wire(G1, 4, AG1, "没有", { via: SOL }),
+      wire(G1, 5, OAG, "别人的", { via: { ...SOL, proactive: true } }),
+    ];
+    const sync = syncOf([group(G1, { members, lastSeq: 5, readSeq: 5 })], messages, [...PRINCIPALS, agentPrincipal(AG1), annBot()]);
+    const v = toView(M.applyAgents(M.applySync(M.initial(), sync), [agentOf(AG1)]), { now: NOW });
+    expect(v.convs[G1].messages.map((m) => m.via)).toEqual([{ ...SOL, proactive: true }, SOL, SOL, SOL, null]);
+    expect("proactive" in v.convs[G1].messages[1].via).toBe(false);
+  });
+
   it("the group's subtitle counts the people, and the Agents when there are any", () => {
     const v = toView(sharedModel(), { now: NOW });
     expect(v.convs[G1].members).toEqual([ME, ANN, BO, OAG]);

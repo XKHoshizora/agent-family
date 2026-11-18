@@ -224,7 +224,7 @@ const isText = (v) => typeof v === "string" && v.length > 0;
 /**
  * A reply's `via` as the service sends it to the Agent's owner (which model and level its run used, what it cost), or
  * null when it is not exactly that shape: `{model: {source: "site", id, label} | {source: "provider", model}, reasoning,
- * points}`.
+ * points, proactive?: true}`.
  */
 function viaView(via) {
   if (!via || typeof via !== "object" || !VIA_LEVELS.has(via.reasoning) || typeof via.points !== "string") return null;
@@ -232,7 +232,9 @@ function viaView(via) {
   let model = null;
   if (m?.source === "site" && isText(m.id) && isText(m.label)) model = { source: "site", id: m.id, label: m.label };
   else if (m?.source === "provider" && isText(m.model)) model = { source: "provider", model: m.model };
-  return model ? { model, reasoning: via.reasoning, points: via.points } : null;
+  if (!model) return null;
+  // `proactive` is there only when the reply was spoken unasked; anything but `true` is no key.
+  return { model, reasoning: via.reasoning, points: via.points, ...(via.proactive === true ? { proactive: true } : {}) };
 }
 
 /** A byte count for people: "932 B", "1.4 KB", "12 MB" (one decimal below 10, base 1024). */

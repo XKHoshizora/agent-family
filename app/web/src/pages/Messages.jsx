@@ -104,7 +104,7 @@ const levelWords = (level) => (level === "none" ? "不思考" : `思考：${leve
 /**
  * The muted line under a reply of my own Agent: which model and thinking level its run used (`via`, sent to its owner
  * only), and — when 在每条回复下显示消耗的点数 is on in this browser — what it cost: “GPT-6 Sol · 思考：中 · 6.9 点”;
- * a reply on my own provider's model costs no points: “ · 不扣点”.
+ * a reply on my own provider's model costs no points: “ · 不扣点”. A reply the Agent gave unasked ends “ · 主动回复”.
  */
 function ReplyVia({ via }) {
   const withPoints = useShowReplyPoints();
@@ -119,7 +119,7 @@ function ReplyVia({ via }) {
   return (
     <p className="msg-via">
       <LabLogo lab={lab} size={14} />
-      {`${name} · ${levelWords(via.reasoning)}${points}`}
+      {`${name} · ${levelWords(via.reasoning)}${points}${via.proactive ? " · 主动回复" : ""}`}
     </p>
   );
 }

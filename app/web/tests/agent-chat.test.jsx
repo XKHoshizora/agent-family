@@ -245,6 +245,25 @@ describe("which model and level a reply of mine used (via)", () => {
     read.mockRestore();
   });
 
+  it("a proactive reply's line ends · 主动回复, after the points when shown; none without the key", async () => {
+    await openAgentChat({
+      messages: [
+        ...BASE,
+        wire(A1, 3, AG1, "好的", { via: { ...SOL, proactive: true } }),
+        wire(A1, 4, AG1, "嗯", { via: { ...CLAUDE, proactive: true } }),
+        wire(A1, 5, AG1, "再", { via: SOL }),
+      ],
+    });
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual(["GPT-6 Sol · 思考：中 · 主动回复", "claude-x · 不思考 · 主动回复", "GPT-6 Sol · 思考：中"]);
+    act(() => setShowReplyPoints(true));
+    expect([3, 4, 5].map((seq) => viaLine(seq).textContent)).toEqual([
+      "GPT-6 Sol · 思考：中 · 6.9 点 · 主动回复",
+      "claude-x · 不思考 · 不扣点 · 主动回复",
+      "GPT-6 Sol · 思考：中 · 6.9 点",
+    ]);
+    act(() => setShowReplyPoints(false));
+  });
+
   it("the reply pushed again once its run is charged brings the line; a push without via shows none", async () => {
     const { transport } = await openAgentChat();
     await runPush(transport, runOf(R1, "running"));
@@ -1670,12 +1689,12 @@ describe("Agents in a group (batch 2C)", () => {
     setShowReplyPoints(true);
     try {
       const mine = { model: { source: "site", id: "gpt-6-sol", label: "GPT-6 Sol" }, reasoning: "high", points: "6.9" };
-      const theirs = { model: { source: "provider", model: "secret-claude" }, reasoning: "max", points: "12" };
+      const theirs = { model: { source: "provider", model: "secret-claude" }, reasoning: "max", points: "12", proactive: true };
       const { transport } = await openGroup([wire(G1, 1, AG1, "周六十点", { via: mine }), wire(G1, 2, OAG, "周日十点", { via: theirs })]);
       await push(transport, { type: "message", message: wire(G1, 3, OAG, "补充一句", { via: theirs }) });
       expect(storedLi(1).querySelector(".msg-via").textContent).toBe("GPT-6 Sol · 思考：高 · 6.9 点");
       for (const seq of [2, 3]) expect(storedLi(seq).querySelector(".msg-via")).toBeNull();
-      expect(mainText()).not.toMatch(/secret-claude|思考：最高|12 点/);
+      expect(mainText()).not.toMatch(/secret-claude|思考：最高|12 点|主动回复/);
       expect(document.querySelector(".chat-head .chat-title p").textContent).toBe("3 位真人 · 2 个 Agent");
     } finally {
       act(() => setShowReplyPoints(false));
