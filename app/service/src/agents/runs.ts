@@ -6,7 +6,7 @@ import { currentMembership, lockForWrite, peekConversation, type ConversationTyp
 import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import type { StoredMessage } from "../messages/model.ts";
+import type { StoredMessage, SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -630,20 +630,6 @@ export const proactiveBudgetSpent = (q: Queryable, agent: Pick<AgentRow, "id" | 
   laneBudgetSpent(q, agent.id, "proactive", agent.proactiveBudgetMicro, siteToday(config));
 
 /**
- * Whether the conversation was told since `dayStart` that Agent `agentId`'s others' daily budget is spent (a notice's
- * sender is its `actorId`: here the Agent).
- */
-async function toldBudgetReachedSince(t: Tx, conversationId: string, agentId: string, dayStart: Date): Promise<boolean> {
-  const { rowCount } = await t.query(
-    `select 1 from messages
-      where conversation_id = $1 and sender_id = $2 and kind = 'system' and body ->> 'event' = 'agent_daily_budget_reached' and created_at >= $3
-      limit 1`,
-    [conversationId, agentId, dayStart],
-  );
-  return rowCount !== 0;
-}
-
-/**
  * The others' daily budget of `agent` (its owner's `othersBudget`) for a call on it in `conversationId` by someone other
  * than its owner (lane `others`; the caller checks the lane): spent once what such calls were charged today has reached
  * it (`laneBudgetSpent`, the site day beginning at `dayStart`). The day's real spend can pass it by the replies under
@@ -659,7 +645,7 @@ export async function othersBudgetSpent(
   dayStart: Date,
 ): Promise<{ spent: boolean; notice: StoredMessage | null }> {
   if (!(await laneBudgetSpent(t, agent.id, "others", agent.othersBudgetMicro, dayStart))) return { spent: false, notice: null };
-  if (await toldBudgetReachedSince(t, conversationId, agent.id, dayStart)) return { spent: true, notice: null };
+  if (await toldSince(t, conversationId, dayStart, "agent_daily_budget_reached", agent.id)) return { spent: true, notice: null };
   return { spent: true, notice: await appendSystem(t, conversationId, { event: "agent_daily_budget_reached", actorId: agent.id, agentId: agent.id }) };
 }
 
@@ -786,13 +772,18 @@ async function haltedSince(t: Tx, conversationId: string, seq: number): Promise<
   return halted !== null && seq <= Number(halted);
 }
 
-/** Whether a notice of `event` (about Agent `agentId`, when given) was appended to the group after seq `since`. */
-async function toldSince(t: Tx, conversationId: string, since: number, event: string, agentId: string | null = null): Promise<boolean> {
-  const { rowCount } = await t.query(
+/**
+ * Whether a notice of `event` (about Agent `agentId`, when given) was appended to the conversation after `after`: a seq
+ * (after that message: a person's latest, for the chain's notices) or a time (since then: the others' daily budget's
+ * notice once a site day, `agent_quieted` once an hour, proactive/decide.ts). What keeps each notice to once a period.
+ */
+export async function toldSince(q: Queryable, conversationId: string, after: number | Date, event: SystemEvent["event"], agentId: string | null = null): Promise<boolean> {
+  const { rowCount } = await q.query(
     `select 1 from messages
-      where conversation_id = $1 and seq > $2 and kind = 'system' and body ->> 'event' = $3 and ($4::text is null or body ->> 'agentId' = $4)
+      where conversation_id = $1 and ${typeof after === "number" ? "seq > $2" : "created_at >= $2"} and kind = 'system' and body ->> 'event' = $3
+        and ($4::text is null or body ->> 'agentId' = $4)
       limit 1`,
-    [conversationId, since, event, agentId],
+    [conversationId, after, event, agentId],
   );
   return rowCount !== 0;
 }

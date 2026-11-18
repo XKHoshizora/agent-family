@@ -7,10 +7,11 @@ import type { Db, Queryable, Tx } from "../../db.ts";
 import { AppError } from "../../errors.ts";
 import { JudgeError, type Answer, type Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
-import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, type RunLimits, type Triggered } from "../runs.ts";
+import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, toldSince, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
 import { judgeable, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Option } from "./candidates.ts";
-import { afterProactive, afterQuiet, NO_STATE, thresholdNow, type GroupState } from "./threshold.ts";
+import { decidedAlready, lockStates, othersSinceSurcharge, saveState, stampJudged } from "./state.ts";
+import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./threshold.ts";
 
 /**
  * Whether one Agent replies unasked to a person's message in a group (batch 2D, design rules 3–15), in three phases:
@@ -22,7 +23,7 @@ import { afterProactive, afterQuiet, NO_STATE, thresholdNow, type GroupState } f
  * 3. unless nothing can come of the answers (the winner under the lowest threshold there is, no quiet answer raising
  *    anyone: nothing is locked), in one transaction holding the group's row (as a send does): if anything was written in
  *    the group since — a message of anyone's, a halt — nothing is done; else each Agent this touches is locked
- *    (`lockAgent`, id order) and read again, then its `agent_group_state` row (id order: `lockStates`), the quiet answers
+ *    (`lockAgent`, id order) and read again, then its `agent_group_state` row (id order: state.ts), the quiet answers
  *    are applied (`afterQuiet`; a sure one tells the group once an hour, `agent_quieted`), and the winner — the Agent
  *    option with the highest pick probability, ties to the lowest id — replies when the message has led to no proactive
  *    reply yet, its probability reaches its threshold (`thresholdNow`), this message did not ask it to be quiet (the hush
@@ -44,11 +45,8 @@ export interface DecideDeps {
 /** Why the winner did not reply (`proactive_skipped`). */
 type Skipped = "already_decided" | "hushed" | "under_threshold" | "active_run" | "fuse" | "budget" | "owner_minute";
 
-/** An Agent's state in the group as stored: the threshold's, and the message its surcharge was stamped after. */
-interface Stored {
-  state: GroupState;
-  surchargeSeq: number | null;
-}
+/** How often a group is told at most that an Agent keeps quiet (`agent_quieted`): once an hour. */
+const QUIETED_NOTICE_EVERY_MS = 3_600_000;
 
 /** The site day the daily limit was last logged on: once per process and day. */
 let limitLoggedOn: string | null = null;
@@ -77,7 +75,9 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
     const reason = err instanceof JudgeError ? err.reason : deadline.aborted ? "timeout" : "network";
     log.info({ metric: "judge_failed", reason, conversationId }, "the judgement model gave no answer: no Agent replies unasked");
   }
-  await counted(db, day, conversationId, options);
+  // Whatever came of it: one more judgement today, and each option judged now.
+  await countJudgement(db, day);
+  await stampJudged(db, conversationId, options.map((o) => o.agentId));
   if (answers === null) return noneTriggered();
 
   const P = config.proactive;
@@ -101,16 +101,6 @@ function logSkipped(log: DecideDeps["log"], reason: Skipped, agentId: string, co
   else log.info(line, "the Agent the judgement picked cannot speak now: no Agent replies unasked");
 }
 
-/**
- * Whether the message at `seq` already led to a proactive reply in the group: a surcharge of any Agent there was stamped
- * after it. Read before the judgement is asked (such a message is not judged again) and again in phase 3, under the
- * group's row (a decision racing this one may have led to it meanwhile).
- */
-async function decidedAlready(q: Queryable, conversationId: string, seq: number): Promise<boolean> {
-  const { rowCount } = await q.query("select 1 from agent_group_state where conversation_id = $1 and surcharge_seq >= $2 limit 1", [conversationId, seq]);
-  return rowCount !== 0;
-}
-
 /** Whether the site's judgements of site day `day` have reached `limit`; logged once a day when they have. */
 async function atDailyLimit(q: Queryable, day: string, limit: number, log: DecideDeps["log"]): Promise<boolean> {
   const { rows } = await q.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [day]);
@@ -122,24 +112,9 @@ async function atDailyLimit(q: Queryable, day: string, limit: number, log: Decid
   return true;
 }
 
-/**
- * After a call, whatever came of it: one more judgement today, and each option stamped as judged now. The rows not there
- * yet are inserted first, on their own: a new row waits for the group's row (its foreign key) while holding no other.
- * Then every option's row is locked in id order — the one order `agent_group_state` rows are ever locked in (`lockStates`)
- * — and stamped.
- */
-async function counted(db: Db, day: string, conversationId: string, options: readonly Option[]): Promise<void> {
-  const ids = options.map((o) => o.agentId);
+/** One more of the site's judgements of site day `day` (`judge_usage`), whatever came of it. */
+async function countJudgement(db: Db, day: string): Promise<void> {
   await db.query("insert into judge_usage (day, calls) values ($1::date, 1) on conflict (day) do update set calls = judge_usage.calls + 1", [day]);
-  await db.query(
-    "insert into agent_group_state (agent_id, conversation_id, judged_at) select unnest($1::uuid[]), $2, now() on conflict (agent_id, conversation_id) do nothing",
-    [ids, conversationId],
-  );
-  await db.query(
-    `with locked as (select agent_id from agent_group_state where conversation_id = $2 and agent_id = any($1::uuid[]) order by agent_id for update)
-     update agent_group_state s set judged_at = now() from locked where s.conversation_id = $2 and s.agent_id = locked.agent_id`,
-    [ids, conversationId],
-  );
 }
 
 /**
@@ -210,8 +185,8 @@ async function settle(t: Tx, j: Judged): Promise<Triggered> {
     const raise = q === undefined ? null : afterQuiet(stored.state, q, now, P);
     if (raise === null) continue;
     stored.state = raise.state;
-    await save(t, id, conversationId, stored);
-    if (raise.big && !(await quietedLastHour(t, conversationId, id))) {
+    await saveState(t, id, conversationId, stored);
+    if (raise.big && !(await toldSince(t, conversationId, new Date(now.getTime() - QUIETED_NOTICE_EVERY_MS), "agent_quieted", id))) {
       notices.push(await appendSystem(t, conversationId, { event: "agent_quieted", actorId: id, agentId: id }));
     }
   }
@@ -228,7 +203,7 @@ async function settle(t: Tx, j: Judged): Promise<Triggered> {
     return told;
   }
   const run = await queueRun(t, agent, conversationId, seq, "human", { id: null, lane: "proactive" });
-  await save(t, agent.id, conversationId, { state: afterProactive(stored.state, now, P), surchargeSeq: seq });
+  await saveState(t, agent.id, conversationId, { state: afterProactive(stored.state, now, P), surchargeSeq: seq });
   return { ...told, runs: [run] };
 }
 
@@ -254,69 +229,6 @@ async function lockOptions(t: Tx, conversationId: string, seq: number, ids: read
   );
   const options = new Set(rows.map((r) => r.id));
   return new Map(locked.filter((a) => options.has(a.id)).map((a) => [a.id, a]));
-}
-
-/**
- * The state of each of `ids` (in id order) in the group, its row locked before anything is written: every row in id
- * order, as `counted` does (rows are written in other orders — the winner's last — so locking them only as each is
- * written could deadlock with a `counted` of another decision). `counted` inserted them; one missing (none stored:
- * `NO_STATE`) is inserted first, in the same order.
- */
-async function lockStates(t: Tx, conversationId: string, ids: readonly string[]): Promise<Map<string, Stored>> {
-  if (ids.length === 0) return new Map();
-  await t.query("insert into agent_group_state (agent_id, conversation_id) select unnest($1::uuid[]), $2 on conflict (agent_id, conversation_id) do nothing", [
-    ids,
-    conversationId,
-  ]);
-  const { rows } = await t.query<{
-    agent_id: string;
-    surcharge: number;
-    surcharge_at: Date | null;
-    surcharge_seq: string | null;
-    quiet: number;
-    quiet_half_life_s: number | null;
-    quiet_at: Date | null;
-  }>(
-    `select agent_id, surcharge, surcharge_at, surcharge_seq::text as surcharge_seq, quiet, quiet_half_life_s, quiet_at
-       from agent_group_state where conversation_id = $1 and agent_id = any($2::uuid[])
-      order by agent_id
-        for update`,
-    [conversationId, ids],
-  );
-  const found = new Map(
-    rows.map((r): [string, Stored] => [
-      r.agent_id,
-      {
-        state: { surcharge: r.surcharge, surchargeAt: r.surcharge_at, othersSince: 0, quiet: r.quiet, quietHalfLifeS: r.quiet_half_life_s, quietAt: r.quiet_at },
-        surchargeSeq: r.surcharge_seq === null ? null : Number(r.surcharge_seq),
-      },
-    ]),
-  );
-  return new Map(ids.map((id) => [id, found.get(id) ?? { state: NO_STATE, surchargeSeq: null }]));
-}
-
-/** Writes the Agent's state in the group (all but `judged_at`, which `counted` alone writes). */
-async function save(t: Tx, agentId: string, conversationId: string, s: Stored): Promise<void> {
-  await t.query(
-    `insert into agent_group_state (agent_id, conversation_id, surcharge, surcharge_at, surcharge_seq, quiet, quiet_half_life_s, quiet_at)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
-     on conflict (agent_id, conversation_id) do update
-       set surcharge = excluded.surcharge, surcharge_at = excluded.surcharge_at, surcharge_seq = excluded.surcharge_seq,
-           quiet = excluded.quiet, quiet_half_life_s = excluded.quiet_half_life_s, quiet_at = excluded.quiet_at`,
-    [agentId, conversationId, s.state.surcharge, s.state.surchargeAt, s.surchargeSeq, s.state.quiet, s.state.quietHalfLifeS, s.state.quietAt],
-  );
-}
-
-/** Whether the group was told within the last hour that Agent `agentId` keeps quiet (`agent_quieted`). */
-async function quietedLastHour(t: Tx, conversationId: string, agentId: string): Promise<boolean> {
-  const { rowCount } = await t.query(
-    `select 1 from messages
-      where conversation_id = $1 and kind = 'system' and body ->> 'event' = 'agent_quieted' and body ->> 'agentId' = $2
-        and created_at > now() - interval '1 hour'
-      limit 1`,
-    [conversationId, agentId],
-  );
-  return rowCount !== 0;
 }
 
 /**
@@ -362,20 +274,4 @@ async function whyNot(
   if (await proactiveBudgetSpent(t, agent, config)) return "budget";
   if (await overLaneLimit(t, agent.ownerId, "proactive", config)) return "owner_minute";
   return null;
-}
-
-/**
- * Messages that are not notices, by anyone but Agent `agentId`, after its surcharge was stamped, up to `seq`: what halves
- * its surcharge every `halfMessages`. Not counted past 20 halvings (a millionth is left); nothing to count without one.
- */
-async function othersSinceSurcharge(t: Tx, conversationId: string, agentId: string, stored: Stored, seq: number, halfMessages: number): Promise<number> {
-  if (stored.surchargeSeq === null || !(stored.state.surcharge > 0)) return 0;
-  const { rows } = await t.query<{ n: number }>(
-    `select count(*)::int as n from (
-       select 1 from messages
-        where conversation_id = $1 and seq > $2 and seq <= $3 and kind <> 'system' and sender_id <> $4
-        limit $5) x`,
-    [conversationId, stored.surchargeSeq, seq, agentId, halfMessages * 20],
-  );
-  return rows[0]!.n;
 }
