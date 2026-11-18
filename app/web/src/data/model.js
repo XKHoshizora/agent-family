@@ -79,8 +79,11 @@ export function initial() {
     usage: null,
     /** The site's models from `GET /api/models`: [{id, label, tier, vision, pdf, reasoning, contextTokens}]. */
     siteModels: [],
-    /** Whether the site has a judgement model, so proactive replies can be turned on (`GET /api/models`). */
-    proactiveAvailable: false,
+    /**
+     * Whether the site has a judgement model, so proactive replies can be turned on (`GET /api/models`); null until that
+     * has answered (not known yet).
+     */
+    proactiveAvailable: null,
     /** What a provider model gets when its entry says nothing: {contextTokens, maxOutputTokens}, or null before it. */
     providerDefaults: null,
     /** conversation id → its latest run (see the header), or null when there is none to show. */

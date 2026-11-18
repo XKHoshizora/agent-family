@@ -707,7 +707,8 @@ export function toView(model, { now = Date.now() } = {}) {
     usage: usageView(model.usage),
     siteModels: model.siteModels ?? [],
     providerDefaults: model.providerDefaults ?? null,
-    proactiveAvailable: model.proactiveAvailable === true,
+    /** true or false once the site's models have answered; null before (not known yet). */
+    proactiveAvailable: typeof model.proactiveAvailable === "boolean" ? model.proactiveAvailable : null,
     /** principal id (the real one, mine too) → the version in its avatar URL; for an avatar of someone nobody names. */
     avatarVersions: versions,
   };

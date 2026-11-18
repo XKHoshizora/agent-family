@@ -1614,6 +1614,7 @@ describe("主动参与群聊 (proactive replies)", () => {
   const HELPER = "打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。";
   const WRONG = "请填写 1 到 100000 之间的点数（最多 6 位小数）";
   const UNAVAILABLE = "现在还不能打开主动参与：站点没有配置判断模型。";
+  const LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
   const ON_SITE = { ...MODELS, proactiveAvailable: true };
   const OFF_SITE = { ...MODELS, proactiveAvailable: false };
   const box = () => inMain().getByLabelText(SWITCH);
@@ -1657,8 +1658,21 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
   });
 
+  it("before the site's models have answered, an Agent that has it on shows nothing of it — not the switch, not why it would not work", async () => {
+    let answer;
+    const models = new Promise((resolve) => (answer = resolve));
+    await openEditOf(proactive(), models);
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    expect(mainText()).not.toContain(LOST);
+    await act(async () => {
+      answer(OFF_SITE);
+      await flush();
+    });
+    expect(box().checked).toBe(true);
+    expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(LOST);
+  });
+
   it("the site has lost its judgement model: an Agent that has it on shows the switch alone, saying so, to turn it off — never on", async () => {
-    const LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
     const { patchAgent } = await openEditOf(proactive({ proactiveLevel: "more" }), OFF_SITE);
     expect(box().checked).toBe(true);
     expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(LOST);

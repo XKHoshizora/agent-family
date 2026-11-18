@@ -527,9 +527,9 @@ describe("providers, usage and site models", () => {
     expect(s.providerDefaults).toEqual({ contextTokens: 16000, maxOutputTokens: 2048 });
   });
 
-  it("applyModels keeps whether the site can judge for proactive replies: only a true counts, and the view says it", () => {
+  it("applyModels keeps whether the site can judge for proactive replies: only a true counts, and the view says it — null until the models answered", () => {
     const answer = (extra) => ({ siteModels: [], providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 }, ...extra });
-    expect(view(M.initial()).proactiveAvailable).toBe(false);
+    expect(view(M.initial()).proactiveAvailable).toBeNull();
     expect(view(M.applyModels(M.initial(), answer({ proactiveAvailable: true }))).proactiveAvailable).toBe(true);
     expect(view(M.applyModels(M.initial(), answer({ proactiveAvailable: "yes" }))).proactiveAvailable).toBe(false);
     expect(view(M.applyModels(M.applyModels(M.initial(), answer({ proactiveAvailable: true })), answer())).proactiveAvailable).toBe(false);

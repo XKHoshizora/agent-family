@@ -196,8 +196,9 @@ export function AgentForm({ agent = null }) {
 
   // 主动参与群聊 is offered (and sent) only while the site has a judgement model; its level and amount only while it is on.
   // Without one, an Agent that has it on still shows the switch alone, saying why, so that it can be turned off: never on.
+  // Before the site's models have answered (null) neither is shown.
   const proactiveOffered = state.proactiveAvailable === true;
-  const proactiveOffOnly = !proactiveOffered && record.proactive;
+  const proactiveOffOnly = state.proactiveAvailable === false && record.proactive;
   const proactiveAsked = proactiveOffered && f.proactive;
 
   const name = f.name.trim();
