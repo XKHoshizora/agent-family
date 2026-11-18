@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Tests first; each new test seen failing. Service: ONE shared test database — focused runs only (`npx vitest run tests/<file>` from `app/service`), never two at once; `npm run typecheck` before each commit. The whole suites run once, in the last task.
-- Commits: explicit path list, the environment's Co-Authored-By trailer, no push. Install nothing; no new dependency. Never read `.env`, `.local/`, or key files under `E:\Agent-Family\`. Migrations append-only (latest is 021).
+- Commits: explicit path list, the environment's Co-Authored-By trailer, no push. Install nothing; no new dependency. Never read `.env`, `.local/`, or key files under `E:\Agent-Family\`. Migrations append-only (latest is 024; this plan uses 025–027).
 - Fail closed (rule 9): judgement unconfigured, over its daily cap, erroring, timing out, or answering anything but a number in [0, 1] for a question → that Agent is not chosen and its state is not changed.
 - The judgement model is shown only: the last messages of the group that every judged Agent may see, and each Agent's name, intro and field. Never a persona document, never anything from another conversation (rule 6).
 - The judgement costs the site, never a user (rule 16). The reply it leads to is its owner's, as any reply (rule 17).
@@ -34,6 +34,17 @@
 - **The Agent's scene gets one more passage for a proactive reply, and its wording is chosen by experiment** (the user, 2026-11-19: it should make the Agent sound like a person, not follow a rule). Default candidate, describing the situation instead of commanding: `群里没有人叫你。你是自己看到这个话题、觉得能帮上忙才开口的，就像群里一个懂行的朋友顺口接一句。直接说有用的，不用打招呼，也不用解释你为什么出现；拿不准就少说。` Task 8 produces a side-by-side of two or three wordings on the calibration samples for the user to choose from — until then the default candidate.
 - **Calibration samples are written by hand to resemble real chats** — there are no real users yet — replace with real excerpts after the friends' test and re-run.
 - **A person can make an Agent quiet or talk by what they say; display names in the transcript are theirs to choose** — the judgement only yields probabilities, and what they can cause (one reply within the budget, or a raised threshold that decays) is no more than they could by @-mentioning or by asking it to be quiet.
+
+## Who is judged (agreed with the user, 2026-11-19)
+
+Most Agents need no question at all. For one message, in this order:
+
+1. *Cannot speak now* (arithmetic, no call): proactive off, paused/deleted/no model, a block with the sender, an active run in the group, the fuse, the proactive budget spent, the owner's others-lane minute full. Such an Agent is still asked the *quiet* question if it spoke in the shown context (its threshold must be able to rise), but can never be chosen.
+2. *Always candidates*: Agents that spoke in the shown context (follow-ups rarely name anyone), and Agents the message names (their display name, handle, or an appellation — a text match, which only guarantees inclusion and decides nothing).
+3. *The rest* are candidates only when the message is a request. With at most 8 candidates in all, everything goes in ONE call (no gate). With more, the always-candidates are asked at once and, in the same round, one gate question — `最新这条消息是在求助或提问，值得有人来回答。闲聊、客套、道谢、表情都不算。` — decides (≥ 0.5) whether the rest are asked, 8 per call, the calls made together.
+4. Above 40 candidates the rest take turns, least recently judged first (`agent_group_state.judged_at`).
+
+Names in the judgement's transcript use the same `speakerLabel` shape as a reply's context is NOT needed (the judgement only yields probabilities); they stay `{name}：` / `{name}（Agent）：`, cleaned with the shared label cleaning. Ranking by relevance (embeddings, or a cheap model picking a few) is left out until a group needs it.
 
 ## Review Focus
 
@@ -59,7 +70,7 @@
 
 ### Task 2: The owner's settings
 
-**Files:** Create `app/service/migrations/022_proactive_settings.sql` (`agents.proactive boolean not null default false`, `proactive_level text not null default 'normal' check in ('less','normal','more')`, `proactive_budget_micro bigint not null default 20000000 check between 1000000 and 100000000000`). Modify `agents/store.ts`, `agents/routes.ts`, the models/site-info route the web reads at start (find the one that lists site models), the co-member sweep test's hidden keys. Test `tests/agents-proactive-settings.test.ts`.
+**Files:** Create `app/service/migrations/025_proactive_settings.sql` (`agents.proactive boolean not null default false`, `proactive_level text not null default 'normal' check in ('less','normal','more')`, `proactive_budget_micro bigint not null default 20000000 check between 1000000 and 100000000000`). Modify `agents/store.ts`, `agents/routes.ts`, the models/site-info route the web reads at start (find the one that lists site models), the co-member sweep test's hidden keys. Test `tests/agents-proactive-settings.test.ts`.
 
 **Interfaces — produces:** create/PATCH `proactive: boolean`, `proactiveLevel`, `proactiveBudget` (the `chainBudget` schema; `null` refused); owner's view adds those three and `proactiveSpentToday: string` (settled charges today on this Agent's lane-`proactive` runs, no holds — generalise the limits work's spend sum to take the lane); `proactive: true` with `config.judge === null` → 409 `proactive_unavailable`; the site-info answer gains `proactiveAvailable: boolean`.
 
@@ -68,7 +79,7 @@
 
 ### Task 3: The floating threshold (pure)
 
-**Files:** Create `app/service/migrations/023_agent_group_state.sql` (`agent_group_state (agent_id, conversation_id, surcharge real not null default 0, surcharge_at timestamptz, surcharge_seq bigint, quiet real not null default 0, quiet_half_life_s int, quiet_at timestamptz, primary key (agent_id, conversation_id))`, both FKs `on delete cascade`), `app/service/src/agents/proactive/threshold.ts`, `app/service/tests/proactive-threshold.test.ts`.
+**Files:** Create `app/service/migrations/026_agent_group_state.sql` (`agent_group_state (agent_id, conversation_id, surcharge real not null default 0, surcharge_at timestamptz, surcharge_seq bigint, quiet real not null default 0, quiet_half_life_s int, quiet_at timestamptz, primary key (agent_id, conversation_id))`, both FKs `on delete cascade`), `app/service/src/agents/proactive/threshold.ts`, `app/service/tests/proactive-threshold.test.ts`.
 
 **Interfaces — produces** (all pure; `P` = `config.proactive`):
 - `type GroupState = { surcharge: number; surchargeAt: Date | null; othersSince: number; quiet: number; quietHalfLifeS: number | null; quietAt: Date | null }`
@@ -86,7 +97,7 @@
 **Files:** Create `app/service/src/agents/proactive/decide.ts`, `app/service/tests/proactive-decide.test.ts`. Modify `app/service/src/agents/runs.ts` (export what is needed: `queueRun` for lane `proactive` with `caller_id` null and `triggered_by` 'human'; the others-lane minute check), `messages/model.ts` + `conversations/system.ts` (`agent_quieted { actorId, agentId }`).
 
 **Interfaces — consumes:** `Judge` (Task 1), settings (Task 2), threshold functions and table (Task 3), `noneTriggered()`/`Triggered`, `lockAgent`, `appendSystem`, `siteDayStart`. **Produces:** `decideProactive(deps: { db, judge, config, log }, conversationId: string, seq: number): Promise<Triggered>` in three phases:
-1. *Read* (no locks): the message at `seq` must still be the group's latest non-system message and a person's, naming no Agent; candidates = current Agent members with `proactive`, not paused/deleted, with a model, no block either way between their owner and the sender (the owner's own message counts: the owner can be answered proactively too); all of them (above 40: the 40 least recently judged, `agent_group_state.judged_at`); none → return. The site's judgement count for today (table `judge_usage (day date primary key, calls int)`, created in this task's migration `024`) at the cap → log once a day, return.
+1. *Read* (no locks): the message at `seq` must still be the group's latest non-system message and a person's, naming no Agent; candidates = current Agent members with `proactive`, not paused/deleted, with a model, no block either way between their owner and the sender (the owner's own message counts: the owner can be answered proactively too); all of them (above 40: the 40 least recently judged, `agent_group_state.judged_at`); none → return. The site's judgement count for today (table `judge_usage (day date primary key, calls int)`, created in this task's migration `027`) at the cap → log once a day, return.
 2. *Judge* (no transaction): transcript = the last 15 non-system messages after the latest `joined_seq` among candidates, each `{display name}：{text}` (an Agent's `{name}（Agent）：…`; a file `[文件] caption`; 300 characters); `state = "群聊记录：\n" + transcript`; three questions per candidate `i`: `i_need`, `i_addr`, `i_quiet`, each opening with `群里有一个 AI 助手，名字叫「{name}」，它的定位是：{intro}；擅长：{field}。记录里标着“{name}（Agent）”的是它说过的话。` then, respectively: `它现在应该主动回复最新这条消息：有人在求助或提问，而且正好是它擅长的事，还没有人回答。真人之间的闲聊、客套、已经有人回答的问题，都不算。` / `最新这条消息是在对{name}说话，或者是在接着{name}刚才说的话继续追问它。` / `最新这条消息是在让{name}别再说话、安静一点，或者表示它打扰到大家了。`. Count the call in `judge_usage`. Error → return.
 3. *Decide* (one transaction, the group's row locked; then `lockAgent` per touched Agent in id order): re-check phase 1's conditions; for each candidate with a `quiet` answer apply `afterQuiet` (upsert state; when `big` and no `agent_quieted` notice about it in this group within the last hour, append one); a candidate without both `need` and `addr` is out; `p = max(need, addr)`; `othersSince` = messages by anyone else after `surcharge_seq`; eligible when `p ≥ thresholdNow`; choose the largest `p − threshold` (ties: lowest id); for the chosen: no active run in the group, fuse (its proactive runs in this group: none in the last 10 s, fewer than 30 in the last hour), proactive budget not spent, owner's others-lane minute not full — any failing: log `{ metric: "proactive_skipped", reason }`, return without trying the next; else queue the run (lane `proactive`), apply `afterProactive` with `surcharge_seq = seq`, return it.
 
