@@ -94,7 +94,74 @@ const siteModelSchema = z.strictObject({
   thinkingSwitch: z.boolean().optional(),
 });
 
-const allowanceTokens = z.number().int().min(0).max(200_000);
+/** The judgement model's configuration (`JUDGE`): where to ask, with which keys, and how long and how often. */
+export interface JudgeConfig {
+  model: string;
+  /** One or two channels, tried in order; each `apiKeyEnv` names ANOTHER variable that holds its key. */
+  channels: { url: string; apiKeyEnv: string }[];
+  timeoutMs: number;
+  /** Judgements the site makes a day, at most (counted by the proactive worker). */
+  dailyLimit: number;
+}
+
+const judgeSchema = z.strictObject({
+  model: z.string().min(1).max(200),
+  channels: z
+    .array(
+      z.strictObject({
+        url: z.url(),
+        apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "must be an environment variable name"),
+      }),
+    )
+    .min(1)
+    .max(2),
+  timeoutMs: z.number().int().min(500).max(30_000).default(4000),
+  dailyLimit: z.number().int().min(1).max(10_000_000).default(20_000),
+});
+
+/** What the proactive replies are tuned by (`PROACTIVE`); every number is a site setting with this default. */
+export interface ProactiveConfig {
+  debounceMs: number;
+  transcriptMessages: number;
+  transcriptChars: number;
+  perCall: number;
+  maxCandidates: number;
+  base: { less: number; normal: number; more: number };
+  surchargeStep: number;
+  surchargeMax: number;
+  surchargeHalfLifeS: number;
+  surchargeHalfMessages: number;
+  quietBig: { at: number; raise: number; halfLifeS: number };
+  quietSmall: { at: number; raise: number; halfLifeS: number };
+  cap: number;
+  fuse: { perSeconds: number; perHour: number };
+  gateAt: number;
+}
+
+const probability = (fallback: number) => z.number().min(0).max(1).default(fallback);
+const positive = (fallback: number, max: number) => z.number().int().min(1).max(max).default(fallback);
+/** An object whose every field is defaulted: nothing (or `{}`) gives all the defaults, a partial one keeps the rest. */
+const defaulted = <T extends z.ZodRawShape>(shape: T) => z.strictObject(shape).prefault({} as never);
+
+const proactiveSchema = z.strictObject({
+  debounceMs: positive(3000, 60_000),
+  transcriptMessages: positive(15, 100),
+  transcriptChars: positive(300, 5000),
+  perCall: positive(8, 100),
+  maxCandidates: positive(40, 1000),
+  base: defaulted({ less: probability(0.6), normal: probability(0.45), more: probability(0.35) }),
+  surchargeStep: probability(0.15),
+  surchargeMax: probability(0.4),
+  surchargeHalfLifeS: positive(120, 86_400),
+  surchargeHalfMessages: positive(4, 1000),
+  quietBig: defaulted({ at: probability(0.8), raise: probability(0.5), halfLifeS: positive(3600, 604_800) }),
+  quietSmall: defaulted({ at: probability(0.3), raise: probability(0.15), halfLifeS: positive(600, 604_800) }),
+  cap: probability(0.9),
+  fuse: defaulted({ perSeconds: positive(10, 3600), perHour: positive(30, 100_000) }),
+  gateAt: probability(0.5),
+});
+
+const allowanceTokens =z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */
 const reasoningAllowanceSchema = z
   .strictObject({
@@ -204,6 +271,10 @@ const envSchema = z.object({
   AGENT_CHAIN_LIMIT: wholeNumber(30, 2, 500),
   /** Tokens of a group's history one reply there may show its model at most (the system text comes on top). */
   AGENT_GROUP_CONTEXT_TOKENS: wholeNumber(12_000, 2_000, 200_000),
+  /** JSON object configuring the judgement model (see JudgeConfig); unset or empty: none, and no Agent replies unprompted. */
+  JUDGE: jsonVariable(judgeSchema.nullable(), null),
+  /** JSON object of the proactive-reply tunings (see ProactiveConfig); every field optional, unset or empty: all defaults. */
+  PROACTIVE: jsonVariable(proactiveSchema, proactiveSchema.parse({})),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -322,6 +393,10 @@ export interface Config {
    * the model's context would hold more (src/agents/context.ts `loadContext`); the system text is not counted in it.
    */
   agentGroupContextTokens: number;
+  /** The judgement model that decides whether an Agent replies unprompted; null: not configured, nobody does. */
+  judge: JudgeConfig | null;
+  /** The proactive replies' tunings. */
+  proactive: ProactiveConfig;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -427,6 +502,24 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       throw new Error(`Invalid configuration: SITE_MODELS: model "${m.id}" needs the environment variable ${m.apiKeyEnv} (its apiKeyEnv), which is not set`);
     }
   }
+  for (const channel of e.JUDGE?.channels ?? []) {
+    // A site model's address rule, and its refusal for a key variable that is not set. The URL stays a full URL (its
+    // path matters), only normalised as a site model's is.
+    const normalised = /[?#]/.test(channel.url) ? null : normaliseBaseUrl(channel.url, false);
+    if (normalised === null) {
+      throw new Error("Invalid configuration: JUDGE: a channel has a url that is not an https URL (no credentials, query or fragment)");
+    }
+    channel.url = normalised;
+    if ((SERVICE_SECRET_VARIABLES as readonly string[]).includes(channel.apiKeyEnv.toUpperCase())) {
+      throw new Error(
+        `Invalid configuration: JUDGE: a channel names ${channel.apiKeyEnv} as its apiKeyEnv, one of the service's own variables; put its key in a variable of its own`,
+      );
+    }
+    const key = env[channel.apiKeyEnv];
+    if (key === undefined || key === "") {
+      throw new Error(`Invalid configuration: JUDGE: a channel needs the environment variable ${channel.apiKeyEnv} (its apiKeyEnv), which is not set`);
+    }
+  }
   const duplicate = e.SITE_MODELS.find((m, i) => e.SITE_MODELS.findIndex((o) => o.id === m.id) !== i);
   if (duplicate) throw new Error(`Invalid configuration: SITE_MODELS: id "${duplicate.id}" appears more than once`);
   if (e.PROVIDER_DEFAULT_CONTEXT_TOKENS <= e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS) {
@@ -475,6 +568,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentMaxRunsInFlight: e.AGENT_MAX_RUNS_IN_FLIGHT,
     agentChainLimit: e.AGENT_CHAIN_LIMIT,
     agentGroupContextTokens: e.AGENT_GROUP_CONTEXT_TOKENS,
+    judge: e.JUDGE,
+    proactive: e.PROACTIVE,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

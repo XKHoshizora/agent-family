@@ -25,6 +25,7 @@ import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
 import { createAgentWorker, SHUTDOWN_GRACE_MS, within, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
+import { createJudge, type Judge } from "./judge/client.ts";
 import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
 import { registerModelRoutes } from "./models/routes.ts";
 import { guardedFetch } from "./providers/guard.ts";
@@ -66,6 +67,8 @@ export interface Deps {
   providerProbe: ProviderProbe;
   /** How the service talks to a language model (default: the AI SDK through `guardedFetch`); tests inject a scripted one. */
   models: ModelGateway;
+  /** The judgement model (src/judge/client.ts); null when `JUDGE` is not configured. Tests inject a scripted one. */
+  judge: Judge | null;
 }
 
 /** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
@@ -162,6 +165,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     searches: overrides.searches ?? createSlots(MAX_CONCURRENT_SEARCHES, MAX_SEARCHES_IN_FLIGHT),
     providerProbe: overrides.providerProbe ?? createProviderProbe(guardedFetch({ ...PROBE_GUARD, ...insecureLocal, calls: providerCalls })),
     models: overrides.models ?? createModelGateway({ ...insecureLocal, calls: providerCalls }),
+    judge: overrides.judge !== undefined ? overrides.judge : config.judge ? createJudge(config.judge, insecureLocal) : null,
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);

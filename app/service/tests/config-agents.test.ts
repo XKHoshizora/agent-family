@@ -259,3 +259,105 @@ describe("agent and metering configuration", () => {
     expect(() => loadConfig(withModels([{ ...model, thinkingSwitch: "yes" }]))).toThrow(/SITE_MODELS/);
   });
 });
+
+const judge = {
+  model: "jev-1",
+  channels: [
+    { url: "https://judge-a.example.test/v1/systemone", apiKeyEnv: "JUDGE_KEY_A" },
+    { url: "https://judge-b.example.test/v1/systemone", apiKeyEnv: "JUDGE_KEY_B" },
+  ],
+  timeoutMs: 2500,
+  dailyLimit: 5000,
+};
+const withJudge = (value: unknown, extra: Record<string, string> = { JUDGE_KEY_A: "key-a", JUDGE_KEY_B: "key-b" }) => ({
+  ...base,
+  ...extra,
+  JUDGE: typeof value === "string" ? value : JSON.stringify(value),
+});
+
+describe("the judgement model's configuration", () => {
+  test("JUDGE unset or empty: none", () => {
+    expect(loadConfig(base).judge).toBeNull();
+    expect(loadConfig({ ...base, JUDGE: "" }).judge).toBeNull();
+  });
+
+  test("a full valid value is kept, urls whole", () => {
+    expect(loadConfig(withJudge(judge)).judge).toEqual(judge);
+  });
+
+  test("timeout and daily limit default; one channel is enough", () => {
+    const one = { model: "m", channels: [judge.channels[0]] };
+    expect(loadConfig(withJudge(one)).judge).toEqual({ model: "m", channels: [judge.channels[0]], timeoutMs: 4000, dailyLimit: 20_000 });
+  });
+
+  test("a key variable that is not set (or empty) refuses start-up, naming it", () => {
+    expect(() => loadConfig(withJudge(judge, { JUDGE_KEY_A: "key-a" }))).toThrow(/JUDGE_KEY_B/);
+    expect(() => loadConfig(withJudge(judge, { JUDGE_KEY_A: "key-a", JUDGE_KEY_B: "" }))).toThrow(/JUDGE_KEY_B/);
+  });
+
+  test("an http url, one with credentials, a query or a fragment, no channel and three channels refuse", () => {
+    const channel = judge.channels[0]!;
+    const bad = [
+      { ...judge, channels: [{ ...channel, url: "http://judge-a.example.test/v1" }] },
+      { ...judge, channels: [{ ...channel, url: "https://user:pw@judge-a.example.test/v1" }] },
+      { ...judge, channels: [{ ...channel, url: "https://judge-a.example.test/v1?x=1" }] },
+      { ...judge, channels: [{ ...channel, url: "https://judge-a.example.test/v1#x" }] },
+      { ...judge, channels: [] },
+      { ...judge, channels: [channel, channel, channel] },
+      { ...judge, timeoutMs: 100 },
+      { ...judge, dailyLimit: 0 },
+      { ...judge, extra: 1 },
+    ];
+    for (const value of bad) expect(() => loadConfig(withJudge(value)), JSON.stringify(value)).toThrow(/JUDGE/);
+    expect(() => loadConfig(withJudge("nope"))).toThrow(/JUDGE/);
+  });
+});
+
+describe("the proactive replies' configuration", () => {
+  const defaults = {
+    debounceMs: 3000,
+    transcriptMessages: 15,
+    transcriptChars: 300,
+    perCall: 8,
+    maxCandidates: 40,
+    base: { less: 0.6, normal: 0.45, more: 0.35 },
+    surchargeStep: 0.15,
+    surchargeMax: 0.4,
+    surchargeHalfLifeS: 120,
+    surchargeHalfMessages: 4,
+    quietBig: { at: 0.8, raise: 0.5, halfLifeS: 3600 },
+    quietSmall: { at: 0.3, raise: 0.15, halfLifeS: 600 },
+    cap: 0.9,
+    fuse: { perSeconds: 10, perHour: 30 },
+    gateAt: 0.5,
+  };
+
+  test("unset or empty: every default", () => {
+    expect(loadConfig(base).proactive).toEqual(defaults);
+    expect(loadConfig({ ...base, PROACTIVE: "" }).proactive).toEqual(defaults);
+    expect(loadConfig({ ...base, PROACTIVE: "{}" }).proactive).toEqual(defaults);
+  });
+
+  test("one override keeps the rest, nested ones too", () => {
+    expect(loadConfig({ ...base, PROACTIVE: '{"debounceMs":1000}' }).proactive).toEqual({ ...defaults, debounceMs: 1000 });
+    expect(loadConfig({ ...base, PROACTIVE: '{"base":{"less":0.7}}' }).proactive).toEqual({ ...defaults, base: { ...defaults.base, less: 0.7 } });
+  });
+
+  test("a probability outside [0, 1], a non-whole count, an unknown key (also nested) and bad JSON refuse", () => {
+    for (const bad of [
+      '{"cap":1.5}',
+      '{"gateAt":-0.1}',
+      '{"base":{"less":2}}',
+      '{"quietBig":{"at":1.1}}',
+      '{"perCall":0}',
+      '{"debounceMs":1.5}',
+      '{"fuse":{"perHour":0}}',
+      '{"nope":1}',
+      '{"base":{"nope":0.5}}',
+      "[]",
+      "nope",
+    ]) {
+      expect(() => loadConfig({ ...base, PROACTIVE: bad }), bad).toThrow(/PROACTIVE/);
+    }
+  });
+});
