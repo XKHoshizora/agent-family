@@ -162,6 +162,43 @@ describe("a model upstream that misbehaves", () => {
     expect(await fromAgent(refused.owner, refused.conv, refused.agent.id)).toEqual([]);
   });
 
+  it("an upstream refusal is logged as a metric", async () => {
+    // What the upstream answered with ends the run as before; a 429 and a 5xx are also counted in the log (the limits plan),
+    // a refused key (401) and a failure that carries no status are not.
+    const metrics = () =>
+      lines
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .filter((e) => e.metric === "upstream_refused")
+        .map(({ metric, status }) => ({ metric, status }));
+    for (const [name, code, status] of [
+      ["busy", "provider_unavailable", 429],
+      ["broken", "provider_unavailable", 503],
+    ] as const) {
+      const w = await owned(name);
+      gateway.fail(code, { status });
+      await say(w.owner, w.conv, "你好");
+      await app.agentWorker.runOnce();
+      expect([name, await settled(w.owner, w.conv, { status: "failed", error: code, retryable: true })]).toMatchObject([name, { cost: "0" }]);
+    }
+    expect(metrics()).toEqual([
+      { metric: "upstream_refused", status: 429 },
+      { metric: "upstream_refused", status: 503 },
+    ]);
+
+    lines.length = 0;
+    for (const [name, code, status] of [
+      ["keyless", "provider_rejected", 401],
+      ["nostatus", "provider_unavailable", undefined],
+    ] as const) {
+      const w = await owned(name);
+      gateway.fail(code, status ? { status } : {});
+      await say(w.owner, w.conv, "你好");
+      await app.agentWorker.runOnce();
+      await settled(w.owner, w.conv, { status: "failed", error: code, retryable: code === "provider_unavailable" });
+    }
+    expect(metrics()).toEqual([]);
+  });
+
   it("an empty answer: failed provider_unavailable, nothing posted, nothing charged", async () => {
     const { owner, agent, conv } = await owned("empty");
     gateway.empty();

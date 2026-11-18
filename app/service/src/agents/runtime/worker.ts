@@ -34,6 +34,7 @@ export async function within(promise: Promise<unknown>, ms: number): Promise<boo
 }
 
 export interface WorkerLog {
+  info(details: Record<string, unknown>, msg: string): void;
   error(details: Record<string, unknown>, msg: string): void;
   warn(details: Record<string, unknown>, msg: string): void;
 }
@@ -162,6 +163,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         // A failure the upstream reported usage for (`thinking_exhausted`: the model did finish) is charged that usage.
         if (err instanceof ModelError && err.usage) finished = { usage: err.usage, truncated: true };
         if (!(err instanceof ModelError)) log.error({ err, runId: run.id }, "agent run: the model call failed unexpectedly");
+        // An upstream that refused (429) or failed (5xx) is counted: an operator reads how often from the log.
+        const status = err instanceof ModelError ? err.upstreamStatus : undefined;
+        if (status !== undefined && (status === 429 || status >= 500)) log.info({ metric: "upstream_refused", status }, "agent run: the upstream refused the call");
       }
     } finally {
       clearInterval(stopCheck);

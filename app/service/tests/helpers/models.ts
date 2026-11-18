@@ -30,7 +30,7 @@ export interface Hold {
 type Answer = { kind: "reply"; text: string; options: ReplyOptions } | { kind: "empty" };
 type Step =
   | Answer
-  | { kind: "fail"; code: ModelErrorCode; afterText: string; usage?: { inputTokens: number; outputTokens: number } }
+  | { kind: "fail"; code: ModelErrorCode; afterText: string; status?: number; usage?: { inputTokens: number; outputTokens: number } }
   | { kind: "cut"; text: string }
   | { kind: "hang"; before: string; gate: Promise<Answer>; reached: (call: ModelCall) => void };
 
@@ -41,8 +41,11 @@ export interface ScriptedGateway extends ModelGateway {
   models: string[];
   /** The next call streams `text` (and `options.reasoning` first), then `finish`. */
   reply(text: string, options?: ReplyOptions): ScriptedGateway;
-  /** The next call throws `ModelError(code)` (with `usage`, as `thinking_exhausted` has it), after streaming `afterText` if given. */
-  fail(code: ModelErrorCode, options?: { afterText?: string; usage?: { inputTokens: number; outputTokens: number } }): ScriptedGateway;
+  /**
+   * The next call throws `ModelError(code)` (with `usage`, as `thinking_exhausted` has it, and the upstream's HTTP `status`
+   * when given), after streaming `afterText` if given.
+   */
+  fail(code: ModelErrorCode, options?: { afterText?: string; status?: number; usage?: { inputTokens: number; outputTokens: number } }): ScriptedGateway;
   /** The next call streams `text`, then simply ends: no `finish`, no error (an upstream that cut the stream short). */
   cut(text: string): ScriptedGateway;
   /** The next call hangs until released (or until its signal aborts). */
@@ -124,7 +127,7 @@ export function scriptedGateway(): ScriptedGateway {
     size = step.kind === "reply" ? (step.options.chunkSize ?? 8) : 8;
     if (step.kind === "fail") {
       yield* emit("text", step.afterText);
-      throw new ModelError(step.code, undefined, step.usage);
+      throw new ModelError(step.code, step.status, step.usage);
     }
     yield* emit("reasoning", step.options.reasoning ?? "");
     yield* emit("text", step.text);
@@ -147,7 +150,7 @@ export function scriptedGateway(): ScriptedGateway {
       return gateway;
     },
     fail(code, options = {}) {
-      queue.push({ kind: "fail", code, afterText: options.afterText ?? "", ...(options.usage ? { usage: options.usage } : {}) });
+      queue.push({ kind: "fail", code, afterText: options.afterText ?? "", ...(options.status ? { status: options.status } : {}), ...(options.usage ? { usage: options.usage } : {}) });
       return gateway;
     },
     cut(text) {
