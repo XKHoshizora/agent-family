@@ -16,7 +16,7 @@ import { randomInt } from "node:crypto";
  *
  * Also the one home of a group label's shape (`speakerLabel`, `labelName`), of how an appellation is shown
  * (`shownAppellation`), of the run's mark (`newMark`) and of taking the mark out of what the model writes
- * (`withoutMark`).
+ * (`withoutMark`, `withoutMarkAtCut`).
  */
 
 export type PromptMode = "normal" | "onboarding";
@@ -231,6 +231,24 @@ export function withoutMark(text: string, mark: string | null): string {
     }
   }
   return kept.join("");
+}
+
+/**
+ * `withoutMark` of a text that was cut for length (agents/conversation.ts `postAsAgent`): a cut can fall inside the mark,
+ * or inside a label, so what it left at the very end goes too — the mark's first characters (as many as the text ends
+ * with, at most all but one), then a label it opened: from the last `〔` that neither a `〕` nor a line break follows,
+ * to the end. Anything earlier in the text is as `withoutMark` leaves it.
+ */
+export function withoutMarkAtCut(text: string, mark: string): string {
+  let kept = withoutMark(text, mark);
+  for (let k = mark.length - 1; k >= 1; k--) {
+    if (kept.endsWith(mark.slice(0, k))) {
+      kept = kept.slice(0, -k);
+      break;
+    }
+  }
+  const open = kept.lastIndexOf(OPEN);
+  return open !== -1 && !kept.includes(CLOSE, open) && !hasVerticalSpace(kept.slice(open)) ? kept.slice(0, open) : kept;
 }
 
 /** How the roster is introduced, before its lines; and its last line when it lists fewer than are there. */

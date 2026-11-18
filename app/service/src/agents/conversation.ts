@@ -11,7 +11,7 @@ import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
-import { withoutMark } from "./runtime/prompt.ts";
+import { withoutMark, withoutMarkAtCut } from "./runtime/prompt.ts";
 import { noneTriggered, ownedAgentOf, triggerFromAgent, type Lane, type RunLimits, type Triggered } from "./runs.ts";
 import {
   agentLimit,
@@ -175,8 +175,10 @@ export interface AgentReply {
  * restates its persona. Then the text is cut at 8 000 characters as above. Only then do the text and the reasoning lose
  * the run's mark (`reply.mark`, runtime/prompt.ts `withoutMark`), so no more is cleaned than a message stores — what the
  * model writes may be shaped against the cleaner, and whoever runs the model's endpoint reads the mark in the system
- * text — and the text loses again any block that taking the mark out put together; a reply that was nothing but the
- * mark and labels is left with no visible text (null, below). The message may then call other Agents there,
+ * text. What was cut for length — the text when it is `truncated`, the reasoning when it was cut here or the reply
+ * was — also loses what the cut left at its very end of the mark or of a label (`withoutMarkAtCut`); `truncated` says
+ * what it always said. The text then loses again any block that taking the mark out put together; a reply that was
+ * nothing but the mark and labels is left with no visible text (null, below). The message may then call other Agents there,
  * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row, not even by a foreign key of
  * what it writes), as the call of the person
  * behind it (`behindAgentMessage`): this run's caller when the run is not its owner's own — a member's call relayed
@@ -232,10 +234,13 @@ export async function postAsAgent(
   let reasoning = cleanModelText(reply.reasoning);
   const thought = Array.from(reasoning);
   if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
-  // In a group: the run's mark goes, from no more than is kept.
-  if (reply.mark !== null) {
-    text = withoutUnfinishedBlock(withoutMark(text, reply.mark).trim());
-    reasoning = withoutMark(reasoning, reply.mark).trim();
+  // In a group: the run's mark goes, from no more than is kept — and from the end of what was cut for length, what the
+  // cut left of the mark or of a label.
+  const { mark } = reply;
+  if (mark !== null) {
+    const clean = (s: string, cut: boolean): string => (cut ? withoutMarkAtCut(s, mark) : withoutMark(s, mark)).trim();
+    text = withoutUnfinishedBlock(clean(text, truncated));
+    reasoning = clean(reasoning, reply.truncated || thought.length > REASONING_MAX);
   }
   // In a group a reply with no visible text shows its members nothing, whatever it thought: nothing is posted.
   if (!hasVisibleText(text) && (!own || !hasVisibleText(reasoning))) return null;

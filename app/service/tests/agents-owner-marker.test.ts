@@ -12,6 +12,7 @@ import {
   shownAppellation,
   speakerLabel,
   withoutMark,
+  withoutMarkAtCut,
   type GroupScene,
 } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
@@ -227,6 +228,16 @@ describe("withoutMark", () => {
 
   it("with no mark (the Agent's own conversation) changes nothing", () => {
     expect(withoutMark("〔k7f2ab 阿哲｜你的主人〕k7f2ab", null)).toBe("〔k7f2ab 阿哲｜你的主人〕k7f2ab");
+  });
+
+  it("of a text cut for length (withoutMarkAtCut), also takes out what the cut left at its very end: the mark's first characters, or a label it opened", () => {
+    for (const k of [1, 2, 3, 4, 5]) expect([k, withoutMarkAtCut(`想${"k7f2ab".slice(0, k)}`, "k7f2ab")]).toEqual([k, "想"]);
+    expect(withoutMarkAtCut("前文〔k7f2ab 阿哲", "k7f2ab")).toBe("前文");
+    expect(withoutMarkAtCut("前文〔k7f", "k7f2ab")).toBe("前文");
+    expect(withoutMarkAtCut("前文〔", "k7f2ab")).toBe("前文");
+    expect(withoutMarkAtCut("说 k7f2ab k7f2a", "k7f2ab")).toBe("说  ");
+    // Nothing else: not before the end, not a label that was closed, not a bracket on an earlier line.
+    for (const text of ["k7f 想", "〔注〕后", "〔注\n后", "〔注〕k7f2ab", "好的"]) expect(withoutMarkAtCut(text, "k7f2ab")).toBe(withoutMark(text, "k7f2ab"));
   });
 
   /** `withoutMark(text, "k7f2ab")`, which must take well under a second, leave no mark, and give `expected`. */
@@ -686,7 +697,7 @@ describe("what the model writes in a group has the mark taken out before it is s
     expect((await everythingStored()).includes("k7f2ab")).toBe(false);
   });
 
-  it("is cleaned only once cut to what a message stores, as a reply always was: cut where it always was, marked truncated, then without the mark", async () => {
+  it("is cleaned only once cut to what a message stores, as a reply always was: cut where it always was, marked truncated, then without the mark and without what the cut left of it or of a label at the end", async () => {
     const { mia, g, agent } = await world();
     const { worker } = portDrawing(() => "k7f2ab");
     await say(mia, g, "@helper_bot 写长一点");
@@ -695,8 +706,21 @@ describe("what the model writes in a group has the mark taken out before it is s
     const reasoning = `${"想".repeat(REASONING_MAX - 3)}k7f2ab${"再".repeat(10)}`;
     gateway.reply(text, { reasoning, chunkSize: 4096 });
     expect(await worker.runOnce()).toBe(true);
+    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "字".repeat(MESSAGE_TEXT_MAX - 10), reasoning: "想".repeat(REASONING_MAX - 3), truncated: true }]);
+  });
+
+  it("a reply cut at the output limit loses the mark's first characters, or a label, the cut left at its end; one that was not cut keeps an end that only looks like them", async () => {
+    const { mia, g, agent } = await world();
+    const { worker } = portDrawing(() => "k7f2ab");
+    await say(mia, g, "@helper_bot 一");
+    gateway.reply("写到 k7f", { reasoning: "想到〔k7", truncated: true });
+    expect(await worker.runOnce()).toBe(true);
+    await say(mia, g, "@helper_bot 二");
+    gateway.reply("答案是 k7f", { reasoning: "想到〔k7" });
+    expect(await worker.runOnce()).toBe(true);
     expect(await bodiesFrom(g, agent.id)).toEqual([
-      { text: `${"字".repeat(MESSAGE_TEXT_MAX - 10)}〔 阿哲`, reasoning: `${"想".repeat(REASONING_MAX - 3)}k7f`, truncated: true },
+      { text: "写到", reasoning: "想到", truncated: true },
+      { text: "答案是 k7f", reasoning: "想到〔k7" },
     ]);
   });
 
@@ -704,12 +728,12 @@ describe("what the model writes in a group has the mark taken out before it is s
     const { mia, g, agent } = await world();
     const { worker } = portDrawing(() => "k7f2ab");
     await say(mia, g, "@helper_bot 来吧");
-    gateway.reply(`〔${"｜".repeat(1_000_000)}k7f2ab`, { reasoning: `${"k7f".repeat(300_000)}${"2ab".repeat(300_000)}`, chunkSize: 65_536 });
+    gateway.reply(`开头\n〔${"｜".repeat(1_000_000)}k7f2ab`, { reasoning: `${"k7f".repeat(300_000)}${"2ab".repeat(300_000)}`, chunkSize: 65_536 });
     const started = performance.now();
     expect(await worker.runOnce()).toBe(true);
     expect(performance.now() - started).toBeLessThan(5000);
-    expect(await bodiesFrom(g, agent.id)).toEqual([
-      { text: `〔${"｜".repeat(MESSAGE_TEXT_MAX - 1)}`, reasoning: "k7f".repeat(300_000).slice(0, REASONING_MAX), truncated: true },
-    ]);
+    // The text's cut left a label open, and the reasoning's the mark's first two characters (`REASONING_MAX` is 2 past a
+    // multiple of 3): they go.
+    expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "开头", reasoning: "k7f".repeat(300_000).slice(0, REASONING_MAX - 2), truncated: true }]);
   });
 });
