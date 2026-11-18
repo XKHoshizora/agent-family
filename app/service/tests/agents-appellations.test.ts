@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { appellationsFor } from "../src/agents/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -28,6 +27,15 @@ const put = (who: Actor, agentId: string, target: string, appellation: unknown) 
 const remove = (who: Actor, agentId: string, target: string) => api(app, who, "DELETE", `/api/agents/${agentId}/appellations/${target}`);
 const view = async (who: Actor, agentId: string) => (await api(app, who, "GET", `/api/agents/${agentId}`)).json;
 const targetsOf = (v: { appellations: Array<{ principalId: string }> }) => v.appellations.map((e) => e.principalId);
+
+/** The rows of `agent_appellations` of `agentId`, by target. */
+const stored = async (agentId: string): Promise<Record<string, string>> =>
+  Object.fromEntries(
+    (await db.query<{ principal_id: string; appellation: string }>("select principal_id, appellation from agent_appellations where agent_id = $1", [agentId])).rows.map((r) => [
+      r.principal_id,
+      r.appellation,
+    ]),
+  );
 
 /** Puts principal `id` into conversation `conv` from its current seq on. */
 const seat = (conv: string, id: string) =>
@@ -187,7 +195,7 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     await db.query("update memberships set left_seq = joined_seq + 1 where conversation_id = $1 and principal_id = $2", [w.g, w.gus.id]);
     expect(targetsOf(await view(w.owner, w.agent.id))).toEqual([w.gus.id]);
     expect((await put(w.owner, w.agent.id, w.gus.id, "新称呼")).status).toBe(404);
-    expect((await appellationsFor(db, w.agent.id)).get(w.gus.id)).toBe("古斯");
+    expect(await stored(w.agent.id)).toEqual({ [w.gus.id]: "古斯" });
     expect(targetsOf((await remove(w.owner, w.agent.id, w.gus.id)).json)).toEqual([]);
   });
 
@@ -230,7 +238,7 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     await db.query("delete from memberships where principal_id = $1", [rows[0]!.id]);
     await db.query("delete from principals where id = $1", [rows[0]!.id]);
     expect(targetsOf(await view(w.owner, w.agent.id))).toEqual([w.mia.id]);
-    expect((await appellationsFor(db, w.agent.id)).size).toBe(1);
+    expect(Object.keys(await stored(w.agent.id))).toEqual([w.mia.id]);
   });
 
   it("pushes the Agent to its owner only, once per change, and tells nobody else", async () => {
@@ -259,21 +267,5 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
       [w.owner.id, w.agent.id],
       [w.owner.id, w.agent.id],
     ]);
-  });
-});
-
-describe("appellationsFor", () => {
-  it("maps every stored target to its appellation, and an Agent without any to nothing", async () => {
-    const w = await world();
-    expect((await appellationsFor(db, w.agent.id)).size).toBe(0);
-    await put(w.owner, w.agent.id, w.mia.id, "米亚");
-    await put(w.owner, w.agent.id, w.gus.id, "古斯");
-    expect(await appellationsFor(db, w.agent.id)).toEqual(
-      new Map([
-        [w.mia.id, "米亚"],
-        [w.gus.id, "古斯"],
-      ]),
-    );
-    expect((await appellationsFor(db, RANDOM)).size).toBe(0);
   });
 });

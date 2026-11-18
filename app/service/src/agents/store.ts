@@ -297,15 +297,6 @@ export async function appellationEntriesOf(q: Queryable, agentIds: readonly stri
   return found;
 }
 
-/** What the Agent calls each person or Agent its owner named, by principal id: every stored row (who is present is the reader's to filter). */
-export async function appellationsFor(q: Queryable, agentId: string): Promise<Map<string, string>> {
-  const { rows } = await q.query<{ principal_id: string; appellation: string }>(
-    "select principal_id, appellation from agent_appellations where agent_id = $1",
-    [agentId],
-  );
-  return new Map(rows.map((r) => [r.principal_id, r.appellation]));
-}
-
 /**
  * Sets (or replaces) what the locked, undeleted `agent` calls `targetId`. The target is a person or an Agent that is
  * neither the Agent nor its owner and is the owner's friend or a current member of a group (not closed) the Agent is
