@@ -44,7 +44,7 @@ Most Agents need no question at all. For one message, in this order:
 3. *The rest* are candidates only when the message is a request. With at most 8 candidates in all, everything goes in ONE call (no gate). With more, the always-candidates are asked at once and, in the same round, one gate question — `最新这条消息是在求助或提问，值得有人来回答。闲聊、客套、道谢、表情都不算。` — decides (≥ 0.5) whether the rest are asked, 8 per call, the calls made together.
 4. Above 40 candidates the rest take turns, least recently judged first (`agent_group_state.judged_at`).
 
-Names in the judgement's transcript use the same `speakerLabel` shape as a reply's context is NOT needed (the judgement only yields probabilities); they stay `{name}：` / `{name}（Agent）：`, cleaned with the shared label cleaning. Ranking by relevance (embeddings, or a cheap model picking a few) is left out until a group needs it.
+The judgement's transcript does not need the reply context's marked labels (it only yields probabilities): its lines stay `{name}：` / `{name}（Agent）：`, the names cleaned with the shared label cleaning. Ranking by relevance (embeddings, or a cheap model picking a few) is left out until a group needs it.
 
 ## Review Focus
 
