@@ -34,6 +34,7 @@ import {
   wire,
 } from "./fixtures.js";
 import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, push, rowNames, toastText } from "./harness.jsx";
+import { othersBudgetSent } from "../src/pages/AgentForm.jsx";
 
 beforeEach(() => {
   installBrowser();
@@ -738,16 +739,31 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
   const box = () => inMain().getByLabelText(LABEL);
   const amount = () => inMain().getByLabelText(AMOUNT);
   const WARNING = "群里任何人都能让它回复，花的是你的点。";
+  const HINT = "群里别人 @ 它所花的点数，每天到了这个数就不再回复他们。你自己 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。";
   const WRONG = "请填写 1 到 100000 之间的点数（最多 6 位小数）";
   const kv = () => document.querySelector(".main-col .kv").textContent;
   const mentions = (value) => fireEvent.change(inMain().getByLabelText("群里谁可以叫它"), { target: { value } });
 
-  it("creating: shown only for 所有群成员, with three options, 20 点（默认）first; nothing sent for 仅我", async () => {
+  it("the value sent: the default, the amount typed, null for 不限 — and none at all for an amount that is not one", () => {
+    expect(othersBudgetSent({ othersChoice: "default", othersAmount: "abc" })).toBe("20");
+    expect(othersBudgetSent({ othersChoice: "custom", othersAmount: " 035.50 " })).toBe("35.5");
+    expect(othersBudgetSent({ othersChoice: "unlimited", othersAmount: "abc" })).toBeNull();
+    // Never null, which the service reads as 不限: whatever lets a wrong amount through still sends nothing.
+    for (const amount of ["0", "100001", "abc", "", "1.1234567"]) expect(othersBudgetSent({ othersChoice: "custom", othersAmount: amount }), amount).toBeUndefined();
+  });
+
+  it("creating: shown only for 所有群成员, with three options, 20 点（默认）first, and what it means; nothing sent for 仅我", async () => {
     const createAgent = vi.fn(async () => agentOf(AG1));
     await openAgents({ api: { createAgent } });
     await openCreate();
     expect(within(box()).getAllByRole("option").map((o) => o.textContent)).toEqual(["20 点（默认）", "自己填", "不限"]);
     expect(box().value).toBe("default");
+    expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(HINT);
+    // The warning for 不限 comes with the hint, which stays.
+    fireEvent.change(box(), { target: { value: "unlimited" } });
+    expect(mainText()).toContain(WARNING);
+    expect(box().closest(".field").textContent).toContain(HINT);
+    fireEvent.change(box(), { target: { value: "default" } });
     expect(screen.queryByLabelText(AMOUNT)).toBeNull();
     mentions("owner");
     expect(screen.queryByLabelText(LABEL)).toBeNull();

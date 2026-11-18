@@ -47,9 +47,12 @@ export function chainBudgetOf(text) {
 /** 别人 @ 每天最多花 when nothing else is said, in points (the service's default); an amount is checked like the chain budget. */
 export const OTHERS_BUDGET_DEFAULT = "20";
 
-/** The sent value of 别人 @ 每天最多花 for the form's fields: the default, the amount typed (null if wrong), or null for 不限. */
-const othersBudgetSent = (f) =>
-  f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? chainBudgetOf(f.othersAmount) : OTHERS_BUDGET_DEFAULT;
+/**
+ * The sent value of 别人 @ 每天最多花 for the form's fields: the default, the amount typed, or null for 不限 — and
+ * undefined, nothing to send, for an amount typed that is not one: never null, which the service reads as no limit.
+ */
+export const othersBudgetSent = (f) =>
+  f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? chainBudgetOf(f.othersAmount) ?? undefined : OTHERS_BUDGET_DEFAULT;
 
 /** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
 export async function settled(pending) {
@@ -260,8 +263,9 @@ export function AgentForm({ agent = null }) {
     body.replyMode = f.replyMode;
     body.groupMentions = f.groupMentions;
     body.chainBudget = chainBudgetOf(f.chainBudget);
-    // Said only when others may call it (otherwise the service keeps its default).
-    if (f.groupMentions === "members") body.othersBudget = othersBudgetSent(f);
+    // Said only when others may call it (otherwise the service keeps its default), and never for a wrong amount.
+    const othersBudget = othersBudgetSent(f);
+    if (f.groupMentions === "members" && othersBudget !== undefined) body.othersBudget = othersBudget;
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -300,9 +304,10 @@ export function AgentForm({ agent = null }) {
     const mine = (key) => edited.current.has(key) && storedValue(key, f) !== record[key];
     const patch = {};
     for (const key of ["name", "intro", "field", "persona", "replyMode", "groupMentions", "chainBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
-    // 别人 @ 每天最多花: only while others may call it, and only when it differs from the record's.
+    // 别人 @ 每天最多花: only while others may call it, only when it differs from the record's, never a wrong amount.
     const othersTouched = edited.current.has("othersChoice") || edited.current.has("othersAmount");
-    if (othersTouched && f.groupMentions === "members" && othersBudgetSent(f) !== othersBudgetSent(record)) patch.othersBudget = othersBudgetSent(f);
+    const othersBudget = othersBudgetSent(f);
+    if (othersTouched && f.groupMentions === "members" && othersBudget !== undefined && othersBudget !== othersBudgetSent(record)) patch.othersBudget = othersBudget;
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -482,7 +487,10 @@ export function AgentForm({ agent = null }) {
         </Field>
         {f.groupMentions === "members" && (
           <>
-            <Field label="别人 @ 每天最多花">
+            <Field
+              label="别人 @ 每天最多花"
+              hint="群里别人 @ 它所花的点数，每天到了这个数就不再回复他们。你自己 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。"
+            >
               <select value={f.othersChoice} onChange={set("othersChoice")}>
                 <option value="default">{OTHERS_BUDGET_DEFAULT} 点（默认）</option>
                 <option value="custom">自己填</option>
