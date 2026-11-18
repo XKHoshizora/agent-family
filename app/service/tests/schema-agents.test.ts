@@ -128,6 +128,31 @@ describe("agent, provider, metering and run tables", () => {
     expect((await db.query(`select 1 from agent_appellations`)).rowCount).toBe(0);
   });
 
+  test("agent_group_state is one row per Agent and group, goes with either end, and refuses negative numbers", async () => {
+    const owner = await human("owner_gs");
+    const agent = await agentPrincipal(owner, "gs_bot");
+    const group = async () =>
+      (await db.query<{ id: string }>(`insert into conversations (type, creator_id) values ('group', $1) returning id`, [owner])).rows[0]!.id;
+    const [one, two] = [await group(), await group()];
+    const insert = (conversation: string, cols = "", vals = "") =>
+      db.query(`insert into agent_group_state (agent_id, conversation_id${cols}) values ($1, $2${vals})`, [agent, conversation]);
+    await insert(one);
+    expect((await db.query(`select surcharge, quiet, quiet_half_life_s, judged_at from agent_group_state`)).rows).toEqual([
+      { surcharge: 0, quiet: 0, quiet_half_life_s: null, judged_at: null },
+    ]);
+    await expect(insert(one)).rejects.toMatchObject({ code: UNIQUE_VIOLATION });
+    await expect(insert(two, ", surcharge", ", -0.1")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(insert(two, ", quiet", ", -0.1")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(insert(two, ", quiet_half_life_s", ", 0")).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await insert(two, ", quiet, quiet_half_life_s", ", 0.5, 3600");
+    await rejectedWith(FOREIGN_KEY_VIOLATION, `insert into agent_group_state (agent_id, conversation_id) values ($1, $2)`, [agent, agent]);
+    await rejectedWith(FOREIGN_KEY_VIOLATION, `insert into agent_group_state (agent_id, conversation_id) values ($1, $2)`, [one, one]);
+    await db.query(`delete from conversations where id = $1`, [one]);
+    expect((await db.query(`select conversation_id from agent_group_state`)).rows).toEqual([{ conversation_id: two }]);
+    await db.query(`delete from principals where id = $1`, [agent]);
+    expect((await db.query(`select 1 from agent_group_state`)).rowCount).toBe(0);
+  });
+
   test("conversations.agents_halted_seq is null until a halt sets it", async () => {
     const owner = await human("owner_hs");
     const { rows } = await db.query(`insert into conversations (type, creator_id) values ('group', $1) returning agents_halted_seq`, [owner]);
