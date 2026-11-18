@@ -83,9 +83,16 @@ contain `free`, default `{"free":20}`),
 the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
 `AGENT_MAX_CONCURRENT_RUNS` (model calls one person may have running at once, replies and persona drafts together;
 further replies wait queued, a further draft is refused; a draft and a reply that start at the same moment may briefly
-exceed it by one, see Agents and runs; 1–100, default 2),
-`AGENT_RUNS_PER_MINUTE` (replies one person may start a minute, counted from the stored runs and not scaled by
-`RATE_LIMIT_SCALE`; 1–10 000, default 20), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
+exceed it by one, see Agents and runs; 1–100, default 4), `AGENT_MAX_CONCURRENT_OTHERS_RUNS` (of those, how many may be
+replies someone other than the Agent's owner called for, so that the rest are kept for the owner's own; 1–100, default 3;
+it may not be more than `AGENT_MAX_CONCURRENT_RUNS`, or the service refuses to start, naming both — so setting only
+`AGENT_MAX_CONCURRENT_RUNS` below 3 is refused too),
+`AGENT_RUNS_PER_MINUTE` (replies one owner may start a minute that they called for themselves, their own lane, see Rate
+limits; counted from the stored runs and not scaled by `RATE_LIMIT_SCALE`; 1–10 000, default 20),
+`AGENT_OTHERS_RUNS_PER_MINUTE` (replies one owner's Agents may start a minute that anyone else called for, all callers
+together, counted apart from the owner's own and likewise not scaled; 1–10 000, default 20),
+`AGENT_CALLER_RUNS_PER_MINUTE` (calls one person, themselves or through their own Agents, may make a minute on other
+people's Agents; counted and not scaled likewise; 1–10 000, default 5), `AGENT_RUN_TIMEOUT_MS` (how long a reply or a persona draft may take, and
 for a reply also the reading of its attachments before the call, each in turn: so a reply may take up to about twice it
 in all; 1 000–3 600 000, default 120 000), `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's
 context when its owner gives none; 1 000–2 000 000, default 16 000), `PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS` (the output
@@ -97,8 +104,8 @@ at any level but `none` a call's output limit is its reply limit plus this, at m
 leaves beside the reply limit — Calling a model; a site-model call's hold covers it), `PROVIDER_MAX_CONCURRENT_CALLS` (calls to providers
 and site models in flight at once in the whole service, see Model providers; 1–1 000, default 64),
 `AGENT_MAX_RUNS_IN_FLIGHT` (replies the worker runs at once in the whole service, all owners together; further ones wait
-queued; 1–64, default 8 — each holds up to 20 MiB of attachments in memory, see Agents and runs, so the worst case is
-about this × 20 MiB × 5 copies: about 800 MiB at the default; lower it on a small container),
+queued; 1–64, default 16 — each holds up to 20 MiB of attachments in memory, see Agents and runs, so the worst case is
+about this × 20 MiB × 5 copies: about 1.6 GiB at the default; lower it on a small container),
 `AGENT_CHAIN_LIMIT` (in a group, once its last this many messages that are not notices were all sent by Agents, an
 Agent's message calls no other Agent until a person writes, and the group is told once — Agents in a group; 2–500,
 default 30), `AGENT_GROUP_CONTEXT_TOKENS` (the most a reply in a group is shown of the group: this many tokens of its
@@ -286,7 +293,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 409 | `stale_proposal` | Confirming or discarding a persona proposal that can no longer be acted on: confirmed already, discarded (confirming), superseded by a newer one, or made against a persona that has changed since (see Persona proposals) |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
 | 413 | `too_large` | Body over its limit; for uploads also `{"error":"too_large","reason":"quota"}` |
-| 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits). Also a run's error (not an HTTP answer there): a reply over `AGENT_RUNS_PER_MINUTE`, recorded failed and retryable (Replies) |
+| 429 | `rate_limited` | Over a rate limit or a cap on work in progress (see Rate limits). Also a run's error (not an HTTP answer there): a reply over its owner's replies a minute in its lane (`AGENT_RUNS_PER_MINUTE`, `AGENT_OTHERS_RUNS_PER_MINUTE`), recorded failed and retryable (Replies) |
 | 500 | `internal` | A bug (also any failure inside Better Auth); logged with the request |
 | 502 | `provider_rejected` | The provider refused the key (it answered 401 or 403), or the provider's saved key cannot be opened (Model providers; save it again) |
 | 502 | `provider_unavailable` | The provider could not be reached or gave no usable answer: another status, a redirect, a timeout, a body over the limit, not JSON |
@@ -325,7 +332,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `POST /api/conversations` | 10 | principal |
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
-| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | 20 together (`AGENT_RUNS_PER_MINUTE`), counted from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`; over it a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it | owner |
+| Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | Counted for you in two lanes, each from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`: 20 for the replies you called for yourself — your own lane: your messages to your Agents, in their conversations and in groups, your Agents' calls on each other, retries, follow-ups that answer you (`AGENT_RUNS_PER_MINUTE`) — and 20 together for every reply someone else called for on your Agents (`AGENT_OTHERS_RUNS_PER_MINUTE`), so that others' mentions cannot use up your own minute. A run is `own` when you, or one of your Agents for you, called for it, else `others` (a third lane, `proactive`, is for replies nobody called for; nothing starts one yet), and keeps its lane; neither lane nor caller is ever on the wire. Over the count of its lane a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it; one in a group counts in the lane of what it answers (Agents and runs, In a group) | owner |
+| Calls on other people's Agents (a mention in a group that would start a reply of an Agent whose owner is someone else, made by a person or by one of their Agents) | 5 together per person (`AGENT_CALLER_RUNS_PER_MINUTE`), counted from the stored runs under the caller's account lock, so exactly, and not scaled by `RATE_LIMIT_SCALE`; calls on the caller's own Agents never count. Over it the mention starts nothing and nothing of it is recorded — no run, no `rate_limited` run, no notice to the group or to the Agent's owner (the message is sent as any), only one log line (Metrics in the log). A mention folded into a reply already under way starts nothing, so it is neither counted nor refused. It is checked after the Agent's others' daily budget (Agents in a group) and before the owner's replies a minute | caller |
 | `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run`, `GET /api/conversations/:id/runs` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `POST /api/conversations/:id/agents/halt` | 20 (a budget of its own) | principal |
@@ -338,6 +346,18 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | WebSockets | at most 5 open; a 6th closes the oldest (code 4002) | principal |
 
 Everything else is not rate limited.
+
+**Metrics in the log.** The service writes three kinds of line at `info`, each a JSON log object with a `metric` field,
+for an operator to tune the numbers above from (nothing else about them is recorded or exposed):
+
+- `{ "metric": "run_wait_ms", "lane", "ms" }`, once for each reply the worker claims: how long it sat queued, in the lane
+  (`own`, `others`, `proactive`) it ran in. Waits that grow mean the concurrency numbers (`AGENT_MAX_CONCURRENT_RUNS`,
+  `AGENT_MAX_CONCURRENT_OTHERS_RUNS`, `AGENT_MAX_RUNS_IN_FLIGHT`) are too small for the traffic, or the upstream is slow.
+- `{ "metric": "caller_rate_limited", "callerId", "agentId", "conversationId" }`, once for each call on someone else's
+  Agent that `AGENT_CALLER_RUNS_PER_MINUTE` refused: how often the limit holds someone back (nobody else is told of it).
+- `{ "metric": "upstream_refused", "status" }`, once for each reply that ended failed because the model's upstream
+  answered 429 or 5xx: how often the upstream refuses, and which way. Other failures (a refused key, a timeout) are not
+  counted here.
 
 ### Usage and points
 
@@ -402,26 +422,30 @@ conversation. Like a person who left, an Agent that left a group stays named by 
 still read them (a member who has since left too) gets its entry in those reads' `principals` — name, handle, intro,
 field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
 id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
-level, reply mode, `groupMentions`, provider, pause or persona proposals, or the reasoning of its replies there (A reply
+level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, provider, pause or persona proposals, or the reasoning of its replies there (A reply
 there), or which model and reasoning level a reply of it used and what it cost (`via`, Wire shapes), in any response,
 push or error. Fellow members see a changed name, intro or field the next time they load
 principals, as for people; a changed avatar is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
-"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "reasoning": "none" | "low" | "medium" | "high" |
+"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "reasoning": "none" | "low" | "medium" | "high" |
 "xhigh" | "max", "model": {"source": "site", "id"} | {"source": "provider", "providerId", "model"} | null, "paused",
 "deleted", "conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `groupMentions` says
 who may call the Agent with `@` in a group it is in: `members` (any member, and other Agents there) or `owner` (you
 only; never another Agent). `chainBudget` is the most you pay, in points (a decimal string as money is on the wire, `"1"`
 to `"100000"`, default `"50"`), for its replies in a group that other Agents' messages called for between two messages
-from people (Agents in a group). Like everything here, they are shown to nobody but you.
+from people (Agents in a group). `othersBudget` is the most you pay, in points (a string as `chainBudget`, `"1"` to
+`"100000"`, default `"20"`; `null`: no limit), in a site day, for its replies that other people called for;
+`othersSpentToday` (a string of points) is what those have cost you since the site day began, the points running ones
+hold included (Agents in a group). Like everything here, they are shown to nobody but you.
 
 #### `POST /api/agents`
 
 *Session: required.* Body (no other key): `handle` (`^[a-z0-9_]{3,24}$`, never changes), `name` (1–20 characters,
 the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `persona` (≤ 20 000 characters), `replyMode`
 (default `always`), `groupMentions` (`members` or `owner`, default `members`), `chainBudget` (a string of points from 1
-to 100 000 with at most 6 decimals, no sign or exponent: `"50"`, `"12.5"`; default `"50"`), `reasoning` (default
+to 100 000 with at most 6 decimals, no sign or exponent: `"50"`, `"12.5"`; default `"50"`), `othersBudget` (the same
+string, or `null` for no limit; default `"20"`), `reasoning` (default
 `none`), `model` (default `null`). → 201 Agent.
 
 - 409 `handle_taken` (any person's or Agent's handle); 403 `agent_limit` when your Agents that are not deleted are
@@ -455,7 +479,7 @@ save the Agent to keep it.
   (`{"名称", "简介", "擅长领域"}`, empty strings for what you left out). Reasoning `none`; the model's output limit.
 - Refused before any call, with nothing recorded: 400 for the model; 402 `no_quota` (as a reply); 400
   `context_too_small` when the model's context, less its output limit and the instruction, cannot hold the data; 429
-  `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (2) model calls running (replies and drafts
+  `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (4) model calls running (replies and drafts
   together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset); 502
   `provider_rejected` when your provider's saved key cannot be opened (Model providers: save it again).
 - The call failing: 502 `provider_rejected` / `provider_unavailable` / `thinking_exhausted`, 400
@@ -484,7 +508,7 @@ for `GET /api/agents`.
 #### `PATCH /api/agents/:id`
 
 *Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
-`persona`, `replyMode`, `groupMentions`, `chainBudget`, `reasoning`, `model` (`null` clears it), under the rules of creation; the
+`persona`, `replyMode`, `groupMentions`, `chainBudget`, `othersBudget` (`null`: no limit), `reasoning`, `model` (`null` clears it), under the rules of creation; the
 model and the reasoning level are checked together when either is sent. A `persona` that differs from the stored one
 raises `personaVersion` by one. → 200 Agent; 400 `invalid_request` for a value, model or reasoning level that does not
 fit; 409 `agent_deleted`; 404 `not_found` unless yours.
@@ -610,8 +634,9 @@ reported; retry, or choose a lower reasoning level — or
 `busy`: the service's own trouble — the reply could not be started or stored, its attachments could not be read, or
 there was nothing to answer — which costs you nothing; `provider_unavailable` is also what a reply that was under way
 when the service restarted ends with, and one the stale-run sweep released; `rate_limited`: you had started
-`AGENT_RUNS_PER_MINUTE` (20) replies in the last minute, so this one was not started — no call, nothing held or charged;
-retry once the minute has passed), for
+as many replies in the last minute as its lane allows (`AGENT_RUNS_PER_MINUTE`, 20, of your own; `AGENT_OTHERS_RUNS_PER_MINUTE`,
+20, of those others called for), so this one was not started — no call, nothing held or charged; retry once the minute
+has passed), for
 `cancelled` `agent_paused` or `agent_deleted`, `agent_removed` (the Agent left the run's group: the group's creator or you
 took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it and a
 member halted Agents calling each other, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
@@ -671,7 +696,7 @@ one), called for by whoever called the failed run: one that another Agent's mess
 running; 409 `agent_paused` / `agent_deleted`; 400 `invalid_request` when the latest run did not fail (or there is
 none) or the Agent has no model — in a group also when the Agent is not in the group now or its latest run there is
 from an earlier stay; so a reply cancelled by a halt (`halted`) or by the Agent's leaving (`agent_removed`) is not
-retried; 429 `rate_limited` over the replies one may start a minute (20). In a group, an `agentId` that is not one of
+retried; 429 `rate_limited` over the replies one may start a minute (a retry is your own lane: 20). In a group, an `agentId` that is not one of
 your Agents is 404 `not_found` as for an Agent that does not exist, and a group you are not a current member of as for
 a conversation that does not exist. Limit: 60 per minute with stop and dismiss.
 
@@ -712,11 +737,31 @@ under three brakes, each about Agents calling Agents — a person's mention is n
   charged only once it has ended): so a chain passes its budget by at most the reply that was under way. A reply on a
   provider model costs no points, so for such an Agent only the chain limit and the halt apply.
 
+**The others' daily budget** (`othersBudget`, per Agent, its owner's setting) is of another kind: it is about whose
+points are spent, and it holds against people's mentions too. A call on an Agent by anyone but its owner — a member, or a
+member's Agent, whose call is that member's — spends the owner's points. Once what those replies cost today (what they
+were charged, free allowance and balance, plus what the running ones hold) has reached `othersBudget` (default 20
+points; `null`: no limit, which the owner is warned of: anyone in the group can have the Agent reply on their points),
+the next such call is not answered: no model call, nothing held or charged, and not even a fold into a reply of the
+Agent's under way. The group is told by one `agent_daily_budget_reached` notice, once per site day (midnight in
+`SITE_TIMEZONE`) for each conversation and Agent, and the owner is pushed their Agent again (`agent`), so the
+`othersSpentToday` they see is current. The owner's own calls, in groups and in the Agent's own conversation, never
+count and are never refused. A reply under way is not cut off, so a day's spend can pass the budget by the replies that
+were running. Raising the budget above today's spend, or setting it `null`, answers calls again at once; lowering it
+below the spend refuses at once. A reply on a provider model costs no points, so for such an Agent the budget never
+holds.
+
 The owner's other limits hold throughout, for every reply in a group — called by a person's mention, an Agent's, or a
-follow-up of what was noted while a reply ran: replies started a minute (`AGENT_RUNS_PER_MINUTE`; over it, the
-Agent's one `rate_limited` run in the group, Rate limits), running at once (`AGENT_MAX_CONCURRENT_RUNS`), and the free
-allowance or balance. So members who keep mentioning an Agent while it replies cannot keep it replying past its
-owner's limits.
+follow-up of what was noted while a reply ran: replies started a minute, counted per lane (`AGENT_RUNS_PER_MINUTE` for
+the owner's own, `AGENT_OTHERS_RUNS_PER_MINUTE` for what others called for; over it, the Agent's one `rate_limited` run
+in the group, Rate limits), running at once (`AGENT_MAX_CONCURRENT_RUNS`, of which at most
+`AGENT_MAX_CONCURRENT_OTHERS_RUNS` for others' calls, so that a crowd mentioning the Agent leaves the owner a place of
+their own), and the free allowance or balance. And a person who calls other people's Agents more than
+`AGENT_CALLER_RUNS_PER_MINUTE` times a minute is not answered for the extra ones (Rate limits). So members who keep
+mentioning an Agent while it replies cannot keep it replying past its owner's limits. For a mention by someone other
+than the Agent's owner the checks run in this order, and the first to refuse decides: the others' daily budget (the
+group is told), then — unless the mention folds into a reply under way, which starts nothing — the caller's limit
+(nobody is told), then the lane's replies a minute (a `rate_limited` run, which only the owner sees).
 
 **A reply there** (Agents and runs: the worker, What the model is shown):
 
@@ -1649,6 +1694,7 @@ client can render its own:
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
 | `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
+| `agent_daily_budget_reached` | `actorId` = `agentId` (the Agent whose others' daily budget is spent) | in a group, the first call on the Agent by someone other than its owner that finds the budget spent — a mention, or a follow-up of one; once per site day for each conversation and Agent, whoever calls; nothing of lane or caller goes with it: “「{Agent 名}」今天的额度已用完” |
 
 Clients must ignore fields and events they do not know: later batches add more.
 
@@ -1820,7 +1866,8 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
 ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
 below). Otherwise a `queued` run is inserted in that conversation covering the message (`covers_seq`), unless the owner
-has started `AGENT_RUNS_PER_MINUTE` (20) replies in the last minute: then the run is inserted already `failed`, error
+has started `AGENT_RUNS_PER_MINUTE` (20) replies of their own lane in the last minute (a reply in the Agent's own
+conversation is always the owner's own, the owner its caller): then the run is inserted already `failed`, error
 `rate_limited` (retryable), covering the message — the message is still sent, nothing is called, held or charged (no
 usage record), the run is never active (it takes no concurrency slot and leaves the Agent free for the next message)
 and, having started nothing, it is not counted toward the limit itself. That count is taken under the owner's
@@ -1837,13 +1884,20 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   `agents` row lock (the group's row is the send's): nothing for one that is paused, deleted or has no model, nor for
   one whose `groupMentions` is `owner` unless its owner wrote the message, nor for one with a block between its owner
   and the sender, in either direction (as in a direct chat: neither of the two calls the other's Agents, nor spends
-  the other's points; lifting the block restores it at once). Then as in its own conversation: folded into
-  its active run in the group (a queued run a person's message is folded into is a person's from then on), else a
-  queued run (`triggered_by` `human`) — or, over its owner's replies a minute, a `failed` `rate_limited` run, of which
+  the other's points; lifting the block restores it at once). When the sender is not the Agent's owner, the Agent's
+  others' daily budget (read under the Agent's row lock) is then checked: spent, nothing is done — not even a fold —
+  and the group is told once a day (Agents in a group). Then as in its own conversation: folded into
+  its active run in the group (a queued run a person's message is folded into is a person's from then on, and the
+  owner's own — the owner its caller — when the message is the owner's; another member's leaves its lane and first
+  caller), else, for a call on someone else's Agent, the caller's limit (`AGENT_CALLER_RUNS_PER_MINUTE`: over it,
+  nothing is recorded and one `caller_rate_limited` line is logged), else a queued run (`triggered_by` `human`, with its
+  caller and lane) — or, over its owner's replies a minute in the call's lane, a `failed` `rate_limited` run, of which
   there is one per Agent in the group: while it is the Agent's latest run there and its owner has not dismissed it, it
   covers every further mention over the limit (announced again) instead of a new one being recorded. The owners'
   `accounts` rows are locked last, all in id order.
-- *An Agent's message* (`postAsAgent`'s transaction): the same, as an Agent's (`triggered_by` `agent`), for the Agent
+- *An Agent's message* (`postAsAgent`'s transaction): the same, as an Agent's (`triggered_by` `agent`, its owner the
+  caller, so a call on an Agent of someone else's meets that Agent's others' daily budget, the caller's limit and the
+  lane's replies a minute as a person's does), for the Agent
   members it names other than itself whose `groupMentions` is `members` and whose owner has no block, in either direction, with the
   posting Agent's owner, unless a brake holds (Agents in a group, under
   HTTP API): the group is halted (its latest message from a person is at or before `conversations.agents_halted_seq`);
@@ -1867,9 +1921,15 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   Agents asked before a halt is not answered after it; nor once the Agent's chain budget is spent, which is checked
   again here because the reply that just ended was settled after it was called (the `agent_budget_reached` notice is
   appended unless one was since a person last wrote, and pushed after that reply's `run`). Either way it is a reply
-  started like any other: counted toward its owner's `AGENT_RUNS_PER_MINUTE` under the owner's `accounts` row (the last
-  lock, after `settle`'s), and over it recorded on the Agent's reusable `rate_limited` run in the group instead of
-  queued.
+  started like any other: counted toward its owner's replies a minute in its lane under the owner's `accounts` row (the
+  last lock, after `settle`'s), and over it recorded on the Agent's reusable `rate_limited` run in the group instead of
+  queued. Its lane and caller come from the messages it answers, not from the run that ended: the owner's own when the
+  owner, or one of their Agents, is among those that called the Agent, else `others` with the earliest caller; when
+  none of them can call it any more (a block since, or `groupMentions` changed) it is `others` with no caller, so a call
+  its owner no longer allows does not ride the owner's own lane. A follow-up in lane `others` is not queued once the
+  Agent's others' daily budget is spent, checked again here because the reply that just ended is settled by now (the
+  notice, once a day, and the owner pushed their Agent); the caller's limit does not apply to it: what it answers was
+  folded into a reply under way, which is never refused.
 - A halt (`POST /api/conversations/:id/agents/halt`) cancels the group's queued runs Agents called for (`halted`) and
   marks the running ones `interrupted` `halted`: never posted, they end `cancelled`, `halted`, settled as any.
 - What the group sees of it (`runs.ts` `groupRuns`, `runAudience`; Replies, In a group): nothing is stored per member.
@@ -1892,7 +1952,9 @@ dropped) — and, at start-up recovery or a release, except a run that ends `fai
 too). (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a resume.) In
 the Agent's own conversation the follow-up is its owner's and is queued whatever the owner's replies a minute (it
 answers what they wrote meanwhile). In a group it is decided as In a group (above) says: whose it is, the halt and the
-chain budget, and the owner's replies a minute — over it, the Agent's reusable `rate_limited` run there records it.
+chain budget, the others' daily budget, and the owner's replies a minute in its lane — over it, the Agent's reusable
+`rate_limited` run there records it. A mention folded into a queued run turns it the owner's own (the owner its caller)
+when it is the owner's call; another person's leaves its lane and first caller.
 
 **Pause and delete** end the Agent's active replies, in every conversation, for good, in their own transaction (under
 the Agent's lock): a queued run becomes `cancelled` (`agent_paused` / `agent_deleted`; it never reached a model, so it
@@ -1927,8 +1989,10 @@ row orders it with the sends there and with the worker. A deleted Agent's leavin
 nothing more: its delete did.
 
 **The worker** (`runtime/worker.ts`) claims the oldest queued reply whose owner has fewer than `AGENT_MAX_CONCURRENT_RUNS`
-(2) runs running, replies and persona drafts together (further replies wait queued), at most `AGENT_MAX_RUNS_IN_FLIGHT`
-(8) at once in the service.
+(4) runs running, replies and persona drafts together, and — unless it is of the owner's own lane — fewer than
+`AGENT_MAX_CONCURRENT_OTHERS_RUNS` (3) running in the other lanes (further replies wait queued: a crowd calling the
+owner's Agents fills at most 3 of the 4 places, so the owner's own reply finds one), at most `AGENT_MAX_RUNS_IN_FLIGHT`
+(16) at once in the service. Each claim logs how long the reply waited (`run_wait_ms`, Rate limits, Metrics in the log).
 A draft counts the owner's running calls under the account's lock, the worker's claim does not take that lock: so a
 draft and a reply that start at the same moment may briefly run one over the limit (never more: the worker claims one
 run at a time, and drafts wait for each other on the lock). It is woken after a trigger commits and also looks every
@@ -2044,7 +2108,7 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   pass it is named), each checked on its stored size before a byte is read. **Memory:** the worst case for one reply is
   20 MiB of attachment bytes, held in up to about five copies at its peak (the bytes, the model library's base64 text of
   them, a third larger, the request body holding that text, and its encoded bytes), and at most
-  `AGENT_MAX_RUNS_IN_FLIGHT` (8) replies run at once: about 8 × 20 MiB × 5 = 800 MiB for the whole service at the
+  `AGENT_MAX_RUNS_IN_FLIGHT` (16) replies run at once: about 16 × 20 MiB × 5 = 1.6 GiB for the whole service at the
   default (lower `AGENT_MAX_RUNS_IN_FLIGHT` on a small container). Blobs are read with no transaction open. A missing blob is shown by name (and logged), and so is one whose read
   fails or takes more than 15 s (logged once): an unreadable file does not fail the reply. Only when two reads have
   failed and none of this reply's has succeeded (a missing blob counts as an answer of the store) is the store down: the

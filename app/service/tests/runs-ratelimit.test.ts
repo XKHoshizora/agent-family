@@ -9,7 +9,8 @@ import { closeAllSockets, connect } from "./helpers/ws.ts";
 /**
  * The limits on replies (spec 6.4 "保护性上限", README "Agents and runs"): an owner starts at most
  * `AGENT_RUNS_PER_MINUTE` (20) replies a minute — counted exactly, also when two of their Agents are written to at the
- * same instant — and has at most `AGENT_MAX_CONCURRENT_RUNS` (2) running at once; further ones wait queued.
+ * same instant — and has at most `AGENT_MAX_CONCURRENT_RUNS` running at once (the default is 4, at most 3 of them for
+ * others' calls; this file sets 2 and 2 explicitly, below); further ones wait queued.
  */
 
 const gateway = scriptedGateway();
