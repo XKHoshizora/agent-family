@@ -88,6 +88,8 @@ interface ViaRow {
   via_reasoning: ReasoningLevel | null;
   /** Micro-points charged for the run (free allowance plus balance), as text. */
   via_points: string | null;
+  /** Whether the run was a proactive one (nobody called its Agent) as stored on the run row: a run a mention took over is not. */
+  via_proactive: boolean | null;
 }
 
 /**
@@ -99,7 +101,7 @@ function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
   const id = r.via_model;
   const model: WireVia["model"] =
     r.via_source === "site" ? { source: "site", id, label: config.siteModels.find((m) => m.id === id)?.label ?? id } : { source: "provider", model: id };
-  return { model, reasoning: r.via_reasoning, points: formatPoints(BigInt(r.via_points)) };
+  return { model, reasoning: r.via_reasoning, points: formatPoints(BigInt(r.via_points)), ...(r.via_proactive === true ? { proactive: true as const } : {}) };
 }
 
 /** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
@@ -200,13 +202,14 @@ export async function toWireForReaders(
   const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean } & ViaRow>(
     `select r.reader_id, m.id,
             coalesce(c.type = 'agent' or (c.type = 'group' and sender.owner_id = r.reader_id), false) as with_reasoning,
-            via.source as via_source, via.model as via_model, via.reasoning as via_reasoning, via.points as via_points
+            via.source as via_source, via.model as via_model, via.reasoning as via_reasoning, via.points as via_points,
+            via.proactive as via_proactive
        from unnest($1::uuid[]) as r (reader_id)
        cross join messages m ${visibleJoin("r.reader_id")}
        join conversations c on c.id = m.conversation_id
        left join principals sender on sender.id = m.sender_id
        left join lateral (
-         select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points
+         select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points, run.lane = 'proactive' as proactive
            from agent_runs run
            join usage_records u on u.run_id = run.id
           where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")}

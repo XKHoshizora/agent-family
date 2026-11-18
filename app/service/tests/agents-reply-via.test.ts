@@ -427,3 +427,46 @@ describe("points is what was charged, not what the call cost", () => {
     expect(read.points).toBe("1.1");
   });
 });
+
+describe("a reply nobody called for: its owner's via says so, and nobody else's", () => {
+  /** `lane` is what the run row holds: a proactive run, or one a member's mention took over while it was queued. */
+  async function withLane(w: ViaWorld, agentId: string, lane: string) {
+    await db.query("update agent_runs set lane = $2 where id = $1", [await runOf(w.g, agentId), lane]);
+  }
+
+  it("a proactive run's reply carries via.proactive: true for its owner on every read; a mentioned run's reply has no such key", async () => {
+    const w = await viaWorld();
+    await withLane(w, w.sol.id, "proactive");
+    const reads = async (who: Actor, seq: number) => {
+      const single = (await api(app, who, "GET", `/api/conversations/${w.g}/messages/${seq}`)).json.message;
+      const history = (await api(app, who, "GET", `/api/conversations/${w.g}/messages`)).json.messages.find((m: any) => m.seq === seq);
+      const sync = (await api(app, who, "GET", "/api/sync")).json.messages.find((m: any) => m.conversationId === w.g && m.seq === seq);
+      const search = (await api(app, who, "GET", "/api/search?q=REPLY-q9x")).json.messages.find((m: any) => m.seq === seq);
+      return [single, history, sync, search].map((m) => m.via);
+    };
+    for (const via of await reads(w.owen, w.mine)) expect(via).toEqual({ ...SOL_VIA, proactive: true });
+    // ned's reply came from a mentioned run (lane own): the key is absent, not false.
+    for (const via of await reads(w.ned, w.theirs)) {
+      expect(via).toEqual(PROV_VIA);
+      expect("proactive" in via).toBe(false);
+    }
+  });
+
+  it("a run queued proactive and taken over by a member's mention (lane others) has no key", async () => {
+    const w = await viaWorld();
+    await withLane(w, w.sol.id, "others");
+    const via = (await api(app, w.owen, "GET", `/api/conversations/${w.g}/messages/${w.mine}`)).json.message.via;
+    expect(via).toEqual(SOL_VIA);
+    expect("proactive" in via).toBe(false);
+  });
+
+  it("a fellow member and the other Agent's owner get no via on a proactive reply, and no word of its lane anywhere", async () => {
+    const w = await viaWorld();
+    await withLane(w, w.sol.id, "proactive");
+    for (const who of [w.mia, w.ned]) {
+      const read = await api(app, who, "GET", `/api/conversations/${w.g}/messages`);
+      const copy = read.json.messages.find((m: any) => m.seq === w.mine);
+      expect([who.handle, "via" in copy, JSON.stringify(read.json).includes("proactive")]).toEqual([who.handle, false, false]);
+    }
+  });
+});

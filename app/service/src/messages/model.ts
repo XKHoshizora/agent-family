@@ -201,6 +201,8 @@ export const wireMessageSchema = z.object({
       ]),
       reasoning: z.enum(REASONING_LEVELS),
       points: z.string(),
+      /** Present (true) only when nobody called the Agent: the reply came from a proactive run. Never false. */
+      proactive: z.literal(true).optional(),
     })
     .optional(),
   createdAt: z.string(),

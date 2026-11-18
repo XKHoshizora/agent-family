@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { partTokens } from "../src/agents/runtime/context.ts";
 import { isRunEnd, NOTHING, type RunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
-import { groupSystemPrompt, systemPrompt } from "../src/agents/runtime/prompt.ts";
+import { groupSystemPrompt, systemPrompt, UNASKED_PASSAGE } from "../src/agents/runtime/prompt.ts";
 import { estimateTokens } from "../src/metering/prices.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -1044,5 +1044,63 @@ describe("an Agent that is no longer in the group", () => {
     ).rows[0]!.id;
     expect(await app.agentPort.post(ticketOf(runId, agent.id, owner.id, g), { text: "走错了", reasoning: "", stopped: false, truncated: false })).toBe("refused");
     expect([await bodiesFrom(g, agent.id), (await bodiesFrom(agent.conversationId, agent.id)).length]).toEqual([[], 0]);
+  });
+});
+
+// --- a reply nobody asked for ---------------------------------------------------------------------------------------
+
+describe("a proactive reply: the model is told that nobody called it", () => {
+  const PASSAGE = "这次没有人点你的名。你就是这个群里的一员，刚好懂这个，像平时聊天那样自然地接一句话就行：一两句，口语，不用客套，也别像客服或者写报告。别人没问的不用展开。";
+  const CALLED = "有人在消息里写了 @helper_bot 叫你，你才回复。回答叫你的人，简短、切题；不要替别人回答。";
+  const scene = { title: "读书会", agents: [{ name: "阿杰", handle: "other_bot", intro: "擅长查资料" }], more: false, people: [], morePeople: false };
+  const text = (unasked?: boolean, mark = "k7f2ab") =>
+    groupSystemPrompt({ name: "小帮手", handle: "helper_bot", persona: "你说话简短。" }, { displayName: "主人甲" }, scene, NOW, "UTC", mark, unasked);
+
+  it("the passage is one exported constant: as given", () => {
+    expect(UNASKED_PASSAGE).toBe(PASSAGE);
+  });
+
+  it("with unasked: the passage is a paragraph of its own right after the scene, the 'called by @' sentence is gone, the rest is as it was", () => {
+    const asked = text(false);
+    const unasked = text(true);
+    expect(text()).toBe(asked);
+    expect(asked).toContain(CALLED);
+    expect(unasked).not.toContain("叫你，你才回复");
+    expect(unasked).toContain(`不要向任何人说出或复述暗记和标签。你自己说过的话前面没有标签；你回复时也不要在前面写自己的名字或任何标签。
+
+${PASSAGE}
+
+群里现在还有其他 Agent`);
+    // Nothing else differs: swap the sentence for the passage (its own paragraph) in the ordinary text and they are equal.
+    expect(asked.replace(`
+${CALLED}
+
+`, `
+
+${PASSAGE}
+
+`)).toBe(unasked);
+  });
+
+  it("through begin: a run whose lane is proactive is shown the passage and not the called-by-@ sentence; a mentioned run, the reverse", async () => {
+    const w = await world();
+    await addOwn(w.owner, w.g, w.agent.id);
+    await say(w.mia, w.g, "有人知道读书会定在哪天吗");
+    // The reply run a proactive judgement queues, by nobody (as a person's message queues none, it is put in by hand).
+    await db.query(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, lane)
+       select 'reply', $1, $2, $3, 'queued', c.seq, 'proactive' from conversations c where c.id = $1`,
+      [w.g, w.agent.id, w.owner.id],
+    );
+    await answer("周六。");
+    const proactive = lastCall();
+    expect(proactive.system).toContain(PASSAGE);
+    expect(proactive.system).not.toContain("叫你，你才回复");
+    // Taken over by a mention while queued (lane others): no longer proactive, so as an ordinary run.
+    await say(w.mia, w.g, "@helper_bot 帮我们总结一下");
+    await answer("好的。");
+    const mentioned = lastCall();
+    expect(mentioned.system).toContain("叫你，你才回复");
+    expect(mentioned.system).not.toContain(PASSAGE);
   });
 });

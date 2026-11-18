@@ -1703,9 +1703,10 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                                        // an Agent's reply that proposed a persona, for the Agent's owner only; intro and
                                        // field only when proposed (Persona proposals)
   "via": { "model": { "source": "site", "id": "…", "label": "…" } | { "source": "provider", "model": "…" },
-           "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "points": "6.9" },
+           "reasoning": "none" | "low" | "medium" | "high" | "xhigh" | "max", "points": "6.9", "proactive": true },
                                        // an Agent's reply, for the Agent's owner only (absent for everyone else): the
-                                       // model and reasoning level its run used, and what you were charged for it (below)
+                                       // model and reasoning level its run used, and what you were charged for it (below);
+                                       // `proactive: true` only when nobody called the Agent for it (otherwise absent)
   "createdAt": "2026-11-16T01:02:03.000Z"
 }
 ```

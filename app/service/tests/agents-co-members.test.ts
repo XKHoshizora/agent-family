@@ -109,8 +109,8 @@ async function postAs(conv: string, senderId: string, text: string, reasoning?: 
  */
 async function providerRun(conv: string, agentId: string, ownerId: string, model: string, reasoning: string): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
-    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, reasoning, started_at, finished_at)
-     select 'reply', $1, $2, $3, 'done', c.seq, 'provider', $4, $5, now(), now() from conversations c where c.id = $1 returning id`,
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, reasoning, started_at, finished_at, lane)
+     select 'reply', $1, $2, $3, 'done', c.seq, 'provider', $4, $5, now(), now(), 'proactive' from conversations c where c.id = $1 returning id`,
     [conv, agentId, ownerId, model, reasoning],
   );
   const id = rows[0]!.id;
@@ -159,7 +159,7 @@ async function world() {
   await befriend(app, mia, sam);
   await seat(g, agent.id);
   expect((await api(app, owner, "PUT", `/api/agents/${agent.id}/appellations/${mia.id}`, { appellation: HIDDEN.appellation })).status).toBe(200);
-  // Said as a reply its owner's provider model gave there at a thinking level (its owner's `via`).
+  // Said as a reply its owner's provider model gave there at a thinking level, unasked (its owner's `via`).
   const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high");
   const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
@@ -225,7 +225,7 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
     // Its owner does read the thinking stored with its message in the group, and which model and level gave it (so
     // their absence below means something).
     const ownersCopy = (await api(app, owner, "GET", `/api/conversations/${g}/messages/${agentSeq}`)).json.message;
-    expect([ownersCopy.reasoning, ownersCopy.via]).toEqual([HIDDEN.groupReasoning, { model: { source: "provider", model: HIDDEN.model }, reasoning: "high", points: "0" }]);
+    expect([ownersCopy.reasoning, ownersCopy.via]).toEqual([HIDDEN.groupReasoning, { model: { source: "provider", model: HIDDEN.model }, reasoning: "high", points: "0", proactive: true }]);
     const bodies: Array<[string, unknown]> = [];
     const read = async (label: string, method: "GET" | "POST", url: string, body?: unknown) => {
       const res = await api(app, mia, method, url, body);
