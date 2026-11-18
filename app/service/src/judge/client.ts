@@ -33,8 +33,8 @@ export interface Judge {
   ask(state: string, questions: readonly Question[], signal?: AbortSignal): Promise<Map<string, Answer>>;
 }
 
-/** The upstream allows this many options for one choice. */
-const MAX_OPTIONS = 255;
+/** The most options one choice question is sent with; one with more is not sent (`askable`). */
+export const MAX_CHOICE_OPTIONS = 254;
 /** An answer is a few numbers; this is plenty. */
 const MAX_RESPONSE_BYTES = 64 * 1024;
 /** Calls in flight at once, for the judgement alone. */
@@ -43,11 +43,11 @@ const MAX_CALLS = 32;
 const isProbability = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1;
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
-/** Whether `q` can be sent at all: a choice needs at least one and fewer than 255 options, each with a name. */
+/** Whether `q` can be sent at all: a choice needs 1 to `MAX_CHOICE_OPTIONS` options, each with a name. */
 function askable(q: Question): boolean {
   if (q.type === "noul") return true;
   const names = Object.keys(q.options);
-  return names.length > 0 && names.length < MAX_OPTIONS && names.every((n) => n !== "");
+  return names.length > 0 && names.length <= MAX_CHOICE_OPTIONS && names.every((n) => n !== "");
 }
 
 function bodyOf(model: string, state: string, questions: readonly Question[]): string {

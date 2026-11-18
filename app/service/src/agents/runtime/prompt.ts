@@ -121,9 +121,10 @@ const VERTICAL_RUN = new RegExp(`[${VERTICAL_SPACE}]+`, "gu");
 
 /**
  * Prose someone else wrote, as the system text shows it: plain text on one line — every line break (and any other
- * vertical space) becomes a space — so it cannot start a line of its own.
+ * vertical space) becomes a space — so it cannot start a line of its own. Also how a proactive judgement shows a
+ * message, an intro and a field (agents/proactive/candidates.ts).
  */
-const oneLine = (text: string): string => text.replace(VERTICAL_RUN, " ").trim();
+export const oneLine = (text: string): string => text.replace(VERTICAL_RUN, " ").trim();
 
 /**
  * What a field of a label or of the roster may not hold once folded (NFKC, `labelSafe`), for `replace`: every bracket

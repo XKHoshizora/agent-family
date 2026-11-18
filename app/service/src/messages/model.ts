@@ -31,6 +31,12 @@ export type SystemEvent =
    * site day per group and Agent.
    */
   | { event: "agent_daily_budget_reached"; actorId: string; agentId: string }
+  /**
+   * In a group: someone's message asked Agent `agentId` (also `actorId`) to be quiet, and the judgement model was sure of
+   * it, so it will hardly reply there unasked for a while; a mention still calls it. At most once an hour per group and
+   * Agent.
+   */
+  | { event: "agent_quieted"; actorId: string; agentId: string }
   | PairEvent;
 
 /** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */

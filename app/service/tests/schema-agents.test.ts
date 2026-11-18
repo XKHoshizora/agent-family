@@ -177,6 +177,14 @@ describe("agent, provider, metering and run tables", () => {
     expect((await db.query(`select 1 from agent_group_state`)).rowCount).toBe(0);
   });
 
+  test("judge_usage is one row per day, starting at no calls, never below none", async () => {
+    await db.query(`insert into judge_usage (day) values ('2026-11-19')`);
+    expect((await db.query(`select day::text as day, calls from judge_usage`)).rows).toEqual([{ day: "2026-11-19", calls: 0 }]);
+    await rejectedWith(UNIQUE_VIOLATION, `insert into judge_usage (day, calls) values ('2026-11-19', 1)`);
+    await rejectedWith(CHECK_VIOLATION, `insert into judge_usage (day, calls) values ('2026-11-20', -1)`);
+    await rejectedWith("23502", `insert into judge_usage (day) values (null)`);
+  });
+
   test("conversations.agents_halted_seq is null until a halt sets it", async () => {
     const owner = await human("owner_hs");
     const { rows } = await db.query(`insert into conversations (type, creator_id) values ('group', $1) returning agents_halted_seq`, [owner]);

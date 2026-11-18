@@ -230,8 +230,12 @@ async function startedLastMinute(t: Tx, ownerId: string, own: boolean): Promise<
   return rows[0]!.n;
 }
 
-/** Whether `ownerId` has started their replies a minute in `lane` (`startedLastMinute`): over it, a reply is refused. */
-async function overLaneLimit(t: Tx, ownerId: string, lane: Lane, config: RunLimits): Promise<boolean> {
+/**
+ * Whether `ownerId` has started their replies a minute in `lane` (`startedLastMinute`): over it, a reply is refused. A
+ * reply nobody called for (`proactive`) is held to the others' minute, as a call by someone else is
+ * (agents/proactive/decide.ts).
+ */
+export async function overLaneLimit(t: Tx, ownerId: string, lane: Lane, config: RunLimits): Promise<boolean> {
   const own = lane === "own";
   return (await startedLastMinute(t, ownerId, own)) >= (own ? config.agentRunsPerMinute : config.agentOthersRunsPerMinute);
 }
@@ -264,8 +268,8 @@ export type TriggeredBy = "human" | "agent";
 /**
  * A run's lane (`agent_runs.lane`), which the limits read: `own` when the Agent's owner called for it — themselves, or
  * through an Agent's message they are behind (`behindAgentMessage`); so is every reply in the Agent's own conversation, a
- * retry and a persona draft — `others` when someone else did, `proactive` when nobody did (batch 2D: nothing here
- * records it).
+ * retry and a persona draft — `others` when someone else did, `proactive` when nobody did (batch 2D: the judgement
+ * model picked the Agent, agents/proactive/decide.ts; no caller).
  */
 export type Lane = "own" | "others" | "proactive";
 
