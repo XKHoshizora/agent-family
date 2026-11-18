@@ -59,21 +59,24 @@ interface Fake {
 }
 
 const DELAY = 20;
-/** The hourly caps on judgements of one group and of one sender's messages, as configured by default. */
-const PER_HOUR = 120;
+/** The hourly caps on judgements about one group and about one sender's messages, as configured by default. */
+const PER_GROUP_HOUR = 600;
+const PER_SENDER_HOUR = 300;
 const HOUR = 3_600_000;
 
 /**
  * A scheduler over a recording `decide` and `act`. `hold`: each decision waits until the test settles it; `decide`
- * replaces the decision's outcome (thrown or returned) after it is recorded; `act` likewise. `maxAtOnce`: the
- * scheduler's limit on decisions in flight (default its own); `perGroupHour`, `perSenderHour` its hourly caps (default
- * `PER_HOUR`).
+ * replaces the decision's outcome (thrown or returned) after it is recorded; `act` likewise. `asks`: whether a decision
+ * asks the judgement model (it then says so at once, as a decision does as it calls the judge; default: every one does).
+ * `maxAtOnce`: the scheduler's limit on decisions in flight (default its own); `perGroupHour`, `perSenderHour` its
+ * hourly caps (default the configuration's).
  */
 function fake(
   opts: {
     hold?: boolean;
     decide?: (call: number) => Triggered | Promise<Triggered>;
     act?: (call: number) => void | Promise<void>;
+    asks?: (call: number) => boolean;
     maxAtOnce?: number;
     perGroupHour?: number;
     perSenderHour?: number;
@@ -93,13 +96,14 @@ function fake(
   } as unknown as Pick<FastifyBaseLogger, "error" | "info">;
   f.scheduler = createProactiveScheduler({
     delayMs: DELAY,
-    perGroupHour: opts.perGroupHour ?? PER_HOUR,
-    perSenderHour: opts.perSenderHour ?? PER_HOUR,
+    perGroupHour: opts.perGroupHour ?? PER_GROUP_HOUR,
+    perSenderHour: opts.perSenderHour ?? PER_SENDER_HOUR,
     log,
     ...(opts.maxAtOnce === undefined ? {} : { maxAtOnce: opts.maxAtOnce }),
-    decide: (conversationId, seq) => {
+    decide: (conversationId, seq, asked) => {
       f.decided.push([conversationId, seq]);
       const call = f.decided.length;
+      if (opts.asks?.(call) ?? true) asked();
       inFlight.set(conversationId, (inFlight.get(conversationId) ?? 0) + 1);
       f.mostAtOnce = Math.max(f.mostAtOnce, inFlight.get(conversationId)!);
       f.mostOverall = Math.max(f.mostOverall, ++overall);
@@ -514,27 +518,44 @@ describe("the hourly caps: no group and no sender uses up the site's judgements"
     await f.scheduler.idle();
   };
 
-  it(`the ${PER_HOUR + 1}st decision of one group within the hour is skipped — not queued, not judged — while another group's goes on; logged once`, async () => {
+  it(`the ${PER_GROUP_HOUR + 1}st judged decision of one group within the hour is skipped — not queued, not judged — while another group's goes on; logged once`, async () => {
     const f = fake();
-    for (let i = 1; i <= PER_HOUR; i++) await decideOne(f, "g", i, `s${i}`);
-    expect(f.decided).toHaveLength(PER_HOUR);
-    await decideOne(f, "g", PER_HOUR + 1, "new");
+    for (let i = 1; i <= PER_GROUP_HOUR; i++) await decideOne(f, "g", i, `s${i}`);
+    expect(f.decided).toHaveLength(PER_GROUP_HOUR);
+    await decideOne(f, "g", PER_GROUP_HOUR + 1, "new");
     await decideOne(f, "h", 1, "new");
-    expect(f.decided.slice(PER_HOUR)).toEqual([["h", 1]]);
+    expect(f.decided.slice(PER_GROUP_HOUR)).toEqual([["h", 1]]);
     expect(vi.getTimerCount()).toBe(0);
-    await decideOne(f, "g", PER_HOUR + 2, "newer");
-    expect(f.decided.filter(([c]) => c === "g")).toHaveLength(PER_HOUR);
+    await decideOne(f, "g", PER_GROUP_HOUR + 2, "newer");
+    expect(f.decided.filter(([c]) => c === "g")).toHaveLength(PER_GROUP_HOUR);
     expect(f.infos).toEqual([{ metric: "judge_capped", scope: "group", conversationId: "g" }]);
   });
 
   it("the same for one sender across groups: their messages are not judged for an hour, anyone else's are", async () => {
     const f = fake();
-    for (let i = 1; i <= PER_HOUR; i++) await decideOne(f, `g${i}`, 1, "busy");
+    for (let i = 1; i <= PER_SENDER_HOUR; i++) await decideOne(f, `g${i}`, 1, "busy");
     await decideOne(f, "other", 1, "busy");
     await decideOne(f, "other", 2, "calm");
     await decideOne(f, "another", 1, "busy");
-    expect(f.decided.slice(PER_HOUR)).toEqual([["other", 2]]);
+    expect(f.decided.slice(PER_SENDER_HOUR)).toEqual([["other", 2]]);
     expect(f.infos).toEqual([{ metric: "judge_capped", scope: "sender", conversationId: "other", senderId: "busy" }]);
+  });
+
+  it("only a decision that asks the judgement model counts: any number that do not (no option, a stale or calling message) caps nothing", async () => {
+    const f = fake({ asks: () => false });
+    for (let i = 1; i <= PER_GROUP_HOUR + 1; i++) await decideOne(f, "g", i, "busy");
+    expect(f.decided).toHaveLength(PER_GROUP_HOUR + 1);
+    expect(f.infos).toEqual([]);
+    expect(f.scheduler.remembered()).toBe(0);
+    // Every other one asks: those alone count, toward the group's and the sender's caps.
+    const g = fake({ asks: (call) => call % 2 === 0, perGroupHour: 3, perSenderHour: 100 });
+    for (let i = 1; i <= 7; i++) await decideOne(g, "g", i, "busy");
+    expect(g.decided).toHaveLength(6);
+    expect(g.infos).toEqual([{ metric: "judge_capped", scope: "group", conversationId: "g" }]);
+    const s = fake({ asks: (call) => call % 2 === 0, perGroupHour: 100, perSenderHour: 2 });
+    for (let i = 1; i <= 5; i++) await decideOne(s, `g${i}`, 1, "busy");
+    expect(s.decided).toHaveLength(4);
+    expect(s.infos).toEqual([{ metric: "judge_capped", scope: "sender", conversationId: "g5", senderId: "busy" }]);
   });
 
   it("the hour slides: once the first decision of it is an hour old, the group is decided again; capped is told again an hour after it was", async () => {
@@ -868,6 +889,51 @@ describe("what comes of it, with the reply worker running", () => {
     await app.deps.proactive!.idle();
     expect(judge.calls).toEqual([]);
     expect(await runsOf(db, anna.id, w.g)).toEqual([]);
+  });
+});
+
+describe("the hourly caps through the app: only messages actually judged count", () => {
+  const WAIT = 30;
+  const { app } = useApp({
+    env: { ...SITE_ENV, PROACTIVE: JSON.stringify({ perGroupHour: 2, perSenderHour: 3 }) },
+    judge,
+    agentWorker: false,
+    config: { judge: JUDGE },
+    proactive: { delayMs: WAIT },
+  });
+  /** A message of `who`, waited for and decided. */
+  const sayDecided = async (who: Actor, conv: string, text: string) => {
+    await say(app, who, conv, text);
+    await app.deps.proactive!.idle();
+  };
+
+  it("a group: messages decided while no Agent there is proactive count for nothing; of those judged, the third in the hour is not", async () => {
+    const w = await world(app);
+    judge.answer(byName({ nobody: 0.95 }));
+    for (const text of ["早", "今天天气不错", "大家在吗"]) await sayDecided(w.member, w.g, text);
+    expect(judge.calls).toEqual([]);
+    await agentIn(app, w.owner, "anna", w.g);
+    await sayDecided(w.third, w.g, "有人会做饭吗");
+    await sayDecided(w.owner, w.g, "我也想学");
+    await sayDecided(w.member, w.g, "第三个问题");
+    expect(judge.calls.map((c) => c.state.split("\n").at(-1))).toEqual(["third：有人会做饭吗", "owner：我也想学"]);
+  });
+
+  it("a sender: across groups, the fourth of their messages judged in the hour is not; unjudged ones never counted", async () => {
+    const w = await world(app);
+    judge.answer(byName({ nobody: 0.95 }));
+    for (const text of ["一", "二", "三", "四"]) await sayDecided(w.member, w.g, text);
+    const groups: string[] = [];
+    for (const title of ["a", "b", "c", "d"]) {
+      const g = await group(app, w.owner, `group ${title}`, [w.member, w.third]);
+      await agentIn(app, w.owner, `bot_${title}`, g);
+      groups.push(g);
+    }
+    for (const g of groups) await sayDecided(w.member, g, "有人懂吗");
+    expect(judge.calls).toHaveLength(3);
+    // Someone else's message in the fourth group is judged.
+    await sayDecided(w.owner, groups[3]!, "我来问");
+    expect(judge.calls).toHaveLength(4);
   });
 });
 

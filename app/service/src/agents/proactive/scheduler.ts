@@ -12,9 +12,11 @@ import { createHourlyCap } from "./hourly.ts";
  * decision would refuse the older message anyway — this only saves asking). Never two judgements of one group at once: a
  * message while one is in flight waits for it to settle, then for a fresh debounce. At most `maxAtOnce` decisions are in
  * flight, all groups together: a group whose debounce is over while that many are waits its turn, oldest first. No group
- * and no sender may use up the site's judgements of the day: once `perGroupHour` decisions about the group, or
- * `perSenderHour` about messages of the latest one's sender, have started within the last hour, its decision is skipped
- * — neither queued nor judged — and that is logged once an hour of each group and each sender (`judge_capped`, ids only).
+ * and no sender may use up the site's judgements of the day: once the judgement model has been asked `perGroupHour`
+ * times within the last hour about the group, or `perSenderHour` times about messages of the latest one's sender, its
+ * decision is skipped — neither queued nor judged — and that is logged once an hour of each group and each sender
+ * (`judge_capped`, ids only). Only a decision that asks counts (it says so, `decide`'s `asked`): one that ends before —
+ * no Agent to ask about, a message no longer to judge — counts for nothing.
  *
  * In memory, in this one process (plan ruling: a restart loses at most the judgements of the last debounce, which is
  * "nobody replies"). It never throws and never rejects: what `decide` or `act` throws is logged with the group's id, never
@@ -48,14 +50,15 @@ export interface ProactiveScheduler {
 export const MAX_DECISIONS_AT_ONCE = 8;
 
 export interface ProactiveSchedulerDeps {
-  decide(conversationId: string, seq: number): Promise<Triggered>;
+  /** Decides about message `seq` of the group; calls `asked` as it asks the judgement model (at most once). */
+  decide(conversationId: string, seq: number, asked: () => void): Promise<Triggered>;
   act(conversationId: string, triggered: Triggered): void | Promise<void>;
   delayMs: number;
   /** Default `MAX_DECISIONS_AT_ONCE`. */
   maxAtOnce?: number;
-  /** The most decisions about one group started within an hour (`PROACTIVE.perGroupHour`). */
+  /** The most times within an hour the judgement model is asked about one group (`PROACTIVE.perGroupHour`). */
   perGroupHour: number;
-  /** The most decisions about one sender's messages, in any group, started within an hour (`PROACTIVE.perSenderHour`). */
+  /** The most times within an hour it is asked about one sender's messages, in any group (`PROACTIVE.perSenderHour`). */
   perSenderHour: number;
   log: Pick<FastifyBaseLogger, "error" | "info">;
 }
@@ -82,7 +85,7 @@ export function createProactiveScheduler({
   log,
 }: ProactiveSchedulerDeps): ProactiveScheduler {
   const groups = new Map<string, Group>();
-  /** The decisions started within the last hour, by group and by the sender of the message decided about. */
+  /** The judgements asked for within the last hour, by group and by the sender of the message judged. */
   const byGroup = createHourlyCap(perGroupHour);
   const bySender = createHourlyCap(perSenderHour);
   /** The groups waiting for a decision's place, oldest first. */
@@ -116,7 +119,7 @@ export function createProactiveScheduler({
   };
 
   /**
-   * Whether the group, or the sender of the message it waits with, has had its decisions of the hour: then nothing waits
+   * Whether the group, or the sender of the message it waits with, has had its judgements of the hour: then nothing waits
    * there any more (`drop`). Logged once an hour of each group and each sender.
    */
   const capped = (id: string, g: Group): boolean => {
@@ -147,29 +150,33 @@ export function createProactiveScheduler({
   };
 
   /**
-   * One decision about the message the group waits with, counted for the group and for the message's sender as it
-   * starts, and acted on unless the scheduler closed meanwhile.
+   * One decision about the message the group waits with — counted for the group and for the message's sender if, and as,
+   * it asks the judgement model — acted on unless the scheduler closed meanwhile.
    */
   const judge = (id: string, g: Group): void => {
     const seq = g.seq!;
-    const now = Date.now();
-    byGroup.count(id, now);
-    bySender.count(g.sender!, now);
+    const sender = g.sender!;
     g.seq = null;
     g.sender = null;
     g.queued = false;
     g.deciding = seq;
     running++;
-    void decideAndAct(id, seq)
+    const asked = (): void => {
+      if (closed) return;
+      const now = Date.now();
+      byGroup.count(id, now);
+      bySender.count(sender, now);
+    };
+    void decideAndAct(id, seq, asked)
       .finally(() => settled(id, g))
       // Only a logger that throws gets here; nothing is left to tell, and nothing may go unhandled.
       .catch(() => {});
   };
 
-  const decideAndAct = async (id: string, seq: number): Promise<void> => {
+  const decideAndAct = async (id: string, seq: number, asked: () => void): Promise<void> => {
     let triggered: Triggered | null = null;
     try {
-      triggered = await decide(id, seq);
+      triggered = await decide(id, seq, asked);
     } catch (err) {
       log.error({ err, conversationId: id }, "a proactive judgement failed: no Agent replies unasked to that message");
     }

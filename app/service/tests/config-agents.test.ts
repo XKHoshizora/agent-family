@@ -342,8 +342,8 @@ describe("the proactive replies' configuration", () => {
     quietSmall: { at: 0.3, raise: 0.15, halfLifeS: 600 },
     cap: 0.98,
     fuse: { perSeconds: 10, perHour: 30 },
-    perGroupHour: 120,
-    perSenderHour: 120,
+    perGroupHour: 600,
+    perSenderHour: 300,
   };
 
   test("unset or empty: every default", () => {

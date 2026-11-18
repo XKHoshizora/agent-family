@@ -300,7 +300,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
       : proactiveAsked === null || deps.judge === null || config.judge === null
         ? null
         : createProactiveScheduler({
-            decide: (conversationId, seq) => decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log }, conversationId, seq),
+            decide: (conversationId, seq, asked) => decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log, onAsk: asked }, conversationId, seq),
             // `agentPort` is declared below: the port takes the scheduler (an Agent's post cancels a wait) and this takes
             // the port. Both exist before any message is noted, so before any debounce can end and call this.
             act: (_conversationId, triggered) => {

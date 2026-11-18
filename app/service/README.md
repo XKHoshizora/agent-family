@@ -171,8 +171,9 @@ that called no Agent, it waits until nobody has written there for `PROACTIVE.deb
 judged once and acts on the outcome as on a mention's (notices published, runs announced). A message that called an
 Agent — one the trigger acted on or refused — cancels the wait, and so does an Agent's post there; any other message
 replaces the one waiting, also one naming an Agent by `@handle` that the trigger ignored, whose decision then refuses it.
-At most 8 decisions are in flight at once, all groups together, and at most `PROACTIVE.perGroupHour` of one group and
-`PROACTIVE.perSenderHour` of one sender's messages start within an hour (Proactive replies, When a message is judged). In
+At most 8 decisions are in flight at once, all groups together, and the judgement model is asked at most
+`PROACTIVE.perGroupHour` times about one group and `PROACTIVE.perSenderHour` about one sender's messages within an hour
+(Proactive replies, When a message is judged). In
 memory, in this process; built only when the judgement model is configured (`JUDGE`), else null and nothing is read or
 timed for it. `proactive` (tests only): `false` builds none, `{ delayMs }` waits less.
 
@@ -2447,8 +2448,8 @@ calibrated on the real judgement model (`docs/acceptance/batch2d/calibration.md`
 | `quietBig` | `{"at": 0.8, "raise": 0.33, "halfLifeS": 3600}` (the same ranges) | The same for a sure quiet answer, which also tells the group (`agent_quieted`) |
 | `cap` | 0.98 (0–1) | The highest a threshold goes |
 | `fuse` | `{"perSeconds": 10, "perHour": 30}` (1–3 600, 1–100 000) | At most one proactive reply of an Agent in a group within this many seconds, and this many within an hour |
-| `perGroupHour` | 120 (1–100 000) | Judgements started within any hour about one group, at most; beyond, its messages are not judged until the hour slides on |
-| `perSenderHour` | 120 (1–100 000) | The same about the messages of one sender, in all groups together, so no account can use up the site's `dailyLimit` |
+| `perGroupHour` | 600 (1–100 000) | Judgements asked for within any hour about one group, at most; beyond, its messages are not judged until the hour slides on |
+| `perSenderHour` | 300 (1–100 000) | The same about the messages of one sender, in all groups together, so no account can use up the site's `dailyLimit` |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
 (`POST /api/conversations/:id/messages`, text or file; not a repeated `clientTxn`), the send route notes it after
@@ -2462,11 +2463,13 @@ decision then refuses. An Agent's post in the group drops the wait too (the grou
 twice at once: a message noted while its decision is in flight waits for that to settle, then for a fresh wait. At most 8
 decisions are in flight, all groups together (`MAX_DECISIONS_AT_ONCE`, a constant: each holds a database connection while
 it reads); a group whose wait ends while 8 are waits its turn, oldest first. No group and no sender may use up the site's
-judgements of the day: when a group's wait ends (or its turn comes), and `perGroupHour` decisions about that group, or
-`perSenderHour` about messages of the sender of the one it waits with (in any group), have started within the last hour,
-its decision is skipped — neither queued nor judged — and `judge_capped` is logged, once an hour for each group and each
-sender (Log). A decision counts as it starts; what the caps count is forgotten an hour after a group or sender was last
-counted or logged, so it holds nothing of those long gone, and all of it when the scheduler is closed. A note about a
+judgements of the day: when a group's wait ends (or its turn comes), and the judgement model has been asked
+`perGroupHour` times about that group, or `perSenderHour` times about messages of the sender of the one it waits with (in
+any group), within the last hour, its decision is skipped — neither queued nor judged — and `judge_capped` is logged,
+once an hour for each group and each sender (Log). Only a judgement counts, as the decision asks for it (`onAsk`): a
+decision that ends before — no option, a message no longer to judge, one naming an Agent — counts for nothing, so a
+lively group without a proactive Agent is never capped. What the caps count is forgotten an hour after a group or sender
+was last counted or logged, so it holds nothing of those long gone, and all of it when the scheduler is closed. A note about a
 message no newer than the one waiting or being decided changes nothing. All of it lives in this process's memory (one instance, Deployment): a restart
 loses the waits, which means nobody replies to those messages. When the service stops, the scheduler is closed first:
 nothing more is judged, and what a decision still in flight decides is dropped (the stop waits for it within
@@ -2524,7 +2527,7 @@ are checked in the order of the table.
 | Case | Log |
 |---|---|
 | No judgement model (`JUDGE` unset) | nothing: no scheduler |
-| `perGroupHour` decisions about the group, or `perSenderHour` about the sender's messages, have started within the hour | `judge_capped`, once an hour for each group and each sender |
+| The judgement model was asked `perGroupHour` times about the group, or `perSenderHour` about the sender's messages, within the hour | `judge_capped`, once an hour for each group and each sender |
 | The message called an Agent or names one by `@handle`; a message (anyone's, an Agent's included) came after it, a halt, or the group was closed before it was decided; it already led to a proactive reply; no Agent of the group is an option (`proactive` off, paused, deleted, without a model, joined at or after the message, or a block between its owner and the sender); no line of the transcript to show | nothing |
 | Agents were halted at or after the message (`POST …/agents/halt`): no message from before a halt is judged; a person's next message is, as usual | nothing |
 | The site's judgements of the site day have reached `dailyLimit` | `judge_daily_limit`, once per process and site day |

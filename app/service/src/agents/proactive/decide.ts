@@ -40,6 +40,8 @@ export interface DecideDeps {
   judge: Judge | null;
   config: RunLimits & Pick<Config, "judge" | "proactive">;
   log: Pick<FastifyBaseLogger, "info" | "debug">;
+  /** Called as the judgement model is asked, once (the scheduler counts its hourly caps by it); not when it is not. */
+  onAsk?: () => void;
 }
 
 /** Why the winner did not reply (`proactive_skipped`). */
@@ -68,6 +70,7 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   let answers: Map<string, Answer> | null = null;
   // Each channel is tried for at most `timeoutMs`; nothing waits longer than all of them together.
   const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
+  deps.onAsk?.();
   try {
     answers = await judge.ask(state, questions, deadline);
   } catch (err) {
