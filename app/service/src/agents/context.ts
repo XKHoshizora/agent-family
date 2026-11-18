@@ -6,6 +6,7 @@ import { currentMembership, VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
 import type { AttachmentRef } from "../messages/model.ts";
+import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
@@ -212,8 +213,8 @@ export const speakerLabel = (name: string, kind: "human" | "agent"): string => (
  * Up to `limit` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
  * not the fixed greeting) that belong after the topic start `from` — in its own conversation the owner's, in a group
  * everyone's but its own — and the Agent's replies to what is covered up to `coversSeq`. A reply belongs where it was
- * answered: right after the message its run covered when it began (the run is the one named by the message's
- * `client_txn`). Only the text, the attachment and the quote are read of a message — never its stored reasoning. A quote
+ * answered: right after the message its run covered when it began (the run that posted it, named by the message's
+ * `client_txn`: messages/read.ts `postingRun`). Only the text, the attachment and the quote are read of a message — never its stored reasoning. A quote
  * shows what the Agent can see of the quoted message: its text, or its attachment's name. In its own conversation the
  * owner's messages are `user` and anyone else's are left out (there is nobody else); in a group every message of
  * someone else's is `user`, starting with who said it (`speakerLabel`, their current name; a quote goes on the next
@@ -237,9 +238,7 @@ async function loadPage(
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
        from messages m ${VISIBLE_JOIN}
        join principals sp on sp.id = m.sender_id
-       left join agent_runs r
-         on r.agent_id = $1
-        and r.id = (case when m.sender_id = $1 and m.client_txn ~ '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$' then m.client_txn end)::uuid
+       left join agent_runs r on m.sender_id = $1 and ${postingRun("m", "r")}
        left join persona_proposals pp on pp.message_id = m.id and pp.agent_id = $1 and m.sender_id = $1 and not $8::boolean
       where m.conversation_id = $2 and m.seq > $3 and ($4::bigint is null or m.seq < $4::bigint)
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
