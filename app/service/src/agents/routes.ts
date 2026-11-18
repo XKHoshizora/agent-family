@@ -111,6 +111,23 @@ function assertProactiveAvailable(config: { judge: unknown }, on: boolean | unde
 const appellationSchema = userText(1, 20, { singleLine: true }).refine((s) => !hasVerticalSpace(s), "one line");
 const ownerAppellation = appellationSchema.nullable();
 
+/** What an owner may say of an Agent when creating it, and change later (`PATCH`): each optional in both. */
+const agentSettings = {
+  intro: intro.optional(),
+  field: field.optional(),
+  persona: persona.optional(),
+  replyMode: replyMode.optional(),
+  groupMentions: groupMentions.optional(),
+  chainBudget: chainBudget.optional(),
+  othersBudget: othersBudget.optional(),
+  proactive: z.boolean().optional(),
+  proactiveLevel: proactiveLevel.optional(),
+  proactiveBudget: proactiveBudget.optional(),
+  ownerAppellation: ownerAppellation.optional(),
+  reasoning: reasoning.optional(),
+  model: model.optional(),
+};
+
 const agentView = z.object({
   id: z.string(),
   handle: z.string(),
@@ -218,23 +235,7 @@ export function registerAgentRoutes(
       schema: {
         params: empty,
         querystring: empty,
-        body: z.strictObject({
-          handle: z.string().regex(/^[a-z0-9_]{3,24}$/),
-          name: agentName,
-          intro: intro.optional(),
-          field: field.optional(),
-          persona: persona.optional(),
-          replyMode: replyMode.optional(),
-          groupMentions: groupMentions.optional(),
-          chainBudget: chainBudget.optional(),
-          othersBudget: othersBudget.optional(),
-          proactive: z.boolean().optional(),
-          proactiveLevel: proactiveLevel.optional(),
-          proactiveBudget: proactiveBudget.optional(),
-          ownerAppellation: ownerAppellation.optional(),
-          reasoning: reasoning.optional(),
-          model: model.optional(),
-        }),
+        body: z.strictObject({ handle: z.string().regex(/^[a-z0-9_]{3,24}$/), name: agentName, ...agentSettings }),
         response: { 201: agentView },
       },
     },
@@ -332,22 +333,7 @@ export function registerAgentRoutes(
         params: idParams,
         querystring: empty,
         // Strict: the handle and the owner are not keys, so naming them is a 400.
-        body: z.strictObject({
-          name: agentName.optional(),
-          intro: intro.optional(),
-          field: field.optional(),
-          persona: persona.optional(),
-          replyMode: replyMode.optional(),
-          groupMentions: groupMentions.optional(),
-          chainBudget: chainBudget.optional(),
-          othersBudget: othersBudget.optional(),
-          proactive: z.boolean().optional(),
-          proactiveLevel: proactiveLevel.optional(),
-          proactiveBudget: proactiveBudget.optional(),
-          ownerAppellation: ownerAppellation.optional(),
-          reasoning: reasoning.optional(),
-          model: model.optional(),
-        }),
+        body: z.strictObject({ name: agentName.optional(), ...agentSettings }),
         response: { 200: agentView },
       },
     },
