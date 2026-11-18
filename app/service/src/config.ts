@@ -180,8 +180,12 @@ const envSchema = z.object({
   ),
   /** Replies one owner may have running at once; further ones wait queued. */
   AGENT_MAX_CONCURRENT_RUNS: wholeNumber(2, 1, 100),
-  /** Replies one owner may start per minute (counted from the stored runs; not scaled by RATE_LIMIT_SCALE). */
+  /** Replies one owner may start per minute that they called for themselves (counted from the stored runs; not scaled by RATE_LIMIT_SCALE). */
   AGENT_RUNS_PER_MINUTE: wholeNumber(20, 1, 10_000),
+  /** Replies one owner's Agents may start per minute that someone else called for, all of them together (counted apart from the owner's own). */
+  AGENT_OTHERS_RUNS_PER_MINUTE: wholeNumber(20, 1, 10_000),
+  /** Replies one person, themselves or through their Agents, may call for per minute on other people's Agents. */
+  AGENT_CALLER_RUNS_PER_MINUTE: wholeNumber(5, 1, 10_000),
   /** A reply still running after this long is ended (and so is the reading of its attachments). */
   AGENT_RUN_TIMEOUT_MS: wholeNumber(120_000, 1_000, 3_600_000),
   /** A provider model's context window when its owner does not give one, in tokens. */
@@ -281,8 +285,12 @@ export interface Config {
   agentTiers: Record<string, number>;
   /** Replies one owner may have running at once; further ones wait queued. */
   agentMaxConcurrentRuns: number;
-  /** Replies one owner may trigger per minute. */
+  /** Replies one owner may start per minute in their own lane: those they called for themselves (src/agents/runs.ts `Lane`). */
   agentRunsPerMinute: number;
+  /** Replies one owner's Agents may start per minute that anyone else called for (every lane but `own`), counted together. */
+  agentOthersRunsPerMinute: number;
+  /** Replies one person may call for per minute on other people's Agents, themselves or through their own Agents. */
+  agentCallerRunsPerMinute: number;
   /** A reply still running after this long is ended; also the most the reading of its attachments may take. */
   agentRunTimeoutMs: number;
   /** For a provider model that does not say: its context window and its maximum output, in tokens. */
@@ -444,6 +452,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentTiers: e.AGENT_TIERS,
     agentMaxConcurrentRuns: e.AGENT_MAX_CONCURRENT_RUNS,
     agentRunsPerMinute: e.AGENT_RUNS_PER_MINUTE,
+    agentOthersRunsPerMinute: e.AGENT_OTHERS_RUNS_PER_MINUTE,
+    agentCallerRunsPerMinute: e.AGENT_CALLER_RUNS_PER_MINUTE,
     agentRunTimeoutMs: e.AGENT_RUN_TIMEOUT_MS,
     providerDefaultContextTokens: e.PROVIDER_DEFAULT_CONTEXT_TOKENS,
     providerDefaultMaxOutputTokens: e.PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS,

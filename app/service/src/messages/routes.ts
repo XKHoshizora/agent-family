@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { maybeTrigger } from "../agents/runs.ts";
+import { logCallerLimited, maybeTrigger } from "../agents/runs.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
@@ -59,16 +59,18 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // Rendered inside the transaction, under the locks that just proved the sender may read it. An owner's
       // message to their Agent, and a message in a group naming Agent members by @handle, queue their replies in the
       // same transaction (agents/runs.ts `maybeTrigger`; over an owner's replies a minute, a failed `rate_limited` run
-      // instead). Each is announced to its own Agent's owner.
+      // instead). Each is announced to its own Agent's owner. A call over its sender's limit on other people's Agents
+      // starts nothing and is only logged.
       const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
         const [rendered] = await toWireFor(t, me.id, [sent.message], config);
         if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
-        const triggered = sent.duplicate ? [] : await maybeTrigger(t, sent.lock, sent.message, config);
+        const triggered = sent.duplicate ? { runs: [], callerLimited: [] } : await maybeTrigger(t, sent.lock, sent.message, config);
         return { ...sent, wire: rendered, triggered };
       });
       if (!duplicate) conversations.publish({ messages: [message], conversations: [] }, req.log);
-      for (const run of triggered) app.agentPort.announce(run);
+      for (const run of triggered.runs) app.agentPort.announce(run);
+      logCallerLimited(req.log, triggered.callerLimited);
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
     },
   );

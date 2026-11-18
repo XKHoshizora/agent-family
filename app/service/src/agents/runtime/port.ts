@@ -31,8 +31,9 @@ export interface Prepared {
  * Why a reply failed, as the owner is told (`Run.error`). `busy`: the service's own trouble (the reply could not be
  * started or stored, or it had nothing to answer and no new topic explains why); such a run is charged nothing.
  * `context_too_small`: the model's context, less its output limit and the system text, cannot hold the owner's newest
- * message (or 200 tokens of it); no call is made. `rate_limited`: the owner had started `agentRunsPerMinute` replies in
- * the last minute; the run was recorded failed by the trigger (runs.ts), never by the worker, and nothing was called.
+ * message (or 200 tokens of it); no call is made. `rate_limited`: the owner had started their replies a minute in the
+ * run's lane (`agentRunsPerMinute` for their own, `agentOthersRunsPerMinute` for everyone else's); the run was recorded
+ * failed by the trigger (runs.ts), never by the worker, and nothing was called.
  * `thinking_exhausted`: the model stopped at its output limit having only thought, no answer (charged what the
  * upstream reported).
  */

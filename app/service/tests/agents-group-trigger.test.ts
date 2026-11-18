@@ -2,7 +2,7 @@ import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mentionedHandles } from "../src/agents/mentions.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
-import { maybeTrigger, triggerFromAgent } from "../src/agents/runs.ts";
+import { maybeTrigger, triggerFromAgent, type RunLimits } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { buildApp } from "../src/app.ts";
 import type { Config } from "../src/config.ts";
@@ -72,7 +72,7 @@ const say = async (who: Actor, conv: string, text: string, extra: object = {}): 
 };
 
 /** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
-const agentSays = (agentId: string, conv: string, text: string, config: Pick<Config, "agentRunsPerMinute" | "agentChainLimit"> = app.deps.config) =>
+const agentSays = (agentId: string, conv: string, text: string, config: RunLimits & Pick<Config, "agentChainLimit"> = app.deps.config) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
@@ -183,10 +183,11 @@ describe("a person's message in a group", () => {
       clientTxn: "x",
       createdAt: new Date(),
     });
+    const nothing = { runs: [], callerLimited: [] };
     for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@an @ 安娜" }, {}]) {
-      expect(await maybeTrigger(fake, lock, message(body), app.deps.config)).toEqual([]);
+      expect(await maybeTrigger(fake, lock, message(body), app.deps.config)).toEqual(nothing);
     }
-    expect(await maybeTrigger(fake, lock, message({ text: "@anna" }, "system"), app.deps.config)).toEqual([]);
+    expect(await maybeTrigger(fake, lock, message({ text: "@anna" }, "system"), app.deps.config)).toEqual(nothing);
     expect(query).not.toHaveBeenCalled();
     // Through the route: an Agent that answers everything in its own conversation still says nothing here.
     await say(w.member, w.g, "大家好，今天开会");
@@ -248,9 +249,10 @@ describe("a person's message in a group", () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     const carl = await agentOf(w.owner, "carlbot", w.g);
+    // The replies others called for, twenty this minute: the others' lane is used up.
     await db.query(
-      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at)
-       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds' from generate_series(1, 20)`,
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)
+       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds', 'others' from generate_series(1, 20)`,
       [anna.conversationId, anna.id, w.owner.id],
     );
     const s = await connect(app, w.owner);
@@ -422,11 +424,12 @@ describe("an Agent's message in a group", () => {
     await db.query("update agent_runs set status = 'running', started_at = now(), triggered_by = 'agent' where agent_id = $1", [b.id]);
     const third = await agentSays(a.id, w.g, "@beta 再补充");
     expect(await runsOf(b.id, w.g)).toEqual([{ status: "running", error: null, covers: asked, pending: third.message.seq, by: "agent", interrupted: null }]);
-    // Over the limit: the reusable failed run, marked as an Agent's.
+    // Over the limit (the others' lane: the owner's Agent calls the member's): the reusable failed run, marked as an
+    // Agent's.
     await settleAll();
     await db.query(
-      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at)
-       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds' from generate_series(1, 20)`,
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)
+       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds', 'others' from generate_series(1, 20)`,
       [b.conversationId, b.id, w.member.id],
     );
     const limited = await agentSays(a.id, w.g, "@beta 超限");
@@ -769,10 +772,10 @@ const endRun = async (port: FastifyInstance["agentPort"], runId: string): Promis
 };
 
 describe("follow-ups in a group", () => {
-  it("count toward the owner's replies a minute: continuous mentions while each reply runs never start more than AGENT_RUNS_PER_MINUTE; over it, the reusable failed run", async () => {
+  it("count toward the owner's replies a minute: continuous mentions while each reply runs never start more than AGENT_OTHERS_RUNS_PER_MINUTE; over it, the reusable failed run", async () => {
     const limit = 3;
     const capped = await buildApp(
-      { config: { ...app.deps.config, agentRunsPerMinute: limit }, db, models: gateway },
+      { config: { ...app.deps.config, agentOthersRunsPerMinute: limit }, db, models: gateway },
       { answerFloor: NO_ANSWER_FLOOR, staleRunSweep: false, agentWorker: false },
     );
     try {

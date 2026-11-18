@@ -11,7 +11,7 @@ import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
-import { ownedAgentOf, triggerFromAgent, type AgentTriggered } from "./runs.ts";
+import { ownedAgentOf, triggerFromAgent, type AgentTriggered, type RunLimits } from "./runs.ts";
 import {
   agentLimit,
   assertModelChoice,
@@ -176,7 +176,7 @@ export async function postAsAgent(
   conversationId: string,
   runId: string,
   reply: AgentReply,
-  config: Pick<Config, "agentRunsPerMinute" | "agentChainLimit">,
+  config: RunLimits & Pick<Config, "agentChainLimit">,
 ): Promise<{ message: StoredMessage; duplicate: boolean; triggered: AgentTriggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
   const own = conversationId === agent.conversationId;
@@ -184,7 +184,7 @@ export async function postAsAgent(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
     [conversationId, agentId, runId],
   );
-  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: { runs: [], notices: [] } };
+  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: { runs: [], callerLimited: [], notices: [] } };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
   // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts); nor a run of another
   // conversation's, here.
@@ -227,7 +227,7 @@ export async function postAsAgent(
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group.
-  const triggered = own ? { runs: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
+  const triggered = own ? { runs: [], callerLimited: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
   return { message, duplicate: false, triggered };
 }
 

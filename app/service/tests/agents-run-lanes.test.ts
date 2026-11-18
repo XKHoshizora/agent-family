@@ -1,3 +1,4 @@
+import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
@@ -11,9 +12,10 @@ import { scriptedGateway } from "./helpers/models.ts";
 /**
  * Who called for each run, and its lane (`agent_runs.caller_id`, `lane`; the limits plan, Task 1): `own` when the Agent's
  * owner called for it — themselves, or through one of their own Agents — and `others` when someone else did, with who
- * (an Agent's call is its owner's). The limits read these two columns; recording them changes nothing that is queued,
- * folded or refused. As in agents-group-trigger.test.ts, an Agent is put into a group by inserting its membership row,
- * and an Agent's own message is stored and handed to `triggerFromAgent` in one transaction, as `postAsAgent` does.
+ * (an Agent's call is its owner's). The limits read these two columns (Task 2, at the end): an owner's replies a minute
+ * are counted apart in their own lane and in the others', and one person's calls on other people's Agents have a limit
+ * of their own. As in agents-group-trigger.test.ts, an Agent is put into a group by inserting its membership row, and
+ * an Agent's own message is stored and handed to `triggerFromAgent` in one transaction, as `postAsAgent` does.
  */
 
 const gateway = scriptedGateway();
@@ -39,6 +41,9 @@ async function world(): Promise<World> {
   return { owner, member, third, g: await group(app, owner, "team", [member, third]) };
 }
 
+// The helpers below act through `app` unless given another instance (`on`): the limits tests at the end build their
+// own, with small limits, on the same database.
+
 /** Puts principal `id` into conversation `conv` from its current seq on. */
 const join = (conv: string, id: string) =>
   db.query(`insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1`, [
@@ -47,25 +52,25 @@ const join = (conv: string, id: string) =>
   ]);
 
 /** An Agent of `owner` with `handle` (also its name), answering on the site model, put into `conv` when given. */
-async function agentOf(owner: Actor, handle: string, conv: string | null) {
-  const agent = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。" });
+async function agentOf(owner: Actor, handle: string, conv: string | null, on: FastifyInstance = app) {
+  const agent = await mustCreateAgent(on, owner, { handle, name: handle, model: FAST, persona: "简短地回答。" });
   if (conv) await join(conv, agent.id);
   return agent as { id: string; handle: string; conversationId: string };
 }
 
 let txn = 0;
-const say = async (who: Actor, conv: string, text: string): Promise<number> => {
-  const sent = await api(app, who, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `ln${++txn}` });
+const say = async (who: Actor, conv: string, text: string, on: FastifyInstance = app): Promise<number> => {
+  const sent = await api(on, who, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `ln${++txn}` });
   if (sent.status !== 201) throw new Error(`say: ${sent.status} ${JSON.stringify(sent.json)}`);
   return sent.json.message.seq as number;
 };
 
 /** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
-const agentSays = (agentId: string, conv: string, text: string) =>
+const agentSays = (agentId: string, conv: string, text: string, on: FastifyInstance = app) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, app.deps.config)) };
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, on.deps.config)) };
   });
 
 /** The Agent's runs in `conv`, oldest first: each one's lane and who called for it. */
@@ -90,13 +95,17 @@ const claim = async (agentId: string, conv: string): Promise<RunTicket> => {
 };
 
 /** Ends a running run as the worker ends one that answered: `finish`, which follows it up. */
-const finish = (ticket: RunTicket) => app.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
+const finish = (ticket: RunTicket, on: FastifyInstance = app) => on.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
 
-/** Twenty replies of `agentId`'s, started half a minute ago in `conv`: its owner's replies a minute are used up. */
+/**
+ * Twenty replies of `agentId`'s in each lane, its owner's own and others', started half a minute ago in `conv`: its
+ * owner's replies a minute, in both lanes, are used up.
+ */
 const useUpTheMinute = (conv: string, agentId: string, ownerId: string) =>
   db.query(
-    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at)
-     select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds' from generate_series(1, 20)`,
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)
+     select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds', lane
+       from generate_series(1, 20), unnest(array['own', 'others']) lane`,
     [conv, agentId, ownerId],
   );
 
@@ -306,5 +315,188 @@ describe("a run's lane and who called for it", () => {
       const seen = JSON.stringify((await api(app, who, "GET", `/api/conversations/${w.g}/runs`)).json);
       expect([who.id, seen.includes("unavailable"), /lane|caller/i.test(seen)]).toEqual([who.id, true, false]);
     }
+  });
+});
+
+describe("replies a minute by lane, and one caller's limit on other people's Agents", () => {
+  // Its own instance, on the same database, with small limits: an owner's own replies 2 a minute, those others call for
+  // 2, and one person's calls on other people's Agents 1. Its log (info and above) is kept here.
+  const lines: string[] = [];
+  const { app: limited } = useApp({
+    env: { ...SITE_ENV, AGENT_RUNS_PER_MINUTE: "2", AGENT_OTHERS_RUNS_PER_MINUTE: "2", AGENT_CALLER_RUNS_PER_MINUTE: "1" },
+    models: gateway,
+    agentWorker: false,
+    logStream: { write: (line) => void lines.push(line) },
+  });
+
+  /** Four people in one group: its owner, and three others. */
+  async function crowd() {
+    const [owner, member, third, fourth] = [await signUp(limited, "owner"), await signUp(limited, "member"), await signUp(limited, "third"), await signUp(limited, "fourth")];
+    return { owner, member, third, fourth, g: await group(limited, owner, "team", [member, third, fourth]) };
+  }
+
+  /** The Agent's runs in `conv`, oldest first: status, error, what each covers and what was noted on it. */
+  const runsOf = async (agentId: string, conv: string) =>
+    (
+      await db.query<{ status: string; error: string | null; covers: number; pending: number | null }>(
+        "select status, error, covers_seq::int as covers, pending_seq::int as pending from agent_runs where agent_id = $1 and conversation_id = $2 order by created_at, id",
+        [agentId, conv],
+      )
+    ).rows;
+  const statusOf = async (agentId: string, conv: string) => (await runsOf(agentId, conv)).map((r) => [r.status, r.error]);
+
+  /** The log lines of calls their caller's limit refused. */
+  const callerLimited = () =>
+    lines
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.metric === "caller_rate_limited")
+      .map(({ metric, callerId, agentId, conversationId }) => ({ metric, callerId, agentId, conversationId }));
+
+  const noticeCount = async (conv: string) =>
+    Number((await db.query("select count(*) n from messages where conversation_id = $1 and kind = 'system'", [conv])).rows[0].n);
+
+  it("others' calls do not use up the owner's own minute", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    await say(w.member, w.g, "@anna 一", limited);
+    await settleAll();
+    await say(w.third, w.g, "@anna 二", limited);
+    await settleAll();
+    // The others' two a minute are used up: a third caller's call is refused, and recorded for the owner to see.
+    await say(w.fourth, w.g, "@anna 三", limited);
+    expect(await statusOf(anna.id, w.g)).toEqual([
+      ["done", null],
+      ["done", null],
+      ["failed", "rate_limited"],
+    ]);
+    // The owner's own call in the same minute starts a reply: in the group, and in the Agent's own conversation.
+    await say(w.owner, w.g, "@anna 我来问", limited);
+    expect((await statusOf(anna.id, w.g)).at(-1)).toEqual(["queued", null]);
+    expect((await laneOf(anna.id, w.g)).at(-1)).toEqual(["own", w.owner.id]);
+    await say(w.owner, anna.conversationId, "你好", limited);
+    expect(await statusOf(anna.id, anna.conversationId)).toEqual([["queued", null]]);
+  });
+
+  it("the owner's own calls do not use up the others'", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    await say(w.owner, anna.conversationId, "一", limited);
+    await say(w.owner, w.g, "@anna 二", limited);
+    await settleAll();
+    // The owner's own two a minute are used up: their next call, here or in the Agent's own conversation, is refused.
+    await say(w.owner, w.g, "@anna 三", limited);
+    await say(w.owner, anna.conversationId, "四", limited);
+    expect(await statusOf(anna.id, w.g)).toEqual([
+      ["done", null],
+      ["failed", "rate_limited"],
+    ]);
+    expect(await statusOf(anna.id, anna.conversationId)).toEqual([
+      ["done", null],
+      ["failed", "rate_limited"],
+    ]);
+    // Others' calls in the same minute start replies, two of them.
+    await say(w.member, w.g, "@anna 你好", limited);
+    expect((await statusOf(anna.id, w.g)).at(-1)).toEqual(["queued", null]);
+    await settleAll();
+    await say(w.third, w.g, "@anna 我也问", limited);
+    expect((await statusOf(anna.id, w.g)).at(-1)).toEqual(["queued", null]);
+    expect((await laneOf(anna.id, w.g)).slice(-2)).toEqual([
+      ["others", w.member.id],
+      ["others", w.third.id],
+    ]);
+  });
+
+  it("one caller's second call in a minute starts nothing, records nothing; another caller's does", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    const tess = await agentOf(w.third, "tess", w.g, limited);
+    lines.length = 0;
+    await say(w.member, w.g, "@anna 一", limited);
+    expect(await statusOf(anna.id, w.g)).toEqual([["queued", null]]);
+    await settleAll();
+    // The member's second call on someone else's Agent this minute — another owner's — is sent, and calls nobody: no
+    // run, no rate_limited record, no notice. Only the log has it.
+    const notices = await noticeCount(w.g);
+    await say(w.member, w.g, "@tess 二", limited);
+    expect((await db.query("select 1 from agent_runs where agent_id = $1", [tess.id])).rowCount).toBe(0);
+    expect(await noticeCount(w.g)).toBe(notices);
+    expect(callerLimited()).toEqual([{ metric: "caller_rate_limited", callerId: w.member.id, agentId: tess.id, conversationId: w.g }]);
+    // Another caller's call in that minute starts a reply.
+    await say(w.third, w.g, "@anna 三", limited);
+    expect(await statusOf(anna.id, w.g)).toEqual([
+      ["done", null],
+      ["queued", null],
+    ]);
+    expect((await laneOf(anna.id, w.g)).at(-1)).toEqual(["others", w.third.id]);
+  });
+
+  it("exact under concurrency: one person's two calls at the same instant, in two groups, start exactly one reply", { timeout: 60_000 }, async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    const g2 = await group(limited, w.third, "elsewhere", [w.member, w.fourth]);
+    const tess = await agentOf(w.third, "tess", g2, limited);
+    for (let round = 0; round < 8; round++) {
+      await db.query("delete from agent_runs");
+      lines.length = 0;
+      await Promise.all([say(w.member, w.g, `@anna ${round}`, limited), say(w.member, g2, `@tess ${round}`, limited)]);
+      const started = (await db.query<{ agent_id: string }>("select agent_id from agent_runs")).rows.map((r) => r.agent_id);
+      // Exactly one started; the other is only logged.
+      expect([round, started.length, callerLimited().length]).toEqual([round, 1, 1]);
+      expect([anna.id, tess.id]).toContain(started[0]);
+    }
+  });
+
+  it("a caller's limit does not count calls to their own Agents; their Agents' calls on others' are theirs", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    const tess = await agentOf(w.third, "tess", w.g, limited);
+    const mia = await agentOf(w.member, "mia", w.g, limited);
+    lines.length = 0;
+    // The member calls their own Agent, then someone else's: the first does not count, so the second starts a reply.
+    await say(w.member, w.g, "@mia 一", limited);
+    await settleAll();
+    await say(w.member, w.g, "@anna 二", limited);
+    expect([await statusOf(mia.id, w.g), await statusOf(anna.id, w.g)]).toEqual([[["done", null]], [["queued", null]]]);
+    await settleAll();
+    // At their limit, a call on their own Agent is not refused.
+    await say(w.member, w.g, "@mia 三", limited);
+    expect(await statusOf(mia.id, w.g)).toEqual([
+      ["done", null],
+      ["queued", null],
+    ]);
+    // Their Agent's call on someone else's Agent is theirs: refused, as their own would be, and logged.
+    gateway.reply("@tess 你也看看");
+    expect(await limited.agentWorker.runOnce()).toBe(true);
+    expect((await db.query("select 1 from messages where conversation_id = $1 and sender_id = $2", [w.g, mia.id])).rowCount).toBe(1);
+    expect(await statusOf(tess.id, w.g)).toEqual([]);
+    expect(callerLimited()).toEqual([{ metric: "caller_rate_limited", callerId: w.member.id, agentId: tess.id, conversationId: w.g }]);
+    // The same, as an Agent's message hands it to the trigger: nothing to announce, the refused call to log.
+    const again = await agentSays(mia.id, w.g, "@tess 再看看", limited);
+    expect([again.runs, again.callerLimited]).toEqual([[], [{ callerId: w.member.id, agentId: tess.id, conversationId: w.g }]]);
+  });
+
+  it("a call folded into a run under way does not count, and its follow-up is not refused", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    lines.length = 0;
+    await say(w.member, w.g, "@anna 一", limited);
+    // At their limit, the member's next call folds into the queued reply, and the one after is noted on it running.
+    const two = await say(w.member, w.g, "@anna 二", limited);
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, covers: two, pending: null }]);
+    const one = await claim(anna.id, w.g);
+    const three = await say(w.member, w.g, "@anna 三", limited);
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "running", error: null, covers: two, pending: three }]);
+    // The follow-up answering it is the member's, and is queued: a follow-up is held to its lane's limit, not its
+    // caller's.
+    await finish(one, limited);
+    expect(await statusOf(anna.id, w.g)).toEqual([
+      ["done", null],
+      ["queued", null],
+    ]);
+    expect(await laneOf(anna.id, w.g)).toEqual([
+      ["others", w.member.id],
+      ["others", w.member.id],
+    ]);
+    expect(callerLimited()).toEqual([]);
   });
 });

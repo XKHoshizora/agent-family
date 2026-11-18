@@ -41,6 +41,8 @@ describe("agent and metering configuration", () => {
       agentTiers: { free: 20 },
       agentMaxConcurrentRuns: 2,
       agentRunsPerMinute: 20,
+      agentOthersRunsPerMinute: 20,
+      agentCallerRunsPerMinute: 5,
       agentRunTimeoutMs: 120_000,
       providerDefaultContextTokens: 16_000,
       providerDefaultMaxOutputTokens: 2048,
@@ -73,6 +75,8 @@ describe("agent and metering configuration", () => {
     const ranges: Array<[name: string, field: string, accepted: Array<[string, number]>, refused: string[]]> = [
       ["AGENT_MAX_CONCURRENT_RUNS", "agentMaxConcurrentRuns", [["1", 1], ["100", 100], ["", 2]], ["0", "101", "-1", "1.5", "two", "1e2"]],
       ["AGENT_RUNS_PER_MINUTE", "agentRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 20]], ["0", "10001", "-5", "2.5", "lots"]],
+      ["AGENT_OTHERS_RUNS_PER_MINUTE", "agentOthersRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 20]], ["0", "10001", "-5", "2.5", "lots"]],
+      ["AGENT_CALLER_RUNS_PER_MINUTE", "agentCallerRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 5]], ["0", "10001", "-1", "1.5", "five"]],
       ["AGENT_RUN_TIMEOUT_MS", "agentRunTimeoutMs", [["1000", 1000], ["3600000", 3_600_000], ["", 120_000]], ["999", "3600001", "0", "60s"]],
       ["PROVIDER_DEFAULT_CONTEXT_TOKENS", "providerDefaultContextTokens", [["2049", 2049], ["2000000", 2_000_000], ["", 16_000]], ["999", "2000001", "16k"]],
       ["PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS", "providerDefaultMaxOutputTokens", [["1", 1], ["15999", 15_999], ["", 2048]], ["0", "-1", "1.5"]],

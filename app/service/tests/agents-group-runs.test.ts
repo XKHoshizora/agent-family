@@ -376,10 +376,11 @@ describe("the run push in a group", () => {
     const w = await world();
     const sockets = await connectAll(w.owner, w.member, w.member, w.third, w.third);
     const thirdS = sockets[4]!;
-    // Over the owner's replies a minute: every mention reuses one failed rate_limited run (plan ruling 7).
+    // Over the owner's replies a minute that others call for: every mention reuses one failed rate_limited run (plan
+    // ruling 7).
     await db.query(
-      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at)
-       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds' from generate_series(1, 20)`,
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)
+       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds', 'others' from generate_series(1, 20)`,
       [w.anna.conversationId, w.anna.id, w.owner.id],
     );
     await say(w.member, w.g, "@anna 一");

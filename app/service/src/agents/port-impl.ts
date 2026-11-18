@@ -26,7 +26,7 @@ import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
-import { followUp, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
+import { followUp, logCallerLimited, RUN_COLUMNS, toWireRun, type Announced, type Interruption, type RunRow } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 export interface AgentPortDeps {
@@ -37,7 +37,7 @@ export interface AgentPortDeps {
   realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged" | "pushChargedReply">;
   conversations: ConversationEvents;
   reads: ReadEvents;
-  log: Pick<FastifyBaseLogger, "error" | "warn">;
+  log: Pick<FastifyBaseLogger, "error" | "warn" | "info">;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -360,10 +360,12 @@ export class DbAgentPort implements AgentPort {
       const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, this.deps.config));
       if (!posted) return "empty";
       const { message, duplicate, triggered } = posted;
-      // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners.
+      // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners, and the
+      // calls over its owner's limit on other people's Agents are only logged.
       if (!duplicate) this.deps.conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, this.deps.log);
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
       for (const called of triggered.runs) this.announce(called);
+      logCallerLimited(this.deps.log, triggered.callerLimited);
       return "posted";
     } catch (err) {
       if (err instanceof AppError && REFUSED.has(err.code)) return "refused";
