@@ -167,7 +167,8 @@ export interface AgentReply {
  * owner's decision of 2026-11-18, replacing plan ruling 2): every member reads the message, but its reasoning is sent
  * only to the owner of the Agent that sent it (messages/read.ts `toWireForReaders`), since a model's thinking often
  * restates its persona. Then the text is cut at 8 000 characters as above, and the message may call other Agents there,
- * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row), as the call of the person
+ * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row, not even by a foreign key of
+ * what it writes), as the call of the person
  * behind it (`behindAgentMessage`): this run's caller when the run is not its owner's own — a member's call relayed
  * through the Agent stays the member's — else the Agent's owner. `triggered` is what to announce and publish after
  * commit (nothing for a repeat, or in the Agent's own conversation).

@@ -783,9 +783,10 @@ async function chainBudgetSpent(
  * the poster's owner, nor between them and the person behind the message (`behindAgentMessage`; none when nobody is) —
  * neither of two people calls the other's Agents, through their own Agent or someone else's no more than themselves: a
  * member's call relayed through the owner's Agent to an Agent whose owner and the member have a block between them
- * reaches nothing, as the member's own mention would. Their `agents` rows are read, not locked: the poster's is held
- * already, and locking another's after it could take two Agents' rows out of id order — two Agents calling each other
- * from two groups at once would deadlock. The fold-or-insert decision needs no target's row: the group's row, which
+ * reaches nothing, as the member's own mention would. Their `agents` rows are read, not locked — not even key-shared
+ * by what this writes: a run refers to its Agent's principal, and so does a recorded refusal (migration 023) — since the
+ * poster's is held already, and locking another's after it could take two Agents' rows out of id order — two Agents
+ * calling each other from two groups at once would deadlock. The fold-or-insert decision needs no target's row: the group's row, which
  * this transaction holds, orders it with every other trigger, retry, follow-up and halt in this group (the one-active-run
  * index backs that). A pause or delete that commits meanwhile takes the target's row, not the group's, and cannot see
  * the run this inserts or the mention it notes (no predicate lock): a deleted Agent's run is ended by the worker without
@@ -887,9 +888,10 @@ export async function triggerFromAgent(
 }
 
 /**
- * That the Agent's message at `seq` named each of `agentIds` and was refused for it when it was posted
- * (`refused_agent_calls`, migration 022; `triggerFromAgent`): `followUp` does not count it as a call of theirs. Never on
- * the wire.
+ * That the message at `seq` called each of `agentIds` and was refused for it when it was posted (`refused_agent_calls`,
+ * migrations 022 and 023; `triggerFromAgent`, and `triggerInGroup` for the others' daily budget): `followUp` does not
+ * count it as a call of theirs. The row refers to each Agent's principal, never its `agents` row, so writing it locks no
+ * `agents` row (an Agent's post holds none but its own). Never on the wire.
  */
 async function recordRefusedCalls(t: Tx, conversationId: string, seq: number, agentIds: readonly string[]): Promise<void> {
   if (agentIds.length === 0) return;

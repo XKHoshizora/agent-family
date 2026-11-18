@@ -1954,8 +1954,9 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   names one); when none of them can call it any more (a block since, or `groupMentions` changed) it is `others` with no
   caller, so a call its owner no longer allows does not ride the owner's own lane. An Agent's mention of it that was
   refused when it was posted — the group halted, the chain limit, its chain budget, its others' daily budget, a block —
-  is no call at all: the refusal is recorded with the message (`refused_agent_calls`, migration 022, never on the wire),
-  so although nothing was noted for it, it does not count when it lies among what the follow-up answers. A follow-up in lane `others` is not queued once the
+  is no call at all: the refusal is recorded with the message (`refused_agent_calls`, migrations 022–023, referring to
+  the Agent's principal, so writing it locks no `agents` row; never on the wire), so although nothing was noted for it,
+  it does not count when it lies among what the follow-up answers. A follow-up in lane `others` is not queued once the
   Agent's others' daily budget is spent, checked again here because the reply that just ended is settled by now (the
   notice, once a day, and the owner pushed their Agent); the caller's limit does not apply to it: what it answers was
   folded into a reply under way, which is never refused.

@@ -332,5 +332,15 @@ describe("agent, provider, metering and run tables", () => {
       expect((await db.query(`select status from persona_proposals`)).rows).toEqual([{ status: "open" }]);
       await rejectedWith(CHECK_VIOLATION, `insert into persona_proposals (agent_id, message_id, base_persona_version, persona, status) values ($1, $2, 0, 'x', 'maybe')`, [agent, messageId]);
     });
+
+    test("a refused call refers to its message and to the Agent's principal — never its agents row, which writing it must not lock", async () => {
+      const { rows } = await db.query<{ def: string }>(
+        "select pg_get_constraintdef(oid) as def from pg_constraint where conrelid = 'refused_agent_calls'::regclass and contype = 'f' order by 1",
+      );
+      expect(rows.map((r) => r.def)).toEqual([
+        "FOREIGN KEY (agent_id) REFERENCES principals(id) ON DELETE CASCADE",
+        "FOREIGN KEY (conversation_id, seq) REFERENCES messages(conversation_id, seq) ON DELETE CASCADE",
+      ]);
+    });
   });
 });

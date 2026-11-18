@@ -749,6 +749,40 @@ describe("POST /api/conversations/:id/agents/halt", () => {
     expect((await runsOf(b.id, w.g)).slice(6)).toEqual([expect.objectContaining({ status: "cancelled", error: "halted" })]);
   });
 
+  it("a mention refused while halted is recorded without touching the named Agent's row: held elsewhere, the post does not wait", async () => {
+    const w = await world();
+    const a = await agentOf(w.owner, "alpha", w.g);
+    const b = await agentOf(w.member, "beta", w.g);
+    await say(w.owner, w.g, "开始");
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    // Another transaction holds Beta's row (as its pause does: `lockAgent`, on its own conversation), not committed.
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => (release = resolve));
+    let holding: () => void = () => {};
+    const held = new Promise<void>((resolve) => (holding = resolve));
+    const holder = db.tx(async (t) => {
+      await lockAgent(t, b.id, b.conversationId);
+      holding();
+      await released;
+    });
+    await held;
+    try {
+      // Alpha's message names Beta and is refused (halted). A wait on Beta's row fails fast instead of hanging.
+      const refused = await db.tx(async (t) => {
+        await t.query("set local lock_timeout = '2s'");
+        const poster = await lockAgent(t, a.id, w.g);
+        const message = await insertMessage(t, w.g, a.id, "text", { text: "@beta 你看看" }, null);
+        return { message, ...(await triggerFromAgent(t, w.g, message, poster, null, app.deps.config)) };
+      });
+      expect(refused.runs).toEqual([]);
+      const recorded = await db.query("select agent_id from refused_agent_calls where conversation_id = $1 and seq = $2", [w.g, refused.message.seq]);
+      expect(recorded.rows).toEqual([{ agent_id: b.id }]);
+    } finally {
+      release();
+      await holder;
+    }
+  });
+
   it("a reply the halt interrupted is never posted", async () => {
     const owner = await signUp(app, "solo");
     const agent = await agentOf(owner, "solo_bot", null);
