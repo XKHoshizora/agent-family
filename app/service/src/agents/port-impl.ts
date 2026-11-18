@@ -18,8 +18,10 @@ import {
   hasOwnerTurn,
   loadContext,
   loadGroupScene,
+  withRoster,
   type BuiltContext,
   type LoadedContext,
+  type Speaker,
 } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
@@ -258,13 +260,15 @@ export class DbAgentPort implements AgentPort {
    *    longer a member of (`cancelled`, `agent_removed`) and one whose model does not resolve (`failed`,
    *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). Otherwise the run
    *    takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be shown is read: the
-   *    system text — its own conversation's (`systemPrompt`), or the group's (`groupSystemPrompt`, with the group's
-   *    title and other Agents, `loadGroupScene`) — and the conversation (`loadContext`, SQL only; in a group at most
-   *    `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, each of someone else's labelled
-   *    with the run's mark, which `loadContext` draws with `deps.drawMark` and the run's `Prepared` carries). With no owner's
-   *    message in it (in a group: nobody else's) the run ends without a call: `cancelled` with no error when everything
-   *    it was to answer is before a new topic (its owner started over), else `failed` `busy`; and so does one whose
-   *    model's context cannot hold the newest such message, or 200 tokens of it (`failed`, `context_too_small`).
+   *    system text — its own conversation's (`systemPrompt`, with what the Agent calls its owner), or the group's
+   *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
+   *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
+   *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, each of someone else's
+   *    labelled with the run's mark, which `loadContext` draws with `deps.drawMark` and the run's `Prepared` carries,
+   *    as does the roster). With no owner's message in it (in a group: nobody else's) the run ends without a call:
+   *    `cancelled` with no error when everything it was to answer is before a new topic (its owner started over), else
+   *    `failed` `busy`; and so does one whose model's context cannot hold the newest such message, or 200 tokens of it,
+   *    beside the system text, roster and all (`failed`, `context_too_small`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
@@ -297,7 +301,7 @@ export class DbAgentPort implements AgentPort {
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
-      const scene = group ? await loadGroupScene(t, agent.id, run.conversationId) : null;
+      const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
 
       let resolved;
@@ -317,10 +321,11 @@ export class DbAgentPort implements AgentPort {
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
-      // The system text with the run's mark: a group's carries it; the Agent's own conversation has none.
-      const system = (mark: string): string =>
+      // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
+      // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
+      const system = (mark: string, speakers: readonly Speaker[]): string =>
         scene
-          ? groupSystemPrompt(agent, { displayName }, scene, now, config.siteTimezone, mark)
+          ? groupSystemPrompt(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark)
           : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;

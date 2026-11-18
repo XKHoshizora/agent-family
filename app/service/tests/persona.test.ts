@@ -372,7 +372,7 @@ describe("parsing the block", () => {
 
   it("the format both prompts describe is one the parser takes", () => {
     for (const mode of ["normal", "onboarding"] as const) {
-      const system = systemPrompt({ name: "小帮手", persona: mode === "normal" ? PERSONA : "" }, { displayName: "主人" }, new Date(), mode, "UTC");
+      const system = systemPrompt({ name: "小帮手", persona: mode === "normal" ? PERSONA : "", ownerAppellation: null }, { displayName: "主人" }, new Date(), mode, "UTC");
       const example = system.slice(system.indexOf("<af-intro>"), system.indexOf("</af-persona>") + "</af-persona>".length);
       expect(example).toContain("<af-persona>");
       expect([mode, parseProposalBlock(example)?.proposal.persona]).toEqual([mode, expect.any(String)]);

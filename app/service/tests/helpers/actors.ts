@@ -95,6 +95,23 @@ export async function befriend(app: FastifyInstance, a: Actor, b: Actor): Promis
   return { conversationId: accepted.json.conversationId };
 }
 
+let seated = 0;
+
+/**
+ * A person who never signs in, seated in group `conv` straight in the database as if they had joined at `joinedSeq`:
+ * for a group larger than signing everyone up is worth. Returns their id.
+ */
+export async function seatPerson(app: FastifyInstance, conv: string, name: string, joinedSeq: number): Promise<string> {
+  const { rows } = await app.deps.db.query<{ id: string }>(
+    `with u as (insert into "user" (id, name, email, "emailVerified") values ($3, $2, $3 || '@example.test', true) returning id)
+     insert into principals (kind, handle, display_name, auth_user_id) select 'human', $1, $2, id from u returning id`,
+    [`seated_${++seated}`, name, `seated-${randomBytes(8).toString("hex")}`],
+  );
+  const id = rows[0]!.id;
+  await app.deps.db.query("insert into memberships (conversation_id, principal_id, role, joined_seq) values ($1, $2, 'speaker', $3)", [conv, id, joinedSeq]);
+  return id;
+}
+
 /** `creator` makes a group with `members`, befriending any that are not yet friends; returns its id. */
 export async function group(app: FastifyInstance, creator: Actor, title: string, members: Actor[]): Promise<string> {
   const social = await api<{ friends: { id: string }[] }>(app, creator, "GET", "/api/social");

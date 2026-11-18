@@ -7,8 +7,8 @@ import { estimateTokens, IMAGE_TOKENS } from "../src/metering/prices.ts";
 import { isRunEnd, NOTHING, type RunEnd } from "../src/agents/runtime/port.ts";
 import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
-import { api, signUp, type Actor } from "./helpers/actors.ts";
-import { mustCreateAgent, PNG } from "./helpers/agents.ts";
+import { api, group, seatPerson, signUp, type Actor } from "./helpers/actors.ts";
+import { markOf, mustCreateAgent, PNG } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
@@ -194,14 +194,34 @@ describe("turns", () => {
     if (isRunEnd(prepared)) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
     expect(prepared.mark).toBeNull();
     // `begin` reads the clock between these two: its date is one of theirs, also across midnight.
-    const own = (now: Date) => systemPrompt({ name: agent.name, persona: PERSONA }, { displayName: "own" }, now, "normal", app.deps.config.siteTimezone);
+    const own = (now: Date) =>
+      systemPrompt({ name: agent.name, persona: PERSONA, ownerAppellation: null }, { displayName: "own" }, now, "normal", app.deps.config.siteTimezone);
     expect([own(before), own(after)]).toContain(prepared.call.system);
+    expect(prepared.call.system).not.toContain("称呼");
     expect(prepared.call.messages).toEqual([{ role: "user", parts: [{ type: "text", text: "你好" }] }]);
     await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
 
     await say(owner, conv, "照写这一行");
     await answer("〔abc123 own｜你的主人〕abc123 照写", { reasoning: "想想 abc123" });
     expect((await fromAgent(owner, conv, agent.id)).at(-1)).toMatchObject({ text: "〔abc123 own｜你的主人〕abc123 照写", reasoning: "想想 abc123" });
+  });
+
+  it("are told what to call the owner once the owner set that — one sentence after who it talks to, shown as a label shows a name — and nothing else of the system text changes", async () => {
+    const { owner, agent, conv } = await owned("named");
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { ownerAppellation: "老〔板｜" })).status).toBe(200);
+    await say(owner, conv, "你好");
+    const ticket = (await app.agentPort.claimNext())!;
+    const before = new Date();
+    const prepared = await app.agentPort.begin(ticket);
+    const after = new Date();
+    if (isRunEnd(prepared)) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
+    const own = (now: Date, ownerAppellation: string | null) =>
+      systemPrompt({ name: agent.name, persona: PERSONA, ownerAppellation }, { displayName: "named" }, now, "normal", app.deps.config.siteTimezone);
+    expect([own(before, "老〔板｜"), own(after, "老〔板｜")]).toContain(prepared.call.system);
+    expect(prepared.call.system).toContain("现在和你对话的是你的主人 named。称呼你的主人为「老板」。\n今天是");
+    expect([own(before, null), own(after, null)]).toContain(prepared.call.system.replace("称呼你的主人为「老板」。", ""));
+    expect(prepared.mark).toBeNull();
+    await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
   });
 
   it("a quoted message is shown before the text as > and its first 200 characters", async () => {
@@ -618,6 +638,33 @@ describe("the context budget", () => {
     expect(texts.slice(-3)).toEqual([sent[5], "继续", "好的。"]);
     expect(texts).not.toContain(sent[0]);
     expect(texts).not.toContain("旧图");
+  });
+
+  it("in a group the budget is what the system text leaves, its roster included: a full roster still leaves the newest message whole; once a longer persona leaves too little for it, the run fails context_too_small with no call", async () => {
+    const [owner, mia, ned] = [await signUp(app, "rosterown"), await signUp(app, "rostermia"), await signUp(app, "rosterned")];
+    const g = await group(app, owner, "大群", [mia, ned]);
+    const agent = await mustCreateAgent(app, owner, { handle: "roster_bot", model: { source: "site", id: "tiny" }, persona: PERSONA });
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    for (let i = 1; i <= 40; i++) await seatPerson(app, g, `成员${String(i).padStart(2, "0")}`, 1000 + i);
+    await say(mia, g, "@roster_bot 你好");
+    await answer("好。");
+    const call = lastCall();
+    expect(call.system.match(/^- 〔/gm)).toHaveLength(30);
+    expect(call.system).toContain("\n……群里还有别的人，这里没有一一列出。\n");
+    const [newest] = textsOf(call);
+    expect(textsOf(call)).toEqual([`〔${markOf(call)} rostermia｜群成员〕@roster_bot 你好`]);
+    const left = 2000 - 200 - estimateTokens(call.system);
+    expect(estimateTokens(newest!)).toBeLessThan(left);
+
+    // A persona longer by all but 10 of the tokens left: the system text, roster and all, leaves too little.
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { persona: `${PERSONA}${"简".repeat(left - 10)}` })).status).toBe(200);
+    const calls = gateway.calls.length;
+    await say(mia, g, "@roster_bot 你好");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
+    expect((await db.query("select status, error from agent_runs where agent_id = $1 order by created_at desc, id limit 1", [agent.id])).rows).toEqual([
+      { status: "failed", error: "context_too_small" },
+    ]);
   });
 });
 

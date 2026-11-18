@@ -10,7 +10,18 @@ import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
-import { GROUP_AGENTS_NAMED, labelName, newMark, speakerLabel, withoutMark, type GroupScene, type SpeakerRole } from "./runtime/prompt.ts";
+import {
+  GROUP_AGENTS_NAMED,
+  GROUP_PEOPLE_NAMED,
+  labelName,
+  newMark,
+  shownAppellation,
+  speakerLabel,
+  withoutMark,
+  type GroupScene,
+  type SpeakerRole,
+} from "./runtime/prompt.ts";
+import type { AgentRow } from "./store.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -184,6 +195,23 @@ async function topicStart(q: Queryable, agentId: string, conversationId: string)
   return Number(rows[0]?.seq ?? 0);
 }
 
+/**
+ * Someone who said something in a group: their account, their name and handle (a label shows them as `labelName`
+ * does), and who they are to the Agent (`speakerRole`).
+ */
+export interface Speaker {
+  id: string;
+  name: string;
+  handle: string;
+  role: SpeakerRole;
+}
+
+/**
+ * Someone in a group now as its roster may list them (`withRoster`): who, and what the Agent's owner wants it to call
+ * them (null: nothing set).
+ */
+export type Member = Speaker & { appellation: string | null };
+
 /** A message as loaded: its entry, its seq, and where it belongs (`answers`). */
 interface Loaded {
   entry: ContextEntry;
@@ -193,20 +221,24 @@ interface Loaded {
   /** An Agent's reply posted by a run (it goes after the owner's message it answers). */
   reply: boolean;
   /**
-   * In a group, a message of someone else's: who said it — the name its label shows (`labelName`) and who they are to
-   * the Agent (`speakerRole`) — and whether its text starts with a quote. `entry` is without the label, which goes before
-   * it once the run's mark is drawn (`shown`).
+   * In a group, a message of someone else's: who said it, whether they are in the group now (`inGroupNow`: the roster
+   * lists only those), and whether its text starts with a quote. `entry` is without the label, which goes before it once
+   * the run's mark is drawn (`shown`).
    */
-  speaker: { name: string; role: SpeakerRole; quoted: boolean } | null;
+  speaker: (Speaker & { present: boolean; quoted: boolean }) | null;
 }
 
 interface MessageRow {
   seq: string;
   sender_id: string;
-  /** The sender's display name, handle and kind (`principals`), for the speaker's label in a group. */
+  /**
+   * The sender's display name, handle and kind (`principals`), for the speaker's label in a group, and whether they
+   * are in the group now (`inGroupNow`; only read in a group).
+   */
   sender_name: string;
   sender_handle: string;
   sender_kind: "human" | "agent";
+  sender_present: boolean;
   text: string | null;
   attachment: AttachmentRef | null;
   reply_to: unknown;
@@ -227,6 +259,13 @@ const speakerRole = (senderId: string, kind: "human" | "agent", ownerId: string)
   kind === "agent" ? "Agent" : senderId === ownerId ? "你的主人" : "群成员";
 
 /**
+ * SQL: membership `ms` (an alias) is of someone in its group now, as a group's system text counts them (its other
+ * Agents, its roster): current (no `left_seq`), and not of an Agent that was deleted (it is leaving).
+ */
+const inGroupNow = (ms: string): string =>
+  `${ms}.left_seq is null and not exists (select 1 from agents gone where gone.principal_id = ${ms}.principal_id and gone.deleted_at is not null)`;
+
+/**
  * Up to `limit` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
  * not the fixed greeting) that belong after the topic start `from` — in its own conversation the owner's, in a group
  * everyone's but its own — and the Agent's replies to what is covered up to `coversSeq`. A reply belongs where it was
@@ -234,11 +273,11 @@ const speakerRole = (senderId: string, kind: "human" | "agent", ownerId: string)
  * `client_txn`: messages/read.ts `postingRun`). Only the text, the attachment and the quote are read of a message — never its stored reasoning. A quote
  * shows what the Agent can see of the quoted message: its text, or its attachment's name. In its own conversation the
  * owner's messages are `user` and anyone else's are left out (there is nobody else); in a group every message of
- * someone else's is `user`, and who said it is kept for its label (`Loaded.speaker`: their current name, and who they
- * are by account, `speakerRole`). A reply of the Agent's that proposed a persona is its text followed by the proposal as
- * the block it was written in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed; it
- * counts toward the budget like any text and is never read for a block again. (A reply in a group never proposes:
- * nothing is looked up there.)
+ * someone else's is `user`, and who said it is kept for its label and the roster (`Loaded.speaker`: their current name,
+ * who they are by account, `speakerRole`, and whether they are in the group now, `inGroupNow`). A reply of the Agent's
+ * that proposed a persona is its text followed by the proposal as the block it was written in (`renderProposalBlock`):
+ * the Agent's own output, so it can revise what it proposed; it counts toward the budget like any text and is never
+ * read for a block again. (A reply in a group never proposes: nothing is looked up there.)
  * `read`: how many messages the query returned; `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -251,6 +290,8 @@ async function loadPage(
   const group = run.group !== null;
   const { rows } = await q.query<MessageRow>(
     `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
+            $8::boolean and exists (select 1 from memberships sm
+                                     where sm.conversation_id = m.conversation_id and sm.principal_id = m.sender_id and ${inGroupNow("sm")}) as sender_present,
             m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
             m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
@@ -293,7 +334,14 @@ async function loadPage(
     const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
     const speaker =
       group && role === "user"
-        ? { name: labelName(r.sender_name, r.sender_handle), role: speakerRole(r.sender_id, r.sender_kind, run.ownerId), quoted: quoted !== null }
+        ? {
+            id: r.sender_id,
+            name: r.sender_name,
+            handle: r.sender_handle,
+            role: speakerRole(r.sender_id, r.sender_kind, run.ownerId),
+            present: r.sender_present,
+            quoted: quoted !== null,
+          }
         : null;
     return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null, speaker }];
   });
@@ -306,12 +354,26 @@ async function loadPage(
  */
 function shown(l: Loaded, mark: string | null): ContextEntry {
   if (l.speaker === null || mark === null) return l.entry;
-  const { name, role, quoted } = l.speaker;
-  return { ...l.entry, text: `${speakerLabel(mark, name, role)}${quoted ? "\n" : ""}${l.entry.text}` };
+  const { name, handle, role, quoted } = l.speaker;
+  return { ...l.entry, text: `${speakerLabel(mark, labelName(name, handle), role)}${quoted ? "\n" : ""}${l.entry.text}` };
 }
 
 /** Whether `mark` occurs in anything of a loaded message the model is shown: its text, its attachment's name, who said it. */
-const shows = (l: Loaded, mark: string): boolean => [l.entry.text, l.entry.attachment?.name ?? "", l.speaker?.name ?? ""].some((s) => s.includes(mark));
+const shows = (l: Loaded, mark: string): boolean =>
+  [l.entry.text, l.entry.attachment?.name ?? "", l.speaker === null ? "" : labelName(l.speaker.name, l.speaker.handle)].some((s) => s.includes(mark));
+
+/**
+ * Who said what is loaded and is in the group now (`Loaded.speaker.present`), the latest to speak first, each once: the
+ * speakers the roster lists after its owner and appellation holders (`withRoster`). None in the Agent's own
+ * conversation.
+ */
+function speakersOf(list: readonly Loaded[]): Speaker[] {
+  const found = new Map<string, Speaker>();
+  for (const { speaker } of [...list].sort((a, b) => b.seq - a.seq)) {
+    if (speaker?.present && !found.has(speaker.id)) found.set(speaker.id, { id: speaker.id, name: speaker.name, handle: speaker.handle, role: speaker.role });
+  }
+  return [...found.values()];
+}
 
 /**
  * In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq; each as
@@ -330,26 +392,28 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
  * the budget after this (`pastBudget` here, the plans here and in `buildContext`, `holdsNewest` in `begin`, and so
  * admission, which holds for what `buildContext` built) uses the capped one.
  *
- * `system(mark)` is the run's system text carrying `mark`; the Agent's own conversation's carries none and ignores it.
- * In a group the run's mark is drawn here, once what is shown is known (`newMark`, with `draw`): one that occurs in no
- * message, quote, name or file name loaded and nowhere in `system("")` — the system text with the mark left out — so
- * that only the labels (`shown`) and the system text carry it. What is read is chosen before it is drawn: by the budget
- * `system("")` leaves and with no label counted — a little more than the marked text and the labels leave, so nothing
- * that could be shown is left unread.
+ * `system(mark, speakers)` is the run's system text carrying `mark`, with a group's roster listing `speakers` (who
+ * spoke in what is loaded and is in the group now, the latest first: `speakersOf`); the Agent's own conversation's
+ * carries neither and ignores both. In a group the run's mark is drawn here, once what is shown is known (`newMark`,
+ * with `draw`): one that occurs in no message, quote, name or file name loaded and nowhere in `system("", speakers)` —
+ * the system text with the mark left out, its roster included — so that only the labels (`shown`) and the system text
+ * carry it. What is read is chosen before that, by the budget `system("", [])` leaves and with no label counted: in the
+ * Agent's own conversation that is the budget the system text leaves; a group's latest `maxMessages` are one page
+ * (`GROUP_CONTEXT_MESSAGES` < `PAGE`), so no budget cuts its reading short. Either way nothing that could be shown is
+ * left unread; the budget used after reading (`budget`) is the one the final system text leaves.
  */
 export async function loadContext(
   q: Queryable,
   run: ContextRun,
   resolved: Pick<Resolved, "contextTokens" | "vision" | "call">,
-  system: (mark: string) => string,
+  system: (mark: string, speakers: readonly Speaker[]) => string,
   draw?: () => string,
 ): Promise<LoadedContext> {
   const budgetWith = (text: string): number => {
     const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text);
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
-  const unmarked = system("");
-  const reading = budgetWith(unmarked);
+  const reading = budgetWith(system("", []));
   const from = await topicStart(q, run.agentId, run.conversationId);
   const loaded: Loaded[] = [];
   // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
@@ -371,8 +435,10 @@ export async function loadContext(
     before = page.oldest;
   }
   const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
+  const speakers = speakersOf(kept);
+  const unmarked = system("", speakers);
   const mark = run.group === null ? null : newMark((m) => unmarked.includes(m) || kept.some((l) => shows(l, m)), draw);
-  const text = mark === null ? unmarked : system(mark);
+  const text = mark === null ? unmarked : system(mark, speakers);
   const budget = budgetWith(text);
   const entries = answeredOrder(kept, mark);
 
@@ -392,25 +458,94 @@ export async function loadContext(
 export const hasOwnerTurn = (loaded: LoadedContext): boolean => loaded.entries.some((e) => e.role === "user");
 
 /**
- * The group a run of Agent `agentId` answers in, for its system text (`groupSystemPrompt`): its title and the other
- * Agents that are current members of it now — not deleted (a deleted one is leaving), in the order they joined, at most
- * `GROUP_AGENTS_NAMED` named — or null when `agentId` itself is not a current member there. Plain reads, under the
- * caller's lock on the group's row (which every membership change takes).
+ * What `loadGroupScene` read of a group: its scene but for the roster, which waits for who spoke (`withRoster`), and
+ * whom the roster can be made of.
  */
-export async function loadGroupScene(q: Queryable, agentId: string, conversationId: string): Promise<GroupScene | null> {
-  if (!(await currentMembership(q, conversationId, agentId))) return null;
+export interface LoadedScene extends Omit<GroupScene, "people" | "morePeople"> {
+  /**
+   * Of those in the group now besides the Agent (`inGroupNow`), in the order they joined: its owner, everyone its owner
+   * gave an appellation, and the first `GROUP_PEOPLE_NAMED` of the others — enough to fill the roster whoever spoke.
+   */
+  members: Member[];
+  /** How many are in the group now besides the Agent (more than `members` when not all were read). */
+  present: number;
+}
+
+/**
+ * The group a run of `agent` answers in, for its system text (`groupSystemPrompt`): its title; the other Agents in it
+ * now (`inGroupNow`: current members, not deleted — a deleted one is leaving), in the order they joined, at most
+ * `GROUP_AGENTS_NAMED` named; and whom its roster can list (`LoadedScene.members`), each with who they are to the Agent
+ * by account and what its owner wants them called — its owner `agents.owner_appellation`, anyone else their
+ * `agent_appellations` row's — read in one query, bounded however large the group. Null when the Agent itself is not
+ * a current member there. Plain reads, under the caller's lock on the group's row (which every membership change takes).
+ */
+export async function loadGroupScene(
+  q: Queryable,
+  agent: Pick<AgentRow, "id" | "ownerId" | "ownerAppellation">,
+  conversationId: string,
+): Promise<LoadedScene | null> {
+  if (!(await currentMembership(q, conversationId, agent.id))) return null;
   const title = await q.query<{ title: string | null }>("select title from conversations where id = $1", [conversationId]);
   const { rows } = await q.query<{ name: string; handle: string; intro: string }>(
     `select p.display_name as name, p.handle::text as handle, a.intro
        from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
-      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id <> $2 and a.deleted_at is null
+      where m.conversation_id = $1 and ${inGroupNow("m")} and p.kind = 'agent' and p.id <> $2
       order by m.joined_seq, p.id
       limit $3`,
-    [conversationId, agentId, GROUP_AGENTS_NAMED + 1],
+    [conversationId, agent.id, GROUP_AGENTS_NAMED + 1],
   );
-  return { title: title.rows[0]?.title ?? null, agents: rows.slice(0, GROUP_AGENTS_NAMED), more: rows.length > GROUP_AGENTS_NAMED };
+  // Everyone in the group now but the Agent is counted and numbered; its owner and those with an appellation are all
+  // read, of the others the first by join order.
+  const people = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent"; appellation: string | null; present: number }>(
+    `select id, name, handle, kind, appellation, present
+       from (select p.id, p.display_name as name, p.handle::text as handle, p.kind, aa.appellation, m.joined_seq,
+                    (count(*) over ())::int as present,
+                    row_number() over (partition by (p.id = $3 or aa.principal_id is not null) order by m.joined_seq, p.id) as nth
+               from memberships m
+               join principals p on p.id = m.principal_id
+               left join agent_appellations aa on aa.agent_id = $2 and aa.principal_id = p.id
+              where m.conversation_id = $1 and ${inGroupNow("m")} and p.id <> $2) r
+      where id = $3 or appellation is not null or nth <= $4
+      order by joined_seq, id`,
+    [conversationId, agent.id, agent.ownerId, GROUP_PEOPLE_NAMED],
+  );
+  return {
+    title: title.rows[0]?.title ?? null,
+    agents: rows.slice(0, GROUP_AGENTS_NAMED),
+    more: rows.length > GROUP_AGENTS_NAMED,
+    members: people.rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      handle: r.handle,
+      role: speakerRole(r.id, r.kind, agent.ownerId),
+      appellation: r.id === agent.ownerId ? agent.ownerAppellation : r.appellation,
+    })),
+    present: people.rows[0]?.present ?? 0,
+  };
+}
+
+/**
+ * `scene` with its roster (owner-marker design rule 8, and the plan's ruling on its order): of those in the group now
+ * besides the Agent, each once and at most `GROUP_PEOPLE_NAMED`, in this order — its owner; whoever its owner gave an
+ * appellation that shows (`shownAppellation`), in the order they joined; whoever spoke in what the run is shown
+ * (`speakers`, the latest first); then everyone else in the order they joined — and whether more are there. Someone
+ * read with the group is listed as read there (so with their appellation); a speaker who was not has none.
+ */
+export function withRoster(scene: LoadedScene, speakers: readonly Speaker[]): GroupScene {
+  const { members, present, ...rest } = scene;
+  const read = new Map(members.map((m) => [m.id, m]));
+  const listed = new Map<string, Member>();
+  const list = (m: Member): void => {
+    if (!listed.has(m.id)) listed.set(m.id, m);
+  };
+  for (const m of members) if (m.role === "你的主人") list(m);
+  for (const m of members) if (shownAppellation(m.appellation) !== null) list(m);
+  for (const s of speakers) list(read.get(s.id) ?? { ...s, appellation: null });
+  for (const m of members) list(m);
+  const people = [...listed.values()].slice(0, GROUP_PEOPLE_NAMED);
+  return { ...rest, people, morePeople: present > people.length };
 }
 
 /**
