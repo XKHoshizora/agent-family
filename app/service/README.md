@@ -448,10 +448,13 @@ with the name and handle they have now (Appellations, below). Like everything he
 who the Agent takes for its owner (that is decided by account, What the model is shown). Two layers. `ownerAppellation`
 is a column of the Agent (set on `POST /api/agents`, `PATCH /api/agents/:id`; `null` clears it). The rest are rows of
 `agent_appellations` (agent, principal, text; at most 100 per Agent, a deleted Agent's or principal's go with it),
-which the two routes below edit. Appellations are 1–20 characters once trimmed, on one line; they are stored as
-written and cleaned only where the model is shown them (What the model is shown). A row stays stored when its target
-leaves the group or the friendship ends, and stays in `appellations`; it simply is not shown to the model while that
-person is not in the group, and comes back when they are. Only the Agent's owner reads or writes them: no one else's
+which the two routes below edit. Appellations are 1–20 characters once trimmed, on one line, with no control character
+or lone surrogate; they are stored as written and cleaned only where the model is shown them (What the model is shown).
+A row stays stored when its target leaves the group or the friendship ends, and stays in `appellations`; it simply is
+not shown to the model while that person is not in the group, and comes back when they are. An Agent named there that
+is in no group with this Agent now, or is deleted, is listed with `name` and `handle` `null` (its row, `kind` and
+appellation stay, and it can be removed): its owner may rename it, and you no longer see it. Only the Agent's owner
+reads or writes them: no one else's
 view of the Agent (the person named included) has `ownerAppellation` or `appellations`, no member list, message read,
 push or log carries them, and they reach nobody but the model of that one Agent.
 
@@ -532,19 +535,21 @@ fit; 409 `agent_deleted`; 404 `not_found` unless yours.
 #### `PUT /api/agents/:id/appellations/:principalId`
 
 *Session: required.* Body (no other key): `appellation` (a string: 1–20 characters once trimmed, on one line — no line
-break or other vertical space). Sets what the Agent calls that person or Agent, or replaces what it called them. → 200
+break or other vertical space — with no control character, NUL included, and no lone surrogate). Sets what the Agent
+calls that person or Agent, or replaces what it called them. → 200
 Agent. Who may be named (the target rule): a person or an Agent other than this Agent and you who is your friend, or a
 current member of an open group this Agent is in. Anything else — also an id that is not an id, a deleted account's,
 yourself — is 404 `not_found`, byte for byte as an id that does not exist is, so that the route says nothing about who
 exists. 400 `invalid_request` for a body that does not fit; 409 `agent_deleted`; 409 `too_many` when the Agent already has
 100 appellations and this names someone new (replacing one is always allowed); 404 `not_found` unless the Agent is
-yours. The change is pushed to your sockets as `agent` (Realtime) and to nobody else: the person named is told nothing. Limit: the 30 a minute of `PATCH /api/agents/:id`, one count with it (Rate limits).
+yours. The change is pushed to your sockets as `agent` (Realtime) and to nobody else: the person named is told nothing;
+setting what it is called already changes nothing and pushes nothing. Limit: the 30 a minute of `PATCH /api/agents/:id`, one count with it (Rate limits).
 
 #### `DELETE /api/agents/:id/appellations/:principalId`
 
-*Session: required.* Body: none or `{}`. Takes back what the Agent calls that person or Agent. → 200 Agent, also when there
-was none (and for an id that is not an id): the answer is the same, nothing is pushed when nothing changed. 409
-`agent_deleted`; 404 `not_found` unless the Agent is yours. Limit as for `PUT`.
+*Session: required.* Body: none or `{}`. Takes back what the Agent calls that person or Agent. → 200 Agent, pushed as
+for `PUT`; 404 `not_found` when it called them nothing (also for an id that is not an id, or nobody's), as an Agent route
+answers any path that names nothing. 409 `agent_deleted`; 404 `not_found` unless the Agent is yours. Limit as for `PUT`.
 
 #### `POST /api/agents/:id/pause`
 
@@ -2151,9 +2156,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   shown to the model starts with a label the service writes, `〔{mark} {name}｜{role}〕`, followed directly by the text.
   *Role* is decided by account and never by name: the sender is this Agent's owner (their principal is the Agent's
   `ownerId`) → `你的主人`; any other person → `群成员`; any Agent, whoever owns it → `Agent`. *Name* is the
-  sender's current display name, cleaned of line breaks and of what could pass for the label's own syntax (`〔 〕 ｜`, the
-  other vertical bars, the corner and lenticular brackets `「」【】[]` and the like, and format characters); a name
-  nothing is left of is replaced by the handle. The *mark* is 6 characters of `a-z0-9` drawn from `crypto` for each
+  sender's current display name, folded to plain characters (NFKC: a full-width letter or a compatibility form such as
+  `﹞` is its plain character) and cleaned of line breaks and of what could pass for the label's own syntax (every
+  bracket and quotation mark, every bar that looks like `｜`, and format characters); a name nothing is left of is
+  replaced by the handle. The *mark* is 6 characters of `a-z0-9` drawn from `crypto` for each
   reply run, and drawn again while it occurs in any text the model is shown in that run — the loaded messages and their
   quotes, attachment names, the names in labels, the group's name, the persona, the roster — so a mark never collides
   with what is written in the chat. The group's system text tells the model that only a label carrying the mark was
@@ -2165,9 +2171,11 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   *What the model writes* is cleaned before it is stored (`withoutMark`, applied in `postAsAgent` to the text and the
   reasoning after they were cut to what a message stores — 8 000 and 32 000 characters — so no more is cleaned than is
   kept; one linear pass): every occurrence of the mark is removed, and a `〔…｜…〕` on one line that contained it is
-  removed whole. A reply of nothing but those is not posted. A reply cut at the length limit inside a label or the mark
-  is stored as cut, `truncated`, with the mark taken out of what is left of it (a fragment such as `〔 阿哲`, or part of
-  the mark). This holds for every way a reply that is posted ends — complete, cut for length, cut by time, stopped —
+  removed whole. A reply of nothing but those is not posted. What was cut for length (the text when it is `truncated`,
+  the reasoning when it or the reply was cut) also loses what the cut left at its very end: the mark's first characters,
+  or a label the cut opened, from its `〔` on (`withoutMarkAtCut`). The mark used is the one the port kept from the
+  run's `begin`, never one handed to it; a reply in a group without one is never posted. All this holds for every way a
+  reply that is posted ends — complete, cut for length, cut by time, stopped —
   and a group's reply is never streamed (no `delta`), so nothing uncleaned reaches a socket. The text of a text file shown
   in a group is cleaned of the mark the same way. Limits: only the exact mark is removed, so a mark written with an
   invisible character inside it, or in capitals, stays (it is useless after its run); the bytes of an image or a PDF go
