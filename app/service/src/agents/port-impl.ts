@@ -52,6 +52,8 @@ export interface AgentPortDeps {
   conversations: ConversationEvents;
   reads: ReadEvents;
   log: Pick<FastifyBaseLogger, "error" | "warn" | "info">;
+  /** How a candidate for a group run's mark is drawn (`loadContext`, `newMark`); default prompt.ts `drawMark`. Tests fix it. */
+  drawMark?: () => string;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -258,7 +260,8 @@ export class DbAgentPort implements AgentPort {
    *    takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be shown is read: the
    *    system text — its own conversation's (`systemPrompt`), or the group's (`groupSystemPrompt`, with the group's
    *    title and other Agents, `loadGroupScene`) — and the conversation (`loadContext`, SQL only; in a group at most
-   *    `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages). With no owner's
+   *    `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, each of someone else's labelled
+   *    with the run's mark, which `loadContext` draws with `deps.drawMark` and the run's `Prepared` carries). With no owner's
    *    message in it (in a group: nobody else's) the run ends without a call: `cancelled` with no error when everything
    *    it was to answer is before a new topic (its owner started over), else `failed` `busy`; and so does one whose
    *    model's context cannot hold the newest such message, or 200 tokens of it (`failed`, `context_too_small`).
@@ -314,9 +317,11 @@ export class DbAgentPort implements AgentPort {
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
-      const system = scene
-        ? groupSystemPrompt(agent, { displayName }, scene, now, config.siteTimezone)
-        : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
+      // The system text with the run's mark: a group's carries it; the Agent's own conversation has none.
+      const system = (mark: string): string =>
+        scene
+          ? groupSystemPrompt(agent, { displayName }, scene, now, config.siteTimezone, mark)
+          : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const loaded = await loadContext(
@@ -324,6 +329,7 @@ export class DbAgentPort implements AgentPort {
         { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap },
         resolved,
         system,
+        this.deps.drawMark,
       );
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget)) return { end: TOO_SMALL };
@@ -379,7 +385,11 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       return {
-        prepared: { call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning }, inputChars: context.inputChars },
+        prepared: {
+          call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning },
+          inputChars: context.inputChars,
+          mark: loaded.mark,
+        },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });

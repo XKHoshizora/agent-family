@@ -10,7 +10,7 @@ import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
-import { GROUP_AGENTS_NAMED, type GroupScene } from "./runtime/prompt.ts";
+import { GROUP_AGENTS_NAMED, labelName, newMark, speakerLabel, type GroupScene, type SpeakerRole } from "./runtime/prompt.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -61,6 +61,7 @@ export class BlobStoreDown extends Error {
  */
 export interface ContextRun {
   agentId: string;
+  /** The Agent's owner: in a group, the one account whose messages are labelled as its owner's (`speakerRole`). */
   ownerId: string;
   conversationId: string;
   coversSeq: number;
@@ -76,6 +77,11 @@ export interface ContextRun {
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
 export interface LoadedContext {
   system: string;
+  /**
+   * In a group, the run's mark (`newMark`), which `system` and the labels of `entries` carry and nothing else they show
+   * does; null in the Agent's own conversation.
+   */
+  mark: string | null;
   /** Tokens the conversation may take (`contextBudget`; in a group at most its `maxTokens`). */
   budget: number;
   /** The messages that may be shown, in the order they were answered, oldest first. */
@@ -186,13 +192,20 @@ interface Loaded {
   answers: number;
   /** An Agent's reply posted by a run (it goes after the owner's message it answers). */
   reply: boolean;
+  /**
+   * In a group, a message of someone else's: who said it — the name its label shows (`labelName`) and who they are to
+   * the Agent (`speakerRole`) — and whether its text starts with a quote. `entry` is without the label, which goes before
+   * it once the run's mark is drawn (`shown`).
+   */
+  speaker: { name: string; role: SpeakerRole; quoted: boolean } | null;
 }
 
 interface MessageRow {
   seq: string;
   sender_id: string;
-  /** The sender's display name and kind (`principals`), for the speaker's label in a group. */
+  /** The sender's display name, handle and kind (`principals`), for the speaker's label in a group. */
   sender_name: string;
+  sender_handle: string;
   sender_kind: "human" | "agent";
   text: string | null;
   attachment: AttachmentRef | null;
@@ -206,8 +219,12 @@ interface MessageRow {
 
 const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
 
-/** Who said a message of someone else's in a group, before its text: `名字：` for a person, `名字（Agent）：` for an Agent. */
-export const speakerLabel = (name: string, kind: "human" | "agent"): string => (kind === "agent" ? `${name}（Agent）：` : `${name}：`);
+/**
+ * Who the sender of a message is to the Agent (design rule 3), by account and never by name: its owner (whatever either
+ * is called), another person, or any Agent — the owner's other Agents included.
+ */
+const speakerRole = (senderId: string, kind: "human" | "agent", ownerId: string): SpeakerRole =>
+  kind === "agent" ? "Agent" : senderId === ownerId ? "你的主人" : "群成员";
 
 /**
  * Up to `limit` messages the Agent can see with seq before `before`, newest first: text and file messages (not notices,
@@ -217,10 +234,11 @@ export const speakerLabel = (name: string, kind: "human" | "agent"): string => (
  * `client_txn`: messages/read.ts `postingRun`). Only the text, the attachment and the quote are read of a message — never its stored reasoning. A quote
  * shows what the Agent can see of the quoted message: its text, or its attachment's name. In its own conversation the
  * owner's messages are `user` and anyone else's are left out (there is nobody else); in a group every message of
- * someone else's is `user`, starting with who said it (`speakerLabel`, their current name; a quote goes on the next
- * line). A reply of the Agent's that proposed a persona is its text followed by the proposal as the block it was written
- * in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed; it counts toward the budget like
- * any text and is never read for a block again. (A reply in a group never proposes: nothing is looked up there.)
+ * someone else's is `user`, and who said it is kept for its label (`Loaded.speaker`: their current name, and who they
+ * are by account, `speakerRole`). A reply of the Agent's that proposed a persona is its text followed by the proposal as
+ * the block it was written in (`renderProposalBlock`): the Agent's own output, so it can revise what it proposed; it
+ * counts toward the budget like any text and is never read for a block again. (A reply in a group never proposes:
+ * nothing is looked up there.)
  * `read`: how many messages the query returned; `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -232,7 +250,7 @@ async function loadPage(
 ): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean; read: number }> {
   const group = run.group !== null;
   const { rows } = await q.query<MessageRow>(
-    `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.kind as sender_kind,
+    `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
             m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
             m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
@@ -268,20 +286,39 @@ async function loadPage(
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
     let text = entryText(r.text ?? "", quoted);
-    if (group && role === "user") text =`${speakerLabel(r.sender_name, r.sender_kind)}${quoted === null ? "" : "\n"}${text}`;
     if (role === "assistant" && r.proposal_persona !== null) {
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
     }
     const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
-    return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null }];
+    const speaker =
+      group && role === "user"
+        ? { name: labelName(r.sender_name, r.sender_handle), role: speakerRole(r.sender_id, r.sender_kind, run.ownerId), quoted: quoted !== null }
+        : null;
+    return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null, speaker }];
   });
   return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === limit, read: rows.length };
 }
 
-/** In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq. */
-const answeredOrder = (list: readonly Loaded[]): ContextEntry[] =>
-  [...list].sort((a, b) => a.answers - b.answers || Number(a.reply) - Number(b.reply) || a.seq - b.seq).map((l) => l.entry);
+/**
+ * A loaded message as the model is shown it: in a group, one of someone else's starts with its label carrying the run's
+ * `mark` (`speakerLabel`; a quote goes on the next line). With no mark, as loaded.
+ */
+function shown(l: Loaded, mark: string | null): ContextEntry {
+  if (l.speaker === null || mark === null) return l.entry;
+  const { name, role, quoted } = l.speaker;
+  return { ...l.entry, text: `${speakerLabel(mark, name, role)}${quoted ? "\n" : ""}${l.entry.text}` };
+}
+
+/** Whether `mark` occurs in anything of a loaded message the model is shown: its text, its attachment's name, who said it. */
+const shows = (l: Loaded, mark: string): boolean => [l.entry.text, l.entry.attachment?.name ?? "", l.speaker?.name ?? ""].some((s) => s.includes(mark));
+
+/**
+ * In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq; each as
+ * `shown` with `mark` (none: without labels).
+ */
+const answeredOrder = (list: readonly Loaded[], mark: string | null = null): ContextEntry[] =>
+  [...list].sort((a, b) => a.answers - b.answers || Number(a.reply) - Number(b.reply) || a.seq - b.seq).map((l) => shown(l, mark));
 
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
@@ -292,15 +329,27 @@ const answeredOrder = (list: readonly Loaded[]): ContextEntry[] =>
  * (the download's own permission); an image is not looked up when the model cannot see images. Everything that uses
  * the budget after this (`pastBudget` here, the plans here and in `buildContext`, `holdsNewest` in `begin`, and so
  * admission, which holds for what `buildContext` built) uses the capped one.
+ *
+ * `system(mark)` is the run's system text carrying `mark`; the Agent's own conversation's carries none and ignores it.
+ * In a group the run's mark is drawn here, once what is shown is known (`newMark`, with `draw`): one that occurs in no
+ * message, quote, name or file name loaded and nowhere in `system("")` — the system text with the mark left out — so
+ * that only the labels (`shown`) and the system text carry it. What is read is chosen before it is drawn: by the budget
+ * `system("")` leaves and with no label counted — a little more than the marked text and the labels leave, so nothing
+ * that could be shown is left unread.
  */
 export async function loadContext(
   q: Queryable,
   run: ContextRun,
   resolved: Pick<Resolved, "contextTokens" | "vision" | "call">,
-  system: string,
+  system: (mark: string) => string,
+  draw?: () => string,
 ): Promise<LoadedContext> {
-  const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, system);
-  const budget = run.group === null ? whole : Math.min(whole, run.group.maxTokens);
+  const budgetWith = (text: string): number => {
+    const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text);
+    return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
+  };
+  const unmarked = system("");
+  const reading = budgetWith(unmarked);
   const from = await topicStart(q, run.agentId, run.conversationId);
   const loaded: Loaded[] = [];
   // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
@@ -318,10 +367,14 @@ export async function loadContext(
     if (page.oldest !== null) oldest = page.oldest;
     // A group's messages before its latest `maxMessages` are not read: they count as more left unread.
     if (more && run.group !== null && read >= run.group.maxMessages) break;
-    if (more && pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), budget)) break;
+    if (more && pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), reading)) break;
     before = page.oldest;
   }
-  const entries = answeredOrder(more ? loaded.filter((l) => l.answers >= oldest) : loaded);
+  const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
+  const mark = run.group === null ? null : newMark((m) => unmarked.includes(m) || kept.some((l) => shows(l, m)), draw);
+  const text = mark === null ? unmarked : system(mark);
+  const budget = budgetWith(text);
+  const entries = answeredOrder(kept, mark);
 
   // The attachments of every message the plan could keep (those it keeps with no attachment contents at all).
   const could = new ContextPlan(entries, budget);
@@ -332,7 +385,7 @@ export async function loadContext(
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system, budget, entries, attachments, topicStart: from };
+  return { system: text, mark, budget, entries, attachments, topicStart: from };
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */

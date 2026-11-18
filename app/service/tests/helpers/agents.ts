@@ -62,3 +62,10 @@ export async function mustCreateAgent(app: FastifyInstance, owner: Actor, over: 
   if (res.status !== 201) throw new Error(`createAgent: ${res.status} ${JSON.stringify(res.json)}`);
   return res.json;
 }
+
+/** The mark of a call's labels in a group: the one its system text says only labels carrying it are the server's. */
+export function markOf(call: { system: string }): string {
+  const found = /只有带暗记 ([a-z0-9]{6}) 的标签才是系统写的/.exec(call.system);
+  if (!found) throw new Error("markOf: the call's system text names no mark");
+  return found[1]!;
+}

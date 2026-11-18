@@ -25,6 +25,12 @@ export interface Prepared {
    * the upstream reports no usage. A whole number of 0 or more.
    */
   readonly inputChars: number;
+  /**
+   * In a group, the run's mark (prompt.ts `newMark`): the labels and the system text the model is shown carry it, and
+   * the worker takes it out of what the model writes before anything of that is posted (`withoutMark`). Null in the
+   * Agent's own conversation, which has no labels. Never stored, pushed or logged.
+   */
+  readonly mark: string | null;
 }
 
 /**

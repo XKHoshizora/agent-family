@@ -4,7 +4,8 @@ import { readPrefix } from "../src/agents/context.ts";
 import { CALL_ATTACHMENT_MAX_BYTES, ContextPlan, CUT_MARK, fileText, type ContextEntry } from "../src/agents/runtime/context.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
 import { estimateTokens, IMAGE_TOKENS } from "../src/metering/prices.ts";
-import type { RunEnd } from "../src/agents/runtime/port.ts";
+import { isRunEnd, NOTHING, type RunEnd } from "../src/agents/runtime/port.ts";
+import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, PNG } from "./helpers/agents.ts";
@@ -181,6 +182,22 @@ describe("turns", () => {
       { role: "assistant", parts: [{ type: "text", text: "答乙丙" }] },
       { role: "user", parts: [{ type: "text", text: "丁" }] },
     ]);
+  });
+
+  it("carry no label and the run no mark (those are a group's): the system text is exactly its own, and a reply that looks like a label is stored as written", async () => {
+    const { owner, agent, conv } = await owned("own");
+    await say(owner, conv, "你好");
+    const ticket = (await app.agentPort.claimNext())!;
+    const prepared = await app.agentPort.begin(ticket);
+    if (isRunEnd(prepared)) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
+    expect(prepared.mark).toBeNull();
+    expect(prepared.call.system).toBe(systemPrompt({ name: agent.name, persona: PERSONA }, { displayName: "own" }, new Date(), "normal", app.deps.config.siteTimezone));
+    expect(prepared.call.messages).toEqual([{ role: "user", parts: [{ type: "text", text: "你好" }] }]);
+    await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
+
+    await say(owner, conv, "照写这一行");
+    await answer("〔abc123 own｜你的主人〕abc123 照写", { reasoning: "想想 abc123" });
+    expect((await fromAgent(owner, conv, agent.id)).at(-1)).toMatchObject({ text: "〔abc123 own｜你的主人〕abc123 照写", reasoning: "想想 abc123" });
   });
 
   it("a quoted message is shown before the text as > and its first 200 characters", async () => {

@@ -1,6 +1,7 @@
 import { ModelError, type ModelGateway } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
 import { BUSY, isRunEnd, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
+import { withoutMark } from "./prompt.ts";
 import { ReplyStream } from "./stream.ts";
 
 /**
@@ -218,8 +219,12 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     // The upstream ended the stream without its finish (cut off midway).
     if (finished === null && why === null) return failed(UNAVAILABLE);
 
-    const text = cleanModelText(out.text);
-    const reasoning = cleanModelText(out.reasoning);
+    // What the model wrote, as it may be posted: in a group, without the run's mark (`withoutMark`). Every reply that is
+    // posted passes here first, text and reasoning alike; nothing of a group's reply was streamed (`AgentPort.emit`),
+    // and the Agent's own conversation has no mark.
+    const postable = (s: string): string => withoutMark(cleanModelText(s), prepared.mark).trim();
+    const text = postable(out.text);
+    const reasoning = postable(out.reasoning);
     const said = hasVisibleText(text) || hasVisibleText(reasoning);
     if (finished === null && why === "stop") {
       // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
