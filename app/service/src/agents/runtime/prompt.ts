@@ -103,11 +103,35 @@ export interface GroupScene {
 const VERTICAL_SPACE = "\\n\\v\\f\\r\\x85\\p{Zl}\\p{Zp}";
 const VERTICAL_RUN = new RegExp(`[${VERTICAL_SPACE}]+`, "gu");
 
+// --- text someone else wrote, as the system text shows it -----------------------------------------------------------
+// Two ways, the second built on the first. Prose — a group's name, another Agent's name and intro — is shown as a
+// description on a line of its own (`oneLine`): any character may stay but a line break, since nothing in it is read as
+// structure. A field of the server's own syntax — a name in a label `〔mark name｜role〕`, an appellation in `「」` — sits
+// inside text the model is told to trust, so it also loses whatever could pass for that syntax (`labelSafe`).
+
 /**
- * Text someone else wrote (a group's name, another Agent's name or intro), as the system text shows it: plain text on
- * one line — every line break (and any other vertical space) becomes a space — so it cannot start a line of its own.
+ * Prose someone else wrote, as the system text shows it: plain text on one line — every line break (and any other
+ * vertical space) becomes a space — so it cannot start a line of its own.
  */
 const oneLine = (text: string): string => text.replace(VERTICAL_RUN, " ").trim();
+
+/**
+ * What a field of a label or of the roster may not hold once folded (NFKC, `labelSafe`), for `replace`: every bracket
+ * and quotation mark (`\p{Ps}\p{Pe}\p{Pi}\p{Pf}`: the label's own `〔 〕`, the `「 」` around an appellation and all
+ * their lookalikes); every bar that could pass for the label's separator, `| │ ┃ ¦ ∣ ⎪ ❘ ❙ ⏐ 丨 ǀ । ׀` (folding has
+ * already made `｜` a `|` and `￨` a `│`; the upright forms `︱ ︳` it lays flat, as `— _`); and every invisible format
+ * character (`\p{Cf}`: zero-width spaces and joiners, bidi controls, soft hyphens…), which could hide any of them. Not
+ * exported: a `/g` pattern keeps its place between `test` calls.
+ */
+const UNSAFE_IN_LABELS = /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Cf}|│┃¦∣⎪❘❙⏐丨ǀ।׀]/gu;
+
+/**
+ * A name or an appellation as the system text shows it, in a label or the roster: folded (NFKC: a compatibility form is
+ * its plain character, so `﹞` is a `〕`), without `UNSAFE_IN_LABELS`, then `oneLine`. So it can neither close its label
+ * or its `「」` nor pass for a role. Folding changes only how a character is written (full-width letters are plain ones,
+ * `㈱` is `株` once its brackets go); taking out `\p{Cf}` splits an emoji joined by a zero-width joiner.
+ */
+export const labelSafe = (text: string): string => oneLine(text.normalize("NFKC").replace(UNSAFE_IN_LABELS, ""));
 
 const HAS_VERTICAL_SPACE = new RegExp(`[${VERTICAL_SPACE}]`, "u");
 /** Whether `text` holds a line break or any other vertical space: what an appellation (agents/routes.ts) must not. */
@@ -120,18 +144,6 @@ export const hasVerticalSpace = (text: string): boolean => HAS_VERTICAL_SPACE.te
  * sender's account, never by a name (agents/context.ts): its owner, another person, or any Agent (whoever owns it).
  */
 export type SpeakerRole = "你的主人" | "群成员" | "Agent";
-
-/**
- * What a name in a label (and an appellation in the system text) may not hold, for `replace`: the label's own brackets
- * and separator `〔 〕 ｜`; what looks like a separator, `| ︱ │ ┃ ¦ ∣ ⎪ ❘`, or like brackets around a name, `｢ ｣ 「 」
- * 【 】 [ ] ［ ］ 〈 〉 《 》`; and every invisible format character (`\p{Cf}`: zero-width spaces and joiners, bidi
- * controls, soft hyphens…), which could hide any of them. So a name can neither close its label nor pass for a role,
- * and an appellation cannot close its `「」`.
- */
-export const UNSAFE_IN_LABELS = /[〔〕｜|︱│┃¦∣⎪❘｢｣「」【】[\]［］〈〉《》\p{Cf}]/gu;
-
-/** `text` on one line (`oneLine`) and without `UNSAFE_IN_LABELS`: how a name and an appellation are shown. */
-const labelSafe = (text: string): string => oneLine(text.replace(UNSAFE_IN_LABELS, ""));
 
 /** A name as a label shows it (design rule 4a): `labelSafe`; the handle when nothing is left. */
 export function labelName(name: string, handle: string): string {
