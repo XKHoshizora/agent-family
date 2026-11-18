@@ -179,7 +179,9 @@ const envSchema = z.object({
     { free: 20 } as Record<string, number>,
   ),
   /** Replies one owner may have running at once; further ones wait queued. */
-  AGENT_MAX_CONCURRENT_RUNS: wholeNumber(2, 1, 100),
+  AGENT_MAX_CONCURRENT_RUNS: wholeNumber(4, 1, 100),
+  /** Of those, how many may be ones someone else called for (every lane but `own`); the rest of the places are the owner's own. */
+  AGENT_MAX_CONCURRENT_OTHERS_RUNS: wholeNumber(3, 1, 100),
   /** Replies one owner may start per minute that they called for themselves (counted from the stored runs; not scaled by RATE_LIMIT_SCALE). */
   AGENT_RUNS_PER_MINUTE: wholeNumber(20, 1, 10_000),
   /** Replies one owner's Agents may start per minute that someone else called for, all of them together (counted apart from the owner's own). */
@@ -197,7 +199,7 @@ const envSchema = z.object({
   /** Calls to providers and site models in flight at once in the whole service (src/providers/guard.ts). */
   PROVIDER_MAX_CONCURRENT_CALLS: wholeNumber(64, 1, 1000),
   /** Replies the worker runs at once in the whole service (each holds its attachments in memory and an outbound call). */
-  AGENT_MAX_RUNS_IN_FLIGHT: wholeNumber(8, 1, 64),
+  AGENT_MAX_RUNS_IN_FLIGHT: wholeNumber(16, 1, 64),
   /** After this many messages in a row from Agents in a group (notices aside), an Agent's message calls no other Agent. */
   AGENT_CHAIN_LIMIT: wholeNumber(30, 2, 500),
   /** Tokens of a group's history one reply there may show its model at most (the system text comes on top). */
@@ -285,6 +287,8 @@ export interface Config {
   agentTiers: Record<string, number>;
   /** Replies one owner may have running at once; further ones wait queued. */
   agentMaxConcurrentRuns: number;
+  /** Of those, how many may be replies anyone else called for (every lane but `own`; src/agents/port-impl.ts `claimNext`). */
+  agentMaxConcurrentOthersRuns: number;
   /** Replies one owner may start per minute in their own lane: those they called for themselves (src/agents/runs.ts `Lane`). */
   agentRunsPerMinute: number;
   /** Replies one owner's Agents may start per minute that anyone else called for (every lane but `own`), counted together. */
@@ -385,6 +389,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       "Invalid configuration: S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together",
     );
   }
+  if (e.AGENT_MAX_CONCURRENT_OTHERS_RUNS > e.AGENT_MAX_CONCURRENT_RUNS) {
+    throw new Error(
+      `Invalid configuration: AGENT_MAX_CONCURRENT_OTHERS_RUNS (${e.AGENT_MAX_CONCURRENT_OTHERS_RUNS}) is more than AGENT_MAX_CONCURRENT_RUNS (${e.AGENT_MAX_CONCURRENT_RUNS})`,
+    );
+  }
   for (const m of e.SITE_MODELS) {
     // A provider's base URL rule (src/providers/guard.ts): https, no credentials, a plain host name or address; and
     // nothing after the path, which a provider's would silently lose. Stored as a provider's is (lower-case host, no
@@ -451,6 +460,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     siteTimezone: e.SITE_TIMEZONE,
     agentTiers: e.AGENT_TIERS,
     agentMaxConcurrentRuns: e.AGENT_MAX_CONCURRENT_RUNS,
+    agentMaxConcurrentOthersRuns: e.AGENT_MAX_CONCURRENT_OTHERS_RUNS,
     agentRunsPerMinute: e.AGENT_RUNS_PER_MINUTE,
     agentOthersRunsPerMinute: e.AGENT_OTHERS_RUNS_PER_MINUTE,
     agentCallerRunsPerMinute: e.AGENT_CALLER_RUNS_PER_MINUTE,

@@ -13,7 +13,8 @@ import { closeAllSockets, connect } from "./helpers/ws.ts";
  */
 
 const gateway = scriptedGateway();
-const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false });
+// The old limit of 2 running at once is set here: the tests of it below are about the limit, not the default.
+const { app, db } = useApp({ env: { ...SITE_ENV, AGENT_MAX_CONCURRENT_RUNS: "2", AGENT_MAX_CONCURRENT_OTHERS_RUNS: "2" }, models: gateway, agentWorker: false });
 
 afterEach(async () => {
   await closeAllSockets();

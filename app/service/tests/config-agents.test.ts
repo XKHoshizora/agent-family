@@ -39,7 +39,8 @@ describe("agent and metering configuration", () => {
       freeDailyMicro: 200_000_000n,
       siteTimezone: "Asia/Shanghai",
       agentTiers: { free: 20 },
-      agentMaxConcurrentRuns: 2,
+      agentMaxConcurrentRuns: 4,
+      agentMaxConcurrentOthersRuns: 3,
       agentRunsPerMinute: 20,
       agentOthersRunsPerMinute: 20,
       agentCallerRunsPerMinute: 5,
@@ -47,7 +48,7 @@ describe("agent and metering configuration", () => {
       providerDefaultContextTokens: 16_000,
       providerDefaultMaxOutputTokens: 2048,
       providerMaxConcurrentCalls: 64,
-      agentMaxRunsInFlight: 8,
+      agentMaxRunsInFlight: 16,
       agentChainLimit: 30,
       agentGroupContextTokens: 12_000,
     });
@@ -73,7 +74,6 @@ describe("agent and metering configuration", () => {
       providerMaxConcurrentCalls: 128,
     });
     const ranges: Array<[name: string, field: string, accepted: Array<[string, number]>, refused: string[]]> = [
-      ["AGENT_MAX_CONCURRENT_RUNS", "agentMaxConcurrentRuns", [["1", 1], ["100", 100], ["", 2]], ["0", "101", "-1", "1.5", "two", "1e2"]],
       ["AGENT_RUNS_PER_MINUTE", "agentRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 20]], ["0", "10001", "-5", "2.5", "lots"]],
       ["AGENT_OTHERS_RUNS_PER_MINUTE", "agentOthersRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 20]], ["0", "10001", "-5", "2.5", "lots"]],
       ["AGENT_CALLER_RUNS_PER_MINUTE", "agentCallerRunsPerMinute", [["1", 1], ["10000", 10_000], ["", 5]], ["0", "10001", "-1", "1.5", "five"]],
@@ -81,7 +81,7 @@ describe("agent and metering configuration", () => {
       ["PROVIDER_DEFAULT_CONTEXT_TOKENS", "providerDefaultContextTokens", [["2049", 2049], ["2000000", 2_000_000], ["", 16_000]], ["999", "2000001", "16k"]],
       ["PROVIDER_DEFAULT_MAX_OUTPUT_TOKENS", "providerDefaultMaxOutputTokens", [["1", 1], ["15999", 15_999], ["", 2048]], ["0", "-1", "1.5"]],
       ["PROVIDER_MAX_CONCURRENT_CALLS", "providerMaxConcurrentCalls", [["1", 1], ["1000", 1000], ["", 64]], ["0", "1001", "many"]],
-      ["AGENT_MAX_RUNS_IN_FLIGHT", "agentMaxRunsInFlight", [["1", 1], ["64", 64], ["", 8]], ["0", "65", "-1", "1.5", "many"]],
+      ["AGENT_MAX_RUNS_IN_FLIGHT", "agentMaxRunsInFlight", [["1", 1], ["64", 64], ["", 16]], ["0", "65", "-1", "1.5", "many"]],
       ["AGENT_CHAIN_LIMIT", "agentChainLimit", [["2", 2], ["500", 500], ["", 30]], ["0", "1", "501", "-3", "2.5", "thirty"]],
       ["AGENT_GROUP_CONTEXT_TOKENS", "agentGroupContextTokens", [["2000", 2000], ["200000", 200_000], ["", 12_000]], ["0", "1999", "200001", "-1", "1.5", "12k"]],
     ];
@@ -89,6 +89,30 @@ describe("agent and metering configuration", () => {
       for (const [value, parsed] of accepted) expect([name, value, (loadConfig({ ...base, [name]: value }) as any)[field]]).toEqual([name, value, parsed]);
       for (const value of refused) expect(() => loadConfig({ ...base, [name]: value }), `${name}=${value}`).toThrow(new RegExp(name));
     }
+  });
+
+  test("an owner's running replies: the total and the most of them others' are whole numbers within their ranges (empty: the default)", () => {
+    // Each is tried with the other one set so that only its own range can refuse.
+    const ranges: Array<[name: string, field: string, other: Record<string, string>, accepted: Array<[string, number]>, refused: string[]]> = [
+      ["AGENT_MAX_CONCURRENT_RUNS", "agentMaxConcurrentRuns", { AGENT_MAX_CONCURRENT_OTHERS_RUNS: "1" }, [["1", 1], ["100", 100], ["", 4]], ["0", "101", "-1", "1.5", "two", "1e2"]],
+      ["AGENT_MAX_CONCURRENT_OTHERS_RUNS", "agentMaxConcurrentOthersRuns", { AGENT_MAX_CONCURRENT_RUNS: "100" }, [["1", 1], ["100", 100], ["", 3]], ["0", "101", "-1", "1.5", "three"]],
+    ];
+    for (const [name, field, other, accepted, refused] of ranges) {
+      for (const [value, parsed] of accepted) expect([name, value, (loadConfig({ ...base, ...other, [name]: value }) as any)[field]]).toEqual([name, value, parsed]);
+      for (const value of refused) expect(() => loadConfig({ ...base, ...other, [name]: value }), `${name}=${value}`).toThrow(new RegExp(name));
+    }
+  });
+
+  test("the replies others call for may not be allowed more places than all of an owner's replies: it refuses to start, naming both", () => {
+    expect(() => loadConfig({ ...base, AGENT_MAX_CONCURRENT_RUNS: "2", AGENT_MAX_CONCURRENT_OTHERS_RUNS: "3" })).toThrow(
+      /AGENT_MAX_CONCURRENT_OTHERS_RUNS.*AGENT_MAX_CONCURRENT_RUNS/,
+    );
+    // The default others' limit (3) is more than a total of 2 set alone.
+    expect(() => loadConfig({ ...base, AGENT_MAX_CONCURRENT_RUNS: "2" })).toThrow(/AGENT_MAX_CONCURRENT_OTHERS_RUNS.*AGENT_MAX_CONCURRENT_RUNS/);
+    expect(loadConfig({ ...base, AGENT_MAX_CONCURRENT_RUNS: "3", AGENT_MAX_CONCURRENT_OTHERS_RUNS: "3" })).toMatchObject({
+      agentMaxConcurrentRuns: 3,
+      agentMaxConcurrentOthersRuns: 3,
+    });
   });
 
   test("the default context of a provider model must be larger than the default output limit, or nothing is left for the conversation", () => {

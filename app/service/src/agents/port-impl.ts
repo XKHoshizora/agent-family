@@ -181,21 +181,25 @@ export class DbAgentPort implements AgentPort {
   }
 
   async claimNext(): Promise<RunTicket | null> {
-    const { rows } = await this.deps.db.query<RunRow & { agent_id: string; owner_id: string; conversation_id: string }>(
+    const { rows } = await this.deps.db.query<RunRow & { agent_id: string; owner_id: string; conversation_id: string; lane: string; wait_ms: number }>(
       `with next as (
          select q.id from agent_runs q
           where q.status = 'queued' and q.purpose = 'reply'
             and (select count(*) from agent_runs x where x.owner_id = q.owner_id and x.status = 'running') < $1
+            and (q.lane = 'own'
+              or (select count(*) from agent_runs x where x.owner_id = q.owner_id and x.status = 'running' and x.lane <> 'own') < $2)
           order by q.created_at, q.id
           limit 1
           for update of q skip locked
        )
        update agent_runs as r set status = 'running', started_at = now() from next where r.id = next.id
-       returning ${RUN_COLUMNS}, r.agent_id, r.owner_id, r.conversation_id`,
-      [this.deps.config.agentMaxConcurrentRuns],
+       returning ${RUN_COLUMNS}, r.agent_id, r.owner_id, r.conversation_id, r.lane,
+                 (extract(epoch from (r.started_at - r.created_at)) * 1000)::int as wait_ms`,
+      [this.deps.config.agentMaxConcurrentRuns, this.deps.config.agentMaxConcurrentOthersRuns],
     );
     const row = rows[0];
     if (!row) return null;
+    this.deps.log.info({ metric: "run_wait_ms", lane: row.lane, ms: row.wait_ms }, "agent run: claimed");
     const run: RunTicket = { id: row.id, agentId: row.agent_id, ownerId: row.owner_id, conversationId: row.conversation_id };
     this.flagsOf(run.id);
     this.announce({ ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(row) });
