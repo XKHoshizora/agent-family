@@ -308,6 +308,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
               actOnTriggered(triggered, { announce: (run) => agentPort.announce(run), log: app.log, realtime: app.realtime });
             },
             delayMs: proactiveAsked.delayMs ?? config.proactive.debounceMs,
+            perGroupHour: config.proactive.perGroupHour,
+            perSenderHour: config.proactive.perSenderHour,
             log: app.log,
           });
   const proactive = deps.proactive;

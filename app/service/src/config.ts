@@ -136,6 +136,9 @@ export interface ProactiveConfig {
   quietSmall: { at: number; raise: number; halfLifeS: number };
   cap: number;
   fuse: { perSeconds: number; perHour: number };
+  /** Judgements started within an hour, at most, about one group and about the messages of one sender (scheduler.ts). */
+  perGroupHour: number;
+  perSenderHour: number;
 }
 
 const probability = (fallback: number) => z.number().min(0).max(1).default(fallback);
@@ -158,6 +161,8 @@ const proactiveSchema = z.strictObject({
   quietSmall: defaulted({ at: probability(0.3), raise: probability(0.15), halfLifeS: positive(600, 604_800) }),
   cap: probability(0.98),
   fuse: defaulted({ perSeconds: positive(10, 3600), perHour: positive(30, 100_000) }),
+  perGroupHour: positive(120, 100_000),
+  perSenderHour: positive(120, 100_000),
 });
 
 const allowanceTokens =z.number().int().min(0).max(200_000);

@@ -327,6 +327,8 @@ describe("the proactive replies' configuration", () => {
     quietSmall: { at: 0.3, raise: 0.15, halfLifeS: 600 },
     cap: 0.98,
     fuse: { perSeconds: 10, perHour: 30 },
+    perGroupHour: 120,
+    perSenderHour: 120,
   };
 
   test("unset or empty: every default", () => {
@@ -338,6 +340,7 @@ describe("the proactive replies' configuration", () => {
   test("one override keeps the rest, nested ones too", () => {
     expect(loadConfig({ ...base, PROACTIVE: '{"debounceMs":1000}' }).proactive).toEqual({ ...defaults, debounceMs: 1000 });
     expect(loadConfig({ ...base, PROACTIVE: '{"base":{"less":0.7}}' }).proactive).toEqual({ ...defaults, base: { ...defaults.base, less: 0.7 } });
+    expect(loadConfig({ ...base, PROACTIVE: '{"perGroupHour":30,"perSenderHour":10}' }).proactive).toEqual({ ...defaults, perGroupHour: 30, perSenderHour: 10 });
   });
 
   test("a probability outside [0, 1], a non-whole count, an unknown key (also nested) and bad JSON refuse", () => {
@@ -349,6 +352,9 @@ describe("the proactive replies' configuration", () => {
       '{"transcriptMessages":0}',
       '{"debounceMs":1.5}',
       '{"fuse":{"perHour":0}}',
+      '{"perGroupHour":0}',
+      '{"perSenderHour":1.5}',
+      '{"perSenderHour":"120"}',
       '{"nope":1}',
       // Gone with the staged judgement: one call now asks about every Agent at once.
       '{"perCall":8}',

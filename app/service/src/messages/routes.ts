@@ -90,7 +90,9 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // A person's message in a group may be answered unasked: the scheduler waits for people to stop, then has the latest
       // judged (agents/proactive/scheduler.ts); one that called an Agent cancels the wait instead. Without a judgement
       // model there is no scheduler.
-      if (!duplicate && proactive !== null && lock.conversation.type === "group") proactive.noted(message.conversationId, message.seq, calledAnAgent(triggered));
+      if (!duplicate && proactive !== null && lock.conversation.type === "group") {
+        proactive.noted(message.conversationId, message.seq, message.senderId, calledAnAgent(triggered));
+      }
       const notCalled = triggered.callerLimited.map(({ agentId }) => ({ agentId, reason: "caller_rate_limited" as const }));
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate, ...(notCalled.length > 0 ? { notCalled } : {}) });
     },

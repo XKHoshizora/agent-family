@@ -49,6 +49,8 @@ interface Fake {
   acted: Array<[string, Triggered]>;
   /** What was logged at error: the fields and the message. */
   errors: Array<{ fields: Record<string, unknown>; msg: string }>;
+  /** The fields of what was logged at info. */
+  infos: Array<Record<string, unknown>>;
   /** The decisions held (with `hold`), in the order they began: settle them by hand. */
   held: Array<Deferred<Triggered>>;
   /** The most decisions in flight at once for one conversation. */
@@ -58,11 +60,15 @@ interface Fake {
 }
 
 const DELAY = 20;
+/** The hourly caps on judgements of one group and of one sender's messages, as configured by default. */
+const PER_HOUR = 120;
+const HOUR = 3_600_000;
 
 /**
  * A scheduler over a recording `decide` and `act`. `hold`: each decision waits until the test settles it; `decide`
  * replaces the decision's outcome (thrown or returned) after it is recorded; `act` likewise. `maxAtOnce`: the
- * scheduler's limit on decisions in flight (default its own).
+ * scheduler's limit on decisions in flight (default its own); `perGroupHour`, `perSenderHour` its hourly caps (default
+ * `PER_HOUR`).
  */
 function fake(
   opts: {
@@ -70,11 +76,13 @@ function fake(
     decide?: (call: number) => Triggered | Promise<Triggered>;
     act?: (call: number) => void | Promise<void>;
     maxAtOnce?: number;
+    perGroupHour?: number;
+    perSenderHour?: number;
     /** The logger throws after recording. */
     logThrows?: boolean;
   } = {},
 ): Fake {
-  const f = { decided: [], returned: [], acted: [], errors: [], held: [], mostAtOnce: 0, mostOverall: 0 } as unknown as Fake;
+  const f = { decided: [], returned: [], acted: [], errors: [], infos: [], held: [], mostAtOnce: 0, mostOverall: 0 } as unknown as Fake;
   const inFlight = new Map<string, number>();
   let overall = 0;
   const log = {
@@ -82,9 +90,12 @@ function fake(
       f.errors.push({ fields, msg });
       if (opts.logThrows) throw new Error("the logger broke");
     },
-  } as unknown as Pick<FastifyBaseLogger, "error">;
+    info: (fields: Record<string, unknown>) => void f.infos.push(fields),
+  } as unknown as Pick<FastifyBaseLogger, "error" | "info">;
   f.scheduler = createProactiveScheduler({
     delayMs: DELAY,
+    perGroupHour: opts.perGroupHour ?? PER_HOUR,
+    perSenderHour: opts.perSenderHour ?? PER_HOUR,
     log,
     ...(opts.maxAtOnce === undefined ? {} : { maxAtOnce: opts.maxAtOnce }),
     decide: (conversationId, seq) => {
@@ -154,9 +165,9 @@ describe("the scheduler", () => {
 
   it("several messages in quick succession: one decision, about the latest, `delayMs` after it; its outcome is acted on", async () => {
     const f = fake();
-    f.scheduler.noted("g", 3, false);
-    f.scheduler.noted("g", 4, false);
-    f.scheduler.noted("g", 5, false);
+    f.scheduler.noted("g", 3, "p", false);
+    f.scheduler.noted("g", 4, "p", false);
+    f.scheduler.noted("g", 5, "p", false);
     expect(vi.getTimerCount()).toBe(1);
     await vi.advanceTimersByTimeAsync(DELAY - 1);
     expect(f.decided).toEqual([]);
@@ -171,11 +182,11 @@ describe("the scheduler", () => {
 
   it("each message starts the wait again: people are waited for until they stop", async () => {
     const f = fake();
-    f.scheduler.noted("g", 1, false);
+    f.scheduler.noted("g", 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY - 1);
-    f.scheduler.noted("g", 2, false);
+    f.scheduler.noted("g", 2, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY - 1);
-    f.scheduler.noted("g", 3, false);
+    f.scheduler.noted("g", 3, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY - 1);
     expect(f.decided).toEqual([]);
     await vi.advanceTimersByTimeAsync(1);
@@ -185,12 +196,12 @@ describe("the scheduler", () => {
 
   it("a message naming an Agent cancels what was waiting and starts nothing", async () => {
     const f = fake();
-    f.scheduler.noted("g", 1, false);
-    f.scheduler.noted("g", 2, true);
+    f.scheduler.noted("g", 1, "p", false);
+    f.scheduler.noted("g", 2, "p", true);
     expect(vi.getTimerCount()).toBe(0);
     expect(await settlesNow(f.scheduler.idle())).toBe(true);
     // Naming an Agent with nothing waiting: nothing either.
-    f.scheduler.noted("g", 3, true);
+    f.scheduler.noted("g", 3, "p", true);
     await vi.advanceTimersByTimeAsync(DELAY * 5);
     expect(f.decided).toEqual([]);
     expect(f.acted).toEqual([]);
@@ -199,7 +210,7 @@ describe("the scheduler", () => {
   it("`cancelled` (an Agent posted) drops what was waiting; for a group with nothing waiting it does nothing", async () => {
     const f = fake();
     f.scheduler.cancelled("nowhere");
-    f.scheduler.noted("g", 1, false);
+    f.scheduler.noted("g", 1, "p", false);
     f.scheduler.cancelled("g");
     expect(vi.getTimerCount()).toBe(0);
     expect(await settlesNow(f.scheduler.idle())).toBe(true);
@@ -209,11 +220,11 @@ describe("the scheduler", () => {
 
   it("a message while a decision is in flight starts no second one; once it settles, a fresh wait, then one decision about the newest", async () => {
     const f = fake({ hold: true });
-    f.scheduler.noted("g", 1, false);
+    f.scheduler.noted("g", 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     expect(f.decided).toEqual([["g", 1]]);
-    f.scheduler.noted("g", 2, false);
-    f.scheduler.noted("g", 3, false);
+    f.scheduler.noted("g", 2, "p", false);
+    f.scheduler.noted("g", 3, "p", false);
     expect(vi.getTimerCount()).toBe(0); // nothing waits while it is in flight
     await vi.advanceTimersByTimeAsync(DELAY * 5);
     expect(f.decided).toEqual([["g", 1]]);
@@ -242,11 +253,11 @@ describe("the scheduler", () => {
   });
 
   it("while a decision is in flight, a message naming an Agent or an Agent's post leaves nothing to follow it; what it decided is still acted on", async () => {
-    for (const drop of [(s: ProactiveScheduler) => s.noted("g", 3, true), (s: ProactiveScheduler) => s.cancelled("g")]) {
+    for (const drop of [(s: ProactiveScheduler) => s.noted("g", 3, "p", true), (s: ProactiveScheduler) => s.cancelled("g")]) {
       const f = fake({ hold: true });
-      f.scheduler.noted("g", 1, false);
+      f.scheduler.noted("g", 1, "p", false);
       await vi.advanceTimersByTimeAsync(DELAY);
-      f.scheduler.noted("g", 2, false);
+      f.scheduler.noted("g", 2, "p", false);
       drop(f.scheduler);
       const outcome = noneTriggered();
       f.held[0]!.resolve(outcome);
@@ -259,9 +270,9 @@ describe("the scheduler", () => {
 
   it("a note about an older message than the one waiting or in flight changes nothing (after-commit steps may run out of order)", async () => {
     const f = fake();
-    f.scheduler.noted("g", 5, false);
-    f.scheduler.noted("g", 4, false);
-    f.scheduler.noted("g", 4, true);
+    f.scheduler.noted("g", 5, "p", false);
+    f.scheduler.noted("g", 4, "p", false);
+    f.scheduler.noted("g", 4, "p", true);
     await vi.advanceTimersByTimeAsync(DELAY);
     await f.scheduler.idle();
     expect(f.decided).toEqual([["g", 5]]);
@@ -278,7 +289,7 @@ describe("the scheduler", () => {
       },
     });
     for (const seq of [1, 2, 3]) {
-      expect(() => f.scheduler.noted("g", seq, false)).not.toThrow();
+      expect(() => f.scheduler.noted("g", seq, "p", false)).not.toThrow();
       await vi.advanceTimersByTimeAsync(DELAY);
       await f.scheduler.idle();
     }
@@ -304,7 +315,7 @@ describe("the scheduler", () => {
       },
     });
     for (const seq of [1, 2, 3]) {
-      f.scheduler.noted("g", seq, false);
+      f.scheduler.noted("g", seq, "p", false);
       await vi.advanceTimersByTimeAsync(DELAY);
       await f.scheduler.idle();
     }
@@ -318,12 +329,12 @@ describe("the scheduler", () => {
   it("close(): no timer is left, later notes do nothing, and what a decision in flight decides is dropped", async () => {
     // A wait under way.
     const waiting = fake();
-    waiting.scheduler.noted("g", 1, false);
-    waiting.scheduler.noted("h", 1, false);
+    waiting.scheduler.noted("g", 1, "p", false);
+    waiting.scheduler.noted("h", 1, "p", false);
     waiting.scheduler.close();
     expect(vi.getTimerCount()).toBe(0);
     expect(await settlesNow(waiting.scheduler.idle())).toBe(true);
-    waiting.scheduler.noted("g", 2, false);
+    waiting.scheduler.noted("g", 2, "p", false);
     waiting.scheduler.cancelled("g");
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(DELAY * 5);
@@ -331,9 +342,9 @@ describe("the scheduler", () => {
 
     // A decision in flight: it finishes, nothing is acted on, nothing follows it.
     const flying = fake({ hold: true });
-    flying.scheduler.noted("g", 1, false);
+    flying.scheduler.noted("g", 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
-    flying.scheduler.noted("g", 2, false);
+    flying.scheduler.noted("g", 2, "p", false);
     flying.scheduler.close();
     const idle = flying.scheduler.idle();
     expect(await settlesNow(idle)).toBe(false);
@@ -347,12 +358,12 @@ describe("the scheduler", () => {
 
   it("conversations are independent: each has its own wait and its own decision, at the same time", async () => {
     const f = fake({ hold: true });
-    f.scheduler.noted("a", 1, false);
-    f.scheduler.noted("b", 7, false);
-    f.scheduler.noted("c", 4, false);
+    f.scheduler.noted("a", 1, "p", false);
+    f.scheduler.noted("b", 7, "p", false);
+    f.scheduler.noted("c", 4, "p", false);
     f.scheduler.cancelled("c");
-    f.scheduler.noted("b", 8, true); // naming an Agent in b cancels b only
-    f.scheduler.noted("b", 9, false);
+    f.scheduler.noted("b", 8, "p", true); // naming an Agent in b cancels b only
+    f.scheduler.noted("b", 9, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     expect(f.decided).toEqual([
       ["a", 1],
@@ -361,7 +372,7 @@ describe("the scheduler", () => {
     // a is in flight; a message in b is decided meanwhile.
     f.held[1]!.resolve(noneTriggered());
     await flush();
-    f.scheduler.noted("b", 10, false);
+    f.scheduler.noted("b", 10, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     expect(f.decided).toEqual([
       ["a", 1],
@@ -376,10 +387,10 @@ describe("the scheduler", () => {
 
   it("at most `maxAtOnce` decisions at once, all groups together: a group whose wait is over waits its turn, oldest first", async () => {
     const f = fake({ hold: true, maxAtOnce: 2 });
-    f.scheduler.noted("a", 1, false);
-    f.scheduler.noted("b", 1, false);
-    f.scheduler.noted("c", 1, false);
-    f.scheduler.noted("d", 1, false);
+    f.scheduler.noted("a", 1, "p", false);
+    f.scheduler.noted("b", 1, "p", false);
+    f.scheduler.noted("c", 1, "p", false);
+    f.scheduler.noted("d", 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     expect(f.decided).toEqual([
       ["a", 1],
@@ -403,12 +414,12 @@ describe("the scheduler", () => {
 
   it("a group waiting its turn: a newer message replaces the one it waits with; a cancel or a message naming an Agent takes it out", async () => {
     const f = fake({ hold: true, maxAtOnce: 1 });
-    for (const g of ["a", "b", "c", "d", "e"]) f.scheduler.noted(g, 1, false);
+    for (const g of ["a", "b", "c", "d", "e"]) f.scheduler.noted(g, 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     expect(f.decided).toEqual([["a", 1]]);
     f.scheduler.cancelled("b");
-    f.scheduler.noted("c", 2, false); // keeps its place, with the newer message
-    f.scheduler.noted("d", 2, true);
+    f.scheduler.noted("c", 2, "p", false); // keeps its place, with the newer message
+    f.scheduler.noted("d", 2, "p", true);
     expect(vi.getTimerCount()).toBe(0);
     f.held[0]!.resolve(noneTriggered());
     await flush();
@@ -431,8 +442,8 @@ describe("the scheduler", () => {
 
   it("close() empties the queue of groups waiting their turn", async () => {
     const f = fake({ hold: true, maxAtOnce: 1 });
-    f.scheduler.noted("a", 1, false);
-    f.scheduler.noted("b", 1, false);
+    f.scheduler.noted("a", 1, "p", false);
+    f.scheduler.noted("b", 1, "p", false);
     await vi.advanceTimersByTimeAsync(DELAY);
     f.scheduler.close();
     f.held[0]!.resolve(noneTriggered());
@@ -449,10 +460,10 @@ describe("the scheduler", () => {
     process.on("unhandledRejection", onUnhandled);
     try {
       const f = fake({ logThrows: true, decide: (call) => (call === 1 ? Promise.reject(new Error("no answer")) : noneTriggered()) });
-      f.scheduler.noted("g", 1, false);
+      f.scheduler.noted("g", 1, "p", false);
       await sleep(DELAY * 3);
       expect(await settlesWithin(f.scheduler.idle(), 100)).toBe(true);
-      f.scheduler.noted("g", 2, false);
+      f.scheduler.noted("g", 2, "p", false);
       await sleep(DELAY * 3);
       expect(await settlesWithin(f.scheduler.idle(), 100)).toBe(true);
       expect(f.errors).toHaveLength(1);
@@ -478,7 +489,7 @@ describe("the scheduler", () => {
     const spy = vi.spyOn(globalThis, "setTimeout");
     try {
       const f = fake();
-      f.scheduler.noted("g", 1, false);
+      f.scheduler.noted("g", 1, "p", false);
       const ours = spy.mock.results.filter((_, i) => spy.mock.calls[i]![1] === DELAY).map((r) => r.value as NodeJS.Timeout);
       expect(ours).toHaveLength(1);
       expect(ours[0]!.hasRef()).toBe(false);
@@ -486,6 +497,103 @@ describe("the scheduler", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("the hourly caps: no group and no sender uses up the site's judgements", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A message noted in `group` by `sender`, waited for, decided and settled. */
+  const decideOne = async (f: Fake, group: string, seq: number, sender: string) => {
+    f.scheduler.noted(group, seq, sender, false);
+    await vi.advanceTimersByTimeAsync(DELAY);
+    await f.scheduler.idle();
+  };
+
+  it(`the ${PER_HOUR + 1}st decision of one group within the hour is skipped — not queued, not judged — while another group's goes on; logged once`, async () => {
+    const f = fake();
+    for (let i = 1; i <= PER_HOUR; i++) await decideOne(f, "g", i, `s${i}`);
+    expect(f.decided).toHaveLength(PER_HOUR);
+    await decideOne(f, "g", PER_HOUR + 1, "new");
+    await decideOne(f, "h", 1, "new");
+    expect(f.decided.slice(PER_HOUR)).toEqual([["h", 1]]);
+    expect(vi.getTimerCount()).toBe(0);
+    await decideOne(f, "g", PER_HOUR + 2, "newer");
+    expect(f.decided.filter(([c]) => c === "g")).toHaveLength(PER_HOUR);
+    expect(f.infos).toEqual([{ metric: "judge_capped", scope: "group", conversationId: "g" }]);
+  });
+
+  it("the same for one sender across groups: their messages are not judged for an hour, anyone else's are", async () => {
+    const f = fake();
+    for (let i = 1; i <= PER_HOUR; i++) await decideOne(f, `g${i}`, 1, "busy");
+    await decideOne(f, "other", 1, "busy");
+    await decideOne(f, "other", 2, "calm");
+    await decideOne(f, "another", 1, "busy");
+    expect(f.decided.slice(PER_HOUR)).toEqual([["other", 2]]);
+    expect(f.infos).toEqual([{ metric: "judge_capped", scope: "sender", conversationId: "other", senderId: "busy" }]);
+  });
+
+  it("the hour slides: once the first decision of it is an hour old, the group is decided again; capped is told again an hour after it was", async () => {
+    const f = fake({ perGroupHour: 3 });
+    await decideOne(f, "g", 1, "a");
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await decideOne(f, "g", 2, "b");
+    await decideOne(f, "g", 3, "c");
+    await decideOne(f, "g", 4, "d");
+    expect(f.decided.map(([, seq]) => seq)).toEqual([1, 2, 3]);
+    // Just before the first decision is an hour old: still capped.
+    await vi.advanceTimersByTimeAsync(HOUR - 10 * 60_000 - 5 * DELAY - 1);
+    await decideOne(f, "g", 5, "e");
+    expect(f.decided.map(([, seq]) => seq)).toEqual([1, 2, 3]);
+    // Now it is: one place again, then capped until the second is an hour old.
+    await vi.advanceTimersByTimeAsync(1);
+    await decideOne(f, "g", 6, "f");
+    await decideOne(f, "g", 7, "g");
+    expect(f.decided.map(([, seq]) => seq)).toEqual([1, 2, 3, 6]);
+    expect(f.infos).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    for (const seq of [8, 9, 10, 11]) await decideOne(f, "g", seq, `x${seq}`);
+    expect(f.decided.map(([, seq]) => seq)).toEqual([1, 2, 3, 6, 8, 9, 10]);
+    expect(f.infos).toHaveLength(2);
+  });
+
+  it("a group waiting for a place is skipped when its turn comes if it is capped by then", async () => {
+    const f = fake({ hold: true, maxAtOnce: 1, perSenderHour: 2 });
+    for (const g of ["a", "b", "c"]) f.scheduler.noted(g, 1, "busy", false);
+    await vi.advanceTimersByTimeAsync(DELAY);
+    // a is decided; b and c wait for the place, neither capped yet (one decision of the sender's has started).
+    expect(f.decided).toEqual([["a", 1]]);
+    expect(f.infos).toEqual([]);
+    f.held[0]!.resolve(noneTriggered());
+    await flush();
+    expect(f.decided).toEqual([
+      ["a", 1],
+      ["b", 1],
+    ]);
+    // b's decision was the sender's second of the hour: c's turn comes, and it is skipped.
+    f.held[1]!.resolve(noneTriggered());
+    await f.scheduler.idle();
+    expect(f.decided.map(([c]) => c)).toEqual(["a", "b"]);
+    expect(f.infos).toEqual([{ metric: "judge_capped", scope: "sender", conversationId: "c", senderId: "busy" }]);
+  });
+
+  it("nothing is remembered of a group or a sender once its hour is over, nor after close()", async () => {
+    const f = fake({ perGroupHour: 2, perSenderHour: 2 });
+    for (let i = 1; i <= 50; i++) await decideOne(f, `g${i}`, 1, `s${i}`);
+    expect(f.scheduler.remembered()).toBe(100);
+    await vi.advanceTimersByTimeAsync(HOUR);
+    await decideOne(f, "late", 1, "late");
+    expect(f.scheduler.remembered()).toBe(2);
+    await decideOne(f, "late", 2, "late");
+    await decideOne(f, "late", 3, "late");
+    expect(f.infos).toHaveLength(1);
+    f.scheduler.close();
+    expect(f.scheduler.remembered()).toBe(0);
   });
 });
 
@@ -600,8 +708,8 @@ describe("what is noted: the send route and an Agent's post", () => {
     expect(await idleNow(scheduler())).toBe(false);
     const second = await say(app, w.owner, w.g, "我也想知道");
     expect(noted.mock.calls).toEqual([
-      [w.g, first, false],
-      [w.g, second, false],
+      [w.g, first, w.member.id, false],
+      [w.g, second, w.owner.id, false],
     ]);
     expect(timers.count()).toBe(2);
     expect(timers.timers().every((t) => !t.hasRef())).toBe(true);
@@ -626,9 +734,9 @@ describe("what is noted: the send route and an Agent's post", () => {
     const toThird = await say(app, w.member, w.g, `@${w.third.handle} 你呢？`);
     expect(await idleNow(scheduler())).toBe(false);
     expect(noted.mock.calls.slice(1)).toEqual([
-      [w.g, toAnna, true],
-      [w.g, toBob, false],
-      [w.g, toThird, false],
+      [w.g, toAnna, w.member.id, true],
+      [w.g, toBob, w.member.id, false],
+      [w.g, toThird, w.member.id, false],
     ]);
     scheduler().cancelled(w.g);
     expect(judge.calls).toEqual([]);
@@ -702,7 +810,7 @@ describe("what is noted: the send route and an Agent's post", () => {
       expect(schedulerClosed).toHaveBeenCalledTimes(1);
       expect(schedulerClosed.mock.invocationCallOrder[0]!).toBeLessThan(workerStopped.mock.invocationCallOrder[0]!);
       expect(await idleNow(ownScheduler)).toBe(true);
-      ownScheduler.noted(w.g, 999, false);
+      ownScheduler.noted(w.g, 999, w.member.id, false);
       expect(timers.count()).toBe(1);
       await sleep(SHORT * 4);
       expect(judge.calls).toEqual([]);
@@ -772,7 +880,7 @@ describe("what comes of it, with the reply worker running", () => {
     judge.answer(byName({ anna: 0.9 }));
     const noted = vi.spyOn(app.deps.proactive!, "noted");
     const asked = await say(app, w.member, w.g, "@bobbot 今晚做什么菜好？");
-    expect(noted.mock.calls).toEqual([[w.g, asked, false]]);
+    expect(noted.mock.calls).toEqual([[w.g, asked, w.member.id, false]]);
     expect(await idleNow(app.deps.proactive!)).toBe(false);
     await sleep(SHORT * 4);
     await app.deps.proactive!.idle();
