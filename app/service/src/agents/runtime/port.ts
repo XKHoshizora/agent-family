@@ -25,12 +25,6 @@ export interface Prepared {
    * the upstream reports no usage. A whole number of 0 or more.
    */
   readonly inputChars: number;
-  /**
-   * In a group, the run's mark (prompt.ts `newMark`): the labels and the system text the model is shown carry it, and
-   * the worker hands it on with the reply (`Reply.mark`) to be taken out of what the model wrote. Null in the Agent's
-   * own conversation, which has no labels. Never stored, pushed or logged.
-   */
-  readonly mark: string | null;
 }
 
 /**
@@ -104,11 +98,6 @@ export interface Reply {
   reasoning: string;
   stopped: boolean;
   truncated: boolean;
-  /**
-   * The run's mark (`Prepared.mark`; null in the Agent's own conversation): taken out of the text and the reasoning once
-   * they are cut to what a message stores (agents/conversation.ts `postAsAgent`). Never stored.
-   */
-  mark: string | null;
 }
 
 export interface Usage {
@@ -138,7 +127,8 @@ export interface AgentPort {
    * Posts the reply as the Agent's message: "refused" when the Agent is paused or deleted, or its pause, delete or
    * removal from the run's conversation, or a group member's halt, interrupted the run, or the run is no longer running (another instance's
    * recovery ended it; `finish` then leaves it as that recorded it); "empty", storing nothing, when nothing of it is
-   * left to show (a reply stopped or cut inside a persona block it never finished, with nothing before it).
+   * left to show (a reply stopped or cut inside a persona block it never finished, with nothing before it; in a group,
+   * also one that was nothing but the mark `begin` drew for the run, which the port keeps and takes out, and labels).
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
   /**

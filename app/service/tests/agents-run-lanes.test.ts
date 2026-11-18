@@ -440,8 +440,9 @@ describe("a run's lane and who called for it", () => {
        select 'reply', $1, $2, $3, 'running', seq, now(), 'others' from conversations where id = $1 returning id`,
       [w.g, anna.id, w.owner.id],
     );
+    // A reply in a group is posted with the mark its run drew: this run, made by hand, is given one.
     const posted = await db.tx((t) =>
-      postAsAgent(t, anna.id, w.g, run.rows[0]!.id, { text: "@carlbot 你看看", reasoning: "", stopped: false, truncated: false, mark: null }, app.deps.config),
+      postAsAgent(t, anna.id, w.g, run.rows[0]!.id, { text: "@carlbot 你看看", reasoning: "", stopped: false, truncated: false }, "k7f2ab", app.deps.config),
     );
     expect(posted?.triggered.runs).toHaveLength(1);
     expect(await laneOf(carl.id, w.g)).toEqual([["others", null]]);

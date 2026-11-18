@@ -337,7 +337,7 @@ describe("stopping, pausing, failing", () => {
     await say(other.owner, other.conv, "讲吧");
     const posted = (await app.agentPort.claimNext())!;
     await app.agentPort.begin(posted);
-    expect(await app.agentPort.post(posted, { text: "讲到一半", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("posted");
+    expect(await app.agentPort.post(posted, { text: "讲到一半", reasoning: "", stopped: true, truncated: false })).toBe("posted");
     expect((await api(app, other.owner, "POST", `/api/conversations/${other.conv}/runs/${posted.id}/stop`)).status).toBe(200);
     expect(await latestRun(other.owner, other.conv)).toEqual({ id: posted.id, status: "stopped", retryable: false });
     expect(await fromAgent(other.owner, other.conv, other.agent.id)).toMatchObject([{ text: "讲到一半", stopped: true }]);

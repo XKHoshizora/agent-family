@@ -122,6 +122,14 @@ interface RunFlags {
    * streamed (plan ruling 2) — its reply arrives whole, with its message.
    */
   group: boolean;
+  /**
+   * In a group, the run's mark (prompt.ts `newMark`), kept from the moment `begin` hands over the call that carries it:
+   * `post` takes this copy, never one the worker could hand it, out of the reply. Null until then, and in the Agent's own
+   * conversation. A run this process did not begin has none — after a restart, every run the previous process left
+   * running is ended by recovery before the worker starts, its model's output gone with that process, so no such run
+   * is ever posted. Never stored, pushed or logged.
+   */
+  mark: string | null;
 }
 
 /**
@@ -162,7 +170,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false };
+      flags = { stop: false, silenced: false, group: false, mark: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -264,8 +272,8 @@ export class DbAgentPort implements AgentPort {
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
    *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
    *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, each of someone else's
-   *    labelled with the run's mark, which `loadContext` draws with `deps.drawMark` and the run's `Prepared` carries,
-   *    as does the roster). With no owner's message in it (in a group: nobody else's) the run ends without a call:
+   *    labelled with the run's mark, which `loadContext` draws with `deps.drawMark` and the roster carries too; the
+   *    port keeps it for `post` once the call is handed over, `RunFlags.mark`). With no owner's message in it (in a group: nobody else's) the run ends without a call:
    *    `cancelled` with no error when everything it was to answer is before a new topic (its owner started over), else
    *    `failed` `busy`; and so does one whose model's context cannot hold the newest such message, or 200 tokens of it,
    *    beside the system text, roster and all (`failed`, `context_too_small`).
@@ -390,11 +398,7 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       return {
-        prepared: {
-          call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning },
-          inputChars: context.inputChars,
-          mark: loaded.mark,
-        },
+        prepared: { call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning }, inputChars: context.inputChars },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });
@@ -404,6 +408,8 @@ export class DbAgentPort implements AgentPort {
       return result.end;
     }
     if (result.read !== null) this.deps.reads.publish({ conversationId: run.conversationId, principalId: run.agentId, seq: result.read }, log);
+    // The mark the call carries is the one `post` takes out of the reply.
+    this.flagsOf(run.id).mark = first.loaded.mark;
     return result.prepared;
   }
 
@@ -419,14 +425,16 @@ export class DbAgentPort implements AgentPort {
   /**
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
    * the Agent's earlier open proposals) also tells the owner's sockets to look at the Agent's proposals again (`agent`;
-   * never in a group, where nothing proposes). "refused" for the Agent's state or a mark on the run — paused, deleted,
+   * never in a group, where nothing proposes). In a group the reply loses the run's mark — the port's own copy, kept from
+   * `begin` (`RunFlags.mark`). "refused" for the Agent's state or a mark on the run — paused, deleted,
    * out of the run's group (`agent_removed`), halted — and also when the run is no longer `running` (`RunNotRunning`:
    * another instance's recovery ended it while this one answered); `finish` then finds it ended and leaves it as that
    * recovery recorded it.
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
+    const mark = this.flags.get(run.id)?.mark ?? null;
     try {
-      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, this.deps.config));
+      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, mark, this.deps.config));
       if (!posted) return "empty";
       const { message, duplicate, triggered } = posted;
       // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners, the

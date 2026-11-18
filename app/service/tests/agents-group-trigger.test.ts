@@ -794,7 +794,7 @@ describe("POST /api/conversations/:id/agents/halt", () => {
       )
     ).rows[0]!.id;
     const ticket: RunTicket = { id, agentId: agent.id, ownerId: owner.id, conversationId: agent.conversationId };
-    expect(await app.agentPort.post(ticket, { text: "回答", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("refused");
+    expect(await app.agentPort.post(ticket, { text: "回答", reasoning: "", stopped: false, truncated: false })).toBe("refused");
     expect(Number((await db.query("select count(*) n from messages where client_txn = $1", [id])).rows[0].n)).toBe(0);
   });
 });

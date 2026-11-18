@@ -221,14 +221,13 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const text = cleanModelText(out.text);
     const reasoning = cleanModelText(out.reasoning);
     const said = hasVisibleText(text) || hasVisibleText(reasoning);
-    // In a group the run's mark goes with the reply: `post` takes it out of what is kept of it (agents/conversation.ts
-    // `postAsAgent`), and a reply that was nothing but the mark and labels is then "empty". Nothing of a group's reply
-    // was streamed (`AgentPort.emit`).
-    const { mark } = prepared;
+    // In a group `post` takes the run's mark out of what is kept of the reply (the port keeps the mark from `begin`), and
+    // a reply that was nothing but the mark and labels is then "empty". Nothing of a group's reply was streamed
+    // (`AgentPort.emit`).
     if (finished === null && why === "stop") {
       // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
       if (!said) return finish(run, { status: "stopped" }, usage, fallback);
-      const posted = await post(run, { text, reasoning, stopped: true, truncated: false, mark });
+      const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
       // All it said was inside a persona block it never finished (in a group, also: it only thought, or said only the
       // mark and labels): as a stop with nothing said.
       if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
@@ -236,7 +235,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
     // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
     if (!said) return failed(UNAVAILABLE);
-    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated, mark });
+    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
     // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, or said only the
     // mark and labels): as an answer that said nothing, failed `provider_unavailable`.
     if (posted === "empty") return failed(UNAVAILABLE);

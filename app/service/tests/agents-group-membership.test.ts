@@ -586,7 +586,7 @@ describe("deleting an Agent", () => {
     // happened yet: the Agent is deleted and still a member.
     await db.query("update agents set deleted_at = now() where principal_id = $1", [x.id]);
 
-    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("refused");
+    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false })).toBe("refused");
     await app.agentPort.finish(ticket, { status: "cancelled" }, CANNED_USAGE, { inputChars: 10, outputChars: 2 });
     expect(await runOf(runId)).toMatchObject({ status: "cancelled", error: "agent_deleted" });
     // A reply queued for it there meanwhile ends before any call.
@@ -670,7 +670,7 @@ describe("races", () => {
       const holderPid = (await holder.query<{ pid: number }>("select pg_backend_pid() as pid")).rows[0]!.pid;
       removal = remove(owner, g, x.id);
       const removalPid = await blockedBy(holderPid);
-      posting = app.agentPort.post(ticket, { text: "总结如下：……", reasoning: "", stopped: false, truncated: false, mark: null });
+      posting = app.agentPort.post(ticket, { text: "总结如下：……", reasoning: "", stopped: false, truncated: false });
       await blockedBy(removalPid);
       await holder.query("rollback");
     } finally {

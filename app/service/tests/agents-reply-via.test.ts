@@ -329,7 +329,7 @@ describe("the second push, on the paths a normal reply does not take", () => {
     const ticket = (await app.agentPort.claimNext())!;
     const prepared = await app.agentPort.begin(ticket);
     if ("status" in prepared) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
-    expect(await app.agentPort.post(ticket, { text: `HAND-q9x ${text}`, reasoning: "", stopped: false, truncated: false, mark: null })).toBe("posted");
+    expect(await app.agentPort.post(ticket, { text: `HAND-q9x ${text}`, reasoning: "", stopped: false, truncated: false })).toBe("posted");
     return { ticket, prepared, seq: await seqFrom(w.g, w.sol.id) };
   }
 

@@ -192,7 +192,6 @@ describe("turns", () => {
     const prepared = await app.agentPort.begin(ticket);
     const after = new Date();
     if (isRunEnd(prepared)) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
-    expect(prepared.mark).toBeNull();
     // `begin` reads the clock between these two: its date is one of theirs, also across midnight.
     const own = (now: Date) =>
       systemPrompt({ name: agent.name, persona: PERSONA, ownerAppellation: null }, { displayName: "own" }, now, "normal", app.deps.config.siteTimezone);
@@ -220,7 +219,6 @@ describe("turns", () => {
     expect([own(before, "老〔板｜"), own(after, "老〔板｜")]).toContain(prepared.call.system);
     expect(prepared.call.system).toContain("现在和你对话的是你的主人 named。称呼你的主人为「老板」。\n今天是");
     expect([own(before, null), own(after, null)]).toContain(prepared.call.system.replace("称呼你的主人为「老板」。", ""));
-    expect(prepared.mark).toBeNull();
     await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
   });
 

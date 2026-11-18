@@ -190,7 +190,7 @@ describe("a run left running when the service stopped", () => {
     await say(old, owner, conv, "你好");
     const ticket = (await old.agentPort.claimNext())!;
     expect(isRunEnd(await old.agentPort.begin(ticket))).toBe(false);
-    expect(await old.agentPort.post(ticket, { text: "已经说完了。", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("posted");
+    expect(await old.agentPort.post(ticket, { text: "已经说完了。", reasoning: "", stopped: false, truncated: false })).toBe("posted");
     await stop(old);
 
     const after = scriptedGateway();
@@ -209,7 +209,7 @@ describe("a run left running when the service stopped", () => {
     await say(old, owner, conv, "讲吧");
     const ticket = (await old.agentPort.claimNext())!;
     await old.agentPort.begin(ticket);
-    expect(await old.agentPort.post(ticket, { text: "讲到一半", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("posted");
+    expect(await old.agentPort.post(ticket, { text: "讲到一半", reasoning: "", stopped: true, truncated: false })).toBe("posted");
     await stop(old);
 
     const fresh = await start(scriptedGateway());
@@ -225,7 +225,7 @@ describe("a run left running when the service stopped", () => {
     const ticket = (await old.agentPort.claimNext())!;
     await old.agentPort.begin(ticket);
     await say(old, owner, conv, "第二句"); // noted on the running reply
-    expect(await old.agentPort.post(ticket, { text: "回第一句。", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("posted");
+    expect(await old.agentPort.post(ticket, { text: "回第一句。", reasoning: "", stopped: false, truncated: false })).toBe("posted");
     await stop(old);
 
     const after = scriptedGateway();
@@ -525,7 +525,7 @@ describe("the stale-run sweep", () => {
     const done = (await app.agentPort.claimNext())!;
     await app.agentPort.begin(done);
     await say(app, posted.owner, posted.conv, "第二句"); // noted on the running reply
-    expect(await app.agentPort.post(done, { text: "回第一句。", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("posted");
+    expect(await app.agentPort.post(done, { text: "回第一句。", reasoning: "", stopped: false, truncated: false })).toBe("posted");
     await age(done.id, 10);
     expect(await app.staleRunSweep.run()).toBe(1);
     expect(await statusOf(done.id)).toMatchObject({ status: "done", hold: "0" });

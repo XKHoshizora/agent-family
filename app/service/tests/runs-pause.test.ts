@@ -116,7 +116,7 @@ describe("pause or delete ends the active reply for good", () => {
     await say(owner, conv, "暂停时说的"); // not answered for itself
     await resume(owner, agent.id);
     await say(owner, conv, "恢复后说的"); // the interrupted run is still running: noted on it
-    expect(await app.agentPort.post(run, { text: "说到一半", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("refused");
+    expect(await app.agentPort.post(run, { text: "说到一半", reasoning: "", stopped: true, truncated: false })).toBe("refused");
     await app.agentPort.finish(run, { status: "stopped" }, null, NOTHING);
 
     expect(await runsOf(agent.id)).toEqual([
@@ -149,7 +149,7 @@ describe("pause or delete ends the active reply for good", () => {
     await pause(owner, agent.id);
     await resume(owner, agent.id);
     expect(app.agentPort.shouldStop(run)).toBe(true);
-    expect(await app.agentPort.post(run, { text: "说到一半", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("refused");
+    expect(await app.agentPort.post(run, { text: "说到一半", reasoning: "", stopped: true, truncated: false })).toBe("refused");
     await app.agentPort.finish(run, { status: "cancelled" }, null, { inputChars: 3, outputChars: 4 });
     expect(await latestRun(owner, conv)).toEqual({ id: run.id, status: "cancelled", error: "agent_paused", retryable: false });
     expect(await fromAgent(owner, conv, agent.id)).toEqual([]);
@@ -176,7 +176,7 @@ describe("pause or delete ends the active reply for good", () => {
     // (a run nobody works on would be released by the route at once).
     app.agentPort.requestStop(run.id);
     expect(app.agentPort.shouldStop(run)).toBe(true);
-    expect(await app.agentPort.post(run, { text: "讲到一半", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("posted");
+    expect(await app.agentPort.post(run, { text: "讲到一半", reasoning: "", stopped: true, truncated: false })).toBe("posted");
     await pause(owner, agent.id);
     await app.agentPort.finish(run, { status: "stopped" }, null, { inputChars: 2, outputChars: 4 });
     expect(await latestRun(owner, conv)).toEqual({ id: run.id, status: "stopped", retryable: false });
@@ -236,7 +236,7 @@ describe("no delta once the pause has answered", () => {
       app.agentPort.emit(run, { text: "乙" }); // waits behind the fan-out
       await pause(owner, agent.id);
       // The run ends, and its final push is queued, before the hub gets to the delta.
-      expect(await app.agentPort.post(run, { text: "甲乙", reasoning: "", stopped: true, truncated: false, mark: null })).toBe("refused");
+      expect(await app.agentPort.post(run, { text: "甲乙", reasoning: "", stopped: true, truncated: false })).toBe("refused");
       await app.agentPort.finish(run, { status: "stopped" }, null, NOTHING);
     } finally {
       release();

@@ -143,8 +143,6 @@ export interface AgentReply {
   reasoning: string;
   stopped: boolean;
   truncated: boolean;
-  /** In a group, the run's mark, to be taken out of the reply (runtime/port.ts `Reply.mark`); null in its own conversation. */
-  mark: string | null;
 }
 
 /**
@@ -173,9 +171,11 @@ export interface AgentReply {
  * owner's decision of 2026-11-18, replacing plan ruling 2): every member reads the message, but its reasoning is sent
  * only to the owner of the Agent that sent it (messages/read.ts `toWireForReaders`), since a model's thinking often
  * restates its persona. Then the text is cut at 8 000 characters as above. Only then do the text and the reasoning lose
- * the run's mark (`reply.mark`, runtime/prompt.ts `withoutMark`), so no more is cleaned than a message stores — what the
- * model writes may be shaped against the cleaner, and whoever runs the model's endpoint reads the mark in the system
- * text. What was cut for length — the text when it is `truncated`, the reasoning when it was cut here or the reply
+ * the run's `mark` (runtime/prompt.ts `withoutMark`), so no more is cleaned than a message stores — what the model
+ * writes may be shaped against the cleaner, and whoever runs the model's endpoint reads the mark in the system text.
+ * `mark` is the one the run drew, as the port kept it from `begin` (port-impl.ts `RunFlags.mark`): only a run begun in
+ * this process is posted, so in a group it is always there, and a reply there without one is thrown, never posted
+ * uncleaned. What was cut for length — the text when it is `truncated`, the reasoning when it was cut here or the reply
  * was — also loses what the cut left at its very end of the mark or of a label (`withoutMarkAtCut`); `truncated` says
  * what it always said. The text then loses again any block that taking the mark out put together; a reply that was
  * nothing but the mark and labels is left with no visible text (null, below). The message may then call other Agents there,
@@ -194,6 +194,7 @@ export async function postAsAgent(
   conversationId: string,
   runId: string,
   reply: AgentReply,
+  mark: string | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
 ): Promise<{ message: StoredMessage; duplicate: boolean; triggered: Triggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
@@ -216,6 +217,7 @@ export async function postAsAgent(
   if (agent.deleted) throw new AppError(409, "agent_deleted");
   if (agent.paused) throw new AppError(409, "agent_paused");
   if (!own && !(await currentMembership(t, conversationId, agentId))) throw new AppError(409, "agent_removed");
+  if (!own && mark === null) throw new Error("a reply in a group is posted only with the mark its run drew");
 
   let text = cleanModelText(reply.text);
   // In a group nothing is a proposal, and no block of one is shown.
@@ -236,7 +238,6 @@ export async function postAsAgent(
   if (thought.length > REASONING_MAX) reasoning = thought.slice(0, REASONING_MAX).join("").trimEnd();
   // In a group: the run's mark goes, from no more than is kept — and from the end of what was cut for length, what the
   // cut left of the mark or of a label.
-  const { mark } = reply;
   if (mark !== null) {
     const clean = (s: string, cut: boolean): string => (cut ? withoutMarkAtCut(s, mark) : withoutMark(s, mark)).trim();
     text = withoutUnfinishedBlock(clean(text, truncated));
