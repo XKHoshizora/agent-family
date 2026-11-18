@@ -127,8 +127,6 @@ export interface ProactiveConfig {
   debounceMs: number;
   transcriptMessages: number;
   transcriptChars: number;
-  perCall: number;
-  maxCandidates: number;
   base: { less: number; normal: number; more: number };
   surchargeStep: number;
   surchargeMax: number;
@@ -138,7 +136,6 @@ export interface ProactiveConfig {
   quietSmall: { at: number; raise: number; halfLifeS: number };
   cap: number;
   fuse: { perSeconds: number; perHour: number };
-  gateAt: number;
 }
 
 const probability = (fallback: number) => z.number().min(0).max(1).default(fallback);
@@ -146,22 +143,21 @@ const positive = (fallback: number, max: number) => z.number().int().min(1).max(
 /** An object whose every field is defaulted: nothing (or `{}`) gives all the defaults, a partial one keeps the rest. */
 const defaulted = <T extends z.ZodRawShape>(shape: T) => z.strictObject(shape).prefault({} as never);
 
+// The defaults are those calibrated on the real judgement model (batch 2D): the right Agent's pick probability was at
+// least 0.74 where a reply was expected, the top Agent's at most 0.70 where none was.
 const proactiveSchema = z.strictObject({
   debounceMs: positive(3000, 60_000),
   transcriptMessages: positive(15, 100),
   transcriptChars: positive(300, 5000),
-  perCall: positive(8, 100),
-  maxCandidates: positive(40, 1000),
-  base: defaulted({ less: probability(0.6), normal: probability(0.45), more: probability(0.35) }),
-  surchargeStep: probability(0.15),
-  surchargeMax: probability(0.4),
+  base: defaulted({ less: probability(0.8), normal: probability(0.65), more: probability(0.5) }),
+  surchargeStep: probability(0.1),
+  surchargeMax: probability(0.25),
   surchargeHalfLifeS: positive(120, 86_400),
   surchargeHalfMessages: positive(4, 1000),
-  quietBig: defaulted({ at: probability(0.8), raise: probability(0.5), halfLifeS: positive(3600, 604_800) }),
+  quietBig: defaulted({ at: probability(0.8), raise: probability(0.33), halfLifeS: positive(3600, 604_800) }),
   quietSmall: defaulted({ at: probability(0.3), raise: probability(0.15), halfLifeS: positive(600, 604_800) }),
-  cap: probability(0.9),
+  cap: probability(0.98),
   fuse: defaulted({ perSeconds: positive(10, 3600), perHour: positive(30, 100_000) }),
-  gateAt: probability(0.5),
 });
 
 const allowanceTokens =z.number().int().min(0).max(200_000);

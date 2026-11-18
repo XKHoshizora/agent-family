@@ -318,18 +318,15 @@ describe("the proactive replies' configuration", () => {
     debounceMs: 3000,
     transcriptMessages: 15,
     transcriptChars: 300,
-    perCall: 8,
-    maxCandidates: 40,
-    base: { less: 0.6, normal: 0.45, more: 0.35 },
-    surchargeStep: 0.15,
-    surchargeMax: 0.4,
+    base: { less: 0.8, normal: 0.65, more: 0.5 },
+    surchargeStep: 0.1,
+    surchargeMax: 0.25,
     surchargeHalfLifeS: 120,
     surchargeHalfMessages: 4,
-    quietBig: { at: 0.8, raise: 0.5, halfLifeS: 3600 },
+    quietBig: { at: 0.8, raise: 0.33, halfLifeS: 3600 },
     quietSmall: { at: 0.3, raise: 0.15, halfLifeS: 600 },
-    cap: 0.9,
+    cap: 0.98,
     fuse: { perSeconds: 10, perHour: 30 },
-    gateAt: 0.5,
   };
 
   test("unset or empty: every default", () => {
@@ -346,13 +343,17 @@ describe("the proactive replies' configuration", () => {
   test("a probability outside [0, 1], a non-whole count, an unknown key (also nested) and bad JSON refuse", () => {
     for (const bad of [
       '{"cap":1.5}',
-      '{"gateAt":-0.1}',
+      '{"surchargeStep":-0.1}',
       '{"base":{"less":2}}',
       '{"quietBig":{"at":1.1}}',
-      '{"perCall":0}',
+      '{"transcriptMessages":0}',
       '{"debounceMs":1.5}',
       '{"fuse":{"perHour":0}}',
       '{"nope":1}',
+      // Gone with the staged judgement: one call now asks about every Agent at once.
+      '{"perCall":8}',
+      '{"maxCandidates":40}',
+      '{"gateAt":0.5}',
       '{"base":{"nope":0.5}}',
       "[]",
       "nope",
