@@ -403,13 +403,15 @@ async function recordRateLimited(t: Tx, agent: RunAgent, conversationId: string,
 /**
  * SQL `set` items: what a run takes on of a call recorded on it (folded in, or covered by a reused `rate_limited` run),
  * when `when` (SQL) holds: whose message called (`triggeredBy`, a parameter position) — a person's makes it a person's —
- * and who (`lane`, `caller`) — an `own` call makes it its owner's own, that caller its caller; any call makes a reply
- * nobody had called for (`proactive`) that call's, in its lane and with its caller (it is no longer unasked: not held to
- * the proactive budget or the fuse, not ended by a halt) —, else it keeps them. So a member's call relayed through one of
- * the owner's Agents does not make it the owner's.
+ * and who (`lane`, `caller`) — an `own` call makes it its owner's own, that caller its caller —, else it keeps them. So a
+ * member's call relayed through one of the owner's Agents does not make it the owner's. But any call makes a reply
+ * nobody had called for (`proactive`) wholly that call's: whose message called, its lane and its caller (it is no longer
+ * unasked: not held to the proactive budget or the fuse; a halt ends it only when an Agent's message called for it, as
+ * any such reply). `lane` on the right of each item is the run's lane before this update — SQL reads every right-hand
+ * side from the row as it was — so the three items agree on whether it was a proactive reply.
  */
 const takesOnCall = (when: string, triggeredBy: string, lane: string, caller: string): string =>
-  `triggered_by = case when ${when} and ${triggeredBy} = 'human' then 'human' else triggered_by end,
+  `triggered_by = case when ${when} and (${triggeredBy} = 'human' or lane = 'proactive') then ${triggeredBy}::text else triggered_by end,
    lane = case when ${when} and (${lane} = 'own' or lane = 'proactive') then ${lane}::text else lane end,
    caller_id = case when ${when} and (${lane} = 'own' or lane = 'proactive') then ${caller}::uuid else caller_id end`;
 

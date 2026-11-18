@@ -15,7 +15,8 @@ import { afterProactive, afterQuiet, NO_STATE, thresholdNow, type GroupState } f
 
 /**
  * Whether one Agent replies unasked to a person's message in a group (batch 2D, design rules 3–15), in three phases:
- * 1. read, without locks: the message is still one to judge, the Agents that may answer it, the site's judgements today
+ * 1. read, without locks: the message is still one to judge and has led to no proactive reply yet, the Agents that may
+ *    answer it, the site's judgements today
  *    under its daily limit (`judge_usage`), the transcript and questions (candidates.ts);
  * 2. ask the judgement model once, outside any transaction (bounded by its time limit), then count the call and stamp the
  *    options as judged, each in a statement of its own;
@@ -58,7 +59,7 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   if (judge === null || config.judge === null) return noneTriggered();
 
   const message = await judgeable(db, conversationId, seq);
-  if (message === null) return noneTriggered();
+  if (message === null || (await decidedAlready(db, conversationId, seq))) return noneTriggered();
   const options = await optionsFor(db, conversationId, message.senderId);
   if (options.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);
@@ -94,6 +95,16 @@ function logSkipped(log: DecideDeps["log"], reason: Skipped, agentId: string, co
   const line = { metric: "proactive_skipped", reason, agentId, conversationId };
   if (reason === "under_threshold" || reason === "already_decided") log.debug(line, "the winner does not reply: the usual case");
   else log.info(line, "the Agent the judgement picked cannot speak now: no Agent replies unasked");
+}
+
+/**
+ * Whether the message at `seq` already led to a proactive reply in the group: a surcharge of any Agent there was stamped
+ * after it. Read before the judgement is asked (such a message is not judged again) and again in phase 3, under the
+ * group's row (a decision racing this one may have led to it meanwhile).
+ */
+async function decidedAlready(q: Queryable, conversationId: string, seq: number): Promise<boolean> {
+  const { rowCount } = await q.query("select 1 from agent_group_state where conversation_id = $1 and surcharge_seq >= $2 limit 1", [conversationId, seq]);
+  return rowCount !== 0;
 }
 
 /** Whether the site's judgements of site day `day` have reached `limit`; logged once a day when they have. */
@@ -319,9 +330,8 @@ async function whyNot(
   config: DecideDeps["config"],
 ): Promise<Skipped | null> {
   const P = config.proactive;
-  // Every writer of `surcharge_seq` holds the group's row, as this does.
-  const decided = await t.query("select 1 from agent_group_state where conversation_id = $1 and surcharge_seq >= $2 limit 1", [conversationId, seq]);
-  if (decided.rowCount) return "already_decided";
+  // Read again here, where it is certain: every writer of `surcharge_seq` holds the group's row, as this does.
+  if (await decidedAlready(t, conversationId, seq)) return "already_decided";
   if (quiet !== undefined && quiet >= P.quietSmall.at) return "hushed";
   if (p < thresholdNow(agent.proactiveLevel, state, now, P)) return "under_threshold";
   const active = await t.query("select 1 from agent_runs where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running') limit 1", [

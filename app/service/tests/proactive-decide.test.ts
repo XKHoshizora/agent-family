@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
 import { MAX_AGENT_OPTIONS } from "../src/agents/proactive/candidates.ts";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
-import { actOnTriggered, noneTriggered, type Triggered } from "../src/agents/runs.ts";
+import { actOnTriggered, noneTriggered, triggerFromAgent, type Caller, type Triggered } from "../src/agents/runs.ts";
+import { lockAgent } from "../src/agents/store.ts";
 import type { Config } from "../src/config.ts";
 import { lockConversation } from "../src/conversations/store.ts";
 import type { Db } from "../src/db.ts";
@@ -700,7 +701,7 @@ describe("after it has spoken unasked", () => {
     expect((await decide(w.g, await say(w.member, w.g, "问二"))).runs).toHaveLength(1);
   });
 
-  it("a message leads to one proactive reply at most, even when it is decided twice", async () => {
+  it("a message leads to one proactive reply at most: once it has, it is not judged again, and a decision racing it stops short", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     judge.answer(byName({ anna: 0.99 }));
@@ -709,7 +710,15 @@ describe("after it has spoken unasked", () => {
     // Nothing else would stop it now: the reply is over, out of the fuse, and 0.99 is over the surcharged threshold.
     await settleAndAge();
     expect(await decide(w.g, asked)).toEqual(noneTriggered());
+    expect(judge.calls).toHaveLength(1);
     expect((await proactiveRuns(anna.id, w.g)).length).toBe(1);
+
+    // Two decisions of one message at once: the one whose judgement comes back last finds the other's reply.
+    const next = await say(w.member, w.g, "那明天呢？");
+    const racing = decide(w.g, next, {}, judgeAfter(async () => (await decide(w.g, next), settleAndAge())));
+    expect(await racing).toEqual(noneTriggered());
+    expect(judge.calls).toHaveLength(3);
+    expect((await proactiveRuns(anna.id, w.g)).map((r) => r.covers)).toEqual([asked, next]);
     expect(lines.filter((l) => l.reason === "already_decided")).toEqual([
       { level: "debug", metric: "proactive_skipped", reason: "already_decided", agentId: anna.id, conversationId: w.g },
     ]);
@@ -895,6 +904,34 @@ describe("the rows it locks, and a proactive reply someone asks for or halts bef
     await decide(w.g, await say(w.third, w.g, "那明天呢？"));
     const own = await say(w.owner, w.g, "@anna 我也想知道");
     expect((await runsOf(anna.id, w.g)).at(-1)).toEqual({ status: "queued", error: null, lane: "own", caller: w.owner.id, by: "human", covers: own });
+  });
+
+  it("an Agent's mention folded into its queued run makes it an Agent's call, in the call's lane — and a halt ends it", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const bob = await agentOf(w.member, "bob_bot", w.g);
+    const carl = await agentOf(w.third, "carl_bot", w.g);
+    /** Agent `posterId`'s message in the group, handed to the trigger as `postAsAgent` does (`postedBy`: its run's call). */
+    const agentCalls = (posterId: string, text: string, postedBy: Caller | null = null) =>
+      db.tx(async (t) => {
+        const poster = await lockAgent(t, posterId, w.g);
+        const message = await insertMessage(t, w.g, posterId, "text", { text }, null);
+        await triggerFromAgent(t, w.g, message, poster, postedBy, app.deps.config);
+        return message.seq;
+      });
+    judge.answer(byName({ anna: 0.9 }));
+    await decide(w.g, await say(w.third, w.g, "今晚吃什么？"));
+    // bob's own message (its owner, member, behind it) calls anna: others', member's, an Agent's.
+    const byBob = await agentCalls(bob.id, "@anna 你来答");
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, lane: "others", caller: w.member.id, by: "agent", covers: byBob }]);
+    // What a reply nobody called for relays: others', nobody's, an Agent's.
+    judge.answer(byName({ carl_bot: 0.9 }));
+    await decide(w.g, await say(w.member, w.g, "明天去哪儿？"));
+    const relayed = await agentCalls(bob.id, "@carl_bot 你说", { id: null, lane: "proactive" });
+    expect(await runsOf(carl.id, w.g)).toEqual([{ status: "queued", error: null, lane: "others", caller: null, by: "agent", covers: relayed }]);
+
+    expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    for (const agent of [anna, carl]) expect((await runsOf(agent.id, w.g)).map((r) => [r.status, r.error])).toEqual([["cancelled", "halted"]]);
   });
 
   it("a halt cancels a queued proactive run and interrupts a running one, and leaves one a mention took over", async () => {
