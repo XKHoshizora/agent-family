@@ -78,7 +78,7 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
 
   const P = config.proactive;
   const { winner, quiet, partial } = answered(options, answers, new Set(questions.map((q) => q.key)));
-  if (partial) log.info({ metric: "judge_partial", conversationId }, "the judgement model left an option of the pick unanswered: no Agent replies unasked");
+  if (partial) log.info({ metric: "judge_partial", conversationId }, "the judgement model's pick was missing, partial or did not add up: no Agent replies unasked");
   // No threshold is below the lowest base (or the cap): a winner under that cannot reply, whatever its state, and when
   // no quiet answer raises anyone either, the group's row and the Agents' are not locked at all (the usual case).
   const contender = winner !== null && winner.p >= Math.min(P.cap, P.base.less, P.base.normal, P.base.more) ? winner : null;
@@ -138,6 +138,12 @@ async function counted(db: Db, day: string, conversationId: string, options: rea
   );
 }
 
+/**
+ * What the probabilities of a pick over the options asked add up to, at least and at most, to count: a choice's sum to 1,
+ * and an answer far from that is no answer.
+ */
+const PICK_SUM = { min: 0.9, max: 1.1 } as const;
+
 /** What the judgement said that counts: the winner of the pick, if any, and each quiet answer by Agent. */
 interface Answered {
   winner: { option: Option; p: number } | null;
@@ -147,7 +153,8 @@ interface Answered {
 /**
  * The answers to what was `asked`, nothing else. The winner: the Agent option with the highest pick probability (ties:
  * the lowest id — options are in id order); none unless every option asked, `nobody` too, has a probability — a maximum
- * over part of them is no answer (`partial`: the pick missing, or part of it).
+ * over part of them is no answer — and they sum to about 1 (`PICK_SUM`) (`partial`: the pick missing, part of it, or
+ * not a choice's probabilities).
  */
 function answered(options: readonly Option[], answers: ReadonlyMap<string, Answer>, asked: ReadonlySet<string>): Answered & { partial: boolean } {
   const quiet = new Map<string, number>();
@@ -159,6 +166,8 @@ function answered(options: readonly Option[], answers: ReadonlyMap<string, Answe
   if (pick?.type !== "choice") return { winner: null, quiet, partial: true };
   const p = pick.probabilities;
   if (!p.has(NOBODY) || options.some((o) => !p.has(o.key))) return { winner: null, quiet, partial: true };
+  const sum = options.reduce((total, o) => total + p.get(o.key)!, p.get(NOBODY)!);
+  if (!(sum >= PICK_SUM.min && sum <= PICK_SUM.max)) return { winner: null, quiet, partial: true };
   let winner: Answered["winner"] = null;
   for (const option of options) {
     const probability = p.get(option.key)!;

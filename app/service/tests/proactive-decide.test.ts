@@ -13,7 +13,7 @@ import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
-import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
+import { byName, nameOf, scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
 import { paidReply } from "./helpers/metering.ts";
 import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
@@ -140,32 +140,11 @@ const noticesOf = async (conv: string) =>
 /** The `proactive_skipped` lines logged at info. */
 const skipped = () => lines.filter((l) => l.metric === "proactive_skipped" && l.level === "info").map(({ level: _, ...l }) => l);
 
-/** The name an option's description starts with (`nobody` for nobody's). */
-const nameOf = (key: string, description: string) => (key === "nobody" ? "nobody" : description.slice(0, description.indexOf("：")));
 const pickOf = (questions: readonly Question[]) => questions.find((q) => q.key === "pick") as Extract<Question, { type: "choice" }>;
 /** The key of the option named `name` in what was asked. */
 const keyOf = (questions: readonly Question[], name: string) => Object.entries(pickOf(questions).options).find(([k, d]) => nameOf(k, d) === name)![0];
 /** The names of the options offered in the judge's latest call, in key order. */
 const offered = () => Object.entries(pickOf(judge.calls.at(-1)!.questions).options).map(([k, d]) => nameOf(k, d));
-
-/**
- * Answers by name: every option of the pick (`nobody` too) with `pick[name]`, 0 when not given — a whole answer — and
- * each quiet question about an Agent `quiet` names.
- */
-const byName =
-  (pick: Record<string, number>, quiet: Record<string, number> = {}) =>
-  (_state: string, questions: readonly Question[]): ScriptedAnswers => {
-    const out: ScriptedAnswers = {};
-    for (const q of questions) {
-      if (q.type === "choice") {
-        out[q.key] = Object.fromEntries(Object.entries(q.options).map(([k, d]) => [k, pick[nameOf(k, d)] ?? 0]));
-      } else {
-        const name = /「(.+?)」/.exec(q.instructions)![1]!;
-        if (quiet[name] !== undefined) out[q.key] = quiet[name];
-      }
-    }
-    return out;
-  };
 
 /** A judge that lets `meanwhile` happen while it is asked, then answers as the scripted one does. */
 const judgeAfter = (meanwhile: () => Promise<unknown>): Judge => ({
@@ -246,10 +225,10 @@ describe("who replies unasked", () => {
 
   it("two options tied: the one with the lower id", async () => {
     const w = await world();
-    const anna = await agentOf(w.owner, "anna", w.g);
-    const bob = await agentOf(w.member, "bob_bot", w.g);
+    const anna = await agentOf(w.owner, "anna", w.g, { proactiveLevel: "more" });
+    const bob = await agentOf(w.member, "bob_bot", w.g, { proactiveLevel: "more" });
     const [lower, higher] = [anna, bob].sort((a, b) => (a.id < b.id ? -1 : 1));
-    judge.answer(byName({ anna: 0.8, bob_bot: 0.8 }));
+    judge.answer(byName({ anna: 0.5, bob_bot: 0.5 }));
     const asked = await say(w.third, w.g, "谁能帮个忙？");
     await decide(w.g, asked);
     expect((await proactiveRuns(lower!.id, w.g)).length).toBe(1);
@@ -319,6 +298,34 @@ describe("who replies unasked", () => {
     // The whole answer: anna replies.
     judge.answer(partial(() => false));
     expect((await decide(w.g, await say(w.member, w.g, "最后一问"))).runs).toHaveLength(1);
+  });
+
+  it("a pick whose probabilities over the options asked do not sum to about 1 (0.9 to 1.1) is no answer: nobody replies", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    await agentOf(w.member, "bob_bot", w.g);
+    const summing = (anna: number, bob: number, nobody: number): Judge => ({
+      async ask(_state, questions) {
+        const pick = new Map([[keyOf(questions, "anna"), anna], [keyOf(questions, "bob_bot"), bob], ["nobody", nobody], ["a9", 0.9]]);
+        return new Map<string, Answer>([["pick", { type: "choice", probabilities: pick }]]);
+      },
+    });
+    // Over: 0.9 + 0.9 + 0.1; under: 0.7 + 0.05 + 0.1. (An option not asked, `a9`, never counts.)
+    for (const [a, b, n] of [
+      [0.9, 0.9, 0.1],
+      [0.7, 0.05, 0.1],
+    ] as const) {
+      expect(await decide(w.g, await say(w.member, w.g, `问 ${a} ${b}`), {}, summing(a, b, n))).toEqual(noneTriggered());
+    }
+    expect(lines.filter((l) => l.metric === "judge_partial")).toEqual([
+      { level: "info", metric: "judge_partial", conversationId: w.g },
+      { level: "info", metric: "judge_partial", conversationId: w.g },
+    ]);
+    expect(await runsOf(anna.id, w.g)).toEqual([]);
+    // At the edges: 1.1 and 0.9 are answers.
+    expect((await decide(w.g, await say(w.member, w.g, "问 1.1"), {}, summing(0.9, 0.1, 0.1))).runs).toHaveLength(1);
+    await settleAndAge();
+    expect((await decide(w.g, await say(w.member, w.g, "问 0.9"), {}, summing(0.88, 0.01, 0.01))).runs).toHaveLength(1);
   });
 });
 
@@ -743,6 +750,9 @@ describe("after it has spoken unasked", () => {
   });
 });
 
+/** Every level's threshold at 0.4: two Agents' pick probabilities, which sum to about 1, may both pass it. */
+const lowBase = (): Partial<Config> => ({ proactive: { ...app.deps.config.proactive, base: { less: 0.4, normal: 0.4, more: 0.4 } } });
+
 describe("a winner that cannot speak now: nobody replies, not the runner-up, and the reason is logged", () => {
   const runAt = (conv: string, agentId: string, ownerId: string, lane: string, ago: string, n = 1) =>
     db.query(
@@ -770,9 +780,10 @@ describe("a winner that cannot speak now: nobody replies, not the runner-up, and
     const bob = await agentOf(w.member, "bob_bot", w.g);
     await before(w, anna);
     const proactiveBefore = (await proactiveRuns(anna.id, w.g)).length;
-    judge.answer(byName({ anna: 0.9, bob_bot: 0.8 }));
+    // bob_bot's 0.45 would pass too.
+    judge.answer(byName({ anna: 0.55, bob_bot: 0.45 }));
     const asked = await say(w.third, w.g, "有人懂吗？");
-    expect(await decide(w.g, asked)).toEqual(noneTriggered());
+    expect(await decide(w.g, asked, lowBase())).toEqual(noneTriggered());
     expect((await proactiveRuns(anna.id, w.g)).length).toBe(proactiveBefore);
     expect(await runsOf(bob.id, w.g)).toEqual([]);
     expect(skipped()).toEqual([{ metric: "proactive_skipped", reason, agentId: anna.id, conversationId: w.g }]);
@@ -813,10 +824,10 @@ describe("what happens while the judgement is out", () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     const bob = await agentOf(w.member, "bob_bot", w.g);
-    judge.answer(byName({ anna: 0.9, bob_bot: 0.8 }));
+    judge.answer(byName({ anna: 0.55, bob_bot: 0.45 }));
     const asked = await say(w.third, w.g, "有人懂吗？");
     const off = () => api(app, w.owner, "PATCH", `/api/agents/${anna.id}`, { proactive: false });
-    expect(await decide(w.g, asked, {}, judgeAfter(off))).toEqual(noneTriggered());
+    expect(await decide(w.g, asked, lowBase(), judgeAfter(off))).toEqual(noneTriggered());
     expect(judge.calls).toHaveLength(1);
     expect([await runsOf(anna.id, w.g), await runsOf(bob.id, w.g)]).toEqual([[], []]);
   });

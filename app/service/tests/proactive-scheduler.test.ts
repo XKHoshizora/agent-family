@@ -5,12 +5,11 @@ import { noneTriggered, type Triggered } from "../src/agents/runs.ts";
 import { buildApp } from "../src/app.ts";
 import { lockConversation } from "../src/conversations/store.ts";
 import type { Db } from "../src/db.ts";
-import type { Question } from "../src/judge/client.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
-import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
+import { byName, scriptedJudge } from "./helpers/judge.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
@@ -669,23 +668,6 @@ const runsOf = async (db: Db, agentId: string, conv: string) =>
       conv,
     ])
   ).rows;
-
-/** The name an option's description starts with (`nobody` for nobody's). */
-const nameOf = (key: string, description: string) => (key === "nobody" ? "nobody" : description.slice(0, description.indexOf("：")));
-/** Answers by name: every option of the pick with `pick[name]` (0 when not given), each quiet question `quiet` names. */
-const byName =
-  (pick: Record<string, number>, quiet: Record<string, number> = {}) =>
-  (_state: string, questions: readonly Question[]): ScriptedAnswers => {
-    const out: ScriptedAnswers = {};
-    for (const q of questions) {
-      if (q.type === "choice") out[q.key] = Object.fromEntries(Object.entries(q.options).map(([k, d]) => [k, pick[nameOf(k, d)] ?? 0]));
-      else {
-        const name = /「(.+?)」/.exec(q.instructions)![1]!;
-        if (quiet[name] !== undefined) out[q.key] = quiet[name];
-      }
-    }
-    return out;
-  };
 
 describe("what is noted: the send route and an Agent's post", () => {
   // Nothing here waits for a debounce to end: whether one is waiting is read from the scheduler (`idleNow`).
