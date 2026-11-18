@@ -230,8 +230,11 @@ export type TriggeredBy = "human" | "agent";
  */
 export type Lane = "own" | "others" | "proactive";
 
-/** Who called for a run (`agent_runs.caller_id`: the person behind it, an Agent's call being its owner's), and its lane. */
-export type Caller = { id: string; lane: Lane };
+/**
+ * Who called for a run (`agent_runs.caller_id`: the person behind it, an Agent's call being its owner's; nobody for a
+ * follow-up in a group none of whose callers it can see any more, `followUp`), and its lane.
+ */
+export type Caller = { id: string | null; lane: Lane };
 
 /** The call person `personId` makes on an Agent of `ownerId`'s: the owner's own, or someone else's. */
 export function callerOf(ownerId: string, personId: string): Caller {
@@ -612,7 +615,9 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [] };
  * answers, not from the run that ended: the messages in (covers, pending] that call the Agent — a person's, as above,
  * or another Agent's while its `groupMentions` lets members call it, which is that Agent's owner's call (with no block
  * between them and the Agent's owner, as for a person) — make it its owner's own when the owner or one of the owner's
- * Agents is among them, else the earliest caller's; its owner's own too when none of them is left (a block since).
+ * Agents is among them, else the earliest caller's. When none of them is left (a block since, or the Agent no longer
+ * lets members call it) it is others', with no caller: a call its owner no longer allows does not ride the owner's own
+ * lane.
  */
 export async function followUp(
   t: Tx,
@@ -640,7 +645,8 @@ export async function followUp(
   );
   const asked = calls.some((r) => r.kind === "human");
   const first = calls[0];
-  const caller = first === undefined || calls.some((r) => r.caller_id === agent.ownerId) ? owners : callerOf(agent.ownerId, first.caller_id);
+  const caller: Caller =
+    first === undefined ? { id: null, lane: "others" } : calls.some((r) => r.caller_id === agent.ownerId) ? owners : callerOf(agent.ownerId, first.caller_id);
   if (!asked) {
     if (await haltedSince(t, conversationId, pending)) return NO_FOLLOW_UP;
     // The chain budget again, now that the reply that just ended is settled: it may have spent it.

@@ -220,19 +220,19 @@ describe("a run's lane and who called for it", () => {
     ]);
   });
 
-  it("a follow-up whose callers are no longer visible to it is its owner's own", async () => {
+  it("a follow-up whose callers are no longer visible to it is others', with no caller — never its owner's own", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.third, w.g, "@anna 一");
     const one = await claim(anna.id, w.g);
     await say(w.member, w.g, "@anna 我也问");
     // The owner blocks the member before the reply ends: the member's mention no longer counts for the follow-up (which
-    // is still queued, as before this change).
+    // is still queued, as before this change). A call its owner no longer allows does not ride the owner's own lane.
     expect((await api(app, w.owner, "PUT", `/api/blocks/${w.member.id}`)).status).toBe(200);
     await finish(one);
     expect(await laneOf(anna.id, w.g)).toEqual([
       ["others", w.third.id],
-      ["own", w.owner.id],
+      ["others", null],
     ]);
   });
 
