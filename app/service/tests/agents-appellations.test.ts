@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { appellationEntriesOf } from "../src/agents/store.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -242,6 +243,49 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     expect(targetsOf(await view(w.owner, w.agent.id))).toHaveLength(100);
     await remove(w.owner, w.agent.id, ids[1]!);
     expect((await put(w.owner, w.agent.id, w.mia.id, "米亚")).status).toBe(200);
+  });
+
+  it("shows its owner's own other Agent by name and handle with no group in common, until it is deleted; someone else's Agent out of every shared group is blanked", async () => {
+    const w = await world();
+    const mine = await mustCreateAgent(app, w.owner, { name: "我的二号" });
+    const theirs = await mustCreateAgent(app, w.eve, { name: "Eve的Bot" });
+    for (const id of [mine.id, theirs.id]) await seat(w.g, id);
+    await put(w.owner, w.agent.id, mine.id, "二号");
+    await put(w.owner, w.agent.id, theirs.id, "小机器人");
+    await db.query("update memberships set left_seq = joined_seq + 1 where conversation_id = $1 and principal_id = any($2::uuid[])", [w.g, [mine.id, theirs.id]]);
+    const entryOf = async (id: string) => (await view(w.owner, w.agent.id)).appellations.find((e: { principalId: string }) => e.principalId === id);
+    expect(await entryOf(mine.id)).toEqual({ principalId: mine.id, kind: "agent", handle: mine.handle, name: "我的二号", appellation: "二号" });
+    expect(await entryOf(theirs.id)).toEqual({ principalId: theirs.id, kind: "agent", handle: null, name: null, appellation: "小机器人" });
+    await db.query("update agents set deleted_at = now() where principal_id = $1", [mine.id]);
+    expect(await entryOf(mine.id)).toEqual({ principalId: mine.id, kind: "agent", handle: null, name: null, appellation: "二号" });
+  });
+
+  it("reads memberships only to show someone else's Agent: a view naming people and its owner's own Agents never waits on them", async () => {
+    const w = await world();
+    const mine = await mustCreateAgent(app, w.owner, { name: "我的二号" });
+    const theirs = await mustCreateAgent(app, w.eve, { name: "Eve的Bot" });
+    for (const id of [mine.id, theirs.id]) await seat(w.g, id);
+    await put(w.owner, w.agent.id, mine.id, "二号");
+    await put(w.owner, w.agent.id, w.mia.id, "米亚");
+    /** The owner's view's read while another transaction holds memberships in ACCESS EXCLUSIVE mode, waiting at most 1 s. */
+    const readLocked = async () => {
+      const holder = await db.pool.connect();
+      try {
+        await holder.query("begin");
+        await holder.query("lock table memberships in access exclusive mode");
+        return await db.tx(async (t) => {
+          await t.query("set local lock_timeout = '1s'");
+          return appellationEntriesOf(t, [w.agent.id]);
+        });
+      } finally {
+        await holder.query("rollback");
+        holder.release();
+      }
+    };
+    expect((await readLocked()).get(w.agent.id)!.map((e) => e.name)).toEqual(expect.arrayContaining(["mia", "我的二号"]));
+    // Someone else's Agent named as well: then it reads them, and waits (55P03: the lock was not granted in time).
+    await put(w.owner, w.agent.id, theirs.id, "小机器人");
+    await expect(readLocked()).rejects.toMatchObject({ code: "55P03" });
   });
 
   it("is 409 agent_deleted for a deleted Agent, for set and remove alike", async () => {

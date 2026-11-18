@@ -451,10 +451,10 @@ is a column of the Agent (set on `POST /api/agents`, `PATCH /api/agents/:id`; `n
 which the two routes below edit. Appellations are 1–20 characters once trimmed, on one line, with no control character
 or lone surrogate; they are stored as written and cleaned only where the model is shown them (What the model is shown).
 A row stays stored when its target leaves the group or the friendship ends, and stays in `appellations`; it simply is
-not shown to the model while that person is not in the group, and comes back when they are. An Agent named there that
-is in no group with this Agent now, or is deleted, is listed with `name` and `handle` `null` (its row, `kind` and
-appellation stay, and it can be removed): its owner may rename it, and you no longer see it. Only the Agent's owner
-reads or writes them: no one else's
+not shown to the model while that person is not in the group, and comes back when they are. Someone else's Agent
+named there that is in no group with this Agent now, and any deleted Agent, is listed with `name` and `handle` `null`
+(its row, `kind` and appellation stay, and it can be removed): its owner may rename it, and you no longer see it; your
+own other Agents always show. Only the Agent's owner reads or writes them: no one else's
 view of the Agent (the person named included) has `ownerAppellation` or `appellations`, no member list, message read,
 push or log carries them, and they reach nobody but the model of that one Agent.
 

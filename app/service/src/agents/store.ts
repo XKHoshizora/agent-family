@@ -282,9 +282,9 @@ const inAGroupWith = (target: string, agent: string): string =>
               and c.type = 'group' and c.closed_at is null)`;
 
 /**
- * An appellation as the owner's view lists it: its target as they are now. An Agent's name and handle are its own
- * owner's to change, so they are shown only while it is in a group with this Agent and not deleted; else both are
- * null — the row stays, and can be removed.
+ * An appellation as the owner's view lists it: its target as they are now. A deleted Agent's name and handle are null;
+ * so are those of someone else's Agent (its owner's to change) while it is in no group with this Agent. A person, and
+ * the owner's own other Agents, are always shown. A row stays when blanked, and can be removed.
  */
 export interface AppellationEntry {
   principalId: string;
@@ -297,30 +297,36 @@ export interface AppellationEntry {
 /**
  * The appellations of each of `agentIds`, by target handle (every row: a target that no longer qualifies stays listed;
  * an Agent's shown as `AppellationEntry` says); an Agent without any has an empty list. Memberships are read only when
- * an Agent is among the targets — most views name none, and an Agent's view never waits on the group tables for nothing.
+ * someone else's Agent (not deleted) is among the targets — most views name none, and an Agent's view never waits on
+ * the group tables for nothing.
  */
 export async function appellationEntriesOf(q: Queryable, agentIds: readonly string[]): Promise<Map<string, AppellationEntry[]>> {
   const found = new Map<string, AppellationEntry[]>(agentIds.map((id) => [id, []]));
   if (agentIds.length === 0) return found;
-  const { rows } = await q.query<AppellationEntry & { agent_id: string }>(
-    `select aa.agent_id, p.id as "principalId", p.kind, p.handle::text as handle, p.display_name as name, aa.appellation
-       from agent_appellations aa join principals p on p.id = aa.principal_id
+  const { rows } = await q.query<AppellationEntry & { agent_id: string; gone: boolean; theirs: boolean }>(
+    `select aa.agent_id, p.id as "principalId", p.kind, p.handle::text as handle, p.display_name as name, aa.appellation,
+            ta.deleted_at is not null as gone, p.kind = 'agent' and p.owner_id <> a.owner_id as theirs
+       from agent_appellations aa
+       join principals p on p.id = aa.principal_id
+       join principals a on a.id = aa.agent_id
+       left join agents ta on ta.principal_id = p.id
       where aa.agent_id = any($1::uuid[])
       order by p.handle, p.id`,
     [agentIds],
   );
-  const shown = new Set<string>();
-  if (rows.some((r) => r.kind === "agent")) {
-    const agents = await q.query<{ agent_id: string; principal_id: string }>(
-      `select aa.agent_id, aa.principal_id
-         from agent_appellations aa join agents ta on ta.principal_id = aa.principal_id
-        where aa.agent_id = any($1::uuid[]) and ta.deleted_at is null and ${inAGroupWith("aa.principal_id", "aa.agent_id")}`,
-      [agentIds],
+  // Someone else's Agent is shown only while it is in a group with this one.
+  const toCheck = rows.filter((r) => r.theirs && !r.gone);
+  const together = new Set<string>();
+  if (toCheck.length > 0) {
+    const met = await q.query<{ agent_id: string; principal_id: string }>(
+      `select aa.agent_id, aa.principal_id from agent_appellations aa
+        where aa.agent_id = any($1::uuid[]) and aa.principal_id = any($2::uuid[]) and ${inAGroupWith("aa.principal_id", "aa.agent_id")}`,
+      [agentIds, toCheck.map((r) => r.principalId)],
     );
-    for (const r of agents.rows) shown.add(`${r.agent_id} ${r.principal_id}`);
+    for (const r of met.rows) together.add(`${r.agent_id} ${r.principal_id}`);
   }
-  for (const { agent_id, ...entry } of rows) {
-    const hidden = entry.kind === "agent" && !shown.has(`${agent_id} ${entry.principalId}`);
+  for (const { agent_id, gone, theirs, ...entry } of rows) {
+    const hidden = gone || (theirs && !together.has(`${agent_id} ${entry.principalId}`));
     found.get(agent_id)?.push(hidden ? { ...entry, handle: null, name: null } : entry);
   }
   return found;
