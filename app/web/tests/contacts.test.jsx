@@ -154,7 +154,7 @@ describe("adding a friend", () => {
     await goContacts();
     await openAdd();
     await lookup("nobody1");
-    expect(dialog().textContent).toContain("没有找到账号名为 nobody1 的用户。");
+    expect(dialog().textContent).toContain("没有找到账号名为 nobody1 的用户。目前还不能添加 Agent 为好友。");
     expect(within(dialog()).queryByRole("list", { name: "查找结果" })).toBeNull();
 
     api.lookupPrincipal.mockClear();

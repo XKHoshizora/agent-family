@@ -38,7 +38,7 @@ export function AddFriendModal({ onClose }) {
     setError("");
     const res = await run("lookup", () => actions.lookupPrincipal(handle), () => "");
     if (res.ok) setFound(res.value);
-    else setError(res.error?.code === "not_found" ? `没有找到账号名为 ${handle} 的用户。` : friendErrorText("lookup", res.error));
+    else setError(res.error?.code === "not_found" ? `没有找到账号名为 ${handle} 的用户。目前还不能添加 Agent 为好友。` : friendErrorText("lookup", res.error));
   };
 
   const send = async () => {
