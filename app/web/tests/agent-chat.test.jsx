@@ -1692,6 +1692,38 @@ describe("Agents in a group (batch 2C)", () => {
     expect(mainText()).not.toMatch(/别人的 Agent 想的|推来的思考/);
   });
 
+  it("a call of mine my own limit stopped: a muted line under my message names the Agent, kept when my message is pushed to me; under nobody else's, and not when the answer says nothing", async () => {
+    const tooOften = (who) => `你 @ 得太频繁了，「${who}」这次没有收到，稍后再试。`;
+    const notCalled = (...agentIds) => agentIds.map((agentId) => ({ agentId, reason: "caller_rate_limited" }));
+    // What each send answers besides the message: the first, the second and the fourth were stopped (the fourth names
+    // an Agent this client knows nothing of), the third reached its Agent.
+    const extras = [{ notCalled: notCalled(OAG) }, { notCalled: notCalled(OAG, AG1) }, {}, { notCalled: notCalled(STRAY) }];
+    let seq = 2;
+    const sendMessage = vi.fn(async (_conv, body) => ({ message: wire(G1, ++seq, ME_ID, body.text), duplicate: false, ...extras.shift() }));
+    // Someone else's message, whatever it carries, never shows the line.
+    const { transport } = await openGroup([wire(G1, 1, ANN, "@annbot 一"), wire(G1, 2, BO, "@annbot 二", { notCalled: notCalled(OAG) })], { api: { sendMessage } });
+    const send = async (text) => {
+      fireEvent.change(input(), { target: { value: text } });
+      fireEvent.keyDown(input(), { key: "Enter" });
+      await flush();
+    };
+    const lines = () => [...timeline().querySelectorAll("li")].filter((li) => li.textContent.includes("这次没有收到")).map((li) => li.getAttribute("data-msg"));
+
+    await send("@annbot 三");
+    expect(within(storedLi(3)).getByText(tooOften("安的助手")).className).toBe("muted");
+    expect(lines()).toEqual(["m3"]);
+    // Several, joined; one that reached its Agent says nothing; a name not known reads 有的 Agent.
+    await send("@annbot @helper 四");
+    await send("@annbot 五");
+    await send("@someone 六");
+    expect(within(storedLi(4)).getByText(tooOften("安的助手、小助手"))).toBeTruthy();
+    expect(within(storedLi(6)).getByText(tooOften("有的 Agent"))).toBeTruthy();
+    expect(lines()).toEqual(["m3", "m4", "m6"]);
+    // My message pushed to me as to every member (it carries nothing of it) keeps the line.
+    await push(transport, { type: "message", message: wire(G1, 3, ME_ID, "@annbot 三") });
+    expect(lines()).toEqual(["m3", "m4", "m6"]);
+  });
+
   it("a reply being written: 正在回复… only (nothing streams), a row per Agent in member order; its owner can stop it, nobody else", async () => {
     const { transport, api } = await openGroup([], { api: { stopRun: vi.fn(async () => ({ ok: true })) } });
     await push(transport, groupRun(OAG, { state: "replying" }));

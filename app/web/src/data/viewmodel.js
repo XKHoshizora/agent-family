@@ -253,6 +253,16 @@ function kindOf(kind, attachment) {
   return "text";
 }
 
+/**
+ * The line under my message some of whose calls on other people's Agents my own calls a minute stopped (`agentIds`):
+ * their names joined with 、, or 有的 Agent while a name is not known.
+ */
+function notCalledText(agentIds, nameOf) {
+  const names = agentIds.map(nameOf);
+  const who = names.every((name) => typeof name === "string" && name !== "") ? names.join("、") : "有的 Agent";
+  return `你 @ 得太频繁了，「${who}」这次没有收到，稍后再试。`;
+}
+
 function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, keepsOwners }) {
   const attachment = m.kind === "file" ? attachmentView(m.attachment) : null;
   const kind = kindOf(m.kind, attachment);
@@ -290,6 +300,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     stopped: Boolean(m.stopped),
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,
+    // Under my own message only: the Agents my own calls a minute kept it from (what its send answered, model.js `markSent`).
+    notCalled: m.senderId === meId && Array.isArray(m.notCalled) && m.notCalled.length > 0 ? notCalledText(m.notCalled, nameOf) : null,
   };
   if (hidden) view.hidden = true;
   if (kind === "image") view.src = attachment.url;

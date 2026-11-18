@@ -57,7 +57,7 @@ export function initial() {
      */
     principals: {},
     conversations: {},
-    /** conversation id → WireMessage[] (plus `clientTxn` on my messages confirmed over HTTP). */
+    /** conversation id → WireMessage[] (plus `clientTxn`, and `notCalled` when there was some, on my messages confirmed over HTTP). */
     messages: {},
     /** clientTxn → unsent message: {clientTxn, conversationId, text, replyToSeq, attachment, file, upload, at, afterSeq, status, error}. */
     pending: {},
@@ -141,15 +141,18 @@ function filterValues(obj, keep) {
   return out;
 }
 
-/** Merges ascending, seq-unique lists; on equal seqs the incoming copy wins but keeps a known clientTxn. */
+/** What this page alone knows of a message of mine its send's answer returned (`markSent`), kept on its held copy. */
+const LOCAL_KEYS = ["clientTxn", "notCalled"];
+
+/** Merges ascending, seq-unique lists; on equal seqs the incoming copy wins but keeps what this page knows (`LOCAL_KEYS`). */
 function mergeBySeq(held, incoming) {
   if (incoming.length === 0) return held;
   if (held.length === 0) return [...incoming].sort((a, b) => a.seq - b.seq);
   const bySeq = new Map(held.map((m) => [m.seq, m]));
   for (const m of incoming) {
     const old = bySeq.get(m.seq);
-    const clientTxn = m.clientTxn ?? old?.clientTxn;
-    bySeq.set(m.seq, clientTxn ? { ...m, clientTxn } : m);
+    const kept = old ? LOCAL_KEYS.filter((key) => m[key] == null && old[key] != null) : [];
+    bySeq.set(m.seq, kept.length > 0 ? { ...m, ...Object.fromEntries(kept.map((key) => [key, old[key]])) } : m);
   }
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 }
@@ -639,9 +642,14 @@ export function markSending(state, { clientTxn, conversationId, text = "", reply
   return { ...state, pending: { ...state.pending, [clientTxn]: entry } };
 }
 
-/** The service stored it (`duplicate` or not): the unsent entry becomes the server's message. */
-export function markSent(state, clientTxn, wire) {
-  return applyPosted({ ...state, pending: without(state.pending, clientTxn) }, { ...wire, clientTxn });
+/**
+ * The service stored it (`duplicate` or not): the unsent entry becomes the server's message, with what the answer told
+ * me alone (`notCalled`): the Agents my own calls a minute on other people's Agents kept it from reaching, by id — held
+ * with my copy while this page holds it, never stored or sent anywhere.
+ */
+export function markSent(state, clientTxn, wire, notCalled = null) {
+  const ids = Array.isArray(notCalled) ? notCalled.filter((n) => n?.reason === "caller_rate_limited" && typeof n.agentId === "string").map((n) => n.agentId) : [];
+  return applyPosted({ ...state, pending: without(state.pending, clientTxn) }, { ...wire, clientTxn, ...(ids.length > 0 ? { notCalled: ids } : {}) });
 }
 
 /**

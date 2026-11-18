@@ -215,6 +215,7 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
               </span>
             )
           )}
+          {mine && msg.notCalled && <span className="muted">{msg.notCalled}</span>}
           {(msg.kind === "text" || msg.kind === "image") && msg.seq !== null && msg.status !== "failed" && msg.status !== "sending" && (
             <button type="button" className="msg-action" onClick={() => onReply(msg)}>
               <Reply size={15} aria-hidden="true" /> 回复

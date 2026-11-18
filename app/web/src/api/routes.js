@@ -48,7 +48,10 @@ export const removeMember = (conversationId, principalId) =>
   request("DELETE", `/api/conversations/${seg(conversationId)}/members/${seg(principalId)}`);
 
 // ───────── messages
-/** body: {clientTxn, text?, attachmentId?, replyToSeq?}; reuse the same clientTxn when retrying. */
+/**
+ * body: {clientTxn, text?, attachmentId?, replyToSeq?}; reuse the same clientTxn when retrying. → {message, duplicate,
+ * notCalled?: [{agentId, reason: "caller_rate_limited"}]} (only for me: calls my own limit kept from someone else's Agent)
+ */
 export const sendMessage = (conversationId, body) => request("POST", `/api/conversations/${seg(conversationId)}/messages`, body);
 export const listMessages = (conversationId, { before, limit } = {}) =>
   request("GET", withQuery(`/api/conversations/${seg(conversationId)}/messages`, { before, limit }));
