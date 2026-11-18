@@ -423,6 +423,27 @@ describe("the others' daily budget", () => {
     expect(await viewOf(w.owner, anna)).toMatchObject({ othersSpentToday: "2" });
   });
 
+  it("a person's mention it refused is no call of a later follow-up whose answer it lies in: that follow-up is the caller's whose mention was noted", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    await say(w.member, w.g, "@anna 一");
+    const ticket = await claim(anna, w.g);
+    // The budget is spent while the reply runs: the third's mention is refused (nothing noted) and the group told.
+    await paidOthers(anna, w.g, 2 * POINT);
+    await say(w.third, w.g, "@anna 二");
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    expect((await db.query("select pending_seq from agent_runs where id = $1", [ticket.id])).rows).toEqual([{ pending_seq: null }]);
+    // Raised, the member's next mention is noted on the reply under way, after the third's.
+    expect((await api(app, w.owner, "PATCH", `/api/agents/${anna.id}`, { othersBudget: "10" })).status).toBe(200);
+    const asked = await say(w.member, w.g, "@anna 三");
+    await app.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
+    const queued = await db.query("select lane, caller_id, covers_seq::int as covers from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'queued'", [
+      anna.id,
+      w.g,
+    ]);
+    expect(queued.rows).toEqual([{ lane: "others", caller_id: w.member.id, covers: asked }]);
+  });
+
   it("yesterday's spend does not count", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });

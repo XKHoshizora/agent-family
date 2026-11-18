@@ -678,8 +678,9 @@ export async function othersBudgetRefusesAdmission(
  * message. `replyMode` plays no part in a group. Someone else's message is then held to the Agent's others' daily
  * budget, read under the Agent's row lock (`othersBudgetSpent`): once it is spent the Agent is not called — not even
  * folded into a reply of its under way — and the group is told once a day (the notice returned, to publish, and the
- * Agent's owner to push it to). Its owner's message never is. Then `reachAgents`, each called for by the sender
- * (`callerOf`).
+ * Agent's owner to push it to); the refusal is recorded with the message (`recordRefusedCalls`), so should it lie among
+ * what a later follow-up of the Agent answers, it is no call of it (`followUp`). Its owner's message never is. Then
+ * `reachAgents`, each called for by the sender (`callerOf`).
  */
 async function triggerInGroup(t: Tx, conversationId: string, message: StoredMessage, config: RunLimits): Promise<Triggered> {
   const handles = mentionedHandles(textOf(message));
@@ -696,14 +697,19 @@ async function triggerInGroup(t: Tx, conversationId: string, message: StoredMess
   const dayStart = siteToday(config);
   const told = noneTold();
   const calls: Call[] = [];
+  const refused: string[] = [];
   for (const { id } of rows) {
     const agent = await lockAgent(t, id, conversationId);
     if (agent.deleted || agent.paused || agent.model === null) continue;
     if (agent.groupMentions === "owner" && message.senderId !== agent.ownerId) continue;
     const by = callerOf(agent.ownerId, message.senderId);
-    if (await refusedByOthersBudget(t, conversationId, agent, by.lane, dayStart, told)) continue;
+    if (await refusedByOthersBudget(t, conversationId, agent, by.lane, dayStart, told)) {
+      refused.push(agent.id);
+      continue;
+    }
     calls.push({ agent, by });
   }
+  await recordRefusedCalls(t, conversationId, message.seq, refused);
   return { ...(await reachAgents(t, conversationId, calls, message.seq, "human", config)), ...told };
 }
 
@@ -940,10 +946,12 @@ export function followUpOf(run: Announced | null, told: Told = noneTold()): Foll
  * owner's own, else that Agent's owner) — make it its owner's own when the owner is behind one of them, else the
  * earliest caller's (a message nobody is behind, relayed from a reply nobody called for, names no one: the earliest that
  * names someone). When none of them is left (a block since, or the Agent no longer lets members call it) it is others',
- * with no caller: a call its owner no longer allows does not ride the owner's own lane. An Agent's mention of it that
- * was refused when it was posted — the group halted, the chain limit, its chain budget, its others' daily budget, a
- * block — is no call at all (`triggerFromAgent` recorded it, `refused_agent_calls`): nothing was noted for it, though it
- * may lie among what the follow-up answers.
+ * with no caller: a call its owner no longer allows does not ride the owner's own lane. A mention of it that was refused
+ * when it was posted — an Agent's for the group's halt, the chain limit, its chain budget, its others' daily budget or a
+ * block (`triggerFromAgent`), a person's for its others' daily budget (`triggerInGroup`) — is no call at all
+ * (`refused_agent_calls`): nothing was noted for it, though it may lie among what the follow-up answers. One refused
+ * because the Agent was paused, had no model or let only its owner call it is not recorded: those are read as they are
+ * when the follow-up is decided.
  */
 export async function followUp(
   t: Tx,
