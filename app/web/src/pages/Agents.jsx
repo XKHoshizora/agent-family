@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { formatPoints, pointsReached } from "../data/viewmodel.js";
+import { PROACTIVE_LEVELS, formatPoints, pointsReached } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
-import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, PROACTIVE_LEVELS, openAgentChat } from "./AgentForm.jsx";
+import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat } from "./AgentForm.jsx";
 import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
 import { convSubtitle, convTitle, isMyAgent, myAgents } from "../state/selectors.js";
@@ -28,12 +28,17 @@ function othersRows(agent) {
 
 /** 主动参与群聊 with its level and today's spend: only in the owner's view, and only while it is on. */
 function proactiveRows(agent) {
-  if (agent.proactive !== true || typeof agent.proactiveBudget !== "string") return [];
+  if (agent.proactive !== true) return [];
   const spentToday = agent.proactiveSpentToday ?? "0";
   const level = (PROACTIVE_LEVELS.find(([id]) => id === agent.proactiveLevel) ?? PROACTIVE_LEVELS[1])[1];
-  const text = pointsReached(spentToday, agent.proactiveBudget)
-    ? "今天主动回复的额度已用完，调高后立即恢复。"
-    : `${level} · 今天主动回复已花 ${formatPoints(spentToday)} / ${formatPoints(agent.proactiveBudget)} 点`;
+  const budget = agent.proactiveBudget;
+  // The budget is always said by the service; if it somehow is not, the level alone is shown.
+  const text =
+    budget === undefined
+      ? level
+      : pointsReached(spentToday, budget)
+        ? "今天主动回复的额度已用完，调高后立即恢复。"
+        : `${level} · 今天主动回复已花 ${formatPoints(spentToday)} / ${formatPoints(budget)} 点`;
   return [["主动参与群聊", text]];
 }
 

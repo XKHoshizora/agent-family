@@ -2,7 +2,8 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { commonErrorText } from "../data/errorTexts.js";
 import { HANDLE_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, handle as handleProblem } from "../auth/validation.js";
-import { Btn, Field, Modal, Notice, Reason, focusInvalid } from "../ui/primitives.jsx";
+import { PROACTIVE_LEVELS } from "../data/viewmodel.js";
+import { Btn, Field, Modal, Notice, Reason, Switch, focusInvalid } from "../ui/primitives.jsx";
 import { ChevronLeft, Lock } from "../icons.js";
 import { AgentAppellations } from "./AgentAppellations.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
@@ -28,12 +29,6 @@ export const CHAIN_BUDGET_DEFAULT = "50";
 export const OTHERS_BUDGET_DEFAULT = "20";
 /** 主动回复每天最多花 when nothing else is said, in points (the service's default); its amount is a budget like the others. */
 const PROACTIVE_BUDGET_DEFAULT = "20";
-/** 话多话少, by the service's `proactiveLevel` (the second is the default). */
-export const PROACTIVE_LEVELS = [
-  ["less", "少说"],
-  ["normal", "适中"],
-  ["more", "多说"],
-];
 // A budget's amount, either of them, as the service takes it.
 const BUDGET_MIN = 1;
 const BUDGET_MAX = 100000;
@@ -147,7 +142,6 @@ export function AgentForm({ agent = null }) {
   const sources = useModelSources();
   const formRef = useRef(null);
   const personaId = useId();
-  const proactiveId = useId();
   const [random] = useState(randomPart);
   const [f, setF] = useState(() => ({ ...recordFields(agent), handle: agent ? "" : suggestHandle("", random) }));
   const [handleTyped, setHandleTyped] = useState(false);
@@ -551,11 +545,7 @@ export function AgentForm({ agent = null }) {
         {proactiveOffered && (
           <>
             <div className="field">
-              <label className="check">
-                <input type="checkbox" role="switch" checked={f.proactive} onChange={setProactive} aria-describedby={`${proactiveId}-hint`} />
-                主动参与群聊
-              </label>
-              <p id={`${proactiveId}-hint`} className="field-hint">打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。</p>
+              <Switch checked={f.proactive} onChange={setProactive} label="主动参与群聊" hint="打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。" hintClass="field-hint" />
             </div>
             {f.proactive && (
               <>

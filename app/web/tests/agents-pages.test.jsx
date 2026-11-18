@@ -1787,6 +1787,25 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(patchAgent.mock.calls[0][1]).toEqual({ proactive: false });
   });
 
+  it("editing: the site loses its judgement model while the form is open with the switch on: the block goes and nothing about it is sent", async () => {
+    let answer = ON_SITE;
+    const record = agentOf(AG1, { model: SITE_MODEL, ...proactive({ proactive: false }) });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    const app = await openAgents({ agents: [record], api: { patchAgent, getModels: vi.fn(async () => answer) }, models: ON_SITE });
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    fireEvent.click(box());
+    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "more" } });
+    answer = OFF_SITE;
+    await act(async () => {
+      await app.layer.actions.loadModels();
+    });
+    expect(screen.queryByLabelText(SWITCH)).toBeNull();
+    type("简介", "新简介");
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+  });
+
   it("editing: 409 proactive_unavailable is said inline", async () => {
     const { patchAgent } = await openEditOf(proactive({ proactive: false }));
     patchAgent.mockImplementation(async () => {
@@ -1836,5 +1855,8 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(await show(proactive({ proactiveSpentToday: "20" }))).toContain("主动参与群聊今天主动回复的额度已用完，调高后立即恢复。");
     cleanup();
     expect(await show(proactive({ proactiveBudget: "0.3", proactiveSpentToday: "0.300000" }))).toContain("今天主动回复的额度已用完，调高后立即恢复。");
+    cleanup();
+    // The budget missing (the service always says it): the level alone.
+    expect(await show({ proactive: true, proactiveLevel: "less" })).toContain("主动参与群聊少说");
   });
 });

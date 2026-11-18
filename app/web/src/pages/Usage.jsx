@@ -1,7 +1,7 @@
-import React, { useCallback, useEffect, useId, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { setShowReplyPoints, useShowReplyPoints } from "../data/prefs.js";
 import { useStore } from "../data/store.jsx";
-import { Btn, KV, Reason } from "../ui/primitives.jsx";
+import { Btn, KV, Reason, Switch } from "../ui/primitives.jsx";
 
 /** A reply has ended (its usage is settled): `run` statuses after which nothing more is charged. */
 const ENDED = new Set(["done", "failed", "stopped", "cancelled"]);
@@ -77,14 +77,9 @@ function useUsage() {
  */
 function ReplyPointsSwitch() {
   const on = useShowReplyPoints();
-  const hint = useId();
   return (
     <div className="reply-points">
-      <label className="check">
-        <input type="checkbox" role="switch" checked={on} aria-describedby={hint} onChange={(e) => setShowReplyPoints(e.target.checked)} />
-        在每条回复下显示消耗的点数
-      </label>
-      <p id={hint} className="muted">只影响你这台设备上的显示。</p>
+      <Switch checked={on} onChange={(e) => setShowReplyPoints(e.target.checked)} label="在每条回复下显示消耗的点数" hint="只影响你这台设备上的显示。" hintClass="muted" />
     </div>
   );
 }

@@ -439,8 +439,14 @@ function personView(p, version) {
   };
 }
 
+/** 话多话少 by the service's `proactiveLevel`, with their labels (the second is the default). */
+export const PROACTIVE_LEVELS = [
+  ["less", "少说"],
+  ["normal", "适中"],
+  ["more", "多说"],
+];
+
 /** The prototype's two private-reply choices, by the service's `replyMode`. */
-const PROACTIVE_LEVELS = ["less", "normal", "more"];
 const PRIVATE_REPLY = { always: "收到消息时回复", mention: "仅在我点名时回复" };
 
 /**
@@ -470,7 +476,7 @@ function agentView(a, version, loaded) {
     ...(typeof a.othersSpentToday === "string" ? { othersSpentToday: a.othersSpentToday } : {}),
     /** 主动参与群聊 with its level, daily budget and today's spend (decimal points): only the owner's view has these. */
     ...(typeof a.proactive === "boolean" ? { proactive: a.proactive } : {}),
-    ...(PROACTIVE_LEVELS.includes(a.proactiveLevel) ? { proactiveLevel: a.proactiveLevel } : {}),
+    ...(PROACTIVE_LEVELS.some(([id]) => id === a.proactiveLevel) ? { proactiveLevel: a.proactiveLevel } : {}),
     ...(typeof a.proactiveBudget === "string" ? { proactiveBudget: a.proactiveBudget } : {}),
     ...(typeof a.proactiveSpentToday === "string" ? { proactiveSpentToday: a.proactiveSpentToday } : {}),
     /** How it addresses me and the others: only the owner's view has these (absent, never defaulted, otherwise). */

@@ -170,6 +170,20 @@ export function Field({ label, hint, error, children }) {
   );
 }
 
+/** A labelled on/off switch with a line saying what it does (`hintClass` styles that line). */
+export function Switch({ checked, onChange, label, hint, hintClass }) {
+  const hintId = useId();
+  return (
+    <>
+      <label className="check">
+        <input type="checkbox" role="switch" checked={checked} aria-describedby={hintId} onChange={onChange} />
+        {label}
+      </label>
+      <p id={hintId} className={hintClass}>{hint}</p>
+    </>
+  );
+}
+
 /** Whether a key event belongs to an input method's composition (Enter confirming a candidate is not Enter). */
 export const composing = (event) => event.nativeEvent.isComposing || event.keyCode === 229;
 
