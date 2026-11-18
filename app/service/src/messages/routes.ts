@@ -1,16 +1,14 @@
-import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { namesAnAgent } from "../agents/proactive/candidates.ts";
-import type { ProactiveScheduler } from "../agents/proactive/scheduler.ts";
-import { actOnTriggered, maybeTrigger, noneTriggered } from "../agents/runs.ts";
+import { actOnTriggered, maybeTrigger, noneTriggered, type Triggered } from "../agents/runs.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
-import type { Db, Tx } from "../db.ts";
+import type { Tx } from "../db.ts";
 import { requirePrincipal } from "../session.ts";
 import { withSlot } from "../slots.ts";
-import { wireMessageSchema, type StoredMessage } from "./model.ts";
+import { wireMessageSchema } from "./model.ts";
 import { principalMapSchema, principalsOf } from "./principals.ts";
 import { getMessage, listMessages, markRead, toWireFor } from "./read.ts";
 import { decodeSearchCursor, inSearchBudget, searchAll, searchConversation } from "./search.ts";
@@ -52,17 +50,11 @@ const searchCursor = z
   });
 
 /**
- * After commit, a person's message in a group to the proactive scheduler, with whether it names an Agent
- * (candidates.ts `namesAnAgent`: a query only when its text has an `@handle`). When that cannot be read, nothing is
- * noted — no Agent replies to it unasked (design rule 9) — and the send stands.
+ * Whether a message called an Agent, as its trigger found (`maybeTrigger`): a call was acted on or refused — a run, a
+ * caller's limit, a spent budget and its notice. Nothing more is read for it. A name the trigger did not reach (an Agent
+ * outside the group, or one it skipped) reads as no; the decision then refuses that message at its first read.
  */
-async function noteForJudgement(proactive: ProactiveScheduler, db: Db, message: StoredMessage, log: FastifyBaseLogger): Promise<void> {
-  try {
-    proactive.noted(message.conversationId, message.seq, await namesAnAgent(db, message.body.text ?? ""));
-  } catch (err) {
-    log.error({ err, conversationId: message.conversationId }, "a message could not be noted for a proactive judgement; no Agent replies to it unasked");
-  }
-}
+const calledAnAgent = (t: Triggered): boolean => t.runs.length > 0 || t.callerLimited.length > 0 || t.budgetReached.length > 0 || t.notices.length > 0;
 
 export function registerMessageRoutes(app: FastifyInstance): void {
   const { db, config, conversations, reads, searches, proactive } = app.deps;
@@ -96,8 +88,9 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       if (!duplicate) conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, req.log);
       actOnTriggered(triggered, { announce: (run) => app.agentPort.announce(run), log: req.log, realtime: app.realtime });
       // A person's message in a group may be answered unasked: the scheduler waits for people to stop, then has the latest
-      // judged (agents/proactive/scheduler.ts). Without a judgement model there is none, and nothing is read for it.
-      if (!duplicate && proactive !== null && lock.conversation.type === "group") await noteForJudgement(proactive, db, message, req.log);
+      // judged (agents/proactive/scheduler.ts); one that called an Agent cancels the wait instead. Without a judgement
+      // model there is no scheduler.
+      if (!duplicate && proactive !== null && lock.conversation.type === "group") proactive.noted(message.conversationId, message.seq, calledAnAgent(triggered));
       const notCalled = triggered.callerLimited.map(({ agentId }) => ({ agentId, reason: "caller_rate_limited" as const }));
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate, ...(notCalled.length > 0 ? { notCalled } : {}) });
     },

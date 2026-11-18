@@ -291,8 +291,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   //
   // Proactive replies (batch 2D): once people in a group stop writing, the scheduler has the group's latest message
   // judged (`decideProactive`) and acts on the outcome as the send route does on a mention's — notices published, runs
-  // announced (a queued one wakes the worker). Only with a judgement model. It stops when the app closes, before the
-  // database: what a decision in flight then decides is dropped, and the stop waits for it within SHUTDOWN_GRACE_MS.
+  // announced (a queued one wakes the worker). Only with a judgement model. It is closed as the stop begins, with the
+  // worker (below): nothing more is judged, and what a decision in flight then decides is dropped.
   const proactiveAsked = options.proactive === false ? null : (options.proactive ?? {});
   deps.proactive =
     overrides.proactive !== undefined
@@ -301,6 +301,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         ? null
         : createProactiveScheduler({
             decide: (conversationId, seq) => decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log }, conversationId, seq),
+            // `agentPort` is declared below: the port takes the scheduler (an Agent's post cancels a wait) and this takes
+            // the port. Both exist before any message is noted, so before any debounce can end and call this.
             act: (_conversationId, triggered) => {
               if (triggered.notices.length > 0) deps.conversations.publish({ messages: triggered.notices, conversations: [] }, app.log);
               actOnTriggered(triggered, { announce: (run) => agentPort.announce(run), log: app.log, realtime: app.realtime });
@@ -309,14 +311,6 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
             log: app.log,
           });
   const proactive = deps.proactive;
-  if (proactive) {
-    app.addHook("onClose", async () => {
-      proactive.close();
-      if (!(await within(proactive.idle(), SHUTDOWN_GRACE_MS))) {
-        app.log.warn(`a proactive judgement was still in flight ${SHUTDOWN_GRACE_MS} ms after the stop; what it decides is dropped`);
-      }
-    });
-  }
   const agentPort = createAgentPort({
     db: deps.db,
     config,
@@ -372,13 +366,21 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const ownReads = perPrincipalLimit(app, 120);
   const { endDrafts } = registerAgentRoutes(app, { draftRuns, readLimit: ownReads });
   // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —
-  // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself).
+  // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself). First of all the proactive scheduler is closed,
+  // so that no debounce ends in a judgement once the stop has begun; a decision in flight is waited for as long (what it
+  // decides is dropped; a run it queued stays queued for the next start).
   app.addHook("preClose", async () => {
+    proactive?.close();
     await Promise.all([
       within(endDrafts(), SHUTDOWN_GRACE_MS).then((ended) => {
         if (!ended) app.log.warn(`persona drafts not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
       }),
       agentWorker.stop(),
+      proactive
+        ? within(proactive.idle(), SHUTDOWN_GRACE_MS).then((ended) => {
+            if (!ended) app.log.warn(`a proactive judgement was still in flight ${SHUTDOWN_GRACE_MS} ms after the stop; what it decides is dropped`);
+          })
+        : undefined,
     ]);
   });
   registerRunRoutes(app, { readLimit: ownReads });
