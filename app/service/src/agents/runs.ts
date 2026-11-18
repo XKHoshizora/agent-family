@@ -71,24 +71,32 @@ export function toWireRun(r: RunRow): WireRun {
 
 /**
  * What a member of a group who does not own the Agent is told of its reply there (wire contract "Run state"): replying
- * while its run is queued or running, unavailable while it failed and its owner has not dismissed it, else nothing.
+ * while its run is queued or running, unavailable while it failed (and someone had asked for it, `groupRunState`) and its
+ * owner has not dismissed it, else nothing.
  */
 export type GroupRunState = "replying" | "unavailable" | null;
 
-export function groupRunState(r: Pick<RunRow, "status" | "dismissed_at"> | null | undefined): GroupRunState {
+/**
+ * The state of an Agent's reply in a group `to` its owner or to any other member (`GroupRunState`). A reply nobody had
+ * asked for (lane `proactive`) that failed is its owner's alone to know: the others were never asked anything of it,
+ * and are told nothing failed (nor, so, that it tried to speak unasked).
+ */
+export function groupRunState(r: (Pick<RunRow, "status" | "dismissed_at"> & { lane: Lane }) | null | undefined, to: "owner" | "member"): GroupRunState {
   if (!r) return null;
   if (r.status === "queued" || r.status === "running") return "replying";
-  return r.status === "failed" && r.dismissed_at === null ? "unavailable" : null;
+  if (r.status !== "failed" || r.dismissed_at !== null) return null;
+  return to === "owner" || r.lane !== "proactive" ? "unavailable" : null;
 }
 
 /**
  * The run that decides what a group shows of an Agent member: the latest reply run of the member `m` (a `memberships`
  * alias, spliced into SQL: only these literals) in its conversation during that stay — one covering a message after it
- * joined, so a run from before it last left and came back is not it. A `lateral` subquery in the shape of `RunRow`.
+ * joined, so a run from before it last left and came back is not it. A `lateral` subquery in the shape of `RunRow`, and
+ * its `lane`.
  */
 type StayAlias = "m" | "am";
 const latestInStay = (m: StayAlias): string =>
-  `lateral (select x.id, x.status, x.error, x.resets_at, x.dismissed_at from agent_runs x
+  `lateral (select x.id, x.status, x.error, x.resets_at, x.dismissed_at, x.lane from agent_runs x
              where x.agent_id = ${m}.principal_id and x.conversation_id = ${m}.conversation_id and x.purpose = 'reply'
                and x.covers_seq > ${m}.joined_seq
              order by x.created_at desc, x.id desc limit 1)`;
@@ -104,13 +112,13 @@ export interface GroupRunEntry {
 /**
  * `GET /api/conversations/:id/runs` for `readerId` (wire contract "Run state"): 404, as for a conversation that does not
  * exist, unless it is a group the reader is a current member of. One entry per current Agent member whose latest run
- * there in its current stay (`latestInStay`) has a state, in `agentId` order; the run itself on the reader's own
- * Agents' entries only.
+ * there in its current stay (`latestInStay`) has a state for the reader (`groupRunState`), in `agentId` order; the run
+ * itself on the reader's own Agents' entries only.
  */
 export async function groupRuns(q: Queryable, readerId: string, conversationId: string): Promise<GroupRunEntry[]> {
   if ((await peekConversation(q, conversationId))?.type !== "group" || !(await currentMembership(q, conversationId, readerId))) throw notFound();
-  const { rows } = await q.query<RunRow & { agent_id: string; owner_id: string }>(
-    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}
+  const { rows } = await q.query<RunRow & { agent_id: string; owner_id: string; lane: Lane }>(
+    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}, r.lane
        from memberships m
        join principals p on p.id = m.principal_id and p.kind = 'agent'
        join ${latestInStay("m")} r on true
@@ -120,8 +128,9 @@ export async function groupRuns(q: Queryable, readerId: string, conversationId: 
   );
   const entries: GroupRunEntry[] = [];
   for (const row of rows) {
-    const state = groupRunState(row);
-    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(row.owner_id === readerId ? { run: toWireRun(row) } : {}) });
+    const owns = row.owner_id === readerId;
+    const state = groupRunState(row, owns ? "owner" : "member");
+    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(owns ? { run: toWireRun(row) } : {}) });
   }
   return entries;
 }
@@ -140,8 +149,9 @@ export interface RunAudience {
 
 /**
  * One statement for one delivery of run `runId` of `conversationId`, however many members the conversation has: its
- * type, the run's Agent and owner, and in a group its current members and the Agent's state there now — that of its
- * latest run in its current stay (`latestInStay`), null once it is not a member. Null when there is no such run.
+ * type, the run's Agent and owner, and in a group its current members and the Agent's state there now as they are told
+ * it (`groupRunState`) — that of its latest run in its current stay (`latestInStay`), null once it is not a member.
+ * Null when there is no such run.
  */
 export async function runAudience(q: Queryable, conversationId: string, runId: string): Promise<RunAudience | null> {
   const { rows } = await q.query<{
@@ -151,11 +161,12 @@ export async function runAudience(q: Queryable, conversationId: string, runId: s
     members: string[] | null;
     status: RunStatus | null;
     dismissed_at: Date | null;
+    lane: Lane | null;
   }>(
     `select c.type, a.agent_id, a.owner_id,
             case when c.type = 'group'
                  then array(select ms.principal_id from memberships ms where ms.conversation_id = c.id and ms.left_seq is null) end as members,
-            r.status, r.dismissed_at
+            r.status, r.dismissed_at, r.lane
        from agent_runs a
        join conversations c on c.id = a.conversation_id
        left join memberships am on c.type = 'group' and am.conversation_id = c.id and am.principal_id = a.agent_id and am.left_seq is null
@@ -165,8 +176,8 @@ export async function runAudience(q: Queryable, conversationId: string, runId: s
   );
   const row = rows[0];
   if (!row) return null;
-  const latest = row.status === null ? null : { status: row.status, dismissed_at: row.dismissed_at };
-  return { type: row.type, agentId: row.agent_id, ownerId: row.owner_id, memberIds: row.members ?? [], state: groupRunState(latest) };
+  const latest = row.status === null || row.lane === null ? null : { status: row.status, dismissed_at: row.dismissed_at, lane: row.lane };
+  return { type: row.type, agentId: row.agent_id, ownerId: row.owner_id, memberIds: row.members ?? [], state: groupRunState(latest, "member") };
 }
 
 /** A run to push to its owner after the transaction that changed it commits. */
