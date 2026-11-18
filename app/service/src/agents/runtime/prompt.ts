@@ -101,12 +101,17 @@ export const hasVerticalSpace = (text: string): boolean => HAS_VERTICAL_SPACE.te
  */
 export type SpeakerRole = "你的主人" | "群成员" | "Agent";
 
-/** What a label is written with: a name in one loses them, so it can neither close the label nor open another. */
-const LABEL_SYNTAX = /[〔〕｜]/g;
+/**
+ * What a name in a label (and an appellation in the roster) may not hold, for `replace`: the label's own brackets and
+ * separator `〔 〕 ｜`; what looks like a separator, `| ︱ │ ┃ ¦ ∣ ⎪ ❘`, or like brackets around a name, `｢ ｣ 「 」 【 】
+ * [ ] ［ ］ 〈 〉 《 》`; and every invisible format character (`\p{Cf}`: zero-width spaces and joiners, bidi controls,
+ * soft hyphens…), which could hide any of them. So a name can neither close its label nor pass for a role.
+ */
+export const UNSAFE_IN_LABELS = /[〔〕｜|︱│┃¦∣⎪❘｢｣「」【】[\]［］〈〉《》\p{Cf}]/gu;
 
-/** A name as a label shows it (design rule 4a): on one line (`oneLine`), without `〔 〕 ｜`; the handle when nothing is left. */
+/** A name as a label shows it (design rule 4a): on one line (`oneLine`), without `UNSAFE_IN_LABELS`; the handle when nothing is left. */
 export function labelName(name: string, handle: string): string {
-  const shown = oneLine(name.replace(LABEL_SYNTAX, ""));
+  const shown = oneLine(name.replace(UNSAFE_IN_LABELS, ""));
   return shown === "" ? handle : shown;
 }
 
@@ -136,22 +141,51 @@ export function newMark(taken: (mark: string) => boolean, draw: () => string = d
   }
 }
 
-/** A label's shape, on one line: `〔…｜…〕` with no bracket and no vertical space inside. */
-const LABEL_SHAPE = new RegExp(`〔[^〔〕${VERTICAL_SPACE}]*｜[^〔〕${VERTICAL_SPACE}]*〕`, "gu");
+/** A label's brackets and separator (`speakerLabel`), as `withoutMark` reads them. */
+const OPEN = "〔";
+const CLOSE = "〕";
+const SEPARATOR = "｜";
 
 /**
- * What a model wrote, without the run's mark (design rule 4b): every label-shaped `〔…｜…〕` (on one line) that carries
- * the mark is taken out whole, then every other occurrence of the mark — again, until taking some out has put no new
- * one together. With no mark (the Agent's own conversation) the text is as written.
+ * Text without the run's mark (design rule 4b): every label-shaped `〔…｜…〕` on one line that carries the mark is taken
+ * out whole, and every other occurrence of the mark — also one that taking out another put together. In one pass, in
+ * time proportional to the text however it is shaped (what the model writes may be shaped against it): what is kept is
+ * built up as the text is read; a mark it comes to end with is dropped at once, and a label as its `〕` comes. A mark is
+ * made of letters and digits (`drawMark`): never of a bracket, the separator or a line break. With no mark (the Agent's
+ * own conversation) the text is as written.
  */
 export function withoutMark(text: string, mark: string | null): string {
   if (!mark) return text;
-  let out = text;
-  while (out.includes(mark)) {
-    const unlabelled = out.replace(LABEL_SHAPE, (label) => (label.includes(mark) ? "" : label));
-    out = unlabelled === out ? out.replaceAll(mark, "") : unlabelled;
+  const wanted = Array.from(mark);
+  const last = wanted.at(-1)!;
+  const kept: string[] = [];
+  /**
+   * Where in `kept` a label could still begin — a `〔` with no `〕` and no line break after it — innermost last; and
+   * whether what came after it had the separator and the mark (a label after it that was taken out took its own along).
+   */
+  const opens: Array<{ at: number; separated: boolean; marked: boolean }> = [];
+  const endsWithMark = (): boolean => kept.length >= wanted.length && wanted.every((c, i) => kept[kept.length - wanted.length + i] === c);
+  for (const c of text) {
+    const open = opens.at(-1);
+    if (c === CLOSE && open !== undefined && open.separated && open.marked) {
+      kept.length = open.at;
+      opens.pop();
+    } else if (c === OPEN) {
+      kept.push(c);
+      opens.push({ at: kept.length - 1, separated: false, marked: false });
+    } else if (c === CLOSE || hasVerticalSpace(c)) {
+      kept.push(c);
+      opens.length = 0;
+    } else {
+      kept.push(c);
+      if (c === SEPARATOR && open !== undefined) open.separated = true;
+      if (c === last && endsWithMark()) {
+        kept.length -= wanted.length;
+        if (open !== undefined) open.marked = true;
+      }
+    }
   }
-  return out;
+  return kept.join("");
 }
 
 /**

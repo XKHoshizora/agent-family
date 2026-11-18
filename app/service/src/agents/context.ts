@@ -10,7 +10,7 @@ import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
-import { GROUP_AGENTS_NAMED, labelName, newMark, speakerLabel, type GroupScene, type SpeakerRole } from "./runtime/prompt.ts";
+import { GROUP_AGENTS_NAMED, labelName, newMark, speakerLabel, withoutMark, type GroupScene, type SpeakerRole } from "./runtime/prompt.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -418,12 +418,14 @@ export async function loadGroupScene(q: Queryable, agentId: string, conversation
  * attachments when the model can take them and they fit — checked on their stored size before a byte is read: a PNG,
  * JPEG or WebP image (a GIF is named) up to 5 MB when the model sees images; a PDF up to 10 MB when it reads PDFs; any
  * other file as text when its bytes are text (`fileText`), read at most 4 bytes per character it may still show; never
- * more than the call's `bytesLeft`. A missing blob is shown by name (and logged). So is one whose read fails or takes
- * longer than `BLOB_READ_TIMEOUT_MS` (logged once) — unless no read of this build has succeeded and this is the second
- * that failed: then the store is down (`BlobStoreDown` is thrown). Once one read has succeeded (a missing blob counts:
- * the store answered), every later failure is shown by its name. Once `stop()` says so, no further blob is read (what
- * is left is shown by name, and the caller ends the run). When `signal` aborts, the read under way is abandoned and its
- * reason thrown.
+ * more than the call's `bytesLeft`. In a group a file's text loses the run's mark (`withoutMark`): files are read after
+ * the mark is drawn, so this is how a file filled with guessed labels can never carry the real one. An image's or a
+ * PDF's bytes go to the model as they are and cannot be cleaned so. A missing blob is shown by name (and logged). So is
+ * one whose read fails or takes longer than `BLOB_READ_TIMEOUT_MS` (logged once) — unless no read of this build has
+ * succeeded and this is the second that failed: then the store is down (`BlobStoreDown` is thrown). Once one read has
+ * succeeded (a missing blob counts: the store answered), every later failure is shown by its name. Once `stop()` says
+ * so, no further blob is read (what is left is shown by name, and the caller ends the run). When `signal` aborts, the
+ * read under way is abandoned and its reason thrown.
  */
 export async function buildContext(
   blobs: BlobStore,
@@ -475,7 +477,7 @@ export async function buildContext(
       const max = Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR, plan.bytesLeft);
       const got = await read(attachment, found.blobKey, max, startsLikeText);
       const text = got ? fileText(got.data, got.complete, maxChars) : null;
-      if (text) plan.offer(slot, { type: "text", ...text });
+      if (text) plan.offer(slot, { type: "text", text: withoutMark(text.text, loaded.mark), chars: text.chars });
     }
   }
 

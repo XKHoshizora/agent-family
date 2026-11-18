@@ -441,7 +441,7 @@ describe("a run's lane and who called for it", () => {
       [w.g, anna.id, w.owner.id],
     );
     const posted = await db.tx((t) =>
-      postAsAgent(t, anna.id, w.g, run.rows[0]!.id, { text: "@carlbot 你看看", reasoning: "", stopped: false, truncated: false }, app.deps.config),
+      postAsAgent(t, anna.id, w.g, run.rows[0]!.id, { text: "@carlbot 你看看", reasoning: "", stopped: false, truncated: false, mark: null }, app.deps.config),
     );
     expect(posted?.triggered.runs).toHaveLength(1);
     expect(await laneOf(carl.id, w.g)).toEqual([["others", null]]);

@@ -1,7 +1,6 @@
 import { ModelError, type ModelGateway } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
 import { BUSY, isRunEnd, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
-import { withoutMark } from "./prompt.ts";
 import { ReplyStream } from "./stream.ts";
 
 /**
@@ -219,25 +218,27 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     // The upstream ended the stream without its finish (cut off midway).
     if (finished === null && why === null) return failed(UNAVAILABLE);
 
-    // What the model wrote, as it may be posted: in a group, without the run's mark (`withoutMark`). Every reply that is
-    // posted passes here first, text and reasoning alike; nothing of a group's reply was streamed (`AgentPort.emit`),
-    // and the Agent's own conversation has no mark.
-    const postable = (s: string): string => withoutMark(cleanModelText(s), prepared.mark).trim();
-    const text = postable(out.text);
-    const reasoning = postable(out.reasoning);
+    const text = cleanModelText(out.text);
+    const reasoning = cleanModelText(out.reasoning);
     const said = hasVisibleText(text) || hasVisibleText(reasoning);
+    // In a group the run's mark goes with the reply: `post` takes it out of what is kept of it (agents/conversation.ts
+    // `postAsAgent`), and a reply that was nothing but the mark and labels is then "empty". Nothing of a group's reply
+    // was streamed (`AgentPort.emit`).
+    const { mark } = prepared;
     if (finished === null && why === "stop") {
       // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
       if (!said) return finish(run, { status: "stopped" }, usage, fallback);
-      const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
-      // All it said was inside a persona block it never finished (in a group, also: it only thought, no visible text): as a stop with nothing said.
+      const posted = await post(run, { text, reasoning, stopped: true, truncated: false, mark });
+      // All it said was inside a persona block it never finished (in a group, also: it only thought, or said only the
+      // mark and labels): as a stop with nothing said.
       if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
       return finish(run, ended(posted, { status: "stopped" }), usage, fallback);
     }
     // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
     if (!said) return failed(UNAVAILABLE);
-    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
-    // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, no visible text): as an answer that said nothing.
+    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated, mark });
+    // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, or said only the
+    // mark and labels): as an answer that said nothing, failed `provider_unavailable`.
     if (posted === "empty") return failed(UNAVAILABLE);
     return finish(run, ended(posted, { status: "done" }), usage, fallback);
   }

@@ -27,8 +27,8 @@ export interface Prepared {
   readonly inputChars: number;
   /**
    * In a group, the run's mark (prompt.ts `newMark`): the labels and the system text the model is shown carry it, and
-   * the worker takes it out of what the model writes before anything of that is posted (`withoutMark`). Null in the
-   * Agent's own conversation, which has no labels. Never stored, pushed or logged.
+   * the worker hands it on with the reply (`Reply.mark`) to be taken out of what the model wrote. Null in the Agent's
+   * own conversation, which has no labels. Never stored, pushed or logged.
    */
   readonly mark: string | null;
 }
@@ -104,6 +104,11 @@ export interface Reply {
   reasoning: string;
   stopped: boolean;
   truncated: boolean;
+  /**
+   * The run's mark (`Prepared.mark`; null in the Agent's own conversation): taken out of the text and the reasoning once
+   * they are cut to what a message stores (agents/conversation.ts `postAsAgent`). Never stored.
+   */
+  mark: string | null;
 }
 
 export interface Usage {

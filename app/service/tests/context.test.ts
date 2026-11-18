@@ -188,10 +188,14 @@ describe("turns", () => {
     const { owner, agent, conv } = await owned("own");
     await say(owner, conv, "你好");
     const ticket = (await app.agentPort.claimNext())!;
+    const before = new Date();
     const prepared = await app.agentPort.begin(ticket);
+    const after = new Date();
     if (isRunEnd(prepared)) throw new Error(`begin ended the run: ${JSON.stringify(prepared)}`);
     expect(prepared.mark).toBeNull();
-    expect(prepared.call.system).toBe(systemPrompt({ name: agent.name, persona: PERSONA }, { displayName: "own" }, new Date(), "normal", app.deps.config.siteTimezone));
+    // `begin` reads the clock between these two: its date is one of theirs, also across midnight.
+    const own = (now: Date) => systemPrompt({ name: agent.name, persona: PERSONA }, { displayName: "own" }, now, "normal", app.deps.config.siteTimezone);
+    expect([own(before), own(after)]).toContain(prepared.call.system);
     expect(prepared.call.messages).toEqual([{ role: "user", parts: [{ type: "text", text: "你好" }] }]);
     await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
 

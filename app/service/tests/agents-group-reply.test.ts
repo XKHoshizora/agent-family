@@ -964,7 +964,7 @@ describe("an Agent that is no longer in the group", () => {
     // Its membership ends with nothing else (no notice, no mark on the run).
     await db.query("update memberships set left_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2", [g, agent.id]);
 
-    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false })).toBe("refused");
+    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("refused");
     await app.agentPort.finish(ticket, { status: "cancelled" }, { inputTokens: 11, outputTokens: 7 }, { inputChars: prepared.inputChars, outputChars: 2 });
     expect(await bodiesFrom(g, agent.id)).toEqual([]);
     expect(await runOf(ticket.id)).toEqual({ status: "cancelled", error: "agent_removed" });
@@ -1018,7 +1018,7 @@ describe("an Agent that is no longer in the group", () => {
     await say(mia, g, "@helper_bot 还在吗");
     expect(await pendingOf(ticket.id)).not.toBeNull();
     await db.query("update memberships set left_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2", [g, agent.id]);
-    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false })).toBe("refused");
+    expect(await app.agentPort.post(ticket, { text: "在的", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("refused");
     await app.agentPort.finish(ticket, { status: "cancelled" }, null, NOTHING);
     expect(await runsOf(agent.id, g)).toEqual([{ status: "cancelled", error: "agent_removed", owner: owner.id, by: "human" }]);
     expect(await pendingOf(ticket.id)).toBeNull();
@@ -1035,7 +1035,7 @@ describe("an Agent that is no longer in the group", () => {
         [agent.conversationId, agent.id, owner.id],
       )
     ).rows[0]!.id;
-    expect(await app.agentPort.post(ticketOf(runId, agent.id, owner.id, g), { text: "走错了", reasoning: "", stopped: false, truncated: false })).toBe("refused");
+    expect(await app.agentPort.post(ticketOf(runId, agent.id, owner.id, g), { text: "走错了", reasoning: "", stopped: false, truncated: false, mark: null })).toBe("refused");
     expect([await bodiesFrom(g, agent.id), (await bodiesFrom(agent.conversationId, agent.id)).length]).toEqual([[], 0]);
   });
 });
