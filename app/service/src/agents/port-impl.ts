@@ -26,7 +26,19 @@ import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
-import { followUp, logCallerLimited, RUN_COLUMNS, toWireRun, type Announced, type BudgetReached, type Interruption, type RunRow } from "./runs.ts";
+import {
+  followUp,
+  logCallerLimited,
+  othersBudgetRefusesAdmission,
+  RUN_COLUMNS,
+  toWireRun,
+  type Announced,
+  type BudgetReached,
+  type Interruption,
+  type Lane,
+  type RunRow,
+  type Triggered,
+} from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 export interface AgentPortDeps {
@@ -48,6 +60,12 @@ const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
 /** The Agent is no longer a member of the run's group: nothing is called or posted there. */
 const REMOVED: RunEnd = { status: "cancelled", error: "agent_removed" };
+/**
+ * Someone else's call found the Agent's others' daily budget spent as it was admitted (runs.ts
+ * `othersBudgetRefusesAdmission`): no call, nothing held or charged — nothing failed and there is nothing to retry, as
+ * for such a call refused when it was made (of which nothing is recorded); the group is told by the budget's notice.
+ */
+const OTHERS_BUDGET_SPENT: RunEnd = { status: "cancelled" };
 
 /** Why `postAsAgent` refuses a run's reply (409): the Agent's state, or what interrupted the run. */
 const REFUSED: ReadonlySet<string> = new Set(["agent_paused", "agent_deleted", "agent_removed", "halted"]);
@@ -58,8 +76,9 @@ interface RunState {
   covers_seq: string | null;
   pending_seq: string | null;
   interrupted: Interruption | null;
+  lane: Lane;
 }
-const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted";
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane";
 
 /**
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
@@ -249,7 +268,11 @@ export class DbAgentPort implements AgentPort {
    *    is still `running`, unadmitted, and its caller ends it (the worker: `release`).
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when
    *    `closing` has aborted by the time the locks are held, the transaction rolls back and `begin` rejects with its
-   *    reason, admitting nothing (as in step 2); otherwise
+   *    reason, admitting nothing (as in step 2). A run someone else called for (lane `others`) then meets the Agent's
+   *    others' daily budget again (runs.ts `othersBudgetRefusesAdmission`: a queued reply, and one not admitted yet,
+   *    holds nothing, so replies queued in several groups at once could pass it): spent, it ends `cancelled` with no
+   *    error (`OTHERS_BUDGET_SPENT`) — no call, nothing held or charged — and the budget's notice, if this appended it,
+   *    is published to the group after commit, the Agent pushed to its owner. Otherwise
    *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
    *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
    *    else `none`.
@@ -315,13 +338,19 @@ export class DbAgentPort implements AgentPort {
     }
     if (closing?.aborted) throw closing.reason;
 
-    const result = await db.tx(async (t): Promise<{ end: RunEnd } | { prepared: Prepared; read: number | null }> => {
+    type Told = Pick<Triggered, "notices" | "budgetReached">;
+    const result = await db.tx(async (t): Promise<{ end: RunEnd; told?: Told } | { prepared: Prepared; read: number | null }> => {
       const { agent, state } = await this.lockRun(t, run);
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
       // The service may have started closing while this waited for the locks: then nothing is admitted (thrown, so the
       // transaction rolls back) and the run is left running, unadmitted, for the caller to end (the worker: `release`).
       if (closing?.aborted) throw closing.reason;
+      // Someone else's call meets the Agent's others' daily budget once more, now that the replies admitted before it hold.
+      if (state.lane === "others") {
+        const told = await othersBudgetRefusesAdmission(t, run.conversationId, agent, config);
+        if (told) return { end: OTHERS_BUDGET_SPENT, told };
+      }
       const { resolved, loaded, covers } = first;
       try {
         await admitRun(t, config, run.id, run.ownerId, resolved, context.inputTokensEstimate, now);
@@ -337,7 +366,12 @@ export class DbAgentPort implements AgentPort {
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });
-    if ("end" in result) return result.end;
+    if ("end" in result) {
+      // The others' daily budget's notice, if this appended it, goes to the group; the Agent to its owner.
+      if (result.told && result.told.notices.length > 0) this.deps.conversations.publish({ messages: result.told.notices, conversations: [] }, log);
+      if (result.told) this.pushBudgetReached(result.told.budgetReached);
+      return result.end;
+    }
     if (result.read !== null) this.deps.reads.publish({ conversationId: run.conversationId, principalId: run.agentId, seq: result.read }, log);
     return result.prepared;
   }

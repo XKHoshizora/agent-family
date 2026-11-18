@@ -640,7 +640,8 @@ has passed), for
 `cancelled` `agent_paused` or `agent_deleted`, `agent_removed` (the Agent left the run's group: the group's creator or you
 took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it and a
 member halted Agents calling each other, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
-answer is before a new topic you started).
+answer is before a new topic you started, or — a reply someone else called for in a group — the Agent's others' daily
+budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail; true
 after `rate_limited`, which a retry within the same minute meets again as 429). `resetsAt` (ISO instant): for
@@ -748,7 +749,10 @@ Agent's under way. The group is told by one `agent_daily_budget_reached` notice,
 `SITE_TIMEZONE`) for each conversation and Agent, and the owner is pushed their Agent again (`agent`), so the
 `othersSpentToday` they see is current. The owner's own calls, in groups and in the Agent's own conversation, never
 count and are never refused. A reply under way is not cut off, so a day's spend can pass the budget by the replies that
-were running. Raising the budget above today's spend, or setting it `null`, answers calls again at once; lowering it
+were running. A reply such a call queued (a queued reply holds nothing, so it does not count yet) meets the budget again
+as the worker admits it, under the Agent's lock, counting the holds of those admitted before it: spent by then, it ends
+`cancelled` with no error — no model call, nothing held or charged — with the same notice, once a day, and the same push
+to the owner; so an Agent called in several groups at once does not pass the budget by a reply in each. Raising the budget above today's spend, or setting it `null`, answers calls again at once; lowering it
 below the spend refuses at once. A reply on a provider model costs no points, so for such an Agent the budget never
 holds.
 
@@ -1695,7 +1699,7 @@ client can render its own:
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
 | `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
-| `agent_daily_budget_reached` | `actorId` = `agentId` (the Agent whose others' daily budget is spent) | in a group, the first call on the Agent by someone other than its owner that finds the budget spent — a mention, or a follow-up of one; once per site day for each conversation and Agent, whoever calls; nothing of lane or caller goes with it: “「{Agent 名}」今天的额度已用完” |
+| `agent_daily_budget_reached` | `actorId` = `agentId` (the Agent whose others' daily budget is spent) | in a group, the first call on the Agent by someone other than its owner that finds the budget spent — a mention, a follow-up of one, or a reply such a call queued as it is about to start; once per site day for each conversation and Agent, whoever calls; nothing of lane or caller goes with it: “「{Agent 名}」今天的额度已用完” |
 
 Clients must ignore fields and events they do not know: later batches add more.
 
@@ -2034,9 +2038,13 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    3. A short transaction under the Agent's lock again: a run interrupted, paused, deleted or stopped meanwhile ends as in
       the first step, with no call; when the service has started closing by the time the locks are held, the
       transaction rolls back and nothing is admitted (the closing service ends the run, Shutdown below;
-      `tests/runs-restart.test.ts`); otherwise the call is admitted on its input estimate (Metering; `no_quota`
-      ends it `failed` before any call) and the Agent's read marker moves to what the run covers (`read` push,
-      `peerReadSeq`).
+      `tests/runs-restart.test.ts`). A reply someone else called for (lane `others`) then meets the Agent's others'
+      daily budget once more (`runs.ts` `othersBudgetRefusesAdmission`; its own hold is not taken yet, and the Agent's
+      lock orders it after the replies admitted before it, whose holds count): spent, it ends `cancelled` with no error,
+      with no call and nothing held or charged, the group told by `agent_daily_budget_reached` once a day (published
+      after commit) and the owner pushed their Agent (Agents in a group). Otherwise the call is admitted on its input
+      estimate (Metering; `no_quota` ends it `failed` before any call) and the Agent's read marker moves to what the run
+      covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)
    — except for a reply in a group, of which no delta goes to anyone, its owner included (plan ruling 2; decided at
    `begin` and kept on the run's in-process flags, so nothing is read per delta): it arrives whole, as its message.

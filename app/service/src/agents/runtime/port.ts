@@ -53,7 +53,7 @@ export type RunErrorCode =
  * (`agent_removed`), or a group member's halt (`halted`: an Agent's message had called for it), interrupted is
  * `cancelled` with that reason — the worker cannot tell an owner's stop from a pause, and a refused post looks the
  * same. `cancelled` with no error from `begin`: everything the reply was to answer is before a new topic its owner
- * started.
+ * started, or (a reply someone else called for) the Agent's others' daily budget was spent by the time it was admitted.
  */
 export type RunEnd =
   | { readonly status: "done" }

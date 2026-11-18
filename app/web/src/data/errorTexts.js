@@ -322,7 +322,8 @@ const RUN_CANCELLED = {
 
 /**
  * The status line of a reply that failed or was cancelled (`Run`): why, in Chinese; "" when nothing went wrong (done,
- * stopped, running, or cancelled because a new topic left it nothing to answer). `source` is where the Agent's model
+ * stopped, running, or cancelled with no reason: a new topic left it nothing to answer, or the Agent's others' daily
+ * budget was spent by the time a reply someone else called for was to start). `source` is where the Agent's model
  * comes from ("site" | "provider"; unknown: as for a provider): a site model's key or address is not the owner's to fix.
  */
 export function runFailureText(run, now = Date.now(), source = null) {

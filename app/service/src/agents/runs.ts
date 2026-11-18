@@ -606,6 +606,25 @@ async function refusedByOthersBudget(
 }
 
 /**
+ * At admission (`DbAgentPort.begin`, in the transaction that admits the call, under the run's conversation row, its
+ * Agent's and its own): whether `agent`'s others' daily budget refuses its run in lane `others` in `conversationId` after
+ * all. Read again there because a queued reply, and a running one before it is admitted, holds nothing and so counts for
+ * nothing toward it (`othersSpentToday`; nor does this run, whose hold is not taken yet): an Agent called in several
+ * groups at once could otherwise pass it by a reply in each. The Agent's row lock orders the admissions of its replies,
+ * so each sees the holds of those admitted before it. Null when it does not refuse; else what the refusal told
+ * (`othersBudgetSpent`): the notice appended, if any, and the Agent's owner to push it to.
+ */
+export async function othersBudgetRefusesAdmission(
+  t: Tx,
+  conversationId: string,
+  agent: Pick<AgentRow, "id" | "ownerId" | "othersBudgetMicro">,
+  config: Pick<Config, "siteTimezone">,
+): Promise<Pick<Triggered, "notices" | "budgetReached"> | null> {
+  const told: Pick<Triggered, "notices" | "budgetReached"> = { notices: [], budgetReached: [] };
+  return (await refusedByOthersBudget(t, conversationId, agent, today(config), told)) ? told : null;
+}
+
+/**
  * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
  * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles
  * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
