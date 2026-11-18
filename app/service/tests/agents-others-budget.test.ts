@@ -1,0 +1,383 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { siteDayStart } from "../src/accounts/store.ts";
+import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
+import { triggerFromAgent } from "../src/agents/runs.ts";
+import { lockAgent } from "../src/agents/store.ts";
+import { insertMessage } from "../src/messages/model.ts";
+import { api, group, signUp, type Actor } from "./helpers/actors.ts";
+import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
+import { useApp } from "./helpers/harness.ts";
+import { scriptedGateway } from "./helpers/models.ts";
+import { closeAllSockets, connect } from "./helpers/ws.ts";
+
+/**
+ * The others' daily budget (the limits plan, Task 4): what calls by people other than an Agent's owner — themselves or
+ * through their own Agents (lane `others`) — spend of its owner's points in a site day is capped by the Agent's
+ * `othersBudget` (20 points unless its owner says otherwise; `null`: no cap). Spent is what those replies were charged
+ * today and what the running ones hold now. Once it is spent such a call reaches nothing — not even a reply under way —
+ * and the group is told once a day; its owner is pushed the Agent again. The owner's own calls never count and are never
+ * refused. As in agents-group-trigger.test.ts, an Agent is put into a group by inserting its membership row, and an
+ * Agent's own message is stored and handed to `triggerFromAgent` in one transaction, as `postAsAgent` does.
+ */
+
+const gateway = scriptedGateway();
+// Runs are only queued here: no worker picks one up unless a test runs it (`runOnce`).
+const { app, db } = useApp({ env: SITE_ENV, models: gateway, agentWorker: false });
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await closeAllSockets();
+  expect(gateway.pending()).toBe(0);
+});
+
+const FAST = { source: "site", id: "fast" } as const;
+const POINT = 1_000_000;
+const EVENT = "agent_daily_budget_reached";
+
+interface World {
+  owner: Actor;
+  member: Actor;
+  third: Actor;
+  /** A group of the three. */
+  g: string;
+}
+
+async function world(): Promise<World> {
+  const [owner, member, third] = [await signUp(app, "owner"), await signUp(app, "member"), await signUp(app, "third")];
+  return { owner, member, third, g: await group(app, owner, "team", [member, third]) };
+}
+
+/** Another group of the three, made by the member. */
+const anotherGroup = (w: World, title: string) => group(app, w.member, title, [w.owner, w.third]);
+
+/** Puts principal `id` into conversation `conv` from its current seq on. */
+const join = (conv: string, id: string) =>
+  db.query(`insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1`, [
+    conv,
+    id,
+  ]);
+
+interface Agent {
+  id: string;
+  ownerId: string;
+  conversationId: string;
+}
+
+/** An Agent of `owner` with `handle` (also its name unless `over` names one), answering on the site model, put into `conv` when given. */
+async function agentOf(owner: Actor, handle: string, conv: string | null, over: Record<string, unknown> = {}): Promise<Agent> {
+  const made = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", ...over });
+  if (conv) await join(conv, made.id);
+  return { id: made.id, ownerId: owner.id, conversationId: made.conversationId };
+}
+
+let txn = 0;
+const say = async (who: Actor, conv: string, text: string): Promise<number> => {
+  const sent = await api(app, who, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `ob${++txn}` });
+  if (sent.status !== 201) throw new Error(`say: ${sent.status} ${JSON.stringify(sent.json)}`);
+  return sent.json.message.seq as number;
+};
+
+/** The Agent's own message in `conv`, stored and handed to the trigger in one transaction, as `postAsAgent` does. */
+const agentSays = (agentId: string, conv: string, text: string) =>
+  db.tx(async (t) => {
+    const poster = await lockAgent(t, agentId, conv);
+    const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, app.deps.config)) };
+  });
+
+/** The Agent's runs in `conv`, oldest first. */
+const runsOf = async (agentId: string, conv: string) =>
+  (
+    await db.query<{ status: string; lane: string; covers: number; pending: number | null }>(
+      "select status, lane, covers_seq::int as covers, pending_seq::int as pending from agent_runs where agent_id = $1 and conversation_id = $2 order by created_at, id",
+      [agentId, conv],
+    )
+  ).rows;
+
+/** Ends every active run, so that the next trigger queues a new one instead of folding. */
+const settleAll = () => db.query("update agent_runs set status = 'done', finished_at = now() where status in ('queued', 'running')");
+
+/** The bodies of the budget notices in `conv`, oldest first. */
+const noticesOf = async (conv: string) =>
+  (
+    await db.query<{ body: Record<string, unknown> }>(
+      "select body from messages where conversation_id = $1 and kind = 'system' and body ->> 'event' = $2 order by seq",
+      [conv, EVENT],
+    )
+  ).rows.map((r) => r.body);
+
+/**
+ * A finished reply of `agent` in `conv`, in `lane`, settled with `micro` charged to its owner's balance; its usage record
+ * written at `at` (now unless given).
+ */
+async function paid(agent: Agent, conv: string, lane: "own" | "others" | "proactive", micro: number, at: Date | null = null): Promise<void> {
+  const run = await db.query<{ id: string }>(
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at, lane)
+     values ('reply', $1, $2, $3, 'done', 0, 'site', 'fast', 'balance', now(), $4) returning id`,
+    [conv, agent.id, agent.ownerId, lane],
+  );
+  await db.query(
+    `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome, created_at)
+     values ($1, $2, $3, 'reply', 'site', 'fast', $4, $4, 'done', coalesce($5::timestamptz, now()))`,
+    [agent.ownerId, agent.id, run.rows[0]!.id, micro, at],
+  );
+}
+
+/** A finished reply of `agent` that someone other than its owner called for, charged `micro` (at `at`: now unless given). */
+const paidOthers = (agent: Agent, conv: string, micro: number, at: Date | null = null) => paid(agent, conv, "others", micro, at);
+
+/** A running reply of `agent` in `conv`, in `lane`, covering its current seq, admitted on the site model and holding `holdMicro`. */
+async function holding(agent: Agent, conv: string, lane: "own" | "others", holdMicro: number): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
+    `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, started_at, source, model, charge_to, hold_micro, lane)
+     select 'reply', $1, $2, $3, 'running', seq, now(), 'site', 'fast', 'balance', $4, $5 from conversations where id = $1 returning id`,
+    [conv, agent.id, agent.ownerId, holdMicro, lane],
+  );
+  return rows[0]!.id;
+}
+
+/** The Agent's queued run in `conv`, made running as the worker's claim makes it. */
+const claim = async (agent: Agent, conv: string): Promise<RunTicket> => {
+  const { rows } = await db.query<{ id: string }>(
+    "update agent_runs set status = 'running', started_at = now() where agent_id = $1 and conversation_id = $2 and status = 'queued' returning id",
+    [agent.id, conv],
+  );
+  return { id: rows[0]!.id, agentId: agent.id, ownerId: agent.ownerId, conversationId: conv };
+};
+
+const viewOf = async (who: Actor, agent: Agent) => (await api(app, who, "GET", `/api/agents/${agent.id}`)).json;
+
+describe("the others' daily budget", () => {
+  it("under the budget another member's call is queued; at it, no run and one notice a day in the group", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { name: "安娜", othersBudget: "2" });
+    await paidOthers(anna, w.g, 2 * POINT - 1);
+    const asked = await say(w.member, w.g, "@anna 你好");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "others", covers: asked });
+    await settleAll();
+
+    // One micro-point more and it is spent: the member's call reaches nothing, the group is told (live), and its owner is
+    // pushed the Agent once.
+    await paidOthers(anna, w.g, 1);
+    const pushed = vi.spyOn(app.realtime, "pushAgentChanged");
+    const thirdSocket = await connect(app, w.third);
+    const before = await runsOf(anna.id, w.g);
+    await say(w.member, w.g, "@anna 再问");
+    expect(await runsOf(anna.id, w.g)).toEqual(before);
+    expect(await noticesOf(w.g)).toEqual([{ event: EVENT, actorId: anna.id, agentId: anna.id, text: "「安娜」今天的额度已用完" }]);
+    const told = await thirdSocket.next((x) => x.type === "message" && x.message.system?.event === EVENT);
+    expect(told.message).toMatchObject({ senderId: null, text: "「安娜」今天的额度已用完", system: { event: EVENT, actorId: anna.id, agentId: anna.id } });
+    expect(pushed.mock.calls).toEqual([[w.owner.id, anna.id]]);
+
+    // Another member's call the same day: refused too, with no second notice and no second push.
+    await say(w.third, w.g, "@anna 我也问");
+    expect(await runsOf(anna.id, w.g)).toEqual(before);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    expect(pushed).toHaveBeenCalledTimes(1);
+
+    // In another group the same day: its own one notice.
+    const g2 = await anotherGroup(w, "second");
+    await join(g2, anna.id);
+    await say(w.member, g2, "@anna 你好");
+    await say(w.third, g2, "@anna 你好");
+    expect(await runsOf(anna.id, g2)).toEqual([]);
+    expect((await noticesOf(g2)).map((n) => n.agentId)).toEqual([anna.id]);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    expect(pushed).toHaveBeenCalledTimes(2);
+
+    // A notice of an earlier day does not count for today's.
+    const dayStart = siteDayStart(new Date(), app.deps.config.siteTimezone, 0);
+    await db.query("update messages set created_at = $2 where conversation_id = $1 and body ->> 'event' = $3", [w.g, new Date(dayStart.getTime() - 1000), EVENT]);
+    await say(w.third, w.g, "@anna 今天呢");
+    expect(await noticesOf(w.g)).toHaveLength(2);
+  });
+
+  it("the owner's own call is answered all the same, and does not count", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const carl = await agentOf(w.owner, "carlbot", w.g);
+    // What its owner's own replies were charged today — in the group, in its own conversation — and what replies nobody
+    // called for were do not count: another member's call is queued.
+    await paid(anna, w.g, "own", 50 * POINT);
+    await paid(anna, anna.conversationId, "own", 50 * POINT);
+    await paid(anna, w.g, "proactive", 50 * POINT);
+    await say(w.member, w.g, "@anna 你好");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "others" });
+    await settleAll();
+
+    // Spent: its owner's call is answered.
+    await paidOthers(anna, w.g, 2 * POINT);
+    const mine = await say(w.owner, w.g, "@anna 我来问");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "own", covers: mine });
+    // Another member's call is not even folded into that reply: it is refused, and the group told.
+    await say(w.member, w.g, "@anna 我也问");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "own", covers: mine });
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    await settleAll();
+    // Through another of its owner's Agents, and in its own conversation: answered too.
+    const called = await agentSays(carl.id, w.g, "@anna 你看看");
+    expect([called.runs.length, called.notices, called.budgetReached]).toEqual([1, [], []]);
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "own" });
+    await say(w.owner, anna.conversationId, "你好");
+    expect((await runsOf(anna.id, anna.conversationId)).at(-1)).toMatchObject({ status: "queued", lane: "own" });
+    // Its owner sees what others spent today, and only that.
+    expect(await viewOf(w.owner, anna)).toMatchObject({ othersBudget: "2", othersSpentToday: "2" });
+  });
+
+  it("an Agent of someone else is refused the same way", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const mia = await agentOf(w.member, "mia", w.g);
+    await say(w.third, w.g, "开始");
+    await paidOthers(anna, w.g, 2 * POINT);
+    const before = await runsOf(anna.id, w.g);
+
+    const refused = await agentSays(mia.id, w.g, "@anna 你看看");
+    expect([refused.runs, refused.callerLimited, refused.budgetReached]).toEqual([[], [], [{ ownerId: w.owner.id, agentId: anna.id }]]);
+    expect(refused.notices.map((n) => [n.seq, n.body])).toEqual([[refused.message.seq + 1, { event: EVENT, actorId: anna.id, agentId: anna.id, text: "「anna」今天的额度已用完" }]]);
+    // Once a day in the group.
+    const again = await agentSays(mia.id, w.g, "@anna 还在吗");
+    expect([again.runs, again.notices, again.budgetReached]).toEqual([[], [], []]);
+    expect(await runsOf(anna.id, w.g)).toEqual(before);
+
+    // Its reply, as the worker posts it, in another group: the same; the notice follows the reply, and its owner is
+    // pushed the Agent.
+    const g2 = await anotherGroup(w, "second");
+    await join(g2, anna.id);
+    await join(g2, mia.id);
+    await say(w.member, g2, "@mia 问问 anna");
+    const pushed = vi.spyOn(app.realtime, "pushAgentChanged");
+    const thirdSocket = await connect(app, w.third);
+    gateway.reply("@anna 你也看看");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const reply = await thirdSocket.waitFor((x) => x.type === "message" && x.message.senderId === mia.id);
+    await thirdSocket.waitFor((x) => x.type === "message" && x.message.system?.event === EVENT, { from: reply + 1 });
+    expect(await runsOf(anna.id, g2)).toEqual([]);
+    expect((await noticesOf(g2)).map((n) => n.agentId)).toEqual([anna.id]);
+    expect(pushed.mock.calls).toEqual([[w.owner.id, anna.id]]);
+  });
+
+  it("a follow-up others asked for is not queued once it is spent; its owner's is", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const g2 = await anotherGroup(w, "second");
+    const g3 = await anotherGroup(w, "third");
+    for (const conv of [g2, g3]) await join(conv, anna.id);
+    // A member's reply under way in each group, with a mention noted on it: another member's in the first and the
+    // third, its owner's in the second.
+    const tickets: RunTicket[] = [];
+    for (const conv of [w.g, g2, g3]) {
+      await say(w.member, conv, "@anna 一");
+      tickets.push(await claim(anna, conv));
+    }
+    const noted = [await say(w.third, w.g, "@anna 二"), await say(w.owner, g2, "@anna 我也问"), await say(w.third, g3, "@anna 二")];
+    for (const [i, conv] of [w.g, g2, g3].entries()) expect((await runsOf(anna.id, conv)).at(-1)).toMatchObject({ status: "running", pending: noted[i] });
+    // The day's spend reaches the budget before they end.
+    await paidOthers(anna, w.g, 2 * POINT);
+    const pushed = vi.spyOn(app.realtime, "pushAgentChanged");
+    const memberSocket = await connect(app, w.member);
+
+    // The first ends: what the other member asked meanwhile is not answered; the group is told after the run's end, and
+    // its owner is pushed the Agent.
+    await app.agentPort.finish(tickets[0]!, { status: "done" }, null, NOTHING);
+    const told = await memberSocket.next((x) => x.type === "message" && x.message.system?.event === EVENT);
+    expect([told.message.conversationId, told.message.system]).toEqual([w.g, { event: EVENT, actorId: anna.id, agentId: anna.id }]);
+    expect((await runsOf(anna.id, w.g)).filter((r) => r.status !== "done")).toEqual([]);
+    expect(pushed.mock.calls).toEqual([[w.owner.id, anna.id]]);
+
+    // The second: what its owner asked is answered, as its owner's own.
+    await app.agentPort.finish(tickets[1]!, { status: "done" }, null, NOTHING);
+    expect((await runsOf(anna.id, g2)).at(-1)).toMatchObject({ status: "queued", lane: "own", covers: noted[1] });
+    expect(await noticesOf(g2)).toEqual([]);
+
+    // The third, released after its reply was posted (recovery's way): the same rule as the first.
+    await db.tx((t) => insertMessage(t, g3, anna.id, "text", { text: "回答" }, tickets[2]!.id));
+    expect(await app.agentPort.releaseRun(tickets[2]!.id)).toBe(true);
+    expect((await runsOf(anna.id, g3)).map((r) => r.status)).toEqual(["done"]);
+    expect((await noticesOf(g3)).map((n) => n.agentId)).toEqual([anna.id]);
+    expect(pushed.mock.calls).toEqual([
+      [w.owner.id, anna.id],
+      [w.owner.id, anna.id],
+    ]);
+  });
+
+  it("a running reply's hold counts; its owner's does not", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const g2 = await anotherGroup(w, "second");
+    await join(g2, anna.id);
+    // Its owner's reply under way in its own conversation, holding more than the budget: another member's call is queued.
+    await holding(anna, anna.conversationId, "own", 50 * POINT);
+    await say(w.member, w.g, "@anna 一");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "others" });
+    await db.query("update agent_runs set status = 'done', finished_at = now() where agent_id = $1 and conversation_id = $2", [anna.id, w.g]);
+
+    // Another member's reply under way in the second group, holding the budget: the next call is refused.
+    await holding(anna, g2, "others", 2 * POINT);
+    const before = await runsOf(anna.id, w.g);
+    await say(w.third, w.g, "@anna 二");
+    expect(await runsOf(anna.id, w.g)).toEqual(before);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    // And in that group, nothing is noted on the reply under way.
+    await say(w.third, g2, "@anna 二");
+    expect(await runsOf(anna.id, g2)).toEqual([expect.objectContaining({ status: "running", pending: null })]);
+    expect(await viewOf(w.owner, anna)).toMatchObject({ othersSpentToday: "2" });
+  });
+
+  it("yesterday's spend does not count", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const dayStart = siteDayStart(new Date(), app.deps.config.siteTimezone, 0);
+    await paidOthers(anna, w.g, 50 * POINT, new Date(dayStart.getTime() - 1000));
+    await say(w.member, w.g, "@anna 你好");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "queued", lane: "others" });
+    expect(await viewOf(w.owner, anna)).toMatchObject({ othersSpentToday: "0" });
+    await settleAll();
+    // From the day's first instant it counts.
+    await paidOthers(anna, w.g, 2 * POINT, dayStart);
+    const before = await runsOf(anna.id, w.g);
+    await say(w.member, w.g, "@anna 再问");
+    expect(await runsOf(anna.id, w.g)).toEqual(before);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+  });
+
+  it("raising it restores calls at once; null is unlimited; lowering it below today's spend refuses", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    const plain = await agentOf(w.owner, "plainbot", w.g);
+    const g2 = await anotherGroup(w, "second");
+    await join(g2, anna.id);
+    await paidOthers(anna, w.g, 2 * POINT);
+    await holding(anna, g2, "others", POINT / 2);
+    const patch = async (value: string | null) => {
+      const res = await api(app, w.owner, "PATCH", `/api/agents/${anna.id}`, { othersBudget: value });
+      expect([value, res.status]).toEqual([value, 200]);
+      return res.json;
+    };
+    const queued = async (who: Actor, text: string) => {
+      const seq = await say(who, w.g, text);
+      const last = (await runsOf(anna.id, w.g)).at(-1);
+      return last?.status === "queued" && last.covers === seq;
+    };
+
+    expect(await queued(w.member, "@anna 一")).toBe(false);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    // Raised above today's spend (2.5 points, the running reply's hold included): answered at once.
+    expect(await patch("3")).toMatchObject({ othersBudget: "3", othersSpentToday: "2.5" });
+    expect(await queued(w.member, "@anna 二")).toBe(true);
+    await db.query("update agent_runs set status = 'done', finished_at = now() where agent_id = $1 and conversation_id = $2", [anna.id, w.g]);
+    // Lowered below it: refused at once (the group was told today already).
+    await patch("1");
+    expect(await queued(w.third, "@anna 三")).toBe(false);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    // No limit: answered, however much was spent.
+    expect(await patch(null)).toMatchObject({ othersBudget: null, othersSpentToday: "2.5" });
+    expect(await queued(w.third, "@anna 四")).toBe(true);
+    // Its owner's list shows each Agent's own.
+    const listed = (await api(app, w.owner, "GET", "/api/agents")).json.agents as Array<Record<string, unknown>>;
+    expect(listed.map((a) => [a.id, a.othersBudget, a.othersSpentToday])).toEqual([
+      [anna.id, null, "2.5"],
+      [plain.id, "20", "0"],
+    ]);
+  });
+});

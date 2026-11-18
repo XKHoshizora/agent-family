@@ -33,6 +33,11 @@ export interface AgentRow {
    * two messages from people (`chainBudget`, runs.ts `triggerFromAgent`). The owner's setting.
    */
   chainBudgetMicro: bigint;
+  /**
+   * The most its owner pays, in micro-points, in a site day for its replies that people other than its owner called for
+   * (lane `others`; `othersBudget`, runs.ts `othersBudgetSpent`); null for no limit. The owner's setting.
+   */
+  othersBudgetMicro: bigint | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
   paused: boolean;
@@ -55,6 +60,7 @@ interface AgentDbRow {
   reply_mode: ReplyMode;
   group_mentions: GroupMentions;
   chain_budget_micro: string;
+  others_budget_micro: string | null;
   reasoning: ReasoningLevel;
   model_source: "site" | "provider" | null;
   site_model_id: string | null;
@@ -67,7 +73,8 @@ interface AgentDbRow {
 }
 
 const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
-       a.persona_version, a.reply_mode, a.group_mentions, a.chain_budget_micro::text, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
+       a.persona_version, a.reply_mode, a.group_mentions, a.chain_budget_micro::text,
+       a.others_budget_micro::text, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
   from agents a
   join principals p on p.id = a.principal_id
@@ -93,6 +100,7 @@ function toAgent(r: AgentDbRow): AgentRow {
     replyMode: r.reply_mode,
     groupMentions: r.group_mentions,
     chainBudgetMicro: BigInt(r.chain_budget_micro),
+    othersBudgetMicro: r.others_budget_micro === null ? null : BigInt(r.others_budget_micro),
     reasoning: r.reasoning,
     model,
     paused: r.paused,
@@ -209,6 +217,7 @@ export interface AgentPatch {
   replyMode?: ReplyMode;
   groupMentions?: GroupMentions;
   chainBudgetMicro?: bigint;
+  othersBudgetMicro?: bigint | null;
   reasoning?: ReasoningLevel;
   model?: AgentModel;
 }
@@ -219,7 +228,8 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
   const personaVersion = next.persona === current.persona ? current.personaVersion : current.personaVersion + 1;
   await t.query(
     `update agents set intro = $2, field = $3, persona = $4, persona_version = $5, reply_mode = $6, group_mentions = $7,
-            reasoning = $8, model_source = $9, site_model_id = $10, provider_id = $11, provider_model = $12, chain_budget_micro = $13
+            reasoning = $8, model_source = $9, site_model_id = $10, provider_id = $11, provider_model = $12, chain_budget_micro = $13,
+            others_budget_micro = $14
       where principal_id = $1`,
     [
       current.id,
@@ -232,6 +242,7 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
       next.reasoning,
       ...modelParams(next.model),
       next.chainBudgetMicro.toString(),
+      next.othersBudgetMicro === null ? null : next.othersBudgetMicro.toString(),
     ],
   );
   if (next.name !== current.name) await t.query("update principals set display_name = $2 where id = $1", [current.id, next.name]);

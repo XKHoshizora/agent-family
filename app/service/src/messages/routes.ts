@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { logCallerLimited, maybeTrigger } from "../agents/runs.ts";
+import { logCallerLimited, maybeTrigger, noneTriggered } from "../agents/runs.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
@@ -60,17 +60,19 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // message to their Agent, and a message in a group naming Agent members by @handle, queue their replies in the
       // same transaction (agents/runs.ts `maybeTrigger`; over an owner's replies a minute, a failed `rate_limited` run
       // instead). Each is announced to its own Agent's owner. A call over its sender's limit on other people's Agents
-      // starts nothing and is only logged.
+      // starts nothing and is only logged. A call on someone else's Agent whose others' daily budget is spent starts
+      // nothing either: the group is told once a day (published after the message) and the Agent's owner is pushed it.
       const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
         const [rendered] = await toWireFor(t, me.id, [sent.message], config);
         if (!rendered) throw new Error("sendMessage: sender cannot read the message it just stored");
-        const triggered = sent.duplicate ? { runs: [], callerLimited: [] } : await maybeTrigger(t, sent.lock, sent.message, config);
+        const triggered = sent.duplicate ? noneTriggered() : await maybeTrigger(t, sent.lock, sent.message, config);
         return { ...sent, wire: rendered, triggered };
       });
-      if (!duplicate) conversations.publish({ messages: [message], conversations: [] }, req.log);
+      if (!duplicate) conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, req.log);
       for (const run of triggered.runs) app.agentPort.announce(run);
       logCallerLimited(req.log, triggered.callerLimited);
+      for (const { ownerId, agentId } of triggered.budgetReached) app.realtime.pushAgentChanged(ownerId, agentId);
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
     },
   );

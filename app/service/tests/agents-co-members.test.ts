@@ -41,6 +41,8 @@ const HIDDEN_KEYS = [
   "reasoning",
   "replyMode",
   "groupMentions",
+  "othersBudget",
+  "othersSpentToday",
   "paused",
   "deleted",
   "provider",
@@ -154,7 +156,15 @@ async function world() {
 
   // The owner's view really holds every hidden value (so their absence below means something).
   const mine = (await api(app, owner, "GET", `/api/agents/${agent.id}`)).json;
-  expect(mine).toMatchObject({ persona: HIDDEN.persona, replyMode: "mention", groupMentions: "owner", paused: true, model: { model: HIDDEN.model } });
+  expect(mine).toMatchObject({
+    persona: HIDDEN.persona,
+    replyMode: "mention",
+    groupMentions: "owner",
+    othersBudget: "20",
+    othersSpentToday: "0",
+    paused: true,
+    model: { model: HIDDEN.model },
+  });
   const privateChat = JSON.stringify((await api(app, owner, "GET", `/api/conversations/${dedicated}/messages`)).json);
   for (const value of [HIDDEN.privateAsk, HIDDEN.privateReply, HIDDEN.proposed, HIDDEN.reasoning]) expect(privateChat).toContain(value);
 

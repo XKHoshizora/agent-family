@@ -2,7 +2,7 @@ import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mentionedHandles } from "../src/agents/mentions.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
-import { maybeTrigger, triggerFromAgent, type RunLimits } from "../src/agents/runs.ts";
+import { maybeTrigger, noneTriggered, triggerFromAgent, type RunLimits } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { buildApp } from "../src/app.ts";
 import type { Config } from "../src/config.ts";
@@ -183,7 +183,7 @@ describe("a person's message in a group", () => {
       clientTxn: "x",
       createdAt: new Date(),
     });
-    const nothing = { runs: [], callerLimited: [] };
+    const nothing = noneTriggered();
     for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@an @ 安娜" }, {}]) {
       expect(await maybeTrigger(fake, lock, message(body), app.deps.config)).toEqual(nothing);
     }

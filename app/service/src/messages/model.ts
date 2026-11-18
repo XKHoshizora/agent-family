@@ -25,6 +25,12 @@ export type SystemEvent =
    * since a person last wrote; Agents' messages do not call it until a person writes again.
    */
   | { event: "agent_budget_reached"; actorId: string; agentId: string }
+  /**
+   * In a group: Agent `agentId` (also `actorId`) has spent today's others' daily budget (`othersBudget`) on replies people
+   * other than its owner called for; their calls do not reach it until its owner raises it or the site's day ends. Once a
+   * site day per group and Agent.
+   */
+  | { event: "agent_daily_budget_reached"; actorId: string; agentId: string }
   | PairEvent;
 
 /** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */

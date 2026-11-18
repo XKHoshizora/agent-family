@@ -81,6 +81,28 @@ describe("agent, provider, metering and run tables", () => {
     await expect(insert("cb_null", null)).rejects.toMatchObject({ code: "23502" });
   });
 
+  test("others_budget_micro is 20 points by default, from 1 to 100 000 points in micro-points, or null for no limit", async () => {
+    const owner = await human("owner_ob");
+    const insert = async (handle: string, value: unknown) =>
+      db.query(`insert into agents (principal_id, others_budget_micro) values ($1, $2)`, [await agentPrincipal(owner, handle), value]);
+    await db.query(`insert into agents (principal_id) values ($1)`, [await agentPrincipal(owner, "ob_default")]);
+    await insert("ob_low", "1000000");
+    await insert("ob_high", "100000000000");
+    await insert("ob_null", null);
+    for (const [handle, value] of [["ob_under", "999999"], ["ob_zero", "0"], ["ob_over", "100000000001"], ["ob_minus", "-1"]] as const) {
+      await expect(insert(handle, value)).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    }
+    const { rows } = await db.query(
+      `select p.handle::text as handle, a.others_budget_micro::text as budget from agents a join principals p on p.id = a.principal_id order by p.handle`,
+    );
+    expect(rows).toEqual([
+      { handle: "ob_default", budget: "20000000" },
+      { handle: "ob_high", budget: "100000000000" },
+      { handle: "ob_low", budget: "1000000" },
+      { handle: "ob_null", budget: null },
+    ]);
+  });
+
   test("conversations.agents_halted_seq is null until a halt sets it", async () => {
     const owner = await human("owner_hs");
     const { rows } = await db.query(`insert into conversations (type, creator_id) values ('group', $1) returning agents_halted_seq`, [owner]);

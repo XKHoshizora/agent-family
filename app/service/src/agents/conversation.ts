@@ -11,7 +11,7 @@ import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
-import { ownedAgentOf, triggerFromAgent, type AgentTriggered, type RunLimits } from "./runs.ts";
+import { noneTriggered, ownedAgentOf, triggerFromAgent, type RunLimits, type Triggered } from "./runs.ts";
 import {
   agentLimit,
   assertModelChoice,
@@ -42,6 +42,7 @@ export interface NewAgent {
   replyMode: ReplyMode;
   groupMentions: GroupMentions;
   chainBudgetMicro: bigint;
+  othersBudgetMicro: bigint | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
 }
@@ -78,8 +79,8 @@ export async function createAgent(
   const personaVersion = input.persona === "" ? 0 : 1;
   const created = await t.query<{ created_at: Date }>(
     `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
-                         model_source, site_model_id, provider_id, provider_model, chain_budget_micro)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) returning created_at`,
+                         model_source, site_model_id, provider_id, provider_model, chain_budget_micro, others_budget_micro)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) returning created_at`,
     [
       id,
       input.intro,
@@ -91,6 +92,7 @@ export async function createAgent(
       input.reasoning,
       ...modelParams(input.model),
       input.chainBudgetMicro.toString(),
+      input.othersBudgetMicro === null ? null : input.othersBudgetMicro.toString(),
     ],
   );
   const conversation = await t.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [ownerId]);
@@ -120,6 +122,7 @@ export async function createAgent(
     replyMode: input.replyMode,
     groupMentions: input.groupMentions,
     chainBudgetMicro: input.chainBudgetMicro,
+    othersBudgetMicro: input.othersBudgetMicro,
     reasoning: input.reasoning,
     model: input.model,
     paused: false,
@@ -177,14 +180,14 @@ export async function postAsAgent(
   runId: string,
   reply: AgentReply,
   config: RunLimits & Pick<Config, "agentChainLimit">,
-): Promise<{ message: StoredMessage; duplicate: boolean; triggered: AgentTriggered } | null> {
+): Promise<{ message: StoredMessage; duplicate: boolean; triggered: Triggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
   const own = conversationId === agent.conversationId;
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
     [conversationId, agentId, runId],
   );
-  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: { runs: [], callerLimited: [], notices: [] } };
+  if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: noneTriggered() };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
   // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts); nor a run of another
   // conversation's, here.
@@ -227,7 +230,7 @@ export async function postAsAgent(
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group.
-  const triggered = own ? { runs: [], callerLimited: [], notices: [] } : await triggerFromAgent(t, conversationId, message, agent, config);
+  const triggered = own ? noneTriggered() : await triggerFromAgent(t, conversationId, message, agent, config);
   return { message, duplicate: false, triggered };
 }
 

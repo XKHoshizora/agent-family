@@ -584,9 +584,10 @@ describe("fuzz", () => {
       const name = `${route.method} ${route.url}`;
       const malformedPath = sent[i]!.filter((x) => x.label.startsWith("path "));
       expect([name, malformedPath.filter((x) => x.status < 400 || x.status >= 500)]).toEqual([name, []]);
-      // Every field an Agent is created or edited with is walked, `groupMentions` and `chainBudget` (batch 2C) included.
+      // Every field an Agent is created or edited with is walked, `groupMentions` and `chainBudget` (batch 2C) and
+      // `othersBudget` (the limits plan) included.
       if (name === "POST /api/agents" || name === "PATCH /api/agents/:id") {
-        for (const field of ["groupMentions", "chainBudget"]) {
+        for (const field of ["groupMentions", "chainBudget", "othersBudget"]) {
           expect([name, field, sent[i]!.some((x) => x.label.startsWith(`body.${field}=`))]).toEqual([name, field, true]);
         }
       }

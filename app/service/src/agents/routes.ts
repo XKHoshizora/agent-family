@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { formatPoints, MICRO_PER_POINT, parsePoints } from "../accounts/store.ts";
+import { formatPoints, MICRO_PER_POINT, parsePoints, siteDayStart } from "../accounts/store.ts";
 import { REASONING_LEVELS } from "../config.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
@@ -14,7 +14,7 @@ import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
-import { endWhatPauseMissed, interruptRuns } from "./runs.ts";
+import { endWhatPauseMissed, interruptRuns, othersSpentToday, othersSpentTodayOf } from "./runs.ts";
 import {
   assertModelChoice,
   GROUP_MENTIONS,
@@ -60,6 +60,13 @@ const chainBudget = z
   .regex(/^[0-9]{1,6}(?:\.[0-9]{1,6})?$/)
   .transform((s) => parsePoints(s)!)
   .refine((micro) => micro >= CHAIN_BUDGET_MIN && micro <= CHAIN_BUDGET_MAX);
+/**
+ * `othersBudget`, the most its owner pays in a site day for the Agent's replies other people called for (runs.ts
+ * `othersBudgetSpent`): as `chainBudget` (1 to 100 000 points), or `null` for no limit; 20 points unless its owner says
+ * otherwise.
+ */
+const othersBudget = chainBudget.nullable();
+const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
 
 const agentView = z.object({
   id: z.string(),
@@ -73,6 +80,8 @@ const agentView = z.object({
   replyMode,
   groupMentions,
   chainBudget: z.string(),
+  othersBudget: z.string().nullable(),
+  othersSpentToday: z.string(),
   reasoning,
   model: modelChoice(z.string()),
   paused: z.boolean(),
@@ -81,8 +90,11 @@ const agentView = z.object({
   createdAt: z.string(),
 });
 
-/** An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown. */
-const toView = (a: AgentRow): z.infer<typeof agentView> => ({
+/**
+ * An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown,
+ * and what other people's calls on it have spent today of the owner's points (`spentMicro`, runs.ts `othersSpentToday`).
+ */
+const toView = (a: AgentRow, spentMicro: bigint): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
   name: a.name,
@@ -94,6 +106,8 @@ const toView = (a: AgentRow): z.infer<typeof agentView> => ({
   replyMode: a.replyMode,
   groupMentions: a.groupMentions,
   chainBudget: formatPoints(a.chainBudgetMicro),
+  othersBudget: a.othersBudgetMicro === null ? null : formatPoints(a.othersBudgetMicro),
+  othersSpentToday: formatPoints(spentMicro),
   reasoning: a.reasoning,
   model: a.model,
   paused: a.paused,
@@ -117,6 +131,10 @@ export function registerAgentRoutes(
 ): { endDrafts(): Promise<void> } {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
+  /** When the site day began: what other people's calls spent since then is shown (runs.ts `othersSpentToday`). */
+  const today = () => siteDayStart(new Date(), config.siteTimezone, 0);
+  /** The owner's view of `agent`, with what other people's calls have spent today, read now. */
+  const viewOf = async (agent: AgentRow) => toView(agent, await othersSpentToday(db, agent.id, today()));
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -145,6 +163,7 @@ export function registerAgentRoutes(
           replyMode: replyMode.optional(),
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
+          othersBudget: othersBudget.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -164,12 +183,15 @@ export function registerAgentRoutes(
         replyMode: b.replyMode ?? "always",
         groupMentions: b.groupMentions ?? "members",
         chainBudgetMicro: b.chainBudget ?? DEFAULT_CHAIN_BUDGET,
+        // `null` is no limit: only an absent key takes the default.
+        othersBudgetMicro: b.othersBudget === undefined ? DEFAULT_OTHERS_BUDGET : b.othersBudget,
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,
       };
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
-      return reply.code(201).send(toView(agent));
+      // A new Agent has had no reply yet: nothing spent.
+      return reply.code(201).send(toView(agent, 0n));
     },
   );
 
@@ -210,7 +232,9 @@ export function registerAgentRoutes(
     async (req) => {
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
-      return { agents: (await listOwnedAgents(db, me.id)).map(toView) };
+      const agents = await listOwnedAgents(db, me.id);
+      const spent = await othersSpentTodayOf(db, agents.map((a) => a.id), today());
+      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? 0n)) };
     },
   );
 
@@ -222,7 +246,7 @@ export function registerAgentRoutes(
       await readLimit(req, me.id);
       const agent = await readOwnedAgent(db, me.id, req.params.id);
       if (!agent) throw notFound();
-      return toView(agent);
+      return viewOf(agent);
     },
   );
 
@@ -241,6 +265,7 @@ export function registerAgentRoutes(
           replyMode: replyMode.optional(),
           groupMentions: groupMentions.optional(),
           chainBudget: chainBudget.optional(),
+          othersBudget: othersBudget.optional(),
           reasoning: reasoning.optional(),
           model: model.optional(),
         }),
@@ -253,10 +278,12 @@ export function registerAgentRoutes(
       const agent = await db.tx(async (t) => {
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
-        const { chainBudget: budget, ...fields } = req.body;
+        const { chainBudget: budget, othersBudget: others, ...fields } = req.body;
         const patch: AgentPatch = {
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
           ...(budget === undefined ? {} : { chainBudgetMicro: budget }),
+          // `null` is no limit, and changes it like any value.
+          ...(others === undefined ? {} : { othersBudgetMicro: others }),
         };
         const next = { ...current, ...patch };
         if ("model" in patch || "reasoning" in patch) await assertModelChoice(t, me.id, next.model, next.reasoning, config);
@@ -264,7 +291,7 @@ export function registerAgentRoutes(
       });
       conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
       app.realtime.pushAgentChanged(me.id, agent.id);
-      return toView(agent);
+      return viewOf(agent);
     },
   );
 
@@ -315,7 +342,7 @@ export function registerAgentRoutes(
             req.log.error({ err, agentId: agent.id }, "a deleted Agent's leaving of its groups failed; the next start finishes it"),
           );
         }
-        return toView(agent);
+        return viewOf(agent);
       },
     );
   stateRoute("post", "/api/agents/:id/pause", { paused: true });
@@ -346,7 +373,7 @@ export function registerAgentRoutes(
       const confirmed = await db.tx((t) => confirmProposal(t, me.id, req.params.id, req.params.proposalId, req.body ?? {}));
       if (!confirmed) throw staleProposal();
       app.realtime.pushAgentChanged(me.id, confirmed.id);
-      return toView(confirmed);
+      return viewOf(confirmed);
     },
   );
 

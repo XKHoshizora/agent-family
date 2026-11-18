@@ -445,7 +445,10 @@ describe("a reply in a group", () => {
 
     expect(await bodiesFrom(g, agent.id)).toEqual([{ text: "我觉得可以这样改。" }]);
     expect((await db.query("select count(*)::int as n from persona_proposals")).rows[0].n).toBe(0);
-    expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json).toEqual(before);
+    // Nothing of the Agent changed: only what mia's call has spent today of its owner's points.
+    const after = (await api(app, owner, "GET", `/api/agents/${agent.id}`)).json;
+    expect([before.othersSpentToday, after.othersSpentToday === before.othersSpentToday]).toEqual(["0", false]);
+    expect({ ...after, othersSpentToday: before.othersSpentToday }).toEqual(before);
     const last = (await messagesOf(owner, g)).at(-1);
     expect(last).not.toHaveProperty("proposal");
     await ownerSocket.waitFor((e) => e.type === "run" && e.run.status === "done");

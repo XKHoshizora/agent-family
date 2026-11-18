@@ -59,6 +59,8 @@ export async function renderNotice(q: Queryable, conversationId: string, e: Syst
       return `Agent 已连续对话 ${e.limit} 条，已暂停互相接话，有人发言后继续。`;
     case "agent_budget_reached":
       return `${n(e.agentId)} 已达到本次接话的点数上限，有人发言后继续。`;
+    case "agent_daily_budget_reached":
+      return `「${n(e.agentId)}」今天的额度已用完`;
   }
 }
 
