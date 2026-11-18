@@ -611,6 +611,58 @@ describe("replies a minute by lane, and one caller's limit on other people's Age
   const noticeCount = async (conv: string) =>
     Number((await db.query("select count(*) n from messages where conversation_id = $1 and kind = 'system'", [conv])).rows[0].n);
 
+  /** `n` replies of `agentId`'s in `lane`, started half a minute ago in `conv` (covering nothing there): they count this minute. */
+  const startedEarlier = (conv: string, agentId: string, ownerId: string, lane: "own" | "others" | "proactive", n: number) =>
+    db.query(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)
+       select 'reply', $1, $2, $3, 'done', 0, now() - interval '30 seconds', now() - interval '29 seconds', $4 from generate_series(1, $5)`,
+      [conv, agentId, ownerId, lane, n],
+    );
+
+  it("replies nobody called for (lane proactive) count with others' calls in the owner's others' minute, not in their own", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    await startedEarlier(w.g, anna.id, w.owner.id, "proactive", 2);
+    // The others' two a minute are used up: a member's call is recorded rate_limited.
+    await say(w.member, w.g, "@anna 一", limited);
+    expect((await statusOf(anna.id, w.g)).at(-1)).toEqual(["failed", "rate_limited"]);
+    // The owner's own call in the same minute starts a reply.
+    await say(w.owner, w.g, "@anna 我来问", limited);
+    expect((await statusOf(anna.id, w.g)).at(-1)).toEqual(["queued", null]);
+  });
+
+  it("its owner's retry in a group is held to their own lane: with the others' lane full it is answered; with their own full, 429", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    const retry = () => api(limited, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: anna.id });
+    const failQueued = () =>
+      db.query("update agent_runs set status = 'failed', error = 'provider_unavailable', finished_at = now() where agent_id = $1 and status = 'queued'", [anna.id]);
+    // A member's call, which failed; with one more of others' this minute, the others' lane is full.
+    await say(w.member, w.g, "@anna 一", limited);
+    await failQueued();
+    await startedEarlier(w.g, anna.id, w.owner.id, "others", 1);
+    expect((await retry()).status).toBe(201);
+    expect((await laneOf(anna.id, w.g)).at(-1)).toEqual(["own", w.owner.id]);
+    // That retry failed too; with one more of the owner's own this minute, their own lane is full: 429.
+    await failQueued();
+    await startedEarlier(w.g, anna.id, w.owner.id, "own", 1);
+    expect(await retry()).toEqual({ status: 429, json: { error: "rate_limited" } });
+  });
+
+  it("a follow-up over its lane's minute is recorded rate_limited with its own caller and lane, not the ended run's", async () => {
+    const w = await crowd();
+    const anna = await agentOf(w.owner, "anna", w.g, limited);
+    await say(w.member, w.g, "@anna 一", limited);
+    const one = await claim(anna.id, w.g);
+    // The third's mention is noted on the member's reply under way; meanwhile the others' minute fills.
+    const asked = await say(w.third, w.g, "@anna 二", limited);
+    await startedEarlier(w.g, anna.id, w.owner.id, "others", 1);
+    await finish(one, limited);
+    const last = (await runsOf(anna.id, w.g)).at(-1);
+    expect(last).toEqual({ status: "failed", error: "rate_limited", covers: asked, pending: null });
+    expect((await laneOf(anna.id, w.g)).at(-1)).toEqual(["others", w.third.id]);
+  });
+
   it("others' calls do not use up the owner's own minute", async () => {
     const w = await crowd();
     const anna = await agentOf(w.owner, "anna", w.g, limited);
