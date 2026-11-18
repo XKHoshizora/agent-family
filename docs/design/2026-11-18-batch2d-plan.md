@@ -61,7 +61,7 @@
 
 **Files:** Create `app/service/migrations/022_proactive_settings.sql` (`agents.proactive boolean not null default false`, `proactive_level text not null default 'normal' check in ('less','normal','more')`, `proactive_budget_micro bigint not null default 20000000 check between 1000000 and 100000000000`). Modify `agents/store.ts`, `agents/routes.ts`, the models/site-info route the web reads at start (find the one that lists site models), the co-member sweep test's hidden keys. Test `tests/agents-proactive-settings.test.ts`.
 
-**Interfaces — produces:** create/PATCH `proactive: boolean`, `proactiveLevel`, `proactiveBudget` (the `chainBudget` schema; `null` refused); owner's view adds those three and `proactiveSpentToday: string` (charged today on this Agent's lane-`proactive` runs plus running holds — generalise the limits work's `othersSpentToday(…)` to take the lane); `proactive: true` with `config.judge === null` → 409 `proactive_unavailable`; the site-info answer gains `proactiveAvailable: boolean`.
+**Interfaces — produces:** create/PATCH `proactive: boolean`, `proactiveLevel`, `proactiveBudget` (the `chainBudget` schema; `null` refused); owner's view adds those three and `proactiveSpentToday: string` (settled charges today on this Agent's lane-`proactive` runs, no holds — generalise the limits work's spend sum to take the lane); `proactive: true` with `config.judge === null` → 409 `proactive_unavailable`; the site-info answer gains `proactiveAvailable: boolean`.
 
 - [ ] Failing tests: defaults; each field's validation; 409 when unconfigured (and `false` still accepted); the owner's view has the four keys, a co-member's none; `proactiveSpentToday` counts only lane `proactive`.
 - [ ] Implement; tests pass; typecheck; commit.
