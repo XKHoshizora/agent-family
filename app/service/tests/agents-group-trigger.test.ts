@@ -302,6 +302,33 @@ describe("a person's message in a group", () => {
     expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, covers: mine, pending: null, by: "human", interrupted: null }]);
   });
 
+  it("a person its owner has blocked does not call it; the others do, and so does that person once the block is lifted", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const theirs = await agentOf(w.third, "tess", w.g);
+    expect((await api(app, w.owner, "PUT", `/api/blocks/${w.member.id}`)).status).toBe(200);
+    await say(w.member, w.g, "@anna 帮我看看 @tess 你也来");
+    // Only the Agent of the owner who blocked them stays silent.
+    expect(await runsOf(anna.id, w.g)).toEqual([]);
+    expect((await runsOf(theirs.id, w.g)).map((r) => r.status)).toEqual(["queued"]);
+    // A block the other way round (the caller blocked the owner) changes nothing.
+    expect((await api(app, w.third, "PUT", `/api/blocks/${w.owner.id}`)).status).toBe(200);
+    const other = await say(w.third, w.g, "@anna 我来问");
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "queued", error: null, covers: other, pending: null, by: "human", interrupted: null }]);
+    // Nor is the blocked person's mention folded into the run under way.
+    await say(w.member, w.g, "@anna 还有我");
+    await db.query("update agent_runs set status = 'running', started_at = now() where agent_id = $1", [anna.id]);
+    await say(w.member, w.g, "@anna 再问一次");
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "running", error: null, covers: other, pending: null, by: "human", interrupted: null }]);
+    await settleAll();
+    expect((await api(app, w.owner, "DELETE", `/api/blocks/${w.member.id}`)).status).toBe(200);
+    const again = await say(w.member, w.g, "@anna 现在呢");
+    expect((await runsOf(anna.id, w.g)).map((r) => [r.status, r.covers])).toEqual([
+      ["done", other],
+      ["queued", again],
+    ]);
+  });
+
   it("a paused, deleted or model-less Agent is not called", async () => {
     const w = await world();
     const paused = await agentOf(w.owner, "paused_bot", w.g);
@@ -353,6 +380,24 @@ describe("an Agent's message in a group", () => {
     // Its owner's own mention does call the owner-only Agent.
     const mine = await say(w.third, w.g, "@gamma");
     expect((await runsOf(c.id, w.g)).map((r) => [r.covers, r.by])).toEqual([[mine, "human"]]);
+  });
+
+  it("does not call the Agent of an owner who has blocked its own owner", async () => {
+    const w = await world();
+    const a = await agentOf(w.member, "alpha", w.g);
+    const b = await agentOf(w.owner, "beta", w.g);
+    const c = await agentOf(w.third, "gamma", w.g);
+    expect((await api(app, w.owner, "PUT", `/api/blocks/${w.member.id}`)).status).toBe(200);
+    await say(w.third, w.g, "开始吧");
+    const said = await agentSays(a.id, w.g, "@beta 你来，@gamma 也来");
+    expect(said.notices).toEqual([]);
+    expect(said.runs.map((r) => r.ownerId)).toEqual([w.third.id]);
+    expect(await runsOf(b.id, w.g)).toEqual([]);
+    expect((await runsOf(c.id, w.g)).map((r) => [r.covers, r.by])).toEqual([[said.message.seq, "agent"]]);
+    // The other way round it is called: the blocked person's Agent answers the Agent of who blocked them.
+    await settleAll();
+    const back = await agentSays(b.id, w.g, "@alpha 你说呢");
+    expect((await runsOf(a.id, w.g)).map((r) => [r.covers, r.by])).toEqual([[back.message.seq, "agent"]]);
   });
 
   it("folds, rate-limits and queues like a person's; a person's mention folded into an Agent's queued run makes it the person's", async () => {
@@ -839,6 +884,23 @@ describe("follow-ups in a group", () => {
       expect.objectContaining({ status: "done", by: "human" }),
       { status: "queued", error: null, covers: noted, pending: null, by: "human", interrupted: null },
     ]);
+  });
+
+  it("a mention by a person its owner has blocked does not make a follow-up a person's", async () => {
+    const w = await world();
+    const a = await agentOf(w.owner, "alpha", w.g);
+    const b = await agentOf(w.member, "beta", w.g);
+    expect((await api(app, w.member, "PUT", `/api/blocks/${w.third.id}`)).status).toBe(200);
+    await say(w.owner, w.g, "开始");
+    // The blocked person's mention falls among what an Agent's noted mention covers; then a halt, lifted by a person.
+    const one = await runningIn(w.g, b.id, w.member.id, "human");
+    await say(w.third, w.g, "@beta 我也问一下");
+    await agentSays(a.id, w.g, "@beta 再补充");
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    await say(w.owner, w.g, "好的");
+    await app.agentPort.finish(one, { status: "done" }, null, NOTHING);
+    // Only an Agent asked, before the halt: nothing follows.
+    expect(await runsOf(b.id, w.g)).toEqual([expect.objectContaining({ status: "done", by: "human" })]);
   });
 
   it("an Agent's follow-up is not queued once the reply under way has spent its Agent's chain budget; the group is told once", async () => {
