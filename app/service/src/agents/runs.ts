@@ -528,9 +528,9 @@ async function reachAgents(
 /**
  * What calls by people other than its owner have spent today of the owner's points on Agent `agentId` (`dayStart`: when
  * the site day began, `siteDayStart`): what its replies in lane `others` were charged (`free_micro + balance_micro`) by
- * the usage records written since then, and what its running replies in that lane hold now (a running reply has no
- * usage record yet: its hold stands for it). Its owner's own replies (`own`) and those nobody called for (`proactive`)
- * do not count.
+ * the usage records written since then — settled charges only. A reply being written counts once it is settled, not
+ * before: its hold is the most it can cost (its whole output limit), which on a paid model can alone pass a budget it
+ * will not come near. Its owner's own replies (`own`) and those nobody called for (`proactive`) do not count.
  */
 export async function othersSpentToday(q: Queryable, agentId: string, dayStart: Date): Promise<bigint> {
   return (await othersSpentTodayOf(q, [agentId], dayStart)).get(agentId) ?? 0n;
@@ -540,10 +540,9 @@ export async function othersSpentToday(q: Queryable, agentId: string, dayStart: 
 export async function othersSpentTodayOf(q: Queryable, agentIds: readonly string[], dayStart: Date): Promise<Map<string, bigint>> {
   const { rows } = await q.query<{ id: string; spent: string }>(
     `select a.id,
-            ((select coalesce(sum(u.free_micro + u.balance_micro), 0)
-                from usage_records u join agent_runs r on r.id = u.run_id
-               where u.agent_id = a.id and u.created_at >= $2 and r.lane = 'others')
-           + (select coalesce(sum(r.hold_micro), 0) from agent_runs r where r.agent_id = a.id and r.status = 'running' and r.lane = 'others'))::text as spent
+            (select coalesce(sum(u.free_micro + u.balance_micro), 0)
+               from usage_records u join agent_runs r on r.id = u.run_id
+              where u.agent_id = a.id and u.created_at >= $2 and r.lane = 'others')::text as spent
        from unnest($1::uuid[]) as a (id)`,
     [agentIds, dayStart],
   );
@@ -566,9 +565,11 @@ async function toldBudgetReachedSince(t: Tx, conversationId: string, agentId: st
 
 /**
  * The others' daily budget of `agent` (its owner's `othersBudget`) for a call on it in `conversationId` by someone other
- * than its owner (lane `others`; the caller checks the lane): spent once what such calls spent today
+ * than its owner (lane `others`; the caller checks the lane): spent once what such calls were charged today
  * (`othersSpentToday`, the site day beginning at `dayStart`) has reached it — never while it is null (no limit; nothing
- * is read then). Once spent, the conversation is told by an `agent_daily_budget_reached` notice about the Agent,
+ * is read then). Replies being written count only once settled, so the day's real spend can pass the budget by the
+ * replies under way when it is reached: at most the owner's places for others' replies (`agentMaxConcurrentOthersRuns`).
+ * Once spent, the conversation is told by an `agent_daily_budget_reached` notice about the Agent,
  * appended now unless one about it was today already (once a site day per conversation and Agent): `notice` is the one
  * appended, else null. The caller holds the conversation's row lock (`appendSystem`).
  */
@@ -609,11 +610,11 @@ async function refusedByOthersBudget(
 /**
  * At admission (`DbAgentPort.begin`, in the transaction that admits the call, under the run's conversation row, its
  * Agent's and its own): whether `agent`'s others' daily budget refuses its run in lane `others` in `conversationId` after
- * all. Read again there because a queued reply, and a running one before it is admitted, holds nothing and so counts for
- * nothing toward it (`othersSpentToday`; nor does this run, whose hold is not taken yet): an Agent called in several
- * groups at once could otherwise pass it by a reply in each. The Agent's row lock orders the admissions of its replies,
- * so each sees the holds of those admitted before it. Null when it does not refuse; else what the refusal told
- * (`othersBudgetSpent`): the notice appended, if any, and the Agent's owner to push it to.
+ * all. Read again there because replies of the Agent's settled while this one waited queued may have reached it since
+ * it was called (`othersSpentToday`: settlement, in `finish`, takes the same Agent row lock, so each admission sees what
+ * was settled before it): an Agent called in several groups at once does not start one more reply in each once the
+ * first have spent it. Null when it does not refuse; else what the refusal told (`othersBudgetSpent`): the notice
+ * appended, if any, and the Agent's owner to push it to.
  */
 export async function othersBudgetRefusesAdmission(
   t: Tx,

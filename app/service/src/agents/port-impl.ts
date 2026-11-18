@@ -269,8 +269,8 @@ export class DbAgentPort implements AgentPort {
    * 3. A short transaction under `lockRun` again: a run `halted` meanwhile ends as in step 1, with no call; when
    *    `closing` has aborted by the time the locks are held, the transaction rolls back and `begin` rejects with its
    *    reason, admitting nothing (as in step 2). A run someone else called for (lane `others`) then meets the Agent's
-   *    others' daily budget again (runs.ts `othersBudgetRefusesAdmission`: a queued reply, and one not admitted yet,
-   *    holds nothing, so replies queued in several groups at once could pass it): spent, it ends `cancelled` with no
+   *    others' daily budget again (runs.ts `othersBudgetRefusesAdmission`: replies settled while it waited queued may
+   *    have reached it since it was called): spent, it ends `cancelled` with no
    *    error (`OTHERS_BUDGET_SPENT`) — no call, nothing held or charged — and the budget's notice, if this appended it,
    *    is published to the group after commit, the Agent pushed to its owner. What step 1 took on (noted on the run
    *    after its claim) is handed back as noted — `covers_seq` back to what it covered before, `pending_seq` at least
@@ -352,7 +352,7 @@ export class DbAgentPort implements AgentPort {
       // The service may have started closing while this waited for the locks: then nothing is admitted (thrown, so the
       // transaction rolls back) and the run is left running, unadmitted, for the caller to end (the worker: `release`).
       if (closing?.aborted) throw closing.reason;
-      // Someone else's call meets the Agent's others' daily budget once more, now that the replies admitted before it hold.
+      // Someone else's call meets the Agent's others' daily budget once more: replies settled while it waited count now.
       // Refused, what step 1 took on (noted on it after its claim — its owner's mention, say) is handed back as noted, so
       // `finish`'s follow-up answers it by the usual rule: its owner's own is queued; someone else's meets the budget again
       // and is simply not queued (no second notice that day), so nothing loops.

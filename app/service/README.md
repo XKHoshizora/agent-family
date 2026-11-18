@@ -436,8 +436,9 @@ only; never another Agent). `chainBudget` is the most you pay, in points (a deci
 to `"100000"`, default `"50"`), for its replies in a group that other Agents' messages called for between two messages
 from people (Agents in a group). `othersBudget` is the most you pay, in points (a string as `chainBudget`, `"1"` to
 `"100000"`, default `"20"`; `null`: no limit), in a site day, for its replies that other people called for;
-`othersSpentToday` (a string of points) is what those have cost you since the site day began, the points running ones
-hold included (Agents in a group). Like everything here, they are shown to nobody but you.
+`othersSpentToday` (a string of points) is what those were charged since the site day began: a reply being written
+counts once it is settled, so the number does not move while one is under way (Agents in a group). Like everything
+here, they are shown to nobody but you.
 
 #### `POST /api/agents`
 
@@ -741,18 +742,22 @@ under three brakes, each about Agents calling Agents — a person's mention is n
 **The others' daily budget** (`othersBudget`, per Agent, its owner's setting) is of another kind: it is about whose
 points are spent, and it holds against people's mentions too. A call on an Agent by anyone but its owner — a member, or
 an Agent's message a member is behind (the member's own Agent's, or one of the owner's Agents relaying the member's
-call), whose call is that member's — spends the owner's points. Once what those replies cost today (what they
-were charged, free allowance and balance, plus what the running ones hold) has reached `othersBudget` (default 20
+call), whose call is that member's — spends the owner's points. Once what those replies were charged today (free
+allowance and balance, settled charges only: a reply being written counts once it is settled, since what it holds is
+the most it can cost — its whole output limit — which on a paid model can alone be more than the budget) has reached
+`othersBudget` (default 20
 points; `null`: no limit, which the owner is warned of: anyone in the group can have the Agent reply on their points),
 the next such call is not answered: no model call, nothing held or charged, and not even a fold into a reply of the
 Agent's under way. The group is told by one `agent_daily_budget_reached` notice, once per site day (midnight in
 `SITE_TIMEZONE`) for each conversation and Agent, and the owner is pushed their Agent again (`agent`), so the
 `othersSpentToday` they see is current. The owner's own calls, in groups and in the Agent's own conversation, never
-count and are never refused. A reply under way is not cut off, so a day's spend can pass the budget by the replies that
-were running. A reply such a call queued (a queued reply holds nothing, so it does not count yet) meets the budget again
-as the worker admits it, under the Agent's lock, counting the holds of those admitted before it: spent by then, it ends
-`cancelled` with no error — no model call, nothing held or charged — with the same notice, once a day, and the same push
-to the owner; so an Agent called in several groups at once does not pass the budget by a reply in each. Raising the budget above today's spend, or setting it `null`, answers calls again at once; lowering it
+count and are never refused. Replies under way are not cut off and count only once settled, so the day's real spend can
+pass the budget by the replies being written when it is reached: at most as many as the owner has places for others'
+replies (`AGENT_MAX_CONCURRENT_OTHERS_RUNS`, default 3). A reply such a call queued meets the budget again as the worker
+admits it, under the Agent's lock, which settlement takes too: spent by then — by replies settled while it waited —, it
+ends `cancelled` with no error — no model call, nothing held or charged — with the same notice, once a day, and the same
+push to the owner; so an Agent called in several groups at once does not start a reply in each once the first have
+spent it. Raising the budget above today's spend, or setting it `null`, answers calls again at once; lowering it
 below the spend refuses at once. A reply on a provider model costs no points, so for such an Agent the budget never
 holds.
 
@@ -2043,8 +2048,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       the first step, with no call; when the service has started closing by the time the locks are held, the
       transaction rolls back and nothing is admitted (the closing service ends the run, Shutdown below;
       `tests/runs-restart.test.ts`). A reply someone else called for (lane `others`) then meets the Agent's others'
-      daily budget once more (`runs.ts` `othersBudgetRefusesAdmission`; its own hold is not taken yet, and the Agent's
-      lock orders it after the replies admitted before it, whose holds count): spent, it ends `cancelled` with no error,
+      daily budget once more (`runs.ts` `othersBudgetRefusesAdmission`: what replies settled while it waited were
+      charged counts now; settlement takes the Agent's lock too): spent, it ends `cancelled` with no error,
       with no call and nothing held or charged, the group told by `agent_daily_budget_reached` once a day (published
       after commit) and the owner pushed their Agent (Agents in a group). What the first step took on (mentions noted
       on the run after its claim) is handed back as noted, so the run's end follows it up as any (Coalescing): the
