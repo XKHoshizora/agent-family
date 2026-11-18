@@ -190,17 +190,17 @@ export function formatPoints(value) {
  * (`formatPoints`); "" for anything that is not a non-negative decimal string.
  */
 export function replyPoints(value) {
-  if (typeof value !== "string") return "";
-  const parts = /^(\d+)(?:\.(\d+))?$/.exec(value);
-  if (!parts) return "";
-  const [, whole, decimals = ""] = parts;
+  const micro = microPoints(value);
+  if (micro === null) return "";
   // In ten-thousandths, rounded half up on the fifth decimal.
-  const scaled = BigInt(whole + (decimals + "0000").slice(0, 4)) + (Number(decimals[4] ?? "0") >= 5 ? 1n : 0n);
-  const digits = scaled.toString().padStart(5, "0");
+  const digits = ((micro + 50n) / 100n).toString().padStart(5, "0");
   return formatPoints(`${digits.slice(0, -4)}.${digits.slice(-4)}`);
 }
 
-/** A decimal string of points in micro-points (six decimals), or null when it is not a non-negative decimal string. */
+/**
+ * A decimal string of points in micro-points (its first six decimals, no float maths), or null when it is not a
+ * non-negative decimal string.
+ */
 function microPoints(value) {
   const parts = typeof value === "string" ? /^(\d+)(?:\.(\d+))?$/.exec(value) : null;
   if (!parts) return null;

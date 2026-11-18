@@ -23,36 +23,39 @@ const chars = (text) => [...text].length;
 
 /** 一次接话最多花费 when nothing else is said, in points (the service's default). */
 export const CHAIN_BUDGET_DEFAULT = "50";
-const CHAIN_BUDGET_MIN = 1;
-const CHAIN_BUDGET_MAX = 100000;
+/** 别人 @ 每天最多花 when nothing else is said, in points (the service's default). */
+export const OTHERS_BUDGET_DEFAULT = "20";
+// A budget's amount, either of them, as the service takes it.
+const BUDGET_MIN = 1;
+const BUDGET_MAX = 100000;
 /** Points as the service counts them: whole points, and at most six decimals (micro-points). */
 const POINTS = /^\d+(?:\.\d{1,6})?$/;
-const CHAIN_BUDGET_WRONG = `请填写 ${CHAIN_BUDGET_MIN} 到 ${CHAIN_BUDGET_MAX} 之间的点数（最多 6 位小数）`;
+const BUDGET_WRONG = `请填写 ${BUDGET_MIN} 到 ${BUDGET_MAX} 之间的点数（最多 6 位小数）`;
 
 /**
- * 一次接话最多花费 as typed, as the decimal string sent (" 012.50 " → "12.5"); null when it is not 1–100000 points with at
- * most six decimals.
+ * A budget's amount (一次接话最多花费, or 别人 @ 每天最多花's 自己填) as typed, as the decimal string sent (" 012.50 " →
+ * "12.5"); null when it is not 1–100000 points with at most six decimals.
  */
-export function chainBudgetOf(text) {
+export function budgetOf(text) {
   const typed = typeof text === "string" ? text.trim() : "";
   if (!POINTS.test(typed)) return null;
   const value = Number(typed);
-  if (!(value >= CHAIN_BUDGET_MIN && value <= CHAIN_BUDGET_MAX)) return null;
+  if (!(value >= BUDGET_MIN && value <= BUDGET_MAX)) return null;
   const [whole, fraction = ""] = typed.split(".");
   const kept = fraction.replace(/0+$/, "");
   const points = whole.replace(/^0+(?=\d)/, "");
   return kept ? `${points}.${kept}` : points;
 }
 
-/** 别人 @ 每天最多花 when nothing else is said, in points (the service's default); an amount is checked like the chain budget. */
-export const OTHERS_BUDGET_DEFAULT = "20";
+/** What is wrong with a budget's amount as typed (`budgetOf`): the sentence shown under it, or "". */
+const budgetProblem = (text) => (budgetOf(text) === null ? BUDGET_WRONG : "");
 
 /**
  * The sent value of 别人 @ 每天最多花 for the form's fields: the default, the amount typed, or null for 不限 — and
  * undefined, nothing to send, for an amount typed that is not one: never null, which the service reads as no limit.
  */
 export const othersBudgetSent = (f) =>
-  f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? chainBudgetOf(f.othersAmount) ?? undefined : OTHERS_BUDGET_DEFAULT;
+  f.othersChoice === "unlimited" ? null : f.othersChoice === "custom" ? budgetOf(f.othersAmount) ?? undefined : OTHERS_BUDGET_DEFAULT;
 
 /** An action's answer (`{ok, value}` or `{ok: false, error, text}`) as a value, or the refusal thrown (for useAction). */
 export async function settled(pending) {
@@ -98,7 +101,7 @@ const recordFields = (a) => ({
   persona: a?.persona ?? "",
   replyMode: a?.replyMode ?? "always",
   groupMentions: a?.groupMentions ?? "members",
-  chainBudget: chainBudgetOf(a?.chainBudget) ?? CHAIN_BUDGET_DEFAULT,
+  chainBudget: budgetOf(a?.chainBudget) ?? CHAIN_BUDGET_DEFAULT,
   // The service's value as a choice and an amount: "20" (or nothing) is the default, null is 不限, anything else 自己填.
   othersChoice: a?.othersBudget === null ? "unlimited" : typeof a?.othersBudget === "string" && a.othersBudget !== OTHERS_BUDGET_DEFAULT ? "custom" : "default",
   othersAmount: typeof a?.othersBudget === "string" ? a.othersBudget : OTHERS_BUDGET_DEFAULT,
@@ -110,8 +113,7 @@ const recordFields = (a) => ({
 const storedValue = (key, f) => {
   if (key === "persona") return personaOf(f.persona);
   if (key === "name" || key === "intro" || key === "field") return f[key].trim();
-  if (key === "chainBudget") return chainBudgetOf(f.chainBudget) ?? f.chainBudget.trim();
-  if (key === "othersAmount") return chainBudgetOf(f.othersAmount) ?? f.othersAmount.trim();
+  if (key === "chainBudget" || key === "othersAmount") return budgetOf(f[key]) ?? f[key].trim();
   return f[key];
 };
 
@@ -188,9 +190,9 @@ export function AgentForm({ agent = null }) {
     intro: chars(intro) > 40 ? "简介不超过 40 个字" : "",
     field: chars(field) > 20 ? "擅长领域不超过 20 个字" : "",
     persona: chars(persona) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
-    chainBudget: chainBudgetOf(f.chainBudget) === null ? CHAIN_BUDGET_WRONG : "",
+    chainBudget: budgetProblem(f.chainBudget),
     // Only while it is asked for (calls from members, 自己填).
-    othersAmount: f.groupMentions === "members" && f.othersChoice === "custom" && chainBudgetOf(f.othersAmount) === null ? CHAIN_BUDGET_WRONG : "",
+    othersAmount: f.groupMentions === "members" && f.othersChoice === "custom" ? budgetProblem(f.othersAmount) : "",
   };
   const invalid = Object.values(errors).some(Boolean);
   const shown = (key) => (touched ? errors[key] : "");
@@ -211,6 +213,8 @@ export function AgentForm({ agent = null }) {
     edited.current.add(key);
     setF((cur) => ({ ...cur, [key]: value }));
   };
+  /** The box a budget's amount is typed in (`budgetOf`). */
+  const budgetBox = (key) => <input value={f[key]} onChange={set(key)} inputMode="decimal" autoComplete="off" />;
   const setName = (event) => {
     const value = event.target.value;
     edited.current.add("name");
@@ -262,7 +266,7 @@ export function AgentForm({ agent = null }) {
     if (persona) body.persona = persona;
     body.replyMode = f.replyMode;
     body.groupMentions = f.groupMentions;
-    body.chainBudget = chainBudgetOf(f.chainBudget);
+    body.chainBudget = budgetOf(f.chainBudget);
     // Said only when others may call it (otherwise the service keeps its default), and never for a wrong amount.
     const othersBudget = othersBudgetSent(f);
     if (f.groupMentions === "members" && othersBudget !== undefined) body.othersBudget = othersBudget;
@@ -483,7 +487,7 @@ export function AgentForm({ agent = null }) {
           hint="两次真人发言之间，它被其他 Agent 叫动所花的点数到了这个数就不再接话。真人 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。"
           error={shown("chainBudget")}
         >
-          <input value={f.chainBudget} onChange={set("chainBudget")} inputMode="decimal" autoComplete="off" />
+          {budgetBox("chainBudget")}
         </Field>
         {f.groupMentions === "members" && (
           <>
@@ -499,7 +503,7 @@ export function AgentForm({ agent = null }) {
             </Field>
             {f.othersChoice === "custom" && (
               <Field label="每天最多花（点）" error={shown("othersAmount")}>
-                <input value={f.othersAmount} onChange={set("othersAmount")} inputMode="decimal" autoComplete="off" />
+                {budgetBox("othersAmount")}
               </Field>
             )}
             {f.othersChoice === "unlimited" && <Notice tone="warn">群里任何人都能让它回复，花的是你的点。</Notice>}
