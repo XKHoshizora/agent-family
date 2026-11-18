@@ -103,7 +103,13 @@ const agentView = z.object({
   othersBudget: z.string().nullable(),
   ownerAppellation: z.string().nullable(),
   appellations: z.array(
-    z.object({ principalId: z.string(), kind: z.enum(["human", "agent"]), handle: z.string(), name: z.string(), appellation: z.string() }),
+    z.object({
+      principalId: z.string(),
+      kind: z.enum(["human", "agent"]),
+      handle: z.string().nullable(),
+      name: z.string().nullable(),
+      appellation: z.string(),
+    }),
   ),
   othersSpentToday: z.string(),
   reasoning,

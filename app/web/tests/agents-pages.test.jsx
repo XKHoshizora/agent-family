@@ -1384,6 +1384,26 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       expect(section().textContent).toContain("还没有给别人设称呼。");
     });
 
+    it("an Agent that is no longer in a group with it (the service gives no name or handle) shows as 已不在同一个群里的 Agent, with no handle, and can still be edited and removed", async () => {
+      const GONE_BOT = "00000000-0000-4000-8000-0000000000aa";
+      const gone = { principalId: GONE_BOT, kind: "agent", handle: null, name: null, appellation: "老机器人" };
+      const rec = record({ appellations: [gone] });
+      const putAppellation = vi.fn(async (_id, _pid, body) => ({ ...rec, appellations: [{ ...gone, appellation: body.appellation }] }));
+      const deleteAppellation = vi.fn(async () => ({ ...rec, appellations: [] }));
+      await openEdit(rec, { putAppellation, deleteAppellation });
+      const row = rowOfName("已不在同一个群里的 Agent");
+      expect(row.querySelector("strong").textContent).toBe("已不在同一个群里的 Agent");
+      expect(row.textContent).not.toContain("@");
+      expect(rowInput("已不在同一个群里的 Agent").value).toBe("老机器人");
+      fireEvent.change(rowInput("已不在同一个群里的 Agent"), { target: { value: "旧机器人" } });
+      fireEvent.blur(rowInput("已不在同一个群里的 Agent"));
+      await flush();
+      expect(putAppellation).toHaveBeenCalledWith(AG1, GONE_BOT, { appellation: "旧机器人" });
+      await click(within(rowOfName("已不在同一个群里的 Agent")).getByRole("button", { name: "移除" }));
+      expect(deleteAppellation).toHaveBeenCalledWith(AG1, GONE_BOT);
+      expect(section().textContent).toContain("还没有给别人设称呼。");
+    });
+
     it("添加称呼 opens a picker of my friends and the people and Agents of its groups, less itself, me and those listed, sorted by name", async () => {
       const rec = record({ appellations: [BOT_ENTRY] });
       await openEdit(rec);

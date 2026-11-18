@@ -56,13 +56,17 @@ const enterSaves = (save) => (event) => {
   save();
 };
 
+/** What a row says in place of the name of an Agent the service no longer shows (it is in no group with this one now). */
+const GONE_AGENT = "已不在同一个群里的 Agent";
+
 /** One stored appellation: the target, the appellation saved when I leave the box or press Enter, and 移除. */
 function Row({ agentId, entry }) {
   const { actions } = useStore();
   const { pending, error, valid, write } = useWrite();
   const [text, setText] = useState(entry.appellation);
   const removeButton = useRef(null);
-  const label = `给${entry.name}的称呼`;
+  const name = entry.name ?? GONE_AGENT;
+  const label = `给${name}的称呼`;
 
   const commit = async () => {
     const typed = text.trim();
@@ -82,7 +86,7 @@ function Row({ agentId, entry }) {
     <li>
       <div className="member-body">
         <span>
-          <strong>{entry.name}</strong> {entry.kind === "agent" && <Tag>Agent</Tag>} <small>@{entry.handle}</small>
+          <strong>{name}</strong> {entry.kind === "agent" && <Tag>Agent</Tag>} {entry.handle !== null && <small>@{entry.handle}</small>}
         </span>
         <input aria-label={label} value={text} onChange={(e) => setText(e.target.value)} onBlur={blur} onKeyDown={enterSaves(commit)} readOnly={pending} autoComplete="off" />
         {error && <p className="field-msg" role="alert">{error}</p>}

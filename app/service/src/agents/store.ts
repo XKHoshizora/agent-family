@@ -270,25 +270,44 @@ export async function setAgentState(t: Tx, agent: AgentRow, change: { paused: bo
 /** How many people and Agents one Agent may have an appellation for. */
 export const MAX_APPELLATIONS = 100;
 
-/** An appellation as the owner's view lists it: its target as they are now. */
+/**
+ * SQL: principal `target` and Agent `agent` (expressions) are both current members of one open group now — one of the
+ * ways a target may be named (`setAppellation`), and the only way an Agent's is shown (`appellationEntriesOf`).
+ */
+const inAGroupWith = (target: string, agent: string): string =>
+  `exists (select 1 from memberships tm
+             join memberships am on am.conversation_id = tm.conversation_id
+             join conversations c on c.id = tm.conversation_id
+            where tm.principal_id = ${target} and tm.left_seq is null and am.principal_id = ${agent} and am.left_seq is null
+              and c.type = 'group' and c.closed_at is null)`;
+
+/**
+ * An appellation as the owner's view lists it: its target as they are now. An Agent's name and handle are its own
+ * owner's to change, so they are shown only while it is in a group with this Agent and not deleted; else both are
+ * null — the row stays, and can be removed.
+ */
 export interface AppellationEntry {
   principalId: string;
   kind: "human" | "agent";
-  handle: string;
-  name: string;
+  handle: string | null;
+  name: string | null;
   appellation: string;
 }
 
 /**
- * The appellations of each of `agentIds`, by target handle (every row: a target that no longer qualifies stays listed);
- * an Agent without any has an empty list.
+ * The appellations of each of `agentIds`, by target handle (every row: a target that no longer qualifies stays listed;
+ * an Agent's shown as `AppellationEntry` says); an Agent without any has an empty list.
  */
 export async function appellationEntriesOf(q: Queryable, agentIds: readonly string[]): Promise<Map<string, AppellationEntry[]>> {
   const found = new Map<string, AppellationEntry[]>(agentIds.map((id) => [id, []]));
   if (agentIds.length === 0) return found;
   const { rows } = await q.query<AppellationEntry & { agent_id: string }>(
-    `select aa.agent_id, p.id as "principalId", p.kind, p.handle::text as handle, p.display_name as name, aa.appellation
-       from agent_appellations aa join principals p on p.id = aa.principal_id
+    `select aa.agent_id, p.id as "principalId", p.kind, aa.appellation,
+            case when s.shown then p.handle::text end as handle, case when s.shown then p.display_name end as name
+       from agent_appellations aa
+       join principals p on p.id = aa.principal_id
+       left join agents ta on ta.principal_id = p.id
+       cross join lateral (values (p.kind = 'human' or (ta.deleted_at is null and ${inAGroupWith("p.id", "aa.agent_id")}))) s(shown)
       where aa.agent_id = any($1::uuid[])
       order by p.handle, p.id`,
     [agentIds],
@@ -308,11 +327,7 @@ export async function setAppellation(t: Tx, agent: AgentRow, targetId: string, a
     `select 1 from principals p
       where p.id = $1 and p.id <> $2 and p.id <> $3
         and (exists (select 1 from friendships f where f.a_id = least($3::uuid, p.id) and f.b_id = greatest($3::uuid, p.id))
-             or exists (select 1 from memberships tm
-                          join memberships am on am.conversation_id = tm.conversation_id
-                          join conversations c on c.id = tm.conversation_id
-                         where tm.principal_id = p.id and tm.left_seq is null and am.principal_id = $2 and am.left_seq is null
-                           and c.type = 'group' and c.closed_at is null))`,
+             or ${inAGroupWith("p.id", "$2")})`,
     [targetId, agent.id, agent.ownerId],
   );
   if (!qualifies.rowCount) throw notFound();

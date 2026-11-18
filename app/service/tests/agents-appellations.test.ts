@@ -199,6 +199,32 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     expect(targetsOf((await remove(w.owner, w.agent.id, w.gus.id)).json)).toEqual([]);
   });
 
+  it("shows an Agent it names by name and handle only while that Agent is in a group with it and not deleted; the row stays, removable; a person always shows", async () => {
+    const w = await world();
+    const theirs = await mustCreateAgent(app, w.eve, { name: "Eve的Bot" });
+    await seat(w.g, theirs.id);
+    await put(w.owner, w.agent.id, theirs.id, "小机器人");
+    await put(w.owner, w.agent.id, w.gus.id, "古斯");
+    const entryOf = async (id: string) => (await view(w.owner, w.agent.id)).appellations.find((e: { principalId: string }) => e.principalId === id);
+    const inGroup = (id: string, now: boolean) =>
+      db.query(`update memberships set left_seq = ${now ? "null" : "joined_seq + 1"} where conversation_id = $1 and principal_id = $2`, [w.g, id]);
+    expect(await entryOf(theirs.id)).toEqual({ principalId: theirs.id, kind: "agent", handle: theirs.handle, name: "Eve的Bot", appellation: "小机器人" });
+
+    await inGroup(theirs.id, false);
+    await inGroup(w.gus.id, false);
+    const hidden = { principalId: theirs.id, kind: "agent", handle: null, name: null, appellation: "小机器人" };
+    expect(await entryOf(theirs.id)).toEqual(hidden);
+    expect(await entryOf(w.gus.id)).toMatchObject({ handle: w.gus.handle, name: "gus" });
+    const listed = (await api(app, w.owner, "GET", "/api/agents")).json.agents.find((a: { id: string }) => a.id === w.agent.id);
+    expect(listed.appellations.find((e: { principalId: string }) => e.principalId === theirs.id)).toEqual(hidden);
+    // Back in the group, it shows again; deleted, it does not, still a member or not.
+    await inGroup(theirs.id, true);
+    expect((await entryOf(theirs.id)).name).toBe("Eve的Bot");
+    await db.query("update agents set deleted_at = now() where principal_id = $1", [theirs.id]);
+    expect(await entryOf(theirs.id)).toEqual(hidden);
+    expect(targetsOf((await remove(w.owner, w.agent.id, theirs.id)).json)).toEqual([w.gus.id]);
+  });
+
   it("holds at most 100 targets: the 101st is 409 too_many, replacing one at the cap is fine, removing one makes room", async () => {
     const w = await world();
     const ids: string[] = [];
