@@ -68,19 +68,16 @@ function Row({ agentId, entry }) {
   const name = entry.name ?? GONE_AGENT;
   const label = `给${name}的称呼`;
 
+  /** The box shows what is stored again: an edit that is not sent is dropped where it is seen. */
+  const revert = () => setText(entry.appellation);
   const commit = async () => {
     const typed = text.trim();
     // Nothing to say is not an appellation: the row goes back to what is stored (移除 is how one goes).
-    if (typed === "" || typed === entry.appellation) {
-      setText(entry.appellation);
-      return;
-    }
+    if (typed === "" || typed === entry.appellation) return revert();
     if (valid(typed)) await write(() => actions.setAppellation(agentId, entry.principalId, typed));
   };
-  // Leaving the box for 移除 drops the edit: only the removal is sent.
-  const blur = (event) => {
-    if (event.relatedTarget !== removeButton.current) commit();
-  };
+  // Leaving the box for 移除 (by Tab, too) drops the edit: only the removal is sent.
+  const blur = (event) => (event.relatedTarget === removeButton.current ? revert() : commit());
 
   return (
     <li>

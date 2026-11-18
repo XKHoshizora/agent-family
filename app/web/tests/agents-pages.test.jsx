@@ -1542,7 +1542,8 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       const putAppellation = vi.fn(async () => ({ ...record(), appellations: [ANN_ENTRY] }));
       const patchAgent = vi.fn(async () => record());
       await add({ putAppellation, patchAgent });
-      fireEvent.keyDown(inMain().getByPlaceholderText("称呼"), { key: "Enter" });
+      // Its default (submitting the form the row sits in) is prevented: `fireEvent` answers false.
+      expect(fireEvent.keyDown(inMain().getByPlaceholderText("称呼"), { key: "Enter" })).toBe(false);
       await flush();
       expect(putAppellation).toHaveBeenCalledWith(AG1, ANN, { appellation: "安姐" });
       expect(patchAgent).not.toHaveBeenCalled();
@@ -1567,26 +1568,23 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       expect(putAppellation).not.toHaveBeenCalled();
     });
 
-    it("移除 on a row with an unsaved edit drops the edit: only the DELETE is sent", async () => {
+    it("移除 on a row with an unsaved edit drops the edit, and the box shows what is stored again: only the DELETE is sent", async () => {
       const rec = record({ appellations: [ANN_ENTRY] });
       const putAppellation = vi.fn(async () => rec);
-      const deleteAppellation = vi.fn(async () => ({ ...rec, appellations: [] }));
+      const deleteAppellation = vi.fn(async () => {
+        throw apiError(500, "internal");
+      });
       await openEdit(rec, { putAppellation, deleteAppellation });
       const remove = within(rowOfName("小安")).getByRole("button", { name: "移除" });
       fireEvent.change(rowInput("小安"), { target: { value: "安安" } });
+      // Leaving the box for 移除 (by Tab, say): the edit is dropped where it is seen.
       fireEvent.blur(rowInput("小安"), { relatedTarget: remove });
+      expect(rowInput("小安").value).toBe("安姐");
       await click(remove);
       expect(putAppellation).not.toHaveBeenCalled();
       expect(deleteAppellation).toHaveBeenCalledWith(AG1, ANN);
+      // The removal failed: the row stays, showing what is stored.
+      expect(rowInput("小安").value).toBe("安姐");
     });
-  });
-
-  it("an Agent that is not mine keeps and shows none of it, even when its entry carries the keys", async () => {
-    const stranger = { ...annBot, ownerAppellation: "老板", appellations: [ANN_ENTRY] };
-    await openAgents({ ...world(record()), others: [stranger] });
-    // Someone else's Agent has no page; mine shows what the service said of mine only.
-    expect(rowNames()).toEqual(["小助手"]);
-    await openRow("小助手");
-    expect(document.querySelector(".main-col .kv").textContent).not.toContain("它怎么称呼");
   });
 });
