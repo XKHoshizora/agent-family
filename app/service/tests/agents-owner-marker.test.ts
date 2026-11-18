@@ -240,25 +240,39 @@ describe("withoutMark", () => {
     for (const text of ["k7f 想", "〔注〕后", "〔注\n后", "〔注〕k7f2ab", "好的"]) expect(withoutMarkAtCut(text, "k7f2ab")).toBe(withoutMark(text, "k7f2ab"));
   });
 
-  /** `withoutMark(text, "k7f2ab")`, which must take well under a second, leave no mark, and give `expected`. */
-  const quickly = (text: string, expected: string): void => {
-    const started = performance.now();
-    const out = withoutMark(text, "k7f2ab");
-    const ms = performance.now() - started;
-    expect([ms < 1500, out.includes("k7f2ab"), out === expected]).toEqual([true, false, true]);
+  /**
+   * `withoutMark(shape(n), "k7f2ab")` is `expected(n)`, for `n` and for four times `n`, and the larger takes less than
+   * eight times as long, the faster of three runs each (in proportion to the text, about four times; a pass gone
+   * quadratic, about sixteen). The sizes keep even a quadratic pass to seconds, so a regression fails rather than hangs.
+   */
+  const inProportion = (n: number, shape: (n: number) => string, expected: (n: number) => string): void => {
+    const fastest = (size: number): number => {
+      const text = shape(size);
+      let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < 3; i++) {
+        const started = performance.now();
+        const out = withoutMark(text, "k7f2ab");
+        best = Math.min(best, performance.now() - started);
+        expect(out === expected(size)).toBe(true);
+      }
+      return best;
+    };
+    const [small, large] = [fastest(n), fastest(4 * n)];
+    // A few milliseconds more, so that a timer's grain or a pause of the collector does not decide it.
+    expect(large).toBeLessThan(8 * small + 5);
   };
 
-  it("takes time in proportion to the text: 200 000 separators after an open bracket, then the mark", () => {
-    quickly(`〔${"｜".repeat(200_000)}k7f2ab`, `〔${"｜".repeat(200_000)}`);
+  it("takes time in proportion to the text: separators after an open bracket, then the mark", () => {
+    inProportion(12_500, (n) => `〔${"｜".repeat(n)}k7f2ab`, (n) => `〔${"｜".repeat(n)}`);
   });
 
-  it("takes time in proportion to the text: a mark split 100 000 times around itself", () => {
-    quickly(`${"k7f".repeat(100_000)}${"2ab".repeat(100_000)}`, "");
+  it("takes time in proportion to the text: a mark split around itself again and again", () => {
+    inProportion(2_500, (n) => `${"k7f".repeat(n)}${"2ab".repeat(n)}`, () => "");
   });
 
-  it("takes time in proportion to the text: 50 000 labels nested so that taking out each puts the mark back together in the next", () => {
-    quickly(`${"〔k7f".repeat(50_000)}〔k7f2ab 小周｜群成员〕${"2ab 阿哲｜你的主人〕".repeat(50_000)}`, "");
-    quickly(`前${"〔".repeat(50_000)}k7f2ab 小周｜群成员${"〕".repeat(50_000)}后`, `前${"〔".repeat(49_999)}${"〕".repeat(49_999)}后`);
+  it("takes time in proportion to the text: labels nested so that taking out each puts the mark back together in the next", () => {
+    inProportion(1_000, (n) => `${"〔k7f".repeat(n)}〔k7f2ab 小周｜群成员〕${"2ab 阿哲｜你的主人〕".repeat(n)}`, () => "");
+    inProportion(6_000, (n) => `前${"〔".repeat(n)}k7f2ab 小周｜群成员${"〕".repeat(n)}后`, (n) => `前${"〔".repeat(n - 1)}${"〕".repeat(n - 1)}后`);
   });
 });
 
