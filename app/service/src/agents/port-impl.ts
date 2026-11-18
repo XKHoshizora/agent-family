@@ -7,7 +7,6 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
-import type { StoredMessage } from "../messages/model.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
@@ -27,17 +26,20 @@ import { postAsAgent } from "./conversation.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
 import {
+  actOnTriggered,
   followUp,
-  logCallerLimited,
+  followUpOf,
+  noneTold,
   othersBudgetRefusesAdmission,
+  pushBudgetReached,
   RUN_COLUMNS,
   toWireRun,
   type Announced,
-  type BudgetReached,
+  type FollowUp,
   type Interruption,
   type Lane,
   type RunRow,
-  type Triggered,
+  type Told,
 } from "./runs.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
@@ -344,7 +346,6 @@ export class DbAgentPort implements AgentPort {
     }
     if (closing?.aborted) throw closing.reason;
 
-    type Told = Pick<Triggered, "notices" | "budgetReached">;
     const result = await db.tx(async (t): Promise<{ end: RunEnd; told?: Told } | { prepared: Prepared; read: number | null }> => {
       const { agent, state } = await this.lockRun(t, run);
       const halted = this.halted(run, agent, state);
@@ -356,18 +357,16 @@ export class DbAgentPort implements AgentPort {
       // Refused, what step 1 took on (noted on it after its claim — its owner's mention, say) is handed back as noted, so
       // `finish`'s follow-up answers it by the usual rule: its owner's own is queued; someone else's meets the budget again
       // and is simply not queued (no second notice that day), so nothing loops.
-      if (state.lane === "others") {
-        const told = await othersBudgetRefusesAdmission(t, run.conversationId, agent, config);
-        if (told) {
-          if (first.covers > first.coveredBefore) {
-            await t.query("update agent_runs set covers_seq = $2, pending_seq = greatest(coalesce(pending_seq, 0), $3) where id = $1", [
-              run.id,
-              first.coveredBefore,
-              first.covers,
-            ]);
-          }
-          return { end: OTHERS_BUDGET_SPENT, told };
+      const told = await othersBudgetRefusesAdmission(t, run.conversationId, agent, state.lane, config);
+      if (told) {
+        if (first.covers > first.coveredBefore) {
+          await t.query("update agent_runs set covers_seq = $2, pending_seq = greatest(coalesce(pending_seq, 0), $3) where id = $1", [
+            run.id,
+            first.coveredBefore,
+            first.covers,
+          ]);
         }
+        return { end: OTHERS_BUDGET_SPENT, told };
       }
       const { resolved, loaded, covers } = first;
       try {
@@ -386,8 +385,7 @@ export class DbAgentPort implements AgentPort {
     });
     if ("end" in result) {
       // The others' daily budget's notice, if this appended it, goes to the group; the Agent to its owner.
-      if (result.told && result.told.notices.length > 0) this.deps.conversations.publish({ messages: result.told.notices, conversations: [] }, log);
-      if (result.told) this.pushBudgetReached(result.told.budgetReached);
+      if (result.told) this.tell(result.told);
       return result.end;
     }
     if (result.read !== null) this.deps.reads.publish({ conversationId: run.conversationId, principalId: run.agentId, seq: result.read }, log);
@@ -421,9 +419,7 @@ export class DbAgentPort implements AgentPort {
       // daily budget it found spent are pushed them.
       if (!duplicate) this.deps.conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, this.deps.log);
       if (!duplicate && typeof message.body.proposalId === "string") this.deps.realtime.pushAgentChanged(run.ownerId, run.agentId);
-      for (const called of triggered.runs) this.announce(called);
-      logCallerLimited(this.deps.log, triggered.callerLimited);
-      this.pushBudgetReached(triggered.budgetReached);
+      actOnTriggered(triggered, { announce: (called) => this.announce(called), log: this.deps.log, realtime: this.deps.realtime });
       return "posted";
     } catch (err) {
       if (err instanceof AppError && REFUSED.has(err.code)) return "refused";
@@ -435,9 +431,13 @@ export class DbAgentPort implements AgentPort {
     }
   }
 
-  /** After commit: each Agent whose others' daily budget a call found spent, and told the group of, to its owner. */
-  private pushBudgetReached(reached: readonly BudgetReached[]): void {
-    for (const { ownerId, agentId } of reached) this.deps.realtime.pushAgentChanged(ownerId, agentId);
+  /**
+   * After commit, what a refusal told (runs.ts `Told`): the notices it appended go to their group, and each Agent whose
+   * others' daily budget it found spent to its owner (`pushBudgetReached`).
+   */
+  private tell(told: Told): void {
+    if (told.notices.length > 0) this.deps.conversations.publish({ messages: told.notices, conversations: [] }, this.deps.log);
+    pushBudgetReached(this.deps.realtime, told.budgetReached);
   }
 
   /**
@@ -467,11 +467,10 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
-    if (result.followUp) this.announce(result.followUp);
+    if (result.followed.run) this.announce(result.followed.run);
     // A notice its follow-up appended (a chain budget or the others' daily budget spent): the group is told after the
     // run's end.
-    if (result.notices.length > 0) this.deps.conversations.publish({ messages: result.notices, conversations: [] }, this.deps.log);
-    this.pushBudgetReached(result.budgetReached);
+    this.tell(result.followed);
   }
 
   /** `finish`'s transaction: what to announce once it has committed, or null for a run that no longer exists. */
@@ -484,7 +483,7 @@ export class DbAgentPort implements AgentPort {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
         if (!current.rows[0]) return null;
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
-        return { ended, followUp: null, notices: [], budgetReached: [], interrupted: false, reply: null };
+        return { ended, followed: followUpOf(null), interrupted: false, reply: null };
       }
       const posted = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
         run.conversationId,
@@ -508,12 +507,9 @@ export class DbAgentPort implements AgentPort {
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent, final);
-      const followed = next === null ? null : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, config);
       return {
         ended,
-        followUp: followed?.run ?? null,
-        notices: followed?.notices ?? [],
-        budgetReached: followed?.budgetReached ?? [],
+        followed: next === null ? followUpOf(null) : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, config),
         interrupted: state.rows[0].interrupted !== null,
         reply: posted.rows[0] ? Number(posted.rows[0].seq) : null,
       };
@@ -545,9 +541,8 @@ export class DbAgentPort implements AgentPort {
     if (recovered === null) return false;
     const { charged } = recovered;
     if (charged !== null) this.deps.realtime.pushChargedReply(charged.conversationId, charged.ownerId, charged.seq);
-    for (const a of recovered.told) this.announce(a);
-    if (recovered.notices.length > 0) this.deps.conversations.publish({ messages: recovered.notices, conversations: [] }, log);
-    this.pushBudgetReached(recovered.budgetReached);
+    for (const a of recovered.runs) this.announce(a);
+    this.tell(recovered.told);
     return true;
   }
 }
@@ -555,24 +550,20 @@ export class DbAgentPort implements AgentPort {
 /** What `finish`'s transaction leaves to do once it has committed. */
 interface Recorded {
   ended: Announced;
-  followUp: Announced | null;
-  /** Notices its follow-up appended (runs.ts `followUp`), to publish. */
-  notices: StoredMessage[];
-  /** The Agent, when its others' daily budget refused the follow-up and told the group: pushed to its owner. */
-  budgetReached: BudgetReached[];
+  /** Its follow-up (runs.ts `followUp`), and what deciding it told: notices to publish, Agents to push their owners. */
+  followed: FollowUp;
   interrupted: boolean;
   /** The seq of the reply the run posted, to push again to its owner now that it is charged; null when none. */
   reply: number | null;
 }
 
 /**
- * What `recoverRun` leaves to do once it has committed: runs to announce, notices to publish (and the Agent to push to its
- * owner when its others' daily budget refused the follow-up), a charged reply to push.
+ * What `recoverRun` leaves to do once it has committed: runs to announce, what its follow-up told (notices to publish,
+ * the Agent to push to its owner when its others' daily budget refused the follow-up), a charged reply to push.
  */
 interface Recovered {
-  told: Announced[];
-  notices: StoredMessage[];
-  budgetReached: BudgetReached[];
+  runs: Announced[];
+  told: Told;
   /** The reply the run had posted, now charged (`Hub.pushChargedReply`); null when it posted none. */
   charged: { conversationId: string; ownerId: string; seq: number } | null;
 }
@@ -657,15 +648,14 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
       where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId, end.status, error, droppedOnEnd(end)],
   );
-  if (reply === null) return { told: [], notices: [], budgetReached: [], charged: null };
+  if (reply === null) return { runs: [], told: noneTold(), charged: null };
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
-  const followed = next === null ? null : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, config);
+  const { run: followed, ...told } = next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, config);
   return {
-    told: followed?.run ? [ended, followed.run] : [ended],
-    notices: followed?.notices ?? [],
-    budgetReached: followed?.budgetReached ?? [],
+    runs: followed ? [ended, followed] : [ended],
+    told,
     charged: posted ? { conversationId, ownerId: agent.ownerId, seq: Number(posted.seq) } : null,
   };
 }

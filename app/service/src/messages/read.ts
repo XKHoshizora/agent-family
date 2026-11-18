@@ -103,7 +103,16 @@ function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
 }
 
 /** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
-export const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+/**
+ * SQL: run `run` (an `agent_runs` alias) posted message `message` (a `messages` alias, spliced in: only aliases) — a
+ * reply run of its sender in its conversation whose id is the message's `client_txn` (`postAsAgent`). A person's
+ * message names no run. The `via` of a reply here, and who is behind an Agent's message (agents/runs.ts `followUp`).
+ */
+export const postingRun = (message: string, run: string): string =>
+  `${run}.id = case when ${message}.client_txn ~ '${RUN_ID_TEXT}' then ${message}.client_txn::uuid end
+   and ${run}.agent_id = ${message}.sender_id and ${run}.conversation_id = ${message}.conversation_id and ${run}.purpose = 'reply'`;
 
 /**
  * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told
@@ -200,13 +209,11 @@ export async function toWireForReaders(
          select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points
            from agent_runs run
            join usage_records u on u.run_id = run.id
-          where sender.owner_id = r.reader_id and m.kind = 'text'
-            and run.id = case when m.client_txn ~ $3 then m.client_txn::uuid end
-            and run.agent_id = m.sender_id and run.conversation_id = m.conversation_id and run.purpose = 'reply'
+          where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")}
             and run.source is not null and run.model is not null and run.reasoning is not null
        ) via on true
       where m.id = any($2::bigint[])`,
-    [readers, msgs.map((m) => m.id), RUN_ID_TEXT],
+    [readers, msgs.map((m) => m.id)],
   );
   const visible = new Set(shown.rows.map((r) => `${r.reader_id}|${r.id}`));
   const shownToAnyone = new Set(shown.rows.map((r) => r.id));

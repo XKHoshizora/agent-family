@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { formatPoints, MICRO_PER_POINT, parsePoints, siteDayStart } from "../accounts/store.ts";
+import { formatPoints, MICRO_PER_POINT, parsePoints } from "../accounts/store.ts";
 import { REASONING_LEVELS } from "../config.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
@@ -14,7 +14,7 @@ import { requirePrincipal } from "../session.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
-import { endWhatPauseMissed, interruptRuns, othersSpentToday, othersSpentTodayOf } from "./runs.ts";
+import { endWhatPauseMissed, interruptRuns, othersSpentToday, othersSpentTodayOf, siteToday } from "./runs.ts";
 import {
   assertModelChoice,
   GROUP_MENTIONS,
@@ -131,10 +131,8 @@ export function registerAgentRoutes(
 ): { endDrafts(): Promise<void> } {
   const { db, config, conversations } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
-  /** When the site day began: what other people's calls spent since then is shown (runs.ts `othersSpentToday`). */
-  const today = () => siteDayStart(new Date(), config.siteTimezone, 0);
-  /** The owner's view of `agent`, with what other people's calls have spent today, read now. */
-  const viewOf = async (agent: AgentRow) => toView(agent, await othersSpentToday(db, agent.id, today()));
+  /** The owner's view of `agent`, with what other people's calls have spent today, read now (runs.ts `othersSpentToday`). */
+  const viewOf = async (agent: AgentRow) => toView(agent, await othersSpentToday(db, agent.id, siteToday(config)));
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -233,7 +231,7 @@ export function registerAgentRoutes(
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
       const agents = await listOwnedAgents(db, me.id);
-      const spent = await othersSpentTodayOf(db, agents.map((a) => a.id), today());
+      const spent = await othersSpentTodayOf(db, agents.map((a) => a.id), siteToday(config));
       return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? 0n)) };
     },
   );

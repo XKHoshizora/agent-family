@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { logCallerLimited, maybeTrigger, noneTriggered } from "../agents/runs.ts";
+import { actOnTriggered, maybeTrigger, noneTriggered } from "../agents/runs.ts";
 import { notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { hasVisibleText, messageText, positiveInt, positiveIntString, searchTerm, uuidParam } from "../schemas.ts";
@@ -68,9 +68,9 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // message to their Agent, and a message in a group naming Agent members by @handle, queue their replies in the
       // same transaction (agents/runs.ts `maybeTrigger`; over an owner's replies a minute, a failed `rate_limited` run
       // instead). Each is announced to its own Agent's owner. A call over its sender's limit on other people's Agents
-      // starts nothing: it is logged, and the sender alone is told which in this answer (`notCalled`). A call on
-      // someone else's Agent whose others' daily budget is spent starts
-      // nothing either: the group is told once a day (published after the message) and the Agent's owner is pushed it.
+      // starts nothing: it is logged, and the sender alone is told which in this answer (`notCalled`). A call on someone
+      // else's Agent whose others' daily budget is spent starts nothing either: the group is told once a day (published
+      // after the message) and the Agent's owner is pushed it.
       const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
         const [rendered] = await toWireFor(t, me.id, [sent.message], config);
@@ -79,9 +79,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
         return { ...sent, wire: rendered, triggered };
       });
       if (!duplicate) conversations.publish({ messages: [message, ...triggered.notices], conversations: [] }, req.log);
-      for (const run of triggered.runs) app.agentPort.announce(run);
-      logCallerLimited(req.log, triggered.callerLimited);
-      for (const { ownerId, agentId } of triggered.budgetReached) app.realtime.pushAgentChanged(ownerId, agentId);
+      actOnTriggered(triggered, { announce: (run) => app.agentPort.announce(run), log: req.log, realtime: app.realtime });
       const notCalled = triggered.callerLimited.map(({ agentId }) => ({ agentId, reason: "caller_rate_limited" as const }));
       return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate, ...(notCalled.length > 0 ? { notCalled } : {}) });
     },

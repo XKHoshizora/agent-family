@@ -4,6 +4,16 @@ import { orderedPair } from "./pair.ts";
 // Read-only questions about a pair. A leaf module, so conversations can ask them without importing
 // the social mutations (which in turn write notices into conversations).
 
+/**
+ * SQL: whether there is a block, in either direction, between `one` and any of `others` — SQL expressions spliced in
+ * (column references, parameter positions; `others` a comma-separated list, where a null matches nothing). The one
+ * statement of the condition for queries that ask it of many rows at once (`canDirectSendMany`, agents/runs.ts);
+ * `blockBetween` asks it of one pair and says who blocked.
+ */
+export const blockedEitherWay = (one: string, others: string): string =>
+  `exists (select 1 from blocks blk
+            where (blk.blocker_id = ${one} and blk.blocked_id in (${others})) or (blk.blocked_id = ${one} and blk.blocker_id in (${others})))`;
+
 /** Any block between the two, either direction. If both block, `a`'s own block is reported. */
 export async function blockBetween(t: Queryable, a: string, b: string): Promise<null | { blocker: string }> {
   const { rows } = await t.query<{ blocker_id: string }>(
@@ -37,8 +47,7 @@ export async function canDirectSendMany(t: Queryable, a: string, others: string[
   if (others.length === 0) return new Map();
   const { rows } = await t.query<{ other: string; blocked: boolean; friends: boolean }>(
     `select o.id as other,
-            exists (select 1 from blocks b
-                     where (b.blocker_id = $1 and b.blocked_id = o.id) or (b.blocker_id = o.id and b.blocked_id = $1)) as blocked,
+            ${blockedEitherWay("$1::uuid", "o.id")} as blocked,
             exists (select 1 from friendships f
                      where f.a_id = least($1::uuid, o.id) and f.b_id = greatest($1::uuid, o.id)) as friends
        from unnest($2::uuid[]) as o (id)`,

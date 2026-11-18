@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { postAsAgent } from "../src/agents/conversation.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
-import { triggerFromAgent } from "../src/agents/runs.ts";
+import { behindAgentMessage, behindMessageSql, triggerFromAgent, type Caller } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -533,6 +534,32 @@ describe("a run's lane and who called for it", () => {
       );
       return [run.rows[0]!.id];
     });
+  });
+
+  it("who is behind an Agent's message: behindAgentMessage and its SQL twin give the same person, whatever run posted it", async () => {
+    const [agentId, ownerId, callerId, personId] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    /** `behindMessageSql` for a message of sender `id` (owned by `owner`) posted by a run of `postedBy`'s (none: null). */
+    const inSql = async (id: string, owner: string | null, postedBy: Caller | null) =>
+      (
+        await db.query<{ behind: string | null }>(
+          `select ${behindMessageSql("p", "r")} as behind
+             from (select $1::uuid as id, $2::uuid as owner_id) p
+             left join (select $3::text as lane, $4::uuid as caller_id) r on $5::boolean`,
+          [id, owner, postedBy?.lane ?? null, postedBy?.id ?? null, postedBy !== null],
+        )
+      ).rows[0]!.behind;
+    const cases: Array<Caller | null> = [
+      null,
+      { id: ownerId, lane: "own" },
+      { id: callerId, lane: "own" },
+      { id: callerId, lane: "others" },
+      { id: null, lane: "others" },
+      { id: callerId, lane: "proactive" },
+      { id: null, lane: "proactive" },
+    ];
+    for (const postedBy of cases) expect([postedBy, await inSql(agentId, ownerId, postedBy)]).toEqual([postedBy, behindAgentMessage(ownerId, postedBy)]);
+    // A person's message (no run posted it) has that person behind it.
+    expect(await inSql(personId, null, null)).toBe(personId);
   });
 
   it("is never on the wire: a run's owner and the other members see no lane and no caller", async () => {
