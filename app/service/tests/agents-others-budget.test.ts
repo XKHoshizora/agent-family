@@ -381,3 +381,39 @@ describe("the others' daily budget", () => {
     ]);
   });
 });
+
+describe("the order of the checks", () => {
+  // Its own instance with a caller limit of one, and its log kept here.
+  const lines: string[] = [];
+  const { app: limited } = useApp({
+    env: { ...SITE_ENV, AGENT_CALLER_RUNS_PER_MINUTE: "1" },
+    models: gateway,
+    agentWorker: false,
+    logStream: { write: (line) => void lines.push(line) },
+  });
+
+  it("the others' budget comes before the caller's limit: a caller over his limit is told the budget is spent, and no limit is logged", async () => {
+    const [owner, member, third] = [await signUp(limited, "owner"), await signUp(limited, "member"), await signUp(limited, "third")];
+    const g = await group(limited, owner, "team", [member, third]);
+    const make = async (handle: string, over: Record<string, unknown> = {}) => {
+      const made = await mustCreateAgent(limited, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", ...over });
+      await join(g, made.id);
+      return { id: made.id, ownerId: owner.id, conversationId: made.conversationId };
+    };
+    const anna = await make("anna", { othersBudget: "2" });
+    const carl = await make("carlbot");
+    await paidOthers(anna, g, 2 * POINT);
+    const sayIn = async (text: string) => {
+      const sent = await api(limited, member, "POST", `/api/conversations/${g}/messages`, { text, clientTxn: `order${++txn}` });
+      expect(sent.status).toBe(201);
+    };
+
+    // The member's one call of the minute on someone else's Agent is used up (queued)...
+    await sayIn("@carlbot 你好");
+    expect(await runsOf(carl.id, g)).toEqual([expect.objectContaining({ status: "queued", lane: "others" })]);
+    // ...so this call is over his limit, and Anna's budget is spent too: the budget answers.
+    await sayIn("@anna 你好");
+    expect(await noticesOf(g)).toHaveLength(1);
+    expect(lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => e.metric === "caller_rate_limited")).toEqual([]);
+  });
+});

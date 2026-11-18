@@ -621,7 +621,7 @@ async function triggerInGroup(t: Tx, conversationId: string, message: StoredMess
     called.push(agent);
   }
   const reached = await reachAgents(t, conversationId, called, message.seq, "human", (agent) => callerOf(agent.ownerId, message.senderId), config);
-  return { ...reached, ...told };
+  return { ...reached, notices: [...reached.notices, ...told.notices], budgetReached: [...reached.budgetReached, ...told.budgetReached] };
 }
 
 /** The seq of the group's latest message from a person (a notice is nobody's message), 0 when there is none. */
@@ -772,7 +772,7 @@ export async function triggerFromAgent(
     called.push(agent);
   }
   const reached = await reachAgents(t, conversationId, called, message.seq, "agent", (agent) => callerOf(agent.ownerId, poster.ownerId), config);
-  return { ...reached, ...told };
+  return { ...reached, notices: [...reached.notices, ...told.notices], budgetReached: [...reached.budgetReached, ...told.budgetReached] };
 }
 
 /** What a run's end calls for in its conversation, to act on after commit (`followUp`). */
