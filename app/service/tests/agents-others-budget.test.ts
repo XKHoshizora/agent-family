@@ -502,14 +502,17 @@ describe("the order of the checks", () => {
     const sayIn = async (text: string) => {
       const sent = await api(limited, member, "POST", `/api/conversations/${g}/messages`, { text, clientTxn: `order${++txn}` });
       expect(sent.status).toBe(201);
+      return sent.json as Record<string, unknown>;
     };
 
     // The member's one call of the minute on someone else's Agent is used up (queued)...
     await sayIn("@carlbot 你好");
     expect(await runsOf(carl.id, g)).toEqual([expect.objectContaining({ status: "queued", lane: "others" })]);
-    // ...so this call is over his limit, and Anna's budget is spent too: the budget answers.
-    await sayIn("@anna 你好");
+    // ...so this call is over his limit, and Anna's budget is spent too: the budget answers — the group is told, and the
+    // sender's answer names nothing his limit refused.
+    const answered = await sayIn("@anna 你好");
     expect(await noticesOf(g)).toHaveLength(1);
+    expect(answered).not.toHaveProperty("notCalled");
     expect(lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => e.metric === "caller_rate_limited")).toEqual([]);
   });
 });

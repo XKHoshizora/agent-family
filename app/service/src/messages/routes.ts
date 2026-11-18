@@ -16,7 +16,15 @@ import { MESSAGE_TEXT_MAX, sendMessage } from "./send.ts";
 
 const empty = z.object({});
 const idParams = z.object({ id: uuidParam });
-const sendResult = z.object({ message: wireMessageSchema, duplicate: z.boolean() });
+/**
+ * A send's answer; `notCalled` only when a call of the sender's on someone else's Agent was refused for their caller
+ * limit (the sender's alone: never stored with the message, never pushed).
+ */
+const sendResult = z.object({
+  message: wireMessageSchema,
+  duplicate: z.boolean(),
+  notCalled: z.array(z.object({ agentId: z.string(), reason: z.literal("caller_rate_limited") })).optional(),
+});
 
 const sendBody = z
   .object({
@@ -60,7 +68,8 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       // message to their Agent, and a message in a group naming Agent members by @handle, queue their replies in the
       // same transaction (agents/runs.ts `maybeTrigger`; over an owner's replies a minute, a failed `rate_limited` run
       // instead). Each is announced to its own Agent's owner. A call over its sender's limit on other people's Agents
-      // starts nothing and is only logged. A call on someone else's Agent whose others' daily budget is spent starts
+      // starts nothing: it is logged, and the sender alone is told which in this answer (`notCalled`). A call on
+      // someone else's Agent whose others' daily budget is spent starts
       // nothing either: the group is told once a day (published after the message) and the Agent's owner is pushed it.
       const { message, duplicate, wire, triggered } = await db.tx(async (t) => {
         const sent = await sendMessage(t, req.params.id, me.id, req.body);
@@ -73,7 +82,8 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       for (const run of triggered.runs) app.agentPort.announce(run);
       logCallerLimited(req.log, triggered.callerLimited);
       for (const { ownerId, agentId } of triggered.budgetReached) app.realtime.pushAgentChanged(ownerId, agentId);
-      return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate });
+      const notCalled = triggered.callerLimited.map(({ agentId }) => ({ agentId, reason: "caller_rate_limited" as const }));
+      return reply.code(duplicate ? 200 : 201).send({ message: wire, duplicate, ...(notCalled.length > 0 ? { notCalled } : {}) });
     },
   );
 

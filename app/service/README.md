@@ -333,7 +333,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `PATCH /api/conversations/:id`, `POST /api/conversations/:id/members`, `DELETE /api/conversations/:id/members/:principalId` | 20 together | principal |
 | `POST /api/conversations/:id/messages` | 120 | principal |
 | Replies started (each message that queues a reply of one of your Agents — yours, or anyone's or an Agent's in a group the Agent is in —, each follow-up in a group: the reply that answers what was noted while one of your Agents was replying there, and `POST …/runs/retry`) | Counted for you in two lanes, each from the stored runs under your account's lock (so exactly, also for messages to two of your Agents at the same moment) and not scaled by `RATE_LIMIT_SCALE`: 20 for the replies you called for yourself — your own lane: your messages to your Agents, in their conversations and in groups, your Agents' calls on each other that you are behind, retries, follow-ups that answer you (`AGENT_RUNS_PER_MINUTE`) — and 20 together for every reply someone else called for on your Agents (`AGENT_OTHERS_RUNS_PER_MINUTE`), so that others' mentions cannot use up your own minute. A run is `own` when you called for it — yourself, or through an Agent's message you are behind — else `others` (a third lane, `proactive`, is for replies nobody called for; nothing starts one yet), and keeps its lane. An Agent's message is the call of whoever called for the reply that posted it, unless that reply was its owner's own: then its owner's (Agents and runs, In a group); so a member's call that one of your Agents relays to another of yours is the member's, not yours. Neither lane nor caller is ever on the wire. Over the count of its lane a message (or a follow-up in a group) starts no reply: the message is still sent, and a `failed` run with error `rate_limited` (retryable) is recorded instead, so you see it (`run` push, `GET …/run`, in a group `GET …/runs`) and can retry — it started nothing and is not counted; in a group one such run per Agent stands for every mention and follow-up over the limit while it is the Agent's latest there and you have not dismissed it; a retry over it is 429. A follow-up in your Agent's own conversation (it answers what you wrote while it replied) is queued whatever the count, and counts toward it; one in a group counts in the lane of what it answers (Agents and runs, In a group) | owner |
-| Calls on other people's Agents (a mention in a group that would start a reply of an Agent whose owner is someone else, made by a person or by an Agent's message they are behind: their own Agent's, or one relaying their call) | 5 together per person (`AGENT_CALLER_RUNS_PER_MINUTE`), counted from the stored runs under the caller's account lock, so exactly, and not scaled by `RATE_LIMIT_SCALE`; calls on the caller's own Agents never count. Over it the mention starts nothing and nothing of it is recorded — no run, no `rate_limited` run, no notice to the group or to the Agent's owner (the message is sent as any), only one log line (Metrics in the log). A mention folded into a reply already under way starts nothing, so it is neither counted nor refused. It is checked after the Agent's others' daily budget (Agents in a group) and before the owner's replies a minute | caller |
+| Calls on other people's Agents (a mention in a group that would start a reply of an Agent whose owner is someone else, made by a person or by an Agent's message they are behind: their own Agent's, or one relaying their call) | 5 together per person (`AGENT_CALLER_RUNS_PER_MINUTE`), counted from the stored runs under the caller's account lock, so exactly, and not scaled by `RATE_LIMIT_SCALE`; calls on the caller's own Agents never count. Over it the mention starts nothing and nothing of it is recorded — no run, no `rate_limited` run, no notice to the group or to the Agent's owner (the message is sent as any), only one log line (Metrics in the log) and, when a person's own message made the call, a word to that person alone in the answer to their send (`notCalled`, `POST /api/conversations/:id/messages`). A mention folded into a reply already under way starts nothing, so it is neither counted nor refused. It is checked after the Agent's others' daily budget (Agents in a group) and before the owner's replies a minute | caller |
 | `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run`, `GET /api/conversations/:id/runs` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `POST /api/conversations/:id/agents/halt` | 20 (a budget of its own) | principal |
@@ -771,7 +771,7 @@ their own), and the free allowance or balance. And a person who calls other peop
 mentioning an Agent while it replies cannot keep it replying past its owner's limits. For a mention by someone other
 than the Agent's owner the checks run in this order, and the first to refuse decides: the others' daily budget (the
 group is told), then — unless the mention folds into a reply under way, which starts nothing — the caller's limit
-(nobody is told), then the lane's replies a minute (a `rate_limited` run, which only the owner sees).
+(only the sender is told, in the answer to their send), then the lane's replies a minute (a `rate_limited` run, which only the owner sees).
 
 **A reply there** (Agents and runs: the worker, What the model is shown):
 
@@ -1487,9 +1487,14 @@ owner also removes their Agent.
   characters, joiners, variation selectors, tag characters, Hangul fillers U+115F/U+1160/U+3164/U+FFA0, the
   combining grapheme joiner, …) and not the Braille blank U+2800 (emoji sequences, keycaps, flags and
   right-to-left text all have one); a caption may be empty or invisible.
-- 201 `{"message": WireMessage, "duplicate": false}`.
+- 201 `{"message": WireMessage, "duplicate": false}`, and, only when the message called someone else's Agent in a group
+  and your own calls a minute on other people's Agents refused it (`AGENT_CALLER_RUNS_PER_MINUTE`, Rate limits),
+  `"notCalled": [{"agentId", "reason": "caller_rate_limited"}]`, one entry per Agent it did not reach, in id order
+  (absent otherwise, never empty). It is yours alone, in this answer: it is not stored with the message, nor in what
+  anyone receives of it (push, history, sync), nor said of a call relayed through an Agent's message (those are only
+  logged); a call another limit refused (the Agent's others' daily budget: its group is told) is not in it.
 - Retries: the same `clientTxn` again (same sender, same conversation) stores nothing and answers 200
-  `{"message": <the stored message>, "duplicate": true}` — even if you could no longer send there now (you
+  `{"message": <the stored message>, "duplicate": true}` (no `notCalled`) — even if you could no longer send there now (you
   must still be a member). The same
   `clientTxn` in another conversation is a new message there. 409 `client_txn_reused` when the message stored
   under it is no longer visible to you (you left and were added again).
@@ -1900,7 +1905,7 @@ text. `replyMode` plays no part. A message that names no handle costs nothing, n
   its active run in the group (a queued run a person's message is folded into is a person's from then on, and the
   owner's own — the owner its caller — when the message is the owner's; another member's leaves its lane and first
   caller), else, for a call on someone else's Agent, the caller's limit (`AGENT_CALLER_RUNS_PER_MINUTE`: over it,
-  nothing is recorded and one `caller_rate_limited` line is logged), else a queued run (`triggered_by` `human`, with its
+  nothing is recorded, one `caller_rate_limited` line is logged and the sender's answer names the Agent, `notCalled`), else a queued run (`triggered_by` `human`, with its
   caller and lane) — or, over its owner's replies a minute in the call's lane, a `failed` `rate_limited` run, of which
   there is one per Agent in the group: while it is the Agent's latest run there and its owner has not dismissed it, it
   covers every further mention over the limit (announced again) instead of a new one being recorded. The owners'
