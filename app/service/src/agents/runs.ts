@@ -78,8 +78,8 @@ export type GroupRunState = "replying" | "unavailable" | null;
 
 /**
  * The state of an Agent's reply in a group `to` its owner or to any other member (`GroupRunState`). A reply nobody had
- * asked for (lane `proactive`) that failed is its owner's alone to know: the others were never asked anything of it,
- * and are told nothing failed (nor, so, that it tried to speak unasked).
+ * asked for (lane `proactive`) that failed shows the others nothing — nobody asked them anything of it — while its owner
+ * is told it failed. While it is queued or running the others see `replying`, the same as for any reply.
  */
 export function groupRunState(r: (Pick<RunRow, "status" | "dismissed_at"> & { lane: Lane }) | null | undefined, to: "owner" | "member"): GroupRunState {
   if (!r) return null;
@@ -776,14 +776,17 @@ async function haltedSince(t: Tx, conversationId: string, seq: number): Promise<
  * Whether a notice of `event` (about Agent `agentId`, when given) was appended to the conversation after `after`: a seq
  * (after that message: a person's latest, for the chain's notices) or a time (since then: the others' daily budget's
  * notice once a site day, `agent_quieted` once an hour, proactive/decide.ts). What keeps each notice to once a period.
+ * Those counted by time are appended by their Agent (`actorId` = `agentId`: the message's sender), so they are also
+ * looked for by sender, which the sender's index finds without reading the group's history.
  */
 export async function toldSince(q: Queryable, conversationId: string, after: number | Date, event: SystemEvent["event"], agentId: string | null = null): Promise<boolean> {
+  const bySender = typeof after !== "number" && agentId !== null;
   const { rowCount } = await q.query(
     `select 1 from messages
       where conversation_id = $1 and ${typeof after === "number" ? "seq > $2" : "created_at >= $2"} and kind = 'system' and body ->> 'event' = $3
-        and ($4::text is null or body ->> 'agentId' = $4)
+        and ($4::text is null or body ->> 'agentId' = $4)${bySender ? " and sender_id = $5" : ""}
       limit 1`,
-    [conversationId, after, event, agentId],
+    [conversationId, after, event, agentId, ...(bySender ? [agentId] : [])],
   );
   return rowCount !== 0;
 }
