@@ -272,7 +272,11 @@ export class DbAgentPort implements AgentPort {
    *    others' daily budget again (runs.ts `othersBudgetRefusesAdmission`: a queued reply, and one not admitted yet,
    *    holds nothing, so replies queued in several groups at once could pass it): spent, it ends `cancelled` with no
    *    error (`OTHERS_BUDGET_SPENT`) — no call, nothing held or charged — and the budget's notice, if this appended it,
-   *    is published to the group after commit, the Agent pushed to its owner. Otherwise
+   *    is published to the group after commit, the Agent pushed to its owner. What step 1 took on (noted on the run
+   *    after its claim) is handed back as noted — `covers_seq` back to what it covered before, `pending_seq` at least
+   *    what it took on — so `finish`'s follow-up answers it as any: the owner's own mention is queued as theirs (the
+   *    owner's calls are never refused by this budget), someone else's meets the budget again and is not queued.
+   *    Otherwise
    *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
    *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
    *    else `none`.
@@ -280,7 +284,7 @@ export class DbAgentPort implements AgentPort {
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
     const now = new Date();
-    const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number }> => {
+    const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number }> => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
       const group = run.conversationId !== agent.conversationId;
@@ -302,7 +306,9 @@ export class DbAgentPort implements AgentPort {
       }
       if (!resolved) return { end: UNAVAILABLE };
 
-      const covers = Math.max(Number(state.covers_seq ?? 0), Number(state.pending_seq ?? 0));
+      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back).
+      const coveredBefore = Number(state.covers_seq ?? 0);
+      const covers = Math.max(coveredBefore, Number(state.pending_seq ?? 0));
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
@@ -319,7 +325,7 @@ export class DbAgentPort implements AgentPort {
       );
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers };
+      return { resolved, loaded, covers, coveredBefore };
     });
     if ("end" in first) return first.end;
 
@@ -347,9 +353,21 @@ export class DbAgentPort implements AgentPort {
       // transaction rolls back) and the run is left running, unadmitted, for the caller to end (the worker: `release`).
       if (closing?.aborted) throw closing.reason;
       // Someone else's call meets the Agent's others' daily budget once more, now that the replies admitted before it hold.
+      // Refused, what step 1 took on (noted on it after its claim — its owner's mention, say) is handed back as noted, so
+      // `finish`'s follow-up answers it by the usual rule: its owner's own is queued; someone else's meets the budget again
+      // and is simply not queued (no second notice that day), so nothing loops.
       if (state.lane === "others") {
         const told = await othersBudgetRefusesAdmission(t, run.conversationId, agent, config);
-        if (told) return { end: OTHERS_BUDGET_SPENT, told };
+        if (told) {
+          if (first.covers > first.coveredBefore) {
+            await t.query("update agent_runs set covers_seq = $2, pending_seq = greatest(coalesce(pending_seq, 0), $3) where id = $1", [
+              run.id,
+              first.coveredBefore,
+              first.covers,
+            ]);
+          }
+          return { end: OTHERS_BUDGET_SPENT, told };
+        }
       }
       const { resolved, loaded, covers } = first;
       try {

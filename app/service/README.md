@@ -2046,7 +2046,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       daily budget once more (`runs.ts` `othersBudgetRefusesAdmission`; its own hold is not taken yet, and the Agent's
       lock orders it after the replies admitted before it, whose holds count): spent, it ends `cancelled` with no error,
       with no call and nothing held or charged, the group told by `agent_daily_budget_reached` once a day (published
-      after commit) and the owner pushed their Agent (Agents in a group). Otherwise the call is admitted on its input
+      after commit) and the owner pushed their Agent (Agents in a group). What the first step took on (mentions noted
+      on the run after its claim) is handed back as noted, so the run's end follows it up as any (Coalescing): the
+      owner's own mention is answered — the owner's calls are never refused by this budget — and someone else's meets
+      the budget again and is not queued (no second notice that day); nothing loops. Otherwise the call is admitted on its input
       estimate (Metering; `no_quota` ends it `failed` before any call) and the Agent's read marker moves to what the run
       covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { siteDayStart } from "../src/accounts/store.ts";
-import { isRunEnd, NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
+import { isRunEnd, NOTHING, type RunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { insertMessage } from "../src/messages/model.ts";
@@ -12,7 +12,8 @@ import { closeAllSockets, connect } from "./helpers/ws.ts";
 
 /**
  * The others' daily budget (the limits plan, Task 4): what calls by people other than an Agent's owner — themselves or
- * through their own Agents (lane `others`) — spend of its owner's points in a site day is capped by the Agent's
+ * through an Agent's message they are behind, their own Agent's or one relaying their call (lane `others`) — spend of
+ * its owner's points in a site day is capped by the Agent's
  * `othersBudget` (20 points unless its owner says otherwise; `null`: no cap). Spent is what those replies were charged
  * today and what the running ones hold now. Once it is spent such a call reaches nothing — not even a reply under way —
  * and the group is told once a day; its owner is pushed the Agent again. The owner's own calls never count and are never
@@ -359,6 +360,39 @@ describe("the others' daily budget", () => {
 
     // The first, still running and holding, is ended here.
     await app.agentPort.finish(first!, { status: "stopped" }, null, NOTHING);
+  });
+
+  it.each([
+    ["its owner's is answered", "owner", true],
+    ["another member's meets the budget again: nothing, and no second notice", "third", false],
+  ] as const)("a mention noted between the claim and a budget-refused admission is followed up: %s", async (_what, who, answered) => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g, { othersBudget: "2" });
+    await paidOthers(anna, w.g, 2 * POINT - 1);
+    await say(w.member, w.g, "@anna 一");
+    const ticket = await app.agentPort.claimNext();
+    expect(ticket?.conversationId).toBe(w.g);
+    // Claimed (running), the reply has a mention noted on it before it begins; then the budget is spent.
+    const asked = await say(w[who], w.g, "@anna 我也问");
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "running", pending: asked });
+    await paidOthers(anna, w.g, 1);
+    const calls = gateway.calls.length;
+    const end = await app.agentPort.begin(ticket!);
+    expect(end).toEqual({ status: "cancelled" });
+    await app.agentPort.finish(ticket!, end as RunEnd, null, NOTHING);
+    expect(gateway.calls.length).toBe(calls);
+    expect(await noticesOf(w.g)).toHaveLength(1);
+    const queued = (await runsOf(anna.id, w.g)).filter((r) => r.status === "queued");
+    if (!answered) {
+      expect(queued).toEqual([]);
+      return;
+    }
+    // The owner's mention: an own follow-up covering it, answered when it runs.
+    expect(queued).toEqual([expect.objectContaining({ lane: "own", covers: asked })]);
+    gateway.reply("好的");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls + 1);
+    expect((await runsOf(anna.id, w.g)).at(-1)).toMatchObject({ status: "done", lane: "own", covers: asked });
   });
 
   it("a running reply's hold counts; its owner's does not", async () => {
