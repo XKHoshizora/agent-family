@@ -463,6 +463,78 @@ describe("a run's lane and who called for it", () => {
     ]);
   });
 
+  /**
+   * Beta (the member's) replies to the third; while it runs, Delta (the member's too: its message, posted by no run, is
+   * the member's own call) names Beta and is refused by `refuse`. Alone it is not followed up; with the third's mention
+   * noted after it, the follow-up is the third's — the refused mention, which lies among what it answers, is no call.
+   */
+  const refusedThenAsked = async (refuse: (w: World, betaId: string) => Promise<string[]>) => {
+    const w = await world();
+    const beta = await agentOf(w.member, "beta", w.g);
+    const delta = await agentOf(w.member, "delta", w.g);
+    const pendingOf = async (runId: string) => (await db.query("select pending_seq::int as p from agent_runs where id = $1", [runId])).rows[0].p as number | null;
+    // Beta's runs as `laneOf` gives them, less the fixtures `refuse` made.
+    const fixtures: string[] = [];
+    const lanes = async () =>
+      (
+        await db.query<{ lane: string; caller_id: string | null }>(
+          "select lane, caller_id from agent_runs where agent_id = $1 and conversation_id = $2 and id <> all($3::uuid[]) order by created_at, id",
+          [beta.id, w.g, fixtures],
+        )
+      ).rows.map((r) => [r.lane, r.caller_id]);
+
+    // Only the refused mention after what the reply covers: nothing is noted, nothing follows.
+    await say(w.third, w.g, "@beta 一");
+    const one = await claim(beta.id, w.g);
+    fixtures.push(...(await refuse(w, beta.id)));
+    expect((await agentSays(delta.id, w.g, "@beta 你看看")).runs).toEqual([]);
+    expect(await pendingOf(one.id)).toBeNull();
+    await finish(one);
+    expect(await lanes()).toEqual([["others", w.third.id]]);
+
+    // The same, then the third's mention noted on the reply: the follow-up is the third's, not the member's own.
+    await say(w.third, w.g, "@beta 二");
+    const two = await claim(beta.id, w.g);
+    fixtures.push(...(await refuse(w, beta.id)));
+    expect((await agentSays(delta.id, w.g, "@beta 你再看看")).runs).toEqual([]);
+    const asked = await say(w.third, w.g, "@beta 三");
+    expect(await pendingOf(two.id)).toBe(asked);
+    await finish(two);
+    expect((await lanes()).slice(1)).toEqual([
+      ["others", w.third.id],
+      ["others", w.third.id],
+    ]);
+  };
+
+  it("an Agent's mention refused because the group was halted never counts as a call of a later follow-up", async () => {
+    await refusedThenAsked(async (w) => {
+      expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+      return [];
+    });
+  });
+
+  it("an Agent's mention refused by the called Agent's chain budget never counts as a call of a later follow-up", async () => {
+    let budgetSet = false;
+    await refusedThenAsked(async (w, betaId) => {
+      if (!budgetSet) {
+        expect((await api(app, w.member, "PATCH", `/api/agents/${betaId}`, { chainBudget: "1" })).status).toBe(200);
+        budgetSet = true;
+      }
+      // A reply of Beta's in the group covering a message after the latest from a person, charged a point: spent.
+      const run = await db.query<{ id: string }>(
+        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, charge_to, finished_at)
+         select 'reply', $1, $2, $3, 'done', seq + 1, 'site', 'fast', 'balance', now() from conversations where id = $1 returning id`,
+        [w.g, betaId, w.member.id],
+      );
+      await db.query(
+        `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, cost_micro, balance_micro, outcome)
+         values ($1, $2, $3, 'reply', 'site', 'fast', 1000000, 1000000, 'done')`,
+        [w.member.id, betaId, run.rows[0]!.id],
+      );
+      return [run.rows[0]!.id];
+    });
+  });
+
   it("is never on the wire: a run's owner and the other members see no lane and no caller", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);

@@ -762,6 +762,10 @@ async function chainBudgetSpent(
  *   (`othersBudgetSpent`, read from the row read above, not locked) → it is not called, and an
  *   `agent_daily_budget_reached` notice about it is appended unless one was today (its owner is returned, to push the
  *   Agent to).
+ * Each Agent refused so, or for a block, is recorded with the message (`recordRefusedCalls`): nothing was noted for it,
+ * and should the message lie among what a later follow-up of that Agent answers, it is no call of it (`followUp`). One
+ * the query does not find at all (paused, deleted, without a model, only its owner's to call, not a member) is not
+ * recorded: a follow-up reads those of the Agent as they are when it is decided.
  * The rest are reached as a person's message reaches them (`reachAgents`), as an Agent's (`triggered_by` `agent`),
  * called for by the person behind the message (`behindAgentMessage`, from `postedBy`, the caller and lane of the run that
  * posted it; null when no run did): the caller of that run when it is not its owner's own, else the poster's owner —
@@ -783,24 +787,36 @@ export async function triggerFromAgent(
   if (handles.length === 0) return noneTriggered();
   const behind = behindAgentMessage(poster.ownerId, postedBy);
   // A block, either way, between a target's owner and the poster's owner or the person behind the message (none to
-  // match when nobody is: `$5` null) keeps the target out.
-  const { rows: targets } = await t.query<{ id: string; owner_id: string; budget: string; others_budget: string | null }>(
-    `select p.id, p.owner_id, a.chain_budget_micro::text as budget, a.others_budget_micro::text as others_budget
+  // match when nobody is: `$5` null) refuses the target.
+  const { rows } = await t.query<{ id: string; owner_id: string; budget: string; others_budget: string | null; blocked: boolean }>(
+    `select p.id, p.owner_id, a.chain_budget_micro::text as budget, a.others_budget_micro::text as others_budget,
+            exists (select 1 from blocks b
+                     where (b.blocker_id = p.owner_id and b.blocked_id in ($4::uuid, $5::uuid))
+                        or (b.blocked_id = p.owner_id and b.blocker_id in ($4::uuid, $5::uuid))) as blocked
        from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
       where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
         and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
-        and not exists (select 1 from blocks b
-                         where (b.blocker_id = p.owner_id and b.blocked_id in ($4::uuid, $5::uuid))
-                            or (b.blocked_id = p.owner_id and b.blocker_id in ($4::uuid, $5::uuid)))
       order by p.id`,
     [conversationId, handles, poster.id, poster.ownerId, behind],
   );
-  if (targets.length === 0) return noneTriggered();
+  // The targets refused below (a block, the halt, the chain limit, a chain budget, an others' daily budget), recorded with
+  // the message as this returns, so that none of them counts it as a call later (`followUp`).
+  const refused = rows.filter((r) => r.blocked).map((r) => r.id);
+  const targets = rows.filter((r) => !r.blocked);
+  const recorded = async (triggered: Triggered): Promise<Triggered> => {
+    await recordRefusedCalls(t, conversationId, message.seq, refused);
+    return triggered;
+  };
+  if (targets.length === 0) return recorded(noneTriggered());
 
   const human = await latestHumanSeq(t, conversationId);
-  if (await isHalted(t, conversationId, human)) return noneTriggered();
+  const all = targets.map((target) => target.id);
+  if (await isHalted(t, conversationId, human)) {
+    refused.push(...all);
+    return recorded(noneTriggered());
+  }
   const limit = config.agentChainLimit;
   // Every message after a person's latest that is not a notice is an Agent's.
   const inARow = await t.query<{ n: number }>(
@@ -808,8 +824,9 @@ export async function triggerFromAgent(
     [conversationId, human, limit],
   );
   if (inARow.rows[0]!.n >= limit) {
-    if (await toldSince(t, conversationId, human, "agent_chain_paused")) return noneTriggered();
-    return { ...noneTriggered(), notices: [await appendSystem(t, conversationId, { event: "agent_chain_paused", actorId: poster.id, limit })] };
+    refused.push(...all);
+    if (await toldSince(t, conversationId, human, "agent_chain_paused")) return recorded(noneTriggered());
+    return recorded({ ...noneTriggered(), notices: [await appendSystem(t, conversationId, { event: "agent_chain_paused", actorId: poster.id, limit })] });
   }
 
   const dayStart = today(config);
@@ -819,15 +836,33 @@ export async function triggerFromAgent(
     const spent = await chainBudgetSpent(t, conversationId, target.id, BigInt(target.budget), human);
     if (spent) {
       if (spent.notice) told.notices.push(spent.notice);
+      refused.push(target.id);
       continue;
     }
     const agent = { id: target.id, ownerId: target.owner_id, othersBudgetMicro: target.others_budget === null ? null : BigInt(target.others_budget) };
     const others = callerOf(agent.ownerId, behind).lane === "others";
-    if (others && (await refusedByOthersBudget(t, conversationId, agent, dayStart, told))) continue;
+    if (others && (await refusedByOthersBudget(t, conversationId, agent, dayStart, told))) {
+      refused.push(target.id);
+      continue;
+    }
     called.push(agent);
   }
   const reached = await reachAgents(t, conversationId, called, message.seq, "agent", (agent) => callerOf(agent.ownerId, behind), config);
-  return { ...reached, notices: [...reached.notices, ...told.notices], budgetReached: [...reached.budgetReached, ...told.budgetReached] };
+  return recorded({ ...reached, notices: [...reached.notices, ...told.notices], budgetReached: [...reached.budgetReached, ...told.budgetReached] });
+}
+
+/**
+ * That the Agent's message at `seq` named each of `agentIds` and was refused for it when it was posted
+ * (`refused_agent_calls`, migration 022; `triggerFromAgent`): `followUp` does not count it as a call of theirs. Never on
+ * the wire.
+ */
+async function recordRefusedCalls(t: Tx, conversationId: string, seq: number, agentIds: readonly string[]): Promise<void> {
+  if (agentIds.length === 0) return;
+  await t.query("insert into refused_agent_calls (conversation_id, seq, agent_id) select $1, $2, unnest($3::uuid[]) on conflict do nothing", [
+    conversationId,
+    seq,
+    agentIds,
+  ]);
 }
 
 /** What a run's end calls for in its conversation, to act on after commit (`followUp`). */
@@ -869,10 +904,10 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [], budgetReached: [] };
  * owner's own, else that Agent's owner) — make it its owner's own when the owner is behind one of them, else the
  * earliest caller's (a message nobody is behind, relayed from a reply nobody called for, names no one: the earliest that
  * names someone). When none of them is left (a block since, or the Agent no longer lets members call it) it is others',
- * with no caller: a call its owner no longer allows does not ride the owner's own lane. An Agent's mention that was
- * refused when it was posted (the group halted, the chain limit, the Agent's chain budget) is not told apart here — the
- * stored messages do not say so, and the halt's history and the charges as they were then are not kept — so it counts
- * like any other; it can make a follow-up its owner's own only when the owner was behind that message.
+ * with no caller: a call its owner no longer allows does not ride the owner's own lane. An Agent's mention of it that
+ * was refused when it was posted — the group halted, the chain limit, its chain budget, its others' daily budget, a
+ * block — is no call at all (`triggerFromAgent` recorded it, `refused_agent_calls`): nothing was noted for it, though it
+ * may lie among what the follow-up answers.
  */
 export async function followUp(
   t: Tx,
@@ -886,8 +921,9 @@ export async function followUp(
   if (conversationId === agent.conversationId) return { ...NO_FOLLOW_UP, run: await queueRun(t, agent, conversationId, pending, "human", owners) };
   // The person behind each message (`behindAgentMessage`): its sender; for an Agent's message, the caller of the run that
   // posted it (the run its `client_txn` names) unless that run is its owner's own (or there is none: the owner). A
-  // message does not count when there is a block, either way, between the Agent's owner and the sender or the sending
-  // Agent's owner, or the person behind it (nobody behind it matches no block).
+  // message does not count when it was refused for this Agent when it was posted (`refused_agent_calls`), nor when there
+  // is a block, either way, between the Agent's owner and the sender or the sending Agent's owner, or the person behind
+  // it (nobody behind it matches no block).
   const { rows } = await t.query<{ kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null }>(
     `select p.kind, m.sender_id, m.body ->> 'text' as text, bh.caller_id
        from messages m
@@ -897,6 +933,7 @@ export async function followUp(
         and r.agent_id = m.sender_id and r.conversation_id = m.conversation_id and r.purpose = 'reply'
        cross join lateral (select case when r.lane <> 'own' then r.caller_id else coalesce(p.owner_id, p.id) end as caller_id) bh
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5
+        and not exists (select 1 from refused_agent_calls x where x.conversation_id = m.conversation_id and x.seq = m.seq and x.agent_id = $5)
         and not exists (select 1 from blocks b
                          where (b.blocker_id = $4 and b.blocked_id in (coalesce(p.owner_id, p.id), bh.caller_id))
                             or (b.blocked_id = $4 and b.blocker_id in (coalesce(p.owner_id, p.id), bh.caller_id)))
