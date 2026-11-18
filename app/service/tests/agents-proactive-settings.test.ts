@@ -75,6 +75,16 @@ describe("proactive settings", () => {
     expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json).toMatchObject({ name: agent.name, proactive: false, proactiveLevel: "normal" });
   });
 
+  it("without the judgement model, turning it on for someone else's Agent is the 404 of any Agent not yours, and for a deleted one agent_deleted", async () => {
+    expect(app.deps.config.judge).toBeNull();
+    const owner = await signUp(app, "pro_order");
+    const stranger = await signUp(app, "pro_stranger");
+    const agent = await mustCreateAgent(app, owner);
+    expect(await api(app, stranger, "PATCH", `/api/agents/${agent.id}`, { proactive: true })).toMatchObject({ status: 404, json: { error: "not_found" } });
+    expect((await api(app, owner, "DELETE", `/api/agents/${agent.id}`)).status).toBe(200);
+    expect(await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { proactive: true })).toMatchObject({ status: 409, json: { error: "agent_deleted" } });
+  });
+
   it("proactive: false is always accepted; level and budget may be set at any time", async () => {
     const owner = await signUp(app, "pro_off");
     const made = await createAgent(app, owner, { proactive: false, proactiveLevel: "less" });

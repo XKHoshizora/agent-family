@@ -77,6 +77,7 @@ const chainBudget = z
  * otherwise.
  */
 const othersBudget = chainBudget.nullable();
+/** The others' daily budget's default (the limits design); the proactive budget's below is a setting of its own. */
 const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
 
 /**
@@ -86,7 +87,11 @@ const DEFAULT_OTHERS_BUDGET = 20n * MICRO_PER_POINT;
  */
 const proactiveLevel = z.enum(PROACTIVE_LEVELS);
 const proactiveBudget = chainBudget;
+/** The proactive budget's default (batch 2D design rule 11): the same number as the others' budget's, not tied to it. */
 const DEFAULT_PROACTIVE_BUDGET = 20n * MICRO_PER_POINT;
+
+/** What an Agent has spent today in the two lanes with a daily budget when nothing is (a new Agent). */
+const NO_SPEND = { others: 0n, proactive: 0n } as const;
 
 /**
  * 409 `proactive_unavailable` when `proactive` turns on (`on`) while the judgement model is not configured. An Agent
@@ -193,7 +198,7 @@ export function registerAgentRoutes(
   const api = app.withTypeProvider<ZodTypeProvider>();
   /** The owner's view of `agent`, with what other people's calls and its proactive replies have spent today, read now (runs.ts `spentTodayOf`). */
   const viewOf = async (agent: AgentRow) =>
-    toView(agent, (await spentTodayOf(db, [agent.id], siteToday(config))).get(agent.id)!, (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
+    toView(agent, (await spentTodayOf(db, [agent.id], siteToday(config))).get(agent.id) ?? NO_SPEND, (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -259,7 +264,7 @@ export function registerAgentRoutes(
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
       // A new Agent has had no reply yet (nothing spent) and its owner has named nobody.
-      return reply.code(201).send(toView(agent, { others: 0n, proactive: 0n }, []));
+      return reply.code(201).send(toView(agent, NO_SPEND, []));
     },
   );
 
@@ -304,7 +309,7 @@ export function registerAgentRoutes(
       const ids = agents.map((a) => a.id);
       const spent = await spentTodayOf(db, ids, siteToday(config));
       const named = await appellationEntriesOf(db, ids);
-      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? { others: 0n, proactive: 0n }, named.get(a.id)!)) };
+      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? NO_SPEND, named.get(a.id)!)) };
     },
   );
 

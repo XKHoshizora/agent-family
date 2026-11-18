@@ -39,19 +39,23 @@ function secondsSince(at: Date | null, now: Date): number {
   return Number.isFinite(s) && s > 0 ? s : 0;
 }
 
+/** How many times `amount` halves at one halving every `per`: none when `per` is not a positive number (no decay, never NaN). */
+function halvings(amount: number, per: number): number {
+  return Number.isFinite(per) && per > 0 ? amount / per : 0;
+}
+
 export function surchargeNow(s: GroupState, now: Date, P: ProactiveNumbers): number {
   const surcharge = nonNegative(s.surcharge);
   if (surcharge === 0) return 0;
-  const byTime = secondsSince(s.surchargeAt, now) / P.surchargeHalfLifeS;
-  const byMessages = nonNegative(s.othersSince) / P.surchargeHalfMessages;
+  const byTime = halvings(secondsSince(s.surchargeAt, now), P.surchargeHalfLifeS);
+  const byMessages = halvings(nonNegative(s.othersSince), P.surchargeHalfMessages);
   return surcharge * Math.pow(0.5, Math.max(byTime, byMessages));
 }
 
 export function quietNow(s: GroupState, now: Date): number {
   const quiet = nonNegative(s.quiet);
-  const halfLife = s.quietHalfLifeS;
-  if (quiet === 0 || halfLife === null || !Number.isFinite(halfLife) || halfLife <= 0) return 0;
-  return quiet * Math.pow(0.5, secondsSince(s.quietAt, now) / halfLife);
+  if (quiet === 0 || s.quietHalfLifeS === null) return 0;
+  return quiet * Math.pow(0.5, halvings(secondsSince(s.quietAt, now), s.quietHalfLifeS));
 }
 
 export function thresholdNow(level: Level, s: GroupState, now: Date, P: ProactiveNumbers): number {

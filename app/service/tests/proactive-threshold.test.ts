@@ -152,6 +152,22 @@ describe("garbage in", () => {
     expect(Number.isFinite(a.surcharge) && a.surcharge >= 0).toBe(true);
     const q = afterQuiet(g, 0.95, T0, P)!;
     expect(Number.isFinite(q.state.quiet) && q.state.quiet >= 0).toBe(true);
+    // And what they return thresholds finitely, now and later.
+    for (const state of [a, q.state]) {
+      for (const at of [T0, later(90)]) expect(Number.isFinite(thresholdNow("normal", state, at, P))).toBe(true);
+    }
+  });
+
+  test("a half-life or a halving count of 0, or not a number, is no decay: never a NaN threshold", () => {
+    const s: GroupState = { ...NO_STATE, surcharge: 0.2, surchargeAt: T0, othersSince: 0, quiet: 0.3, quietHalfLifeS: 0, quietAt: T0 };
+    for (const bad of [0, NaN, Infinity, -1]) {
+      const Q: ProactiveNumbers = { ...P, surchargeHalfLifeS: bad, surchargeHalfMessages: bad };
+      for (const now of [T0, later(600)]) {
+        expect([bad, now, surchargeNow(s, now, Q)]).toEqual([bad, now, 0.2]);
+        expect([bad, now, quietNow({ ...s, quietHalfLifeS: bad }, now)]).toEqual([bad, now, 0.3]);
+        expect(Number.isFinite(thresholdNow("normal", { ...s, quietHalfLifeS: bad }, now, Q))).toBe(true);
+      }
+    }
   });
 
   test("a future surchargeAt does not boost the surcharge", () => {

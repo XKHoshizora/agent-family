@@ -1082,6 +1082,14 @@ ${PASSAGE}
 `)).toBe(unasked);
   });
 
+  it("with a roster, the passage is a paragraph of its own before the roster's heading too", () => {
+    const people = [{ name: "米娅", handle: "mia", role: "群成员" as const, appellation: null }];
+    const unasked = groupSystemPrompt({ name: "小帮手", handle: "helper_bot", persona: "你说话简短。" }, { displayName: "主人甲" }, { ...scene, people }, NOW, "UTC", "k7f2ab", true);
+    expect(unasked).toContain(`${PASSAGE}
+
+以下是群里的人，由系统列出。`);
+  });
+
   it("through begin: a run whose lane is proactive is shown the passage and not the called-by-@ sentence; a mentioned run, the reverse", async () => {
     const w = await world();
     await addOwn(w.owner, w.g, w.agent.id);

@@ -107,11 +107,11 @@ async function postAs(conv: string, senderId: string, text: string, reasoning?: 
  * A reply run of `agentId` in `conv` that ended `done`, called on its owner's provider model `model` at `reasoning`, and
  * its usage record (a provider call costs nothing); returns its id.
  */
-async function providerRun(conv: string, agentId: string, ownerId: string, model: string, reasoning: string): Promise<string> {
+async function providerRun(conv: string, agentId: string, ownerId: string, model: string, reasoning: string, lane: "own" | "others" | "proactive"): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, source, model, reasoning, started_at, finished_at, lane)
-     select 'reply', $1, $2, $3, 'done', c.seq, 'provider', $4, $5, now(), now(), 'proactive' from conversations c where c.id = $1 returning id`,
-    [conv, agentId, ownerId, model, reasoning],
+     select 'reply', $1, $2, $3, 'done', c.seq, 'provider', $4, $5, now(), now(), $6 from conversations c where c.id = $1 returning id`,
+    [conv, agentId, ownerId, model, reasoning, lane],
   );
   const id = rows[0]!.id;
   await db.query(
@@ -160,7 +160,8 @@ async function world() {
   await seat(g, agent.id);
   expect((await api(app, owner, "PUT", `/api/agents/${agent.id}/appellations/${mia.id}`, { appellation: HIDDEN.appellation })).status).toBe(200);
   // Said as a reply its owner's provider model gave there at a thinking level, unasked (its owner's `via`).
-  const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high");
+  // A reply nobody asked for: the owner's copy says so (`via.proactive`), nobody else's has a `via`.
+  const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high", "proactive");
   const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
 
