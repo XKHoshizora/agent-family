@@ -1086,7 +1086,9 @@ ${PASSAGE}
     const w = await world();
     await addOwn(w.owner, w.g, w.agent.id);
     await say(w.mia, w.g, "有人知道读书会定在哪天吗");
-    // The reply run a proactive judgement queues, by nobody (as a person's message queues none, it is put in by hand).
+    // The reply run a proactive judgement queues, by nobody (as a person's message queues none, it is put in by hand), of
+    // an Agent with proactive replies on (its admission reads the switch again).
+    await db.query("update agents set proactive = true where principal_id = $1", [w.agent.id]);
     await db.query(
       `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, lane)
        select 'reply', $1, $2, $3, 'queued', c.seq, 'proactive' from conversations c where c.id = $1`,

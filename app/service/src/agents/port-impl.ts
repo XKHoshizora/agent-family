@@ -271,7 +271,8 @@ export class DbAgentPort implements AgentPort {
    * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one in a group its Agent is no
    *    longer a member of (`cancelled`, `agent_removed`) and one whose model does not resolve (`failed`,
    *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). Otherwise the run
-   *    takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be shown is read: the
+   *    takes on what came meanwhile (`covers_seq` = max(covers, pending)) — unless nobody asked for it (lane `proactive`):
+   *    what was noted on it stays noted, for its follow-up — and what the model may be shown is read: the
    *    system text — its own conversation's (`systemPrompt`, with what the Agent calls its owner), or the group's
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
    *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
@@ -329,10 +330,12 @@ export class DbAgentPort implements AgentPort {
       }
       if (!resolved) return { end: UNAVAILABLE };
 
-      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back).
+      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back). A reply
+      // nobody asked for (lane `proactive`) takes nothing on: a mention noted on it stays noted, and its follow-up answers
+      // it in the caller's lane — it is no reply nobody asked for, nor charged to the proactive budget, nor ended by a halt.
       const coveredBefore = Number(state.covers_seq ?? 0);
-      const covers = Math.max(coveredBefore, Number(state.pending_seq ?? 0));
-      await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
+      const covers = state.lane === "proactive" ? coveredBefore : Math.max(coveredBefore, Number(state.pending_seq ?? 0));
+      if (state.lane !== "proactive") await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
