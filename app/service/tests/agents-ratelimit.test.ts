@@ -39,7 +39,7 @@ describe("Agent write rate limit", () => {
     for (let i = 2; i <= 28; i++) expect((await api(app, a, "PATCH", `/api/agents/${agent.id}`, { intro: `v${i}` })).status).toBe(200);
     // Refused for its target, and still counted.
     expect((await api(app, a, "PUT", `/api/agents/${agent.id}/appellations/${randomUUID()}`, { appellation: "称" })).status).toBe(404); // 29
-    expect((await api(app, a, "DELETE", `/api/agents/${agent.id}/appellations/${randomUUID()}`)).status).toBe(200); // 30
+    expect((await api(app, a, "DELETE", `/api/agents/${agent.id}/appellations/${randomUUID()}`)).status).toBe(404); // 30
     const limited = { status: 429, json: { error: "rate_limited" } };
     expect(await api(app, a, "PUT", `/api/agents/${agent.id}/appellations/${randomUUID()}`, { appellation: "称" })).toEqual(limited);
     expect(await api(app, a, "DELETE", `/api/agents/${agent.id}/appellations/${randomUUID()}`)).toEqual(limited);
