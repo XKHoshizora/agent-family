@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { PROACTIVE_LEVELS, formatPoints, pointsReached } from "../data/viewmodel.js";
+import { formatPoints, pointsReached, proactiveLevelLabel } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
 import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat } from "./AgentForm.jsx";
@@ -12,34 +12,32 @@ import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
 const groupMentionsLabel = (agent) => (GROUP_MENTIONS.find(([id]) => id === agent.groupMentions) ?? GROUP_MENTIONS[0])[1];
 
+/**
+ * Today's spend against a daily budget, by what spent it (`what`: 别人 @, 主动回复): how much of it, or — `reached` —
+ * that it is used up.
+ */
+function spendLine(what, spentToday, budget) {
+  const reached = pointsReached(spentToday, budget);
+  return { reached, text: reached ? `今天${what}的额度已用完，调高后立即恢复。` : `今天${what}已花 ${formatPoints(spentToday)} / ${formatPoints(budget)} 点` };
+}
+
 /** 别人 @ 每天最多花 with today's spend: only for my Agent that others may call, when the service says its budget. */
 function othersRows(agent) {
   if (agent.othersBudget === undefined || agent.groupMentions !== "members") return [];
   const spentToday = agent.othersSpentToday ?? "0";
-  const spent = formatPoints(spentToday);
   const text =
-    agent.othersBudget === null
-      ? `今天别人 @ 已花 ${spent} 点（不限）`
-      : pointsReached(spentToday, agent.othersBudget)
-        ? "今天别人 @ 的额度已用完，调高后立即恢复。"
-        : `今天别人 @ 已花 ${spent} / ${formatPoints(agent.othersBudget)} 点`;
+    agent.othersBudget === null ? `今天别人 @ 已花 ${formatPoints(spentToday)} 点（不限）` : spendLine("别人 @ ", spentToday, agent.othersBudget).text;
   return [["别人 @ 每天最多花", text]];
 }
 
 /** 主动参与群聊 with its level and today's spend: only in the owner's view, and only while it is on. */
 function proactiveRows(agent) {
   if (agent.proactive !== true) return [];
-  const spentToday = agent.proactiveSpentToday ?? "0";
-  const level = (PROACTIVE_LEVELS.find(([id]) => id === agent.proactiveLevel) ?? PROACTIVE_LEVELS[1])[1];
-  const budget = agent.proactiveBudget;
+  const level = proactiveLevelLabel(agent.proactiveLevel);
   // The budget is always said by the service; if it somehow is not, the level alone is shown.
-  const text =
-    budget === undefined
-      ? level
-      : pointsReached(spentToday, budget)
-        ? "今天主动回复的额度已用完，调高后立即恢复。"
-        : `${level} · 今天主动回复已花 ${formatPoints(spentToday)} / ${formatPoints(budget)} 点`;
-  return [["主动参与群聊", text]];
+  if (agent.proactiveBudget === undefined) return [["主动参与群聊", level]];
+  const { reached, text } = spendLine("主动回复", agent.proactiveSpentToday ?? "0", agent.proactiveBudget);
+  return [["主动参与群聊", reached ? text : `${level} · ${text}`]];
 }
 
 /** 它怎么称呼你 and how many others it has an appellation for: only in the owner's view of the Agent (mine), when set. */

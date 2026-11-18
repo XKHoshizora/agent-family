@@ -1657,6 +1657,27 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
   });
 
+  it("the site has lost its judgement model: an Agent that has it on shows the switch alone, saying so, to turn it off — never on", async () => {
+    const LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
+    const { patchAgent } = await openEditOf(proactive({ proactiveLevel: "more" }), OFF_SITE);
+    expect(box().checked).toBe(true);
+    expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(LOST);
+    expect(screen.queryByLabelText(LEVEL)).toBeNull();
+    expect(screen.queryByLabelText(AMOUNT)).toBeNull();
+    // Off and on again: as it was, nothing of it sent.
+    fireEvent.click(box());
+    fireEvent.click(box());
+    type("简介", "新简介");
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
+    // Off: that alone is sent.
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    fireEvent.click(box());
+    expect(box().checked).toBe(false);
+    await save();
+    expect(patchAgent.mock.calls[1][1]).toEqual({ proactive: false });
+  });
+
   it("an answer without the flag is read as no judgement model", async () => {
     await openAgents({ models: MODELS });
     await openCreate();

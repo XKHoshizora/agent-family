@@ -447,6 +447,10 @@ export const PROACTIVE_LEVELS = [
   ["normal", "适中"],
   ["more", "多说"],
 ];
+/** Whether `id` is one of the levels (`PROACTIVE_LEVELS`). */
+export const isProactiveLevel = (id) => PROACTIVE_LEVELS.some(([level]) => level === id);
+/** The label of level `id`; the default's (适中) for anything else. */
+export const proactiveLevelLabel = (id) => (PROACTIVE_LEVELS.find(([level]) => level === id) ?? PROACTIVE_LEVELS[1])[1];
 
 /** The prototype's two private-reply choices, by the service's `replyMode`. */
 const PRIVATE_REPLY = { always: "收到消息时回复", mention: "仅在我点名时回复" };
@@ -478,7 +482,7 @@ function agentView(a, version, loaded) {
     ...(typeof a.othersSpentToday === "string" ? { othersSpentToday: a.othersSpentToday } : {}),
     /** 主动参与群聊 with its level, daily budget and today's spend (decimal points): only the owner's view has these. */
     ...(typeof a.proactive === "boolean" ? { proactive: a.proactive } : {}),
-    ...(PROACTIVE_LEVELS.some(([id]) => id === a.proactiveLevel) ? { proactiveLevel: a.proactiveLevel } : {}),
+    ...(isProactiveLevel(a.proactiveLevel) ? { proactiveLevel: a.proactiveLevel } : {}),
     ...(typeof a.proactiveBudget === "string" ? { proactiveBudget: a.proactiveBudget } : {}),
     ...(typeof a.proactiveSpentToday === "string" ? { proactiveSpentToday: a.proactiveSpentToday } : {}),
     /** How it addresses me and the others: only the owner's view has these (absent, never defaulted, otherwise). */

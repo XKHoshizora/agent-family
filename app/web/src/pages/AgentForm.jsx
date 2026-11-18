@@ -2,7 +2,7 @@ import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { commonErrorText } from "../data/errorTexts.js";
 import { HANDLE_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, handle as handleProblem } from "../auth/validation.js";
-import { PROACTIVE_LEVELS } from "../data/viewmodel.js";
+import { PROACTIVE_LEVELS, isProactiveLevel } from "../data/viewmodel.js";
 import { Btn, Field, Modal, Notice, Reason, Switch, focusInvalid } from "../ui/primitives.jsx";
 import { ChevronLeft, Lock } from "../icons.js";
 import { AgentAppellations } from "./AgentAppellations.jsx";
@@ -29,6 +29,9 @@ export const CHAIN_BUDGET_DEFAULT = "50";
 export const OTHERS_BUDGET_DEFAULT = "20";
 /** 主动回复每天最多花 when nothing else is said, in points (the service's default); its amount is a budget like the others. */
 const PROACTIVE_BUDGET_DEFAULT = "20";
+/** Under 主动参与群聊: what it does, or — the site having no judgement model — why it does nothing now. */
+const PROACTIVE_HELPER = "打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。";
+const PROACTIVE_LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
 // A budget's amount, either of them, as the service takes it.
 const BUDGET_MIN = 1;
 const BUDGET_MAX = 100000;
@@ -103,7 +106,7 @@ const recordFields = (a) => ({
   othersChoice: a?.othersBudget === null ? "unlimited" : typeof a?.othersBudget === "string" && a.othersBudget !== OTHERS_BUDGET_DEFAULT ? "custom" : "default",
   othersAmount: typeof a?.othersBudget === "string" ? a.othersBudget : OTHERS_BUDGET_DEFAULT,
   proactive: a?.proactive === true,
-  proactiveLevel: PROACTIVE_LEVELS.some(([id]) => id === a?.proactiveLevel) ? a.proactiveLevel : "normal",
+  proactiveLevel: isProactiveLevel(a?.proactiveLevel) ? a.proactiveLevel : "normal",
   proactiveBudget: budgetOf(a?.proactiveBudget) ?? PROACTIVE_BUDGET_DEFAULT,
   ownerAppellation: a?.ownerAppellation ?? "",
   reasoning: a?.reasoning ?? "none",
@@ -192,7 +195,9 @@ export function AgentForm({ agent = null }) {
   const reasoning = levels.includes(f.reasoning) ? f.reasoning : "none";
 
   // 主动参与群聊 is offered (and sent) only while the site has a judgement model; its level and amount only while it is on.
+  // Without one, an Agent that has it on still shows the switch alone, saying why, so that it can be turned off: never on.
   const proactiveOffered = state.proactiveAvailable === true;
+  const proactiveOffOnly = !proactiveOffered && record.proactive;
   const proactiveAsked = proactiveOffered && f.proactive;
 
   const name = f.name.trim();
@@ -338,10 +343,11 @@ export function AgentForm({ agent = null }) {
     // 别人 @ 每天最多花: only while others may call it, never a wrong amount (`othersBudgetToSend`).
     const othersBudget = othersBudgetToSend(f);
     if (mine("othersBudget") && othersBudget !== undefined) patch.othersBudget = othersBudget;
-    // 主动参与群聊: only while the site can judge; its level and amount only while it is on.
-    if (proactiveOffered) {
+    // 主动参与群聊: while the site can judge, or (only off, then) while it is on without a judgement model; its level and
+    // amount only while it is on and can be.
+    if (proactiveOffered || proactiveOffOnly) {
       if (mine("proactive")) patch.proactive = f.proactive;
-      if (f.proactive) for (const key of ["proactiveLevel", "proactiveBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
+      if (proactiveAsked) for (const key of ["proactiveLevel", "proactiveBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
     }
     // 它怎么称呼你: cleared (emptied) is null, which the service reads as none.
     if (mine("ownerAppellation")) patch.ownerAppellation = ownerAppellation || null;
@@ -542,12 +548,12 @@ export function AgentForm({ agent = null }) {
             {f.othersChoice === "unlimited" && <Notice tone="warn">群里任何人都能让它回复，花的是你的点。</Notice>}
           </>
         )}
-        {proactiveOffered && (
+        {(proactiveOffered || proactiveOffOnly) && (
           <>
             <div className="field">
-              <Switch checked={f.proactive} onChange={setProactive} label="主动参与群聊" hint="打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。" hintClass="field-hint" />
+              <Switch checked={f.proactive} onChange={setProactive} label="主动参与群聊" hint={proactiveOffered ? PROACTIVE_HELPER : PROACTIVE_LOST} hintClass="field-hint" />
             </div>
-            {f.proactive && (
+            {proactiveAsked && (
               <>
                 <Field label="话多话少">
                   <select value={f.proactiveLevel} onChange={set("proactiveLevel")}>
