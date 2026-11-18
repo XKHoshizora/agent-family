@@ -380,8 +380,8 @@ async function reachAgents(
 /**
  * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
  * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles
- * whose owner has not blocked the sender (`blocks`, read as a send reads it: a person an owner has blocked calls none of
- * that owner's Agents, and spends none of their points); each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
+ * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
+ * as a direct chat reads it: neither of the two calls the other's Agents, nor spends the other's points); each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
  * deleted, paused or has no model, or only its owner may call it (`groupMentions` `owner`) and this is someone else's
  * message. `replyMode` plays no part in a group. Then `reachAgents`.
  */
@@ -393,7 +393,7 @@ async function triggerInGroup(t: Tx, conversationId: string, message: StoredMess
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
       where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[])
-        and not exists (select 1 from blocks b where b.blocker_id = p.owner_id and b.blocked_id = $3)
+        and not exists (select 1 from blocks b where (b.blocker_id = p.owner_id and b.blocked_id = $3) or (b.blocker_id = $3 and b.blocked_id = p.owner_id))
       order by p.id`,
     [conversationId, handles, message.senderId],
   );
@@ -485,8 +485,8 @@ export interface AgentTriggered {
  * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
  * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
  * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
- * paused, with a model, `groupMentions` `members`, and of an owner who has not blocked the poster's owner (a blocked
- * person calls an owner's Agents no more through their own Agent than themselves). Their `agents` rows are read, not locked: the poster's is held
+ * paused, with a model, `groupMentions` `members`, and of an owner with no block between them and the poster's owner, in either
+ * direction (neither calls the other's Agents, through their own Agent no more than themselves). Their `agents` rows are read, not locked: the poster's is held
  * already, and locking another's after it could take two Agents' rows out of id order — two Agents calling each other
  * from two groups at once would deadlock. The fold-or-insert decision needs no target's row: the group's row, which
  * this transaction holds, orders it with every other trigger, retry, follow-up and halt in this group (the one-active-run
@@ -523,7 +523,7 @@ export async function triggerFromAgent(
        join agents a on a.principal_id = p.id
       where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
         and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
-        and not exists (select 1 from blocks b where b.blocker_id = p.owner_id and b.blocked_id = $4)
+        and not exists (select 1 from blocks b where (b.blocker_id = p.owner_id and b.blocked_id = $4) or (b.blocker_id = $4 and b.blocked_id = p.owner_id))
       order by p.id`,
     [conversationId, handles, poster.id, poster.ownerId],
   );
@@ -570,7 +570,7 @@ const NO_FOLLOW_UP: FollowUp = { run: null, notices: [] };
  * covered (`covers`), under that conversation's row and the Agent's (`finish`, recovery): a queued reply answering up
  * to `pending`. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
  * replies a minute (it answers what its owner wrote meanwhile; README "Replies started"). In a group it is a person's
- * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it, from a person its owner has not blocked); otherwise only
+ * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it, from a person with no block between them and its owner, in either direction); otherwise only
  * Agents' messages called for it: it is an Agent's, and is not queued at all when the latest of them (`pending`) came
  * at or before the group's latest halt (`agents_halted_seq`, ruling 11), even if a person has written since: what
  * Agents asked before a halt is not answered after it (what a person asked is); nor once the Agent's chain budget is
@@ -594,7 +594,7 @@ export async function followUp(
   const { rows } = await t.query<{ sender_id: string; text: string | null }>(
     `select m.sender_id, m.body ->> 'text' as text from messages m join principals p on p.id = m.sender_id
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and p.kind = 'human'
-        and not exists (select 1 from blocks b where b.blocker_id = $4 and b.blocked_id = m.sender_id)`,
+        and not exists (select 1 from blocks b where (b.blocker_id = $4 and b.blocked_id = m.sender_id) or (b.blocker_id = m.sender_id and b.blocked_id = $4))`,
     [conversationId, covers, pending, agent.ownerId],
   );
   const handle = agent.handle.toLowerCase();
