@@ -176,6 +176,21 @@ export async function setNewNotes(q: Queryable, ownerId: string, value: NewNotes
   );
 }
 
+/** Whether the owner's notes are consolidated while they are away (`accounts.dream`); on before they chose. */
+export async function getDream(q: Queryable, ownerId: string): Promise<boolean> {
+  const { rows } = await q.query<{ dream: boolean }>("select dream from accounts where principal_id = $1", [ownerId]);
+  return rows[0]?.dream ?? true;
+}
+
+/** Sets it, creating the owner's account as `setNewNotes` does. */
+export async function setDream(q: Queryable, ownerId: string, value: boolean): Promise<void> {
+  await q.query(
+    `insert into accounts (principal_id, dream) values ($1, $2)
+     on conflict (principal_id) do update set dream = excluded.dream`,
+    [ownerId, value],
+  );
+}
+
 /** A model the owner chose for the review calls (`accounts.memory_model`): what an Agent's model choice is. */
 export type MemoryModelChoice = Exclude<AgentModel, null>;
 

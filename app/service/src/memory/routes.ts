@@ -399,6 +399,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
           throw err;
         }
         await again();
+        // A change the owner confirmed may have left a room nearly full.
+        if (verb === "confirm") app.deps.memory?.changed(agent.id);
         return decided;
       },
     );

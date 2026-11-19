@@ -37,6 +37,11 @@ import {
  * `memory_changes.ops` holds a JSON array of `StoredOp`: the `AppliedOp` fields plus what undo and confirm need to
  * restore or to check that nothing changed since. A pending change's `add` has `noteId: null` until it is confirmed.
  *
+ * A dream (`applyDream`, dream.ts) goes through the same path: its `merge`, `split`, `rewrite` (stored as a `replace`) and `lock`
+ * are stored ops too, undone and confirmed here. A merge keeps, on the note it is written into, what undo needs of the notes it
+ * removed (`removed`); a split keeps the parts it made (`parts`) and records the source (the op's own fields). Undo of either
+ * puts every note back as it was, ids and stamps, `strength` and `seen_at` included.
+ *
  * A change of the other kind records hearsay (`applyHearsay`): its ops are `StoredHearsayOp`s only, and it is never
  * pending (hearsay is a list of clues, not a note, so even an Agent that asks first writes it at once). Undo deletes the
  * entries it inserted and puts back those it dropped; it is stale unless every inserted one is still there and no dropped
@@ -44,7 +49,7 @@ import {
  */
 
 export interface AppliedOp {
-  op: Op["op"];
+  op: Op["op"] | "merge" | "split";
   kind: NoteKind;
   /** The note changed; null only for an `add` of a pending change, which has no note yet. */
   noteId: string | null;
@@ -72,7 +77,39 @@ export interface StoredOp extends AppliedOp {
   seenAtBefore?: string | null;
   /** A `remove` also keeps the deleted note's strength, so undo restores it whole. */
   strengthBefore?: number | null;
+  /** A `merge`: what the note it is written into holds afterwards. */
+  strengthAfter?: number | null;
+  seenAtAfter?: string | null;
+  /** A dream's `replace` is no mention of the owner's: it leaves `seen_at` alone. */
+  keepSeen?: boolean;
+  /** A `merge`: the notes it removed, whole. */
+  removed?: StoredNote[];
+  /** A `split`: the notes it made from the source (the op's own fields are the source); `noteId` and `updatedAt` are null until they are written. */
+  parts?: StoredNote[];
 }
+
+/** A note a merge removed or a split made, as a stored op keeps it. */
+export interface StoredNote {
+  noteId: string | null;
+  text: string;
+  vault: boolean;
+  vaultBy: "auto" | "owner";
+  unsure: boolean;
+  origin: Note["origin"];
+  originConversationId: string | null;
+  createdAt: string | null;
+  /** A removed note: its exact `updated_at` when read. A part: the one the write left (null before). */
+  updatedAt: string | null;
+  strength: number;
+  seenAt: string;
+}
+
+/** What a dream may ask for (dream.ts `parseDreamOps` makes them from the model's answer, refs being the numbers it was shown). */
+export type DreamOp =
+  | { op: "merge"; into: string; from: string[]; text: string }
+  | { op: "rewrite"; ref: string; text: string }
+  | { op: "split"; ref: string; texts: string[] }
+  | { op: "lock"; ref: string };
 
 /**
  * What a hearsay change stores of each entry it touched: `hearsay_add` an entry it inserted (`createdAt` null: undo only
@@ -154,7 +191,7 @@ async function loadState(t: Tx, w: Ids): Promise<State> {
 
 const usedIn = (state: State): { owner: number; self: number } => ({ owner: used([...state.owner.values()]), self: used([...state.self.values()]) });
 
-const base = (op: Op["op"], kind: NoteKind, noteId: string | null): StoredOp => ({
+const base = (op: AppliedOp["op"], kind: NoteKind, noteId: string | null): StoredOp => ({
   op,
   kind,
   noteId,
@@ -308,12 +345,32 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
       });
     } else if (s.op === "replace") {
       const movedIn = s.vaultBefore === false && s.vaultAfter === true;
-      // A note a review rewrote is seen now.
-      took = await updateNote(t, room, s.noteId!, { ...(movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! }), seenAt: "now" });
+      // A note a review rewrote is seen now (a dream's rewrite is no mention of the owner's).
+      took = await updateNote(t, room, s.noteId!, { ...(movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! }), ...(s.keepSeen ? {} : { seenAt: "now" as const }) });
     } else if (s.op === "remove") {
       took = await deleteNote(t, room, s.noteId!);
     } else if (s.op === "lock") {
-      took = await updateNote(t, room, s.noteId!, { vault: true, vaultBy: "owner" });
+      took = await updateNote(t, room, s.noteId!, { vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! });
+    } else if (s.op === "merge") {
+      took = await updateNote(t, room, s.noteId!, { text: s.after!, vault: s.vaultAfter!, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter!, strength: s.strengthAfter!, seenAt: s.seenAtAfter! });
+      if (took) for (const r of s.removed!) await deleteNote(t, room, r.noteId!);
+    } else if (s.op === "split") {
+      // The parts keep the source's origin, strength and last-mentioned time, and list in order from its creation time.
+      for (const [i, p] of s.parts!.entries()) {
+        p.noteId = await insertNote(t, room, {
+          text: p.text,
+          vault: p.vault,
+          vaultBy: p.vaultBy,
+          unsure: p.unsure,
+          origin: p.origin,
+          originConversationId: p.originConversationId,
+          strength: p.strength,
+          seenAt: p.seenAt,
+          createdAt: s.createdAt!,
+          createdOffsetUs: i,
+        });
+      }
+      took = await deleteNote(t, room, s.noteId!);
     } else {
       throw new Error("an unlock is only ever applied by confirmChange");
     }
@@ -325,9 +382,13 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
 /** Records, on every op that wrote a note, the exact `updated_at` the write left (read back in the same transaction). */
 async function stamp(t: Tx, w: Ids, ops: StoredOp[]): Promise<void> {
   for (const kind of ["owner", "self"] as const) {
-    const touched = ops.filter((s) => s.kind === kind && s.noteId !== null && s.op !== "remove");
+    const touched = ops.filter((s) => s.kind === kind && s.noteId !== null && s.op !== "remove" && s.op !== "split");
     const at = await updatedAtOf(t, roomFor(kind, w), touched.map((s) => s.noteId!));
     for (const s of touched) s.updatedAtAfter = at.get(s.noteId!) ?? null;
+    // The parts a split made are stamped the same way.
+    const parts = ops.filter((s) => s.kind === kind && s.op === "split").flatMap((s) => s.parts!.filter((p) => p.noteId !== null));
+    const partAt = await updatedAtOf(t, roomFor(kind, w), parts.map((p) => p.noteId!));
+    for (const p of parts) p.updatedAt = partAt.get(p.noteId!) ?? null;
   }
 }
 
@@ -365,6 +426,161 @@ export async function applyOps(
   if (stored.length === 0 && !full && unlocks.length === 0) return null;
   const changeId = stored.length > 0 || full ? await writeChange(t, who, opts.conversationId, opts.status, stored, full) : null;
   return { changeId, applied: stored.map(plain), full, unlocks };
+}
+
+export interface DreamApplyOpts {
+  conversationId: string;
+  /** `pending`: the whole dream is only recorded, to be confirmed by the owner as one change. */
+  status: "applied" | "pending";
+  /** The sorting verdict by `vaultKey(kind, text)` of a text a merge, rewrite or split makes, or of an open note that is new; a text with none goes into the vault, unsure. */
+  vaults: Map<string, { vault: boolean; unsure: boolean }>;
+  /** The ids of the notes whose split the judgement accepted: a split of any other is dropped. */
+  splits: ReadonlySet<string>;
+  /** Every note the dream was shown: its id and exact `updated_at` as it was read. An op naming a note that has changed (or is gone) since is dropped. */
+  read: ReadonlyMap<string, string>;
+  /** The ids of the notes that are new since the last dream: each such note that is open, not the owner's choice and untouched by an op is sorted again, and locked when the verdict says so. */
+  fresh: ReadonlySet<string>;
+  rooms: Rooms;
+}
+
+/**
+ * What a dream's operations would do to the rooms as they stand, judged by the net effect (the shrinking ones first, then the
+ * growing ones in op order, each dropped when its room would pass its limit). An op names notes by the refs the model was
+ * shown; one that names a note that changed since it was read, that is not of a room this dream may change, that another op
+ * took, or whose notes are not all of one room, is dropped. The vault only fills here: a merge with a note in the vault, and
+ * every part of a split vault note, is in the vault; no op takes a note out of it. Nothing is written.
+ */
+function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): { stored: StoredOp[]; full: boolean } {
+  const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
+  const room = usedIn(state);
+  const touched = new Set<string>();
+  const noteOf = (ref: string): Note | null => {
+    const target = refs.get(ref);
+    if (!target || !allowed(target.kind)) return null;
+    const note = state[target.kind].get(target.id);
+    if (!note || touched.has(note.id) || state.exact.get(note.id)?.updatedAt !== opts.read.get(note.id)) return null;
+    return note;
+  };
+  const verdictOf = (kind: NoteKind, text: string) => opts.vaults.get(vaultKey(kind, text)) ?? { vault: true, unsure: true };
+  const keep = (n: Note, text: string): { vault: boolean; by: "auto" | "owner"; unsure: boolean } => {
+    // Into the vault only; a note inside stays whatever the text says. One outside is new text nobody approved for groups.
+    if (n.vault) return { vault: true, by: n.vaultBy, unsure: n.unsure };
+    const verdict = verdictOf(n.kind, text);
+    return verdict.vault ? { vault: true, by: "auto", unsure: verdict.unsure } : { vault: false, by: n.vaultBy, unsure: n.unsure };
+  };
+  const whole = (n: Note): StoredNote => {
+    const at = state.exact.get(n.id)!;
+    return { noteId: n.id, text: n.text, vault: n.vault, vaultBy: n.vaultBy, unsure: n.unsure, origin: n.origin, originConversationId: n.originConversationId, createdAt: at.createdAt, updatedAt: at.updatedAt, strength: n.strength, seenAt: at.seenAt };
+  };
+
+  const steps: Array<{ index: number; kind: NoteKind; growth: number; stored: StoredOp }> = [];
+  ops.forEach((op, index) => {
+    if (op.op === "merge") {
+      const into = noteOf(op.into);
+      const from = op.from.map(noteOf);
+      if (!into || from.some((n) => n === null)) return;
+      const sources = [into, ...(from as Note[])];
+      if (new Set(sources.map((n) => n.id)).size !== sources.length || sources.some((n) => n.kind !== into.kind)) return;
+      const text = modelNote(op.text);
+      if (text === null) return;
+      sources.forEach((n) => touched.add(n.id));
+      // Any source in the vault puts the result there (the owner's only when every source was); else it is sorted afresh.
+      const vault = sources.some((n) => n.vault)
+        ? { vault: true, by: sources.every((n) => n.vault && n.vaultBy === "owner") ? ("owner" as const) : ("auto" as const), unsure: sources.some((n) => n.vault && n.unsure) }
+        : keep(into, text);
+      steps.push({
+        index,
+        kind: into.kind,
+        growth: codePoints(text) - total(sources),
+        stored: {
+          ...snapshot(base("merge", into.kind, into.id), into, state),
+          after: text,
+          vaultAfter: vault.vault,
+          vaultByAfter: vault.by,
+          unsureAfter: vault.unsure,
+          strengthAfter: sources.reduce((sum, n) => sum + n.strength, 0),
+          seenAtAfter: sources.map((n) => state.exact.get(n.id)!.seenAt).sort().at(-1)!,
+          removed: (from as Note[]).map(whole),
+        },
+      });
+    } else if (op.op === "rewrite") {
+      const note = noteOf(op.ref);
+      const text = note ? modelNote(op.text) : null;
+      if (!note || text === null || text === note.text) return;
+      touched.add(note.id);
+      const vault = keep(note, text);
+      steps.push({
+        index,
+        kind: note.kind,
+        growth: codePoints(text) - codePoints(note.text),
+        stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true },
+      });
+    } else if (op.op === "split") {
+      const note = noteOf(op.ref);
+      const texts = op.texts.map(modelNote);
+      if (!note || !opts.splits.has(note.id) || texts.length < 2 || texts.length > 4 || texts.some((t) => t === null)) return;
+      touched.add(note.id);
+      const at = state.exact.get(note.id)!;
+      const parts = (texts as string[]).map((text): StoredNote => {
+        const vault = note.vault ? { vault: true, by: note.vaultBy, unsure: note.unsure } : keep(note, text);
+        return { noteId: null, text, vault: vault.vault, vaultBy: vault.vault && !note.vault ? "auto" : note.vaultBy, unsure: vault.unsure, origin: note.origin, originConversationId: note.originConversationId, createdAt: at.createdAt, updatedAt: null, strength: note.strength, seenAt: at.seenAt };
+      });
+      steps.push({
+        index,
+        kind: note.kind,
+        growth: total(parts) - codePoints(note.text),
+        stored: { ...snapshot(base("split", note.kind, note.id), note, state), after: parts.map((p) => p.text).join("；"), originConversationId: note.originConversationId, origin: note.origin, createdAt: at.createdAt, parts },
+      });
+    } else {
+      const note = noteOf(op.ref);
+      if (!note || note.vault) return;
+      touched.add(note.id);
+      steps.push({ index, kind: note.kind, growth: 0, stored: { ...snapshot(base("lock", note.kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: false } });
+    }
+  });
+
+  // The net rule: shrinking ops free room first, then growing ones in op order, each dropped when its room would pass its limit.
+  const rejected = new Set<number>();
+  let full = false;
+  for (const s of steps.filter((s) => s.growth < 0)) room[s.kind] += s.growth;
+  for (const s of steps.filter((s) => s.growth > 0).sort((a, b) => a.index - b.index)) {
+    if (fits(room[s.kind], s.growth, roomLimit(opts.rooms, s.kind))) room[s.kind] += s.growth;
+    else {
+      rejected.add(s.index);
+      full = true;
+    }
+  }
+  const stored = steps.filter((s) => !rejected.has(s.index)).map((s) => s.stored);
+
+  // An open note that is new since the last dream and that no op touched is sorted once more; the owner's own choice is final.
+  for (const kind of ["owner", "self"] as const) {
+    if (!allowed(kind)) continue;
+    for (const note of state[kind].values()) {
+      if (!opts.fresh.has(note.id) || touched.has(note.id) || note.vault || note.vaultBy === "owner" || state.exact.get(note.id)?.updatedAt !== opts.read.get(note.id)) continue;
+      const verdict = opts.vaults.get(vaultKey(kind, note.text));
+      if (verdict?.vault) stored.push({ ...snapshot(base("lock", kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: verdict.unsure });
+    }
+  }
+  return { stored, full };
+}
+
+/**
+ * Applies a dream's operations (or, with status `pending`, only records them as one change for the owner to confirm), in the
+ * caller's transaction, under the account lock. `who.agentId` is the Agent carrying the dream out, `who.kinds` the room it
+ * consolidates. The change is judged by its net effect on the room (`planDream`). Null when no op took effect; also when the
+ * Agent is not the owner's.
+ */
+export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): Promise<ApplyResult | null> {
+  await lockAccount(t, who.ownerId);
+  if (!(await ownsAgent(t, who))) return null;
+  const state = await loadState(t, who);
+  const planned = planDream(state, who, ops, refs, opts);
+  const stored = opts.status === "applied" ? await execute(t, who, planned.stored) : planned.stored;
+  if (opts.status === "applied") await stamp(t, who, stored);
+  // A room too full to take a longer text is nothing a dream has to say.
+  if (stored.length === 0) return null;
+  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full);
+  return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [] };
 }
 
 /** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */
@@ -483,9 +699,40 @@ const stands = (state: State, s: StoredOp, side: "before" | "after"): boolean =>
   return n !== undefined && n.text === a.text && n.vault === a.vault && n.vaultBy === a.by && n.unsure === a.unsure && a.at !== null && state.exact.get(n.id)?.updatedAt === a.at;
 };
 
+/** Whether a note a merge removed or a split made is exactly as the change found it (`before`: a removed note) or left it (`after`: a part). */
+const partStands = (state: State, kind: NoteKind, p: StoredNote): boolean => {
+  const n = p.noteId === null ? undefined : state[kind].get(p.noteId);
+  return n !== undefined && n.text === p.text && n.vault === p.vault && n.vaultBy === p.vaultBy && n.unsure === p.unsure && p.updatedAt !== null && state.exact.get(n.id)?.updatedAt === p.updatedAt;
+};
+
+/**
+ * `stands` for any stored op, a merge and a split included. A merge before: its note and every note it removes are as found;
+ * after: its note as left and the removed ones gone. A split before: its source as found; after: the source gone and every
+ * part as left.
+ */
+const operationStands = (state: State, s: StoredOp, side: "before" | "after"): boolean => {
+  if (s.op === "split") return side === "before" ? stands(state, s, "before") : !state[s.kind].has(s.noteId!) && s.parts!.every((p) => partStands(state, s.kind, p));
+  if (s.op === "merge") {
+    return stands(state, s, side) && s.removed!.every((r) => (side === "before" ? partStands(state, s.kind, r) : !state[s.kind].has(r.noteId!)));
+  }
+  return stands(state, s, side);
+};
+
+const total = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + codePoints(n.text), 0);
+
 /** How many code points a stored op adds to its room when undone (negative: frees). */
 const undoGrowth = (s: StoredOp): number =>
-  s.op === "add" ? -codePoints(s.after!) : s.op === "remove" ? codePoints(s.before!) : s.op === "replace" ? codePoints(s.before!) - codePoints(s.after!) : 0;
+  s.op === "add"
+    ? -codePoints(s.after!)
+    : s.op === "remove"
+      ? codePoints(s.before!)
+      : s.op === "replace"
+        ? codePoints(s.before!) - codePoints(s.after!)
+        : s.op === "merge"
+          ? codePoints(s.before!) - codePoints(s.after!) + total(s.removed!)
+          : s.op === "split"
+            ? codePoints(s.before!) - total(s.parts!)
+            : 0;
 
 /**
  * Undoes an applied change of the owner's: every note it touched is put back exactly as it was (text, vault state,
@@ -503,7 +750,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
   const w = { ownerId, agentId: change.agentId };
   const state = await loadState(t, w);
   for (const s of change.ops) {
-    const ok = s.op === "remove" ? !state[s.kind].has(s.noteId!) : stands(state, s, "after");
+    const ok = s.op === "remove" ? !state[s.kind].has(s.noteId!) : operationStands(state, s, "after");
     if (!ok) return "stale";
   }
   const room = usedIn(state);
@@ -515,6 +762,34 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
     const at = roomFor(s.kind, w);
     if (s.op === "add") {
       await deleteNote(t, at, s.noteId!);
+    } else if (s.op === "split") {
+      for (const p of s.parts!) await deleteNote(t, at, p.noteId!);
+      await restoreNote(t, at, {
+        id: s.noteId!,
+        text: s.before!,
+        vault: s.vaultBefore!,
+        vaultBy: s.vaultByBefore!,
+        unsure: s.unsureBefore!,
+        origin: s.origin!,
+        originConversationId: s.originConversationId,
+        createdAt: s.createdAt!,
+        updatedAt: s.updatedAtBefore!,
+        ...(s.strengthBefore != null ? { strength: s.strengthBefore } : {}),
+        ...(s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
+      });
+    } else if (s.op === "merge") {
+      for (const r of s.removed!) {
+        await restoreNote(t, at, { id: r.noteId!, text: r.text, vault: r.vault, vaultBy: r.vaultBy, unsure: r.unsure, origin: r.origin, originConversationId: r.originConversationId, createdAt: r.createdAt!, updatedAt: r.updatedAt!, strength: r.strength, seenAt: r.seenAt });
+      }
+      await updateNote(t, at, s.noteId!, {
+        text: s.before!,
+        vault: s.vaultBefore!,
+        vaultBy: s.vaultByBefore!,
+        unsure: s.unsureBefore!,
+        updatedAt: s.updatedAtBefore!,
+        strength: s.strengthBefore!,
+        seenAt: s.seenAtBefore!,
+      });
     } else if (s.op === "remove") {
       await restoreNote(t, at, {
         id: s.noteId!,
@@ -580,7 +855,7 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
   const state = await loadState(t, w);
   for (const s of change.ops) {
     if (s.op === "add") continue;
-    if (!stands(state, s, "before")) {
+    if (!operationStands(state, s, "before")) {
       await resolve(t, changeId, "discarded");
       return "stale";
     }

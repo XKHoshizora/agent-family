@@ -220,6 +220,17 @@ export interface MemoryConfig {
    * reached this share of the judge's daily limit, so that it never uses up what unasked replies need.
    */
   listenShare: number;
+  /**
+   * 入梦: the sweep that looks for owners to consolidate comes every `dreamSweepMs`. An owner dreams after they have sent no
+   * message anywhere for `dreamIdleMs`, with something new since their last dream, and not twice within `dreamEveryMs`.
+   * A room left at `napAt` of its limit by a change is consolidated at once (a nap), at most once per `dreamEveryMs`.
+   * A split of one entry into several is applied when the judgement model is `splitAt` sure it adds nothing.
+   */
+  dreamSweepMs: number;
+  dreamIdleMs: number;
+  dreamEveryMs: number;
+  napAt: number;
+  splitAt: number;
 }
 
 const memorySchema = z.strictObject({
@@ -245,7 +256,13 @@ const memorySchema = z.strictObject({
   hearsayNewAt: probability(0.5),
   hearsayAbuseAt: probability(0.7),
   hearsayMuteMs: positive(21_600_000, 31_536_000_000),
+  hearsayMute: z.enum(["off", "observe", "on"]).default("observe"),
   listenShare: probability(0.5),
+  dreamSweepMs: positive(900_000, 86_400_000),
+  dreamIdleMs: positive(10_800_000, 604_800_000),
+  dreamEveryMs: positive(72_000_000, 2_592_000_000),
+  napAt: probability(0.8),
+  splitAt: probability(0.6),
 });
 
 const allowanceTokens = z.number().int().min(0).max(200_000);
@@ -256,7 +273,6 @@ const reasoningAllowanceSchema = z
     medium: allowanceTokens.optional(),
     high: allowanceTokens.optional(),
     xhigh: allowanceTokens.optional(),
-  hearsayMute: z.enum(["off", "observe", "on"]).default("observe"),
     max: allowanceTokens.optional(),
   })
   .transform(

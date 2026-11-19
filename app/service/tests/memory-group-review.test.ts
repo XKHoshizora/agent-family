@@ -302,7 +302,8 @@ describe("after a restart", () => {
     await flag(w.agent.id, w.g, old, "hearsay", false);
     await db.query("update memory_flags set created_at = now() - interval '25 hours' where kind = 'hearsay'");
     expect(await memory().resume()).toBe(1);
-    expect(clock.timers()).toBe(2);
+    // The pair's flag wake-up (two timers) and the dream sweep's.
+    expect(clock.timers()).toBe(3);
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
     gateway.reply(ops(add("下周三要搬家")));
     await wake();

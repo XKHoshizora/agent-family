@@ -281,7 +281,16 @@ export async function toWireForReaders(
         const change = changes.get(String(m.body.changeId));
         if (!change || change.owner_id !== reader) continue;
         const wire = toWire(m, null, null, false, null);
-        wire.system = { ...wire.system!, status: change.status, pending: change.status === "pending", full: change.full };
+        // A notice stored before 入梦 existed has neither phase nor count: it is a `rest` one.
+        const lines = Array.isArray(m.body.lines) ? m.body.lines.length : 0;
+        wire.system = {
+          ...wire.system!,
+          phase: m.body.phase === "dream" ? "dream" : "rest",
+          count: typeof m.body.count === "number" ? m.body.count : lines,
+          status: change.status,
+          pending: change.status === "pending",
+          full: change.full,
+        };
         list.push(wire);
         continue;
       }

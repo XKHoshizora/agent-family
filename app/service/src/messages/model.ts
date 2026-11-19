@@ -54,6 +54,10 @@ export type SystemEvent =
       unlock: boolean;
       full: boolean;
       status: "applied" | "undone" | "pending" | "discarded";
+      /** Which tier of memory wrote it: after a conversation went quiet (`rest`, the default, and what every notice stored before was) or a consolidation of the notes alone (`dream`). */
+      phase?: "rest" | "dream";
+      /** The number of lines (`lines.length`); added when it is stored. */
+      count?: number;
     }
   | PairEvent;
 

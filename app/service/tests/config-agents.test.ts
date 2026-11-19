@@ -410,6 +410,11 @@ describe("the memory configuration", () => {
     hearsayMuteMs: 21_600_000,
     hearsayMute: "observe",
     listenShare: 0.5,
+    dreamSweepMs: 900_000,
+    dreamIdleMs: 10_800_000,
+    dreamEveryMs: 72_000_000,
+    napAt: 0.8,
+    splitAt: 0.6,
   };
 
   test("unset or empty: every default", () => {

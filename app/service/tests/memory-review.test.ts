@@ -633,7 +633,8 @@ describe("restart and close", () => {
     clock.reset();
     const fresh = createReviewer(reviewerDeps());
     expect(await fresh.resume()).toBe(1);
-    expect(clock.timers()).toBe(1);
+    // The pair's quiet timer, and the dream sweep's.
+    expect(clock.timers()).toBe(2);
     gateway.reply(ops(add("喜欢茶")));
     clock.advance(10 * MIN);
     await fresh.idle();

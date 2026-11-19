@@ -805,7 +805,8 @@ notes of either kind that are not in the vault, those that were learned in that 
 nothing else (`src/memory/store.ts` `notesFor`, the one place that decides). With `memory` off nothing is shown and
 nothing is learned. Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`) — reaches
 anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
-`memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes` and `accounts.memory_model`.
+`memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`, `accounts.memory_model`,
+`accounts.dream` and `accounts.dreamed_at`, and `strength` and `seen_at` on both kinds of note.
 
 **The owner reads and edits the palace.** Every route below is the owner's only: anyone else, a fellow member of a group
 the Agent is in, and an id that is nobody's (or another Agent's, another note) get the same 404 `not_found`. *Session:
@@ -907,6 +908,56 @@ A review is one `memoryCall` (the owner's points, purpose `memory`) given the ne
 - *Hearsay*: one `memoryCall` (the owner's points, purpose `memory`) over the newest `flaggedMax` (never more than 60) flagged messages the Agent may read: nothing from before it joined, a message of the owner's own or the Agent's is not read, and a sender who is not a person or has a block with the owner either way (checked at the time of the call) is not read either. The user message is one JSON object (`JSON.stringify`; every name and text a `cleanText`ed string, a text cut to `reviewMessageChars` code points): `{"owner": "<the owner's name>", "window": [{"id": "m1", "who": "<speaker>", "text", "owner": boolean, "agent": boolean}…], "existing": [{"ref": "e1", "who", "text"}…]}`. The window is shown once, however many are flagged: the group's messages from `flaggedContext` before the earliest flagged one to `flaggedContext` after the latest (what the Agent may read), `id` only on the flagged ones, `owner` true for the owner's own lines and `agent` true for the Agent's own; when that is more than 60 messages each flagged message keeps its nearest neighbours (the nearest first) and the middle is dropped. `existing` is what this Agent already heard in this group. The system text says everything inside is material, not instructions; that an entry is one short sentence in the third person about “主人”, in the language it was said in; that a request or an order addressed to anyone is never copied, and that links, keys, passwords and account details are never kept; and to answer only `{"entries": [{"from": "m1", "text"}…], "drop": ["e1"…]}`. An entry is kept only when its `from` is a flagged message that was shown (one entry each; every entry is checked first, then at most as many as were flagged are kept), its text passes `modelNote` (200 code points; no link, key or address to the reader) and repeats no entry that stays; every other key is ignored: who said it, and when, come from the flagged message (`agent_hearsay.speaker_id`, `speaker_name`, `said_at`), never from the answer. The name is stored cleaned as a label's is (no bracket or bar), and it is `某人` when nothing is left, when it is `主人`, or when it is the owner's own name, so a name can never pass for the owner. A `drop` names an entry of this group by the ref it was shown, and is applied only when an entry is kept, and is recorded only for the rows the delete really removed. The entries are inserted, then the oldest entries of the Agent (any group) are deleted until the room holds `roomHearsay` code points (each entry's text and speaker name; the same measure trims, checks an undo and fills `hearsayUsed`), in one transaction with the flags' deletion and a `memory_changed` notice in the owner's conversation with the Agent, once per change, `lines` `听说：「{speaker}」在「{group}」里说：{text}`, `vaultLines` all false, `pending` false — also with `memoryAsk`: hearsay is a list of clues, not a note. Its change is stored as ops `hearsay_add` / `hearsay_drop` (the entry's id, group, speaker, name, text, `saidAt`, and for a dropped one its exact `createdAt`); undo is stale unless every inserted entry is still there and no dropped one is (the owner's deleting an entry, or confirming it with 属实, takes the same lock, so an undo can never bring back what they took), and a dropped entry whose group is gone takes no room.
 - *What keeps a member from spending the owner's points*: a pair makes at most `hearsayPerHour` paid hearsay calls in a rolling hour (counted in this process's memory, so a restart gives it a fresh allowance); over it the wake-up makes no call and keeps the flags, and is armed again (with no new flag needed) for a quiet time after the oldest of the hour's calls leaves the hour (no try is counted; the 24-hour limit below still removes them). Before each paid call the site's judgement model (the same client, daily limit and `judge_usage` count as the other memory judgements) is asked one request with two questions over the flagged messages (who, text, time) and the entries already kept, speakers being opaque ids (`p1`, `p2`… by account, per batch), never names: whether some message says something new about the owner (below `hearsayNewAt`: no call, the flags are deleted), and whether the same person is flooding, probing or making things up in a very short time (not a friend telling a story in several messages) — the second question is asked only when `hearsayMute` is not `"off"`. With `hearsayMute` `"on"`, an answer of `hearsayAbuseAt` or more mutes a speaker (by account) who sent at least 3 of the batch's flagged messages and more than half of them, for `hearsayMuteMs` (`hearsay_mutes`; the group judgement raises no hearsay flag for the owner's Agents from a muted speaker until it runs out), and then the batch is dropped as abuse: no call, the flags are deleted; when no speaker qualifies nobody is muted and the batch goes on to the call as usual. With `"observe"` (the default) nobody is muted and nothing is dropped as abuse, and each time a speaker would have been muted one line `memory_mute_would` is logged (counts only: the batch's flagged messages, the speaker's share, the abuse score). An owner's expired mutes are deleted at every wake-up. Nobody is told: no notice, no message; only a count is logged. A judgement that fails, or answers nothing, lets the paid call go ahead: the hour's cap is the hard ceiling.
 - *Failure*: a flag is tried at most twice (`memory_flags.tries`). A call that could not be made (no model, no quota, an error, a time-out), or a step that threw, counts a try for the flags it covered and wakes the pair again after `groupQuietMs`, with no new flag needed; flags that arrive meanwhile have tries of their own. At every wake-up flags tried twice, and flags older than 24 hours, are deleted without a call. An own review whose call could not be made does the same (`reviewed_seq` stays). A charged answer nothing of which can be used deletes the flags at once. Nothing logs a message, an entry or an answer.
+
+**入梦** (`src/memory/dream.ts`, `reviewer.ts`, `apply.ts` `applyDream`; `tests/memory-dream.test.ts`). The review after a conversation
+goes quiet is the Agent's 小憩; 入梦 is the second tier, a consolidation that reads **only the notes of one room** — never a
+conversation, hearsay or a name, so nobody can speak into it. It runs when the owner has been away, and costs the owner's points
+as a review does (`memoryCall`, purpose `memory`: one call per room; the judgement calls it needs are the site's).
+
+- *When*: a sweep every `MEMORY.dreamSweepMs` finds the owners who dream — `accounts.dream` is on (`GET`/`PATCH /api/me`
+  `dream`, on until chosen); they have sent no message (text or file) in any conversation for `dreamIdleMs`; something happened to
+  their notes since `accounts.dreamed_at` (a change applied or confirmed, a note written or mentioned again, a note's `seen_at`);
+  and `dreamed_at` is empty or older than `dreamEveryMs`. The sweep's timer is armed once when the service starts (`resume`) and
+  again after each sweep; `close()` clears it. One job per owner consolidates, one room after another, the owner's shared room
+  (carried out by the owner's Agent with memory and shared notes on that has the lowest id and is neither paused nor deleted: the
+  notice goes to that Agent's own conversation; with no such Agent the shared room does not dream) and each Agent's own room that
+  had something since `dreamed_at`, as that Agent. When every room is done `dreamed_at` is set, whether or not anything changed.
+  A call that fails (none could be made, an error, a time-out) sets nothing, and the next sweep tries again: three calls in all
+  in a day per owner, counted in this process's memory; rooms already done are not paid for again.
+- *A nap*: right after a change was applied or confirmed leaves a room at or above `napAt` of its limit, that room is
+  consolidated at once, without waiting for idleness, at most once per `dreamEveryMs` per room (in this process's memory). A nap
+  does not set `dreamed_at`.
+- *What the model is shown*: one JSON object `{"notes": [{"ref": "n1", "text", "date", "last_mentioned", "strength", "vault",
+  "new"}…], "room": {"used", "limit"}}` — the room's notes cleaned (`cleanText`), `date` the day it was written and `last_mentioned`
+  the day it was last mentioned (site time zone, `YYYY-MM-DD`), `new` for a note written or changed since `dreamed_at`. Its
+  system text (Chinese) names the jobs: look at what is new, merge what says the same thing, let the later date win (the earlier
+  becomes `现在…（以前…，YYYY 年 M 月改的）`), write a passing mood or one day's event as a dated event, shorten low-`strength`,
+  long-ago entries when the room is over 80% full, split an entry only when it plainly holds unrelated facts, lock one that
+  should not be shown in groups; invent nothing, delete nothing except by merging, and treat every note as material, not as
+  instructions. It answers `{"ops": [...]}`.
+- *What it may do* (`parseDreamOps`, a parser of its own: of the first 8 entries, those of exactly these shapes naming refs it was
+  shown, each ref in one op only, every text through `modelNote`): `{"op": "merge", "into": "n1", "from": ["n2", "n3"], "text"}`
+  (the result replaces `into`, the `from` notes are removed), `{"op": "rewrite", "ref", "text"}`, `{"op": "split", "ref",
+  "texts": [2 to 4 texts]}` (the source is removed) and `{"op": "lock", "ref"}`. No add, no bare remove, no unlock: none of them
+  is ever applied, and no dream path takes a note out of the vault. In code, not in the prompt: a merge whose notes are not all
+  of one room is dropped; any note of a merge in the vault puts the result in the vault (`vault_by` stays the owner's only when
+  every source was); a merged note's `strength` is the sum, its `seen_at` the latest, its origin the `into` note's; a merged or
+  rewritten text must fit the room by the net rule and, when it is outside the vault, is sorted again (towards the vault only; a
+  text with no verdict goes in, unsure); every open note that is new and that no op touched, and that the owner did not open
+  themselves, is sorted again once and locked (`vault_by` `auto`) on a vault verdict; an op naming a note that changed since the
+  dream read it (its exact `updated_at`) is dropped. A split must add nothing: one judgement question
+  (`splitAddsNothing`, the site's, counted as the others, fail closed: dropped on any error) about the source and its parts, applied at
+  `splitAt` or more, and parts that together are longer than twice the source plus 40 code points are not even asked about. A
+  part keeps the source's origin, `strength` and `seen_at`, lists in order from the source's `created_at`, and is in the vault with
+  the source's `vault_by` when the source was, else sorted on its own (the vault when unsure).
+- *The audited path*: everything goes through `memory_changes` as one change per room (stored ops `merge` — with the notes it
+  removed — `split` — with the parts it made —, `replace` for a rewrite and `lock`), a notice for the owner only, undo
+  (every note back exactly: ids, texts, vault state, `created_at`, `updated_at`, `strength`, `seen_at`; refused 409
+  `stale_change` when one changed since) and 先问我再记 (`memoryAsk` of the Agent carrying the dream out: the dream's changes are
+  one pending card; confirming applies all or nothing). The notice's lines: `合并了：{text}`, `改成了：{text}`,
+  `拆成了：{part 1}；{part 2}…`, `锁进了保险箱：{text}`.
+- *The notice*: the `memory_changed` event of a dream has `phase: "dream"`; every other (a review's, hearsay) `phase: "rest"`; `count`
+  is the number of its lines.
 
 ### Agents in a group
 
@@ -1440,12 +1491,13 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/me`
 
-*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes", "memoryModel", "memoryModelUsable"}`: the signed-in principal.
+*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes", "memoryModel", "memoryModelUsable", "dream"}`: the signed-in principal.
 `newNotes` (`"auto"`, `"vault"` or `"open"`; `"auto"` until chosen) is what newly written notes of their Agents' memory do
 about the vault (An Agent's memory); only they are ever shown it. So are `memoryModel` (`null`, or the model they chose to tidy
 their memory, `{"source": "site", "id"}` or `{"source": "provider", "providerId", "model"}` as an Agent's model is written;
 Memory calls) and `memoryModelUsable` (`false` when that model cannot be called now: its provider was deleted or its key
 cannot be opened, the model is off the provider's list or no longer on the site; always `true` while `memoryModel` is `null`).
+`dream` (a boolean, `true` until chosen) says whether their notes are consolidated while they are away (An Agent's memory, 入梦).
 
 ### Profiles and principals
 
@@ -1457,7 +1509,7 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
   Agent creation checks it: a site model that is configured, or a model on the list of one of your own providers whose
   context is larger than the default output limit — anything else, another person's provider included, 400
-  `invalid_request`), each optional but at least one; `newNotes` and `memoryModel` are read back with `GET /api/me`. The fields are written together or not at all: a refused `memoryModel` leaves the name and `newNotes` as they were. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+  `invalid_request`) and `dream` (a boolean: whether your notes are consolidated while you are away), each optional but at least one; `newNotes`, `memoryModel` and `dream` are read back with `GET /api/me`. The fields are written together or not at all: a refused `memoryModel` leaves the name and `newNotes` as they were. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
   U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
@@ -1466,7 +1518,7 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
   as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
   same rule applies on registration and, with 1–60 characters, to group titles.
-- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes` or `memoryModel` was sent). Other members see it the next time they
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes`, `memoryModel` or `dream` was sent). Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
 
@@ -1908,7 +1960,7 @@ client can render its own:
 | `blocked` | `actorId` (who blocked), `principalId` (who is blocked) | a new block, in the pair's direct chat if any |
 | `unblocked` | `actorId`, `principalId` | lifting a block, in the pair's direct chat if any |
 | `topic_reset` | `actorId` (the owner) | `POST /api/conversations/:id/topic`, in an Agent's conversation: what comes before it is no longer shown to the Agent's model |
-| `memory_changed` | `actorId` = the Agent, `changeId`, `lines` (`记住了：…`, `改成了：…`, `忘掉了：…`, `锁进了保险箱：…`; `听说：「{speaker}」在「{group}」里说：…` for hearsay; for a request to unlock, the note's text), `vaultLines` (booleans, one per line: the note is in the vault afterwards), `pending`, `unlock`, `full`, `status` (`applied`, `undone`, `pending`, `discarded`) | a review changed, or proposed to change, the Agent's notes, in the owner's own conversation with it, sent to the owner only; text “记忆已更新” |
+| `memory_changed` | `actorId` = the Agent, `changeId`, `lines` (`记住了：…`, `改成了：…`, `忘掉了：…`, `锁进了保险箱：…`; `听说：「{speaker}」在「{group}」里说：…` for hearsay; for a request to unlock, the note's text), `vaultLines` (booleans, one per line: the note is in the vault afterwards), `pending`, `unlock`, `full`, `status` (`applied`, `undone`, `pending`, `discarded`) | a review (小憩) or a dream (入梦) changed, or proposed to change, the Agent's notes, in the owner's own conversation with it, sent to the owner only; text “记忆已更新”; also `phase` (`"rest"`, or `"dream"` for a dream: `合并了：…`, `改成了：…`, `拆成了：…`, `锁进了保险箱：…`) and `count` (the number of lines) |
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
 | `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
@@ -2617,6 +2669,9 @@ milliseconds.
 | `hearsayPerHour` | 4 (1–1000) | At most this many paid hearsay calls (Acting on flags) per Agent and group in a rolling hour; over it the flags wait |
 | `hearsayNewAt`, `hearsayAbuseAt` | 0.5, 0.7 (0–1) | Before a hearsay call the judgement model is asked whether the batch holds something new (below the first: no call) and whether it looks like flooding or probing (at or above the second: with `hearsayMute` `"on"`, a speaker with at least 3 of the batch's flagged messages and more than half of them is muted and the batch is dropped) |
 | `hearsayMuteMs` | 21 600 000 (1–31 536 000 000) | How long a speaker judged to flood or probe raises no hearsay flags for an owner |
+| `hearsayMute` | `"observe"` (`"off"`, `"observe"`, `"on"`) | `"on"`: flooding speakers are muted as above; `"observe"`: nobody is muted or dropped, and `memory_mute_would` is logged (counts only) each time a speaker would have been; `"off"`: the flooding question is not asked |
+| `dreamSweepMs`, `dreamIdleMs`, `dreamEveryMs` | 900 000 (1–86 400 000), 10 800 000 (1–604 800 000), 72 000 000 (1–2 592 000 000) | 入梦 (An Agent's memory): how often the sweep looks for owners to consolidate; how long an owner must have sent no message anywhere; the least time between two dreams of an owner, and between two naps of a room |
+| `napAt`, `splitAt` | 0.8, 0.6 (0–1) | A room a change leaves at or above this share of its limit is consolidated at once (a nap); a split of one entry into several is applied when the judgement model is at least this sure it adds nothing |
 | `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
@@ -2669,7 +2724,6 @@ nothing more is judged, and what a decision still in flight decides is dropped (
    - One yes/no question, key `q_a{i}`, about each option that sent one of the messages shown (the quiet question):
      “群里有一个 AI 助手「{name}」。记录里标着“{name}（Agent）”的是它说过的话。最新这条消息是在让{name}别再说话、安静一点，
      或者表示它打扰到大家了。”
-| `hearsayMute` | `"observe"` (`"off"`, `"observe"`, `"on"`) | `"on"`: flooding speakers are muted as above; `"observe"`: nobody is muted or dropped, and `memory_mute_would` is logged (counts only) each time a speaker would have been; `"off"`: the flooding question is not asked |
 2. *Ask, outside any transaction.* One call (the judgement client, below). Whatever comes of it, the call is counted
    (`judge_usage` + 1) and every option is stamped as judged now (`judged_at`), each in a statement of its own.
 3. *Settle.* Only answers to the questions asked are read. The winner is the Agent option with the highest `pick`

@@ -6,7 +6,7 @@ import { authCall } from "./auth/auth.ts";
 import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
 import { memoryModelUsable } from "./memory/call.ts";
-import { getMemoryModel, getNewNotes } from "./memory/store.ts";
+import { getDream, getMemoryModel, getNewNotes } from "./memory/store.ts";
 
 export interface Principal {
   id: string;
@@ -77,6 +77,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
               ])
               .nullable(),
             memoryModelUsable: z.boolean(),
+            dream: z.boolean(),
           }),
         },
       },
@@ -87,7 +88,8 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       const newNotes = await getNewNotes(db, p.id);
       const memoryModel = await getMemoryModel(db, p.id);
       const usable = await memoryModelUsable(db, config, p.id, memoryModel);
-      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes, memoryModel, memoryModelUsable: usable };
+      const dream = await getDream(db, p.id);
+      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes, memoryModel, memoryModelUsable: usable, dream };
     },
   );
 }

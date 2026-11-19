@@ -9,6 +9,7 @@ import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
+import type { DreamJob, DreamState, NapJob, SweepJob } from "./dream.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
@@ -52,6 +53,11 @@ export interface ReviewContext {
   closing: AbortSignal;
   /** Called with the newest seq a review looked at, as soon as it is known (before its call). */
   attempted(seq: number): void;
+  /** After commit: a change was applied to the notes of this Agent's owner; the scheduler may nap the rooms it left nearly full. */
+  changed?(agentId: string): void;
+  /** What the scheduler keeps for the dreams (dream.ts), and how a dream job asks for another job: only given to the job kinds of dream.ts. */
+  dream?: DreamState;
+  enqueue?(job: DreamJob): void;
 }
 
 /** What may be logged of an error: never its message or detail, which can carry the text of a note. */
@@ -135,7 +141,17 @@ export async function kindsFor(db: Db, agent: AgentRow, conversationId: string, 
   return new Set<NoteKind>(mine?.reviewerId === agent.id ? ["owner", "self"] : ["self"]);
 }
 
-export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<void> {
+/**
+ * One job of the scheduler other than a flag wake-up: a review (below), or one of the dream jobs (dream.ts: the sweep, a nap,
+ * a dream), which are handed on. One entry for the scheduler's runner, whatever the kind.
+ */
+export async function runReview(deps: PipelineDeps, job: ReviewJob | DreamJob | NapJob | SweepJob, ctx: ReviewContext): Promise<void> {
+  // Loaded when needed: dream.ts uses this file's helpers.
+  if (job.kind !== "review") return (await import("./dream.ts")).runDreamJob(deps, job, ctx);
+  return review(deps, job, ctx);
+}
+
+async function review(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<void> {
   const { db, config, log } = deps;
   const { agentId, conversationId } = job;
   const agent = await reviewableAgent(db, agentId);
@@ -219,12 +235,16 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
           unlock: w.unlock,
           full: row.full,
           status,
+          phase: "rest",
+          count: linesOf(row.ops).lines.length,
         }),
       );
     }
     return stored;
   });
   announce(deps, notices, agentId);
+  // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
+  if (notices?.some((n) => n.body.status === "applied" && n.body.unlock !== true && Array.isArray(n.body.lines) && n.body.lines.length > 0)) ctx.changed?.(agentId);
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");
 }
 

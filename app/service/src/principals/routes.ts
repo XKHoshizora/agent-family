@@ -9,7 +9,7 @@ import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { assertModelChoice } from "../agents/store.ts";
-import { setMemoryModel, setNewNotes } from "../memory/store.ts";
+import { setDream, setMemoryModel, setNewNotes } from "../memory/store.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
@@ -67,15 +67,16 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
             displayName: displayName.optional(),
             newNotes: z.enum(["auto", "vault", "open"]).optional(),
             memoryModel: chosenModel(uuidParam).nullable().optional(),
+            dream: z.boolean().optional(),
           })
-          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined || b.memoryModel !== undefined, "displayName, newNotes or memoryModel"),
+          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined || b.memoryModel !== undefined || b.dream !== undefined, "displayName, newNotes, memoryModel or dream"),
         response: { 200: publicPrincipal },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
-      const { displayName: name, newNotes, memoryModel } = req.body;
+      const { displayName: name, newNotes, memoryModel, dream } = req.body;
       // All or nothing: a model that is refused changes nothing, the name and the setting included.
       await db.tx(async (t) => {
         // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider.
@@ -83,6 +84,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         if (name !== undefined) await updateDisplayName(t, me.id, name);
         if (newNotes !== undefined) await setNewNotes(t, me.id, newNotes);
         if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);
+        if (dream !== undefined) await setDream(t, me.id, dream);
       });
       return { id: me.id, handle: me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
     },

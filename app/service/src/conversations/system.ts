@@ -75,5 +75,7 @@ export async function renderNotice(q: Queryable, conversationId: string, e: Syst
  */
 export async function appendSystem(t: Tx, conversationId: string, e: SystemEvent): Promise<StoredMessage> {
   const text = await renderNotice(t, conversationId, e);
-  return insertMessage(t, conversationId, e.actorId, "system", { ...e, text }, null);
+  // A memory notice always says which tier wrote it and how many lines it has (a web client words its sentence from them).
+  const stored = e.event === "memory_changed" ? { ...e, phase: e.phase ?? "rest", count: e.count ?? e.lines.length } : e;
+  return insertMessage(t, conversationId, e.actorId, "system", { ...stored, text }, null);
 }

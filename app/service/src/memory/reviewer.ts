@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
+import { newDreamState, SWEEP_JOB, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { EXPLICIT } from "./review.ts";
@@ -22,6 +23,12 @@ import { EXPLICIT } from "./review.ts";
  * In memory, in this one process, as the proactive scheduler is: it never throws and never rejects (what goes wrong is
  * logged with ids, never a note or an answer). `close()` cancels every timer and waiting job and abandons calls under way.
  * The job type is open (`kind`) for the jobs a later batch adds. Timers come from the caller, so tests never sleep.
+ *
+ * 入梦 (dream.ts): a sweep timer, armed once when the reviewer starts (`resume`) and again after each sweep, every
+ * `MEMORY.dreamSweepMs`, runs a `sweep` job that finds the owners who dream and asks, for each, for a `dream` job (one owner's
+ * rooms, one after another: two dream jobs of one owner never run together). After a change was applied (`changed`) a `nap`
+ * job looks at whether a room is nearly full. The sweep's jobs run through the same runner, so they have the clock the
+ * pipeline has; what they remember between runs is `DreamState`, here.
  */
 
 export const MAX_REVIEWS_AT_ONCE = 4;
@@ -35,7 +42,7 @@ export const realTimer: SetTimer = (fn, ms) => {
   return { clear: () => clearTimeout(timer) };
 };
 
-export type Job = ReviewJob | FlagsJob;
+export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob;
 
 export interface ReviewerDeps {
   db: Db;
@@ -55,11 +62,14 @@ export interface Reviewer {
   topicReset(agentId: string, conversationId: string): void;
   /** After the row is written: a message of `conversationId` was flagged for the Agent (hearsay, or the owner's own remark). */
   flagged(agentId: string, conversationId: string, kind: "hearsay" | "own"): void;
+  /** After commit: a change was applied (or confirmed) in the notes of this Agent's owner, which may have left a room nearly full. */
+  changed(agentId: string): void;
   /** How many pairs the scheduler remembers an attempt for (for tests: it must not grow with the pairs reviewed). */
   remembered(): number;
   /**
    * At start: arms a quiet timer for every pair whose Agent replied in the last day and has replies after `reviewed_seq`,
-   * and a wake-up for every pair with flags left over from the last day (older flags are deleted); how many pairs.
+   * and a wake-up for every pair with flags left over from the last day (older flags are deleted); how many pairs. Also arms
+   * the dream sweep (one timer: arming it again moves it).
    */
   resume(): Promise<number>;
   close(): void;
@@ -83,6 +93,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   const hearsayCalls = new Map<string, number[]>();
   /** The newest seq the last attempt of each pair looked at (a failed call is not asked again for the same words). */
   const attempted = new Map<string, number>();
+  const dream = newDreamState();
+  let sweepTimer: { clear(): void } | null = null;
+  /** The owners with a dream job under way: the rooms of one owner are never consolidated in parallel. */
+  const dreaming = new Set<string>();
   let waiting: Job[] = [];
   const running = new Set<string>();
   /** Evaluations of a trigger under way (they read the database before deciding). */
@@ -110,15 +124,19 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     if (closed) return;
     for (const job of [...waiting]) {
       if (running.size >= MAX_REVIEWS_AT_ONCE) return;
-      if (running.has(job.agentId)) continue;
+      if (running.has(job.agentId) || (job.kind === "dream" && dreaming.has(job.ownerId))) continue;
       waiting = waiting.filter((j) => j !== job);
       running.add(job.agentId);
+      if (job.kind === "dream") dreaming.add(job.ownerId);
       const key = keyOf(job.agentId, job.conversationId);
       const ctx: FlagsContext = {
         closing,
         attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
         again: (afterMs) => void (job.kind === "flags" && armFlags(job, afterMs)),
         hearsayCalls: hearsayCalls.get(key) ?? [],
+        changed: (agentId) => api.changed(agentId),
+        dream,
+        enqueue: (next) => enqueue(next),
       };
       if (job.kind === "flags") hearsayCalls.set(key, ctx.hearsayCalls);
       void Promise.resolve()
@@ -128,6 +146,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         .finally(() => {
           if (ctx.hearsayCalls.length === 0) hearsayCalls.delete(key);
           running.delete(job.agentId);
+          if (job.kind === "dream") dreaming.delete(job.ownerId);
+          if (job.kind === "sweep") armSweep();
           pump();
           settleIdle();
         })
@@ -136,10 +156,23 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     settleIdle();
   };
 
+  const sameJob = (a: Job, b: Job): boolean =>
+    a.kind === b.kind && a.agentId === b.agentId && a.conversationId === b.conversationId && (a.kind !== "dream" || (b.kind === "dream" && a.scope === b.scope));
+
   const enqueue = (job: Job): void => {
     if (closed) return;
-    if (!waiting.some((j) => j.kind === job.kind && j.agentId === job.agentId && j.conversationId === job.conversationId)) waiting.push(job);
+    if (!waiting.some((j) => sameJob(j, job))) waiting.push(job);
     pump();
+  };
+
+  /** (Re)arms the one sweep timer; it fires a `sweep` job, which arms the next when it is done. */
+  const armSweep = (): void => {
+    if (closed) return;
+    sweepTimer?.clear();
+    sweepTimer = deps.setTimer(() => {
+      sweepTimer = null;
+      enqueue(SWEEP_JOB);
+    }, config.memory.dreamSweepMs);
   };
 
   const track = async (work: () => Promise<void>): Promise<void> => {
@@ -235,7 +268,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     }
   }
 
-  return {
+  const api: Reviewer = {
     noted(agentId, conversationId) {
       if (closed) return;
       void track(() => considerReply(agentId, conversationId));
@@ -249,8 +282,12 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     flagged(agentId, conversationId) {
       armFlags({ kind: "flags", agentId, conversationId });
     },
+    changed(agentId) {
+      enqueue({ kind: "nap", agentId, conversationId: "nap" });
+    },
     remembered: () => attempted.size,
     async resume() {
+      armSweep();
       let armed = 0;
       await track(async () => {
         const { rows } = await db.query<{ agent_id: string; conversation_id: string }>(
@@ -282,6 +319,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       timers.clear();
       for (const pair of flagTimers.values()) for (const timer of pair) timer.clear();
       flagTimers.clear();
+      sweepTimer?.clear();
+      sweepTimer = null;
       hearsayCalls.clear();
       attempted.clear();
       waiting = [];
@@ -292,4 +331,5 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       return looking === 0 && running.size === 0 && waiting.length === 0 ? Promise.resolve() : new Promise((done) => idlers.push(done));
     },
   };
+  return api;
 }

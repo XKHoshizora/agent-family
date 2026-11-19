@@ -22,6 +22,10 @@ const SELF_INSTRUCTIONS =
 const DUPLICATE_INSTRUCTIONS =
   "下面是一个 AI 助手已经记下的几条笔记和一条新的笔记（都可能用任何语言写）。新的这条和哪一条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下它不会让助手多知道任何东西？如果它和已有的矛盾、是对它的更新、或者多了已有的没有的信息，选“都不是”。";
 
+const SPLIT_INSTRUCTIONS =
+  "下面是一条笔记和由它拆出来的几条。拆出来的这几条加在一起，说的全都是原来那条里已经有的事，没有多出任何原来没有的内容、推测或细节。都可能是任何语言。";
+
+const SPLIT = "split";
 const SORT = "sort";
 const DUP = "dup";
 const NONE = "都不是";
@@ -80,6 +84,16 @@ export async function sortNote(
   const { shareAt } = deps.config.memory;
   if (answer.p >= shareAt) return { vault: false, unsure: false };
   return { vault: true, unsure: answer.p >= UNSURE_FROM };
+}
+
+/**
+ * Whether the parts a note was split into hold nothing the note did not (checked by meaning, not by length: parts repeat
+ * a subject or a date, and languages differ in length): one question to the site's judgement model, `splitAt` or more sure.
+ * False whenever it cannot be asked or answers nothing usable: no split then.
+ */
+export async function splitAddsNothing(deps: SortDeps, source: string, parts: ReadonlyArray<string>): Promise<boolean> {
+  const answer = await ask(deps, JSON.stringify({ source, parts }), { key: SPLIT, type: "noul", instructions: SPLIT_INSTRUCTIONS });
+  return answer?.type === "noul" && answer.p >= deps.config.memory.splitAt;
 }
 
 /** The id of the existing note that `text` repeats, or null (also whenever it cannot be asked: the note is then added). */
