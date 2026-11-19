@@ -1,5 +1,8 @@
 import type { FastifyBaseLogger } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { siteDay } from "../src/accounts/store.ts";
+import type { Config } from "../src/config.ts";
+import type { Db } from "../src/db.ts";
 import { listenersFor } from "../src/agents/proactive/listeners.ts";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
 import type { Question } from "../src/judge/client.ts";
@@ -35,7 +38,8 @@ afterEach(async () => {
   await closeAllSockets();
 });
 
-const decide = (conv: string, seq: number) => decideProactive({ db, judge, config: app.deps.config, log }, conv, seq);
+const decide = (conv: string, seq: number, over: Partial<Config> = {}, withDb: Db = db) =>
+  decideProactive({ db: withDb, judge, config: { ...app.deps.config, ...over }, log }, conv, seq);
 
 async function world(tag = "") {
   const [owner, member, third] = [await signUp(app, `owner${tag}`), await signUp(app, `member${tag}`), await signUp(app, `third${tag}`)];
@@ -258,5 +262,130 @@ describe("listeners", () => {
     expect(keys(judge.calls[0]!.questions)).toEqual(["pick", "h1"]);
     expect(decided.runs).toHaveLength(1);
     expect(await flagsOf(w.g)).toEqual([{ agent_id: bot.id, seq: said, kind: "hearsay" }]);
+  });
+
+  it("a judgement with no proactive option is skipped once the day's judgements reach listenShare of the limit; one with options is not", async () => {
+    const day = siteDay(new Date(), app.deps.config.siteTimezone);
+    const over = { judge: { ...JUDGE, dailyLimit: 10 } };
+    const used = (calls: number) => db.query("insert into judge_usage (day, calls) values ($1::date, $2) on conflict (day) do update set calls = $2", [day, calls]);
+    const only = await world();
+    await agentOf(only.owner, "memo", only.g);
+    const both = await world("2");
+    await agentOf(both.owner, "memo_b", both.g);
+    await agentOf(both.owner, "anna", both.g, { proactive: true });
+    judge.answer(answering({ h1: 0.9, h1o: 0.9 }));
+
+    await used(5);
+    expect(await decide(only.g, await say(only.member, only.g, "owner 喜欢跑步"), over)).toEqual({ runs: [], callerLimited: [], notices: [], budgetReached: [] });
+    expect(judge.calls).toHaveLength(0);
+    expect(await flagsOf(only.g)).toEqual([]);
+    expect((await db.query("select calls from judge_usage")).rows).toEqual([{ calls: 5 }]);
+    await decide(both.g, await say(both.member, both.g, "owner 喜欢跑步"), over);
+    expect(judge.calls).toHaveLength(1);
+    expect(keys(judge.calls[0]!.questions)).toContain("pick");
+    expect((await db.query("select calls from judge_usage")).rows).toEqual([{ calls: 6 }]);
+
+    judge.calls.splice(0);
+    await used(4);
+    await decide(only.g, await say(only.member, only.g, "owner 喜欢游泳"), over);
+    expect(judge.calls).toHaveLength(1);
+    expect((await flagsOf(only.g)).length).toBeGreaterThan(0);
+  });
+
+  it("a flag that cannot be written never drops the pick that was answered", async () => {
+    const w = await world();
+    await agentOf(w.owner, "memo", w.g, { proactive: true });
+    judge.answer((_s, questions) => {
+      const pick = questions.find((q) => q.key === "pick") as Extract<Question, { type: "choice" }>;
+      const [k] = Object.keys(pick.options).filter((x) => x !== "nobody");
+      return { pick: { [k!]: 0.95, nobody: 0.05 }, h1: 0.9 };
+    });
+    const failing = {
+      query: (sql: string, params?: unknown[]) => (sql.includes("insert into memory_flags") ? Promise.reject(new Error("disk full")) : db.query(sql, params)),
+      tx: db.tx.bind(db),
+      pool: db.pool,
+      close: db.close,
+    } as unknown as Db;
+    const decided = await decide(w.g, await say(w.member, w.g, "owner 的生日快到了，送什么好？"), {}, failing);
+    expect(decided.runs).toHaveLength(1);
+    expect(decided.flags ?? []).toEqual([]);
+    expect(await flagsOf(w.g)).toEqual([]);
+  });
+
+  it("an Agent whose owner has left the group does not listen", async () => {
+    const w = await world();
+    await agentOf(w.owner, "memo", w.g);
+    const said = await say(w.member, w.g, "hello");
+    expect(await listenersFor(db, w.g, said + 1)).toHaveLength(1);
+    await db.query("update memberships set left_seq = joined_seq where principal_id = $1 and conversation_id = $2", [w.owner.id, w.g]);
+    expect(await listenersFor(db, w.g, said + 1)).toEqual([]);
+  });
+
+  it("with a blocked and an unblocked sender both new, only the unblocked sender's messages are flagged", async () => {
+    const w = await world();
+    const bot = await agentOf(w.owner, "memo", w.g);
+    await db.query("insert into blocks (blocker_id, blocked_id) values ($1, $2)", [w.owner.id, w.member.id]);
+    await judgedUpTo(w.g, await say(w.third, w.g, "早"));
+    await say(w.member, w.g, "owner 昨晚加班");
+    const last = await say(w.third, w.g, "owner 周末要搬家");
+    judge.answer(answering({ h1: 0.8 }));
+    await decide(w.g, last);
+    expect(await flagsOf(w.g)).toEqual([{ agent_id: bot.id, seq: last, kind: "hearsay" }]);
+  });
+
+  it("at most 20 owners listen, the least recently judged first", async () => {
+    const w = await world();
+    const owners: Actor[] = [];
+    const agents: string[] = [];
+    for (let i = 0; i < 21; i++) {
+      const o = await signUp(app, `lo${i}`);
+      await join(w.g, o.id);
+      owners.push(o);
+      agents.push((await agentOf(o, `lbot${i}`, w.g)).id);
+    }
+    // Owner 0 was judged most recently, owner 19 longest ago, owner 20 never.
+    for (let i = 0; i < 20; i++) {
+      await db.query("insert into agent_group_state (agent_id, conversation_id, judged_at) values ($1, $2, now() - make_interval(mins => $3))", [agents[i], w.g, i + 1]);
+    }
+    const said = await say(w.member, w.g, "hello");
+    const listeners = await listenersFor(db, w.g, said);
+    expect(listeners).toHaveLength(20);
+    expect(listeners.map((l) => l.ownerId).sort()).toEqual(owners.slice(1).map((o) => o.id).sort());
+    expect(listeners.map((l) => l.key)).toEqual(Array.from({ length: 20 }, (_, i) => `h${i + 1}`));
+    expect(listeners.map((l) => l.ownerId)).toEqual([...listeners.map((l) => l.ownerId)].sort());
+  }, 120_000);
+
+  it("judging the same messages again writes no duplicate flags and returns none", async () => {
+    const w = await world();
+    const bot = await agentOf(w.owner, "memo", w.g);
+    const said = await say(w.member, w.g, "owner 报名了马拉松");
+    judge.answer(answering({ h1: 0.9 }));
+    const first = await decide(w.g, said);
+    expect(first.flags).toHaveLength(1);
+    await db.query("update agent_group_state set judged_seq = null where agent_id = $1", [bot.id]);
+    const again = await decide(w.g, said);
+    expect(judge.calls).toHaveLength(2);
+    expect(again.flags).toBeUndefined();
+    expect(await flagsOf(w.g)).toEqual([{ agent_id: bot.id, seq: said, kind: "hearsay" }]);
+  });
+
+  it("with no reviewer the owner's own question is not asked, while the hearsay one still is", async () => {
+    const w = await world();
+    await agentOf(w.owner, "memo", w.g, { sharedNotes: false });
+    await judgedUpTo(w.g, await say(w.third, w.g, "早"));
+    await say(w.owner, w.g, "我今晚加班");
+    const last = await say(w.member, w.g, "owner 好辛苦");
+    await decide(w.g, last);
+    expect(keys(judge.calls[0]!.questions)).toEqual(["h1"]);
+  });
+
+  it("a judgement that fails leaves judged_seq unstamped (and judged_at stamped) and flags nothing", async () => {
+    const w = await world();
+    const bot = await agentOf(w.owner, "memo", w.g);
+    judge.answer(() => new Error("upstream down"));
+    await decide(w.g, await say(w.member, w.g, "owner 喜欢爬山"));
+    const state = await db.query("select judged_seq, judged_at from agent_group_state where agent_id = $1", [bot.id]);
+    expect(state.rows).toEqual([{ judged_seq: null, judged_at: expect.any(Date) }]);
+    expect(await flagsOf(w.g)).toEqual([]);
   });
 });

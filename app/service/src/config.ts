@@ -199,6 +199,11 @@ export interface MemoryConfig {
   /** At most this many flagged messages are reviewed together, each with `flaggedContext` messages of context. */
   flaggedMax: number;
   flaggedContext: number;
+  /**
+   * Listening for memory (a judgement with no Agent to pick, only listeners) is skipped once the day's judgements have
+   * reached this share of the judge's daily limit, so that it never uses up what unasked replies need.
+   */
+  listenShare: number;
 }
 
 const memorySchema = z.strictObject({
@@ -220,6 +225,7 @@ const memorySchema = z.strictObject({
   ownAt: probability(0.6),
   flaggedMax: positive(20, 500),
   flaggedContext: z.number().int().min(0).max(50).default(3),
+  listenShare: probability(0.5),
 });
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

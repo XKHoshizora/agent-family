@@ -55,6 +55,10 @@ export interface Option {
 /** The key of option `o`'s quiet question. */
 export const quietKey = (o: Pick<Option, "key">): string => `q_${o.key}`;
 
+/** The Agents whose judgement state a request reads and a decision stamps: the options' and the listeners', each once, in id order. */
+export const judgedAgentIds = (options: readonly Pick<Option, "agentId">[], listeners: readonly Pick<Listener, "agentIds">[]): string[] =>
+  [...new Set([...options.map((o) => o.agentId), ...listeners.flatMap((l) => l.agentIds)])].sort();
+
 /** The keys of listener `l`'s two questions: what others said about the owner, and what the owner said about themselves. */
 export const hearsayKey = (l: Pick<Listener, "key">): string => l.key;
 export const ownKey = (l: Pick<Listener, "key">): string => `${l.key}o`;
@@ -191,8 +195,7 @@ export async function requestFor(
   );
   if (rows.length === 0) return null;
   // Null (never judged with an answer): only the latest message is new, as when each message is judged in turn.
-  const agentIds = [...new Set([...options.map((o) => o.agentId), ...listeners.flatMap((l) => l.agentIds)])];
-  const judged = Math.min((await judgedUpTo(q, conversationId, agentIds)) ?? seq - 1, seq - 1);
+  const judged = Math.min((await judgedUpTo(q, conversationId, judgedAgentIds(options, listeners))) ?? seq - 1, seq - 1);
   rows.reverse();
   const lines = rows.map((r) => {
     const text = r.kind === "file" ? `[文件] ${r.text || r.file || ""}` : (r.text ?? "");

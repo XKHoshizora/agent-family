@@ -404,6 +404,7 @@ describe("the memory configuration", () => {
     ownAt: 0.6,
     flaggedMax: 20,
     flaggedContext: 3,
+    listenShare: 0.5,
   };
 
   test("unset or empty: every default", () => {
@@ -417,7 +418,7 @@ describe("the memory configuration", () => {
   });
 
   test("a threshold outside [0, 1], a non-whole or non-positive count, an unknown key and bad JSON refuse", () => {
-    for (const bad of ['{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
+    for (const bad of ['{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }
   });

@@ -34,6 +34,9 @@ const JUDGE = {
 const judge = scriptedJudge();
 const { app, db } = useApp({ env: SITE_ENV, judge, agentWorker: false, config: { judge: JUDGE } });
 
+/** Whether the Agents `agentOf` makes have memory on: the scenarios that say so run once each way. */
+let memoryOn = false;
+
 const FAST = { source: "site", id: "fast" } as const;
 const RANDOM = "6a0d4c2e-1b3f-4a5e-9c7d-8e9f0a1b2c3d";
 
@@ -55,6 +58,7 @@ beforeEach(() => {
   judge.calls.splice(0);
   judge.answer(() => ({}));
   lines = [];
+  memoryOn = false;
 });
 
 afterEach(async () => {
@@ -82,12 +86,11 @@ const join = (conv: string, id: string) =>
   db.query(`insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1`, [conv, id]);
 
 /**
- * A proactive Agent of `owner` named `handle`, on the site model, put into `conv` when given. Memory is off unless `over` says
- * otherwise: an Agent with memory also listens for what is said about its owner (memory-flags.test.ts), and these tests are
- * about who replies.
+ * A proactive Agent of `owner` named `handle`, on the site model, put into `conv` when given. Memory (`memoryOn`) is off
+ * unless a scenario says otherwise: an Agent with memory also listens for what is said about its owner (memory-flags.test.ts).
  */
 async function agentOf(owner: Actor, handle: string, conv: string | null, over: Record<string, unknown> = {}) {
-  const agent = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", proactive: true, memory: false, ...over });
+  const agent = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", proactive: true, memory: memoryOn, ...over });
   if (conv) await join(conv, agent.id);
   return agent as { id: string; handle: string; conversationId: string };
 }
@@ -184,11 +187,30 @@ describe("an Agent with memory on in the request", () => {
     // Without the listeners the request is what it was.
     expect((await requestFor(db, w.g, asked, options, app.deps.config.proactive))!.questions.map((q) => q.key)).toEqual(["pick"]);
   });
+
+  it("a memory-only Agent that joins after a proactive one narrows what the pick is shown, for the proactive Agent too", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    await say(w.member, w.g, "加入之前的话");
+    await agentOf(w.third, "memo", w.g, { memory: true, proactive: false });
+    const asked = await say(w.member, w.g, "加入之后的话");
+    judge.answer(byName({ anna: 0.1, nobody: 0.9 }));
+    await decide(w.g, asked);
+    const { state, questions } = judge.calls[0]!;
+    expect(state).toBe("群聊记录：\n【新】member：加入之后的话");
+    expect(Object.values(pickOf(questions).options).map((d) => d.split("：")[0])).toEqual(["anna", "不需要任何 AI 助手回答"]);
+    expect(questions.map((q) => q.key)).toEqual(["pick", "h1"]);
+    expect(anna.id).toBeTruthy();
+  });
 });
 
 // --- who replies ---------------------------------------------------------------------------------------------------
 
-describe("who replies unasked", () => {
+describe.each([false, true])("who replies unasked (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("an on-topic request: the picked Agent's reply is queued in lane proactive, by nobody, covering the message; its surcharge rises", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g, { intro: "会做饭的助手", field: "家常菜" });
@@ -291,7 +313,7 @@ describe("who replies unasked", () => {
     };
     const said = await say(w.third, w.g, "问一下");
     expect((await decide(w.g, said, {}, raw)).runs).toHaveLength(1);
-    expect(asked.map((q) => q.key)).toEqual(["pick"]);
+    expect(asked.map((q) => q.key).filter((k) => k === "pick" || k.startsWith("q_"))).toEqual(["pick"]); // listener questions (`h1`, …) come with memory on
     expect((await proactiveRuns(anna.id, w.g)).length).toBe(1);
     expect(await stateOf(bob.id, w.g)).toEqual(UNTOUCHED);
   });
@@ -677,7 +699,11 @@ describe("a judgement that fails", () => {
 
 // --- quiet ---------------------------------------------------------------------------------------------------------------
 
-describe("being asked to be quiet", () => {
+describe.each([false, true])("being asked to be quiet (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("a sure answer raises the threshold to its cap and tells the group once an hour; a direct address still passes", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
@@ -735,7 +761,11 @@ describe("being asked to be quiet", () => {
 
 // --- the brakes ------------------------------------------------------------------------------------------------------------
 
-describe("after it has spoken unasked", () => {
+describe.each([false, true])("after it has spoken unasked (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("the same pick no longer passes until time passes or others have spoken", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
@@ -827,7 +857,11 @@ describe("after it has spoken unasked", () => {
 /** Every level's threshold at 0.4: two Agents' pick probabilities, which sum to about 1, may both pass it. */
 const lowBase = (): Partial<Config> => ({ proactive: { ...app.deps.config.proactive, base: { less: 0.4, normal: 0.4, more: 0.4 } } });
 
-describe("a winner that cannot speak now: nobody replies, not the runner-up, and the reason is logged", () => {
+describe.each([false, true])("a winner that cannot speak now: nobody replies, not the runner-up, and the reason is logged (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   const runAt = (conv: string, agentId: string, ownerId: string, lane: string, ago: string, n = 1) =>
     db.query(
       `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, finished_at, lane)

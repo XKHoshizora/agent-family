@@ -37,7 +37,7 @@ export interface MemoryFlag {
 
 /**
  * The owners whose Agents listen to the group at message `seq`: current Agent members that joined before it, with memory
- * on, not paused or deleted — one listener per owner, at most `MAX_LISTENERS` (those judged here least recently, never
+ * on, not paused or deleted, whose owner is a current member too — one listener per owner, at most `MAX_LISTENERS` (those judged here least recently, never
  * first: `agent_group_state.judged_at`), keyed and returned in owner id order.
  */
 export async function listenersFor(q: Queryable, conversationId: string, seq: number): Promise<Listener[]> {
@@ -53,6 +53,7 @@ export async function listenersFor(q: Queryable, conversationId: string, seq: nu
          left join agent_group_state s on s.agent_id = p.id and s.conversation_id = m.conversation_id
         where m.conversation_id = $1 and m.left_seq is null and m.joined_seq < $2 and p.kind = 'agent'
           and a.memory and not a.paused and a.deleted_at is null
+          and exists (select 1 from memberships om where om.conversation_id = m.conversation_id and om.principal_id = p.owner_id and om.left_seq is null)
         group by o.id, o.display_name, o.handle
         order by min(coalesce(s.judged_at, '-infinity'::timestamptz)), o.id
         limit $3) x

@@ -9,7 +9,7 @@ import { JudgeError, type Answer, type Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, toldSince, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
-import { judgeable, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type Option } from "./candidates.ts";
+import { judgeable, judgedAgentIds, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type Option } from "./candidates.ts";
 import { listenersFor, writeFlags, type MemoryFlag } from "./listeners.ts";
 import { decidedAlready, lockStates, othersSinceSurcharge, saveState, stampJudged } from "./state.ts";
 import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./threshold.ts";
@@ -31,6 +31,13 @@ import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./thr
  *    rule) and it can speak now; when it cannot, nobody does (there is no second choice). Its reply is queued in lane
  *    `proactive`, called for by nobody (a call folded into it while it is queued makes it that call's; a halt ends it
  *    while it is not, runs.ts), and its surcharge rises at once (`afterProactive`).
+ * The same request also carries the listener questions of the Agents with memory on (listeners.ts, the memory plan's
+ * Task 8): per owner whether someone else just said something lasting about them (`hearsay`), and whether they did
+ * (`own`). The answers raise rows of `memory_flags`, written right after the answer (a failed write drops the flags only,
+ * never the pick) and returned as `flags` when any were new. A judgement with no proactive Agent, only listeners, asks no
+ * pick and can trigger nothing; it is skipped once the day's judgements have reached `memory.listenShare` of the limit,
+ * so that listening never uses up what unasked replies need. The transcript starts after the latest join among the
+ * options and the listeners: no Agent that listens or may answer is shown more than it may see.
  * Every failure of the judgement — none configured, over the daily limit, an error, no answer in time, an answer missing
  * any option asked — means nobody replies. What it decides is returned, to act on after commit as a send does
  * (`actOnTriggered`, the notices published). Nothing of it reaches a wire shape; the log carries ids and reasons only.
@@ -71,6 +78,8 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   if (options.length === 0 && listeners.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);
   if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
+  // Listening alone never uses up what unasked replies need: with no Agent to pick, past `listenShare` of the limit, skip.
+  if (options.length === 0 && (await judgementsOn(db, day)) >= config.memory.listenShare * config.judge.dailyLimit) return noneTriggered();
   const request = await requestFor(db, conversationId, seq, options, config.proactive, listeners);
   if (request === null) return noneTriggered();
   const { state, questions, flaggable } = request;
@@ -88,12 +97,16 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   }
   // Whatever came of it: one more judgement today, and each option judged now — up to this message when it was answered.
   await countJudgement(db, day);
-  await stampJudged(db, conversationId, [...new Set([...options.map((o) => o.agentId), ...listeners.flatMap((l) => l.agentIds)])].sort(), answers === null ? null : seq);
+  await stampJudged(db, conversationId, judgedAgentIds(options, listeners), answers === null ? null : seq);
   if (answers === null) return noneTriggered();
 
   const P = config.proactive;
   const asked = new Set(questions.map((q) => q.key));
-  const flags = await writeFlags(db, flagged(flaggable, answers, config.memory, conversationId));
+  // A flag that cannot be written costs the flag only: the pick that was answered is still acted on.
+  const flags = await writeFlags(db, flagged(flaggable, answers, config.memory, conversationId)).catch((err: unknown) => {
+    log.info({ metric: "memory_flags_failed", conversationId, reason: err instanceof Error ? err.name : "error" }, "the memory flags could not be written: none are");
+    return [];
+  });
   const done = <T extends Triggered>(t: T): T & Pick<Decided, "flags"> => (flags.length === 0 ? t : { ...t, flags });
   // Nobody can reply when no Agent was offered: the listeners' questions only flag.
   if (options.length === 0) return done(noneTriggered());
@@ -135,13 +148,18 @@ function logSkipped(log: DecideDeps["log"], reason: Skipped, agentId: string, co
 
 /** Whether the site's judgements of site day `day` have reached `limit`; logged once a day when they have. */
 export async function atDailyLimit(q: Queryable, day: string, limit: number, log: DecideDeps["log"]): Promise<boolean> {
-  const { rows } = await q.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [day]);
-  if ((rows[0]?.calls ?? 0) < limit) return false;
+  if ((await judgementsOn(q, day)) < limit) return false;
   if (limitLoggedOn !== day) {
     limitLoggedOn = day;
     log.info({ metric: "judge_daily_limit" }, "the site's judgements of the day are used up: no Agent replies unasked until the next site day");
   }
   return true;
+}
+
+/** The site's judgements of site day `day` so far (`judge_usage`). */
+async function judgementsOn(q: Queryable, day: string): Promise<number> {
+  const { rows } = await q.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [day]);
+  return rows[0]?.calls ?? 0;
 }
 
 /** One more of the site's judgements of site day `day` (`judge_usage`), whatever came of it. */
