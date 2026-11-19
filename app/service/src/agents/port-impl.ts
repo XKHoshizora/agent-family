@@ -28,7 +28,7 @@ import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
-import { groupSystemPrompt, systemPrompt } from "./runtime/prompt.ts";
+import { groupSystemPrompt, NO_NOTES, systemPrompt } from "./runtime/prompt.ts";
 import {
   actOnTriggered,
   followUp,
@@ -344,7 +344,8 @@ export class DbAgentPort implements AgentPort {
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
       // What its Agent may be shown of its memory here (`notesFor`'s rules), read once with the rest, under the same locks.
-      const notes = await loadNotes(t, agent, { conversationId: run.conversationId, group });
+      // An onboarding run (its own conversation, no persona yet) is shown none (`systemPrompt`), so none is read.
+      const notes = !group && agent.persona === "" ? NO_NOTES : await loadNotes(t, agent, { conversationId: run.conversationId, group });
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
       // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
