@@ -740,3 +740,55 @@ describe("fix round 2", () => {
     expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner", unsure: false });
   });
 });
+
+describe("fix round 3", () => {
+  const lockedByModel = async (w: World) => {
+    const a = await seed(w, "owner", "lock me", { vault: false });
+    const r = await run(w, [{ op: "lock", ref: "a" }], new Map([["a", ref("owner", a)]]));
+    return { a, r };
+  };
+
+  it("the owner's own lock after the model's, through the route, makes the model's lock not undoable", async () => {
+    const w = await world();
+    const { a, r } = await lockedByModel(w);
+    const res = await api(app, { cookie: w.cookie }, "PATCH", `/api/memory/notes/${a}`, { vault: true });
+    expect(res.status).toBe(200);
+    expect(await undo(w, r!.changeId!)).toBe("stale");
+    expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner" });
+    expect((await changeRow(r!.changeId!)).status).toBe("applied");
+  });
+
+  it("with nothing else done, the model's lock is undone and the note is open again; the recorded times are exact UTC text", async () => {
+    const w = await world();
+    const { r } = await lockedByModel(w);
+    const op = (await changeRow(r!.changeId!)).ops[0]!;
+    for (const key of ["updatedAtBefore", "updatedAtAfter"]) expect(op[key]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/);
+    expect(await undo(w, r!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w))[0]).toMatchObject({ vault: false, vaultBy: "auto" });
+  });
+
+  it("a held change is stale after the owner edits the note and edits it back to the same text", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "original words", { vault: true });
+    const id = await propose(w, [ref("owner", a)]);
+    for (const text of ["changed words", "original words"]) {
+      expect((await api(app, { cookie: w.cookie }, "PATCH", `/api/memory/notes/${a}`, { text })).status).toBe(200);
+    }
+    expect((await ownerNotes(w))[0]).toMatchObject({ text: "original words", vault: true });
+    expect(await confirm(w, id!)).toBe("stale");
+    expect((await ownerNotes(w))[0]!.vault).toBe(true);
+    expect((await changeRow(id!)).status).toBe("discarded");
+  });
+
+  it("growth is judged in op order across adds and replaces together", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "a".repeat(10));
+    const r = await run(w, [{ op: "add", kind: "owner", text: "n".repeat(10) }, { op: "replace", ref: "a", text: "c".repeat(20) }], new Map([["a", ref("owner", a)]]), {
+      rooms: { ...ROOMS, owner: 25 },
+      vaults: new Map([[vaultKey("owner", "c".repeat(20)), OPEN]]),
+    });
+    expect(r!.full).toBe(true);
+    expect(r!.applied.map((x) => x.op)).toEqual(["add"]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["a".repeat(10), "n".repeat(10)]);
+  });
+});

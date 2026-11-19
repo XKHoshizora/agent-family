@@ -3,7 +3,7 @@ import type { Tx } from "../db.ts";
 import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
 import { codePoints, used, type Note, type NoteKind, type Rooms } from "./store.ts";
-import { createdAtText, deleteNote, fits, insertNote, listRoom, lockRoom, restoreNote, roomLimit, updateNote, type Room } from "./write.ts";
+import { deleteNote, fits, insertNote, listRoomExact, lockRoom, restoreNote, roomLimit, updatedAtOf, updateNote, type ExactNote, type Room } from "./write.ts";
 
 /**
  * Applying what a review may change, the one audited path: every change is recorded in `memory_changes` (so the owner
@@ -42,6 +42,9 @@ export interface StoredOp extends AppliedOp {
   /** A `remove` keeps the deleted note's origin and creation time, so undo restores it whole. */
   origin: Note["origin"] | null;
   createdAt: string | null;
+  /** The exact `updated_at` of the note before the change (what it was found as) and after it (what the change left): undo and confirm are stale unless the note still has it. */
+  updatedAtBefore: string | null;
+  updatedAtAfter: string | null;
 }
 
 export interface Who {
@@ -80,7 +83,7 @@ export interface ApplyResult {
 /** The key of a sorting verdict in `ApplyOpts.vaults`: the kind of the note and its text (the sorter's answer depends on the kind). */
 export const vaultKey = (kind: NoteKind, text: string): string => `${kind}:${text}`;
 
-type State = { owner: Map<string, Note>; self: Map<string, Note>; created: Map<string, string> };
+type State = { owner: Map<string, Note>; self: Map<string, Note>; exact: Map<string, { createdAt: string; updatedAt: string }> };
 type Ids = { ownerId: string; agentId: string };
 
 const roomFor = (kind: NoteKind, w: Ids): Room => (kind === "owner" ? { kind, ownerId: w.ownerId } : { kind, agentId: w.agentId });
@@ -98,9 +101,10 @@ async function loadState(t: Tx, w: Ids): Promise<State> {
   const self = roomFor("self", w);
   await lockRoom(t, owner);
   await lockRoom(t, self);
-  const [o, s] = [await listRoom(t, owner), await listRoom(t, self)];
-  const created = new Map([...(await createdAtText(t, owner)), ...(await createdAtText(t, self))]);
-  return { owner: new Map(o.map((n) => [n.id, n])), self: new Map(s.map((n) => [n.id, n])), created };
+  const [o, s] = [await listRoomExact(t, owner), await listRoomExact(t, self)];
+  const byId = (list: ExactNote[]) => new Map(list.map((e) => [e.note.id, e.note]));
+  const exact = new Map([...o, ...s].map((e) => [e.note.id, { createdAt: e.createdAt, updatedAt: e.updatedAt }]));
+  return { owner: byId(o), self: byId(s), exact };
 }
 
 const usedIn = (state: State): { owner: number; self: number } => ({ owner: used([...state.owner.values()]), self: used([...state.self.values()]) });
@@ -120,74 +124,95 @@ const base = (op: Op["op"], kind: NoteKind, noteId: string | null): StoredOp => 
   originConversationId: null,
   origin: null,
   createdAt: null,
+  updatedAtBefore: null,
+  updatedAtAfter: null,
 });
 
-const snapshot = (s: StoredOp, n: Note): StoredOp => ({
+const snapshot = (s: StoredOp, n: Note, state: State): StoredOp => ({
   ...s,
+  updatedAtBefore: state.exact.get(n.id)!.updatedAt,
   before: n.text,
   vaultBefore: n.vault,
   vaultByBefore: n.vaultBy,
   unsureBefore: n.unsure,
 });
 
-type Candidate = { op: "remove" | "lock" | "replace"; note: Note; text: string; growth: number };
+type Candidate = { index: number; op: "remove" | "lock" | "replace"; note: Note; text: string; growth: number };
+type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
 
 /**
- * What the operations would do to the rooms as they stand: removes, replaces and locks first (in the order given, with
- * every remove's room counted as free before a replace is judged), then adds, so a merge frees room for its add. A note
- * is touched by at most one op (the first). Nothing is written.
+ * What the operations would do to the rooms as they stand. A change is judged by its net effect: every remove and every
+ * shrinking replace is counted first (they free room), then every growth (a growing replace or an add) in the order the
+ * ops came, each dropped (and `full` set) when its room would pass its limit. A note is touched by at most one op (the
+ * first). The result lists removes, replaces and locks first, then the adds, so the notes added list in op order.
+ * Nothing is written.
  */
 function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteKind; id: string }>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
   const room = usedIn(state);
   const touched = new Set<string>();
   const candidates: Candidate[] = [];
+  const adds: AddStep[] = [];
   const unlocks: string[] = [];
 
-  for (const op of ops) {
-    if (op.op === "add") continue;
+  ops.forEach((op, index) => {
+    if (op.op === "add") {
+      if (!allowed(op.kind)) return;
+      const text = modelNote(op.text);
+      if (text !== null && !opts.duplicates.has(text) && !opts.duplicates.has(op.text)) adds.push({ index, op, text });
+      return;
+    }
     const target = refs.get(op.ref);
-    if (!target || !allowed(target.kind)) continue;
+    if (!target || !allowed(target.kind)) return;
     const note = state[target.kind].get(target.id);
-    if (!note) continue;
+    if (!note) return;
     if (op.op === "unlock") {
       if (note.vault && !unlocks.includes(op.ref)) unlocks.push(op.ref);
-      continue;
+      return;
     }
-    if (touched.has(note.id)) continue;
+    if (touched.has(note.id)) return;
     if (op.op === "lock") {
-      if (note.vault && note.vaultBy === "owner") continue;
+      if (note.vault && note.vaultBy === "owner") return;
       touched.add(note.id);
-      candidates.push({ op: "lock", note, text: note.text, growth: 0 });
+      candidates.push({ index, op: "lock", note, text: note.text, growth: 0 });
     } else if (op.op === "remove") {
       touched.add(note.id);
       room[note.kind] -= codePoints(note.text);
-      candidates.push({ op: "remove", note, text: note.text, growth: 0 });
+      candidates.push({ index, op: "remove", note, text: note.text, growth: 0 });
     } else {
       const text = modelNote(op.text);
-      if (text === null || text === note.text) continue;
+      if (text === null || text === note.text) return;
       touched.add(note.id);
       const growth = codePoints(text) - codePoints(note.text);
-      // Every shrink counts before any growth is judged: the change is judged by its net effect.
       if (growth < 0) room[note.kind] += growth;
-      candidates.push({ op: "replace", note, text, growth });
+      candidates.push({ index, op: "replace", note, text, growth });
+    }
+  });
+
+  // Growth, in op order across replaces and adds together.
+  const rejected = new Set<number>();
+  let full = false;
+  const growing = [
+    ...candidates.filter((c) => c.op === "replace" && c.growth > 0).map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
+    ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: codePoints(a.text) })),
+  ].sort((x, y) => x.index - y.index);
+  for (const g of growing) {
+    if (fits(room[g.kind], g.growth, roomLimit(opts.rooms, g.kind))) room[g.kind] += g.growth;
+    else {
+      rejected.add(g.index);
+      full = true;
     }
   }
 
   const stored: StoredOp[] = [];
-  let full = false;
-  for (const { op, note, text, growth } of candidates) {
-    const s = snapshot(base(op, note.kind, note.id), note);
+  for (const { index, op, note, text } of candidates) {
+    if (rejected.has(index)) continue;
+    const s = snapshot(base(op, note.kind, note.id), note, state);
     if (op === "remove") {
-      stored.push({ ...s, originConversationId: note.originConversationId, origin: note.origin, createdAt: state.created.get(note.id) ?? note.createdAt.toISOString() });
+      stored.push({ ...s, originConversationId: note.originConversationId, origin: note.origin, createdAt: state.exact.get(note.id)!.createdAt });
     } else if (op === "lock") {
       stored.push({ ...s, after: note.text, vaultAfter: true, vaultByAfter: "owner", unsureAfter: note.unsure });
     } else {
-      if (growth > 0 && !fits(room[note.kind], growth, roomLimit(opts.rooms, note.kind))) {
-        full = true;
-        continue;
-      }
-      if (growth > 0) room[note.kind] += growth;
       // Into the vault only: a note inside stays (one the owner locked too, whatever the text). One outside, whoever put
       // it there, is new text the owner never approved for groups: it goes in unless the sorting says it is fine (a
       // text with no verdict is not known to be).
@@ -199,17 +224,8 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
       stored.push({ ...s, after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure });
     }
   }
-
-  for (const op of ops) {
-    if (op.op !== "add" || !allowed(op.kind)) continue;
-    const text = modelNote(op.text);
-    if (text === null || opts.duplicates.has(text) || opts.duplicates.has(op.text)) continue;
-    const growth = codePoints(text);
-    if (!fits(room[op.kind], growth, roomLimit(opts.rooms, op.kind))) {
-      full = true;
-      continue;
-    }
-    room[op.kind] += growth;
+  for (const { index, op, text } of adds) {
+    if (rejected.has(index)) continue;
     const verdict = opts.vaults.get(vaultKey(op.kind, text)) ?? opts.vaults.get(vaultKey(op.kind, op.text)) ?? { vault: true, unsure: true };
     stored.push({
       ...base("add", op.kind, null),
@@ -258,6 +274,15 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
   return done;
 }
 
+/** Records, on every op that wrote a note, the exact `updated_at` the write left (read back in the same transaction). */
+async function stamp(t: Tx, w: Ids, ops: StoredOp[]): Promise<void> {
+  for (const kind of ["owner", "self"] as const) {
+    const touched = ops.filter((s) => s.kind === kind && s.noteId !== null && s.op !== "remove");
+    const at = await updatedAtOf(t, roomFor(kind, w), touched.map((s) => s.noteId!));
+    for (const s of touched) s.updatedAtAfter = at.get(s.noteId!) ?? null;
+  }
+}
+
 async function writeChange(t: Tx, w: Ids, conversationId: string, status: "applied" | "pending", stored: StoredOp[], full: boolean): Promise<string> {
   const { rows } = await t.query<{ id: string }>(
     `insert into memory_changes (owner_id, agent_id, conversation_id, status, ops, "full") values ($1, $2, $3, $4, $5::jsonb, $6) returning id`,
@@ -286,6 +311,7 @@ export async function applyOps(
   const planned = plan(state, who, ops, refs, opts);
   const { full, unlocks } = planned;
   const stored = opts.status === "applied" ? await execute(t, who, planned.stored) : planned.stored;
+  if (opts.status === "applied") await stamp(t, who, stored);
   if (stored.length === 0 && !full && unlocks.length === 0) return null;
   const changeId = stored.length > 0 || full ? await writeChange(t, who, opts.conversationId, opts.status, stored, full) : null;
   return { changeId, applied: stored.map(plain), full, unlocks };
@@ -306,7 +332,7 @@ export async function proposeUnlocks(t: Tx, who: Ids, conversationId: string, no
     const note = state[target.kind].get(target.id);
     if (!note || !note.vault || seen.has(note.id)) continue;
     seen.add(note.id);
-    stored.push({ ...snapshot(base("unlock", target.kind, note.id), note), after: note.text, vaultAfter: false, vaultByAfter: "owner", unsureAfter: false });
+    stored.push({ ...snapshot(base("unlock", target.kind, note.id), note, state), after: note.text, vaultAfter: false, vaultByAfter: "owner", unsureAfter: false });
   }
   return stored.length === 0 ? null : writeChange(t, who, conversationId, "pending", stored, false);
 }
@@ -333,9 +359,16 @@ const resolve = (t: Tx, changeId: string, status: "undone" | "discarded" | "appl
     ? t.query(`update memory_changes set status = $2, ops = $3::jsonb, "full" = $4, resolved_at = now() where id = $1`, [changeId, status, JSON.stringify(extra.ops), extra.full])
     : t.query("update memory_changes set status = $2, resolved_at = now() where id = $1", [changeId, status]);
 
-/** The note a stored op names stands as the change left it (or, before a pending change is applied, as it found it). */
-const stands = (n: Note | undefined, text: string | null, vault: boolean | null, by: "auto" | "owner" | null, unsure: boolean | null): boolean =>
-  n !== undefined && n.text === text && n.vault === vault && n.vaultBy === by && n.unsure === unsure;
+/**
+ * The note a stored op names is exactly as the change left it (`side` after) or found it (before): its text, vault state,
+ * `vault_by`, `unsure` and its exact `updated_at`. The last is what catches an owner's write that changed no value (their
+ * own lock of a note the model locked): every write bumps it.
+ */
+const stands = (state: State, s: StoredOp, side: "before" | "after"): boolean => {
+  const n = s.noteId === null ? undefined : state[s.kind].get(s.noteId);
+  const a = side === "after" ? { text: s.after, vault: s.vaultAfter, by: s.vaultByAfter, unsure: s.unsureAfter, at: s.updatedAtAfter } : { text: s.before, vault: s.vaultBefore, by: s.vaultByBefore, unsure: s.unsureBefore, at: s.updatedAtBefore };
+  return n !== undefined && n.text === a.text && n.vault === a.vault && n.vaultBy === a.by && n.unsure === a.unsure && a.at !== null && state.exact.get(n.id)?.updatedAt === a.at;
+};
 
 /** How many code points a stored op adds to its room when undone (negative: frees). */
 const undoGrowth = (s: StoredOp): number =>
@@ -355,8 +388,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
   const w = { ownerId, agentId: change.agentId };
   const state = await loadState(t, w);
   for (const s of change.ops) {
-    const note = s.noteId === null ? undefined : state[s.kind].get(s.noteId);
-    const ok = s.op === "remove" ? note === undefined : stands(note, s.after, s.vaultAfter, s.vaultByAfter, s.unsureAfter);
+    const ok = s.op === "remove" ? !state[s.kind].has(s.noteId!) : stands(state, s, "after");
     if (!ok) return "stale";
   }
   const room = usedIn(state);
@@ -401,7 +433,7 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
   const state = await loadState(t, w);
   for (const s of change.ops) {
     if (s.op === "add") continue;
-    if (!stands(state[s.kind].get(s.noteId!), s.before, s.vaultBefore, s.vaultByBefore, s.unsureBefore)) {
+    if (!stands(state, s, "before")) {
       await resolve(t, changeId, "discarded");
       return "stale";
     }
@@ -419,6 +451,7 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
     if (s.op === "unlock" && (await updateNote(t, roomFor(s.kind, w), s.noteId!, { vault: false, vaultBy: "owner", unsure: false }))) done.push(s);
   }
   const kept = change.ops.filter((s) => done.includes(s));
+  await stamp(t, w, kept);
   await resolve(t, changeId, "applied", { ops: kept, full: change.full });
   return kept.map(plain);
 }

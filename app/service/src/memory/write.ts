@@ -23,10 +23,37 @@ const keyOf = (room: Room): string => (room.kind === "owner" ? room.ownerId : ro
 /** The notes of `room`, oldest first. */
 export const listRoom = (q: Queryable, room: Room): Promise<Note[]> => (room.kind === "owner" ? listOwnerNotes(q, room.ownerId) : listAgentNotes(q, room.agentId));
 
-/** The exact creation times of the notes of `room`, as the database prints them (a JS Date keeps milliseconds only), by id. */
-export async function createdAtText(q: Queryable, room: Room): Promise<Map<string, string>> {
-  const { rows } = await q.query<{ id: string; created: string }>(`select id, created_at::text as created from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1`, [keyOf(room)]);
-  return new Map(rows.map((r) => [r.id, r.created]));
+/**
+ * A timestamp column as text in one explicit, session-independent format (UTC, microseconds): what a change records and
+ * compares (a JS Date keeps milliseconds only, and the session's time zone must not matter). `$n::timestamptz` reads it back.
+ */
+const exactTs = (column: string): string => `to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
+export interface ExactNote {
+  note: Note;
+  /** `created_at` and `updated_at` as `exactTs` prints them. */
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** The notes of `room`, oldest first, with their exact timestamps from the same read. */
+export async function listRoomExact(q: Queryable, room: Room): Promise<ExactNote[]> {
+  const { rows } = await q.query<NoteRow & { created_x: string; updated_x: string }>(
+    `select ${NOTE_COLUMNS}, ${exactTs("created_at")} as created_x, ${exactTs("updated_at")} as updated_x
+       from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1 order by created_at, id`,
+    [keyOf(room)],
+  );
+  return rows.map((r) => ({ note: toNote(room.kind, r), createdAt: r.created_x, updatedAt: r.updated_x }));
+}
+
+/** The exact `updated_at` of the notes `ids` of `room`, by id. */
+export async function updatedAtOf(q: Queryable, room: Room, ids: ReadonlyArray<string>): Promise<Map<string, string>> {
+  if (ids.length === 0) return new Map();
+  const { rows } = await q.query<{ id: string; updated: string }>(
+    `select id, ${exactTs("updated_at")} as updated from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1 and id = any($2::uuid[])`,
+    [keyOf(room), ids],
+  );
+  return new Map(rows.map((r) => [r.id, r.updated]));
 }
 
 /** One note of `room`, or null when it has none such. */
@@ -75,12 +102,12 @@ export interface NotePatch {
   unsure?: boolean;
 }
 
-/** Changes the fields given of a note of `room` (under `lockRoom`); false when `room` has no such note. */
+/** Changes the fields given of a note of `room` (under `lockRoom`); false when `room` has no such note. Every call bumps `updated_at`, even when no value changes: it is how a change knows the owner touched a note since. */
 export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch): Promise<boolean> {
   const { rowCount } = await t.query(
     `update ${TABLE[room.kind]}
         set text = coalesce($3, text), vault = coalesce($4, vault), vault_by = coalesce($5, vault_by),
-            unsure = coalesce($6, unsure), updated_at = now()
+            unsure = coalesce($6, unsure), updated_at = clock_timestamp()
       where id = $1 and ${COLUMN[room.kind]} = $2`,
     [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null],
   );
