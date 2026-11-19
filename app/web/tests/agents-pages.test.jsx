@@ -1106,7 +1106,7 @@ describe("the Agent's page", () => {
     expect(kv).not.toContain("群内回复方式");
     expect(document.querySelector(".main-col .kv img")).toBeNull();
     const tabs = within(inMain().getByRole("tablist", { name: "Agent 分区" })).getAllByRole("tab").map((t) => t.textContent);
-    expect(tabs).toEqual(["资料", "参与的会话", "能力与设备"]);
+    expect(tabs).toEqual(["资料", "参与的会话", "记忆宫殿", "能力与设备"]);
     await click(inMain().getByRole("tab", { name: "能力与设备" }));
     expect(document.querySelector(".main-col .page-body").textContent).toBe("尚未开放");
     expect(document.querySelector(".main-col input, .main-col select")).toBeNull();
@@ -1893,5 +1893,103 @@ describe("主动参与群聊 (proactive replies)", () => {
     cleanup();
     // The budget missing (the service always says it): the level alone.
     expect(await show({ proactive: true, proactiveLevel: "less" })).toContain("主动参与群聊少说");
+  });
+});
+
+describe("the 记忆 section of the form", () => {
+  const MEMORY = "记忆";
+  const ASK = "先问我再记";
+  const SHARED = "使用共用的“关于我”";
+  const HELPER = "它会记住关于你的事和自己学到的事。复盘花的是你的点。";
+  const sw = (label) => inMain().getByLabelText(label);
+  const save = () => click(inMain().getByRole("button", { name: "保存" }));
+  const openEditOf = async (fields = {}) => {
+    const record = agentOf(AG1, { model: SITE_MODEL, ...fields });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    const app = await openAgents({ agents: [record], api: { patchAgent } });
+    app.transport.handlers.agent = () => record;
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    return { patchAgent };
+  };
+
+  it("a 记忆 section after 称呼 has three switches with the helper; a record that says nothing is the service's defaults", async () => {
+    await openEditOf();
+    const sections = [...document.querySelectorAll(".main-col fieldset legend")].map((l) => l.textContent);
+    expect(sections.indexOf("记忆")).toBe(sections.indexOf("称呼") + 1);
+    expect(inMain().getByText(HELPER)).toBeTruthy();
+    expect(sw(MEMORY).getAttribute("aria-describedby")).toBe(inMain().getByText(HELPER).id);
+    expect([sw(MEMORY).checked, sw(ASK).checked, sw(SHARED).checked]).toEqual([true, false, true]);
+    for (const label of [MEMORY, ASK, SHARED]) expect(sw(label).getAttribute("role")).toBe("switch");
+  });
+
+  it("the switches show the record's values", async () => {
+    await openEditOf({ memory: true, memoryAsk: true, sharedNotes: false });
+    expect([sw(MEMORY).checked, sw(ASK).checked, sw(SHARED).checked]).toEqual([true, true, false]);
+  });
+
+  it("saving without touching them sends none of them", async () => {
+    const { patchAgent } = await openEditOf({ memory: true, memoryAsk: false, sharedNotes: true });
+    type("名称", "新名字");
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ name: "新名字" });
+  });
+
+  it("each switch sends only itself, and one put back as it was sends nothing", async () => {
+    const { patchAgent } = await openEditOf();
+    fireEvent.click(sw(ASK));
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ memoryAsk: true });
+    cleanup();
+    const second = await openEditOf();
+    fireEvent.click(sw(SHARED));
+    await save();
+    expect(second.patchAgent.mock.calls[0][1]).toEqual({ sharedNotes: false });
+    cleanup();
+    const third = await openEditOf();
+    fireEvent.click(sw(ASK));
+    fireEvent.click(sw(ASK));
+    await save();
+    expect(third.patchAgent).not.toHaveBeenCalled();
+  });
+
+  it("with 记忆 off the other two are disabled; turning it off sends only memory: false", async () => {
+    const { patchAgent } = await openEditOf();
+    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([false, false]);
+    fireEvent.click(sw(MEMORY));
+    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([true, true]);
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ memory: false });
+  });
+
+  it("a record with 记忆 off opens with the other two disabled, and turning it on sends memory: true", async () => {
+    const { patchAgent } = await openEditOf({ memory: false });
+    expect(sw(MEMORY).checked).toBe(false);
+    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([true, true]);
+    fireEvent.click(sw(MEMORY));
+    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([false, false]);
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ memory: true });
+  });
+
+  it("creating: the defaults send none of them; a changed one is sent", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    await click(createButton());
+    for (const key of ["memory", "memoryAsk", "sharedNotes"]) expect(createAgent.mock.calls[0][0]).not.toHaveProperty(key);
+    cleanup();
+    const second = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent: second } });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    fireEvent.click(sw(ASK));
+    fireEvent.click(sw(SHARED));
+    await click(createButton());
+    expect(second.mock.calls[0][0]).toMatchObject({ memoryAsk: true, sharedNotes: false });
+    expect(second.mock.calls[0][0]).not.toHaveProperty("memory");
   });
 });

@@ -24,6 +24,8 @@ export const resetPassword = (body) => request("POST", "/api/auth/reset-password
 // ───────── me and principals
 export const getMe = () => request("GET", "/api/me");
 export const updateMe = (displayName) => request("PATCH", "/api/me", { displayName });
+/** How a new note is sorted for the vault: "auto" (judged), "vault" (all in) or "open" (none in). The answer does not echo it. */
+export const updateNewNotes = (newNotes) => request("PATCH", "/api/me", { newNotes });
 export const lookupPrincipal = (handle) => request("GET", withQuery("/api/principals/lookup", { handle }));
 
 // ───────── social
@@ -103,6 +105,23 @@ export const discardProposal = (agentId, proposalId) => request("POST", `/api/ag
 export const undoMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/undo`);
 export const confirmMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/confirm`);
 export const discardMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/discard`);
+
+// ───────── the memory palace: 关于我 (mine, shared by my Agents) and an Agent's own notes and hearsay
+// Note: {id, text, vault, unsure, origin: "review"|"owner"|"hearsay", source: {kind: "agent"|"group"|"manual", title}, createdAt, updatedAt};
+// a room's counts are code points: {notes, used, limit}. Refusals: 422 note_refused, 409 room_full.
+export const listMemoryNotes = () => request("GET", "/api/memory/notes");
+/** body: {text, vault?} → Note */
+export const addMemoryNote = (body) => request("POST", "/api/memory/notes", body);
+/** patch: {text?, vault?} → Note */
+export const patchMemoryNote = (noteId, patch) => request("PATCH", `/api/memory/notes/${seg(noteId)}`, patch);
+export const deleteMemoryNote = (noteId) => request("DELETE", `/api/memory/notes/${seg(noteId)}`);
+/** → {notes, used, limit, hearsay: [{id, text, speakerName, group: {id, title} | null, saidAt}], hearsayUsed, hearsayLimit} */
+export const getAgentMemory = (agentId) => request("GET", `/api/agents/${seg(agentId)}/memory`);
+export const addAgentMemoryNote = (agentId, body) => request("POST", `/api/agents/${seg(agentId)}/memory/notes`, body);
+export const patchAgentMemoryNote = (agentId, noteId, patch) => request("PATCH", `/api/agents/${seg(agentId)}/memory/notes/${seg(noteId)}`, patch);
+export const deleteAgentMemoryNote = (agentId, noteId) => request("DELETE", `/api/agents/${seg(agentId)}/memory/notes/${seg(noteId)}`);
+export const deleteHearsay = (agentId, hearsayId) => request("DELETE", `/api/agents/${seg(agentId)}/memory/hearsay/${seg(hearsayId)}`);
+export const confirmHearsay = (agentId, hearsayId) => request("POST", `/api/agents/${seg(agentId)}/memory/hearsay/${seg(hearsayId)}/confirm`);
 
 // ───────── an Agent's replies (runs) and new topics, by its conversation; in a group, by the group and the Agent
 export const getRun = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/run`); // → {run: Run | null}

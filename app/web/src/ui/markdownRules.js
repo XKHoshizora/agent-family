@@ -123,5 +123,6 @@ export const APP_CLASSES = new Set(
   sync-added sync-failed sync-name sync-others sync-rows sync-tags sync-tools
   tag tag-human tag-muted tag-ok tag-pending tag-row tag-solid tag-warn task-controls task-list-item theirs thinking
   thinking-text toast typed up upload-progress vis-banner
-  memory-card memory-chip memory-detail memory-foot memory-hint memory-lines msg-memory`.split(/\s+/),
+  memory-card memory-chip memory-detail memory-foot memory-hint memory-lines msg-memory
+  memory-room memory-head memory-add memory-add-line memory-rows memory-row memory-body memory-text memory-source memory-actions memory-open memory-switches memory-vault`.split(/\s+/),
 );

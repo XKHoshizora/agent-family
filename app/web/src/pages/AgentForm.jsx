@@ -29,6 +29,15 @@ export const CHAIN_BUDGET_DEFAULT = "50";
 export const OTHERS_BUDGET_DEFAULT = "20";
 /** 主动回复每天最多花 when nothing else is said, in points (the service's default); its amount is a budget like the others. */
 const PROACTIVE_BUDGET_DEFAULT = "20";
+/** The 记忆 switches: the form key, its label and what it says; the last two only matter while the first is on. */
+const MEMORY_HELPER = "它会记住关于你的事和自己学到的事。复盘花的是你的点。";
+const MEMORY_SWITCHES = [
+  ["memoryAsk", "先问我再记", "记之前先在会话里问你，你同意了才记。"],
+  ["sharedNotes", "使用共用的“关于我”", "和你名下其他开着这一项的 Agent 共用同一份。"],
+];
+/** What the service takes when a switch is not said (the form's defaults, `recordFields`). */
+const MEMORY_DEFAULTS = { memory: true, memoryAsk: false, sharedNotes: true };
+const MEMORY_KEYS = Object.keys(MEMORY_DEFAULTS);
 /** Under 主动参与群聊: what it does, or — the site having no judgement model — why it does nothing now. */
 const PROACTIVE_HELPER = "打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。";
 const PROACTIVE_LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
@@ -109,6 +118,10 @@ const recordFields = (a) => ({
   proactiveLevel: isProactiveLevel(a?.proactiveLevel) ? a.proactiveLevel : "normal",
   proactiveBudget: budgetOf(a?.proactiveBudget) ?? PROACTIVE_BUDGET_DEFAULT,
   ownerAppellation: a?.ownerAppellation ?? "",
+  // The service's defaults when the record says nothing: remembers, tells me nothing first, uses the shared 关于我.
+  memory: a?.memory !== false,
+  memoryAsk: a?.memoryAsk === true,
+  sharedNotes: a?.sharedNotes !== false,
   reasoning: a?.reasoning ?? "none",
   model: modelKey(a?.model ?? null),
 });
@@ -245,6 +258,11 @@ export function AgentForm({ agent = null }) {
     edited.current.add("proactive");
     setF((cur) => ({ ...cur, proactive: value }));
   };
+  const setSwitch = (key) => (event) => {
+    const value = event.target.checked;
+    edited.current.add(key);
+    setF((cur) => ({ ...cur, [key]: value }));
+  };
   const setName = (event) => {
     const value = event.target.value;
     edited.current.add("name");
@@ -303,6 +321,8 @@ export function AgentForm({ agent = null }) {
     // Said only when it is on (off is the service's default).
     if (proactiveAsked) Object.assign(body, { proactive: true, proactiveLevel: f.proactiveLevel, proactiveBudget: budgetOf(f.proactiveBudget) });
     if (ownerAppellation) body.ownerAppellation = ownerAppellation;
+    // Said only when it is not the service's default.
+    for (const key of MEMORY_KEYS) if (f[key] !== MEMORY_DEFAULTS[key]) body[key] = f[key];
     body.reasoning = reasoning;
     body.model = choice.model;
     const res = await run(
@@ -352,6 +372,7 @@ export function AgentForm({ agent = null }) {
     }
     // 它怎么称呼你: cleared (emptied) is null, which the service reads as none.
     if (mine("ownerAppellation")) patch.ownerAppellation = ownerAppellation || null;
+    for (const key of MEMORY_KEYS) if (mine(key)) patch[key] = f[key];
     // The service checks the model and the reasoning level together: a new model goes with its level. The level alone
     // is sent only when I changed it (a stored level the model no longer takes is not reset behind my back).
     const modelChanged = mine("model") && !choice.stale;
@@ -577,6 +598,20 @@ export function AgentForm({ agent = null }) {
           </Field>
           {/* An Agent must exist to name others for it. */}
           {agent && <AgentAppellations agent={agent} />}
+        </fieldset>
+        <fieldset className="form-section">
+          <legend>记忆</legend>
+          <div className="field">
+            <Switch checked={f.memory} onChange={setSwitch("memory")} label="记忆" hint={MEMORY_HELPER} hintClass="field-hint" />
+          </div>
+          {/* A disabled fieldset turns off every switch inside it: with 记忆 off the other two do nothing. */}
+          <fieldset className="memory-switches" disabled={!f.memory}>
+            {MEMORY_SWITCHES.map(([key, label, hint]) => (
+              <div className="field" key={key}>
+                <Switch checked={f[key]} onChange={setSwitch(key)} label={label} hint={hint} hintClass="field-hint" />
+              </div>
+            ))}
+          </fieldset>
         </fieldset>
         <Notice tone="info">
           {agent

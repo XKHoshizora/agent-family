@@ -517,6 +517,10 @@ function agentView(a, version, loaded) {
     /** How it addresses me and the others: only the owner's view has these (absent, never defaulted, otherwise). */
     ...(typeof a.ownerAppellation === "string" || a.ownerAppellation === null ? { ownerAppellation: a.ownerAppellation } : {}),
     ...(Array.isArray(a.appellations) ? { appellations: a.appellations } : {}),
+    /** 记忆 and its two sub-switches (先问我再记, 使用共用的“关于我”): only the owner's view has these. */
+    ...(typeof a.memory === "boolean" ? { memory: a.memory } : {}),
+    ...(typeof a.memoryAsk === "boolean" ? { memoryAsk: a.memoryAsk } : {}),
+    ...(typeof a.sharedNotes === "boolean" ? { sharedNotes: a.sharedNotes } : {}),
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),

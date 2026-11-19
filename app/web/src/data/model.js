@@ -840,6 +840,33 @@ export function dropAgent(state, agentId) {
   return agentId in state.agents ? { ...state, agents: without(state.agents, agentId) } : state;
 }
 
+// ───────── the memory palace (rooms are held by the pages that show them, not in the model: they are read when opened)
+
+const isNote = (n) =>
+  n && typeof n.id === "string" && typeof n.text === "string" && typeof n.createdAt === "string" && n.source && typeof n.source === "object";
+const isHeard = (h) => h && typeof h.id === "string" && typeof h.text === "string" && typeof h.speakerName === "string";
+const count = (n) => (Number.isFinite(n) && n >= 0 ? n : 0);
+
+/**
+ * A room as `GET /api/memory/notes` or `GET /api/agents/:id/memory` answers it, with only what the pages read: the notes
+ * (vault flag and `unsure` as booleans), the characters used and the room's limit (code points), and for an Agent what it
+ * heard with its own count. A malformed answer is no room (null).
+ */
+export function memoryRoomOf(answer) {
+  if (!answer || !Array.isArray(answer.notes) || !Number.isFinite(answer.limit)) return null;
+  const notes = answer.notes.filter(isNote).map((n) => ({ ...n, vault: n.vault === true, unsure: n.unsure === true }));
+  const room = { notes, used: count(answer.used), limit: answer.limit, hearsay: null, hearsayUsed: 0, hearsayLimit: 0 };
+  if (Array.isArray(answer.hearsay)) {
+    room.hearsay = answer.hearsay.filter(isHeard).map((h) => ({ ...h, group: h.group && typeof h.group === "object" ? h.group : null }));
+    room.hearsayUsed = count(answer.hearsayUsed);
+    room.hearsayLimit = count(answer.hearsayLimit);
+  }
+  return room;
+}
+
+/** How my new notes are sorted, as `GET /api/me` says it: "auto" (the default), "vault" or "open". */
+export const newNotesOf = (me) => (me?.newNotes === "vault" || me?.newNotes === "open" ? me.newNotes : "auto");
+
 // ───────── persona proposal cards
 
 /** Whether `m` is a memory-change notice (`memory_changed`) still waiting for the owner's decision. */

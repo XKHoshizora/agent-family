@@ -168,6 +168,14 @@ const MEMORY_CHANGE = {
   not_found: "这条记忆变更已经不存在了。",
 };
 
+// A note of the memory palace (add, edit, lock, delete, confirm what it heard): the room is full, or the text cannot be remembered.
+const MEMORY_NOTE = {
+  room_full: "这个房间装不下了，先删掉或合并几条。",
+  note_refused: "这条内容不能记：看起来像指令、链接或密钥。",
+  agent_deleted: AGENT_DELETED,
+  not_found: "这条已经不存在了，已刷新。",
+};
+
 const AGENT = {
   create: {
     handle_taken: "这个账号名已被占用，请换一个。",
@@ -220,10 +228,11 @@ const AGENT = {
   memoryUndo: MEMORY_CHANGE,
   memoryConfirm: MEMORY_CHANGE,
   memoryDiscard: MEMORY_CHANGE,
+  memoryNote: MEMORY_NOTE,
 };
 
 /**
- * Why an Agent action was refused. action: create | edit | appellation | pause | resume | delete | avatar | draft | confirm | discard | memoryUndo | memoryConfirm | memoryDiscard.
+ * Why an Agent action was refused. action: create | edit | appellation | pause | resume | delete | avatar | draft | confirm | discard | memoryUndo | memoryConfirm | memoryDiscard | memoryNote.
  * `now` places a `no_quota` reset time.
  */
 export function agentErrorText(action, error, now = Date.now()) {

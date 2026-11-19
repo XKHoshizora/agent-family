@@ -43,6 +43,8 @@ import {
   setCanSend,
   setDraft,
   setMemoryChangeStatus,
+  memoryRoomOf,
+  newNotesOf,
   setProposalStatus,
   setUploaded,
   setUploadProgress,
@@ -665,6 +667,14 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       onFail: staleAgent(agentId),
     });
 
+  /** A write in the memory palace: `agentId` is the Agent whose room it is (null: 关于我). An Agent deleted elsewhere makes its record stale. */
+  const memoryWrite = (agentId) => ({
+    text: agentText("memoryNote"),
+    onFail: (error) => {
+      if (agentId && error.code === "agent_deleted") request({ agent: agentId });
+    },
+  });
+
   const agentActions = {
     loadAgents: () => attempt(() => api.listAgents(), { after: (res) => setModel(applyAgents(getModel(), res?.agents)), text: commonErrorText }),
     /**
@@ -719,6 +729,26 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     undoMemoryChange: (agentId, changeId) => memoryDecision("memoryUndo", agentId, changeId, api.undoMemoryChange),
     confirmMemoryChange: (agentId, changeId) => memoryDecision("memoryConfirm", agentId, changeId, api.confirmMemoryChange),
     discardMemoryChange: (agentId, changeId) => memoryDecision("memoryDiscard", agentId, changeId, api.discardMemoryChange),
+
+    // ───────── the memory palace. `agentId` null is 关于我 (mine, shared by my Agents); an Agent's id is its own room. The rooms
+    // are not held in the model: the page that shows one reads it when it opens and again after every write.
+    /** → value: the room (`memoryRoomOf`), or null when the answer was not one. */
+    loadMemoryRoom: (agentId) =>
+      attempt(() => (agentId ? api.getAgentMemory(agentId) : api.listMemoryNotes()), { map: memoryRoomOf, text: commonErrorText }),
+    /** body: {text, vault?} → value: the note. 409 room_full, 422 note_refused. */
+    addMemoryNote: (agentId, body) => attempt(() => (agentId ? api.addAgentMemoryNote(agentId, body) : api.addMemoryNote(body)), memoryWrite(agentId)),
+    /** patch: {text?, vault?} → value: the note. */
+    patchMemoryNote: (agentId, noteId, patch) =>
+      attempt(() => (agentId ? api.patchAgentMemoryNote(agentId, noteId, patch) : api.patchMemoryNote(noteId, patch)), memoryWrite(agentId)),
+    deleteMemoryNote: (agentId, noteId) =>
+      attempt(() => (agentId ? api.deleteAgentMemoryNote(agentId, noteId) : api.deleteMemoryNote(noteId)), memoryWrite(agentId)),
+    /** What the Agent heard: forgotten, or taken as true (it becomes one of its own notes). */
+    deleteHearsay: (agentId, hearsayId) => attempt(() => api.deleteHearsay(agentId, hearsayId), memoryWrite(agentId)),
+    confirmHearsay: (agentId, hearsayId) => attempt(() => api.confirmHearsay(agentId, hearsayId), memoryWrite(agentId)),
+    /** value: "auto" | "vault" | "open", how my new notes are sorted (`GET /api/me`). */
+    loadNewNotes: () => attempt(() => api.getMe(), { map: newNotesOf, text: commonErrorText }),
+    /** value: the setting as sent (the answer does not echo it). */
+    setNewNotes: (newNotes) => attempt(() => api.updateNewNotes(newNotes), { map: () => newNotes, text: commonErrorText }),
     discardProposal: (agentId, proposalId) =>
       attempt(
         () => api.discardProposal(agentId, proposalId),

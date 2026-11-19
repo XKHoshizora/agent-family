@@ -287,6 +287,30 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .memory-lines .tag { margin-left: 6px; }
 .memory-foot, .memory-hint { margin: 6px 0 0; font-size: 13px; }
 .memory-card { width: min(420px, 100%); }
+/* The memory palace: a room's open entries as bordered rows, the vault block set apart under them. A row wraps (text, then its actions) on a phone. */
+.memory-switches { margin: 0; padding: 0; border: 0; min-width: 0; }
+.memory-room { margin: 4px 0 22px; max-width: var(--field-w); }
+.memory-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.memory-head h3 { margin: 18px 0 4px; }
+.memory-room > p { margin: 0 0 8px; font-size: 13px; }
+.memory-add { margin: 8px 0; }
+.memory-add-line { display: flex; gap: 8px; align-items: center; }
+.memory-add-line input, .memory-body input {
+  flex: 1; min-width: 0; height: 38px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: rgba(255, 255, 255, 0.78); font: inherit; color: var(--ink);
+}
+.memory-add-line input:focus, .memory-body input:focus { border-color: var(--purple); background: #fff; outline: 0; }
+.memory-rows { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.memory-row { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 8px 12px; border: 1px solid var(--line); border-radius: 10px; background: rgba(255, 255, 255, 0.5); }
+.memory-body { flex: 1 1 200px; min-width: 0; }
+.memory-body form { display: flex; }
+.memory-text { margin: 0; overflow-wrap: anywhere; }
+.memory-source { margin: 2px 0 0; font-size: 12.5px; }
+.memory-source .tag { margin-left: 8px; }
+.memory-actions { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; max-width: 100%; }
+.memory-vault { margin-top: 18px; padding: 10px 12px 12px; border: 1px dashed var(--line-strong); border-radius: 12px; background: var(--purple-tint); }
+.memory-vault h4 { margin: 0 0 8px; font-size: 14px; color: var(--ink-2); }
+.memory-vault .memory-row { background: rgba(255, 255, 255, 0.7); }
+.memory-vault .memory-rows:empty { display: none; }
 .thinking { font-size: 13px; color: var(--ink-2); }
 .thinking > summary { width: fit-content; cursor: pointer; }
 .thinking-text { margin-top: 4px; padding: 4px 10px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; word-break: break-word; }

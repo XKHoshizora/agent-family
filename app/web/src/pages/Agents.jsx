@@ -8,6 +8,8 @@ import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
 import { convSubtitle, convTitle, isMyAgent, myAgents } from "../state/selectors.js";
 import { refusalText, settled, useAction } from "./useAction.js";
+import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
+import { MemoryHearsay } from "./MemoryHearsay.jsx";
 import { Plus, ChevronLeft, Pencil, Pause, Play, Trash2 } from "../icons.js";
 
 const groupMentionsLabel = (agent) => (GROUP_MENTIONS.find(([id]) => id === agent.groupMentions) ?? GROUP_MENTIONS[0])[1];
@@ -165,6 +167,18 @@ function Conversations({ agent }) {
   );
 }
 
+/** 记忆宫殿 of an Agent: its own notes (with their vault) and what it heard, read together and again after each write. */
+function AgentMemory({ agent }) {
+  const { room, failure, reload } = useMemoryRoom(agent.id);
+  if (!room) return failure ? <p className="field-msg" role="alert">{failure}</p> : <p className="muted">正在读取…</p>;
+  return (
+    <>
+      <MemoryRoom agentId={agent.id} agentName={agent.name} title={`${agent.name}自己的笔记`} room={room} reload={reload} />
+      {room.hearsay && <MemoryHearsay agentId={agent.id} agentName={agent.name} room={room} reload={reload} />}
+    </>
+  );
+}
+
 function DeleteModal({ agent, onClose }) {
   const { actions, dispatch } = useStore();
   const { busy, run } = useAction();
@@ -257,6 +271,7 @@ function AgentDetail({ agent }) {
             options={[
               ["profile", "资料"],
               ["convs", "参与的会话"],
+              ...(live ? [["memory", "记忆宫殿"]] : []),
               ["ability", "能力与设备"],
             ]}
           />
@@ -299,6 +314,7 @@ function AgentDetail({ agent }) {
               </>
             )}
             {tab === "convs" && <Conversations agent={agent} />}
+            {tab === "memory" && live && <AgentMemory agent={agent} />}
             {tab === "ability" && <p className="muted">尚未开放</p>}
           </div>
         </>

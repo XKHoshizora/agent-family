@@ -12,7 +12,8 @@ import { ProvidersPage } from "./Providers.jsx";
 import { UsagePage } from "./Usage.jsx";
 import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
-import { useAction } from "./useAction.js";
+import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
+import { refusalText, settled, useAction } from "./useAction.js";
 
 export function SettingsList() {
   const { state, dispatch } = useStore();
@@ -43,6 +44,11 @@ export function SettingsList() {
         <li>
           <button type="button" className="row slim" onClick={() => open({ settingsPage: "usage" })}>
             <span className="row-body"><span className="row-name">用量与余额</span><span className="row-preview">今日免费额度、余额与最近用量</span></span>
+          </button>
+        </li>
+        <li>
+          <button type="button" className="row slim" onClick={() => open({ settingsPage: "memory" })}>
+            <span className="row-body"><span className="row-name">记忆宫殿</span><span className="row-preview">记住的关于你的事，可以在这里整理</span></span>
           </button>
         </li>
         <li>
@@ -177,7 +183,72 @@ function BlockedPage() {
   );
 }
 
-/** The settings page `nav.settingsPage` names: "profile" (the default), "providers", "usage" or "blocks". */
+const NEW_NOTES = [
+  ["auto", "自动判断要不要进保险箱"],
+  ["vault", "全部进保险箱"],
+  ["open", "全部不进保险箱"],
+];
+
+/**
+ * 新记下的内容: where a note goes when it is written (the vault or not). The box shows what the service holds; a change is
+ * shown once it is saved, a refusal is toasted and the box stays as it was.
+ */
+function NewNotesSetting() {
+  const { actions } = useStore();
+  const { busy, run } = useAction();
+  const [value, setValue] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    actions.loadNewNotes().then((res) => {
+      if (alive) setValue(res.ok ? res.value : "auto");
+    });
+    return () => {
+      alive = false;
+    };
+  }, [actions]);
+  const change = async (event) => {
+    const next = event.target.value;
+    const res = await run("newNotes", () => settled(actions.setNewNotes(next)), refusalText);
+    if (res.ok) setValue(res.value);
+  };
+  return (
+    <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
+      <select value={value ?? "auto"} disabled={value === null || busy !== null} onChange={change}>
+        {NEW_NOTES.map(([id, label]) => (
+          <option key={id} value={id}>{label}</option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
+/** 记忆宫殿: how new notes are sorted, and the room 关于我 (shared by all my Agents). */
+function MemoryPage() {
+  const { room, failure, reload } = useMemoryRoom(null);
+  return (
+    <section className="page" aria-label="记忆宫殿">
+      <BackButton />
+      <header className="profile-head">
+        <div>
+          <h2>记忆宫殿</h2>
+          <p className="muted">Agent 记住的事都在这里，可以随时整理。</p>
+        </div>
+      </header>
+      <div className="page-body">
+        <NewNotesSetting />
+        {room ? (
+          <MemoryRoom title="关于我" helper="你名下的所有 Agent 共用这一份。" room={room} reload={reload} />
+        ) : failure ? (
+          <p className="field-msg" role="alert">{failure}</p>
+        ) : (
+          <p className="muted">正在读取…</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** The settings page `nav.settingsPage` names: "profile" (the default), "providers", "usage", "memory" or "blocks". */
 export function SettingsMain() {
   const { state } = useStore();
   switch (state.nav.settingsPage) {
@@ -187,6 +258,8 @@ export function SettingsMain() {
       return <ProvidersPage back={<BackButton />} />;
     case "usage":
       return <UsagePage back={<BackButton />} />;
+    case "memory":
+      return <MemoryPage />;
     default:
       return <ProfilePage />;
   }
