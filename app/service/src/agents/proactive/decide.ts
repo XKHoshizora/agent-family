@@ -105,7 +105,7 @@ function logSkipped(log: DecideDeps["log"], reason: Skipped, agentId: string, co
 }
 
 /** Whether the site's judgements of site day `day` have reached `limit`; logged once a day when they have. */
-async function atDailyLimit(q: Queryable, day: string, limit: number, log: DecideDeps["log"]): Promise<boolean> {
+export async function atDailyLimit(q: Queryable, day: string, limit: number, log: DecideDeps["log"]): Promise<boolean> {
   const { rows } = await q.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [day]);
   if ((rows[0]?.calls ?? 0) < limit) return false;
   if (limitLoggedOn !== day) {
@@ -116,7 +116,7 @@ async function atDailyLimit(q: Queryable, day: string, limit: number, log: Decid
 }
 
 /** One more of the site's judgements of site day `day` (`judge_usage`), whatever came of it. */
-async function countJudgement(db: Db, day: string): Promise<void> {
+export async function countJudgement(db: Db, day: string): Promise<void> {
   await db.query("insert into judge_usage (day, calls) values ($1::date, 1) on conflict (day) do update set calls = judge_usage.calls + 1", [day]);
 }
 
