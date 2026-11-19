@@ -25,7 +25,7 @@ const { app, db } = useApp({ env: { ...SITE_ENV, RATE_LIMIT_SCALE: "1000" }, jud
 describe("ownerNote and modelNote", () => {
   it("both put the text on one line, trimmed, and refuse the empty and key-like ones", () => {
     for (const clean of [ownerNote, modelNote]) {
-      expect(clean("  喜欢\n喝  美式 ")).toBe("喜欢 喝  美式");
+      expect(clean("  喜欢\n喝  美式 ")).toBe("喜欢 喝 美式");
       expect(clean("   ")).toBeNull();
       expect(clean("")).toBeNull();
       expect(clean("the key is sk-abcdef123456")).toBeNull();
@@ -41,14 +41,19 @@ describe("ownerNote and modelNote", () => {
     }
   });
 
-  it("both refuse invisible format characters; brackets are only dropped from the owner's, and refused in a model's", () => {
-    expect(ownerNote("a​b")).toBeNull();
-    expect(modelNote("a​b")).toBeNull();
-    expect(ownerNote("喜欢《三体》和[科幻]")).toBe("喜欢三体和科幻");
-    expect(modelNote("喜欢《三体》")).toBeNull();
-    // Folding alone (full-width comma, letters) is not a removal.
-    expect(modelNote("喜欢咖啡，不加糖")).toBe("喜欢咖啡,不加糖");
-    expect(ownerNote("ＡＢＣ")).toBe("ABC");
+  it("storage keeps the owner's text as typed: no folding, no bracket or punctuation stripping, nothing refused for it", () => {
+    for (const clean of [ownerNote, modelNote]) {
+      expect(clean("不吃辣，也不吃香菜")).toBe("不吃辣，也不吃香菜");
+      expect(clean("don’t like 《三体》")).toBe("don’t like 《三体》");
+      expect(clean("ＡＢＣ｜x [y] “z”")).toBe("ＡＢＣ｜x [y] “z”");
+      expect(clean("现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）")).toBe("现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）");
+      // Invisible format characters (zero-width, bidi controls) are removed, not refused; line breaks become a space.
+      expect(clean("a\u200bb\u202ec\u2066d")).toBe("abcd");
+      expect(clean("a\r\n\n b\t\tc\u2028d")).toBe("a b c d");
+      expect(clean("\u200b \u200d")).toBeNull();
+      // Hidden characters cannot break up a key.
+      expect(clean("sk-ab\u200bcdef123456")).toBeNull();
+    }
   });
 
   it("the owner may write instructions and links in their own notes; a model may not", () => {
@@ -197,7 +202,7 @@ describe("the owner's room: /api/memory/notes", () => {
 
   it("refused text is 422 note_refused and nothing is stored; a body that does not fit is 400", async () => {
     const { owner } = await world();
-    for (const text of ["", "   ", "key sk-abcdef123456", "a​b"]) {
+    for (const text of ["", "   ", "key sk-abcdef123456", "\u200b"]) {
       const res = await api(app, owner, "POST", "/api/memory/notes", { text });
       expect([text, res.status, res.json]).toEqual([text, 422, { error: "note_refused" }]);
     }
@@ -468,11 +473,57 @@ describe("an Agent's room: /api/agents/:id/memory", () => {
     expect((await db.query("select 1 from owner_notes")).rowCount).toBe(1);
   });
 
+  it("confirming hearsay that the owner's rules refuse (a key) is 422 note_refused and leaves it in place", async () => {
+    const { owner, agent, g } = await world();
+    const h = await insertHearsay(agent.id, g, "the key is sk-abcdef123456");
+    const res = await api(app, owner, "POST", `/api/agents/${agent.id}/memory/hearsay/${h}/confirm`, {});
+    expect([res.status, res.json]).toEqual([422, { error: "note_refused" }]);
+    expect((await db.query("select 1 from agent_hearsay")).rowCount).toBe(1);
+    expect((await db.query("select 1 from owner_notes")).rowCount).toBe(0);
+  });
+
   it("the confirmation body is none or {}", async () => {
     const { owner, agent, g } = await world();
     const h = await insertHearsay(agent.id, g, "听来的");
     expect((await api(app, owner, "POST", `/api/agents/${agent.id}/memory/hearsay/${h}/confirm`, ["x"])).status).toBe(400);
     expect((await api(app, owner, "POST", `/api/agents/${agent.id}/memory/hearsay/${h}/confirm`)).status).toBe(201);
+  });
+});
+
+describe("races under the room's lock", () => {
+  it("two parallel 1200-point entries: exactly one is stored, the other is room_full", async () => {
+    const { owner, agent } = await world();
+    const post = () => api(app, owner, "POST", "/api/memory/notes", { text: "字".repeat(1200), vault: true });
+    const results = await Promise.all([post(), post()]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409]);
+    expect(results.find((r) => r.status === 409)!.json).toEqual({ error: "room_full", left: 800 });
+    expect((await db.query("select 1 from owner_notes")).rowCount).toBe(1);
+    // The same on an Agent's room of 3000: two of 1600 do not both fit.
+    const postSelf = () => api(app, owner, "POST", `/api/agents/${agent.id}/memory/notes`, { text: "字".repeat(1600), vault: true });
+    expect((await Promise.all([postSelf(), postSelf()])).map((r) => r.status).sort()).toEqual([201, 409]);
+  });
+
+  it("two parallel edits that each fit alone but not together: one wins, the room is never over", async () => {
+    const { owner } = await world();
+    const a = await insertOwnerNote(owner.id, "a", true, "owner");
+    const b = await insertOwnerNote(owner.id, "b", true, "owner");
+    const edit = (id: string) => api(app, owner, "PATCH", `/api/memory/notes/${id}`, { text: "字".repeat(1500) });
+    expect((await Promise.all([edit(a), edit(b)])).map((r) => r.status).sort()).toEqual([200, 409]);
+    expect((await notes(owner)).json.used).toBeLessThanOrEqual(2000);
+  });
+
+  it("a text edit racing the owner's vault:false: the owner's choice wins, whichever lands first", async () => {
+    const { owner } = await world();
+    for (const order of [0, 1]) {
+      const id = await insertOwnerNote(owner.id, "在备孕", true);
+      judge.answer(() => ({ sort: 0.1 }));
+      const text = () => api(app, owner, "PATCH", `/api/memory/notes/${id}`, { text: "改了一句" });
+      const open = () => api(app, owner, "PATCH", `/api/memory/notes/${id}`, { vault: false });
+      const results = await Promise.all(order === 0 ? [text(), open()] : [open(), text()]);
+      expect(results.map((r) => r.status)).toEqual([200, 200]);
+      expect(await rowOf(id)).toMatchObject({ vault: false, vault_by: "owner", text: "改了一句" });
+    }
+    judge.answer(() => ({}));
   });
 });
 

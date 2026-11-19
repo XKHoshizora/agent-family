@@ -51,9 +51,12 @@ export const roomOf = (config: Pick<Config, "memory">): Rooms => ({
 });
 
 /** How much of a room `notes` fill: the sum of their code points. */
-export const used = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + [...n.text].length, 0);
+/** The length of `text` in code points: the one counter of every limit here. */
+export const codePoints = (text: string): number => [...text].length;
 
-interface NoteRow {
+export const used = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + codePoints(n.text), 0);
+
+export interface NoteRow {
   id: string;
   text: string;
   vault: boolean;
@@ -65,9 +68,9 @@ interface NoteRow {
   updated_at: Date;
 }
 
-const NOTE_COLUMNS = "id, text, vault, vault_by, unsure, origin_conversation_id, origin, created_at, updated_at";
+export const NOTE_COLUMNS = "id, text, vault, vault_by, unsure, origin_conversation_id, origin, created_at, updated_at";
 
-const toNote = (kind: NoteKind, r: NoteRow): Note => ({
+export const toNote = (kind: NoteKind, r: NoteRow): Note => ({
   id: r.id,
   kind,
   text: r.text,

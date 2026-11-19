@@ -1,16 +1,20 @@
-import { labelSafe, oneLine } from "../agents/runtime/prompt.ts";
+import { oneLine } from "../agents/runtime/prompt.ts";
+import { codePoints } from "./store.ts";
 
 /**
- * What may be stored as a note. Notes are data, not instructions: every note is put on one line and cleaned as a label
- * is (`labelSafe`: folded, without brackets, bars and invisible format characters) before the prompt shows it. Two
- * rule sets, because two kinds of writer: the owner, who may write what they like in their own notes, and a model,
- * which may not slip an instruction, a link or a secret in.
+ * What may be stored as a note. A note is stored as it was written (no folding, no stripping of brackets, quotes or
+ * punctuation: an owner's words, and a model's history entry such as `现在喜欢麻婆豆腐（以前喜欢鱼香肉丝）`, stay as they
+ * are); only line breaks and runs of whitespace become one space and invisible format characters go. Notes are data,
+ * not instructions: every prompt path cleans them again when it renders them (`labelSafe`, `oneLine`). Two rule sets,
+ * because two kinds of writer: the owner, who may write what they like in their own notes, and a model, which may not
+ * slip an instruction, a link or a secret in.
  */
 
 /** Longest entry a model writes, in code points (the plan's Numbers). */
 export const MODEL_NOTE_MAX = 200;
 
-const FORMAT_CHARACTER = /\p{Cf}/u;
+const FORMAT_CHARACTERS = /\p{Cf}/gu;
+const WHITESPACE_RUN = /\s+/g;
 const KEY_RUN = /[A-Za-z0-9_-]{20,}/g;
 const KEY_PREFIX = /\b(?:sk-[\w-]|ghp_\w|AKIA\w)|-----BEGIN/;
 
@@ -31,33 +35,22 @@ const ADDRESSES_THE_READER =
   /你必须|你应该|以后都|忽略|无视|指令|听我的|从今以后|これからは必ず|無視して|\bignore|\byou must\b|\bsystem\b/i;
 
 /**
- * The cleaned text, or null when it is empty, key-like, or held an invisible format character (which could hide
- * anything). Also says whether cleaning dropped anything but a line break: a bracket, a bar.
+ * The text on one line with its whitespace runs collapsed and its invisible format characters (zero-width, bidi
+ * controls; they could hide anything) removed, trimmed; null when nothing is left or it looks like a key or secret.
  */
-function cleaned(text: string): { text: string; dropped: boolean } | null {
-  const folded = text.normalize("NFKC");
-  if (FORMAT_CHARACTER.test(folded)) return null;
-  const clean = labelSafe(text);
-  if (clean === "" || keyLike(clean)) return null;
-  return { text: clean, dropped: oneLine(folded) !== clean };
+function tidy(text: string): string | null {
+  const clean = oneLine(text.replace(FORMAT_CHARACTERS, "")).replace(WHITESPACE_RUN, " ");
+  return clean === "" || keyLike(clean) ? null : clean;
 }
 
-/**
- * What the owner typed as a note: on one line, cleaned as a label is, trimmed. Null when empty, key-like, or it held
- * format characters. No limit but the room's, and no rule about instructions or links.
- */
+/** What the owner typed as a note. No limit but the room's, and no rule about instructions or links. */
 export function ownerNote(text: string): string | null {
-  return cleaned(text)?.text ?? null;
+  return tidy(text);
 }
 
-/**
- * What a model wrote as a note (the reviewer's, later tasks): the owner's rules, and refused when cleaning had to drop
- * more than whitespace, over 200 code points, with a link, or addressing the reader as an instruction does.
- */
+/** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over 200 code points, with a link, or addressing the reader as an instruction does. */
 export function modelNote(text: string): string | null {
-  const c = cleaned(text);
-  if (c === null || c.dropped) return null;
-  if ([...c.text].length > MODEL_NOTE_MAX) return null;
-  if (URL_LIKE.some((p) => p.test(c.text)) || ADDRESSES_THE_READER.test(c.text)) return null;
-  return c.text;
+  const clean = tidy(text);
+  if (clean === null || codePoints(clean) > MODEL_NOTE_MAX) return null;
+  return URL_LIKE.some((p) => p.test(clean)) || ADDRESSES_THE_READER.test(clean) ? null : clean;
 }

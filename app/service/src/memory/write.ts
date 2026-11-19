@@ -1,5 +1,5 @@
 import type { Queryable, Tx } from "../db.ts";
-import { listAgentNotes, listOwnerNotes, type Note } from "./store.ts";
+import { listAgentNotes, listOwnerNotes, NOTE_COLUMNS, toNote, type Note, type NoteRow } from "./store.ts";
 
 /**
  * Changing notes and hearsay: what the owner's routes need on top of the reads of store.ts. A room is the owner's
@@ -16,6 +16,12 @@ const keyOf = (room: Room): string => (room.kind === "owner" ? room.ownerId : ro
 
 /** The notes of `room`, oldest first. */
 export const listRoom = (q: Queryable, room: Room): Promise<Note[]> => (room.kind === "owner" ? listOwnerNotes(q, room.ownerId) : listAgentNotes(q, room.agentId));
+
+/** One note of `room`, or null when it has none such. */
+export async function readNote(q: Queryable, room: Room, id: string): Promise<Note | null> {
+  const { rows } = await q.query<NoteRow>(`select ${NOTE_COLUMNS} from ${TABLE[room.kind]} where id = $1 and ${COLUMN[room.kind]} = $2`, [id, keyOf(room)]);
+  return rows[0] ? toNote(room.kind, rows[0]) : null;
+}
 
 /** Holds `room` until the transaction ends: reading how much it holds and then adding are one step. */
 export async function lockRoom(t: Tx, room: Room): Promise<void> {

@@ -813,19 +813,22 @@ required* everywhere. Reads share the budget of `GET /api/agents` (120 a minute)
 minute per owner. **Note** (`src/memory/routes.ts`): `{"id", "text", "vault": boolean, "unsure": boolean, "origin":
 "review" | "owner" | "hearsay", "source": {"kind": "agent" | "group" | "manual", "title": string | null}, "createdAt",
 "updatedAt"}` (`source` is where it was learned: the owner's chat with that Agent — `title` is the Agent's name — a group
-(its title), or typed by hand). What an owner types is put on one line and cleaned as a label is (`src/memory/clean.ts`
-`ownerNote`: folded, brackets, bars and invisible characters dropped); it is refused, 422 `note_refused`, when it is empty,
-looks like a key or secret (a run of 20 or more letters, digits, `_` and `-` holding both a letter and a digit, or
-`sk-…`, `ghp_…`, `AKIA…`, `-----BEGIN`), or holds an invisible format character. The owner may write instructions and
-links in their own notes; a model's entry (`modelNote`, for the reviewer) is held to 200 code points and also refused when
-cleaning had to drop anything but a line break, or it holds a link or addresses the reader (`你必须`, `ignore`, …). An entry
+(its title), or typed by hand). Text is stored as written (`src/memory/clean.ts`): line breaks and runs of whitespace become one space and invisible
+format characters (zero-width, bidi controls) are removed; nothing else is changed — no folding, and brackets, quotes and
+punctuation stay (every prompt cleans a note again when it shows it). A note is refused, 422 `note_refused`, when it is
+empty after that or looks like a key or secret (a run of 20 or more letters, digits, `_` and `-` holding both a letter and a
+digit, or `sk-…`, `ghp_…`, `AKIA…`, `-----BEGIN`); the owner may otherwise write instructions and links in their own
+notes. A model's entry (`modelNote`, for the reviewer) is also refused when it is over 200 code points, holds a link, or
+addresses the reader (`你必须`, `ignore`, …). Hearsay you confirm is held to the owner's rules too (422, it stays hearsay).
+An entry
 may be as long as its room has space (`roomOwner` 2000, `roomSelf` 3000 code points); otherwise 409 `{"error":
-"room_full", "left": n}` (`left` is a number, the one detail that is: what text may still be as long as, counting the
-note being edited as freed) and nothing is stored. **The vault only fills by itself:** a note leaves it only when the
+"room_full", "left": n}` (`left` is a number, the one detail that is, and is about the room: for an addition what space is
+left, for an edit how long the new text may be, the note's old text counted as freed) and nothing is stored. **The vault only fills by itself:** a note leaves it only when the
 owner sends `"vault": false` here. Any `vault` the owner sends is their choice, `unsure` becomes `false`, and no code
 sorts that note again; without one a new note goes by the owner's setting (`newNotes`: `vault`, `open`, or `auto`: asked
 of the judgement model, in the vault when that cannot be asked or is not sure), and a text edit alone may move a note
-outside the vault into it (judged again) but never out, and never touches a note the owner chose for.
+outside the vault into it (judged again; `unsure` then comes from that judgement) but never out, and never touches a note
+the owner chose for.
 
 #### `GET /api/memory/notes`
 
@@ -872,7 +875,7 @@ Body: none or `{}`. Forgets what the Agent heard. → 200 `{"ok": true}`; 404 `n
 #### `POST /api/agents/:id/memory/hearsay/:hearsayId/confirm`
 
 Body: none or `{}`. Takes what was heard as true: it becomes a note about you (`origin` `"hearsay"`, in the vault, learned in
-the group it was heard in) and is no longer hearsay. → 201 Note; 409 `room_full` (the hearsay stays) when it does not
+the group it was heard in) and is no longer hearsay. → 201 Note; 422 `note_refused` (the hearsay stays); 409 `room_full` (the hearsay stays) when it does not
 fit; 404 `not_found` unless it is this Agent's.
 
 ### Agents in a group
@@ -2569,6 +2572,7 @@ milliseconds.
 | `reviewMaxOutputTokens` | 800 (1–100 000) | The most a review may answer |
 | `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.8, 0.6, 0.6, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging |
 | `flaggedMax`, `flaggedContext` | 20 (1–500), 3 (0–50) | At most this many flagged messages are reviewed together, each with this many messages of context |
+| `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
 (`POST /api/conversations/:id/messages`, text or file; not a repeated `clientTxn`), the send route notes it after
