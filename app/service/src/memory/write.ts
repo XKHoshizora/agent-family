@@ -116,6 +116,8 @@ export interface NotePatch {
   /** Writes this exact strength / last-mentioned time (an undo, a merge), or `"now"` for the seen time (a review that wrote the note). Neither touches `updated_at`. */
   strength?: number;
   seenAt?: string;
+  /** The conversation the note began in: `null` clears it, left out keeps it (what to write is origin.ts's rule; an undo writes what was recorded). */
+  originConversationId?: string | null;
 }
 
 /** Changes the fields given of a note of `room` (under `lockRoom`); false when `room` has no such note. Every call bumps `updated_at`, even when no value changes: it is how a change knows the owner touched a note since. */
@@ -125,9 +127,22 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
         set text = coalesce($3, text), vault = coalesce($4, vault), vault_by = coalesce($5, vault_by),
             unsure = coalesce($6, unsure), updated_at = coalesce($7::timestamptz, clock_timestamp()),
             strength = coalesce($8::int, strength),
-            seen_at = case when $9::text = 'now' then clock_timestamp() when $9::text is not null then $9::timestamptz else seen_at end
+            seen_at = case when $9::text = 'now' then clock_timestamp() when $9::text is not null then $9::timestamptz else seen_at end,
+            origin_conversation_id = case when $10::boolean then (select id from conversations where id = $11::uuid) else origin_conversation_id end
       where id = $1 and ${COLUMN[room.kind]} = $2`,
-    [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null, patch.updatedAt ?? null, patch.strength ?? null, patch.seenAt ?? null],
+    [
+      id,
+      keyOf(room),
+      patch.text ?? null,
+      patch.vault ?? null,
+      patch.vaultBy ?? null,
+      patch.unsure ?? null,
+      patch.updatedAt ?? null,
+      patch.strength ?? null,
+      patch.seenAt ?? null,
+      patch.originConversationId !== undefined,
+      patch.originConversationId ?? null,
+    ],
   );
   return rowCount === 1;
 }

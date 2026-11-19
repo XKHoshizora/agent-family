@@ -3,8 +3,8 @@ import { lockAccount } from "../src/accounts/store.ts";
 import { lockRoom } from "../src/memory/write.ts";
 import { applyOps, confirmChange, discardChange, proposeUnlocks, undoChange, vaultKey } from "../src/memory/apply.ts";
 import type { Op } from "../src/memory/ops.ts";
-import { listAgentNotes, listOwnerNotes, type NoteKind, type Rooms } from "../src/memory/store.ts";
-import { api, signUp } from "./helpers/actors.ts";
+import { listAgentNotes, listOwnerNotes, notesFor, type NoteKind, type Rooms } from "../src/memory/store.ts";
+import { api, group, signUp } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 
@@ -24,7 +24,7 @@ async function world() {
   const n = ++counter;
   const owner = await signUp(app, `ap_owner${n}`);
   const agent = await mustCreateAgent(app, owner);
-  return { n, cookie: owner.cookie as string, conv: agent.conversationId as string, ownerId: owner.id as string, agentId: agent.id as string };
+  return { n, actor: owner, cookie: owner.cookie as string, conv: agent.conversationId as string, ownerId: owner.id as string, agentId: agent.id as string };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -838,5 +838,76 @@ describe("undo walks back through changes to one note", () => {
     expect(await undo(w, r2!.changeId!)).toBe("undone");
     expect(await undo(w, r1!.changeId!)).toBe("undone");
     expect((await ownerNotes(w))[0]).toMatchObject({ id: n, text: "before" });
+  });
+});
+
+describe("a note keeps its origin conversation only while all its content came from there", () => {
+  async function inGroup() {
+    const w = await world();
+    const mia = await signUp(app, `ap_mia${w.n}`);
+    const g = await group(app, mia, "群", [w.actor, await signUp(app, `ap_ned${w.n}`)]);
+    return { w, g };
+  }
+  const setOrigin = (kind: NoteKind, id: string, conv: string) =>
+    db.query(`update ${kind === "owner" ? "owner_notes" : "agent_notes"} set origin_conversation_id = $2 where id = $1`, [id, conv]);
+  const agentOf = (w: World) => ({ id: w.agentId, ownerId: w.ownerId, memory: true, sharedNotes: true });
+  const shownIn = async (w: World, conv: string, group: boolean): Promise<string[]> => {
+    const shown = await notesFor(db, agentOf(w), { conversationId: conv, group });
+    return [...shown.owner, ...shown.self].map((n) => n.text).sort();
+  };
+
+  it("a review in another conversation that replaces a vault note which began in a group takes it out of that group's view; in its own conversation the owner still has it", async () => {
+    const { w, g } = await inGroup();
+    const a = await seed(w, "owner", "喝茶", { vault: true });
+    await setOrigin("owner", a, g);
+    expect(await shownIn(w, g, true)).toEqual(["喝茶"]);
+    await run(w, [{ op: "replace", ref: "a", text: "喝茶，私下里还说过胃不好" }], new Map([["a", ref("owner", a)]]), { vaults: new Map([[vaultKey("owner", "喝茶，私下里还说过胃不好"), { vault: true, unsure: false }]]) });
+    expect(await shownIn(w, g, true)).toEqual([]);
+    expect(await shownIn(w, w.conv, false)).toEqual(["喝茶，私下里还说过胃不好"]);
+    expect((await ownerNotes(w))[0]).toMatchObject({ originConversationId: null, vault: true });
+  });
+
+  it("a replace written from the note's own conversation keeps the origin", async () => {
+    const { w, g } = await inGroup();
+    const a = await seed(w, "owner", "喝茶", { vault: true });
+    await setOrigin("owner", a, g);
+    await db.tx((t) =>
+      applyOps(t, { ownerId: w.ownerId, agentId: w.agentId, sharedNotes: true, kinds: BOTH }, [{ op: "replace", ref: "a", text: "喝绿茶" }], new Map([["a", ref("owner", a)]]), {
+        conversationId: w.conv,
+        originConversationId: g,
+        status: "applied",
+        vaults: new Map(),
+        duplicates: new Set(),
+        rooms: ROOMS,
+      }),
+    );
+    expect(await shownIn(w, g, true)).toEqual(["喝绿茶"]);
+  });
+
+  it("undo brings the origin back exactly", async () => {
+    const { w, g } = await inGroup();
+    const a = await seed(w, "owner", "喝茶", { vault: true });
+    await setOrigin("owner", a, g);
+    const r = await run(w, [{ op: "replace", ref: "a", text: "喝茶，胃不好" }], new Map([["a", ref("owner", a)]]));
+    expect((await ownerNotes(w))[0]!.originConversationId).toBeNull();
+    expect(await undo(w, r!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w))[0]).toMatchObject({ text: "喝茶", originConversationId: g });
+    expect(await shownIn(w, g, true)).toEqual(["喝茶"]);
+  });
+
+  it("an owner's text edit in the palace clears the origin of that note; a vault-only patch does not", async () => {
+    const { w, g } = await inGroup();
+    const a = await seed(w, "owner", "喝茶", { vault: true });
+    const b = await seed(w, "self", "说话简短", { vault: true });
+    await setOrigin("owner", a, g);
+    await setOrigin("self", b, g);
+    await patchNote(w, a, { vault: true });
+    expect(await shownIn(w, g, true)).toEqual(["喝茶", "说话简短"]);
+    await patchNote(w, a, { text: "喝茶，其实是怕失眠" });
+    expect(await shownIn(w, g, true)).toEqual(["说话简短"]);
+    expect((await ownerNotes(w))[0]).toMatchObject({ originConversationId: null });
+    const res = await api(app, { cookie: w.cookie }, "PATCH", `/api/agents/${w.agentId}/memory/notes/${b}`, { text: "说话简短，先说结论" });
+    expect(res.status).toBe(200);
+    expect(await shownIn(w, g, true)).toEqual([]);
   });
 });

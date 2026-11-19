@@ -2,6 +2,7 @@ import { lockAccount } from "../accounts/store.ts";
 import type { Tx } from "../db.ts";
 import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
+import { keptOrigin } from "./origin.ts";
 import { codePoints, hearsayCost, hearsayUsed, used, type Note, type NoteKind, type Rooms } from "./store.ts";
 import {
   deleteHearsay,
@@ -80,6 +81,9 @@ export interface StoredOp extends AppliedOp {
   /** A `merge`: what the note it is written into holds afterwards. */
   strengthAfter?: number | null;
   seenAtAfter?: string | null;
+  /** A `replace` or `merge`: the note's origin conversation before the change and after it (origin.ts decides; undo puts `originBefore` back). Absent in changes made before: those leave the origin alone. */
+  originBefore?: string | null;
+  originAfter?: string | null;
   /** A dream's `replace` is no mention of the owner's: it leaves `seen_at` alone. */
   keepSeen?: boolean;
   /** A `merge`: the notes it removed, whole. */
@@ -305,7 +309,8 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
         const verdict = opts.vaults.get(vaultKey(note.kind, text)) ?? { vault: true, unsure: true };
         if (verdict.vault) vault = { vault: true, by: "auto", unsure: verdict.unsure };
       }
-      stored.push({ ...s, after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure });
+      const originAfter = keptOrigin(note.originConversationId, { from: "conversation", id: opts.originConversationId });
+      stored.push({ ...s, after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, originBefore: note.originConversationId, originAfter });
     }
   }
   for (const { index, op, text } of adds) {
@@ -346,13 +351,25 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
     } else if (s.op === "replace") {
       const movedIn = s.vaultBefore === false && s.vaultAfter === true;
       // A note a review rewrote is seen now (a dream's rewrite is no mention of the owner's).
-      took = await updateNote(t, room, s.noteId!, { ...(movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! }), ...(s.keepSeen ? {} : { seenAt: "now" as const }) });
+      took = await updateNote(t, room, s.noteId!, {
+        ...(movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! }),
+        ...(s.keepSeen ? {} : { seenAt: "now" as const }),
+        ...(s.originAfter !== undefined ? { originConversationId: s.originAfter } : {}),
+      });
     } else if (s.op === "remove") {
       took = await deleteNote(t, room, s.noteId!);
     } else if (s.op === "lock") {
       took = await updateNote(t, room, s.noteId!, { vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! });
     } else if (s.op === "merge") {
-      took = await updateNote(t, room, s.noteId!, { text: s.after!, vault: s.vaultAfter!, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter!, strength: s.strengthAfter!, seenAt: s.seenAtAfter! });
+      took = await updateNote(t, room, s.noteId!, {
+        text: s.after!,
+        vault: s.vaultAfter!,
+        vaultBy: s.vaultByAfter!,
+        unsure: s.unsureAfter!,
+        strength: s.strengthAfter!,
+        seenAt: s.seenAtAfter!,
+        ...(s.originAfter !== undefined ? { originConversationId: s.originAfter } : {}),
+      });
       if (took) for (const r of s.removed!) await deleteNote(t, room, r.noteId!);
     } else if (s.op === "split") {
       // The parts keep the source's origin, strength and last-mentioned time, and list in order from its creation time.
@@ -498,6 +515,8 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
           vaultAfter: vault.vault,
           vaultByAfter: vault.by,
           unsureAfter: vault.unsure,
+          originBefore: into.originConversationId,
+          originAfter: keptOrigin(into.originConversationId, { from: "notes", origins: sources.map((n) => n.originConversationId) }),
           strengthAfter: sources.reduce((sum, n) => sum + n.strength, 0),
           seenAtAfter: sources.map((n) => state.exact.get(n.id)!.seenAt).sort().at(-1)!,
           removed: (from as Note[]).map(whole),
@@ -513,7 +532,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
         index,
         kind: note.kind,
         growth: codePoints(text) - codePoints(note.text),
-        stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true },
+        stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true, originBefore: note.originConversationId, originAfter: keptOrigin(note.originConversationId, { from: "conversation", id: null }) },
       });
     } else if (op.op === "split") {
       const note = noteOf(op.ref);
@@ -523,7 +542,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       const at = state.exact.get(note.id)!;
       const parts = (texts as string[]).map((text): StoredNote => {
         const vault = note.vault ? { vault: true, by: note.vaultBy, unsure: note.unsure } : keep(note, text);
-        return { noteId: null, text, vault: vault.vault, vaultBy: vault.vault && !note.vault ? "auto" : note.vaultBy, unsure: vault.unsure, origin: note.origin, originConversationId: note.originConversationId, createdAt: at.createdAt, updatedAt: null, strength: note.strength, seenAt: at.seenAt };
+        return { noteId: null, text, vault: vault.vault, vaultBy: vault.vault && !note.vault ? "auto" : note.vaultBy, unsure: vault.unsure, origin: note.origin, originConversationId: keptOrigin(note.originConversationId, { from: "nothing-new" }), createdAt: at.createdAt, updatedAt: null, strength: note.strength, seenAt: at.seenAt };
       });
       steps.push({
         index,
@@ -789,6 +808,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         updatedAt: s.updatedAtBefore!,
         strength: s.strengthBefore!,
         seenAt: s.seenAtBefore!,
+        ...(s.originBefore !== undefined ? { originConversationId: s.originBefore } : {}),
       });
     } else if (s.op === "remove") {
       await restoreNote(t, at, {
@@ -812,6 +832,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         unsure: s.unsureBefore!,
         updatedAt: s.updatedAtBefore!,
         ...(s.op === "replace" && s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
+        ...(s.op === "replace" && s.originBefore !== undefined ? { originConversationId: s.originBefore } : {}),
       });
     }
   }

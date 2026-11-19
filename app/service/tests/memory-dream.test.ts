@@ -803,3 +803,73 @@ describe("the notice's phase", () => {
     expect(chip.system).toMatchObject({ phase: "rest", count: 2 });
   });
 });
+
+describe("a dream never carries vault content into a group", () => {
+  /** The owner's Agent is in a group (`g`); a note that began there and one from the owner's private conversation, both in the vault. */
+  async function groupWorld(name: string) {
+    const w = await owned(name, { handle: `${name}_bot`, name: `${name}_bot` });
+    const mia = await signUp(app, `${name}_mia`);
+    const g = await group(app, mia, "读书会", [w.owner, await signUp(app, `${name}_ned`)]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    return { ...w, mia, g, handle: `${name}_bot` };
+  }
+  const insert = async (ownerId: string, text: string, vault: boolean, origin: string | null) =>
+    (await db.query("insert into owner_notes (owner_id, text, vault, vault_by, origin_conversation_id) values ($1, $2, $3, 'owner', $4) returning id", [ownerId, text, vault, origin])).rows[0].id as string;
+  /** What the Agent is given when it is called in the group: the system text of the run. */
+  async function groupRun(w: Awaited<ReturnType<typeof groupWorld>>): Promise<string> {
+    await say(w.mia, w.g, `@${w.handle} 你好`);
+    gateway.reply("好。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await memory().idle();
+    return gateway.calls.at(-1)!.system;
+  }
+  const shown = async (w: Awaited<ReturnType<typeof groupWorld>>, conv: string, isGroup: boolean) => {
+    const { notesFor } = await import("../src/memory/store.ts");
+    const n = await notesFor(db, { id: w.agent.id, ownerId: w.owner.id, memory: true, sharedNotes: true }, { conversationId: conv, group: isGroup });
+    return n.owner.map((x) => x.text);
+  };
+
+  it("a merge of a vault note that began in the group with one from the owner's private conversation is not shown in the group, though the owner still has it", async () => {
+    const w = await groupWorld("dk1");
+    await insert(w.owner.id, "GROUPNOTE喜欢喝茶", true, w.g);
+    await insert(w.owner.id, "PRIVATENOTE怕失眠", true, w.conv);
+    gateway.reply(dreamAns(merge("n1", ["n2"], "MERGEDTEXT喜欢喝茶，怕失眠")));
+    await night();
+    const rows = await db.query("select text, origin_conversation_id from owner_notes where owner_id = $1", [w.owner.id]);
+    expect(rows.rows).toEqual([{ text: "MERGEDTEXT喜欢喝茶，怕失眠", origin_conversation_id: null }]);
+    expect(await shown(w, w.g, true)).toEqual([]);
+    expect(await shown(w, w.conv, false)).toEqual(["MERGEDTEXT喜欢喝茶，怕失眠"]);
+    const system = await groupRun(w);
+    for (const secret of ["MERGEDTEXT", "GROUPNOTE", "PRIVATENOTE", "怕失眠"]) expect([secret, system.includes(secret)]).toEqual([secret, false]);
+    // The owner's own conversation still gets it.
+    await say(w.owner, w.conv, "你好");
+    gateway.reply("好。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.at(-1)!.system).toContain("MERGEDTEXT");
+  });
+
+  it("a merge of two notes that both began in the group keeps the group as its origin: the group's Agent still has it", async () => {
+    const w = await groupWorld("dk2");
+    await insert(w.owner.id, "GROUPA喜欢喝茶", true, w.g);
+    await insert(w.owner.id, "GROUPB爱喝茶", true, w.g);
+    gateway.reply(dreamAns(merge("n1", ["n2"], "MERGEDHERE爱喝茶")));
+    await night();
+    const rows = await db.query("select origin_conversation_id from owner_notes where owner_id = $1", [w.owner.id]);
+    expect(rows.rows).toEqual([{ origin_conversation_id: w.g }]);
+    expect(await shown(w, w.g, true)).toEqual(["MERGEDHERE爱喝茶"]);
+    expect(await groupRun(w)).toContain("MERGEDHERE");
+  });
+
+  it("undoing the merge brings the group note and its origin back exactly", async () => {
+    const w = await groupWorld("dk3");
+    await insert(w.owner.id, "GROUPNOTE喜欢喝茶", true, w.g);
+    await insert(w.owner.id, "PRIVATENOTE怕失眠", true, w.conv);
+    const before = await exactRows(w.owner.id);
+    gateway.reply(dreamAns(merge("n1", ["n2"], "喜欢喝茶，怕失眠")));
+    await night();
+    const [chip] = await chips(w.owner, w.conv);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
+    expect(await exactRows(w.owner.id)).toEqual(before);
+    expect(await shown(w, w.g, true)).toEqual(["GROUPNOTE喜欢喝茶"]);
+  });
+});

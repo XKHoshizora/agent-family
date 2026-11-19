@@ -9,6 +9,7 @@ import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { confirmChange, discardChange, undoChange } from "./apply.ts";
 import { ownerNote } from "./clean.ts";
+import { keptOrigin } from "./origin.ts";
 import { sortNote } from "./sort.ts";
 import { codePoints, getNewNotes, hearsayUsed, listHearsay, roomOf, used, type Note } from "./store.ts";
 import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
@@ -168,7 +169,9 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
             ? { vault: true, unsure: sorted.unsure }
             : {};
       const changed = (text !== undefined && text !== note.text) || Object.keys(patch).length > 0;
-      if (changed) await updateNote(t, room, noteId, { ...patch, ...(text === undefined ? {} : { text }) });
+      // A text the owner typed may hold anything, so the note no longer began only where it did (origin.ts).
+      const typed = text !== undefined && text !== note.text ? { text, originConversationId: keptOrigin(note.originConversationId, { from: "owner" }) } : {};
+      if (changed) await updateNote(t, room, noteId, { ...patch, ...typed });
     });
     return noteOf(db, room, noteId);
   }
