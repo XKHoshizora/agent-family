@@ -3,7 +3,7 @@ import { endMemoryCalls, memoryCall, memoryModel, type MemoryCallDeps } from "..
 import type { SiteModel } from "../src/config.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
-import { costOf, grant, METER_ENV, runningRun } from "./helpers/metering.ts";
+import { costOf, METER_ENV, runningRun } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 
 /**
@@ -36,15 +36,16 @@ const records = async (ownerId: string) =>
   (
     await db.query(
       `select purpose, agent_id, source, model, input_tokens::text, output_tokens::text, cost_micro::text, free_micro::text,
-              balance_micro::text, forgiven_micro::text, outcome
+              balance_micro::text, memory_micro::text, forgiven_micro::text, outcome
          from usage_records where owner_id = $1 order by id`,
       [ownerId],
     )
   ).rows;
+const memoryUsed = async (ownerId: string) => (await db.query("select used_micro::text as used from memory_usage where owner_id = $1", [ownerId])).rows;
 const freeUsed = async (ownerId: string) => (await db.query("select used_micro::text as used from free_usage where owner_id = $1", [ownerId])).rows;
 
 describe("memoryCall", () => {
-  it("is one usage record of purpose memory that charges the allowance, and returns the text", async () => {
+  it("is one usage record of purpose memory that charges the memory allowance, and returns the text", async () => {
     const owner = await signUp(app, "memcall");
     gateway.reply("  喜欢喝茶  ", { usage: USAGE });
     const inFlight = new Set<string>();
@@ -63,13 +64,14 @@ describe("memoryCall", () => {
     expect(call.messages).toEqual([{ role: "user", parts: [{ type: "text", text: INPUT.user }] }]);
 
     expect(await runs(owner.id)).toEqual([
-      { purpose: "memory", agent_id: null, conversation_id: null, status: "done", error: null, lane: "own", caller_id: owner.id, source: "site", model: "meter_free", charge_to: "free", hold: "0" },
+      { purpose: "memory", agent_id: null, conversation_id: null, status: "done", error: null, lane: "own", caller_id: owner.id, source: "site", model: "meter_free", charge_to: "memory", hold: "0" },
     ]);
     const cost = costOf(USAGE).toString();
     expect(await records(owner.id)).toEqual([
-      { purpose: "memory", agent_id: null, source: "site", model: "meter_free", input_tokens: "100", output_tokens: "50", cost_micro: cost, free_micro: cost, balance_micro: "0", forgiven_micro: "0", outcome: "done" },
+      { purpose: "memory", agent_id: null, source: "site", model: "meter_free", input_tokens: "100", output_tokens: "50", cost_micro: cost, free_micro: "0", balance_micro: "0", memory_micro: cost, forgiven_micro: "0", outcome: "done" },
     ]);
-    expect(await freeUsed(owner.id)).toEqual([{ used: cost }]);
+    expect(await freeUsed(owner.id)).toEqual([]);
+    expect(await memoryUsed(owner.id)).toEqual([{ used: cost }]);
   });
 
   it("holds only what its own output limit allows, not the model's", async () => {
@@ -85,9 +87,9 @@ describe("memoryCall", () => {
     expect(await pending).toBe("好");
   });
 
-  it("without quota: null, nothing recorded, no call", async () => {
+  it("without quota (the memory allowance used up): null, nothing recorded, no call", async () => {
     const owner = await signUp(app, "memnoquota");
-    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 3000000)", [owner.id]);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 20000000)", [owner.id]);
     const before = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
     expect(gateway.calls).toHaveLength(before);
@@ -172,16 +174,15 @@ describe("memoryCall", () => {
     expect(await freeUsed(b.id)).toEqual([]);
   });
 
-  it("MEMORY.model overrides the cheapest: a paid-tier model is charged to the balance", async () => {
+  it("MEMORY.model overrides the cheapest: a paid-tier model is charged to the memory allowance too", async () => {
     const owner = await signUp(app, "memoverride");
-    await grant(db, owner.id, 5_000_000n);
     const config = { ...app.deps.config, memory: { ...app.deps.config.memory, model: "meter_paid" } };
     gateway.reply("好", { usage: USAGE });
     const first = gateway.calls.length;
     expect(await memoryCall(deps({ config }), owner.id, INPUT, never)).toBe("好");
     expect(gateway.calls[first]!.model).toBe("upstream-meter_paid");
     const cost = costOf(USAGE).toString();
-    expect(await records(owner.id)).toMatchObject([{ purpose: "memory", model: "meter_paid", balance_micro: cost, free_micro: "0" }]);
+    expect(await records(owner.id)).toMatchObject([{ purpose: "memory", model: "meter_paid", memory_micro: cost, balance_micro: "0", free_micro: "0" }]);
   });
 });
 
@@ -234,7 +235,7 @@ describe("GET /api/usage", () => {
     );
     const { json } = await api(app, owner, "GET", "/api/usage");
     expect(json.recent).toEqual([
-      { agentId: null, purpose: "memory", model: "meter_free", source: "site", points: "0.06", replies: 0 },
+      { agentId: null, purpose: "memory", model: "meter_free", source: "site", points: "0.06", replies: 0, paidBy: "site" },
       { agentId: null, purpose: "draft", model: "meter_free", source: "site", points: "0.05", replies: 0 },
     ]);
   });

@@ -1,4 +1,4 @@
-import { freeUsedToday, lockAccount, nextSiteMidnight } from "../accounts/store.ts";
+import { freeUsedToday, lockAccount, memoryUsedToday, nextSiteMidnight } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
@@ -7,8 +7,9 @@ import { maxCostMicro } from "./prices.ts";
 
 /**
  * Admission (spec 6.4): before a site-model call, in one transaction under the owner's account lock, decide the one
- * source it will charge — today's free allowance or the points balance — and hold the most it can cost against that
- * source until it is settled (settle.ts). A run's hold counts while the run is `running`; settle it before, or in the
+ * source it will charge — today's free allowance or the points balance, or for a memory call (purpose `memory`) the
+ * memory allowance the site pays (`MEMORY.freeDailyPoints`), never the other two — and hold the most it can cost against
+ * that source until it is settled (settle.ts). A run's hold counts while the run is `running`; settle it before, or in the
  * transaction that, moves it out of `running`. Because every call in flight holds its maximum cost and settlement
  * charges no call more than it held, what the owner's calls can overrun is bounded: the forgiven free overrun of a day
  * and the negative balance are each less than one call's maximum cost (tests/metering-concurrency.test.ts).
@@ -17,12 +18,26 @@ import { maxCostMicro } from "./prices.ts";
  * `agents` row: callers that need those take them first.
  */
 
-export type ChargeTo = "free" | "balance";
+export type ChargeTo = "free" | "balance" | "memory";
 
 /** Where a call's cost goes (null: a provider model, which costs nothing) and what it holds meanwhile. */
 export interface Admission {
   chargeTo: ChargeTo | null;
   holdMicro: bigint;
+}
+
+/** What the owner's running memory calls hold against the memory allowance. */
+export async function readMemoryHold(q: Queryable, ownerId: string): Promise<bigint> {
+  const { rows } = await q.query<{ held: string }>(
+    "select coalesce(sum(hold_micro), 0)::text as held from agent_runs where owner_id = $1 and status = 'running' and charge_to = 'memory'",
+    [ownerId],
+  );
+  return BigInt(rows[0]!.held);
+}
+
+/** What is left of the memory allowance of the site day `now` is in: the allowance less what is used and what running calls hold. */
+export async function memoryLeft(q: Queryable, config: Pick<Config, "siteTimezone" | "memory">, ownerId: string, now: Date): Promise<bigint> {
+  return BigInt(config.memory.freeDailyPoints) * 1_000_000n - (await memoryUsedToday(q, ownerId, now, config.siteTimezone)) - (await readMemoryHold(q, ownerId));
 }
 
 /** An amount per source: the holds against each, or what is left of each. */
@@ -64,18 +79,28 @@ export function chargeSource(tier: "free" | "paid", left: PerSource): ChargeTo |
  * Admits one call on `resolved` for `ownerId`, under the account lock. A provider model: `{chargeTo: null,
  * holdMicro: 0n}`, nothing locked or read. A site model: the source by `chargeSource`, holding `maxCostMicro`;
  * neither source left is 402 `no_quota` with `reason` `free_and_balance` (free-tier model; `resetsAt`: the next site
- * midnight) or `balance` (paid-tier model). The caller stores `chargeTo` and `holdMicro` on the run in the same
+ * midnight) or `balance` (paid-tier model); a memory call (`purpose` `memory`) on a site model takes the memory allowance
+ * and nothing else, and is 402 `no_quota` with `reason` `memory` when it is used up. The caller stores `chargeTo` and `holdMicro` on the run in the same
  * transaction (`admitRun` does).
  */
 export async function admit(
   t: Tx,
-  config: Pick<Config, "freeDailyMicro" | "siteTimezone">,
+  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "memory">,
   ownerId: string,
   resolved: Pick<Resolved, "source" | "tier" | "price" | "call">,
   inputTokensEstimate: number,
   now: Date,
+  purpose: "reply" | "draft" | "memory" = "reply",
 ): Promise<Admission> {
   if (resolved.source === "provider") return { chargeTo: null, holdMicro: 0n };
+  if (purpose === "memory") {
+    // Memory is paid from its own allowance, whatever the model's tier: not the free allowance, not the balance.
+    await lockAccount(t, ownerId);
+    if ((await memoryLeft(t, config, ownerId, now)) <= 0n) {
+      throw new AppError(402, "no_quota", { reason: "memory", resetsAt: nextSiteMidnight(now, config.siteTimezone).toISOString() });
+    }
+    return { chargeTo: "memory", holdMicro: maxCostMicro(resolved, inputTokensEstimate) };
+  }
   // A site model without a tier is treated as paid: it never touches the free allowance.
   const tier = resolved.tier === "free" ? "free" : "paid";
   const account = await lockAccount(t, ownerId);
@@ -105,15 +130,15 @@ export async function admit(
  */
 export async function admitRun(
   t: Tx,
-  config: Pick<Config, "freeDailyMicro" | "siteTimezone">,
+  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "memory">,
   runId: string,
   ownerId: string,
   resolved: Pick<Resolved, "source" | "name" | "tier" | "price" | "call" | "reasoning">,
   inputTokensEstimate: number,
   now: Date,
 ): Promise<Admission> {
-  const { rows } = await t.query<{ owner_id: string; status: string; source: string | null }>(
-    "select owner_id, status, source from agent_runs where id = $1 for update",
+  const { rows } = await t.query<{ owner_id: string; status: string; source: string | null; purpose: "reply" | "draft" | "memory" }>(
+    "select owner_id, status, source, purpose from agent_runs where id = $1 for update",
     [runId],
   );
   const run = rows[0];
@@ -122,7 +147,7 @@ export async function admitRun(
   if ((await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0) {
     throw new Error(`admitRun: ${runId} is already settled`);
   }
-  const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now);
+  const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now, run.purpose);
   await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5, reasoning = $6 where id = $1", [
     runId,
     resolved.source,

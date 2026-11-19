@@ -453,7 +453,7 @@ describe("a conversion changes the language and nothing else, and says what it c
     const running = convert(owner);
     await hold.reached;
     const day = siteDay(new Date(), app.deps.config.siteTimezone);
-    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [owner.id, day]);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [owner.id, day]);
     hold.release(ops(rewrite("n1", "Likes tea")));
     expect((await running).json).toEqual({ rooms: 2, converted: 1, kept: 0, noRoom: 0, failedRooms: 1 });
     expect(await ownerTexts(owner.id)).toEqual([{ text: "Likes tea", vault: false }]);

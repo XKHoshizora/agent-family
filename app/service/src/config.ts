@@ -246,6 +246,11 @@ export interface MemoryConfig {
    * notes never crowd out the conversation.
    */
   passageShare: number;
+  /**
+   * What the site pays for one owner's memory calls on a site model each site day, in whole points (0: none, memory then works only
+   * for owners who chose a model of their own provider). Its own allowance: never the owner's free allowance or balance.
+   */
+  freeDailyPoints: number;
 }
 
 const memorySchema = z.strictObject({
@@ -281,6 +286,7 @@ const memorySchema = z.strictObject({
   judgePerOwnerDay: positive(300, 1_000_000),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
+  freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
 });
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

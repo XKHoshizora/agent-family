@@ -1,4 +1,4 @@
-import { applyLedger, freeUsedToday, lockAccount, siteDay } from "../accounts/store.ts";
+import { applyLedger, freeUsedToday, lockAccount, memoryUsedToday, siteDay } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Tx } from "../db.ts";
 import { assertCount, costMicro, isCount } from "./prices.ts";
@@ -38,7 +38,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * - Charged: the cost up to the run's hold — never more than admission held; the part above it is forgiven. Then by
  *   `charge_to`: `free` grows the free allowance of the site day it is *now* (a call that started before midnight and
  *   ends after it uses the new day's allowance) by the charge, up to what is left of it, and the rest is forgiven too,
- *   charged to nobody, not even the next day; `balance` debits the whole charge to the ledger (`usage`), which may
+ *   charged to nobody, not even the next day; `memory` (a memory call) grows the memory allowance of that site day the same way
+ *   (`memory_usage`, `usage_records.memory_micro`) and never touches the other two; `balance` debits the whole charge to the ledger (`usage`), which may
  *   take the balance below zero. `forgiven_micro` is everything of the cost not charged.
  * - Appends the `usage_records` row and zeroes the run's `hold_micro`.
  * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
@@ -48,7 +49,7 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  */
 export async function settle(
   t: Tx,
-  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "siteModels">,
+  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "siteModels" | "memory">,
   runId: string,
   usage: Usage | null,
   fallback: { inputChars: number; outputChars: number },
@@ -64,7 +65,7 @@ export async function settle(
     purpose: string;
     source: "site" | "provider" | null;
     model: string | null;
-    charge_to: "free" | "balance" | null;
+    charge_to: "free" | "balance" | "memory" | null;
     hold_micro: string;
   }>("select owner_id, agent_id, purpose, source, model, charge_to, hold_micro::text from agent_runs where id = $1 for update", [runId]);
   const run = rows[0];
@@ -90,6 +91,7 @@ export async function settle(
 
   let freeMicro = 0n;
   let balanceMicro = 0n;
+  let memoryMicro = 0n;
   if (run.charge_to !== null) {
     const charged = forgiveAll ? 0n : min(cost, BigInt(run.hold_micro));
     await lockAccount(t, run.owner_id);
@@ -103,20 +105,32 @@ export async function settle(
           [run.owner_id, siteDay(now, config.siteTimezone), freeMicro.toString()],
         );
       }
+    } else if (run.charge_to === "memory") {
+      // The memory allowance of the site day it is now, as the free one is: what is above what is left of it is forgiven.
+      const used = await memoryUsedToday(t, run.owner_id, now, config.siteTimezone);
+      const allowance = BigInt(config.memory.freeDailyPoints) * 1_000_000n;
+      memoryMicro = min(charged, allowance > used ? allowance - used : 0n);
+      if (memoryMicro > 0n) {
+        await t.query(
+          `insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, $3)
+           on conflict (owner_id, day) do update set used_micro = memory_usage.used_micro + excluded.used_micro`,
+          [run.owner_id, siteDay(now, config.siteTimezone), memoryMicro.toString()],
+        );
+      }
     } else {
       balanceMicro = charged;
     }
   }
-  const forgivenMicro = cost - freeMicro - balanceMicro;
+  const forgivenMicro = cost - freeMicro - balanceMicro - memoryMicro;
 
   const inserted = await t.query<{ id: string }>(
     `insert into usage_records (owner_id, agent_id, run_id, purpose, source, model, input_tokens, output_tokens, estimated,
-                                cost_micro, free_micro, balance_micro, forgiven_micro, outcome)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                cost_micro, free_micro, balance_micro, memory_micro, forgiven_micro, outcome)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      returning id::text`,
     [
       run.owner_id, run.agent_id, runId, run.purpose, run.source, run.model, input, output, !reported || !priced,
-      cost.toString(), freeMicro.toString(), balanceMicro.toString(), forgivenMicro.toString(), outcome,
+      cost.toString(), freeMicro.toString(), balanceMicro.toString(), memoryMicro.toString(), forgivenMicro.toString(), outcome,
     ],
   );
   if (balanceMicro > 0n) await applyLedger(t, run.owner_id, -balanceMicro, "usage", null, inserted.rows[0]!.id);

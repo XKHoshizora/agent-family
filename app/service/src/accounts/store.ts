@@ -118,3 +118,12 @@ export async function freeUsedToday(q: Queryable, ownerId: string, now: Date, ti
   );
   return rows[0] ? BigInt(rows[0].used_micro) : 0n;
 }
+
+/** What the owner's memory allowance (paid by the site, `MEMORY.freeDailyPoints`) has used on the current site day (0 if nothing). */
+export async function memoryUsedToday(q: Queryable, ownerId: string, now: Date, timezone: string): Promise<bigint> {
+  const { rows } = await q.query<{ used_micro: string }>(
+    "select used_micro::text from memory_usage where owner_id = $1 and day = $2::date",
+    [ownerId, siteDay(now, timezone)],
+  );
+  return rows[0] ? BigInt(rows[0].used_micro) : 0n;
+}

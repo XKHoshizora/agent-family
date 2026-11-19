@@ -36,24 +36,26 @@ const records = async (ownerId: string) =>
   (
     await db.query(
       `select purpose, agent_id, source, model, input_tokens::text, output_tokens::text, cost_micro::text, free_micro::text,
-              balance_micro::text, outcome from usage_records where owner_id = $1 order by id`,
+              balance_micro::text, memory_micro::text, outcome from usage_records where owner_id = $1 order by id`,
       [ownerId],
     )
   ).rows;
 const runs = async (ownerId: string) =>
   (await db.query("select purpose, status, source, model, charge_to, hold_micro::text as hold from agent_runs where owner_id = $1 order by created_at", [ownerId])).rows;
+const memoryUsed = async (ownerId: string) => (await db.query("select used_micro::text as used from memory_usage where owner_id = $1", [ownerId])).rows;
 const freeUsed = async (ownerId: string) => (await db.query("select used_micro::text as used from free_usage where owner_id = $1", [ownerId])).rows;
 const balance = async (ownerId: string) => (await db.query("select balance_micro::text as b from accounts where principal_id = $1", [ownerId])).rows[0]?.b;
 
 describe("the owner's memory model", () => {
-  it("is null at first (the site's model, charged to the allowance as before), and usable", async () => {
+  it("is null at first (the site's model, charged to the memory allowance), and usable", async () => {
     const owner = await signUp(app, "mmdefault");
     expect(await me(owner)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
     gateway.reply("好", { usage: USAGE });
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBe("好");
     expect(gateway.calls[first]!.model).toBe("upstream-meter_free");
-    expect(await freeUsed(owner.id)).toEqual([{ used: costOf(USAGE).toString() }]);
+    expect(await freeUsed(owner.id)).toEqual([]);
+    expect(await memoryUsed(owner.id)).toEqual([{ used: costOf(USAGE).toString() }]);
   });
 
   it("a model of their own provider: that model is called, no site point is charged, the usage record is purpose memory and costs nothing", async () => {
@@ -77,13 +79,13 @@ describe("the owner's memory model", () => {
     expect(await freeUsed(owner.id)).toEqual([]);
     expect(await runs(owner.id)).toEqual([{ purpose: "memory", status: "done", source: "provider", model: "own-model", charge_to: null, hold: "0" }]);
     expect(await records(owner.id)).toEqual([
-      { purpose: "memory", agent_id: null, source: "provider", model: "own-model", input_tokens: "100", output_tokens: "50", cost_micro: "0", free_micro: "0", balance_micro: "0", outcome: "done" },
+      { purpose: "memory", agent_id: null, source: "provider", model: "own-model", input_tokens: "100", output_tokens: "50", cost_micro: "0", free_micro: "0", balance_micro: "0", memory_micro: "0", outcome: "done" },
     ]);
   });
 
-  it("an owner out of site allowance still gets their own model's reviews", async () => {
+  it("an owner out of the memory allowance still gets their own model's reviews", async () => {
     const owner = await signUp(app, "mmbroke");
-    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 3000000)", [owner.id]);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 20000000)", [owner.id]);
     gateway.reply("x", { usage: USAGE });
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
@@ -94,7 +96,7 @@ describe("the owner's memory model", () => {
     expect(gateway.calls[first]!.model).toBe("own-model");
   });
 
-  it("a site model they may use: called, and charged to their balance as a reply on it is", async () => {
+  it("a paid site model they may use: called, and charged to the memory allowance, never their balance", async () => {
     const owner = await signUp(app, "mmpaid");
     await grant(db, owner.id, 5_000_000n);
     expect((await setModel(owner, SITE_PAID)).status).toBe(200);
@@ -103,17 +105,22 @@ describe("the owner's memory model", () => {
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBe("好");
     expect(gateway.calls[first]!.model).toBe("upstream-meter_paid");
-    expect(await balance(owner.id)).toBe((5_000_000n - costOf(USAGE)).toString());
-    expect(await records(owner.id)).toMatchObject([{ purpose: "memory", source: "site", model: "meter_paid", cost_micro: costOf(USAGE).toString(), balance_micro: costOf(USAGE).toString() }]);
+    expect(await balance(owner.id)).toBe("5000000");
+    expect(await records(owner.id)).toMatchObject([
+      { purpose: "memory", source: "site", model: "meter_paid", cost_micro: costOf(USAGE).toString(), balance_micro: "0", free_micro: "0", memory_micro: costOf(USAGE).toString() },
+    ]);
   });
 
-  it("a paid model without balance: nothing called, nothing recorded, the free model is not used instead", async () => {
+  it("a paid model with the memory allowance used up: nothing called, nothing recorded, the free model is not used instead, the balance is not touched", async () => {
     const owner = await signUp(app, "mmnobalance");
+    await grant(db, owner.id, 5_000_000n);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 20000000)", [owner.id]);
     expect((await setModel(owner, SITE_PAID)).status).toBe(200);
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
     expect(gateway.calls).toHaveLength(first);
     expect(await runs(owner.id)).toEqual([]);
+    expect(await balance(owner.id)).toBe("5000000");
   });
 
   it("rejects what an Agent's model may not be: an unknown site model, another person's provider, a model not on the list, a too small one, a malformed choice", async () => {

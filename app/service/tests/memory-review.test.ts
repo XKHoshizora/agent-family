@@ -350,7 +350,7 @@ describe("what a review does with an answer", () => {
   it("no quota: no call at all", async () => {
     const w = await owned("una");
     await exchange(w, "我喜欢茶");
-    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id]);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id]);
     clock.advance(10 * MIN);
     await memory().idle();
     expect(reviewCalls()).toHaveLength(0);

@@ -875,7 +875,7 @@ describe("when the call fails", () => {
   it("the owner has no quota: no call, the flags are kept once", async () => {
     const w = await world("p");
     const seq = await say(w.mia, w.g, "小李下周要去北京出差");
-    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id]);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id]);
     await flag(w.agent.id, w.g, seq, "hearsay");
     await wake();
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([seq]);
