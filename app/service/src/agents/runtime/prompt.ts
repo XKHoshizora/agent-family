@@ -1,4 +1,5 @@
 import { randomInt } from "node:crypto";
+import { estimateTokens } from "../../metering/prices.ts";
 
 /**
  * The system text of a reply (spec 6.5 "发给模型的内容"). In the Agent's own conversation (`systemPrompt`): the site's
@@ -202,6 +203,9 @@ export function shownAppellation(appellation: string | null): string | null {
 export interface PromptNote {
   text: string;
   updatedAt: Date;
+  /** How often the owner mentioned it again and when it was last said (the order notes are left out in: `fitNotes`). */
+  strength?: number;
+  seenAt?: Date;
 }
 
 /** What the passage reads of a heard thing, with the title of the group it was said in. */
@@ -272,6 +276,47 @@ export function notesPassage(notes: PromptNotes, group: boolean, timeZone: strin
     ...(group ? ["- 现在是在群里：只在用得上的时候用这些，不要主动提起，也不要说是你记下的。"] : []),
   ];
   return [NOTES_HEADING, how.join("\n"), JSON.stringify(kept)].join("\n\n");
+}
+
+/**
+ * The notes a run is given when the passage may take at most `maxTokens` of the model's context (`MEMORY.passageShare` of it, by the
+ * token estimate the context budget uses, `estimateTokens`): the notes as they are when their passage fits; else entries are left
+ * out, in this order, until it does — hearsay (oldest said first), the Agent's own notes (lowest `strength`, then the oldest
+ * `seenAt`), notes about the owner (the same order). Nothing tells the model so. `fits` is false when anything was left out. No
+ * model call: it is arithmetic on the text the passage would be.
+ */
+export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, ownerName: string, maxTokens: number): { notes: PromptNotes; fits: boolean } {
+  const label = labelSafe(ownerName);
+  const size = (n: PromptNotes): number => estimateTokens(notesPassage(n, group, timeZone, label));
+  if (size(notes) <= maxTokens) return { notes, fits: true };
+  const weakest = (list: readonly PromptNote[]): number[] =>
+    list
+      .map((n, i) => ({ i, strength: n.strength ?? 0, at: (n.seenAt ?? n.updatedAt).getTime() }))
+      .sort((a, b) => a.strength - b.strength || a.at - b.at || a.i - b.i)
+      .map((x) => x.i);
+  const order: Array<["hearsay" | "self" | "owner", number]> = [
+    ...notes.hearsay.map((h, i) => ({ i, at: h.saidAt.getTime() })).sort((a, b) => a.at - b.at || a.i - b.i).map((x): ["hearsay", number] => ["hearsay", x.i]),
+    ...weakest(notes.self).map((i): ["self", number] => ["self", i]),
+    ...weakest(notes.owner).map((i): ["owner", number] => ["owner", i]),
+  ];
+  /** The notes once the first `k` of `order` are gone. */
+  const without = (k: number): PromptNotes => {
+    const gone = { hearsay: new Set<number>(), self: new Set<number>(), owner: new Set<number>() };
+    for (const [room, i] of order.slice(0, k)) gone[room].add(i);
+    return {
+      owner: notes.owner.filter((_, i) => !gone.owner.has(i)),
+      self: notes.self.filter((_, i) => !gone.self.has(i)),
+      hearsay: notes.hearsay.filter((_, i) => !gone.hearsay.has(i)),
+    };
+  };
+  // The passage only shrinks as entries go: the fewest left out that fits (all of them leave nothing, whose passage is empty).
+  let [low, high] = [1, order.length];
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (size(without(mid)) <= maxTokens) high = mid;
+    else low = mid + 1;
+  }
+  return { notes: without(low), fits: false };
 }
 
 /** A label's brackets and separator: what `speakerLabel` writes and `withoutMark` reads. */

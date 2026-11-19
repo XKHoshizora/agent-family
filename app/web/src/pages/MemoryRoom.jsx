@@ -288,6 +288,7 @@ export function MemoryRoom({ agentId = null, agentName, title, helper, memory })
         <span className="muted">已用 {usedPercent(room.used, room.limit)}%</span>
       </header>
       {helper && <p className="muted">{helper}</p>}
+      {agentId !== null && room.fits === false && <p className="muted">这个模型的上下文较小，每次只带得下一部分记忆。</p>}
       <StaleLine memory={memory} />
       <AddRow agentId={agentId} left={left} memory={memory} inputRef={addBox} />
       <ul className="memory-rows memory-open">

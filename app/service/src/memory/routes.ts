@@ -1,13 +1,16 @@
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { readOwnedAgent } from "../agents/store.ts";
+import { fitNotes } from "../agents/runtime/prompt.ts";
+import { readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound, type ErrorDetails } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
+import { resolveModel } from "../models/resolve.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { confirmChange, discardChange, undoChange } from "./apply.ts";
+import { loadNotes } from "./passage.ts";
 import { ownerNote } from "./clean.ts";
 import { keptOrigin } from "./origin.ts";
 import { sortNote } from "./sort.ts";
@@ -197,6 +200,23 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     if (!agent) throw notFound();
     return agent;
   }
+  /**
+   * Whether the Agent's current model can carry the whole palace in its own conversation: the notes passage of everything it may be
+   * shown there is within `MEMORY.passageShare` of the model's context. No model call (the passage is measured, `fitNotes`); true when
+   * there is nothing to measure against (no model that can be called, no notes read, no persona yet).
+   */
+  async function palaceFits(agent: AgentRow, ownerName: string): Promise<boolean> {
+    if (!agent.memory || agent.persona === "") return true;
+    let resolved;
+    try {
+      resolved = await resolveModel(db, config, agent);
+    } catch {
+      return true;
+    }
+    if (resolved === null) return true;
+    const found = await loadNotes(db, agent, { conversationId: agent.conversationId, group: false });
+    return fitNotes(found, false, config.siteTimezone, ownerName, config.memory.passageShare * resolved.contextTokens).fits;
+  }
   const mustLive = (agent: { deleted: boolean }): void => {
     if (agent.deleted) throw new AppError(409, "agent_deleted");
   };
@@ -255,7 +275,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       schema: {
         params: agentParams,
         querystring: empty,
-        response: { 200: roomView.extend({ hearsay: z.array(hearsayView), hearsayUsed: z.number(), hearsayLimit: z.number() }) },
+        response: { 200: roomView.extend({ hearsay: z.array(hearsayView), hearsayUsed: z.number(), hearsayLimit: z.number(), fits: z.boolean() }) },
       },
     },
     async (req) => {
@@ -287,6 +307,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         })),
         hearsayUsed: hearsayUsed(heard),
         hearsayLimit: limits.hearsay,
+        fits: await palaceFits(agent, me.displayName),
       };
     },
   );

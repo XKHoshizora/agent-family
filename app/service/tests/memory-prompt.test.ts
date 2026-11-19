@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentPort, type DbAgentPort } from "../src/agents/port-impl.ts";
 import { isRunEnd, NOTHING } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
-import { groupSystemPrompt, notesPassage, systemPrompt, type PromptNotes } from "../src/agents/runtime/prompt.ts";
+import { fitNotes, groupSystemPrompt, notesPassage, systemPrompt, type PromptNotes } from "../src/agents/runtime/prompt.ts";
 import { estimateTokens } from "../src/metering/prices.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import type { Note } from "../src/memory/store.ts";
@@ -388,7 +388,7 @@ describe("the whole text", () => {
     await port.finish(ticket, { status: "cancelled" }, null, NOTHING);
   });
 
-  it("a full room shortens the history and never fails the run", async () => {
+  it("a full palace is cut to a quarter of the context, the history keeps the rest, and the run never fails", async () => {
     const run = async (name: string, fill: boolean) => {
       const owner = await signUp(app, name);
       const agent = await mustCreateAgent(app, owner, { handle: `${name}_bot`, model: { source: "site", id: "mid" }, persona: "你说话简短。" });
@@ -415,12 +415,100 @@ describe("the whole text", () => {
     expect(full.run).toEqual({ status: "done", error: null });
     const shown = textsOf(full.call);
     expect(shown.at(-1)).toBe("继续");
-    expect(shown).not.toContain(full.sent[0]);
+    // The notes took at most a quarter of the context (the weakest and oldest went), so the whole history is still there.
+    expect(shown).toContain(full.sent[0]);
     expect(shown).toContain(full.sent[5]);
-    // What remains fits what the system text, passage included, leaves.
     expect(full.call.system).toContain("主19");
-    expect(full.call.system).toContain("自29");
+    expect(full.call.system).not.toContain("自00");
     const used = estimateTokens(full.call.system) + shown.reduce((n, t) => n + estimateTokens(t), 0);
     expect(used).toBeLessThanOrEqual(11_000 - 500);
+  });
+});
+
+// --- the notes take at most a share of the context --------------------------------------------------------------------
+
+describe("fitNotes", () => {
+  const body = (tag: string) => `${tag}${"字".repeat(60)}`;
+  const at = (i: number) => new Date(Date.UTC(2026, 10, 1, 0, 0, i));
+  const owned = (tag: string, strength: number, seen: number) => note("owner", body(tag), { strength, seenAt: at(seen) });
+  const own = (tag: string, strength: number, seen: number) => note("self", body(tag), { strength, seenAt: at(seen) });
+  const heardAt = (tag: string, i: number) => heard("某人", body(tag), "群", at(i).toISOString());
+  const ALL: PromptNotes = {
+    owner: [owned("OA", 5, 1), owned("OB", 0, 2)],
+    self: [own("SA", 2, 1), own("SB", 0, 5), own("SC", 0, 3)],
+    hearsay: [heardAt("HB", 9), heardAt("HA", 4)],
+  };
+  // What is left out, in order: hearsay oldest first, then own notes (least strength, then oldest seen), then the owner's the same way.
+  const ORDER = ["HA", "HB", "SC", "SB", "SA", "OB", "OA"];
+  const tagsOf = (n: PromptNotes): string[] => [...n.owner, ...n.self, ...n.hearsay].map((x) => x.text.slice(0, 2)).sort();
+  const sizeOf = (n: PromptNotes, group = false) => estimateTokens(notesPassage(n, group, ZONE, "主人"));
+
+  it("leaves the notes as they are while the passage fits, and says it fits", () => {
+    const r = fitNotes(ALL, false, ZONE, "主人", sizeOf(ALL));
+    expect(r).toEqual({ notes: ALL, fits: true });
+    expect(fitNotes(EMPTY, false, ZONE, "主人", 0)).toEqual({ notes: EMPTY, fits: true });
+  });
+
+  it("leaves entries out in order — hearsay oldest first, the Agent's own weakest then oldest, the owner's the same — until it fits, and no more than it takes", () => {
+    for (let k = 1; k <= ORDER.length; k++) {
+      const expected = ORDER.slice(k);
+      const probe = (n: number) => ({
+        owner: ALL.owner.filter((x) => !ORDER.slice(0, n).includes(x.text.slice(0, 2))),
+        self: ALL.self.filter((x) => !ORDER.slice(0, n).includes(x.text.slice(0, 2))),
+        hearsay: ALL.hearsay.filter((x) => !ORDER.slice(0, n).includes(x.text.slice(0, 2))),
+      });
+      const r = fitNotes(ALL, false, ZONE, "主人", sizeOf(probe(k)));
+      expect([k, tagsOf(r.notes)]).toEqual([k, [...expected].sort()]);
+      expect(r.fits).toBe(false);
+      expect(sizeOf(r.notes)).toBeLessThanOrEqual(sizeOf(probe(k)));
+    }
+    // Nothing fits: nothing is shown.
+    expect(fitNotes(ALL, false, ZONE, "主人", 0).notes).toEqual(EMPTY);
+  });
+
+  it("a group's passage is measured as a group's (its own sentence, no group name on what was heard)", () => {
+    const whole = sizeOf(ALL, true);
+    expect(whole).not.toBe(sizeOf(ALL, false));
+    expect(fitNotes(ALL, true, ZONE, "主人", whole)).toEqual({ notes: ALL, fits: true });
+    expect(fitNotes(ALL, true, ZONE, "主人", whole - 1).fits).toBe(false);
+  });
+
+  it("nothing in what the model is shown says anything was left out", () => {
+    const r = fitNotes(ALL, false, ZONE, "主人", sizeOf({ ...ALL, hearsay: [] }));
+    expect(notesPassage(r.notes, false, ZONE, "主人")).not.toMatch(/省略|left out|部分|truncat/i);
+  });
+});
+
+describe("the passage takes at most a quarter of the model's context", () => {
+  it("a run on a model with a small context is shown the strongest and newest notes only, within a quarter of its context; the conversation is not crowded out", async () => {
+    const owner = await signUp(app, "mpquarter");
+    const agent = await mustCreateAgent(app, owner, { handle: "quarter_bot", model: { source: "site", id: "mid" }, persona: "你说话简短。" });
+    for (let i = 0; i < 20; i++) await insertSelf(agent.id, `自${String(i).padStart(2, "0")}${"自".repeat(97)}`, false);
+    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(97)}`, false);
+    await say(owner, agent.conversationId, "你好");
+    await answer("好的。");
+    const system = lastCall().system;
+    // 11 000 tokens of context: a quarter is 2 750; the passage is what is between the heading and the end of the JSON.
+    const passage = system.slice(system.indexOf("以下是你记下的笔记"));
+    expect(estimateTokens(passage)).toBeLessThanOrEqual(2750);
+    // The Agent's own, weakest and oldest first, went before any note about the owner; of those about the owner the newest stay.
+    expect(system).not.toContain("自00");
+    expect(system).not.toContain("自19");
+    expect(system).toContain("主19");
+  });
+
+  it("GET /api/agents/:id/memory says whether the model can carry the whole palace: false on a small context that cannot, true on a large one and with no notes", async () => {
+    const owner = await signUp(app, "mpfits");
+    const small = await mustCreateAgent(app, owner, { handle: "fits_small", model: { source: "site", id: "mid" }, persona: "你说话简短。" });
+    const large = await mustCreateAgent(app, owner, { handle: "fits_large", model: FAST, persona: "你说话简短。" });
+    const fitsOf = async (id: string) => (await api(app, owner, "GET", `/api/agents/${id}/memory`)).json.fits;
+    expect([await fitsOf(small.id), await fitsOf(large.id)]).toEqual([true, true]);
+    for (let i = 0; i < 20; i++) await insertSelf(small.id, `自${String(i).padStart(2, "0")}${"自".repeat(97)}`, false);
+    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(97)}`, false);
+    expect(await fitsOf(small.id)).toBe(false);
+    expect(await fitsOf(large.id)).toBe(true);
+    // The Agent's current model: after a change of model it is measured against the new one.
+    expect((await api(app, owner, "PATCH", `/api/agents/${small.id}`, { model: FAST })).status).toBe(200);
+    expect(await fitsOf(small.id)).toBe(true);
   });
 });

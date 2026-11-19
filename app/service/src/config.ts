@@ -240,6 +240,12 @@ export interface MemoryConfig {
   judgePerOwnerDay: number;
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
   roomNotes: number;
+  /**
+   * The notes passage takes at most this share of the model's context (by the token estimate the context budget uses); over it
+   * entries are left out (hearsay first, then the Agent's own notes, then those about the owner, the weakest and oldest first), so the
+   * notes never crowd out the conversation.
+   */
+  passageShare: number;
 }
 
 const memorySchema = z.strictObject({
@@ -274,6 +280,7 @@ const memorySchema = z.strictObject({
   faithfulAt: probability(0.6),
   judgePerOwnerDay: positive(300, 1_000_000),
   roomNotes: positive(150, 100_000),
+  passageShare: z.number().gt(0).max(1).default(0.25),
 });
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

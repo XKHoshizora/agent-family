@@ -37,8 +37,8 @@ const note = (id, text, fields = {}) => ({
  * A fake memory service: the rooms' routes over mutable notes; `used` counts the characters of both lists as the service does.
  * `over` replaces any route.
  */
-function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, over = {} } = {}) {
-  const s = { notes: [...notes], hearsay: [...hearsay], limit, hearsayLimit };
+function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, fits = true, over = {} } = {}) {
+  const s = { notes: [...notes], hearsay: [...hearsay], limit, hearsayLimit, fits };
   let n = 100;
   const used = () => s.notes.reduce((sum, x) => sum + chars(x.text), 0);
   const room = () => ({ notes: structuredClone(s.notes), used: used(), limit: s.limit });
@@ -47,6 +47,7 @@ function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, ove
     hearsay: structuredClone(s.hearsay),
     hearsayUsed: s.hearsay.reduce((sum, x) => sum + chars(x.text), 0),
     hearsayLimit: s.hearsayLimit,
+    fits: s.fits,
   });
   const add = (body) => {
     const made = note(`n${(n += 1)}`, body.text, { vault: body.vault === true });
@@ -751,6 +752,15 @@ describe("an Agent's page: its own notes and what it heard", () => {
     expect(mainText()).toContain("只当线索 · 只用在来源的群和你们的对话里");
     expect(inRoom("小助手自己的笔记").getByText("已用 5%")).toBeTruthy();
     expect(inRoom("小助手听说的").getByText("已用 13%")).toBeTruthy(); // 8 of 60, rounded
+  });
+
+  it("says so on the Agent's tab when its model cannot carry the whole palace, and only then", async () => {
+    const SMALL = "这个模型的上下文较小，每次只带得下一部分记忆。";
+    await openAgentPalace(service({ notes: [note("a", "它学到的事")], fits: false }));
+    expect(mainText()).toContain(SMALL);
+    cleanup();
+    await openAgentPalace(service({ notes: [note("a", "它学到的事")], fits: true }));
+    expect(mainText()).not.toContain(SMALL);
   });
 
   it("its own notes are a room like the shared one: the lock, edit, delete and add use the Agent's routes", async () => {

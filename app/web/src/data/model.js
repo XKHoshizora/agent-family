@@ -852,12 +852,12 @@ const count = (n) => (Number.isFinite(n) && n >= 0 ? n : 0);
 /**
  * A room as `GET /api/memory/notes` or `GET /api/agents/:id/memory` answers it, with only what the pages read: the notes
  * (vault flag and `unsure` as booleans), the characters used and the room's limit (code points), and for an Agent what it
- * heard with its own count. A malformed answer is no room (null).
+ * heard with its own count, and whether the Agent's model carries the whole palace (`fits`, true unless the service says false). A malformed answer is no room (null).
  */
 export function memoryRoomOf(answer) {
   if (!answer || !Array.isArray(answer.notes) || !Number.isFinite(answer.limit)) return null;
   const notes = answer.notes.filter(isNote).map((n) => ({ ...n, vault: n.vault === true, unsure: n.unsure === true }));
-  const room = { notes, used: count(answer.used), limit: answer.limit, hearsay: null, hearsayUsed: 0, hearsayLimit: 0 };
+  const room = { notes, used: count(answer.used), limit: answer.limit, fits: answer.fits !== false, hearsay: null, hearsayUsed: 0, hearsayLimit: 0 };
   if (Array.isArray(answer.hearsay)) {
     room.hearsay = answer.hearsay.filter(isHeard).map((h) => ({ ...h, group: h.group && typeof h.group === "object" ? h.group : null }));
     room.hearsayUsed = count(answer.hearsayUsed);
