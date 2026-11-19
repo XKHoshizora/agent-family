@@ -2573,7 +2573,6 @@ milliseconds.
 | `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.8, 0.6, 0.6, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging |
 | `flaggedMax`, `flaggedContext` | 20 (1–500), 3 (0–50) | At most this many flagged messages are reviewed together, each with this many messages of context |
 | `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |
-| `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
 (`POST /api/conversations/:id/messages`, text or file; not a repeated `clientTxn`), the send route notes it after
