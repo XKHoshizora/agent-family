@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
 import { MAX_AGENT_OPTIONS, optionsFor, requestFor } from "../src/agents/proactive/candidates.ts";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
+import { listenersFor } from "../src/agents/proactive/listeners.ts";
 import { actOnTriggered, noneTriggered, triggerFromAgent, type Caller, type Triggered } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import type { Config } from "../src/config.ts";
@@ -80,9 +81,13 @@ async function world(): Promise<World> {
 const join = (conv: string, id: string) =>
   db.query(`insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1`, [conv, id]);
 
-/** A proactive Agent of `owner` named `handle`, on the site model, put into `conv` when given. */
+/**
+ * A proactive Agent of `owner` named `handle`, on the site model, put into `conv` when given. Memory is off unless `over` says
+ * otherwise: an Agent with memory also listens for what is said about its owner (memory-flags.test.ts), and these tests are
+ * about who replies.
+ */
 async function agentOf(owner: Actor, handle: string, conv: string | null, over: Record<string, unknown> = {}) {
-  const agent = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", proactive: true, ...over });
+  const agent = await mustCreateAgent(app, owner, { handle, name: handle, model: FAST, persona: "简短地回答。", proactive: true, memory: false, ...over });
   if (conv) await join(conv, agent.id);
   return agent as { id: string; handle: string; conversationId: string };
 }
@@ -159,6 +164,27 @@ const publish = (t: Triggered) => {
   app.deps.conversations.publish({ messages: t.notices, conversations: [] }, log);
   actOnTriggered(t, { announce: (run) => app.agentPort.announce(run), log, realtime: app.realtime });
 };
+
+// --- listeners (Task 8; the rest is in memory-flags.test.ts) ---
+
+describe("an Agent with memory on in the request", () => {
+  it("adds the listener questions after the pick and the quiet ones, and shows no more than the options may see", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    await say(w.member, w.g, "加入之前");
+    const memo = await agentOf(w.third, "memo", w.g, { memory: true, proactive: false });
+    const asked = await say(w.member, w.g, "third 周末要去爬山");
+    const options = await optionsFor(db, w.g, asked, w.member.id);
+    const listeners = await listenersFor(db, w.g, asked);
+    expect(listeners).toMatchObject([{ key: "h1", ownerId: w.third.id, ownerName: "third", agentIds: [memo.id], reviewerId: memo.id }]);
+    const request = (await requestFor(db, w.g, asked, options, app.deps.config.proactive, listeners))!;
+    expect(request.state).toBe("群聊记录：\n【新】member：third 周末要去爬山");
+    expect(request.questions.map((q) => q.key)).toEqual(["pick", "h1"]);
+    expect(options.map((o) => o.agentId)).toEqual([anna.id]);
+    // Without the listeners the request is what it was.
+    expect((await requestFor(db, w.g, asked, options, app.deps.config.proactive))!.questions.map((q) => q.key)).toEqual(["pick"]);
+  });
+});
 
 // --- who replies ---------------------------------------------------------------------------------------------------
 

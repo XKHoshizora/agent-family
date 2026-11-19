@@ -9,7 +9,8 @@ import { JudgeError, type Answer, type Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, toldSince, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
-import { judgeable, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Option } from "./candidates.ts";
+import { judgeable, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type Option } from "./candidates.ts";
+import { listenersFor, writeFlags, type MemoryFlag } from "./listeners.ts";
 import { decidedAlready, lockStates, othersSinceSurcharge, saveState, stampJudged } from "./state.ts";
 import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./threshold.ts";
 
@@ -38,7 +39,7 @@ import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./thr
 export interface DecideDeps {
   db: Db;
   judge: Judge | null;
-  config: RunLimits & Pick<Config, "judge" | "proactive">;
+  config: RunLimits & Pick<Config, "judge" | "proactive" | "memory">;
   log: Pick<FastifyBaseLogger, "info" | "debug">;
   /** Called as the judgement model is asked, once (the scheduler counts its hourly caps by it); not when it is not. */
   onAsk?: () => void;
@@ -53,19 +54,26 @@ const QUIETED_NOTICE_EVERY_MS = 3_600_000;
 /** The site day the daily limit was last logged on: once per process and day. */
 let limitLoggedOn: string | null = null;
 
-export async function decideProactive(deps: DecideDeps, conversationId: string, seq: number): Promise<Triggered> {
+/**
+ * What a decision comes to: what `Triggered` says, and — only when the judgement raised any — the memory flags it wrote
+ * (listeners.ts, Task 8), for the caller to tell the reviewer of.
+ */
+export type Decided = Triggered & { flags?: MemoryFlag[] };
+
+export async function decideProactive(deps: DecideDeps, conversationId: string, seq: number): Promise<Decided> {
   const { db, judge, config, log } = deps;
   if (judge === null || config.judge === null) return noneTriggered();
 
   const message = await judgeable(db, conversationId, seq);
   if (message === null || (await decidedAlready(db, conversationId, seq))) return noneTriggered();
   const options = await optionsFor(db, conversationId, seq, message.senderId);
-  if (options.length === 0) return noneTriggered();
+  const listeners = await listenersFor(db, conversationId, seq);
+  if (options.length === 0 && listeners.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);
   if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
-  const request = await requestFor(db, conversationId, seq, options, config.proactive);
+  const request = await requestFor(db, conversationId, seq, options, config.proactive, listeners);
   if (request === null) return noneTriggered();
-  const { state, questions } = request;
+  const { state, questions, flaggable } = request;
 
   let answers: Map<string, Answer> | null = null;
   // Each channel is tried for at most `timeoutMs`; nothing waits longer than all of them together.
@@ -80,18 +88,39 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   }
   // Whatever came of it: one more judgement today, and each option judged now — up to this message when it was answered.
   await countJudgement(db, day);
-  await stampJudged(db, conversationId, options.map((o) => o.agentId), answers === null ? null : seq);
+  await stampJudged(db, conversationId, [...new Set([...options.map((o) => o.agentId), ...listeners.flatMap((l) => l.agentIds)])].sort(), answers === null ? null : seq);
   if (answers === null) return noneTriggered();
 
   const P = config.proactive;
-  const { winner, quiet, partial } = answered(options, answers, new Set(questions.map((q) => q.key)));
+  const asked = new Set(questions.map((q) => q.key));
+  const flags = await writeFlags(db, flagged(flaggable, answers, config.memory, conversationId));
+  const done = <T extends Triggered>(t: T): T & Pick<Decided, "flags"> => (flags.length === 0 ? t : { ...t, flags });
+  // Nobody can reply when no Agent was offered: the listeners' questions only flag.
+  if (options.length === 0) return done(noneTriggered());
+  const { winner, quiet, partial } = answered(options, answers, asked);
   if (partial) log.info({ metric: "judge_partial", conversationId }, "the judgement model's pick was missing, partial or did not add up: no Agent replies unasked");
   // No threshold is below the lowest base (or the cap): a winner under that cannot reply, whatever its state, and when
   // no quiet answer raises anyone either, the group's row and the Agents' are not locked at all (the usual case).
   const contender = winner !== null && winner.p >= Math.min(P.cap, P.base.less, P.base.normal, P.base.more) ? winner : null;
   if (winner !== null && contender === null) logSkipped(log, "under_threshold", winner.option.agentId, conversationId);
-  if (contender === null && !options.some((o) => (quiet.get(o.agentId) ?? 0) >= P.quietSmall.at)) return noneTriggered();
-  return db.tx((t) => settle(t, { conversationId, seq, options, config, log, winner: contender, quiet }));
+  if (contender === null && !options.some((o) => (quiet.get(o.agentId) ?? 0) >= P.quietSmall.at)) return done(noneTriggered());
+  return done(await db.tx((t) => settle(t, { conversationId, seq, options, config, log, winner: contender, quiet })));
+}
+
+/**
+ * The flags the answers raise: a hearsay question answered at `hearsayAt` or more flags each message it was asked of for
+ * every Agent of that owner that listens; an own question at `ownAt` or more, for the owner's reviewing Agent alone. A
+ * question left unanswered, or answered with a choice, raises nothing.
+ */
+function flagged(flaggable: readonly Flaggable[], answers: ReadonlyMap<string, Answer>, M: Pick<Config["memory"], "hearsayAt" | "ownAt">, conversationId: string): MemoryFlag[] {
+  const out: MemoryFlag[] = [];
+  for (const f of flaggable) {
+    const a = answers.get(f.key);
+    if (a?.type !== "noul" || a.p < (f.kind === "hearsay" ? M.hearsayAt : M.ownAt)) continue;
+    const agents = f.kind === "hearsay" ? f.listener.agentIds : f.listener.reviewerId === null ? [] : [f.listener.reviewerId];
+    for (const agentId of agents) for (const seq of f.seqs) out.push({ agentId, conversationId, seq, kind: f.kind });
+  }
+  return out;
 }
 
 /**

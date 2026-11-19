@@ -4,6 +4,7 @@ import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
 import { mentionedHandles } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
+import type { Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
 
 /**
@@ -34,6 +35,11 @@ const NOBODY_DESCRIPTION = "不需要任何 AI 助手回答：真人之间的闲
 const quietInstructions = (name: string): string =>
   `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。开头标着${NEW_MARK}的是刚发的消息。在这些${NEW_MARK}消息里，有人在让${name}别再说话、安静一点，或者表示它打扰到大家了，而且在那之后没有人又让它继续说。没有标${NEW_MARK}的旧消息不算。`;
 
+const hearsayInstructions = (name: string): string =>
+  `群里有一位成员叫「${name}」。在标着${NEW_MARK}的消息里，有人（不是${name}自己）说了一件关于${name}本人的、以后还用得上的事：做过什么、打算做什么、有什么没做完、喜欢或不喜欢什么、安排或情况。只是打招呼、叫他、@ 他、顺口提到名字、开玩笑、泛泛的评价，都不算。消息可能是任何语言。`;
+const ownInstructions = (name: string): string =>
+  `群里有一位成员叫「${name}」。在标着${NEW_MARK}的消息里，${name}自己说了一件关于自己的、以后还用得上的事：喜欢或不喜欢什么、习惯、安排、情况，或者要别人记住的事。只是闲聊、接话、提问、对别人的事发表看法，都不算。消息可能是任何语言。`;
+
 /** An Agent the judgement may pick. */
 export interface Option {
   /** `a1`, `a2`, … in Agent id order. */
@@ -48,6 +54,10 @@ export interface Option {
 
 /** The key of option `o`'s quiet question. */
 export const quietKey = (o: Pick<Option, "key">): string => `q_${o.key}`;
+
+/** The keys of listener `l`'s two questions: what others said about the owner, and what the owner said about themselves. */
+export const hearsayKey = (l: Pick<Listener, "key">): string => l.key;
+export const ownKey = (l: Pick<Listener, "key">): string => `${l.key}o`;
 
 /** The first `chars` characters of `text` once it is on one line (`oneLine`). */
 const cut = (text: string, chars: number): string => Array.from(oneLine(text)).slice(0, chars).join("");
@@ -129,22 +139,36 @@ export async function optionsFor(q: Queryable, conversationId: string, seq: numb
   });
 }
 
-/** What the judgement model is shown (`state`) and asked (`questions`) about the message at `seq`. */
+/** What a listener's question flags when it is answered high enough: the new messages it is about. */
+export interface Flaggable {
+  key: string;
+  kind: "hearsay" | "own";
+  listener: Listener;
+  seqs: number[];
+}
+
+/** What the judgement model is shown (`state`) and asked (`questions`) about the message at `seq`, and what its answers flag. */
 export interface JudgeRequest {
   state: string;
   questions: Question[];
+  /** The listener questions, each with the seqs of the new messages a high answer flags. */
+  flaggable: Flaggable[];
 }
 
 /**
  * The request for the message at `seq` (the group's latest that is not a notice): the transcript — the last
- * `transcriptMessages` messages that are not notices, after the latest join among `options` (so no option is shown what
- * came before it joined), oldest first, each `{name}：{text}`, opened with `NEW_MARK` when it came after the message the
- * options were last judged up to (the latest always: a request to be quiet that a later message covered is still asked
- * about, and one judged already is not asked about again) (an Agent's `{name}（Agent）：{text}`; a file `[文件] {caption
- * or name}`), the name a label's (`labelName`), the text on one line and cut at `transcriptChars` characters — then one
- * choice over the options and `nobody` about the latest message, and a quiet question about each option that sent one of
- * the messages shown, asked of the new messages.
- * Null when there is no line to show (nothing is asked about descriptions alone).
+ * `transcriptMessages` messages that are not notices, after the latest join among `options` and `listeners` (so no Agent
+ * that may answer or listens is shown what came before it joined), oldest first, each `{name}：{text}`, opened with
+ * `NEW_MARK` when it came after the message they were last judged up to (`judgedUpTo`; the latest always: a request to
+ * be quiet that a later message covered is still asked about, and one judged already is not asked about again) (an
+ * Agent's `{name}（Agent）：{text}`; a file `[文件] {caption or name}`), the name a label's (`labelName`), the text on one
+ * line and cut at `transcriptChars` characters — then, when there are options, one choice over them and `nobody` about
+ * the latest message, and a quiet question about each option that sent one of the messages shown, asked of the new
+ * messages; then, for each listener (an owner whose Agents remember), whether a new message by someone else says
+ * something lasting about the owner (`{key}`: asked only when a person with no block with the owner either way sent
+ * one) and whether a new message by the owner says something lasting about themselves (`{key}o`: asked only when the
+ * owner sent one and an Agent of theirs reviews it, `reviewerId`).
+ * Null when there is no line to show (nothing is asked about descriptions alone) or nothing to ask.
  */
 export async function requestFor(
   q: Queryable,
@@ -152,8 +176,10 @@ export async function requestFor(
   seq: number,
   options: readonly Option[],
   P: Pick<ProactiveConfig, "transcriptMessages" | "transcriptChars">,
+  listeners: readonly Listener[] = [],
 ): Promise<JudgeRequest | null> {
-  const after = Math.max(...options.map((o) => o.joinedSeq));
+  if (options.length === 0 && listeners.length === 0) return null;
+  const after = Math.max(...options.map((o) => o.joinedSeq), ...listeners.map((l) => l.joinedSeq));
   const { rows } = await q.query<{ seq: string; sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
     `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
@@ -165,20 +191,58 @@ export async function requestFor(
   );
   if (rows.length === 0) return null;
   // Null (never judged with an answer): only the latest message is new, as when each message is judged in turn.
-  const judged = Math.min((await judgedUpTo(q, conversationId, options.map((o) => o.agentId))) ?? seq - 1, seq - 1);
-  const lines = rows.reverse().map((r) => {
+  const agentIds = [...new Set([...options.map((o) => o.agentId), ...listeners.flatMap((l) => l.agentIds)])];
+  const judged = Math.min((await judgedUpTo(q, conversationId, agentIds)) ?? seq - 1, seq - 1);
+  rows.reverse();
+  const lines = rows.map((r) => {
     const text = r.kind === "file" ? `[文件] ${r.text || r.file || ""}` : (r.text ?? "");
     return `${Number(r.seq) > judged ? NEW_MARK : ""}${labelName(r.name, r.handle)}${r.sender_kind === "agent" ? "（Agent）" : ""}：${cut(text, P.transcriptChars)}`;
   });
-  const spoke = new Set(rows.map((r) => r.sender_id));
-  const pick: Question = {
-    key: PICK,
-    type: "choice",
-    instructions: PICK_INSTRUCTIONS,
-    options: Object.fromEntries([...options.map((o) => [o.key, o.description]), [NOBODY, NOBODY_DESCRIPTION]]),
-  };
-  const quiet = options
-    .filter((o) => spoke.has(o.agentId))
-    .map((o): Question => ({ key: quietKey(o), type: "noul", instructions: quietInstructions(o.name) }));
-  return { state: `群聊记录：\n${lines.join("\n")}`, questions: [pick, ...quiet] };
+  const questions: Question[] = [];
+  if (options.length > 0) {
+    const spoke = new Set(rows.map((r) => r.sender_id));
+    questions.push({
+      key: PICK,
+      type: "choice",
+      instructions: PICK_INSTRUCTIONS,
+      options: Object.fromEntries([...options.map((o) => [o.key, o.description]), [NOBODY, NOBODY_DESCRIPTION]]),
+    });
+    for (const o of options) if (spoke.has(o.agentId)) questions.push({ key: quietKey(o), type: "noul", instructions: quietInstructions(o.name) });
+  }
+  const flaggable = await listenerQuestions(q, rows, judged, listeners);
+  for (const f of flaggable) {
+    questions.push({ key: f.key, type: "noul", instructions: (f.kind === "hearsay" ? hearsayInstructions : ownInstructions)(f.listener.ownerName) });
+  }
+  if (questions.length === 0) return null;
+  return { state: `群聊记录：\n${lines.join("\n")}`, questions, flaggable };
+}
+
+/**
+ * The listener questions worth asking of the transcript `rows` (`judged`: the last seq judged already): per listener,
+ * hearsay when a new message came from a person other than the owner who has no block with the owner either way, and
+ * the owner's own when the owner sent a new message and an Agent of theirs reviews it.
+ */
+async function listenerQuestions(
+  q: Queryable,
+  rows: readonly { seq: string; sender_id: string; sender_kind: string }[],
+  judged: number,
+  listeners: readonly Listener[],
+): Promise<Flaggable[]> {
+  if (listeners.length === 0) return [];
+  const fresh = rows.filter((r) => Number(r.seq) > judged && r.sender_kind !== "agent");
+  if (fresh.length === 0) return [];
+  const { rows: blocks } = await q.query<{ blocker_id: string; blocked_id: string }>(
+    `select blocker_id, blocked_id from blocks
+      where (blocker_id = any($1::uuid[]) and blocked_id = any($2::uuid[])) or (blocker_id = any($2::uuid[]) and blocked_id = any($1::uuid[]))`,
+    [listeners.map((l) => l.ownerId), [...new Set(fresh.map((r) => r.sender_id))]],
+  );
+  const blocked = new Set(blocks.flatMap((b) => [`${b.blocker_id}|${b.blocked_id}`, `${b.blocked_id}|${b.blocker_id}`]));
+  const out: Flaggable[] = [];
+  for (const l of listeners) {
+    const others = fresh.filter((r) => r.sender_id !== l.ownerId && !blocked.has(`${l.ownerId}|${r.sender_id}`)).map((r) => Number(r.seq));
+    if (others.length > 0) out.push({ key: hearsayKey(l), kind: "hearsay", listener: l, seqs: others });
+    const own = fresh.filter((r) => r.sender_id === l.ownerId).map((r) => Number(r.seq));
+    if (own.length > 0 && l.reviewerId !== null) out.push({ key: ownKey(l), kind: "own", listener: l, seqs: own });
+  }
+  return out;
 }
