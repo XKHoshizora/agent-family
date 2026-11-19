@@ -1,7 +1,8 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import { errInfo, reviewableAgent, reviewedSeq, type ReviewContext, type ReviewJob } from "./pipeline.ts";
+import type { FlagKind, FlagsContext, FlagsJob } from "./hearsay.ts";
+import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { EXPLICIT } from "./review.ts";
 
 /**
@@ -11,6 +12,11 @@ import { EXPLICIT } from "./review.ts";
  * unless the owner said something after what the last attempt looked at, so a review that failed is not asked again for the
  * same words. One job per Agent at a time (a trigger meanwhile waits and runs once after it), at most
  * `MAX_REVIEWS_AT_ONCE` overall.
+ *
+ * A flagged group message (`flagged`, after the judgement wrote its `memory_flags` row) waits for the group's quiet too:
+ * the pair's wake-up (hearsay.ts `runFlags`: the owner's own remarks reviewed, then the hearsay) runs `MEMORY.groupQuietMs`
+ * after the pair's latest flag, or `MEMORY.groupMaxWaitMs` after the first of the batch, whichever comes first. A wake-up
+ * that could not ask its model keeps the flags for exactly one more try (the pair's next wake-up).
  *
  * In memory, in this one process, as the proactive scheduler is: it never throws and never rejects (what goes wrong is
  * logged with ids, never a note or an answer). `close()` cancels every timer and waiting job and abandons calls under way.
@@ -28,7 +34,7 @@ export const realTimer: SetTimer = (fn, ms) => {
   return { clear: () => clearTimeout(timer) };
 };
 
-export type Job = ReviewJob;
+export type Job = ReviewJob | FlagsJob;
 
 export interface ReviewerDeps {
   db: Db;
@@ -37,8 +43,8 @@ export interface ReviewerDeps {
   /** The service is stopping: a job under way is told (its `closing`). `close()` ends them too. */
   closing?: AbortSignal;
   setTimer: SetTimer;
-  /** Does one job (pipeline.ts `runReview`); may reject: it is logged. */
-  run(job: Job, ctx: ReviewContext): Promise<void>;
+  /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`); may reject: it is logged. */
+  run(job: Job, ctx: FlagsContext): Promise<void>;
 }
 
 export interface Reviewer {
@@ -46,11 +52,14 @@ export interface Reviewer {
   noted(agentId: string, conversationId: string): void;
   /** After commit: the owner started a new topic in the Agent's own conversation. */
   topicReset(agentId: string, conversationId: string): void;
-  /** After commit: a message of `conversationId` was flagged for the Agent (a later batch fills this in). */
+  /** After the row is written: a message of `conversationId` was flagged for the Agent (hearsay, or the owner's own remark). */
   flagged(agentId: string, conversationId: string, kind: "hearsay" | "own"): void;
   /** How many pairs the scheduler remembers an attempt for (for tests: it must not grow with the pairs reviewed). */
   remembered(): number;
-  /** At start: arms a quiet timer for every pair whose Agent replied in the last day and has replies after `reviewed_seq`; how many. */
+  /**
+   * At start: arms a quiet timer for every pair whose Agent replied in the last day and has replies after `reviewed_seq`,
+   * and a wake-up for every pair with flags left over from the last day (older flags are deleted); how many pairs.
+   */
   resume(): Promise<number>;
   close(): void;
   /** Resolves once nothing is being looked at, nothing waits and no job is under way (timers do not count). */
@@ -67,6 +76,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   const stop = new AbortController();
   const closing = deps.closing ? AbortSignal.any([deps.closing, stop.signal]) : stop.signal;
   const timers = new Map<string, { clear(): void }>();
+  /** The waiting wake-ups of pairs with flags: the quiet timer (moved by every flag) and the one from the batch's first flag. */
+  const flagTimers = new Map<string, Array<{ clear(): void }>>();
+  /** How many times in a row a kind of flags of a pair could not be asked (`FlagsContext.failures`), by `pair|kind`. */
+  const failures = new Map<string, number>();
   /** The newest seq the last attempt of each pair looked at (a failed call is not asked again for the same words). */
   const attempted = new Map<string, number>();
   let waiting: Job[] = [];
@@ -101,8 +114,18 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       running.add(job.agentId);
       const key = keyOf(job.agentId, job.conversationId);
       // Called inside the chain: a `run` that throws before it returns a promise is a failed review, not a stuck Agent.
+      const failed = (kind: FlagKind): string => `${key}|${kind}`;
+      const ctx: FlagsContext = {
+        closing,
+        attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
+        failures: {
+          count: (kind) => failures.get(failed(kind)) ?? 0,
+          add: (kind) => failures.set(failed(kind), (failures.get(failed(kind)) ?? 0) + 1),
+          clear: (kind) => void failures.delete(failed(kind)),
+        },
+      };
       void Promise.resolve()
-        .then(() => deps.run(job, { closing, attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)) }))
+        .then(() => deps.run(job, ctx))
         .catch((err: unknown) => log.error({ ...errInfo(err), agentId: job.agentId, conversationId: job.conversationId }, "a memory review failed; nothing was changed"))
         .then(() => forgetReached(job))
         .finally(() => {
@@ -117,7 +140,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
 
   const enqueue = (job: Job): void => {
     if (closed) return;
-    if (!waiting.some((j) => j.agentId === job.agentId && j.conversationId === job.conversationId)) waiting.push(job);
+    if (!waiting.some((j) => j.kind === job.kind && j.agentId === job.agentId && j.conversationId === job.conversationId)) waiting.push(job);
     pump();
   };
 
@@ -171,6 +194,24 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     return true;
   };
 
+  /**
+   * (Re)arms the pair's flag wake-up: the quiet timer starts over, the maximum one starts only with the batch's first flag.
+   * False when the reviewer is closed and nothing was armed.
+   */
+  const armFlags = (job: FlagsJob): boolean => {
+    if (closed) return false;
+    const key = keyOf(job.agentId, job.conversationId);
+    const [quiet, max] = flagTimers.get(key) ?? [];
+    quiet?.clear();
+    const wake = (): void => {
+      for (const timer of flagTimers.get(key) ?? []) timer.clear();
+      flagTimers.delete(key);
+      enqueue(job);
+    };
+    flagTimers.set(key, [deps.setTimer(wake, config.memory.groupQuietMs), max ?? deps.setTimer(wake, config.memory.groupMaxWaitMs)]);
+    return true;
+  };
+
   const disarm = (job: Job): void => {
     const key = keyOf(job.agentId, job.conversationId);
     timers.get(key)?.clear();
@@ -206,8 +247,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       disarm(job);
       void enqueueIfNew(job);
     },
-    flagged() {
-      // Filled in by the group listeners' batch: nothing is reviewed for a flag yet.
+    flagged(agentId, conversationId) {
+      armFlags({ kind: "flags", agentId, conversationId });
     },
     remembered: () => attempted.size,
     async resume() {
@@ -224,6 +265,15 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         for (const r of rows) {
           if (arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
         }
+        // Flags a restart left: a day's worth is acted on after the quiet; older ones are no longer worth a call.
+        await db.query(`delete from memory_flags where created_at < now() - interval '${RESUME_WINDOW}'`);
+        const flags = await db.query<{ agent_id: string; conversation_id: string }>(
+          `select distinct f.agent_id, f.conversation_id from memory_flags f
+             join agents a on a.principal_id = f.agent_id and a.memory and not a.paused and a.deleted_at is null`,
+        );
+        for (const r of flags.rows) {
+          if (armFlags({ kind: "flags", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
+        }
       });
       return armed;
     },
@@ -231,6 +281,9 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       closed = true;
       for (const timer of timers.values()) timer.clear();
       timers.clear();
+      for (const pair of flagTimers.values()) for (const timer of pair) timer.clear();
+      flagTimers.clear();
+      failures.clear();
       attempted.clear();
       waiting = [];
       stop.abort();

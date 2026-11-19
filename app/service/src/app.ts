@@ -21,6 +21,7 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls, memoryModel } from "./memory/call.ts";
+import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
@@ -315,7 +316,12 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
       : proactiveAsked === null || deps.judge === null || config.judge === null
         ? null
         : createProactiveScheduler({
-            decide: (conversationId, seq, asked) => decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log, onAsk: asked }, conversationId, seq),
+            decide: async (conversationId, seq, asked) => {
+              const decided = await decideProactive({ db: deps.db, judge: deps.judge, config, log: app.log, onAsk: asked }, conversationId, seq);
+              // The flags the judgement wrote are in the database: the reviewer acts on them once the group has been quiet.
+              for (const f of decided.flags ?? []) deps.memory?.flagged(f.agentId, f.conversationId, f.kind);
+              return decided;
+            },
             // `agentPort` is declared below: the port takes the scheduler (an Agent's post cancels a wait) and this takes
             // the port. Both exist before any message is noted, so before any debounce can end and call this.
             act: (_conversationId, triggered) => {
@@ -344,12 +350,10 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
             log: app.log,
             closing: memoryClosing.signal,
             setTimer: memoryAsked.setTimer ?? realTimer,
-            run: (job, ctx) =>
-              runReview(
-                { db: deps.db, config, models: deps.models, judge: deps.judge, log: app.log, inFlight: memoryRuns, conversations: deps.conversations, now: memoryAsked.now ?? Date.now },
-                job,
-                ctx,
-              ),
+            run: (job, ctx) => {
+              const pipeline = { db: deps.db, config, models: deps.models, judge: deps.judge, log: app.log, inFlight: memoryRuns, conversations: deps.conversations, now: memoryAsked.now ?? Date.now };
+              return job.kind === "flags" ? runFlags(pipeline, job, ctx) : runReview(pipeline, job, ctx);
+            },
           });
   const memory = deps.memory;
   const agentPort = createAgentPort({
@@ -385,9 +389,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   app.addHook("onReady", async () => {
     const recovered = await recoverRuns(deps.db, config, app.log);
     if (recovered > 0) app.log.info({ recovered }, "agent runs left running by the previous start were recovered");
-    // Conversations with replies nobody has reviewed yet (a restart delays a review, never loses it) wait for their quiet again.
+    // Conversations with replies nobody has reviewed yet, and groups with flags nobody has acted on (a restart delays a review, never loses it), wait for their quiet again.
     const armed = (await memory?.resume()) ?? 0;
-    if (armed > 0) app.log.info({ armed }, "conversations with replies still to review were armed");
+    if (armed > 0) app.log.info({ armed }, "conversations with replies or flags still to act on were armed");
     // A deleted Agent still in a group (its delete committed, its leaving did not happen) leaves it now.
     const left = await leaveGroupsOfDeleted({ db: deps.db, conversations: deps.conversations, log: app.log });
     if (left > 0) app.log.info({ left }, "deleted Agents left the groups they were still in");
