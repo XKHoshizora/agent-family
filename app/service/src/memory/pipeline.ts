@@ -12,7 +12,7 @@ import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
-import { linesOf, readReview, type RefNote } from "./review.ts";
+import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
 import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
 import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { bumpNotes } from "./write.ts";
@@ -222,15 +222,21 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       for (const id of ids) bumped.add(id);
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
-    if (changing.length > 0) {
-      const result = await applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, changing, input.refs, {
+    // In the owner's own conversation a destructive op needs the owner's words (`needsWords`): else it waits for their yes, all
+    // together in one pending change, the card 先问我再记 produces. With 先问我再记 on everything waits as one change anyway.
+    const held = group || locked.memoryAsk ? [] : changing.filter((op) => needsWords(op, input));
+    const direct = changing.filter((op) => !held.includes(op));
+    const apply = (list: Op[], status: "applied" | "pending") =>
+      applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, list, input.refs, {
         conversationId: locked.conversationId,
         originConversationId: conversationId,
-        status: locked.memoryAsk ? "pending" : "applied",
+        status,
         vaults: sorted.vaults,
         duplicates: sorted.duplicates,
         rooms: roomOf(config),
       });
+    if (direct.length > 0) {
+      const result = await apply(direct, locked.memoryAsk ? "pending" : "applied");
       if (result?.changeId) written.push({ changeId: result.changeId, unlock: false });
       if (result && result.unlocks.length > 0) {
         const targets = result.unlocks.flatMap((ref) => {
@@ -241,6 +247,10 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
         if (unlockId) written.push({ changeId: unlockId, unlock: true });
       }
     }
+    if (held.length > 0) {
+      const result = await apply(held, "pending");
+      if (result?.changeId) written.push({ changeId: result.changeId, unlock: false });
+    }
     await markReviewed(t, agentId, conversationId, input.upToSeq);
     const stored: StoredMessage[] = [];
     for (const w of written) stored.push(await memoryNotice(t, locked, w.changeId, { unlock: w.unlock, phase: "rest", linesOf }));
@@ -250,6 +260,18 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
   if (notices?.some((n) => n.body.status === "applied" && n.body.unlock !== true && Array.isArray(n.body.lines) && n.body.lines.length > 0)) ctx.changed?.(agentId);
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");
+}
+
+/**
+ * Whether a destructive op of the owner's own conversation lacks the owner's words and so waits for their yes: a `remove` or a
+ * `lock` unless some owner line of the review's window asks for it (`EXPLICIT`); a `replace` unless the owner said something
+ * after the note was last changed. An `add` (or an `unlock`, which is only ever a request) never waits.
+ */
+function needsWords(op: Op, input: Pick<ReviewInput, "explicit" | "ownerAt" | "refs">): boolean {
+  if (op.op === "remove" || op.op === "lock") return !input.explicit;
+  if (op.op !== "replace") return false;
+  const note = input.refs.get(op.ref);
+  return note === undefined || !input.ownerAt.some((at) => at > note.updatedAt);
 }
 
 /** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */

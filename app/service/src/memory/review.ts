@@ -36,6 +36,10 @@ export interface ReviewInput {
   existing: string[];
   /** The newest message the review covers: reviewed up to here once it is done. */
   upToSeq: number;
+  /** Some owner entry of the review's window asks for something to be remembered, forgotten or locked (`EXPLICIT`). */
+  explicit: boolean;
+  /** When each owner entry of the window was sent: what a replace of a note needs one of, after the note's last change. */
+  ownerAt: Date[];
 }
 
 export interface ReviewOpts {
@@ -114,7 +118,7 @@ export const shown = (text: string, max: number): string => cut(cleanText(text),
  *
  * The user message is JSON (`JSON.stringify`): `conversation` the newest `reviewMessages` of the owner's and the Agent's
  * own messages, oldest first (text, and a file's caption; in a group only those sent after the Agent joined, as the Agent
- * itself reads them), each `{ who: "owner" | "agent", text }`; `notes` the notes the Agent may see there (`notesFor`, so in
+ * itself reads them; an Agent's line only when an owner's line follows it at once), each `{ who: "owner" | "agent", text }`; `notes` the notes the Agent may see there (`notesFor`, so in
  * a group nothing of the vault) as `{ ref: "n1"…, room, text }` — the owner's room first, then its own; `room_left` the
  * space left in each room this review may change (counted over all its notes: a number, not a note). Texts go in as
  * stored: line breaks collapsed to a space and invisible and control characters removed (`cleanText`, as before storing),
@@ -128,8 +132,8 @@ export async function readReview(
   opts: ReviewOpts,
 ): Promise<{ input: ReviewInput | null; seen: number | null }> {
   const { memory } = opts.config;
-  const { rows } = await q.query<{ seq: string; sender_id: string; text: string; newest: string | null }>(
-    `select m.seq::text, m.sender_id, m.body ->> 'text' as text,
+  const { rows } = await q.query<{ seq: string; sender_id: string; text: string; newest: string | null; created_at: Date }>(
+    `select m.seq::text, m.sender_id, m.created_at, m.body ->> 'text' as text,
             (select max(x.seq)::text from messages x where x.conversation_id = $2) as newest
        from messages m ${VISIBLE_JOIN}
       where m.conversation_id = $2 and m.seq > $3 and m.kind in ('text', 'file') and m.sender_id in ($1, $4)
@@ -141,9 +145,12 @@ export async function readReview(
   const seen = window.length > 0 ? Number(window.at(-1)!.newest ?? window.at(-1)!.seq) : null;
   const spoken = window.flatMap((m) => {
     const text = shown(m.text, memory.reviewMessageChars);
-    return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq: Number(m.seq) }];
+    return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq: Number(m.seq), at: m.created_at }];
   });
   if (!spoken.some((m) => m.who === "owner")) return { input: null, seen };
+  // The Agent's own lines are only shown where they make sense of what the owner answered: one immediately followed by an owner's
+  // line ("it asked, the owner answered"). A trailing line and a self-contained one are left out.
+  const shownLines = spoken.filter((m, i) => m.who === "owner" || spoken[i + 1]?.who === "owner");
 
   const group = conversationId !== agent.conversationId;
   const visible = await notesFor(q, agent, { conversationId, group });
@@ -171,12 +178,13 @@ export async function readReview(
   }
 
   const user = JSON.stringify({
-    conversation: spoken.map(({ who, text }) => ({ who, text })),
+    conversation: shownLines.map(({ who, text }) => ({ who, text })),
     notes,
     room_left: roomLeft,
   });
   const system = reviewSystem(group, todayIn(opts.now, opts.config.siteTimezone), await getMemoryLanguage(q, agent.ownerId));
-  return { input: { system, user, refs, existing, upToSeq: Number(window.at(-1)!.seq) }, seen };
+  const owner = spoken.filter((m) => m.who === "owner");
+  return { input: { system, user, refs, existing, upToSeq: Number(window.at(-1)!.seq), explicit: owner.some((m) => EXPLICIT.test(m.text)), ownerAt: owner.map((m) => m.at) }, seen };
 }
 
 /** `readReview`'s input alone: null when there is no owner message to look at. */
