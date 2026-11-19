@@ -237,6 +237,24 @@ describe("listeners", () => {
     expect(judge.calls[0]!.state).toBe("群聊记录：\n【新】member：加入之后的话");
   });
 
+  it("with a proactive option the window is the option's: a listener that joined later is asked about and flagged only for messages after its own join", async () => {
+    const w = await world();
+    await agentOf(w.owner, "anna", w.g, { proactive: true, memory: false });
+    await judgedUpTo(w.g, await say(w.third, w.g, "早"));
+    const before = await say(w.member, w.g, "third 去年在上海工作");
+    const memo = await agentOf(w.third, "memo", w.g);
+    const after = await say(w.member, w.g, "third 下周要回来");
+    judge.answer((_s, questions) => {
+      const pick = questions.find((q) => q.key === "pick") as Extract<Question, { type: "choice" }>;
+      return { pick: Object.fromEntries(Object.keys(pick.options).map((k) => [k, k === "nobody" ? 1 : 0])), h1: 0.9 };
+    });
+    await decide(w.g, after);
+    // Anna's window reaches back to before the listener joined; the listener's flags do not.
+    expect(judge.calls[0]!.state).toContain(`【新】member：third 去年在上海工作`);
+    expect(await flagsOf(w.g)).toEqual([{ agent_id: memo.id, seq: after, kind: "hearsay" }]);
+    expect(before).toBeLessThan(after);
+  });
+
   it("two owners: one pair of questions each, keyed in owner id order", async () => {
     const w = await world();
     await agentOf(w.owner, "memo_a", w.g);

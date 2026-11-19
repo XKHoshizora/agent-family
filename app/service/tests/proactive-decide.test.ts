@@ -180,7 +180,7 @@ const publish = (t: Triggered) => {
 // --- listeners (Task 8; the rest is in memory-flags.test.ts) ---
 
 describe("an Agent with memory on in the request", () => {
-  it("adds the listener questions after the pick and the quiet ones, and shows no more than the options may see", async () => {
+  it("adds the listener questions after the pick and the quiet ones, and the window is the options' alone (a listener narrows nothing)", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.member, w.g, "加入之前");
@@ -190,14 +190,14 @@ describe("an Agent with memory on in the request", () => {
     const listeners = await listenersFor(db, w.g, asked);
     expect(listeners).toMatchObject([{ key: "h1", ownerId: w.third.id, ownerName: "third", agentIds: [memo.id], reviewerId: memo.id }]);
     const request = (await requestFor(db, w.g, asked, options, app.deps.config.proactive, listeners))!;
-    expect(request.state).toBe("群聊记录：\n【新】member：third 周末要去爬山");
+    expect(request.state).toBe("群聊记录：\nmember：加入之前\n【新】member：third 周末要去爬山");
     expect(request.questions.map((q) => q.key)).toEqual(["pick", "h1"]);
     expect(options.map((o) => o.agentId)).toEqual([anna.id]);
     // Without the listeners the request is what it was.
     expect((await requestFor(db, w.g, asked, options, app.deps.config.proactive))!.questions.map((q) => q.key)).toEqual(["pick"]);
   });
 
-  it("a memory-only Agent that joins after a proactive one narrows what the pick is shown, for the proactive Agent too", async () => {
+  it("a memory-only Agent that joins after a proactive one does not narrow what the pick is shown", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.member, w.g, "加入之前的话");
@@ -206,7 +206,8 @@ describe("an Agent with memory on in the request", () => {
     judge.answer(byName({ anna: 0.1, nobody: 0.9 }));
     await decide(w.g, asked);
     const { state, questions } = judge.calls[0]!;
-    expect(state).toBe("群聊记录：\n【新】member：加入之后的话");
+    // Exactly as without memory: anna's window starts at her own join; the listener asks for its owner meanwhile.
+    expect(state).toBe("群聊记录：\nmember：加入之前的话\n【新】member：加入之后的话");
     expect(Object.values(pickOf(questions).options).map((d) => d.split("：")[0])).toEqual(["anna", "不需要任何 AI 助手回答"]);
     expect(questions.map((q) => q.key)).toEqual(["pick", "h1"]);
     expect(anna.id).toBeTruthy();
@@ -509,8 +510,7 @@ describe.each([false, true])("what the judgement model is asked (memory %s)", (m
     expect(await requestFor(db, w.g, asked, [{ ...option!, joinedSeq: asked }], app.deps.config.proactive)).toBeNull();
   });
 
-  /** Shared start: dave_bot joined after earlier messages, so the first request is narrowed for everyone. */
-  const narrowed = async () => {
+  it("an Agent that joined after earlier messages narrows the transcript for everyone; once it is no option, it widens again (with or without memory)", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.member, w.g, "早");
@@ -523,24 +523,14 @@ describe.each([false, true])("what the judgement model is asked (memory %s)", (m
     // anna's own message lies before dave joined: it is not shown, so anna is asked no quiet question.
     expect(coreKeys(judge.calls[0]!.questions)).toEqual(["pick"]);
     expect(listenerKinds(judge.calls[0]!.questions)).toEqual(memory ? ["hearsay:owner", "own:third"] : []);
+
+    // A listener narrows nothing: dave_bot no option, the window is anna's again, whatever dave_bot's memory.
     await db.query("update agents set proactive = false where principal_id = $1", [dave.id]);
     const again = await say(w.third, w.g, "再问一个");
     await decide(w.g, again);
-    return judge.calls[1]!;
-  };
-
-  it.skipIf(memory)("an Agent that joined after earlier messages narrows the transcript for everyone; once it is no option, it widens again", async () => {
-    const second = await narrowed();
-    expect(second.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
-    expect(coreKeys(second.questions)).toEqual(["pick", "q_a1"]);
-  });
-
-  it.skipIf(!memory)("an Agent that joined after earlier messages narrows the transcript for everyone; with memory on it still does once it is no option", async () => {
-    // Differs from memory off: dave_bot still listens, so the window stays cut after its join and anna is asked no quiet question.
-    const second = await narrowed();
-    expect(second.state).toBe("群聊记录：\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
-    expect(coreKeys(second.questions)).toEqual(["pick"]);
-    expect(listenerKinds(second.questions)).toEqual(["hearsay:owner", "own:third"]);
+    expect(judge.calls[1]!.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
+    expect(coreKeys(judge.calls[1]!.questions)).toEqual(["pick", "q_a1"]);
+    expect(listenerKinds(judge.calls[1]!.questions)).toEqual(memory ? ["hearsay:owner", "own:third"] : []);
   });
 
   it("the transcript holds the last 15 messages that are not notices", async () => {

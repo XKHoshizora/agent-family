@@ -161,8 +161,10 @@ export interface JudgeRequest {
 
 /**
  * The request for the message at `seq` (the group's latest that is not a notice): the transcript — the last
- * `transcriptMessages` messages that are not notices, after the latest join among `options` and `listeners` (so no Agent
- * that may answer or listens is shown what came before it joined), oldest first, each `{name}：{text}`, opened with
+ * `transcriptMessages` messages that are not notices, after the latest join among `options` — only when there are none, among `listeners`
+ * (so no option is shown what came before it joined; a listener never narrows what the options are shown, and never
+ * receives what came before it joined either: its questions are asked about, and its flags written for, messages after
+ * its own join alone) — oldest first, each `{name}：{text}`, opened with
  * `NEW_MARK` when it came after the message they were last judged up to (`judgedUpTo`; the latest always: a request to
  * be quiet that a later message covered is still asked about, and one judged already is not asked about again) (an
  * Agent's `{name}（Agent）：{text}`; a file `[文件] {caption or name}`), the name a label's (`labelName`), the text on one
@@ -183,7 +185,7 @@ export async function requestFor(
   listeners: readonly Listener[] = [],
 ): Promise<JudgeRequest | null> {
   if (options.length === 0 && listeners.length === 0) return null;
-  const after = Math.max(...options.map((o) => o.joinedSeq), ...listeners.map((l) => l.joinedSeq));
+  const after = Math.max(...(options.length > 0 ? options : listeners).map((o) => o.joinedSeq));
   const { rows } = await q.query<{ seq: string; sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
     `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
@@ -232,16 +234,18 @@ async function listenerQuestions(
   listeners: readonly Listener[],
 ): Promise<Flaggable[]> {
   if (listeners.length === 0) return [];
-  const fresh = rows.filter((r) => Number(r.seq) > judged && r.sender_kind !== "agent");
-  if (fresh.length === 0) return [];
+  const all = rows.filter((r) => Number(r.seq) > judged && r.sender_kind !== "agent");
+  if (all.length === 0) return [];
   const { rows: blocks } = await q.query<{ blocker_id: string; blocked_id: string }>(
     `select blocker_id, blocked_id from blocks
       where (blocker_id = any($1::uuid[]) and blocked_id = any($2::uuid[])) or (blocker_id = any($2::uuid[]) and blocked_id = any($1::uuid[]))`,
-    [listeners.map((l) => l.ownerId), [...new Set(fresh.map((r) => r.sender_id))]],
+    [listeners.map((l) => l.ownerId), [...new Set(all.map((r) => r.sender_id))]],
   );
   const blocked = new Set(blocks.flatMap((b) => [`${b.blocker_id}|${b.blocked_id}`, `${b.blocked_id}|${b.blocker_id}`]));
   const out: Flaggable[] = [];
   for (const l of listeners) {
+    // Nothing from before the listener's own (latest) join is asked about or flagged: the window may reach further back.
+    const fresh = all.filter((r) => Number(r.seq) > l.joinedSeq);
     const others = fresh.filter((r) => r.sender_id !== l.ownerId && !blocked.has(`${l.ownerId}|${r.sender_id}`)).map((r) => Number(r.seq));
     if (others.length > 0) out.push({ key: hearsayKey(l), kind: "hearsay", listener: l, seqs: others });
     const own = fresh.filter((r) => r.sender_id === l.ownerId).map((r) => Number(r.seq));

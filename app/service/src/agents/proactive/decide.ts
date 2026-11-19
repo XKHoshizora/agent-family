@@ -37,7 +37,8 @@ import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./thr
  * never the pick) and returned as `flags` when any were new. A judgement with no proactive Agent, only listeners, asks no
  * pick and can trigger nothing; it is skipped once the day's judgements have reached `memory.listenShare` of the limit,
  * so that listening never uses up what unasked replies need. The transcript starts after the latest join among the
- * options and the listeners: no Agent that listens or may answer is shown more than it may see.
+ * options (among the listeners when there are none): a listener never narrows what the options are shown, and what it
+ * is asked about and flagged is only what came after its own join.
  * Every failure of the judgement — none configured, over the daily limit, an error, no answer in time, an answer missing
  * any option asked — means nobody replies. What it decides is returned, to act on after commit as a send does
  * (`actOnTriggered`, the notices published). Nothing of it reaches a wire shape; the log carries ids and reasons only.
