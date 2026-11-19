@@ -148,6 +148,15 @@ const noticesOf = async (conv: string) =>
 /** The `proactive_skipped` lines logged at info. */
 const skipped = () => lines.filter((l) => l.metric === "proactive_skipped" && l.level === "info").map(({ level: _, ...l }) => l);
 
+/** The pick and quiet questions of a request: what the proactive judgement asks, whatever listens besides. */
+const coreKeys = (questions: readonly Question[]) => questions.filter((q) => q.key === "pick" || q.key.startsWith("q_")).map((q) => q.key);
+/** The listener questions of a request by what they ask and about whom (their keys follow owner ids): `hearsay:{name}` / `own:{name}`, sorted. */
+const listenerKinds = (questions: readonly Question[]) =>
+  questions
+    .filter((q) => /^h\d+o?$/.test(q.key))
+    .map((q) => `${q.key.endsWith("o") ? "own" : "hearsay"}:${/「(.+?)」/.exec(q.instructions)![1]}`)
+    .sort();
+
 const pickOf = (questions: readonly Question[]) => questions.find((q) => q.key === "pick") as Extract<Question, { type: "choice" }>;
 /** The key of the option named `name` in what was asked. */
 const keyOf = (questions: readonly Question[], name: string) => Object.entries(pickOf(questions).options).find(([k, d]) => nameOf(k, d) === name)![0];
@@ -379,7 +388,11 @@ describe.each([false, true])("who replies unasked (memory %s)", (memory) => {
 
 // --- what is asked ----------------------------------------------------------------------------------------------------
 
-describe("what the judgement model is asked", () => {
+describe.each([false, true])("what the judgement model is asked (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("one choice over every proactive Agent and nobody, keyed in id order, and a quiet question for each one that spoke", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g, { intro: "会做饭的助手", field: "家常菜" });
@@ -414,10 +427,13 @@ describe("what the judgement model is asked", () => {
     };
     const options = Object.fromEntries(inIdOrder.map((a, i) => [`a${i + 1}`, descriptions[a.id]!]));
     const annaKey = `a${inIdOrder.indexOf(anna) + 1}`;
-    expect(questions).toEqual([
+    expect(questions.filter((q) => q.key === "pick" || q.key.startsWith("q_"))).toEqual([
       { key: "pick", type: "choice", instructions: PICK_TEXT, options: { ...options, nobody: NOBODY_TEXT } },
       { key: `q_${annaKey}`, type: "noul", instructions: quietText("anna") },
     ]);
+    // With memory on, each owner of an Agent in the group is listened for: others' words about member and owner, third's own.
+    expect(listenerKinds(questions)).toEqual(memory ? ["hearsay:member", "hearsay:owner", "own:third"] : []);
+    expect(questions).toHaveLength(2 + (memory ? 3 : 0));
     expect(Object.keys(pickOf(questions).options)).toEqual(["a1", "a2", "a3", "nobody"]);
   });
 
@@ -448,7 +464,8 @@ describe("what the judgement model is asked", () => {
     expect(questions.find((q) => q.type === "noul")?.instructions).toBe(quietText("小厨群成员 Agent"));
   });
 
-  it("an Agent that joined at or after the message is no option for it; with no other option the judge is not asked", async () => {
+  /** Shared start: anna (proactive) was there; dave_bot joined at the message and is no option (nor a listener) for it. */
+  const lateJoiner = async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.member, w.g, "早");
@@ -458,11 +475,29 @@ describe("what the judgement model is asked", () => {
     await decide(w.g, asked);
     expect(offered()).toEqual(["anna", "nobody"]);
     expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：早\n【新】member：今晚做什么菜好？");
-
-    // The late one alone: nobody to ask about.
+    expect(coreKeys(judge.calls[0]!.questions)).toEqual(["pick"]);
+    // dave_bot joined at the message: no listener for it; anna's owner is listened for when memory is on.
+    expect(listenerKinds(judge.calls[0]!.questions)).toEqual(memory ? ["hearsay:owner"] : []);
     await db.query("update agents set proactive = false where principal_id = $1", [anna.id]);
+    return { w, asked };
+  };
+
+  it.skipIf(memory)("an Agent that joined at or after the message is no option for it; with no other option the judge is not asked", async () => {
+    const { w, asked } = await lateJoiner();
+    // The late one alone: nobody to ask about.
     expect(await decide(w.g, asked)).toEqual(noneTriggered());
     expect(judge.calls).toHaveLength(1);
+  });
+
+  it.skipIf(!memory)("an Agent that joined at or after the message is no option for it; with no other option, only the Agent that listens is asked about", async () => {
+    // Differs from memory off: anna still listens for her owner, so the judgement is asked, with the listener question alone.
+    const { w, asked } = await lateJoiner();
+    expect(await decide(w.g, asked)).toEqual(noneTriggered());
+    expect(judge.calls).toHaveLength(2);
+    const second = judge.calls[1]!.questions;
+    expect(coreKeys(second)).toEqual([]);
+    expect(listenerKinds(second)).toEqual(["hearsay:owner"]);
+    expect(judge.calls[1]!.state).toBe("群聊记录：\nmember：早\n【新】member：今晚做什么菜好？");
   });
 
   it("no line of the transcript to show (every option joined at the message or after): no request", async () => {
@@ -474,7 +509,8 @@ describe("what the judgement model is asked", () => {
     expect(await requestFor(db, w.g, asked, [{ ...option!, joinedSeq: asked }], app.deps.config.proactive)).toBeNull();
   });
 
-  it("an Agent that joined after earlier messages narrows the transcript for everyone; once it is no option, it widens again", async () => {
+  /** Shared start: dave_bot joined after earlier messages, so the first request is narrowed for everyone. */
+  const narrowed = async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     await say(w.member, w.g, "早");
@@ -485,13 +521,26 @@ describe("what the judgement model is asked", () => {
     await decide(w.g, asked);
     expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：dave 来了\n【新】third：问个问题");
     // anna's own message lies before dave joined: it is not shown, so anna is asked no quiet question.
-    expect(judge.calls[0]!.questions.map((q) => q.key)).toEqual(["pick"]);
-
+    expect(coreKeys(judge.calls[0]!.questions)).toEqual(["pick"]);
+    expect(listenerKinds(judge.calls[0]!.questions)).toEqual(memory ? ["hearsay:owner", "own:third"] : []);
     await db.query("update agents set proactive = false where principal_id = $1", [dave.id]);
     const again = await say(w.third, w.g, "再问一个");
     await decide(w.g, again);
-    expect(judge.calls[1]!.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
-    expect(judge.calls[1]!.questions.map((q) => q.key)).toEqual(["pick", "q_a1"]);
+    return judge.calls[1]!;
+  };
+
+  it.skipIf(memory)("an Agent that joined after earlier messages narrows the transcript for everyone; once it is no option, it widens again", async () => {
+    const second = await narrowed();
+    expect(second.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
+    expect(coreKeys(second.questions)).toEqual(["pick", "q_a1"]);
+  });
+
+  it.skipIf(!memory)("an Agent that joined after earlier messages narrows the transcript for everyone; with memory on it still does once it is no option", async () => {
+    // Differs from memory off: dave_bot still listens, so the window stays cut after its join and anna is asked no quiet question.
+    const second = await narrowed();
+    expect(second.state).toBe("群聊记录：\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
+    expect(coreKeys(second.questions)).toEqual(["pick"]);
+    expect(listenerKinds(second.questions)).toEqual(["hearsay:owner", "own:third"]);
   });
 
   it("the transcript holds the last 15 messages that are not notices", async () => {
@@ -586,7 +635,11 @@ describe("what the judgement model is asked", () => {
 
 // --- when nothing is asked ---------------------------------------------------------------------------------------------
 
-describe("when the judgement model is not asked", () => {
+describe.each([false, true])("when the judgement model is not asked (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("an Agent's message, a message naming any Agent, a stale seq, a halt since, or no group: the judge is not called", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
@@ -648,16 +701,21 @@ describe("when the judgement model is not asked", () => {
     expect(await decide(w.g, await say(w.member, w.g, "四"), capped)).toEqual(noneTriggered());
     expect(judge.calls).toHaveLength(2);
     expect((await db.query("select calls from judge_usage")).rows).toEqual([{ calls: 2 }]);
-    expect(lines.filter((l) => l.metric === "judge_daily_limit")).toEqual([{ level: "info", metric: "judge_daily_limit" }]);
+    // The line is logged once per process and site day: only the first leg of this describe (memory off) sees it.
+    if (!memory) expect(lines.filter((l) => l.metric === "judge_daily_limit")).toEqual([{ level: "info", metric: "judge_daily_limit" }]);
     // Above it again (the limit lowered): still once.
     expect(await decide(w.g, await say(w.member, w.g, "五"), { judge: { ...JUDGE, dailyLimit: 1 } })).toEqual(noneTriggered());
-    expect(lines.filter((l) => l.metric === "judge_daily_limit")).toHaveLength(1);
+    if (!memory) expect(lines.filter((l) => l.metric === "judge_daily_limit")).toHaveLength(1);
   });
 });
 
 // --- failures ----------------------------------------------------------------------------------------------------------
 
-describe("a judgement that fails", () => {
+describe.each([false, true])("a judgement that fails (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it("throws, or hangs past its time: nobody replies, nothing changes", async () => {
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
@@ -901,7 +959,11 @@ describe.each([false, true])("a winner that cannot speak now: nobody replies, no
 
 // --- between the reads and the decision ---------------------------------------------------------------------------------
 
-describe("what happens while the judgement is out", () => {
+describe.each([false, true])("what happens while the judgement is out (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   it.each<[string, (w: World, annaId: string) => Promise<unknown>]>([
     ["an Agent posts", (w, annaId) => agentSays(annaId, w.g, "我先说")],
     ["another person speaks", (w) => say(w.third, w.g, "我也想知道")],
@@ -958,7 +1020,11 @@ describe("what happens while the judgement is out", () => {
 
 // --- locks, calls and halts ---------------------------------------------------------------------------------------------
 
-describe("the rows it locks, and a proactive reply someone asks for or halts before it begins", () => {
+describe.each([false, true])("the rows it locks, and a proactive reply someone asks for or halts before it begins (memory %s)", (memory) => {
+  beforeEach(() => {
+    memoryOn = memory;
+  });
+
   const byId = (a: { id: string }, b: { id: string }) => (a.id < b.id ? -1 : 1);
   /** Until some session of this database waits for a lock. */
   const someoneWaits = async () => {
