@@ -132,6 +132,44 @@ function paidText(usage) {
 }
 
 /**
+ * The groups of options a model `<select>` offers: 站点提供 (each model 免费 or 需余额) and 我的供应商 (provider → its
+ * models); what cannot be read yet is said inside its group. `sources`: `useModelSources()`.
+ */
+export function ModelGroups({ sources }) {
+  const { site, providers } = sources.choices;
+  return (
+    <>
+      <optgroup label="站点提供">
+        {!sources.modelsKnown ? (
+          <option disabled value="site-unknown">暂时读取不到</option>
+        ) : site.length === 0 ? (
+          <option disabled value="site-closed">尚未开放</option>
+        ) : (
+          site.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)
+        )}
+      </optgroup>
+      {!sources.providersKnown || providers.length === 0 ? (
+        <optgroup label="我的供应商">
+          <option disabled value="providers-none">{sources.providersKnown ? "还没有添加供应商" : "暂时读取不到"}</option>
+        </optgroup>
+      ) : (
+        providers.map((p) => (
+          <optgroup key={p.id} label={`我的供应商 · ${p.name}`}>
+            {p.models.length === 0 ? (
+              <option disabled value={`provider-empty-${p.id}`}>没有可选的模型</option>
+            ) : (
+              p.models.map((m) => (
+                <option key={m.key} value={m.key} disabled={!m.usable}>{m.label}</option>
+              ))
+            )}
+          </optgroup>
+        ))
+      )}
+    </>
+  );
+}
+
+/**
  * The model field of the Agent form: two groups, 站点提供 (each model 免费 or 需余额) and 我的供应商 (provider → its models);
  * a notice leading to Settings › 模型供应商 when nothing at all can be chosen; the privacy notice beside it.
  * `options`: `choiceList(sources, …)`; `value`: the chosen key; `onChange(key)`.
@@ -143,7 +181,6 @@ export function ModelPicker({ sources, options, value, onChange }) {
   const stale = options.filter((o) => o.stale);
   const showSelect = sources.status === "ready" && !sources.nothing;
   const addProvider = () => dispatch({ type: "nav", patch: { section: "settings", settingsPage: "providers", pane: "main" } });
-  const { site, providers } = sources.choices;
 
   let control;
   if (sources.status === "loading") control = <p className="muted">正在读取可用的模型…</p>;
@@ -160,32 +197,7 @@ export function ModelPicker({ sources, options, value, onChange }) {
         {stale.map((o) => (
           <option key={`current-${o.key}`} value={o.key}>{o.label}</option>
         ))}
-        <optgroup label="站点提供">
-          {!sources.modelsKnown ? (
-            <option disabled value="site-unknown">暂时读取不到</option>
-          ) : site.length === 0 ? (
-            <option disabled value="site-closed">尚未开放</option>
-          ) : (
-            site.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)
-          )}
-        </optgroup>
-        {!sources.providersKnown || providers.length === 0 ? (
-          <optgroup label="我的供应商">
-            <option disabled value="providers-none">{sources.providersKnown ? "还没有添加供应商" : "暂时读取不到"}</option>
-          </optgroup>
-        ) : (
-          providers.map((p) => (
-            <optgroup key={p.id} label={`我的供应商 · ${p.name}`}>
-              {p.models.length === 0 ? (
-                <option disabled value={`provider-empty-${p.id}`}>没有可选的模型</option>
-              ) : (
-                p.models.map((m) => (
-                  <option key={m.key} value={m.key} disabled={!m.usable}>{m.label}</option>
-                ))
-              )}
-            </optgroup>
-          ))
-        )}
+        <ModelGroups sources={sources} />
       </select>
     );
   }

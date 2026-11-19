@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
-import { A1, AG1, MODELS, PRINCIPALS, ME, agentConv, agentOf, agentPrincipal, apiError, deferred, syncOf } from "./fixtures.js";
+import { A1, AG1, MODELS, P1, PRINCIPALS, ME, agentConv, agentOf, agentPrincipal, apiError, deferred, providerOf, syncOf } from "./fixtures.js";
 import { click, elapse, flush, inMain, installBrowser, mainText, openApp } from "./harness.jsx";
 
 beforeEach(() => installBrowser());
@@ -64,8 +64,11 @@ function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, ove
     return null;
   };
   s.api = {
-    getMe: vi.fn(async () => ({ ...ME, newNotes: "auto" })),
+    getMe: vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true })),
     updateNewNotes: vi.fn(async () => ({})),
+    updateMemoryModel: vi.fn(async () => ({})),
+    getModels: vi.fn(async () => MODELS),
+    listProviders: vi.fn(async () => ({ providers: [providerOf()] })),
     listMemoryNotes: vi.fn(async () => room()),
     addMemoryNote: vi.fn(async (body) => add(body)),
     patchMemoryNote: vi.fn(async (id, body) => patch(id, body)),
@@ -384,6 +387,104 @@ describe("新记下的内容", () => {
     await flush();
     expect(inMain().getByLabelText(SETTING).value).toBe("auto");
     expect(document.querySelector(".toast")).toBeTruthy();
+  });
+});
+
+describe("用哪个模型整理记忆", () => {
+  const PICK = "用哪个模型整理记忆";
+  const OWN = { source: "provider", providerId: P1, model: "gpt-x" };
+  const me = (extra) => vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, ...extra }));
+
+  it("sits right under 新记下的内容: the site's calibrated model first, then the site's and my providers' models as the Agent form groups them", async () => {
+    const svc = service();
+    await openPalace(svc);
+    const select = inMain().getByLabelText(PICK);
+    expect(select.compareDocumentPosition(inMain().getByLabelText("新记下的内容")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(select.compareDocumentPosition(room("关于我")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(select.options[0].textContent).toBe("站点的模型（已校准）");
+    expect(select.value).toBe("");
+    const groups = [...select.querySelectorAll("optgroup")].map((g) => [g.label, [...g.querySelectorAll("option")].map((o) => o.textContent)]);
+    expect(groups).toEqual([
+      ["站点提供", ["小模型 · 免费", "大模型 · 需余额"]],
+      ["我的供应商 · 我的 OpenAI", ["gpt-x", "plain", "tiny（上下文太小）"]],
+    ]);
+    expect(inMain().getByText("换成自己的模型后，记得好不好我们没法保证；安全检查不变。")).toBeTruthy();
+    expect(inMain().queryByText("选的模型现在用不了，记忆暂时不会更新。")).toBeNull();
+  });
+
+  it("shows the stored choice", async () => {
+    const svc = service({ over: { getMe: me({ memoryModel: OWN }) } });
+    await openPalace(svc);
+    const select = inMain().getByLabelText(PICK);
+    expect([...select.options].find((o) => o.selected).textContent).toBe("gpt-x");
+  });
+
+  it("choosing a model sends memoryModel and keeps it; choosing the site's sends null", async () => {
+    const svc = service();
+    await openPalace(svc);
+    const select = () => inMain().getByLabelText(PICK);
+    const optionOf = (label) => [...select().options].find((o) => o.textContent === label).value;
+    fireEvent.change(select(), { target: { value: optionOf("gpt-x") } });
+    await flush();
+    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(OWN);
+    expect([...select().options].find((o) => o.selected).textContent).toBe("gpt-x");
+    fireEvent.change(select(), { target: { value: optionOf("大模型 · 需余额") } });
+    await flush();
+    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith({ source: "site", id: "paid-1" });
+    fireEvent.change(select(), { target: { value: "" } });
+    await flush();
+    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(null);
+    expect(select().value).toBe("");
+  });
+
+  it("a refused change goes back to the stored choice and says so", async () => {
+    const svc = service({
+      over: {
+        updateMemoryModel: vi.fn(async () => {
+          throw apiError(400, "invalid_request");
+        }),
+      },
+    });
+    await openPalace(svc);
+    const select = inMain().getByLabelText(PICK);
+    fireEvent.change(select, { target: { value: [...select.options].find((o) => o.textContent === "gpt-x").value } });
+    await flush();
+    expect(inMain().getByLabelText(PICK).value).toBe("");
+    expect(document.querySelector(".toast")).toBeTruthy();
+  });
+
+  it("says so when the chosen model cannot be used now, and not after a new choice was saved", async () => {
+    const svc = service({ over: { getMe: me({ memoryModel: OWN, memoryModelUsable: false }) } });
+    await openPalace(svc);
+    expect(inMain().getByText("选的模型现在用不了，记忆暂时不会更新。")).toBeTruthy();
+    fireEvent.change(inMain().getByLabelText(PICK), { target: { value: "" } });
+    await flush();
+    expect(inMain().queryByText("选的模型现在用不了，记忆暂时不会更新。")).toBeNull();
+  });
+
+  it("a choice that is no longer offered stays shown (as the Agent form shows its current model)", async () => {
+    const svc = service({ over: { getMe: me({ memoryModel: { source: "provider", providerId: P1, model: "gone" }, memoryModelUsable: false }) } });
+    await openPalace(svc);
+    expect([...inMain().getByLabelText(PICK).options].find((o) => o.selected).textContent).toContain("已不可用");
+  });
+
+  it("when the settings cannot be read, both boxes stay off and say so, with a retry", async () => {
+    let fail = true;
+    const svc = service({
+      over: {
+        getMe: vi.fn(async () => {
+          if (fail) throw apiError(500, "internal");
+          return { ...ME, newNotes: "vault", memoryModel: OWN, memoryModelUsable: true };
+        }),
+      },
+    });
+    await openPalace(svc);
+    expect(inMain().getByLabelText(PICK).disabled).toBe(true);
+    expect(inMain().getByLabelText("新记下的内容").disabled).toBe(true);
+    fail = false;
+    await click(inMain().getByRole("button", { name: "重试" }));
+    expect(inMain().getByLabelText(PICK).disabled).toBe(false);
+    expect(inMain().getByLabelText("新记下的内容").value).toBe("vault");
   });
 });
 

@@ -26,6 +26,8 @@ export const getMe = () => request("GET", "/api/me");
 export const updateMe = (displayName) => request("PATCH", "/api/me", { displayName });
 /** How a new note is sorted for the vault: "auto" (judged), "vault" (all in) or "open" (none in). The answer does not echo it. */
 export const updateNewNotes = (newNotes) => request("PATCH", "/api/me", { newNotes });
+/** The model that tidies my memory: a model as an Agent's is written, or null for the site's. The answer does not echo it. */
+export const updateMemoryModel = (memoryModel) => request("PATCH", "/api/me", { memoryModel });
 export const lookupPrincipal = (handle) => request("GET", withQuery("/api/principals/lookup", { handle }));
 
 // ───────── social

@@ -867,6 +867,17 @@ export function memoryRoomOf(answer) {
 /** How my new notes are sorted, as `GET /api/me` says it: "auto" (the default), "vault" or "open". */
 export const newNotesOf = (me) => (me?.newNotes === "vault" || me?.newNotes === "open" ? me.newNotes : "auto");
 
+/** The model I chose to tidy my memory, as `GET /api/me` says it: a site or a provider model, else null (the site's). */
+export const memoryModelOf = (me) => {
+  const m = me?.memoryModel;
+  if (m?.source === "site" && typeof m.id === "string") return { source: "site", id: m.id };
+  if (m?.source === "provider" && typeof m.providerId === "string" && typeof m.model === "string") return { source: "provider", providerId: m.providerId, model: m.model };
+  return null;
+};
+
+/** What the memory settings of `GET /api/me` hold: how new notes are sorted, and the model that tidies them (and whether it can be used now). */
+export const memorySettingsOf = (me) => ({ newNotes: newNotesOf(me), memoryModel: memoryModelOf(me), memoryModelUsable: me?.memoryModelUsable !== false });
+
 // ───────── persona proposal cards
 
 /** Whether `m` is a memory-change notice (`memory_changed`) still waiting for the owner's decision. */

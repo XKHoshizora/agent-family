@@ -13,6 +13,7 @@ import { UsagePage } from "./Usage.jsx";
 import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
 import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
+import { ModelGroups, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
 import { refusalText, settled, useAction } from "./useAction.js";
 
 export function SettingsList() {
@@ -190,48 +191,72 @@ const NEW_NOTES = [
 ];
 
 /**
- * 新记下的内容: where a note goes when it is written (the vault or not). The box shows what the service holds; a change is
- * shown once it is saved, a refusal is toasted and the box stays as it was.
+ * My memory settings, read once (`GET /api/me`): 新记下的内容 (where a note goes when it is written, the vault or not) and
+ * 用哪个模型整理记忆 (the model that tidies it). Each box shows what the service holds; a change is shown once it is saved,
+ * a refusal is toasted and the box stays as it was. `settings`: null while being read, "" when it could not be (both boxes
+ * stay off and say so).
  */
-function NewNotesSetting() {
+function MemorySettings() {
   const { actions } = useStore();
   const { busy, run } = useAction();
-  // null: being read; "": could not be read (the box stays off and says so).
-  const [value, setValue] = useState(null);
+  const sources = useModelSources();
+  const [settings, setSettings] = useState(null);
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let alive = true;
-    actions.loadNewNotes().then((res) => {
-      if (alive) setValue(res.ok ? res.value : "");
+    actions.loadMemorySettings().then((res) => {
+      if (alive) setSettings(res.ok ? res.value : "");
     });
     return () => {
       alive = false;
     };
   }, [actions, attempt]);
   const retry = () => {
-    setValue(null);
+    setSettings(null);
     setAttempt((n) => n + 1);
   };
-  const change = async (event) => {
-    const next = event.target.value;
-    const res = await run("newNotes", () => settled(actions.setNewNotes(next)), refusalText);
-    if (res.ok) setValue(res.value);
+  const off = !settings || busy !== null;
+  const unread = <option value="" hidden>{settings === null ? "正在读取…" : "读取失败"}</option>;
+
+  const changeNewNotes = async (event) => {
+    const res = await run("newNotes", () => settled(actions.setNewNotes(event.target.value)), refusalText);
+    if (res.ok) setSettings((cur) => ({ ...cur, newNotes: res.value }));
+  };
+
+  // The chosen model leads the list when it is no longer offered, as it does on the Agent form.
+  const options = settings ? choiceList(sources, settings.memoryModel) : [];
+  const changeModel = async (event) => {
+    const next = options.find((o) => o.key === event.target.value)?.model ?? null;
+    const res = await run("memoryModel", () => settled(actions.setMemoryModel(next)), refusalText);
+    // A model the service accepted can be used (it checked it as it does for an Agent).
+    if (res.ok) setSettings((cur) => ({ ...cur, memoryModel: res.value, memoryModelUsable: true }));
   };
   return (
     <>
-    <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
-      <select value={value ?? ""} disabled={!value || busy !== null} onChange={change}>
-        {!value && <option value="" hidden>{value === null ? "正在读取…" : "读取失败"}</option>}
-        {NEW_NOTES.map(([id, label]) => (
-          <option key={id} value={id}>{label}</option>
-        ))}
-      </select>
-    </Field>
-    {value === "" && (
-      <Reason>
-        没能读取这项设置，请重试。 <Btn small onClick={retry}>重试</Btn>
-      </Reason>
-    )}
+      <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
+        <select value={settings?.newNotes ?? ""} disabled={off} onChange={changeNewNotes}>
+          {!settings && unread}
+          {NEW_NOTES.map(([id, label]) => (
+            <option key={id} value={id}>{label}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="用哪个模型整理记忆" hint="换成自己的模型后，记得好不好我们没法保证；安全检查不变。">
+        <select value={settings ? modelKey(settings.memoryModel) : ""} disabled={off || sources.status !== "ready"} onChange={changeModel}>
+          {!settings && unread}
+          <option value="">站点的模型（已校准）</option>
+          {options.filter((o) => o.stale).map((o) => (
+            <option key={`current-${o.key}`} value={o.key}>{o.label}</option>
+          ))}
+          <ModelGroups sources={sources} />
+        </select>
+      </Field>
+      {settings && !settings.memoryModelUsable && <Reason>选的模型现在用不了，记忆暂时不会更新。</Reason>}
+      {settings === "" && (
+        <Reason>
+          没能读取这项设置，请重试。 <Btn small onClick={retry}>重试</Btn>
+        </Reason>
+      )}
     </>
   );
 }
@@ -250,7 +275,7 @@ function MemoryPage() {
         </div>
       </header>
       <div className="page-body">
-        <NewNotesSetting />
+        <MemorySettings />
         {room ? (
           <MemoryRoom title="关于我" helper="你名下的所有 Agent 共用这一份。" memory={memory} />
         ) : failure ? (
