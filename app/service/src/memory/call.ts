@@ -81,8 +81,14 @@ export async function endMemoryCalls(): Promise<void> {
  *    call is abandoned and the run ended `failed`, nothing charged, as recovery ends one.
  * 3. One transaction: `settle`d (a failed call is charged only what the upstream reported) and the run ended.
  */
-export async function memoryCall(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal): Promise<string | null> {
-  const call = callOnce(deps, ownerId, input, closing);
+export async function memoryCall(
+  deps: MemoryCallDeps,
+  ownerId: string,
+  input: MemoryCallInput,
+  closing: AbortSignal,
+  report?: MemoryCallReport,
+): Promise<string | null> {
+  const call = callOnce(deps, ownerId, input, closing, report);
   underWay.add(call);
   try {
     return await call;
@@ -91,7 +97,16 @@ export async function memoryCall(deps: MemoryCallDeps, ownerId: string, input: M
   }
 }
 
-async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal): Promise<string | null> {
+/**
+ * What a caller may ask to be told of a call that returned nothing: `answered` is set when the model did answer (and was
+ * charged for it) but what it said cannot be used — cut at its limit, or empty. A call that could not be made, failed, or
+ * was abandoned leaves it false.
+ */
+export interface MemoryCallReport {
+  answered: boolean;
+}
+
+async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal, report?: MemoryCallReport): Promise<string | null> {
   const { db, config, models, log, inFlight } = deps;
   const { system, user } = input;
   const inputChars = estimateTokens(system) + estimateTokens(user);
@@ -195,6 +210,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
       log.error({ err, runId: started.runId }, "memory call: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
       return null;
     }
+    if (report && failure === null && !abandoned && finished !== null) report.answered = true;
     if (end.status !== "done" || finished?.truncated === true) return null;
     return answer;
   } finally {

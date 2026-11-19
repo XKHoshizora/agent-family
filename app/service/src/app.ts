@@ -21,6 +21,7 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls, memoryModel } from "./memory/call.ts";
+import { runReview } from "./memory/pipeline.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { decideProactive } from "./agents/proactive/decide.ts";
@@ -340,14 +341,15 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         : createReviewer({
             db: deps.db,
             config,
-            models: deps.models,
-            judge: deps.judge,
             log: app.log,
-            inFlight: memoryRuns,
             closing: memoryClosing.signal,
-            conversations: deps.conversations,
-            now: memoryAsked.now ?? Date.now,
             setTimer: memoryAsked.setTimer ?? realTimer,
+            run: (job, ctx) =>
+              runReview(
+                { db: deps.db, config, models: deps.models, judge: deps.judge, log: app.log, inFlight: memoryRuns, conversations: deps.conversations, now: memoryAsked.now ?? Date.now },
+                job,
+                ctx,
+              ),
           });
   const memory = deps.memory;
   const agentPort = createAgentPort({

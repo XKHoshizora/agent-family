@@ -367,13 +367,23 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
         const agent = await ownAgent(me.id, req.params.id);
-        const decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId));
-        // The notice of the change is pushed to its owner again, now with its new status (read when it is sent).
-        const notices = await db.query<{ seq: string }>(
-          "select seq::text from messages where conversation_id = $1 and kind = 'system' and body ->> 'changeId' = $2",
-          [agent.conversationId, req.params.changeId],
-        );
-        for (const n of notices.rows) app.realtime.pushNoticeAgain(agent.conversationId, me.id, Number(n.seq));
+        // The notice of the change is pushed to its owner again, now with its new status (read when it is sent) — also when
+        // a confirmation found the change stale and discarded it.
+        const again = async (): Promise<void> => {
+          const notices = await db.query<{ seq: string }>(
+            "select seq::text from messages where conversation_id = $1 and kind = 'system' and body ->> 'changeId' = $2",
+            [agent.conversationId, req.params.changeId],
+          );
+          for (const n of notices.rows) app.realtime.pushNoticeAgain(agent.conversationId, me.id, Number(n.seq));
+        };
+        let decided: { status: typeof wanted };
+        try {
+          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId));
+        } catch (err) {
+          if (verb === "confirm" && err instanceof AppError && err.code === "stale_change") await again();
+          throw err;
+        }
+        await again();
         return decided;
       },
     );
