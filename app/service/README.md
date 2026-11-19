@@ -1449,7 +1449,7 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
   Agent creation checks it: a site model that is configured, or a model on the list of one of your own providers whose
   context is larger than the default output limit — anything else, another person's provider included, 400
-  `invalid_request`), each optional but at least one; `newNotes` and `memoryModel` are read back with `GET /api/me`. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+  `invalid_request`), each optional but at least one; `newNotes` and `memoryModel` are read back with `GET /api/me`. The fields are written together or not at all: a refused `memoryModel` leaves the name and `newNotes` as they were. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
   U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.

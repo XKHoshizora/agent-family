@@ -86,7 +86,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       const { db, config } = app.deps;
       const newNotes = await getNewNotes(db, p.id);
       const memoryModel = await getMemoryModel(db, p.id);
-      const usable = await memoryModelUsable(db, config, p.id);
+      const usable = await memoryModelUsable(db, config, p.id, memoryModel);
       return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes, memoryModel, memoryModelUsable: usable };
     },
   );

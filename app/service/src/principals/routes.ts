@@ -76,15 +76,14 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
       const { displayName: name, newNotes, memoryModel } = req.body;
-      if (name !== undefined) await updateDisplayName(db, me.id, name);
-      if (newNotes !== undefined) await setNewNotes(db, me.id, newNotes);
-      if (memoryModel !== undefined) {
+      // All or nothing: a model that is refused changes nothing, the name and the setting included.
+      await db.tx(async (t) => {
         // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider.
-        await db.tx(async (t) => {
-          if (memoryModel !== null) await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
-          await setMemoryModel(t, me.id, memoryModel);
-        });
-      }
+        if (memoryModel !== undefined && memoryModel !== null) await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
+        if (name !== undefined) await updateDisplayName(t, me.id, name);
+        if (newNotes !== undefined) await setNewNotes(t, me.id, newNotes);
+        if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);
+      });
       return { id: me.id, handle: me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
     },
   );

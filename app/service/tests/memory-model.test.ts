@@ -30,8 +30,8 @@ const SITE_PAID = { source: "site", id: "meter_paid" } as const;
 
 const setModel = (who: Actor, memoryModel: unknown) => api(app, who, "PATCH", "/api/me", { memoryModel });
 const me = async (who: Actor) => (await api(app, who, "GET", "/api/me")).json;
-const addProvider = async (who: Actor, models: unknown[] = [{ name: "own-model", contextTokens: 50_000 }]) =>
-  (await api(app, who, "POST", "/api/providers", providerBody({ baseUrl: "https://own.example.test/v1", models }))).json.id as string;
+const addProvider = async (who: Actor, models: unknown[] = [{ name: "own-model", contextTokens: 50_000 }], name = "My provider") =>
+  (await api(app, who, "POST", "/api/providers", providerBody({ name, baseUrl: "https://own.example.test/v1", models }))).json.id as string;
 const records = async (ownerId: string) =>
   (
     await db.query(
@@ -163,6 +163,49 @@ describe("the owner's memory model", () => {
     expect(await records(owner.id)).toEqual([]);
     expect(await freeUsed(owner.id)).toEqual([]);
     expect(await me(owner)).toMatchObject({ memoryModel: choice, memoryModelUsable: false });
+  });
+
+  it("a refused model changes nothing else in the same PATCH: the name and newNotes stay", async () => {
+    const owner = await signUp(app, "mmatomic");
+    const res = await api(app, owner, "PATCH", "/api/me", { displayName: "Renamed", newNotes: "vault", memoryModel: { source: "site", id: "nope" } });
+    expect([res.status, res.json]).toEqual([400, { error: "invalid_request" }]);
+    expect(await me(owner)).toMatchObject({ displayName: "mmatomic", newNotes: "auto", memoryModel: null });
+    const ok = await api(app, owner, "PATCH", "/api/me", { displayName: "Renamed", newNotes: "vault", memoryModel: SITE_PAID });
+    expect(ok.status).toBe(200);
+    expect(await me(owner)).toMatchObject({ displayName: "Renamed", newNotes: "vault", memoryModel: SITE_PAID });
+  });
+
+  it("a provider key that cannot be opened: null, no call, nothing recorded, not usable, and nothing of the key or the error in /api/me", async () => {
+    const owner = await signUp(app, "mmkey");
+    const providerId = await addProvider(owner);
+    const spare = await addProvider(owner, [{ name: "spare", contextTokens: 50_000 }], "Spare");
+    const choice = { source: "provider", providerId, model: "own-model" };
+    await setModel(owner, choice);
+    // The saved key of another row moved onto this one: it does not open there.
+    await db.query("update providers set key_cipher = (select key_cipher from providers where id = $1) where id = $2", [spare, providerId]);
+    const first = gateway.calls.length;
+    expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
+    expect(gateway.calls).toHaveLength(first);
+    expect(await runs(owner.id)).toEqual([]);
+    const got = await api(app, owner, "GET", "/api/me");
+    expect(got.json).toMatchObject({ memoryModel: choice, memoryModelUsable: false });
+    const body = JSON.stringify(got.json).toLowerCase();
+    expect(["sk-test", "cipher", "key_", "unreadable", "provider_rejected"].filter((w) => body.includes(w))).toEqual([]);
+  });
+
+  it("a provider transferred to another owner (not deleted): the same as deleted", async () => {
+    const owner = await signUp(app, "mmmoved");
+    const other = await signUp(app, "mmreceiver");
+    const providerId = await addProvider(owner);
+    const choice = { source: "provider", providerId, model: "own-model" };
+    await setModel(owner, choice);
+    await db.query("update providers set owner_id = $2 where id = $1", [providerId, other.id]);
+    const first = gateway.calls.length;
+    expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
+    expect(gateway.calls).toHaveLength(first);
+    expect(await runs(owner.id)).toEqual([]);
+    expect(await me(owner)).toMatchObject({ memoryModel: choice, memoryModelUsable: false });
+    expect(await me(other)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
   });
 
   it("a chosen site model that is no longer configured: null, no call, not usable", async () => {

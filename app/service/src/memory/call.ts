@@ -51,25 +51,24 @@ export function memoryModel(config: Pick<Config, "siteModels" | "memory">): Site
 }
 
 /**
- * The model a call for `ownerId` is made on, ready to call: their choice, else the site's memory model; null when there
+ * The model a call for `ownerId` is made on, ready to call: their choice `own`, else the site's memory model; null when there
  * is none or it does not resolve now (a provider deleted, a model off its list or removed from the site, a site key
  * unset). Throws `KeyUnreadableError` when a provider's saved key cannot be opened.
  */
-async function modelFor(q: Queryable, config: Config, ownerId: string): Promise<Resolved | null> {
-  const own = await getMemoryModel(q, ownerId);
+async function modelFor(q: Queryable, config: Config, ownerId: string, own: MemoryModelChoice | null): Promise<Resolved | null> {
   const site = memoryModel(config);
   const choice: MemoryModelChoice | null = own ?? (site ? { source: "site", id: site.id } : null);
   return choice === null ? null : resolveModel(q, config, { model: choice, ownerId });
 }
 
 /**
- * Whether the owner's chosen model (`GET /api/me` `memoryModelUsable`) can be called now; true when they chose none.
+ * Whether the owner's chosen model `own` (`GET /api/me` `memoryModelUsable`) can be called now; true when they chose none.
  * The static part of a call's checks: it resolves and its context holds its own output (a call's input is judged per call).
  */
-export async function memoryModelUsable(q: Queryable, config: Config, ownerId: string): Promise<boolean> {
-  if ((await getMemoryModel(q, ownerId)) === null) return true;
+export async function memoryModelUsable(q: Queryable, config: Config, ownerId: string, own: MemoryModelChoice | null): Promise<boolean> {
+  if (own === null) return true;
   try {
-    const resolved = await modelFor(q, config, ownerId);
+    const resolved = await modelFor(q, config, ownerId, own);
     return resolved !== null && resolved.contextTokens > resolved.call.maxOutputTokens;
   } catch (err) {
     if (err instanceof KeyUnreadableError) return false;
@@ -156,7 +155,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
       await lockAccount(t, ownerId);
       let resolved: Resolved | null;
       try {
-        resolved = await modelFor(t, config, ownerId);
+        resolved = await modelFor(t, config, ownerId, await getMemoryModel(t, ownerId));
       } catch (err) {
         if (!(err instanceof KeyUnreadableError)) throw err;
         log.error({ err }, "memory call: the model's saved key cannot be opened");
