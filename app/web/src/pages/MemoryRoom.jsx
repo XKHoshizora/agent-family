@@ -3,14 +3,12 @@
 // is never given to the model in a group. Each row saves itself (as AgentAppellations' rows do): nothing here has a
 // 保存 for the room as a whole.
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { weight } from "../data/memoryWeight.js";
 import { useStore } from "../data/store.jsx";
 import { formatAt } from "../data/viewmodel.js";
 import { Lock, Pencil, Trash2 } from "../icons.js";
 import { Btn, IconBtn, Tag } from "../ui/primitives.jsx";
 import { useRowWrite } from "./useAction.js";
-
-/** Characters as the service counts them: code points. */
-const chars = (text) => [...text].length;
 
 /** `已用 N%` of a room: rounded, never above 100. */
 export const usedPercent = (used, limit) => (limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 100);
@@ -155,9 +153,9 @@ export function DeleteButton({ onDelete, disabled, describedBy, icon = false }) 
   );
 }
 
-/** What a text needs of the room: how many characters it may have (`left`) and whether it has more. */
-const tooLong = (text, left) => chars(text.trim()) > left;
-const leftText = (left) => `只剩 ${Math.max(0, left)} 个字了，这条太长。`;
+/** Whether a text needs more of the room than is left (`left`, in weight, as the service counts it). No number is shown: a count of characters would be wrong for mixed text. */
+const tooLong = (text, left) => weight(text.trim()) > left;
+const TOO_LONG = "这条太长了，这个房间装不下。";
 
 /** The add row at the top of a room: a box and 添加; what was typed stays when the service refuses it. */
 function AddRow({ agentId, left, memory, inputRef }) {
@@ -177,7 +175,7 @@ function AddRow({ agentId, left, memory, inputRef }) {
         <input ref={inputRef} aria-label="新的笔记" value={text} onChange={(e) => setText(e.target.value)} placeholder="手动加一条" autoComplete="off" readOnly={pending} />
         <Btn type="submit" small variant="primary" disabled={pending || !typed || over}>添加</Btn>
       </div>
-      {over && <p className="field-msg">{leftText(left)}</p>}
+      {over && <p className="field-msg">{TOO_LONG}</p>}
       {error && <p className="field-msg" role="alert">{error}</p>}
     </form>
   );
@@ -193,8 +191,8 @@ function NoteRow({ agentId, agentName, note, left, memory, leaving }) {
   const returnFocus = useRef(false);
   const typed = text.trim();
   const textId = `memory-text-${note.id}`;
-  // Its own characters are the room it may use again.
-  const over = tooLong(typed, left + chars(note.text));
+  // Its own weight is the room it may use again.
+  const over = tooLong(typed, left + weight(note.text));
 
   // Back from the box: the focus is on this row's 编辑 again.
   useEffect(() => {
@@ -238,7 +236,7 @@ function NoteRow({ agentId, agentName, note, left, memory, leaving }) {
           {note.strength >= OFTEN && <Tag tone="muted">常提起</Tag>}
           {note.vault && note.unsure && <Tag tone="muted">拿不准，先锁上了</Tag>}
         </p>
-        {editing && over && <p className="field-msg">{leftText(left + chars(note.text))}</p>}
+        {editing && over && <p className="field-msg">{TOO_LONG}</p>}
         {error && <p className="field-msg" role="alert">{error}</p>}
       </div>
       <div className="memory-actions">

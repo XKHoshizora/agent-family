@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { A1, AG1, MODELS, P1, PRINCIPALS, ME, agentConv, agentOf, agentPrincipal, apiError, deferred, providerOf, syncOf } from "./fixtures.js";
 import { click, elapse, flush, inMain, installBrowser, mainText, openApp } from "./harness.jsx";
+import { weightOf } from "../src/data/memoryWeight.js";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -19,7 +20,7 @@ afterEach(() => {
 
 const rail = (name) => within(screen.getByRole("navigation", { name: "主导航" })).getByRole("button", { name });
 const when = (day) => new Date(2026, 10, day, 12, 0).toISOString();
-const chars = (text) => [...text].length;
+// The fake service measures as the real one does, in weight; tests/memory-weight.test.js pins the function.
 
 const note = (id, text, fields = {}) => ({
   id,
@@ -40,12 +41,12 @@ const note = (id, text, fields = {}) => ({
 function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, fits = true, over = {} } = {}) {
   const s = { notes: [...notes], hearsay: [...hearsay], limit, hearsayLimit, fits };
   let n = 100;
-  const used = () => s.notes.reduce((sum, x) => sum + chars(x.text), 0);
+  const used = () => weightOf(s.notes);
   const room = () => ({ notes: structuredClone(s.notes), used: used(), limit: s.limit });
   const agentRoom = () => ({
     ...room(),
     hearsay: structuredClone(s.hearsay),
-    hearsayUsed: s.hearsay.reduce((sum, x) => sum + chars(x.text), 0),
+    hearsayUsed: weightOf(s.hearsay),
     hearsayLimit: s.hearsayLimit,
     fits: s.fits,
   });
@@ -146,7 +147,7 @@ describe("the 关于我 room on the Settings page", () => {
   });
 
   it("已用 is capped at 100%", async () => {
-    const svc = service({ notes: [note("a", "x".repeat(30))], limit: 20 });
+    const svc = service({ notes: [note("a", "茶".repeat(30))], limit: 20 });
     await openPalace(svc);
     expect(inRoom("关于我").getByText("已用 100%")).toBeTruthy();
   });
@@ -269,35 +270,54 @@ describe("the 关于我 room on the Settings page", () => {
     expect(inRoom("关于我").getByText("保险箱 · 0 条 · 群里的 Agent 拿不到")).toBeTruthy();
   });
 
-  it("an entry longer than the room left cannot be added: the button is off and the row says how much is left", async () => {
-    await openPalace(service({ notes: [note("a", "x".repeat(90))], limit: 100 }));
+  it("an entry longer than the room left cannot be added: the button is off and the row says it does not fit, with no number", async () => {
+    await openPalace(service({ notes: [note("a", "茶".repeat(90))], limit: 100 }));
     const scope = inRoom("关于我");
-    typeInto(scope.getByLabelText("新的笔记"), "y".repeat(11));
+    typeInto(scope.getByLabelText("新的笔记"), "字".repeat(11));
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
-    expect(scope.getByText("只剩 10 个字了，这条太长。")).toBeTruthy();
-    typeInto(scope.getByLabelText("新的笔记"), "y".repeat(10));
+    expect(scope.getByText("这条太长了，这个房间装不下。")).toBeTruthy();
+    typeInto(scope.getByLabelText("新的笔记"), "字".repeat(10));
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(false);
-    expect(scope.queryByText(/只剩/)).toBeNull();
+    expect(scope.queryByText(/太长/)).toBeNull();
   });
 
-  it("the room left counts code points, not UTF-16 units", async () => {
-    await openPalace(service({ notes: [note("a", "x".repeat(97))], limit: 100 }));
+  it("the room left is counted in weight (utf-8 bytes / 3), as the service counts it: an emoji is 4 bytes, an English letter a third", async () => {
+    await openPalace(service({ notes: [note("a", "茶".repeat(97))], limit: 100 }));
     const scope = inRoom("关于我");
-    typeInto(scope.getByLabelText("新的笔记"), "😀😀😀");
+    // 3 left: two emoji are 8 bytes, 3 weight; three are 12 bytes, 4.
+    typeInto(scope.getByLabelText("新的笔记"), "😀😀");
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(false);
-    typeInto(scope.getByLabelText("新的笔记"), "😀😀😀😀");
+    typeInto(scope.getByLabelText("新的笔记"), "😀😀😀");
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
+  });
+
+  it("the add row refuses exactly when the service would, for English and mixed text too", async () => {
+    // 30 weight left: 90 letters are 90 bytes, 30 weight; 91 are 31.
+    await openPalace(service({ notes: [note("a", "茶".repeat(70))], limit: 100 }));
+    const scope = inRoom("关于我");
+    const input = scope.getByLabelText("新的笔记");
+    const add = () => scope.getByRole("button", { name: "添加" });
+    typeInto(input, "a".repeat(90));
+    expect(add().disabled).toBe(false);
+    typeInto(input, "a".repeat(91));
+    expect(add().disabled).toBe(true);
+    expect(scope.getByText("这条太长了，这个房间装不下。")).toBeTruthy();
+    // Mixed: 10 Chinese characters (10 weight) and 60 letters (20 weight) are 30; one more letter is 31.
+    typeInto(input, `${"字".repeat(10)}${"b".repeat(60)}`);
+    expect(add().disabled).toBe(false);
+    typeInto(input, `${"字".repeat(10)}${"b".repeat(61)}`);
+    expect(add().disabled).toBe(true);
   });
 
   it("an edit may use the room its own entry holds: longer than the room left but within left + its own is allowed", async () => {
-    await openPalace(service({ notes: [note("a", "x".repeat(90)), note("b", "我不吃辣")], limit: 100 }));
+    await openPalace(service({ notes: [note("a", "茶".repeat(90)), note("b", "我不吃辣")], limit: 100 }));
     const scope = inRoom("关于我");
     await click(within(rowWith(room("关于我"), "我不吃辣")).getByRole("button", { name: "编辑" }));
     // 6 left + the 4 it holds = 10.
-    typeInto(scope.getByLabelText("编辑这条笔记"), "z".repeat(11));
+    typeInto(scope.getByLabelText("编辑这条笔记"), "字".repeat(11));
     expect(scope.getByRole("button", { name: "保存" }).disabled).toBe(true);
-    expect(scope.getByText("只剩 10 个字了，这条太长。")).toBeTruthy();
-    typeInto(scope.getByLabelText("编辑这条笔记"), "z".repeat(10));
+    expect(scope.getByText("这条太长了，这个房间装不下。")).toBeTruthy();
+    typeInto(scope.getByLabelText("编辑这条笔记"), "字".repeat(10));
     expect(scope.getByRole("button", { name: "保存" }).disabled).toBe(false);
   });
 
@@ -1092,7 +1112,7 @@ describe("fix round 1", () => {
     const scope = inRoom("关于我");
     typeInto(scope.getByLabelText("新的笔记"), "一二三四五");
     await click(scope.getByRole("button", { name: "添加" }));
-    expect(scope.getByText("只剩 3 个字了，这条太长。")).toBeTruthy();
+    expect(scope.getByText("这条太长了，这个房间装不下。")).toBeTruthy();
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
     expect(scope.getByText("已用 97%")).toBeTruthy();
   });
