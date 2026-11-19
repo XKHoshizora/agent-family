@@ -1,0 +1,188 @@
+主动判断校准报告  模型 jev-latest  样本 111（成功 111，失败 0）
+
+一、逐条（期望 | 前两名 | 对错 | 让它安静的概率 | 毫秒）
+fresh-cook-eggs            fresh-request        期望 a1     a1 0.93 / nobody 0.07  ✓  安静[]  224ms
+fresh-law-deposit          fresh-request        期望 a1     a1 0.96 / nobody 0.04  ✓  安静[]  202ms
+fresh-code-map             fresh-request        期望 a1     a1 0.94 / nobody 0.06  ✓  安静[]  199ms
+fresh-travel-hz            fresh-request        期望 a1     a1 0.96 / nobody 0.04  ✓  安静[]  191ms
+fresh-fit-squat            fresh-request        期望 a1     a1 0.96 / nobody 0.04  ✓  安静[]  131ms
+fresh-pet-food             fresh-request        期望 a1     a1 0.93 / nobody 0.07  ✓  安静[]  139ms
+fresh-acct-budget          fresh-request        期望 a1     a1 0.96 / nobody 0.04  ✓  安静[]  137ms
+fresh-study-chicken        fresh-request        期望 a1     a1 0.99 / nobody 0.01  ✓  安静[]  198ms
+fresh-trans-mail           fresh-request        期望 a1     a1 0.99 / nobody 0.01  ✓  安静[]  136ms
+fresh-movie-light          fresh-request        期望 a1     a1 0.95 / nobody 0.05  ✓  安静[]  138ms
+fresh-secretary-remind     fresh-request        期望 a1     a1 0.95 / nobody 0.05  ✓  安静[]  137ms
+fresh-car-service          fresh-request        期望 a1     a1 0.99 / nobody 0.01  ✓  安静[]  126ms
+fresh-job-intro            fresh-request        期望 a1     a1 0.97 / nobody 0.03  ✓  安静[]  163ms
+fup-cook-sugar             follow-up-asker      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  141ms
+fup-law-refuse             follow-up-asker      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  149ms
+fup-code-objs              follow-up-asker      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  133ms
+fup-travel-ticket          follow-up-asker      期望 a1     a1 1.00 / a2 0.00      ✓  安静[a1:0.01]  152ms
+fup-fit-freq               follow-up-asker      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  141ms
+fup-pet-kitten             follow-up-asker      期望 a1     a1 1.00 / a2 0.00      ✓  安静[a1:0.01]  136ms
+fup-study-tense            follow-up-asker      期望 a1     a1 1.00 / a2 0.00      ✓  安静[a1:0.01]  130ms
+fup-trans-formal           follow-up-asker      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  127ms
+fuo-cook-spicy             follow-up-other      期望 a1     a1 0.95 / nobody 0.05  ✓  安静[a1:0.01]  130ms
+fuo-law-waive              follow-up-other      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  128ms
+fuo-code-bigfile           follow-up-other      期望 a1     a1 0.98 / nobody 0.02  ✓  安静[a1:0.01]  128ms
+fuo-fit-days               follow-up-other      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  141ms
+fuo-pet-afraid             follow-up-other      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  126ms
+fuo-parent-egg             follow-up-other      期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.01]  135ms
+named-cook                 named-no-at          期望 a1     a1 0.95 / nobody 0.05  ✓  安静[]  130ms
+named-travel               named-no-at          期望 a1     a1 0.89 / nobody 0.11  ✓  安静[]  136ms
+named-code                 named-no-at          期望 a1     a1 0.95 / nobody 0.05  ✓  安静[]  127ms
+named-fit                  named-no-at          期望 a1     a1 0.84 / nobody 0.15  ✓  安静[]  147ms
+named-law-online           named-no-at          期望 a1     a1 0.74 / nobody 0.26  ✓  安静[]  128ms
+named-trans-polish         named-no-at          期望 a1     a1 0.99 / nobody 0.01  ✓  安静[]  132ms
+overlap-food-travel        overlap              期望 a1     a1 0.97 / nobody 0.02  ✓  安静[]  139ms
+overlap-fit-diet-meals     overlap              期望 a2     a2 0.97 / a1 0.03      ✓  安静[]  128ms
+overlap-fit-diet-train     overlap              期望 a1     a1 0.98 / nobody 0.02  ✓  安静[]  123ms
+overlap-law-account        overlap              期望 a1     a1 0.92 / a2 0.06      ✓  安静[]  141ms
+overlap-code-trans         overlap              期望 a2     a2 0.96 / nobody 0.03  ✓  安静[]  134ms
+overlap-health-fit         overlap              期望 a1     a1 0.98 / nobody 0.02  ✓  安静[]  152ms
+overlap-parent-study       overlap              期望 a1     a1 0.99 / nobody 0.01  ✓  安静[]  142ms
+overlap-vague-law          overlap              期望 a2     a2 0.98 / nobody 0.02  ✓  安静[]  125ms
+overlap-vague-cook         overlap              期望 a2     a2 0.83 / a1 0.16      ✓  安静[]  142ms
+thanks-cook                thanks               期望 nobody nobody 0.98 / a1 0.02  ✓  安静[a1:0.01]  142ms
+thanks-law                 thanks               期望 nobody nobody 0.98 / a1 0.02  ✓  安静[a1:0.01]  129ms
+thanks-code                thanks               期望 nobody nobody 0.98 / a1 0.02  ✓  安静[a1:0.02]  125ms
+thanks-travel              thanks               期望 nobody nobody 0.92 / a1 0.08  ✓  安静[a1:0.02]  133ms
+thanks-pet                 thanks               期望 nobody nobody 0.98 / a1 0.02  ✓  安静[a1:0.01]  142ms
+chat-weather               chitchat             期望 nobody nobody 0.96 / a3 0.04  ✓  安静[]  139ms
+chat-greeting              chitchat             期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  124ms
+chat-meme                  chitchat             期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  132ms
+chat-brush-noodle          chitchat             期望 nobody nobody 0.98 / a1 0.02  ✓  安静[]  130ms
+chat-brush-gym             chitchat             期望 nobody nobody 0.87 / a1 0.13  ✓  安静[]  126ms
+chat-brush-cat             chitchat             期望 nobody nobody 0.95 / a1 0.05  ✓  安静[]  125ms
+chat-brush-trip            chitchat             期望 nobody nobody 0.75 / a1 0.25  ✓  安静[]  126ms
+chat-monday                chitchat             期望 nobody nobody 0.96 / a2 0.04  ✓  安静[]  128ms
+chat-joke-hair             chitchat             期望 nobody nobody 0.99 / a1 0.01  ✓  安静[]  132ms
+chat-lunch-call            chitchat             期望 nobody nobody 0.64 / a1 0.36  ✓  安静[]  126ms
+chat-goodnight             chitchat             期望 nobody nobody 0.99 / a1 0.01  ✓  安静[]  132ms
+abp-hotpot                 answered-by-person   期望 nobody nobody 0.91 / a1 0.09  ✓  安静[]  132ms
+abp-npm                    answered-by-person   期望 nobody nobody 0.87 / a1 0.13  ✓  安静[]  142ms
+abp-lease                  answered-by-person   期望 nobody nobody 0.83 / a1 0.17  ✓  安静[]  127ms
+abp-dumbbell               answered-by-person   期望 nobody nobody 0.90 / a1 0.10  ✓  安静[]  121ms
+abp-jiayou                 answered-by-person   期望 nobody nobody 0.92 / a1 0.08  ✓  安静[]  136ms
+abp-vaccine                answered-by-person   期望 nobody nobody 0.94 / a1 0.06  ✓  安静[]  125ms
+tap-weekend                to-a-person          期望 nobody nobody 0.99 / a1 0.01  ✓  安静[]  123ms
+tap-after-agent            to-a-person          期望 nobody nobody 0.99 / a1 0.01  ✓  安静[a1:0.01]  136ms
+tap-borrow                 to-a-person          期望 nobody nobody 0.58 / a1 0.42  ✓  安静[]  139ms
+tap-api                    to-a-person          期望 nobody nobody 0.80 / a1 0.20  ✓  安静[]  140ms
+tap-interview              to-a-person          期望 nobody nobody 0.87 / a2 0.13  ✓  安静[]  135ms
+tap-after-agent-cat        to-a-person          期望 nobody nobody 0.95 / a1 0.05  ✓  安静[a1:0.01]  129ms
+noexp-phone                no-expert            期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  128ms
+noexp-tap                  no-expert            期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  162ms
+noexp-game                 no-expert            期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  130ms
+noexp-plant                no-expert            期望 nobody nobody 0.98 / a1 0.02  ✓  安静[]  143ms
+noexp-wifi                 no-expert            期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  181ms
+qb-chef                    quiet-blunt          期望 nobody nobody 0.79 / a1 0.21  ✓  安静[a1*:0.97]  139ms
+qb-code                    quiet-blunt          期望 nobody nobody 0.55 / a1 0.45  ✓  安静[a1*:0.96]  132ms
+qb-travel                  quiet-blunt          期望 nobody nobody 0.74 / a1 0.26  ✓  安静[a1*:0.97]  128ms
+qb-generic                 quiet-blunt          期望 nobody nobody 0.92 / a1 0.06  ✓  安静[a1*:0.96]  122ms
+qm-toomuch                 quiet-mild           期望 nobody a1 0.62 / nobody 0.38  ✗  安静[a1*:0.33]  130ms
+qm-flood                   quiet-mild           期望 nobody a1 0.69 / nobody 0.30  ✗  安静[a1*:0.58]  144ms
+qm-law                     quiet-mild           期望 nobody nobody 0.68 / a1 0.32  ✓  安静[a1*:0.60]  137ms
+qm-bot                     quiet-mild           期望 nobody a1 0.70 / nobody 0.30  ✗  安静[a1*:0.66]  146ms
+qj-drunk                   quiet-joke           期望 nobody nobody 0.97 / a1 0.03  ✓  安静[a1:0.04]  125ms
+qj-spoiler                 quiet-joke           期望 nobody nobody 0.80 / a1 0.20  ✓  安静[a1:0.03]  151ms
+qj-laugh                   quiet-joke           期望 nobody nobody 0.95 / a1 0.05  ✓  安静[a1:0.02]  128ms
+rhet-meeting               rhetorical           期望 nobody nobody 0.92 / a2 0.06  ✓  安静[]  150ms
+rhet-oil                   rhetorical           期望 nobody nobody 0.51 / a1 0.48  ✓  安静[]  124ms
+rhet-diet                  rhetorical           期望 nobody nobody 0.95 / a1 0.04  ✓  安静[]  123ms
+rhet-rent                  rhetorical           期望 nobody nobody 0.80 / a1 0.20  ✓  安静[]  167ms
+tc-cook-travel             topic-change         期望 a2     a2 0.84 / nobody 0.12  ✓  安静[a1:0.01]  156ms
+tc-code-law                topic-change         期望 a2     a2 0.98 / a1 0.01      ✓  安静[a1:0.01]  144ms
+tc-fit-cook                topic-change         期望 a2     a2 0.92 / nobody 0.06  ✓  安静[a1:0.01]  146ms
+tc-pet-movie               topic-change         期望 a2     a2 0.95 / nobody 0.03  ✓  安静[a1:0.01]  131ms
+priv-quarrel               private-or-sensitive 期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  150ms
+priv-grief                 private-or-sensitive 期望 nobody nobody 0.82 / a1 0.16  ✓  安静[]  127ms
+priv-breakup               private-or-sensitive 期望 nobody nobody 1.00 / a1 0.00  ✓  安静[]  134ms
+qc-chef-hotpot             quiet-covered        期望 nobody nobody 0.75 / a1 0.25  ✓  安静[a1*:0.97]  138ms
+qc-chef-meet               quiet-covered        期望 nobody nobody 0.98 / a1 0.01  ✓  安静[a1*:0.93]  135ms
+qc-code-plan               quiet-covered        期望 nobody nobody 0.71 / a1 0.29  ✓  安静[a1*:0.97]  123ms
+qc-travel-budget           quiet-covered        期望 nobody nobody 0.56 / a1 0.44  ✓  安静[a1*:0.96]  137ms
+qc-law-then-ask            quiet-covered        期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1*:0.96]  131ms
+qc-mild-chatty             quiet-covered        期望 nobody a2 0.68 / nobody 0.29  ✗  安静[a1*:0.45]  172ms
+qc-mild-spam               quiet-covered        期望 nobody nobody 0.96 / a1 0.04  ✓  安静[a1*:0.71]  144ms
+qc-two-agents              quiet-covered        期望 nobody nobody 0.92 / a2 0.07  ✓  安静[a1*:0.97 a2:0.10]  136ms
+qo-chef-hike               quiet-old            期望 nobody nobody 0.79 / a2 0.20  ✓  安静[a1:0.04]  124ms
+qo-code-lunch              quiet-old            期望 nobody nobody 1.00 / a1 0.00  ✓  安静[a1:0.07]  130ms
+qo-travel-ask              quiet-old            期望 a1     a1 0.96 / nobody 0.04  ✓  安静[a1:0.10]  129ms
+qo-law-retract             quiet-old            期望 a1     a1 0.99 / nobody 0.01  ✓  安静[a1:0.10]  153ms
+qc-other-agent             quiet-covered        期望 a1     a1 0.97 / nobody 0.03  ✓  安静[a1:0.04 a2*:0.93]  137ms
+qo-person                  quiet-old            期望 nobody nobody 0.87 / a1 0.13  ✓  安静[a1:0.08]  138ms
+  （安静里带 * 的是期望要安静的）
+
+二、按类别（对 / 总，失败的不计）
+fresh-request          13 / 13
+follow-up-asker        8 / 8
+follow-up-other        6 / 6
+named-no-at            6 / 6
+overlap                9 / 9
+thanks                 5 / 5
+chitchat               11 / 11
+answered-by-person     6 / 6
+to-a-person            6 / 6
+no-expert              5 / 5
+quiet-blunt            4 / 4
+quiet-mild             1 / 4
+quiet-joke             3 / 3
+rhetorical             4 / 4
+topic-change           4 / 4
+private-or-sensitive   3 / 3
+quiet-covered          8 / 9
+quiet-old              5 / 5
+合计                     107 / 111
+
+三、回复门槛扫描（服务拿“最高的 Agent 选项”的概率去比门槛；nobody 不会赢，但它的概率会压低 Agent 们）
+  期望有 Agent 回的 50 条，期望没人回的 61 条
+  T     会回回对  该回没回  回错人  不该回却回  合计错(b+c+d)
+  0.30  50        0         0       10          10
+  0.35  50        0         0       9           9
+  0.40  50        0         0       8           8
+  0.45  50        0         0       6           6
+  0.50  50        0         0       4           4
+  0.55  50        0         0       4           4
+  0.60  50        0         0       4           4
+  0.65  50        0         0       3           3
+  0.70  50        0         0       1           1
+  0.75  49        1         0       0           1
+  0.80  49        1         0       0           1
+  0.85  46        4         0       0           4
+  0.90  45        5         0       0           5
+  0.95  40        10        0       0           10
+  错得最少的门槛：T = 0.80（合计错 1；并列取最高的 T）
+
+四、让它安静
+  门槛 0.3：
+    quiet-blunt：4 / 4 达到
+    quiet-mild：4 / 4 达到
+    quiet-covered：9 / 9 达到
+    误报（不该安静却达到）：0 个
+  门槛 0.8：
+    quiet-blunt：4 / 4 达到
+    quiet-mild：0 / 4 达到
+    quiet-covered：7 / 9 达到
+    误报（不该安静却达到）：0 个
+
+五、延迟
+  中位数 135ms，p95 181ms，最大 224ms
+
+六、判错的样本（完整概率，供细看）
+  qm-toomuch（quiet-mild）期望 nobody  备注：mild
+    最后一条 阿哲：这机器人话有点多啊
+    概率 a1 0.62  nobody 0.38
+    安静 a1 0.33
+  qm-flood（quiet-mild）期望 nobody  备注：mild
+    最后一条 大刘：感觉今天助手有点刷屏了
+    概率 a1 0.69  nobody 0.30  a2 0.01
+    安静 a1 0.58
+  qm-bot（quiet-mild）期望 nobody  备注：mild
+    最后一条 小周：这bot是不是有点吵
+    概率 a1 0.70  nobody 0.30  a2 0.00
+    安静 a1 0.66
+  qc-mild-chatty（quiet-covered）期望 nobody  备注：委婉
+    最后一条 小林：周末去不去爬山
+    概率 a2 0.68  nobody 0.29  a1 0.03
+    安静 a1 0.45

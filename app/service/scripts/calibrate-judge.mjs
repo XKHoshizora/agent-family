@@ -29,6 +29,8 @@ const MIN_PER_CATEGORY = {
   'quiet-blunt': 4,
   'quiet-mild': 4,
   'quiet-joke': 3,
+  'quiet-covered': 8,
+  'quiet-old': 5,
   rhetorical: 4,
   'topic-change': 4,
   'private-or-sensitive': 3,
@@ -38,7 +40,9 @@ const PICK_INSTRUCTIONS =
   '群里有几个 AI 助手。记录里标着“（Agent）”的是它们说过的话。最新这条消息如果需要某个 AI 助手主动来回答，应该由谁回答？'
 const NOBODY_TEXT = '不需要任何 AI 助手回答：真人之间的闲聊、客套、道谢，已经有人回答了，或者不属于上面任何一位擅长的事'
 const quietInstructions = (name) =>
-  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。最新这条消息是在让${name}别再说话、安静一点，或者表示它打扰到大家了。`
+  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。开头标着【新】的是刚发的消息。在这些【新】消息里，有人在让${name}别再说话、安静一点，或者表示它打扰到大家了，而且在那之后没有人又让它继续说。没有标【新】的旧消息不算。`
+/** What marks a line as new since the group was last judged (a sample's last `fresh` lines, 1 by default). */
+const NEW_MARK = '【新】'
 
 // ---------- args
 
@@ -114,6 +118,8 @@ function checkSamples(samples) {
         else spoke.add(names.get(m.from))
       } else if (names.has(m.from)) errors.push(`${at}: transcript[${i}] 是 Agent 的名字但 agent 不是 true`)
     }
+    if (s.fresh !== undefined && (!Number.isInteger(s.fresh) || s.fresh < 1 || s.fresh > t.length)) errors.push(`${at}: fresh 要是 1 到 transcript 条数之间的整数`)
+    if ((s.category === 'quiet-covered' || s.category === 'quiet-old') && !(s.fresh >= 2)) errors.push(`${at}: ${s.category} 需要 fresh >= 2`)
     const last = t[t.length - 1]
     if (last.agent) errors.push(`${at}: 最后一条必须是真人发的`)
     if (lasts.has(last.text)) errors.push(`${at}: 最后一条消息和别的样本重复`)
@@ -127,8 +133,9 @@ function checkSamples(samples) {
     }
     if (s.category === 'overlap' && !s.note) errors.push(`${at}: overlap 需要 note`)
     if (s.category === 'quiet-joke' && !s.note) errors.push(`${at}: quiet-joke 需要 note`)
-    if (s.category.startsWith('quiet-') && s.category !== 'quiet-joke') {
-      if (pick !== 'nobody') errors.push(`${at}: 让它安静的样本 pick 应为 nobody`)
+    if (s.category === 'quiet-old' && Object.keys(s.expect?.quiet ?? {}).length !== 0) errors.push(`${at}: quiet-old 不应有 expect.quiet`)
+    if (s.category.startsWith('quiet-') && s.category !== 'quiet-joke' && s.category !== 'quiet-old') {
+      if (pick !== 'nobody' && s.category !== 'quiet-covered') errors.push(`${at}: 让它安静的样本 pick 应为 nobody`)
       if (Object.keys(s.expect?.quiet ?? {}).length === 0) errors.push(`${at}: 缺 expect.quiet`)
     }
     if (s.category === 'quiet-mild' && s.note !== 'mild') errors.push(`${at}: quiet-mild 的 note 应为 "mild"`)
@@ -153,8 +160,10 @@ function speakers(sample) {
 }
 
 function buildBody(sample, model) {
+  const firstNew = sample.transcript.length - (sample.fresh ?? 1)
   const state =
-    '群聊记录：\n' + sample.transcript.map((m) => (m.agent ? `${m.from}（Agent）：${m.text}` : `${m.from}：${m.text}`)).join('\n')
+    '群聊记录：\n' +
+    sample.transcript.map((m, i) => `${i >= firstNew ? NEW_MARK : ''}${m.from}${m.agent ? '（Agent）' : ''}：${m.text}`).join('\n')
   const criteria = {}
   for (const a of sample.agents) criteria[a.key] = `${a.name}：${a.intro}；擅长：${a.field}`
   criteria.nobody = NOBODY_TEXT
@@ -313,7 +322,7 @@ function report(results, samples, model) {
   out('四、让它安静')
   for (const T of [0.3, 0.8]) {
     out(`  门槛 ${T.toFixed(1)}：`)
-    for (const c of ['quiet-blunt', 'quiet-mild']) {
+    for (const c of ['quiet-blunt', 'quiet-mild', 'quiet-covered']) {
       let hit = 0
       let total = 0
       for (const r of ok.filter((x) => x.category === c)) {
