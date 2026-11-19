@@ -1,6 +1,7 @@
 import type { AgentModel } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { Queryable } from "../db.ts";
+import { isMemoryLanguage, type MemoryLanguage } from "./language.ts";
 
 /**
  * The notes of an Agent's memory as stored, and the one function that decides which of them a conversation may show
@@ -206,5 +207,21 @@ export async function setMemoryModel(q: Queryable, ownerId: string, choice: Memo
     `insert into accounts (principal_id, memory_model) values ($1, $2::jsonb)
      on conflict (principal_id) do update set memory_model = excluded.memory_model`,
     [ownerId, choice === null ? null : JSON.stringify(choice)],
+  );
+}
+
+/** The one language the owner's notes are written in (`accounts.memory_language`); null (the default) is automatic. */
+export async function getMemoryLanguage(q: Queryable, ownerId: string): Promise<MemoryLanguage | null> {
+  const { rows } = await q.query<{ memory_language: string | null }>("select memory_language from accounts where principal_id = $1", [ownerId]);
+  const stored = rows[0]?.memory_language;
+  return isMemoryLanguage(stored) ? stored : null;
+}
+
+/** Sets it (null clears it), creating the owner's account as `setNewNotes` does. The caller has checked the code. */
+export async function setMemoryLanguage(q: Queryable, ownerId: string, language: MemoryLanguage | null): Promise<void> {
+  await q.query(
+    `insert into accounts (principal_id, memory_language) values ($1, $2)
+     on conflict (principal_id) do update set memory_language = excluded.memory_language`,
+    [ownerId, language],
   );
 }

@@ -6,10 +6,11 @@ import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
+import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
-import { codePoints, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
+import { codePoints, getMemoryLanguage, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
 
 /**
@@ -33,6 +34,11 @@ import { listRoomExact, type ExactNote, type Room } from "./write.ts";
  *
  * What is called `new` is a note written or changed since `dreamed_at`. The split of an entry is checked by one judgement
  * question (sort.ts `splitAddsNothing`), fail closed. Never logs a note or an answer.
+ *
+ * One language (language.ts): a dream writes in the owner's chosen language, and when one is chosen it is also asked to restate, per
+ * room, at most 8 notes that are not in it (no language is detected in code). `POST /api/memory/language/convert` runs a `ConvertJob`:
+ * per room of the owner that has notes, one call of the same machinery (`dreamRoom`) restricted to `rewrite`, so every rewrite passes
+ * the same checks (the faithful question, the vault only inwards, the origin rule) and lands as one audited, undoable change.
  */
 
 /** One owner's consolidation: all the rooms that have something to do (`all`), the shared room alone (`owner`) or one Agent's own (`self:<agentId>`). */
@@ -96,7 +102,7 @@ function todayIn(now: Date, timeZone: string): string {
  * The system text. The user message is JSON (`dreamInput`), so a note is only ever an escaped string: it can never become
  * another entry or an instruction.
  */
-const dreamSystem = (today: string): string =>
+const dreamSystem = (today: string, language: MemoryLanguage | null): string =>
   [
     `你是一个 AI 助手的“梦中整理员”。下面是它记下的一个房间里的全部笔记。主人不在的时候，你把这些笔记整理一遍，只输出操作，不聊天。今天是 ${today}。你只看得到笔记，看不到任何对话。`,
     "",
@@ -114,9 +120,11 @@ const dreamSystem = (today: string): string =>
     "5. 房间用到 80% 以上时，先把 strength 低、last_mentioned 很久以前的条目写短，先去掉括号里的旧经过。",
     "6. 一条笔记明显是几件不相干的事（比如一件无所谓的，一件私密的），才把它拆开（split），拆成 2 到 4 条，每条只说原来那条里已有的事。",
     "7. 一条笔记不该被群里的人看到却没锁，可以锁起来（lock）。",
+    ...(language === null ? [] : [`8. 有不是${languageName(language)}的笔记，用 rewrite 改写成${languageName(language)}，意思不变，一次最多改 8 条。`]),
     "",
     "规矩：",
-    `- 每条新写的笔记一句短话（最多 ${MODEL_NOTE_MAX} 个字），用笔记原来的语言，不要翻译。`,
+    `- 每条新写的笔记一句短话（最多 ${MODEL_NOTE_MAX} 个字）。`,
+    `- ${languageRule(language)}`,
     "- 不要编造：不要写任何笔记里没有的事。",
     "- 不要删掉任何一条，除非它已经合并进了另一条。",
     "- 没有必要整理的就不要动，宁可什么都不做。",
@@ -137,22 +145,45 @@ export interface DreamInput {
   refs: Map<string, { kind: NoteKind; id: string; text: string; vault: boolean; vaultBy: "auto" | "owner" }>;
 }
 
-/**
- * What a dream of `notes` (the room's, oldest first) is asked: the notes cleaned (`cleanText`) and numbered, each with its
- * dates in the site's time zone, `new` when its id is in `fresh`; and how much of the room is used. Nothing else.
- */
-export function dreamInput(notes: ReadonlyArray<ExactNote>, kind: NoteKind, fresh: ReadonlySet<string>, limit: number, now: Date, timeZone: string): DreamInput {
+/** The notes of a room as a model is shown them: cleaned (`cleanText`), numbered `n1`…, and what each number stands for. */
+function numbered(notes: ReadonlyArray<ExactNote>, kind: NoteKind): { refs: DreamInput["refs"]; shown: Array<{ ref: string; text: string; note: ExactNote["note"] }> } {
   const refs: DreamInput["refs"] = new Map();
-  const shown: Array<Record<string, unknown>> = [];
+  const shown: Array<{ ref: string; text: string; note: ExactNote["note"] }> = [];
   for (const { note } of notes) {
     const text = cleanText(note.text);
     if (text === "") continue;
     const ref = `n${refs.size + 1}`;
     refs.set(ref, { kind, id: note.id, text: note.text, vault: note.vault, vaultBy: note.vaultBy });
-    shown.push({ ref, text, date: siteDay(note.createdAt, timeZone), last_mentioned: siteDay(note.seenAt, timeZone), strength: note.strength, vault: note.vault, new: fresh.has(note.id) });
+    shown.push({ ref, text, note });
   }
-  const user = JSON.stringify({ notes: shown, room: { used: used(notes.map((n) => n.note)), limit } });
-  return { system: dreamSystem(todayIn(now, timeZone)), user, refs };
+  return { refs, shown };
+}
+
+/**
+ * What a dream of `notes` (the room's, oldest first) is asked: the notes cleaned (`cleanText`) and numbered, each with its
+ * dates in the site's time zone, `new` when its id is in `fresh`; and how much of the room is used. Nothing else.
+ */
+export function dreamInput(
+  notes: ReadonlyArray<ExactNote>,
+  kind: NoteKind,
+  fresh: ReadonlySet<string>,
+  limit: number,
+  now: Date,
+  timeZone: string,
+  language: MemoryLanguage | null = null,
+): DreamInput {
+  const { refs, shown } = numbered(notes, kind);
+  const user = JSON.stringify({
+    notes: shown.map(({ ref, text, note }) => ({ ref, text, date: siteDay(note.createdAt, timeZone), last_mentioned: siteDay(note.seenAt, timeZone), strength: note.strength, vault: note.vault, new: fresh.has(note.id) })),
+    room: { used: used(notes.map((n) => n.note)), limit },
+  });
+  return { system: dreamSystem(todayIn(now, timeZone), language), user, refs };
+}
+
+/** What a conversion of `notes` into `language` is asked: the notes cleaned and numbered, nothing else (language.ts `convertSystem`). */
+function convertInput(notes: ReadonlyArray<ExactNote>, kind: NoteKind, language: MemoryLanguage, now: Date, timeZone: string): DreamInput {
+  const { refs, shown } = numbered(notes, kind);
+  return { system: convertSystem(language, todayIn(now, timeZone)), user: JSON.stringify({ notes: shown.map(({ ref, text }) => ({ ref, text })) }), refs };
 }
 
 // --- what the answer may ask for -------------------------------------------------------------------------------------
@@ -196,9 +227,10 @@ function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
  * anything else answers `[]`. Of the first `MAX_OPS` entries only `merge`, `rewrite`, `split` and `lock` of exactly their
  * shapes are kept — no add, no bare remove, no unlock — with refs from `refs`, every text through `modelNote`; a note is named
  * by one op only (the first), so an op naming one already used, a merge of a note into itself or a split into fewer than two
- * or more than four parts is dropped. Pure and total: it never throws.
+ * or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8) and only `ops`
+ * `["rewrite"]`. Pure and total: it never throws.
  */
-export function parseDreamOps(answer: string, refs: ReadonlySet<string>): DreamOp[] {
+export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]> } = {}): DreamOp[] {
   try {
     const parsed = parseAnswer(answer);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
@@ -206,9 +238,9 @@ export function parseDreamOps(answer: string, refs: ReadonlySet<string>): DreamO
     if (!Array.isArray(list)) return [];
     const named = new Set<string>();
     const ops: DreamOp[] = [];
-    for (const raw of list.slice(0, MAX_OPS)) {
+    for (const raw of list.slice(0, only.max ?? MAX_OPS)) {
       const op = one(raw, refs);
-      if (op === null) continue;
+      if (op === null || (only.ops && !only.ops.includes(op.op))) continue;
       const names = op.op === "merge" ? [op.into, ...op.from] : [op.ref];
       if (names.some((n) => named.has(n))) continue;
       for (const n of names) named.add(n);
@@ -251,15 +283,16 @@ export interface DreamContext extends ReviewContext {
   enqueue(job: DreamJob): void;
 }
 
-export async function runDreamJob(deps: PipelineDeps, job: DreamJob | NapJob | SweepJob, ctx: DreamContext): Promise<void> {
+export async function runDreamJob(deps: PipelineDeps, job: DreamJob | NapJob | SweepJob | ConvertJob, ctx: DreamContext): Promise<void> {
   if (!ctx.dream || !ctx.enqueue) throw new Error("a dream job needs the scheduler's dream state and its queue");
+  if (job.kind === "convert") return convert(deps, ctx, job);
   if (job.kind === "sweep") return sweep(deps, ctx);
   if (job.kind === "nap") return nap(deps, ctx, job);
   return dream(deps, ctx, job);
 }
 
 /** The owner's live Agents that keep notes, lowest id first. */
-async function liveAgents(db: Db, ownerId: string): Promise<AgentRow[]> {
+export async function liveAgents(db: Db, ownerId: string): Promise<AgentRow[]> {
   const { rows } = await db.query<{ id: string }>(
     `select a.principal_id as id from agents a join principals p on p.id = a.principal_id
       where p.owner_id = $1 and a.memory and not a.paused and a.deleted_at is null order by a.principal_id`,
@@ -453,8 +486,22 @@ function usable(answer: string): boolean {
   return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && Array.isArray((parsed as { ops?: unknown }).ops);
 }
 
-/** One room, one call: read, ask, parse, judge what needs judging (outside any transaction), apply in one. */
-async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date | null): Promise<"done" | "failed" | "aborted"> {
+/** A conversion asks `dreamRoom` for what a dream asks, but for a restatement in `language` only, and counts what came of it in `tally`. */
+interface Conversion {
+  language: MemoryLanguage;
+  tally: ConvertResult;
+}
+
+/** The most a conversion's answer may be, in tokens: it restates a whole room, which is more than a dream's few operations. */
+const CONVERT_OUTPUT_TOKENS = 4000;
+
+/**
+ * One room, one call: read, ask, parse, judge what needs judging (outside any transaction), apply in one. With a `conversion` the
+ * question is language.ts's, only `rewrite` is kept, nothing is re-sorted, and the change is applied whatever 先问我再记 says (the
+ * owner asked for it just now); everything else — the faithful check, the vault only inwards, the origin rule, the audited
+ * and undoable change with its notice — is the dream's.
+ */
+async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date | null, conversion?: Conversion): Promise<"done" | "failed" | "aborted"> {
   const { db, config, log } = deps;
   const ownerId = by.ownerId;
   const where: Room = room.kind === "owner" ? { kind: "owner", ownerId } : { kind: "self", agentId: room.agentId };
@@ -464,14 +511,21 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   const recent = new Date(deps.now() - NEW_WITHIN);
   const fresh = new Set(notes.filter((n) => (since === null ? n.note.createdAt > recent : n.note.updatedAt > since)).map((n) => n.note.id));
   const read = new Map(notes.map((n) => [n.note.id, n.updatedAt]));
-  const input = dreamInput(notes, room.kind, fresh, room.kind === "owner" ? config.memory.roomOwner : config.memory.roomSelf, new Date(deps.now()), config.siteTimezone);
+  const now = new Date(deps.now());
+  const input = conversion
+    ? convertInput(notes, room.kind, conversion.language, now, config.siteTimezone)
+    : dreamInput(notes, room.kind, fresh, room.kind === "owner" ? config.memory.roomOwner : config.memory.roomSelf, now, config.siteTimezone, await getMemoryLanguage(db, ownerId));
   if (input.refs.size === 0) return "done";
+  if (conversion) {
+    conversion.tally.rooms++;
+    conversion.tally.kept += input.refs.size;
+  }
 
   const report: MemoryCallReport = { answered: false };
   const answer = await memoryCall(
     { db, models: deps.models, config, log, inFlight: deps.inFlight },
     ownerId,
-    { system: input.system, user: input.user, maxOutputTokens: config.memory.reviewMaxOutputTokens },
+    { system: input.system, user: input.user, maxOutputTokens: conversion ? Math.max(CONVERT_OUTPUT_TOKENS, config.memory.reviewMaxOutputTokens) : config.memory.reviewMaxOutputTokens },
     ctx.closing,
     report,
   );
@@ -481,10 +535,10 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   // judgement is spent on it.
   if (answer === null || !usable(answer)) return "done";
 
-  const ops = parseDreamOps(answer, new Set(input.refs.keys()));
-  // The open notes that are new, the newest first: what the re-sort may look at.
+  const ops = parseDreamOps(answer, new Set(input.refs.keys()), conversion ? { max: input.refs.size, ops: ["rewrite"] } : {});
+  // The open notes that are new, the newest first: what the re-sort may look at (a conversion re-sorts nothing).
   const candidates = notes
-    .filter((n) => fresh.has(n.note.id) && !n.note.vault && n.note.vaultBy === "auto")
+    .filter((n) => !conversion && fresh.has(n.note.id) && !n.note.vault && n.note.vaultBy === "auto")
     .sort((a, b) => b.note.updatedAt.getTime() - a.note.updatedAt.getTime())
     .map((n) => n.note.id);
   const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing);
@@ -494,7 +548,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   const notices = await inLockedAgent(db, by.id, async (t, locked): Promise<StoredMessage[]> => {
     const applied = await applyDream(t, { ownerId: locked.ownerId, agentId: locked.id, sharedNotes: locked.sharedNotes, kinds: new Set<NoteKind>([room.kind]) }, ops, refs, {
       conversationId: locked.conversationId,
-      status: locked.memoryAsk ? "pending" : "applied",
+      status: locked.memoryAsk && !conversion ? "pending" : "applied",
       vaults,
       checked,
       read,
@@ -502,11 +556,42 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
       rooms: roomOf(config),
     });
     if (applied?.changeId == null) return [];
+    if (conversion) {
+      const rewritten = applied.applied.filter((o) => o.op === "replace").length;
+      conversion.tally.converted += rewritten;
+      conversion.tally.kept -= rewritten;
+    }
     return [await memoryNotice(t, locked, applied.changeId, { unlock: false, phase: "dream", linesOf: dreamLines })];
   });
   announce(deps, notices, by.id);
   log.info({ metric: "memory_dream", agentId: by.id, room: room.kind, ops: ops.length, notices: notices?.length ?? 0 }, "a memory dream ended");
   return "done";
+}
+
+/**
+ * One owner's conversion (`POST /api/memory/language/convert`): the shared room (carried out by the owner's Agent that keeps notes
+ * and uses them, the lowest id) and then each live Agent's own room, one after another, a room with no notes skipped. A room whose
+ * call fails or is not usable leaves its notes as they are (counted as kept) and the next room goes on. `job.settle` is told the
+ * tally; it is not called when the service is stopping.
+ */
+async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): Promise<void> {
+  const { log } = deps;
+  const agents = await liveAgents(deps.db, job.ownerId);
+  const shared = carrierOf(agents);
+  const todo: Array<{ room: DreamRoom; carrier: AgentRow }> = [
+    ...(shared ? [{ room: { kind: "owner" } as DreamRoom, carrier: shared }] : []),
+    ...agents.map((agent) => ({ room: { kind: "self", agentId: agent.id } as DreamRoom, carrier: agent })),
+  ];
+  const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0 };
+  for (const { room, carrier } of todo) {
+    if (ctx.closing.aborted) return;
+    try {
+      if ((await dreamRoom(deps, ctx, carrier, room, null, { language: job.language, tally })) === "aborted") return;
+    } catch (err) {
+      log.error({ ...errInfo(err), ownerId: job.ownerId }, "the conversion of one room failed; nothing was changed in it");
+    }
+  }
+  job.settle(tally);
 }
 
 /**

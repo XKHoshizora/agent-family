@@ -11,7 +11,7 @@ import { confirmChange, discardChange, undoChange } from "./apply.ts";
 import { ownerNote } from "./clean.ts";
 import { keptOrigin } from "./origin.ts";
 import { sortNote } from "./sort.ts";
-import { codePoints, getNewNotes, hearsayUsed, listHearsay, roomOf, used, type Note } from "./store.ts";
+import { codePoints, getMemoryLanguage, getNewNotes, hearsayUsed, listHearsay, roomOf, used, type Note } from "./store.ts";
 import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
@@ -96,6 +96,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   const { db, config, judge } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const writeLimit = perPrincipalLimit(app, 30);
+  // A conversion is paid for in the owner's points, one call per room.
+  const convertLimit = perPrincipalLimit(app, 6);
   const limits = roomOf(config);
   const limitOf = (room: Room): number => roomLimit(limits, room.kind);
   const sortDeps = (log: FastifyBaseLogger) => ({ db, judge, config, log });
@@ -221,6 +223,26 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     await writeLimit(req, me.id);
     return remove({ kind: "owner", ownerId: me.id }, req.params.id);
   });
+
+  // --- one language for the palace ---------------------------------------------------------------------------------
+
+  // The owner's existing notes (the shared room and each Agent's own, never hearsay) restated in the language they chose, by the
+  // dream's own rewrite path (dream.ts): 409 `no_language` while the setting is automatic, 409 `busy` while a dream or a
+  // conversion of theirs is under way.
+  api.post(
+    "/api/memory/language/convert",
+    { schema: { params: empty, querystring: empty, body: empty.nullish(), response: { 200: z.object({ rooms: z.number(), converted: z.number(), kept: z.number() }) } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await convertLimit(req, me.id);
+      const language = await getMemoryLanguage(db, me.id);
+      if (language === null) throw new AppError(409, "no_language");
+      const result = await app.deps.memory?.convert(me.id, language);
+      if (result === "busy") throw new AppError(409, "busy");
+      if (!result) throw new AppError(503, "unavailable");
+      return result;
+    },
+  );
 
   // --- an Agent's room: its own notes and what it heard ----------------------------------------------------------
 

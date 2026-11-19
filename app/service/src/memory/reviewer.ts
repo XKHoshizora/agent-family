@@ -1,8 +1,9 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import { newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
+import { liveAgents, newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
+import type { ConvertJob, ConvertResult, MemoryLanguage } from "./language.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { EXPLICIT } from "./review.ts";
 
@@ -42,7 +43,7 @@ export const realTimer: SetTimer = (fn, ms) => {
   return { clear: () => clearTimeout(timer) };
 };
 
-export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob;
+export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob | ConvertJob;
 
 /** What a job is handed: the context of every kind (each job uses what its kind needs). */
 export type JobContext = FlagsContext & DreamContext;
@@ -67,6 +68,12 @@ export interface Reviewer {
   flagged(agentId: string, conversationId: string, kind: "hearsay" | "own"): void;
   /** After commit: a change was applied (or confirmed) in the notes of this Agent's owner, which may have left a room nearly full. */
   changed(agentId: string): void;
+  /**
+   * The owner asked for their notes to be restated in `language` (dream.ts `ConvertJob`): resolves when every room that has notes
+   * has been looked at; "busy" when a dream or a conversion of theirs is already under way or waiting; null when it did not run
+   * (the service is stopping, or the job was dropped).
+   */
+  convert(ownerId: string, language: MemoryLanguage): Promise<ConvertResult | "busy" | null>;
   /** How many pairs the scheduler remembers an attempt for (for tests: it must not grow with the pairs reviewed). */
   remembered(): number;
   /**
@@ -127,10 +134,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     if (closed) return;
     for (const job of [...waiting]) {
       if (running.size >= MAX_REVIEWS_AT_ONCE) return;
-      if (running.has(job.agentId) || (job.kind === "dream" && dreaming.has(job.ownerId))) continue;
+      if (running.has(job.agentId) || (alone(job) && dreaming.has(job.ownerId))) continue;
       waiting = waiting.filter((j) => j !== job);
       running.add(job.agentId);
-      if (job.kind === "dream") dreaming.add(job.ownerId);
+      if (alone(job)) dreaming.add(job.ownerId);
       const key = keyOf(job.agentId, job.conversationId);
       const ctx: JobContext = {
         closing,
@@ -149,7 +156,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         .finally(() => {
           if (ctx.hearsayCalls.length === 0) hearsayCalls.delete(key);
           running.delete(job.agentId);
-          if (job.kind === "dream") dreaming.delete(job.ownerId);
+          if (alone(job)) dreaming.delete(job.ownerId);
+          if (job.kind === "convert") job.settle(null);
           if (job.kind === "sweep") armSweep();
           pump();
           settleIdle();
@@ -158,6 +166,9 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     }
     settleIdle();
   };
+
+  /** A job that takes the whole of an owner's notes: two of them never run together (`dreaming`). */
+  const alone = (job: Job): job is DreamJob | ConvertJob => job.kind === "dream" || job.kind === "convert";
 
   const sameJob = (a: Job, b: Job): boolean =>
     a.kind === b.kind && a.agentId === b.agentId && a.conversationId === b.conversationId && (a.kind !== "dream" || (b.kind === "dream" && a.scope === b.scope));
@@ -288,6 +299,15 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     changed(agentId) {
       enqueue({ kind: "nap", agentId, conversationId: "nap" });
     },
+    async convert(ownerId, language) {
+      if (closed) return null;
+      const agents = await liveAgents(db, ownerId);
+      // Decided and queued with nothing awaited in between: two requests never both get in.
+      if (closed) return null;
+      if (dreaming.has(ownerId) || waiting.some((j) => alone(j) && j.ownerId === ownerId)) return "busy";
+      if (agents.length === 0) return { rooms: 0, converted: 0, kept: 0 };
+      return new Promise((settle) => enqueue({ kind: "convert", agentId: agents[0]!.id, conversationId: "convert", ownerId, language, settle }));
+    },
     remembered: () => attempted.size,
     async resume() {
       armSweep();
@@ -326,6 +346,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       sweepTimer = null;
       hearsayCalls.clear();
       attempted.clear();
+      for (const job of waiting) if (job.kind === "convert") job.settle(null);
       waiting = [];
       stop.abort();
       settleIdle();
