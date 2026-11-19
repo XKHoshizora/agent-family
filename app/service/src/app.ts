@@ -20,7 +20,7 @@ import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
-import { endMemoryCalls, memoryModel } from "./memory/call.ts";
+import { endMemoryCalls } from "./memory/call.ts";
 import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
@@ -84,7 +84,7 @@ export interface Deps {
   proactive: ProactiveScheduler | null;
   /**
    * What an Agent remembers, decided in the background (src/memory/reviewer.ts); built with the reply worker's port, and
-   * null when no memory model resolves (and in tests unless they ask, `BuildOptions.memory`).
+   * null in tests unless they ask (`BuildOptions.memory`).
    */
   memory: Reviewer | null;
 }
@@ -147,7 +147,7 @@ export interface BuildOptions {
    */
   proactive?: false | { delayMs?: number };
   /**
-   * The reviewer (`Deps.memory`), built when a memory model resolves (`memoryModel`). Tests: `false` builds none, and
+   * The reviewer (`Deps.memory`), built always: whose model a call uses (the owner's own choice, else the site's) is decided per call (`memoryCall`), and one with none to call does nothing. Tests: `false` builds none, and
    * `{ now, setTimer }` run its quiet timers on their own clock (tests/helpers/harness.ts `testClock`).
    */
   memory?: false | { now?: () => number; setTimer?: SetTimer };
@@ -342,7 +342,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   deps.memory =
     overrides.memory !== undefined
       ? overrides.memory
-      : memoryAsked === null || memoryModel(config) === null
+      : memoryAsked === null
         ? null
         : createReviewer({
             db: deps.db,

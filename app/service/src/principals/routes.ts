@@ -2,12 +2,14 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Readable } from "node:stream";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { chosenModel } from "../agents/routes.ts";
 import { displayName, uuidParam } from "../schemas.ts";
 import { isMissingBlob } from "../attachments/blob.ts";
 import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
-import { setNewNotes } from "../memory/store.ts";
+import { assertModelChoice } from "../agents/store.ts";
+import { setMemoryModel, setNewNotes } from "../memory/store.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
@@ -61,17 +63,28 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         params: z.object({}),
         querystring: z.object({}),
         body: z
-          .object({ displayName: displayName.optional(), newNotes: z.enum(["auto", "vault", "open"]).optional() })
-          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined, "displayName or newNotes"),
+          .object({
+            displayName: displayName.optional(),
+            newNotes: z.enum(["auto", "vault", "open"]).optional(),
+            memoryModel: chosenModel(uuidParam).nullable().optional(),
+          })
+          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined || b.memoryModel !== undefined, "displayName, newNotes or memoryModel"),
         response: { 200: publicPrincipal },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
-      const { displayName: name, newNotes } = req.body;
+      const { displayName: name, newNotes, memoryModel } = req.body;
       if (name !== undefined) await updateDisplayName(db, me.id, name);
       if (newNotes !== undefined) await setNewNotes(db, me.id, newNotes);
+      if (memoryModel !== undefined) {
+        // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider.
+        await db.tx(async (t) => {
+          if (memoryModel !== null) await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
+          await setMemoryModel(t, me.id, memoryModel);
+        });
+      }
       return { id: me.id, handle: me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
     },
   );

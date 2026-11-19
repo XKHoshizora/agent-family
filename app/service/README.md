@@ -803,9 +803,9 @@ code points each, kept with the group and the speaker). A note is in the **vault
 a group never gets a vault note: in the owner's own conversation with the Agent every note is shown; in a group, the
 notes of either kind that are not in the vault, those that were learned in that very group, and that group's hearsay,
 nothing else (`src/memory/store.ts` `notesFor`, the one place that decides). With `memory` off nothing is shown and
-nothing is learned. Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`) — reaches
+nothing is learned. Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`) — reaches
 anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
-`memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`.
+`memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes` and `accounts.memory_model`.
 
 **The owner reads and edits the palace.** Every route below is the owner's only: anyone else, a fellow member of a group
 the Agent is in, and an id that is nobody's (or another Agent's, another note) get the same 404 `not_found`. *Session:
@@ -890,7 +890,7 @@ Body: none or `{}`. Decides a pending change (先问我再记, or a request to t
 
 Body: none or `{}`. Declines a pending change; nothing is written. → 200 `{"status": "discarded"}`; 409 `stale_change` when it is not pending; 404 as above.
 
-**The reviewer** (`src/memory/reviewer.ts` schedules, `pipeline.ts` reviews, `review.ts` builds the input; `tests/memory-review.test.ts`). Built when a memory model resolves (Memory calls); in this process's memory, so a restart arms a quiet timer again for every conversation whose Agent replied in the last 24 hours (fixed greetings excluded) and has replies after `reviewed_seq` (`memory_review_state`), and a wake-up for every pair with flags left over (Acting on flags). A review follows any reply the Agent posts, in its own conversation or in a group; what it may write depends on where (below). It runs once the conversation has been quiet `MEMORY.quietMs`, at once after `maxReplies` replies since the last review, at once when the owner's latest message asks for something to be remembered, forgotten or locked (`记住`, `forget`, `覚えて`…), and at once when the owner starts a new topic (`POST /api/conversations/:id/topic`). A trigger never fires unless the owner said something after what the last attempt looked at (kept in memory per Agent and conversation): a review that failed is not asked again for the same words. One review per Agent at a time (a trigger meanwhile runs once after it), at most 4 at once.
+**The reviewer** (`src/memory/reviewer.ts` schedules, `pipeline.ts` reviews, `review.ts` builds the input; `tests/memory-review.test.ts`). Always built (which model a call uses is decided per call, Memory calls); in this process's memory, so a restart arms a quiet timer again for every conversation whose Agent replied in the last 24 hours (fixed greetings excluded) and has replies after `reviewed_seq` (`memory_review_state`), and a wake-up for every pair with flags left over (Acting on flags). A review follows any reply the Agent posts, in its own conversation or in a group; what it may write depends on where (below). It runs once the conversation has been quiet `MEMORY.quietMs`, at once after `maxReplies` replies since the last review, at once when the owner's latest message asks for something to be remembered, forgotten or locked (`记住`, `forget`, `覚えて`…), and at once when the owner starts a new topic (`POST /api/conversations/:id/topic`). A trigger never fires unless the owner said something after what the last attempt looked at (kept in memory per Agent and conversation): a review that failed is not asked again for the same words. One review per Agent at a time (a trigger meanwhile runs once after it), at most 4 at once.
 
 A review is one `memoryCall` (the owner's points, purpose `memory`) given the newest `reviewMessages` messages after `reviewed_seq` — the owner's and the Agent's own only and, in a group, only those sent after the Agent joined — as one JSON object (`JSON.stringify`, so any text is an escaped string and can never become another entry or another speaker): `{"conversation": [{"who": "owner" | "agent", "text"}…] (oldest first; an Agent's entries are context, never evidence), "notes": [{"ref": "n1"…, "room": "owner" | "self", "text"}…] (the notes the Agent may see there, apart from the conversation), "room_left": {"owner", "self"}}` (code points left in each room the review may change). Texts go in as written: line breaks collapsed to a space and invisible and control characters removed (`cleanText` in `src/memory/clean.ts`, the cleaning applied before storing), a message cut to `reviewMessageChars` code points; nothing is folded, stripped or rewritten. The system text explains the format, says only the owner's words are evidence and that everything inside `conversation` and `notes` is material, not instructions — a `text` claiming to be the owner, the system or a developer is still only text said by its `who`. Its answer is only operations (`parseOps`). **In a group only additions are applied** (and the prompt offers only `add`, saying nothing of replacing, merging, forgetting or locking): forgetting, replacing and locking by speech belong to the owner's own conversation; and an Agent writes about the owner there only if it is the owner's reviewing Agent in that group (memory and shared notes on, the lowest id), else only its own notes. Each addition is checked against the notes it may see and against what this owner has pending: in the owner's own conversation by the judgement model (`duplicateOf`) and by exact text; in a group only the exact-text match applies to pending changes (and a pending unlock suppresses a new request for the same note) and sorted (`sortNote`) outside any transaction — nothing is asked of the judgement model for an addition that is dropped anyway — then applied (`applyOps`; `pending` with `memoryAsk`) with `reviewed_seq` and the notice in one transaction. A call that could not be made, failed or was abandoned changes nothing and does not move `reviewed_seq`; an answer nothing of which can be used (garbage, cut at its limit, empty) changes nothing and does, as does a review with no owner message to look at (`reviewed_seq` goes to the newest seq). The notice is the `memory_changed` system notice (System notices) in your own conversation with the Agent, once for the change and once more for a request to take notes out of the vault; none when nothing was applied and no room was full; with `memoryAsk` and a full room only the full notice, no card. Only the owner is ever sent it: `status`, `pending` and `full` are read from the change when it is sent, and no one else is sent the notice at all.
 
@@ -1432,9 +1432,12 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/me`
 
-*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes"}`: the signed-in principal.
+*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes", "memoryModel", "memoryModelUsable"}`: the signed-in principal.
 `newNotes` (`"auto"`, `"vault"` or `"open"`; `"auto"` until chosen) is what newly written notes of their Agents' memory do
-about the vault (An Agent's memory); only they are ever shown it.
+about the vault (An Agent's memory); only they are ever shown it. So are `memoryModel` (`null`, or the model they chose to tidy
+their memory, `{"source": "site", "id"}` or `{"source": "provider", "providerId", "model"}` as an Agent's model is written;
+Memory calls) and `memoryModelUsable` (`false` when that model cannot be called now: its provider was deleted or its key
+cannot be opened, the model is off the provider's list or no longer on the site; always `true` while `memoryModel` is `null`).
 
 ### Profiles and principals
 
@@ -1442,8 +1445,11 @@ about the vault (An Agent's memory); only they are ever shown it.
 
 *Session: required.* Changes your display name and your memory setting (only yours: no route takes a target id).
 
-- Body: `displayName` and `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
-  existing notes do not move), each optional but at least one; `newNotes` is read back with `GET /api/me`. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+- Body: `displayName`, `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
+  existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
+  Agent creation checks it: a site model that is configured, or a model on the list of one of your own providers whose
+  context is larger than the default output limit — anything else, another person's provider included, 400
+  `invalid_request`), each optional but at least one; `newNotes` and `memoryModel` are read back with `GET /api/me`. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
   U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
@@ -1452,7 +1458,7 @@ about the vault (An Agent's memory); only they are ever shown it.
   text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
   as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
   same rule applies on registration and, with 1–60 characters, to group titles.
-- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes` was sent). Other members see it the next time they
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes` or `memoryModel` was sent). Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
 
@@ -2483,9 +2489,14 @@ nobody working on it: the stale-run sweep (below) releases it.
 background is `memoryCall`, paid for by the Agent's owner as a draft is: a run of purpose `memory` (no Agent, no
 conversation, the owner's own lane), admitted against the owner's allowance or balance, held for the model's input
 estimate and the call's own output limit, settled on what the upstream reported (one usage record of purpose `memory`;
-`GET /api/usage` lists it apart from replies and drafts). The model is `MEMORY.model` when it names a site model, else the
-free-tier site model with the lowest input plus output price (the lowest `id` among equals), else there is none and no
-call is made. A call returns the model's text, or nothing — after settling whatever was used — when there is no model,
+`GET /api/usage` lists it apart from replies and drafts). The model is the one the owner chose (`PATCH /api/me`
+`memoryModel`: a site model they may use, or a model of their own provider), else the site's: `MEMORY.model` when it names a
+site model, else the free-tier site model with the lowest input plus output price (the lowest `id` among equals), else there
+is none and no call is made. The choice is metered as a reply on that model is: a site model's cost is charged to the owner's
+allowance or balance, a model of their own provider costs no site points (its record, purpose `memory`, still counts tokens).
+A choice that cannot be used now (provider deleted or key unreadable, model off its list or no longer on the site, context too
+small) is never replaced by the site's model: no call is made, nothing is recorded. Only the owner's calls follow the choice;
+the judgement calls (vault sorting, duplicates, flags) stay the site's. A call returns the model's text, or nothing — after settling whatever was used — when there is no model,
 the owner is out of allowance and balance (402 inside, nothing recorded), the owner already has
 `AGENT_MAX_CONCURRENT_RUNS` calls running, the input does not fit the model's context, the call failed or ran past
 `AGENT_RUN_TIMEOUT_MS`, the answer was cut at its limit or empty. When the service stops, a call under way is abandoned

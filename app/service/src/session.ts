@@ -5,7 +5,8 @@ import { z } from "zod";
 import { authCall } from "./auth/auth.ts";
 import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
-import { getNewNotes } from "./memory/store.ts";
+import { memoryModelUsable } from "./memory/call.ts";
+import { getMemoryModel, getNewNotes } from "./memory/store.ts";
 
 export interface Principal {
   id: string;
@@ -69,14 +70,24 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             avatarVersion: z.number(),
             email: z.string(),
             newNotes: z.enum(["auto", "vault", "open"]),
+            memoryModel: z
+              .union([
+                z.object({ source: z.literal("site"), id: z.string() }),
+                z.object({ source: z.literal("provider"), providerId: z.string(), model: z.string() }),
+              ])
+              .nullable(),
+            memoryModelUsable: z.boolean(),
           }),
         },
       },
     },
     async (req) => {
       const p = await requirePrincipal(req);
-      const newNotes = await getNewNotes(app.deps.db, p.id);
-      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes };
+      const { db, config } = app.deps;
+      const newNotes = await getNewNotes(db, p.id);
+      const memoryModel = await getMemoryModel(db, p.id);
+      const usable = await memoryModelUsable(db, config, p.id);
+      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes, memoryModel, memoryModelUsable: usable };
     },
   );
 }

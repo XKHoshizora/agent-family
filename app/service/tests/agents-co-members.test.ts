@@ -60,6 +60,8 @@ const HIDDEN_KEYS = [
   "memoryAsk",
   "sharedNotes",
   "newNotes",
+  "memoryModel",
+  "memoryModelUsable",
   "paused",
   "deleted",
   "provider",

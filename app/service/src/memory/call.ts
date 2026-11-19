@@ -3,7 +3,7 @@ import { lockAccount } from "../accounts/store.ts";
 import { contextBudget } from "../agents/runtime/context.ts";
 import { UNAVAILABLE } from "../agents/runtime/port.ts";
 import type { Config, SiteModel } from "../config.ts";
-import type { Db } from "../db.ts";
+import type { Db, Queryable } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { estimateTokens } from "../metering/prices.ts";
@@ -11,6 +11,7 @@ import { settle, type Usage } from "../metering/settle.ts";
 import { ModelError, type ModelErrorCode, type ModelGateway } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
+import { getMemoryModel, type MemoryModelChoice } from "./store.ts";
 
 /**
  * The one way an Agent's memory calls a model in the background (a review of what the owner said, a consolidation).
@@ -18,6 +19,11 @@ import { KeyUnreadableError } from "../providers/crypto.ts";
  * purpose `memory` with no Agent and no conversation, belonging to the Agent's owner in the owner's own lane, admitted
  * against the owner's allowance or balance and settled on what the upstream reported. Nothing else of memory calls a
  * model on the owner's account.
+ *
+ * Whose model: the owner's own choice (`accounts.memory_model`, a model they could give an Agent: a site model or a
+ * model of their own provider) when they made one, else the site's memory model. A choice that cannot be used is never
+ * replaced by the site's model — that would spend points the owner chose not to spend: the call is not made. Metering is
+ * a reply's: a site model is charged to the owner, a model of their own provider costs no site points (`admitRun`).
  */
 
 /**
@@ -42,6 +48,33 @@ export function memoryModel(config: Pick<Config, "siteModels" | "memory">): Site
     if (price < best || (price === best && m.id < cheapest.id)) cheapest = m;
   }
   return cheapest;
+}
+
+/**
+ * The model a call for `ownerId` is made on, ready to call: their choice, else the site's memory model; null when there
+ * is none or it does not resolve now (a provider deleted, a model off its list or removed from the site, a site key
+ * unset). Throws `KeyUnreadableError` when a provider's saved key cannot be opened.
+ */
+async function modelFor(q: Queryable, config: Config, ownerId: string): Promise<Resolved | null> {
+  const own = await getMemoryModel(q, ownerId);
+  const site = memoryModel(config);
+  const choice: MemoryModelChoice | null = own ?? (site ? { source: "site", id: site.id } : null);
+  return choice === null ? null : resolveModel(q, config, { model: choice, ownerId });
+}
+
+/**
+ * Whether the owner's chosen model (`GET /api/me` `memoryModelUsable`) can be called now; true when they chose none.
+ * The static part of a call's checks: it resolves and its context holds its own output (a call's input is judged per call).
+ */
+export async function memoryModelUsable(q: Queryable, config: Config, ownerId: string): Promise<boolean> {
+  if ((await getMemoryModel(q, ownerId)) === null) return true;
+  try {
+    const resolved = await modelFor(q, config, ownerId);
+    return resolved !== null && resolved.contextTokens > resolved.call.maxOutputTokens;
+  } catch (err) {
+    if (err instanceof KeyUnreadableError) return false;
+    throw err;
+  }
 }
 
 export interface MemoryCallDeps {
@@ -110,8 +143,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
   const { db, config, models, log, inFlight } = deps;
   const { system, user } = input;
   const inputChars = estimateTokens(system) + estimateTokens(user);
-  const model = memoryModel(config);
-  if (model === null || closing.aborted) return null;
+  if (closing.aborted) return null;
 
   let started: { runId: string; resolved: Resolved } | null;
   try {
@@ -124,7 +156,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
       await lockAccount(t, ownerId);
       let resolved: Resolved | null;
       try {
-        resolved = await resolveModel(t, config, { model: { source: "site", id: model.id }, ownerId });
+        resolved = await modelFor(t, config, ownerId);
       } catch (err) {
         if (!(err instanceof KeyUnreadableError)) throw err;
         log.error({ err }, "memory call: the model's saved key cannot be opened");

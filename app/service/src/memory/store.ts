@@ -1,3 +1,4 @@
+import type { AgentModel } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { Queryable } from "../db.ts";
 
@@ -158,5 +159,23 @@ export async function setNewNotes(q: Queryable, ownerId: string, value: NewNotes
     `insert into accounts (principal_id, new_notes) values ($1, $2)
      on conflict (principal_id) do update set new_notes = excluded.new_notes`,
     [ownerId, value],
+  );
+}
+
+/** A model the owner chose for the review calls (`accounts.memory_model`): what an Agent's model choice is. */
+export type MemoryModelChoice = Exclude<AgentModel, null>;
+
+/** The owner's choice of the model that tidies their memory; null (the default) is the site's memory model. */
+export async function getMemoryModel(q: Queryable, ownerId: string): Promise<MemoryModelChoice | null> {
+  const { rows } = await q.query<{ memory_model: MemoryModelChoice | null }>("select memory_model from accounts where principal_id = $1", [ownerId]);
+  return rows[0]?.memory_model ?? null;
+}
+
+/** Sets it (null clears it), creating the owner's account as `setNewNotes` does. The caller has checked the choice. */
+export async function setMemoryModel(q: Queryable, ownerId: string, choice: MemoryModelChoice | null): Promise<void> {
+  await q.query(
+    `insert into accounts (principal_id, memory_model) values ($1, $2::jsonb)
+     on conflict (principal_id) do update set memory_model = excluded.memory_model`,
+    [ownerId, choice === null ? null : JSON.stringify(choice)],
   );
 }
