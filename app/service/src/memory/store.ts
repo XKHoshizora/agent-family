@@ -132,11 +132,10 @@ export async function notesFor(
   where: { conversationId: string; group: boolean },
 ): Promise<{ owner: Note[]; self: Note[]; hearsay: Hearsay[] }> {
   if (!agent.memory) return { owner: [], self: [], hearsay: [] };
-  const [owner, self, hearsay] = await Promise.all([
-    agent.sharedNotes ? listOwnerNotes(q, agent.ownerId) : [],
-    listAgentNotes(q, agent.id),
-    listHearsay(q, agent.id, where.group ? where.conversationId : undefined),
-  ]);
+  // In sequence: `q` may be one transaction client, which runs one query at a time.
+  const owner = agent.sharedNotes ? await listOwnerNotes(q, agent.ownerId) : [];
+  const self = await listAgentNotes(q, agent.id);
+  const hearsay = await listHearsay(q, agent.id, where.group ? where.conversationId : undefined);
   if (!where.group) return { owner, self, hearsay };
   const shown = (n: Note): boolean => !n.vault || n.originConversationId === where.conversationId;
   return { owner: owner.filter(shown), self: self.filter(shown), hearsay };

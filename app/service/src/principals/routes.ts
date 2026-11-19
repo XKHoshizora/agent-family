@@ -7,10 +7,10 @@ import { isMissingBlob } from "../attachments/blob.ts";
 import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
+import { setNewNotes } from "../memory/store.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
-import { setNewNotes } from "../memory/store.ts";
 import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
 
 const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
@@ -62,7 +62,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         querystring: z.object({}),
         body: z
           .object({ displayName: displayName.optional(), newNotes: z.enum(["auto", "vault", "open"]).optional() })
-          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined),
+          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined, "displayName or newNotes"),
         response: { 200: publicPrincipal },
       },
     },

@@ -186,6 +186,27 @@ describe("notesFor: the usage rules in one place", () => {
     expect(await ask(w, "g1", { sharedNotes: false })).toEqual({ owner: [], self: ["s-open", "s-open-g2", "s-vault-g1"], hearsay: ["h-g1"] });
   });
 
+  it("another owner's and another Agent's notes never appear, and an unsure hearsay note is like any other", async () => {
+    const w = await seeded();
+    const other = await signUp(app, "mem_other");
+    const stranger = await mustCreateAgent(app, other);
+    await insertNote("owner_notes", other.id, "x-owner", false, null);
+    await insertNote("agent_notes", stranger.id, "x-self", false, null);
+    await db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_name, text, said_at) values ($1, $2, 'Mia', 'x-hear', now())", [stranger.id, w.g1]);
+    await db.query("insert into owner_notes (owner_id, text, vault, unsure, origin, origin_conversation_id) values ($1, 'o-hearsay-open', false, true, 'hearsay', null), ($1, 'o-hearsay-vault', true, true, 'hearsay', null)", [w.owner.id]);
+    await db.query("insert into agent_notes (agent_id, text, vault, unsure, origin, origin_conversation_id) values ($1, 's-hearsay-open', false, true, 'hearsay', null), ($1, 's-hearsay-vault', true, true, 'hearsay', $2)", [w.agent.id, w.g1]);
+    for (const where of ["own", "g1", "g2"] as const) {
+      const got = JSON.stringify(await ask(w, where));
+      for (const t of ["x-owner", "x-self", "x-hear"]) expect([where, t, got.includes(t)]).toEqual([where, t, false]);
+    }
+    const g1 = await ask(w, "g1");
+    expect(g1.owner).toContain("o-hearsay-open");
+    expect(g1.owner).not.toContain("o-hearsay-vault");
+    expect(g1.self).toEqual(expect.arrayContaining(["s-hearsay-open", "s-hearsay-vault"]));
+    expect((await ask(w, "g2")).self).not.toContain("s-hearsay-vault");
+    expect((await ask(w, "own")).owner).toContain("o-hearsay-vault");
+  });
+
   it("a group that began no note shows nothing of the vault and no hearsay", async () => {
     const w = await seeded();
     const none = await notesFor(
