@@ -41,6 +41,8 @@
 // a pushed leave or removal notice of the Agent, or a member list without it, drops it (an owner's run that ended because
 // the Agent was taken out stays until closed: it says so).
 
+import { isMemoryLanguage } from "./memoryLanguages.js";
+
 /** How many of its newest messages `GET /api/sync` returns per conversation (service: SYNC_MESSAGES_PER_CONVERSATION). */
 export const SYNC_WINDOW = 30;
 
@@ -875,8 +877,17 @@ export const memoryModelOf = (me) => {
   return null;
 };
 
-/** What the memory settings of `GET /api/me` hold: how new notes are sorted, whether they are tidied while I rest (`dream`; absent: off), and the model that tidies them (and whether it can be used now). */
-export const memorySettingsOf = (me) => ({ newNotes: newNotesOf(me), dream: me?.dream === true, memoryModel: memoryModelOf(me), memoryModelUsable: me?.memoryModelUsable !== false });
+/** The one language my notes are written in, as `GET /api/me` says it: one of the codes, else null (automatic). */
+export const memoryLanguageOf = (me) => (isMemoryLanguage(me?.memoryLanguage) ? me.memoryLanguage : null);
+
+/** What the memory settings of `GET /api/me` hold: how new notes are sorted, whether they are tidied while I rest (`dream`; absent: off), the language they are written in, and the model that tidies them (and whether it can be used now). */
+export const memorySettingsOf = (me) => ({
+  newNotes: newNotesOf(me),
+  dream: me?.dream === true,
+  memoryLanguage: memoryLanguageOf(me),
+  memoryModel: memoryModelOf(me),
+  memoryModelUsable: me?.memoryModelUsable !== false,
+});
 
 // ───────── persona proposal cards
 

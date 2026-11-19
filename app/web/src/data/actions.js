@@ -746,12 +746,20 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** What the Agent heard: forgotten, or taken as true (it becomes one of its own notes). */
     deleteHearsay: (agentId, hearsayId) => attempt(() => api.deleteHearsay(agentId, hearsayId), memoryWrite(agentId)),
     confirmHearsay: (agentId, hearsayId) => attempt(() => api.confirmHearsay(agentId, hearsayId), memoryWrite(agentId)),
-    /** value: `{newNotes: "auto" | "vault" | "open", dream, memoryModel, memoryModelUsable}`, my memory settings (`GET /api/me`). */
+    /** value: `{newNotes: "auto" | "vault" | "open", dream, memoryLanguage, memoryModel, memoryModelUsable}`, my memory settings (`GET /api/me`). */
     loadMemorySettings: () => attempt(() => api.getMe(), { map: memorySettingsOf, text: commonErrorText }),
     /** value: the setting as sent (the answer does not echo it). */
     setNewNotes: (newNotes) => attempt(() => api.updateNewNotes(newNotes), { map: () => newNotes, text: commonErrorText }),
     /** value: the setting as sent (the answer does not echo it). */
     setDream: (dream) => attempt(() => api.updateDream(dream), { map: () => dream, text: commonErrorText }),
+    /** value: the language code as sent, or null (automatic). */
+    setMemoryLanguage: (memoryLanguage) => attempt(() => api.updateMemoryLanguage(memoryLanguage), { map: () => memoryLanguage, text: commonErrorText }),
+    /** value: `{rooms, converted, kept}`, how my existing notes were restated in the chosen language. */
+    convertMemoryLanguage: () =>
+      attempt(() => api.convertMemoryLanguage(), {
+        map: (answer) => ({ rooms: Number(answer?.rooms) || 0, converted: Number(answer?.converted) || 0, kept: Number(answer?.kept) || 0 }),
+        text: commonErrorText,
+      }),
     /** value: the model as sent, or null (the site's). */
     setMemoryModel: (memoryModel) => attempt(() => api.updateMemoryModel(memoryModel), { map: () => memoryModel, text: commonErrorText }),
     discardProposal: (agentId, proposalId) =>

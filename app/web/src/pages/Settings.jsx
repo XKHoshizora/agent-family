@@ -13,6 +13,7 @@ import { UsagePage } from "./Usage.jsx";
 import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
 import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
+import { MEMORY_LANGUAGES, languageName } from "../data/memoryLanguages.js";
 import { ModelGroups, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
 import { refusalText, settled, useAction } from "./useAction.js";
 
@@ -191,7 +192,8 @@ const NEW_NOTES = [
 ];
 
 /**
- * My memory settings, read once (`GET /api/me`): 作息 (the switch 入梦), 新记下的内容 (where a note goes when it is written, the vault or not) and
+ * My memory settings, read once (`GET /api/me`): 作息 (the switch 入梦 and 记忆用的语言, with the question about converting the notes
+ * already there), 新记下的内容 (where a note goes when it is written, the vault or not) and
  * 用哪个模型整理记忆 (the model that tidies it). Each box shows what the service holds; a change is shown once it is saved,
  * a refusal is toasted and the box stays as it was. `settings`: null while being read, "" when it could not be (every control
  * stay off and say so).
@@ -202,6 +204,9 @@ function MemorySettings() {
   const sources = useModelSources();
   const [settings, setSettings] = useState(null);
   const [attempt, setAttempt] = useState(0);
+  // The language just chosen, while I am asked whether to convert the notes already there; and how the conversion went.
+  const [asked, setAsked] = useState(null);
+  const [converted, setConverted] = useState(null);
   useEffect(() => {
     let alive = true;
     actions.loadMemorySettings().then((res) => {
@@ -221,6 +226,22 @@ function MemorySettings() {
   const changeDream = async (event) => {
     const res = await run("dream", () => settled(actions.setDream(event.target.checked)), refusalText);
     if (res.ok) setSettings((cur) => ({ ...cur, dream: res.value }));
+  };
+
+  const changeLanguage = async (event) => {
+    const next = event.target.value === "auto" ? null : event.target.value;
+    const res = await run("memoryLanguage", () => settled(actions.setMemoryLanguage(next)), refusalText);
+    if (!res.ok) return;
+    setSettings((cur) => ({ ...cur, memoryLanguage: res.value }));
+    setConverted(null);
+    setAsked(res.value);
+  };
+
+  const convertNotes = async () => {
+    const res = await run("convert", () => settled(actions.convertMemoryLanguage()), refusalText);
+    if (!res.ok) return;
+    setConverted(res.value);
+    setAsked(null);
   };
 
   const changeNewNotes = async (event) => {
@@ -256,6 +277,25 @@ function MemorySettings() {
             hintClass="field-hint"
           />
         </fieldset>
+        <Field label="记忆用的语言" hint="它记下的笔记统一用这种语言写；名字和原话保留原文。">
+          <select value={settings ? (settings.memoryLanguage ?? "auto") : ""} disabled={off} onChange={changeLanguage}>
+            {!settings && unread}
+            <option value="auto">自动</option>
+            {MEMORY_LANGUAGES.map(([code, name]) => (
+              <option key={code} value={code}>{name}</option>
+            ))}
+          </select>
+        </Field>
+        {busy === "convert" ? (
+          <p className="field-hint" role="status">正在转换…</p>
+        ) : converted ? (
+          <p className="field-hint" role="status">转了 {converted.converted} 条，{converted.kept} 条保持原样。</p>
+        ) : asked ? (
+          <p className="field-hint">
+            <span>把已有的笔记也转成{languageName(asked)}吗？</span>{" "}
+            <Btn small disabled={off} onClick={convertNotes}>转换</Btn> <Btn small disabled={off} onClick={() => setAsked(null)}>先不用</Btn>
+          </p>
+        ) : null}
       </section>
       <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
         <select value={settings?.newNotes ?? ""} disabled={off} onChange={changeNewNotes}>

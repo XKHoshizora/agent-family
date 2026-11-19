@@ -68,6 +68,8 @@ function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, ove
     updateNewNotes: vi.fn(async () => ({})),
     updateMemoryModel: vi.fn(async () => ({})),
     updateDream: vi.fn(async () => ({})),
+    updateMemoryLanguage: vi.fn(async () => ({})),
+    convertMemoryLanguage: vi.fn(async () => ({ rooms: 0, converted: 0, kept: 0 })),
     getModels: vi.fn(async () => MODELS),
     listProviders: vi.fn(async () => ({ providers: [providerOf()] })),
     listMemoryNotes: vi.fn(async () => room()),
@@ -404,7 +406,8 @@ describe("作息", () => {
     expect(within(section).getByText("小憩")).toBeTruthy();
     expect(within(section).getByText("聊完一段后，它会回想刚才的对话，记下值得留的事。")).toBeTruthy();
     expect(within(section).getAllByRole("switch")).toHaveLength(1);
-    expect(section.querySelectorAll("input, select, button")).toHaveLength(1);
+    // The switch, and the language's select below it: no control for 小憩.
+    expect(section.querySelectorAll("input, select, button")).toHaveLength(2);
     expect(within(section).getByText("你休息的时候，它把这一天记下的整理一遍：合并重复的，分清一时的情绪和长久的事。")).toBeTruthy();
     expect(dreamBox().checked).toBe(true);
   });
@@ -457,11 +460,131 @@ describe("作息", () => {
     });
     await openPalace(svc);
     expect(dreamBox().matches(":disabled")).toBe(true);
+    expect(inMain().getByLabelText("记忆用的语言").matches(":disabled")).toBe(true);
     expect(inMain().getByText(/没能读取这项设置/)).toBeTruthy();
     fail = false;
     await click(inMain().getByRole("button", { name: "重试" }));
     expect(dreamBox().matches(":disabled")).toBe(false);
     expect(dreamBox().checked).toBe(true);
+  });
+});
+
+describe("记忆用的语言", () => {
+  const meWith = (extra) => vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, ...extra }));
+  const pick = () => inMain().getByLabelText("记忆用的语言");
+  const choose = async (value) => {
+    fireEvent.change(pick(), { target: { value } });
+    await flush();
+  };
+  const NAMES = ["简体中文", "繁體中文", "日本語", "English", "한국어", "Français", "Deutsch", "Español", "Português", "Русский", "Italiano", "Tiếng Việt", "ไทย", "Bahasa Indonesia"];
+
+  it("is a select in 作息 under 入梦: 自动 first, then the languages by their own names, with its helper", async () => {
+    const svc = service({ over: { getMe: meWith({ dream: true }) } });
+    await openPalace(svc);
+    const section = inMain().getByRole("region", { name: "作息" });
+    expect(within(section).getByLabelText("记忆用的语言")).toBe(pick());
+    expect(inMain().getByRole("switch", { name: "入梦" }).compareDocumentPosition(pick()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect([...pick().options].map((o) => o.textContent)).toEqual(["自动", ...NAMES]);
+    expect(within(section).getByText("它记下的笔记统一用这种语言写；名字和原话保留原文。")).toBeTruthy();
+    expect(pick().value).toBe("auto");
+  });
+
+  it("shows what the service holds, and an unknown value reads as 自动; the settings are still read once", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: "ja" }) } });
+    await openPalace(svc);
+    expect(pick().value).toBe("ja");
+    expect(svc.api.getMe).toHaveBeenCalledTimes(1);
+    cleanup();
+    const odd = service({ over: { getMe: meWith({ memoryLanguage: "xx" }) } });
+    await openPalace(odd);
+    expect(pick().value).toBe("auto");
+  });
+
+  it("choosing sends { memoryLanguage } and shows the new value once saved; 自动 sends null", async () => {
+    const wait = deferred();
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), updateMemoryLanguage: vi.fn(() => wait.promise) } });
+    await openPalace(svc);
+    await choose("en");
+    expect(svc.api.updateMemoryLanguage).toHaveBeenCalledWith("en");
+    expect(pick().value).toBe("auto");
+    expect(pick().matches(":disabled")).toBe(true);
+    wait.resolve({});
+    await flush();
+    expect(pick().value).toBe("en");
+    svc.api.updateMemoryLanguage.mockImplementation(async () => ({}));
+    await choose("auto");
+    expect(svc.api.updateMemoryLanguage).toHaveBeenLastCalledWith(null);
+    expect(pick().value).toBe("auto");
+  });
+
+  it("a refused save leaves the select as it was and says so", async () => {
+    const svc = service({
+      over: {
+        getMe: meWith({ memoryLanguage: "fr" }),
+        updateMemoryLanguage: vi.fn(async () => {
+          throw apiError(500, "internal");
+        }),
+      },
+    });
+    await openPalace(svc);
+    await choose("de");
+    expect(pick().value).toBe("fr");
+    expect(document.querySelector(".toast")).toBeTruthy();
+    expect(inMain().queryByText(/把已有的笔记也转成/)).toBeNull();
+  });
+
+  it("asks about the existing notes only after a language is chosen: not at load, not for 自动, and 先不用 puts it away without a call", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: "ja" }) } });
+    await openPalace(svc);
+    expect(inMain().queryByRole("button", { name: "转换" })).toBeNull();
+    await choose("en");
+    expect(inMain().getByText("把已有的笔记也转成English吗？")).toBeTruthy();
+    expect(inMain().getByRole("button", { name: "转换" })).toBeTruthy();
+    await click(inMain().getByRole("button", { name: "先不用" }));
+    expect(inMain().queryByText(/把已有的笔记也转成/)).toBeNull();
+    expect(svc.api.convertMemoryLanguage).not.toHaveBeenCalled();
+    await choose("ja");
+    expect(inMain().getByText("把已有的笔记也转成日本語吗？")).toBeTruthy();
+    await choose("auto");
+    expect(inMain().queryByText(/把已有的笔记也转成/)).toBeNull();
+  });
+
+  it("转换 calls the route, says 正在转换… while it runs, then how many were converted and how many kept", async () => {
+    const wait = deferred();
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(() => wait.promise) } });
+    await openPalace(svc);
+    await choose("en");
+    await click(inMain().getByRole("button", { name: "转换" }));
+    expect(svc.api.convertMemoryLanguage).toHaveBeenCalledTimes(1);
+    expect(inMain().getByText("正在转换…")).toBeTruthy();
+    expect(pick().matches(":disabled")).toBe(true);
+    wait.resolve({ rooms: 2, converted: 3, kept: 1 });
+    await flush();
+    expect(inMain().queryByText("正在转换…")).toBeNull();
+    expect(inMain().getByText("转了 3 条，1 条保持原样。")).toBeTruthy();
+    expect(inMain().queryByRole("button", { name: "转换" })).toBeNull();
+    // Choosing again clears the line and asks again.
+    await choose("fr");
+    expect(inMain().queryByText("转了 3 条，1 条保持原样。")).toBeNull();
+    expect(inMain().getByText("把已有的笔记也转成Français吗？")).toBeTruthy();
+  });
+
+  it("a refused conversion is toasted, no result line is shown, and the question stays", async () => {
+    const svc = service({
+      over: {
+        getMe: meWith({ memoryLanguage: null }),
+        convertMemoryLanguage: vi.fn(async () => {
+          throw apiError(409, "busy");
+        }),
+      },
+    });
+    await openPalace(svc);
+    await choose("en");
+    await click(inMain().getByRole("button", { name: "转换" }));
+    expect(document.querySelector(".toast")).toBeTruthy();
+    expect(inMain().queryByText(/转了/)).toBeNull();
+    expect(inMain().queryByText("正在转换…")).toBeNull();
+    expect(inMain().getByRole("button", { name: "转换" })).toBeTruthy();
   });
 });
 

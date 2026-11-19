@@ -28,6 +28,10 @@ export const updateMe = (displayName) => request("PATCH", "/api/me", { displayNa
 /** Whether my Agents tidy the day's notes while I rest (入梦). */
 export const updateDream = (dream) => request("PATCH", "/api/me", { dream });
 export const updateNewNotes = (newNotes) => request("PATCH", "/api/me", { newNotes });
+/** The one language my notes are written in: a code of the list, or null for automatic. The answer does not echo it. */
+export const updateMemoryLanguage = (memoryLanguage) => request("PATCH", "/api/me", { memoryLanguage });
+/** Restates my existing notes in that language → `{rooms, converted, kept}`. 409 no_language | busy. */
+export const convertMemoryLanguage = () => request("POST", "/api/memory/language/convert");
 /** The model that tidies my memory: a model as an Agent's is written, or null for the site's. The answer does not echo it. */
 export const updateMemoryModel = (memoryModel) => request("PATCH", "/api/me", { memoryModel });
 export const lookupPrincipal = (handle) => request("GET", withQuery("/api/principals/lookup", { handle }));
