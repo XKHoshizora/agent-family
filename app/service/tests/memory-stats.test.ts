@@ -216,6 +216,9 @@ describe("what the owner does about what a review made", () => {
     expect((await api(app, w.owner, "DELETE", `/api/memory/notes/${mine.id}`)).status).toBe(200);
     const found = await stats();
     expect([found.owner_edited_auto_note, found.owner_deleted_auto_note]).toEqual([1, 1]);
+    // Edits are counted, not notes: no column says who wrote a note's text last, so editing it again counts again (README).
+    expect((await api(app, w.owner, "PATCH", `/api/memory/notes/${a!.id}`, { text: "不吃香菜，也不吃葱" })).status).toBe(200);
+    expect((await stats()).owner_edited_auto_note).toBe(2);
   });
 
   it("taking a note out of the vault, and putting one in", async () => {
@@ -433,6 +436,24 @@ describe("a dream", () => {
     gateway.fail("provider_unavailable");
     await night();
     expect(await stats()).toEqual({ dream_failed: 1 });
+  });
+
+  it("a dream the memory allowance refuses is counted as refused, not as failed, and uses none of the day's three tries", async () => {
+    const w = await owned("d5");
+    const before = gateway.calls.length;
+    await seeded(w.owner, "喜欢喝茶", false);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, today()]);
+    await night();
+    // Sweeps go on every quarter of an hour: the refused owner is not asked again before the allowance is back.
+    for (let i = 0; i < 4; i++) await night(16 * MIN);
+    expect(await stats()).toEqual({ memory_refused_allowance: 1 });
+    expect(gateway.calls.slice(before)).toHaveLength(0);
+    // A new site day: the allowance is there again and the dream is made (three refusals counted as tries would have barred it for a day).
+    const { nextSiteMidnight } = await import("../src/accounts/store.ts");
+    await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);
+    gateway.reply(JSON.stringify({ ops: [] }));
+    await night(nextSiteMidnight(new Date(clock.now()), app.deps.config.siteTimezone).getTime() - clock.now() + MIN);
+    expect(await stats()).toEqual({ memory_refused_allowance: 1, dream_run: 1 });
   });
 
   it("a room left nearly full by a change is a nap, not a dream", async () => {

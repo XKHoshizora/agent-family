@@ -284,9 +284,10 @@ describe("the 关于我 room on the Settings page", () => {
   it("the text is measured as the service will store it: its line breaks and runs of spaces are one space, and it is trimmed", async () => {
     await openPalace(service({ notes: [note("a", "茶".repeat(90))], limit: 100 }));
     const scope = inRoom("关于我");
-    // 10 characters with a run of 5 spaces: stored as 10 + 1 + 1 = 12 > 10 left? no: "字"*5 + " " + "字"*5 is 11 weight, over by one.
+    // 10 weight is left. 5 + 5 characters with a run of 5 spaces between: stored with one space, 31 bytes, 11 weight: over by one.
     typeInto(scope.getByLabelText("新的笔记"), `${"字".repeat(5)}     ${"字".repeat(5)}`);
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
+    // 5 + 4 characters with two line breaks and two spaces between: stored with one space, 28 bytes, 10 weight: it fits (as typed it would weigh 11).
     typeInto(scope.getByLabelText("新的笔记"), `${"字".repeat(5)}\n\n  ${"字".repeat(4)}`);
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(false);
   });

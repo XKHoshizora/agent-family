@@ -276,6 +276,15 @@ interface Fixture {
   victimAgent: string;
   /** `me`'s provider; an Agent uses it, so deleting it is 409 `provider_in_use` every time. */
   provider: string;
+  /**
+   * The memory of `agent`: a note of its own to edit and another to delete, an entry it heard to delete and another to take as true
+   * (one each, so that neither route takes the other's), and a change of its notes to decide on.
+   */
+  note: string;
+  doomedNote: string;
+  heard: string;
+  heardToConfirm: string;
+  change: string;
 }
 
 const FAST = { source: "site", id: "fast" } as const;
@@ -330,6 +339,16 @@ async function fixture(): Promise<Fixture> {
      select 'reply', $1, $2, $3, 'failed', 'provider_unavailable', seq, now() from conversations where id = $1 returning id`,
     [g, agent.id, me.id],
   );
+  const notes = await db.query<{ id: string }>("insert into agent_notes (agent_id, text, vault) values ($1, '喜欢喝茶', false), ($1, '喜欢咖啡', false) returning id", [agent.id]);
+  const heard = await db.query<{ id: string }>(
+    "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at) values ($1, $2, $3, 'peer', '主人下周出差', now()), ($1, $2, $3, 'peer', '主人喜欢爬山', now()) returning id",
+    [agent.id, g, peer.id],
+  );
+  const change = await db.query<{ id: string }>("insert into memory_changes (owner_id, agent_id, conversation_id, status, ops) values ($1, $2, $3, 'applied', '[]'::jsonb) returning id", [
+    me.id,
+    agent.id,
+    agent.conversationId,
+  ]);
   return {
     me,
     peer,
@@ -347,6 +366,11 @@ async function fixture(): Promise<Fixture> {
     groupRun: groupRun.rows[0]!.id,
     victimAgent: victimAgent.id,
     provider: provider.json.id,
+    note: notes.rows[0]!.id,
+    doomedNote: notes.rows[1]!.id,
+    heard: heard.rows[0]!.id,
+    heardToConfirm: heard.rows[1]!.id,
+    change: change.rows[0]!.id,
   };
 }
 
@@ -368,6 +392,10 @@ function validParams(route: Pick<RouteEntry, "method" | "url">, fx: Fixture): Re
     else if (name === "principalId") out[name] = fx.victim.id; // the one whose removal, unfriending or blocking costs nothing
     else if (name === "runId") out[name] = fx.run;
     else if (name === "proposalId") out[name] = fx.proposal;
+    // An Agent's memory: what each route needs is a real one of the fuzzing account's Agent (one to delete, one to take as true).
+    else if (name === "noteId") out[name] = method === "DELETE" ? fx.doomedNote : fx.note;
+    else if (name === "hearsayId") out[name] = url.endsWith("/confirm") ? fx.heardToConfirm : fx.heard;
+    else if (name === "changeId") out[name] = fx.change;
     else {
       const collection = url.split(`/:${name}`)[0]!.split("/").pop();
       out[name] =

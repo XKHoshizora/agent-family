@@ -22,6 +22,7 @@ import {
   type GroupPerson,
   type GroupScene,
   type SpeakerRole,
+  type SystemText,
 } from "./runtime/prompt.ts";
 import type { AgentRow } from "./store.ts";
 import {
@@ -89,7 +90,8 @@ export interface ContextRun {
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
 export interface LoadedContext {
-  system: string;
+  /** The run's system text, with its notes passage known apart (what the budget and the estimate measure). */
+  system: SystemText;
   /**
    * In a group, the run's mark (`newMark`), which `system` and the labels of `entries` carry and nothing else they show
    * does; null in the Agent's own conversation.
@@ -403,10 +405,10 @@ export async function loadContext(
   q: Queryable,
   run: ContextRun,
   resolved: Pick<Resolved, "contextTokens" | "vision" | "call">,
-  system: (mark: string, speakers: readonly Speaker[]) => string,
+  system: (mark: string, speakers: readonly Speaker[]) => SystemText,
   draw?: () => string,
 ): Promise<LoadedContext> {
-  const budgetWith = (text: string): number => {
+  const budgetWith = (text: SystemText): number => {
     const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text);
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
@@ -431,7 +433,7 @@ export async function loadContext(
   const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
   const speakers = speakersOf(kept);
   const unmarked = system("", speakers);
-  const mark = run.group === null ? null : newMark((m) => unmarked.includes(m) || kept.some((l) => shows(l, m)), draw);
+  const mark = run.group === null ? null : newMark((m) => unmarked.text.includes(m) || kept.some((l) => shows(l, m)), draw);
   const text = mark === null ? unmarked : system(mark, speakers);
   const budget = budgetWith(text);
   const entries = answeredOrder(kept, mark);

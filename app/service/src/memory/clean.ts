@@ -46,9 +46,9 @@ const STATES_A_PASSWORD = /密码\s*(?:是|为)\s*\S|密码[:：]\s*\S|\b(?:pass
 
 /**
  * A bare domain with a path (`example.org/page`), which the list of known endings above does not catch: a dot-separated host of at least two
- * labels whose last is 2 to 6 letters, then `/` and a path of 3 characters or more; not where that last label is a file ending (`node.js/docs`).
+ * labels whose last is 2 to 6 letters, then `/` and a path of 3 characters or more; not where that last label is a file ending (`node.js/docs`, `package.json/scripts`).
  */
-const BARE_DOMAIN_PATH = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs)\b)[a-z]{2,6}\/\S{3,}/i;
+const BARE_DOMAIN_PATH = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs|json|yml|yaml|toml|lock|css|html)\b)[a-z]{2,6}\/\S{3,}/i;
 
 export { cleanText };
 

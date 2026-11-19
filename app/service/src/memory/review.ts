@@ -15,11 +15,14 @@ import { cutToWeight, weightOf } from "./weight.ts";
 /**
  * What an owner's message may ask for, in three lists (a word that asks to REMEMBER must never open the way to deleting or locking):
  * `REMEMBER` only asks for a review at once; `FORGET` is what lets a `remove` apply at once; `LOCK` is what lets a `lock` apply at once.
- * `EXPLICIT`, their union, is what makes a review run at once.
+ * `EXPLICIT`, their union, is what makes a review run at once. `FORGET` does not match a negated forget or one that asks to remember
+ * (`别忘了它`, `不要忘掉`, `don't forget`, `never forget`, `I always forget`, `keep forgetting`) nor `别记错`; `LOCK` matches only a few
+ * whole phrases (`lock it`, never `unlock` or `clock`; `锁起来`, never `门锁上了`). Only a fast path: whatever these miss becomes a card the
+ * owner confirms.
  */
 export const REMEMBER = /记住|记一下|记下来|别忘了|remember|覚えて/i;
-export const FORGET = /忘掉|忘了它|别记|不用记|删掉|forget|忘れて|消して/i;
-export const LOCK = /锁起来|锁上|保险箱|别告诉别人|lock|秘密にして/i;
+export const FORGET = /(?<!别|不要)(?:忘掉|忘了它|删掉)|别记(?!错)|不用记|(?<!n't |n’t |not |never |always |dont )\bforget\b|忘れて|消して/i;
+export const LOCK = /锁起来|锁进保险箱|放进保险箱|别告诉别人|不要告诉别人|(?<![a-z])lock (?:it|this|that)\b|秘密にして/i;
 export const EXPLICIT = new RegExp([REMEMBER, FORGET, LOCK].map((r) => r.source).join("|"), "i");
 
 /** What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote. */
@@ -49,6 +52,8 @@ export interface ReviewInput {
   lock: boolean;
   /** When each owner entry of the window was sent: a replace of a note needs one, after the note's last change (and so at least one). */
   ownerAt: Date[];
+  /** The owner said something in a later topic than the one reviewed (a review never reaches across a new topic): another review is due after it. */
+  more: boolean;
 }
 
 export interface ReviewOpts {
@@ -122,7 +127,8 @@ export const shown = (text: string, max: number): string => cutToWeight(cleanTex
  *
  * The user message is JSON (`JSON.stringify`): `conversation` the newest `reviewMessages` of the owner's and the Agent's
  * own messages, oldest first (text, and a file's caption; in a group only those sent after the Agent joined, as the Agent
- * itself reads them; an Agent's line only when an owner's line follows it at once), each `{ who: "owner" | "agent", text }`; `notes` the notes the Agent may see there (`notesFor`, so in
+ * itself reads them), from one topic only — the earliest after `afterSeq` the owner said something in — and ending at the owner's
+ * last line there (an Agent's lines only before it; a trailing one waits for the next review), each `{ who: "owner" | "agent", text }`; `notes` the notes the Agent may see there (`notesFor`, so in
  * a group nothing of the vault) as `{ ref: "n1"…, room, text }` — the owner's room first, then its own; `room_left` the
  * space left in each room this review may change (counted over all its notes: a number, not a note). Texts go in as
  * stored: line breaks collapsed to a space and invisible and control characters removed (`cleanText`, as before storing),
@@ -147,11 +153,25 @@ export async function readReview(
   );
   const window = rows.reverse();
   const seen = window.length > 0 ? Number(window.at(-1)!.newest ?? window.at(-1)!.seq) : null;
-  const spoken = window.flatMap((m) => {
+  // The new topics the owner started after what was reviewed (`topic_reset` notices): which topic each line belongs to.
+  const resets = (
+    await q.query<{ seq: string }>(
+      `select m.seq::text from messages m ${VISIBLE_JOIN}
+        where m.conversation_id = $2 and m.seq > $3 and m.kind = 'system' and m.body ->> 'event' = 'topic_reset' order by m.seq`,
+      [agent.id, conversationId, afterSeq],
+    )
+  ).rows.map((r) => Number(r.seq));
+  const lines = window.flatMap((m) => {
     const text = shown(m.text, memory.reviewMessageWeight);
-    return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq: Number(m.seq), at: m.created_at }];
+    const seq = Number(m.seq);
+    return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq, at: m.created_at, topic: resets.filter((r) => r < seq).length }];
   });
-  if (!spoken.some((m) => m.who === "owner")) return { input: null, seen };
+  // A review never reaches back across a new topic: it reads the earliest topic the owner said something in. An older topic's Agent
+  // lines that no owner line answered there are not shown; an owner line of a later topic is left for the next review (`more`).
+  const first = lines.find((m) => m.who === "owner");
+  if (first === undefined) return { input: null, seen };
+  const spoken = lines.filter((m) => m.topic === first.topic);
+  const more = lines.some((m) => m.who === "owner" && m.topic > first.topic);
   // The window ends at the owner's last line: an Agent's lines are only shown where they make sense of what the owner answered (every
   // Agent entry in the unbroken run of Agent entries just before an owner entry), and one that trails the last owner line is left for
   // the next review, where it is read together with the owner's answer.
@@ -190,7 +210,7 @@ export async function readReview(
   });
   const system = reviewSystem(group, todayIn(opts.now, opts.config.siteTimezone), await getMemoryLanguage(q, agent.ownerId));
   const owner = spoken.filter((m) => m.who === "owner");
-  return { input: { system, user, refs, existing, upToSeq: spoken[lastOwner]!.seq, forget: owner.some((m) => FORGET.test(m.text)), lock: owner.some((m) => LOCK.test(m.text)), ownerAt: owner.map((m) => m.at) }, seen };
+  return { input: { system, user, refs, existing, upToSeq: spoken[lastOwner]!.seq, forget: owner.some((m) => FORGET.test(m.text)), lock: owner.some((m) => LOCK.test(m.text)), ownerAt: owner.map((m) => m.at), more }, seen };
 }
 
 /** `readReview`'s input alone: null when there is no owner message to look at. */

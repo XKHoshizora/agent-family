@@ -125,7 +125,8 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
         spec.maxOutputTokens === undefined
           ? resolved
           : { ...resolved, call: { ...resolved.call, maxOutputTokens: Math.min(spec.maxOutputTokens, resolved.call.maxOutputTokens) } };
-      if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, system) < estimateTokens(user)) {
+      // A system text of its own (a draft's, a memory call's): no notes passage in it.
+      if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, { rest: system, passage: "" }) < estimateTokens(user)) {
         throw new AppError(400, "context_too_small");
       }
       await admitRun(t, config, runId, ownerId, sized, inputChars, new Date());

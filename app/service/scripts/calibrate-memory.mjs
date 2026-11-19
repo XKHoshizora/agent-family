@@ -425,7 +425,7 @@ const URL_LIKE = [
 ]
 const ADDRESSES_THE_READER = RX(F.clean, 'ADDRESSES_THE_READER', /你必须|你应该|忽略|无视|指令|听我的|無視して|\bignore|\bdisregard|\byou must\b|\bforget (?:all|your)\b|\bsystem\b/i, false)
 const STATES_A_PASSWORD = RX(F.clean, 'STATES_A_PASSWORD', /密码\s*(?:是|为)\s*\S|密码[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b)|[:=])\s*\S|\bpassword\s+was\s+\S|\bpassword's\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i)
-const BARE_DOMAIN_PATH = RX(F.clean, 'BARE_DOMAIN_PATH', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs)\b)[a-z]{2,6}\/\S{3,}/i)
+const BARE_DOMAIN_PATH = RX(F.clean, 'BARE_DOMAIN_PATH', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs|json|yml|yaml|toml|lock|css|html)\b)[a-z]{2,6}\/\S{3,}/i)
 SN(F.clean, 'tidy', 'return clean === "" || keyLike(clean) ? null : clean;')
 SN(F.clean, 'modelNote 1', 'if (clean === null || weight(clean) > modelEntryMaxNow) return null;')
 SN(F.clean, 'modelNote 2', 'return URL_LIKE.some((p) => p.test(clean)) || BARE_DOMAIN_PATH.test(clean) || STATES_A_PASSWORD.test(clean) || ADDRESSES_THE_READER.test(clean) ? null : clean;')
@@ -1435,7 +1435,7 @@ function reviewRequest(s, { mixed, today, model, language }) {
     const text = shown(l.text, DEFAULTS.reviewMessageWeight)
     return text === '' ? [] : [{ who: l.who, text }]
   })
-  // As review.ts: an Agent's line is shown only when an owner's line follows it at once.
+  // As review.ts: the window ends at the owner's last line (an Agent's lines only before it; the samples have no new topic in them).
   const window = spoken.slice(-DEFAULTS.reviewMessages)
   const conversation = window.slice(0, window.findLastIndex((m) => m.who === 'owner') + 1)
   const { refs, notes } = reviewNotes(s)

@@ -29,7 +29,7 @@ import { postAsAgent } from "./conversation.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
-import { fitNotes, groupSystemPrompt, NO_NOTES, passageBudget, systemPrompt } from "./runtime/prompt.ts";
+import { fitNotes, groupSystemText, NO_NOTES, passageBudget, systemText, type SystemText } from "./runtime/prompt.ts";
 import {
   actOnTriggered,
   followUp,
@@ -356,10 +356,10 @@ export class DbAgentPort implements AgentPort {
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
       // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
-      const system = (mark: string, speakers: readonly Speaker[]): string =>
+      const system = (mark: string, speakers: readonly Speaker[]): SystemText =>
         scene
-          ? groupSystemPrompt(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes)
-          : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes);
+          ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes)
+          : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const loaded = await loadContext(
@@ -423,7 +423,7 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       return {
-        prepared: { call: { ...resolved.call, system: loaded.system, messages: context.messages, reasoning }, inputChars: context.inputChars },
+        prepared: { call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning }, inputChars: context.inputChars },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });

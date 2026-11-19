@@ -1,4 +1,4 @@
-import { siteDay } from "../accounts/store.ts";
+import { nextSiteMidnight, siteDay } from "../accounts/store.ts";
 import type { AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import { resolveModel } from "../models/resolve.ts";
@@ -33,7 +33,8 @@ import { listRoomExact, type ExactNote, type Room } from "./write.ts";
  *   consolidates, one after another, the owner's shared room (carried out by the owner's Agent with memory and shared notes
  *   on that has the lowest id: the notice goes to that Agent's own conversation) and each Agent's own room, when it had
  *   something since `dreamed_at`. Then `dreamed_at` is set, whether or not anything changed. A call that fails sets nothing:
- *   the next sweep tries again, three tries in all in a day (the rooms already done are not paid for twice).
+ *   the next sweep tries again, three tries in all in a day (the rooms already done are not paid for twice). A call the memory
+ *   allowance refuses is no failure and no try: it sets nothing either, and the owner's dreams and naps wait for the next site day.
  * - A nap: a change that leaves a room at or above `napAt` of its limit asks (`NapJob`) for that room to be consolidated at
  *   once, without waiting for idleness, at most once per `dreamEveryMs` per room. A nap does not touch `dreamed_at`.
  *
@@ -81,9 +82,23 @@ export interface DreamState {
    * for again), and when that dream began (ms): after a day it is forgotten, as the failures are.
    */
   done: Map<string, { at: number; rooms: Set<string> }>;
+  /**
+   * Until when (ms: the next site midnight) an owner's dreams and naps wait because the memory allowance refused one: no failure and
+   * none of the day's tries, and not asked again before the allowance is there again.
+   */
+  refused: Map<string, number>;
 }
 
-export const newDreamState = (): DreamState => ({ rooms: new Map(), failures: new Map(), done: new Map() });
+export const newDreamState = (): DreamState => ({ rooms: new Map(), failures: new Map(), done: new Map(), refused: new Map() });
+
+/** Whether the owner's dreams wait for the memory allowance at `now` (and forgets a wait that is over). */
+function waitsForAllowance(state: DreamState, ownerId: string, now: number): boolean {
+  const until = state.refused.get(ownerId);
+  if (until === undefined) return false;
+  if (now < until) return true;
+  state.refused.delete(ownerId);
+  return false;
+}
 
 /** How many calls an owner's dream may fail in a day before it waits for the next. */
 const TRIES_A_DAY = 3;
@@ -341,7 +356,7 @@ async function sweep(deps: PipelineDeps, ctx: DreamContext): Promise<void> {
     // What expired is forgotten.
     if (failed.length === 0) ctx.dream.failures.delete(r.owner_id);
     else ctx.dream.failures.set(r.owner_id, failed);
-    if (failed.length >= TRIES_A_DAY) continue;
+    if (failed.length >= TRIES_A_DAY || waitsForAllowance(ctx.dream, r.owner_id, now)) continue;
     ctx.enqueue({ kind: "dream", agentId: r.agent_id, conversationId: "dream", ownerId: r.owner_id, scope: "all" });
   }
 }
@@ -363,7 +378,7 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
   const limits = roomOf(config);
   const now = deps.now();
   // As a dream: three failed calls in a day and it waits for the next.
-  if ((ctx.dream.failures.get(agent.ownerId) ?? []).filter((t) => t > now - DAY).length >= TRIES_A_DAY) return;
+  if ((ctx.dream.failures.get(agent.ownerId) ?? []).filter((t) => t > now - DAY).length >= TRIES_A_DAY || waitsForAllowance(ctx.dream, agent.ownerId, now)) return;
   // How full a room is is its weight, as everywhere (weight.ts).
   // Or its count of notes: at 90% of `roomNotes` a room is tidied before it is refused for having too many.
   const [ownerNotes, selfNotes] = [await listOwnerNotes(db, agent.ownerId), await listAgentNotes(db, agent.id)];
@@ -426,6 +441,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
   if (!cycle || now - cycle.at > DAY) cycle = { at: now, rooms: new Set<string>() };
   ctx.dream.done.set(ownerId, cycle);
   let failed = false;
+  let refused = false;
   let consolidated = 0;
   for (const { room, carrier: by } of todo) {
     if (ctx.closing.aborted) return;
@@ -433,7 +449,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     // A room consolidated within `dreamEveryMs` (a nap, or an earlier job of the same room) is not consolidated again.
     const last = ctx.dream.rooms.get(key);
     if ((job.scope === "all" && cycle.rooms.has(key)) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
-    let outcome: "done" | "failed" | "aborted";
+    let outcome: "done" | "failed" | "aborted" | "refused";
     try {
       outcome = await dreamRoom(deps, ctx, by, room, since);
     } catch (err) {
@@ -441,6 +457,11 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
       outcome = "failed";
     }
     if (outcome === "aborted") return;
+    // The allowance is the owner's: the other rooms would be refused too.
+    if (outcome === "refused") {
+      refused = true;
+      break;
+    }
     if (outcome === "failed") {
       failed = true;
       continue;
@@ -455,6 +476,12 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
   if (failed) {
     count(db, "dream_failed");
     ctx.dream.failures.set(ownerId, [...(ctx.dream.failures.get(ownerId) ?? []).filter((t) => t > deps.now() - DAY), deps.now()]);
+    return;
+  }
+  // A call the memory allowance refused (counted `memory_refused_allowance` where it was refused) is no failure and no try: the owner's
+  // dreams wait for the next site day, when the allowance is there again; nothing is marked dreamed.
+  if (refused) {
+    ctx.dream.refused.set(ownerId, nextSiteMidnight(new Date(deps.now()), config.siteTimezone).getTime());
     return;
   }
   if (job.scope !== "all") return;
@@ -505,7 +532,7 @@ async function conversionTokens(db: Db, config: Config, ownerId: string, notes: 
  * owner asked for it just now); everything else — the faithful check, the vault only inwards, the origin rule, the audited
  * and undoable change with its notice — is the dream's.
  */
-async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date | null, conversion?: Conversion): Promise<"done" | "failed" | "aborted"> {
+async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date | null, conversion?: Conversion): Promise<"done" | "failed" | "aborted" | "refused"> {
   const { db, config, log } = deps;
   const ownerId = by.ownerId;
   const where: Room = room.kind === "owner" ? { kind: "owner", ownerId } : { kind: "self", agentId: room.agentId };
@@ -534,9 +561,10 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   if (answer === null && !report.answered) {
     if (conversion) {
       conversion.tally.failedRooms++;
-      conversion.tally.unanswered = (conversion.tally.unanswered ?? 0) + 1;
+      // A call that could not even start (the allowance, no model, too many calls running), as against one that started and failed.
+      if (report.started !== true) conversion.tally.unanswered = (conversion.tally.unanswered ?? 0) + 1;
     }
-    return "failed";
+    return report.refused === true ? "refused" : "failed";
   }
   // Charged for an answer that cannot be used (a cut one too): a dream all the same (nothing is asked again for the same notes), and no
   // judgement is spent on it. A conversion counts the room as one that failed: its notes are neither converted nor kept.

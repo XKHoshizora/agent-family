@@ -119,7 +119,7 @@ export function useApp(
       previous.set(name, process.env[name]);
       process.env[name] = value;
     }
-    const config = {
+    const loaded = {
       ...loadConfig({
         ...process.env,
         DATABASE_URL: testDatabaseUrl(),
@@ -132,6 +132,9 @@ export function useApp(
       }),
       ...configured,
     };
+    // Nor the memory-change sweep's own timer, unless the file's MEMORY names `changesSweepMs`.
+    const asked = (env?.MEMORY ?? "").includes("changesSweepMs") || configured?.memory?.changesSweepMs !== undefined;
+    const config = asked ? loaded : { ...loaded, memory: { ...loaded.memory, changesSweepMs: 0 } };
     database = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });
     instance = await buildApp({ config, db: database, ...overrides }, options);
     await instance.ready();

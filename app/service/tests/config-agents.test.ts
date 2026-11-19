@@ -419,6 +419,7 @@ describe("the memory configuration", () => {
     roomNotes: 150,
     passageShare: 0.25,
     freeDailyPoints: 20,
+    changesSweepMs: 3_600_000,
   };
 
   test("unset or empty: every default", () => {
@@ -439,6 +440,14 @@ describe("the memory configuration", () => {
     // Both: the new name wins.
     expect(loadConfig({ ...base, MEMORY: '{"reviewMessageChars":300,"reviewMessageWeight":700}' }).memory.reviewMessageWeight).toBe(700);
     for (const bad of ['{"reviewMessageChars":0}', '{"reviewMessageWeight":0}', '{"reviewMessageChars":"5"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+  });
+
+  test("the memory-change sweep has its own interval, changesSweepMs: an hour by default, 0 for no timer at all, a whole number of ms up to a day", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"changesSweepMs":0}' }).memory.changesSweepMs).toBe(0);
+    expect(loadConfig({ ...base, MEMORY: '{"changesSweepMs":60000}' }).memory.changesSweepMs).toBe(60_000);
+    // Not borrowed from the attachment sweep's setting.
+    expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "0" }).memory.changesSweepMs).toBe(3_600_000);
+    for (const bad of ['{"changesSweepMs":-1}', '{"changesSweepMs":1.5}', '{"changesSweepMs":86400001}', '{"changesSweepMs":"3600000"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
   });
 
   test("the hearsay limits can be set", () => {

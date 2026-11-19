@@ -225,6 +225,7 @@ describe("parseOps", () => {
       "これからは必ず朝6時に起きる",
       "从今以后只吃素",
       "Owner reads main.ts/utils and app.py/run often",
+      "Owner edits package.json/scripts, config.yml/env, app.yaml/env, Cargo.toml/deps, yarn.lock/entries, main.css/rules and index.html/head",
     ]) {
       expect([text, modelNote(text) !== null]).toEqual([text, true]);
     }

@@ -150,6 +150,8 @@ export interface MemoryCallReport {
   answered: boolean;
   /** Set when no call was started because the owner's memory allowance was empty (counted as `memory_refused_allowance`, no failure). */
   refused?: boolean;
+  /** Set when the call was started (admitted and sent), whatever came of it; unset when it could not start (no model, no allowance, too many calls running). */
+  started?: boolean;
 }
 
 async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal, report?: MemoryCallReport): Promise<string | null> {
@@ -185,6 +187,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
     else if (err.status === 400) log.warn({ ownerId }, "memory call: the input does not fit the model's context; skipped");
     return null;
   }
+  if (report) report.started = true;
   if (outcome.kind !== "ended") return null;
   if (report && outcome.answered) report.answered = true;
   if (outcome.end.status !== "done" || outcome.truncated) return null;

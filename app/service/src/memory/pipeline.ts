@@ -55,6 +55,8 @@ export interface ReviewContext {
   attempted(seq: number): void;
   /** After commit: a change was applied to the notes of this Agent's owner; the scheduler may nap the rooms it left nearly full. */
   changed?(agentId: string): void;
+  /** After commit: the review left owner lines of a later topic for the next review (`ReviewInput.more`); the scheduler runs it after this one. */
+  more?(): void;
 }
 
 /** What may be logged of an error: never its message or detail, which can carry the text of a note. */
@@ -296,6 +298,8 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   }
   // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
   if (notices?.some((n) => n.body.status === "applied" && n.body.unlock !== true && Array.isArray(n.body.lines) && n.body.lines.length > 0)) ctx.changed?.(agentId);
+  // A new topic's words were left for a review of their own: it follows this one.
+  if (notices !== null && input.more) ctx.more?.();
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");
 }
 

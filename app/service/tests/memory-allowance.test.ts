@@ -4,7 +4,7 @@ import { memoryCall, type MemoryCallDeps } from "../src/memory/call.ts";
 import { admitRun } from "../src/metering/admit.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
-import { costOf, ESTIMATE, meteredAgent, METER_ENV, runningRun } from "./helpers/metering.ts";
+import { costOf, ESTIMATE, grant, meteredAgent, METER_ENV, runningRun } from "./helpers/metering.ts";
 import { providerBody } from "./helpers/providers.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 
@@ -103,9 +103,12 @@ describe("the memory allowance", () => {
     expect(BigInt((await memoryUsed(owner.id))[0]!.used)).toBeLessThanOrEqual(1_000_000n + costOf(USAGE));
   });
 
-  it("a stale run charged to memory (a crash) is swept: nothing is charged and its hold is released", async () => {
+  it("a stale run charged to memory (a crash) is swept: nothing is charged, neither to the memory allowance nor to the free allowance or the balance, and its hold is released", async () => {
     const owner = await signUp(app, "alwcrash");
     await fill(owner.id, today(), 100_000);
+    // Something in the free allowance and the balance, for the sweep to leave alone.
+    await grant(db, owner.id, 5_000_000n);
+    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, $2::date, 200000)", [owner.id, today()]);
     await db.query(
       `insert into agent_runs (owner_id, purpose, lane, status, charge_to, hold_micro, source, model, reasoning, created_at, started_at)
        values ($1, 'memory', 'own', 'running', 'memory', 500000, 'site', 'meter_free', 'none', now() - interval '1 day', now() - interval '1 day')`,
@@ -115,6 +118,9 @@ describe("the memory allowance", () => {
     expect(rows[0]).toEqual({ hold: "500000" });
     expect(await app.staleRunSweep.run()).toBe(1);
     expect(await memoryUsed(owner.id)).toEqual([{ day: today(), used: "100000" }]);
+    expect(await freeUsed(owner.id)).toEqual([{ used: "200000" }]);
+    expect(await balance(owner.id)).toBe("5000000");
+    expect((await db.query("select count(*)::int as n from usage_records where owner_id = $1 and (free_micro <> 0 or balance_micro <> 0)", [owner.id])).rows[0].n).toBe(0);
     expect((await db.query("select status from agent_runs where owner_id = $1 and status = 'running'", [owner.id])).rows).toEqual([]);
   });
 

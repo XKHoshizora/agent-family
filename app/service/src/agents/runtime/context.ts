@@ -1,7 +1,7 @@
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../../metering/prices.ts";
 import type { ModelCall, Part } from "../../models/gateway.ts";
 import { stripUnsafeText } from "../../schemas.ts";
-import { systemTokens } from "./prompt.ts";
+import { systemTokens, type SystemText } from "./prompt.ts";
 
 /**
  * What the model is shown (spec 6.5 "发给模型的内容"; README "Agents and runs"), as pure functions: the budget, how a
@@ -66,8 +66,8 @@ export type AttachmentContent =
 /** `[图片：name]` or `[文件：name]`: an attachment shown by its name. */
 export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): string => (a.image ? `[图片：${a.name}]` : `[文件：${a.name}]`);
 
-/** Tokens left for the conversation: the model's context less its output limit and the system text. */
-export function contextBudget(contextTokens: number, maxOutputTokens: number, system: string): number {
+/** Tokens left for the conversation: the model's context less its output limit and the system text (as `systemTokens` counts its parts). */
+export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">): number {
   return contextTokens - maxOutputTokens - systemTokens(system);
 }
 

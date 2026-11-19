@@ -191,9 +191,30 @@ describe("reviewInput", () => {
   it("three word lists: REMEMBER only asks for a review at once, FORGET and LOCK are what let a remove and a lock apply; EXPLICIT is their union", () => {
     for (const t of ["记住我不吃辣", "帮我记一下", "记下来", "别忘了", "please remember this", "覚えてね"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, true, false, false]);
     for (const t of ["忘掉那个", "忘了它吧", "别记这个", "不用记了", "删掉它", "Forget it", "忘れて", "消して"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, true, false]);
-    for (const t of ["锁起来", "锁上它", "放进保险箱", "别告诉别人", "please lock it", "秘密にして"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, false, true]);
+    for (const t of ["锁起来", "锁进保险箱", "放进保险箱", "别告诉别人", "不要告诉别人", "please lock it", "Lock this", "lock that one", "秘密にして"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, false, true]);
     for (const t of ["记住", "忘掉", "锁起来", "别记", "秘密にして", "消して"]) expect([t, EXPLICIT.test(t)]).toEqual([t, true]);
     expect(EXPLICIT.test("今天天气不错")).toBe(false);
+  });
+
+  it("FORGET does not open the remove gate on a negated forget or one that asks to remember; LOCK not on unlock, clock or a door locked", () => {
+    for (const t of [
+      "别忘了",
+      "别忘了它",
+      "不要忘",
+      "不要忘了它",
+      "不要忘掉这件事",
+      "don't forget my birthday",
+      "Do not forget it",
+      "never forget that",
+      "I always forget my keys",
+      "I keep forgetting names",
+      "别记错了",
+    ]) {
+      expect([t, FORGET.test(t)]).toEqual([t, false]);
+    }
+    for (const t of ["unlock it", "the clock is wrong", "门锁上了吗", "a lock of hair"]) expect([t, LOCK.test(t)]).toEqual([t, false]);
+    // What asks to forget or to lock still does.
+    for (const t of ["忘掉那个", "忘了它吧", "别记这个", "删掉它", "Forget it", "please forget my address"]) expect([t, FORGET.test(t)]).toEqual([t, true]);
   });
 
   it("the review window ends at the owner's last line: two Agent lines before an owner line are both shown, a trailing Agent line is left for the next review, and the window stops at the owner's line", async () => {
@@ -698,6 +719,40 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
       { who: "agent", text: "要加糖吗？" },
       { who: "owner", text: "不加" },
     ]);
+  });
+
+  it("the window never reaches back across a new topic: an Agent question left before it is not shown with the owner's first line after it", async () => {
+    const w = await owned("tpr");
+    await exchange(w, "我喜欢茶", "要加糖吗？");
+    await quietThen(ops(add("喜欢茶")));
+    const reviewed = (await reviewedSeq(w.agent.id, w.conv))!;
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.conv}/topic`)).status).toBe(201);
+    await memory().idle();
+    await exchange(w, "好的", "好。");
+    const agent = (await readOwnedAgent(db, w.owner.id, w.agent.id))!;
+    const input = (await reviewInput(db, agent, w.conv, reviewed, { kinds: new Set(["owner", "self"]), config: app.deps.config, now: new Date() }))!;
+    expect(JSON.parse(input.user).conversation).toEqual([{ who: "owner", text: "好的" }]);
+    await quietThen(ops());
+  });
+
+  it("words of the old topic nobody reviewed yet are reviewed apart from the new topic's, one review after the other", async () => {
+    const w = await owned("tps");
+    await exchange(w, "我喜欢茶", "要加糖吗？");
+    // The review the new topic asks for fails: the old topic's words are still to be reviewed.
+    gateway.fail("provider_unavailable");
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.conv}/topic`)).status).toBe(201);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(1);
+    await exchange(w, "我下周去北京", "好。");
+    gateway.reply(ops(add("喜欢茶"))).reply(ops(add("下周去北京")));
+    clock.advance(10 * MIN);
+    await memory().idle();
+    const calls = reviewCalls();
+    expect(calls).toHaveLength(3);
+    const conversationOf = (c: (typeof calls)[number]) => JSON.parse((c.messages[0]!.parts[0] as { text: string }).text).conversation;
+    expect(conversationOf(calls[1]!)).toEqual([{ who: "owner", text: "我喜欢茶" }]);
+    expect(conversationOf(calls[2]!)).toEqual([{ who: "owner", text: "我下周去北京" }]);
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text).sort()).toEqual(["下周去北京", "喜欢茶"].sort());
   });
 
   const heldWorld = async (name: string) => {

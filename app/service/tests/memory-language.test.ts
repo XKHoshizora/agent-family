@@ -458,6 +458,17 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect(await ownerTexts(owner.id)).toEqual([{ text: "喜欢喝茶", vault: false }]);
   });
 
+  it("a call that started and then failed upstream is a failed room in a 200, not a 503: only a call that could not start at all is", async () => {
+    const owner = await signUp(app, "cf9b");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    gateway.fail("provider_unavailable");
+    const res = await convert(owner);
+    expect([res.status, res.json]).toEqual([200, { rooms: 1, converted: 0, kept: 0, noRoom: 0, failedRooms: 1 }]);
+    expect(await ownerTexts(owner.id)).toEqual([{ text: "喜欢喝茶", vault: false }]);
+  });
+
   it("a truncated answer is a failed room: not counted in kept", async () => {
     const owner = await signUp(app, "cf7");
     const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });

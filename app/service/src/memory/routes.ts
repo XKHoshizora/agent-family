@@ -273,7 +273,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const result = await app.deps.memory?.convert(me.id, language);
       if (result === "busy") throw new AppError(409, "busy");
       if (!result) throw new AppError(503, "unavailable");
-      // No room could be processed at all because no call could be made (the allowance is empty, no model resolves): nothing happened, say so.
+      // No room's call could even start (the allowance is empty, no model resolves, too many calls running): nothing happened, say so. A call
+      // that started and failed is a failed room of a 200.
       if (result.rooms > 0 && result.unanswered === result.rooms) throw new AppError(503, "unavailable");
       return result;
     },

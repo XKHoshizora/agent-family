@@ -3,7 +3,7 @@ import { createAgentPort, type DbAgentPort } from "../src/agents/port-impl.ts";
 import { isRunEnd, NOTHING } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import { contextBudget } from "../src/agents/runtime/context.ts";
-import { fitNotes, groupSystemPrompt, notesPassage, passageBudget, splitPassage, systemPrompt, systemTokens, type PromptNotes } from "../src/agents/runtime/prompt.ts";
+import { fitNotes, groupSystemPrompt, groupSystemText, labelSafe, notesPassage, passageBudget, systemPrompt, systemText, systemTokens, type PromptNotes } from "../src/agents/runtime/prompt.ts";
 import { estimateTokens } from "../src/metering/prices.ts";
 import { TOKENS_PER_WEIGHT, weight } from "../src/memory/weight.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
@@ -36,7 +36,9 @@ const MID = {
   pdf: false,
   reasoning: [],
 };
-const ENV = { ...SITE_ENV, SITE_MODELS: JSON.stringify([...JSON.parse(SITE_ENV.SITE_MODELS), MID]), RATE_LIMIT_SCALE: "1000", SITE_TIMEZONE: "Asia/Shanghai" };
+/** A small model: 16k of context of which 4k is its output limit. */
+const SMALL = { ...MID, id: "small16k", label: "small16k", model: "small-1", maxOutputTokens: 4_000, contextTokens: 16_000 };
+const ENV = { ...SITE_ENV, SITE_MODELS: JSON.stringify([...JSON.parse(SITE_ENV.SITE_MODELS), MID, SMALL]), RATE_LIMIT_SCALE: "1000", SITE_TIMEZONE: "Asia/Shanghai" };
 
 const gateway = scriptedGateway();
 /** Every line the app logs (info and up): where nothing of a note may ever be. */
@@ -539,24 +541,67 @@ describe("the context budget counts the notes passage as fitNotes does: in weigh
     ["English", { owner: fullRoom("owner", (i) => `note ${i} ${"abcdefg ".repeat(70)}`.trim(), 10), self: fullRoom("self", (i) => `note ${i} ${"abcdefg ".repeat(70)}`.trim(), 15), hearsay: [] }],
   ];
 
-  it("splitPassage finds the passage wherever it stands, and none when there is none", () => {
-    const passage = notesPassage({ ...EMPTY, owner: [note("owner", "喜欢茶")] }, false, ZONE);
-    expect(splitPassage(`前\n\n${passage}\n\n后`)).toEqual({ rest: "前\n\n\n\n后", passage });
-    expect(splitPassage("没有笔记")).toEqual({ rest: "没有笔记", passage: "" });
+  it("the measure takes the parts the system text was composed from: a persona holding the notes heading and a JSON line is measured as persona, never as the passage", () => {
+    const notes = { ...EMPTY, owner: [note("owner", "喜欢茶")] };
+    const heading = notesPassage(notes, false, ZONE).split("\n\n")[0]!;
+    const persona = `${heading}\n\n{"about_owner":["${"x".repeat(600)}"]}`;
+    const own = systemText({ name: "A", persona, ownerAppellation: null }, { displayName: "主人" }, NOW, "normal", ZONE, notes);
+    expect(own.text).toBe(systemPrompt({ name: "A", persona, ownerAppellation: null }, { displayName: "主人" }, NOW, "normal", ZONE, notes));
+    expect(own.passage).toBe(notesPassage(notes, false, ZONE, labelSafe("主人")));
+    expect(own.rest).toContain(persona);
+    expect(own.text.replace(own.passage, "")).toBe(own.rest);
+    expect(systemTokens(own)).toBe(estimateTokens(own.rest) + weight(own.passage) * TOKENS_PER_WEIGHT);
+    // In a group the persona comes after the passage: the same.
+    const scene = { title: "群", agents: [], more: false, people: [], morePeople: false };
+    const grouped = groupSystemText({ name: "A", handle: "a_bot", persona }, { displayName: "主人" }, scene, NOW, ZONE, "k7f2ab", false, notes);
+    expect(grouped.text).toBe(groupSystemPrompt({ name: "A", handle: "a_bot", persona }, { displayName: "主人" }, scene, NOW, ZONE, "k7f2ab", false, notes));
+    expect(grouped.passage).toBe(notesPassage(notes, true, ZONE, labelSafe("主人")));
+    expect(grouped.text.replace(grouped.passage, "")).toBe(grouped.rest);
+    expect(grouped.rest).toContain(persona);
+    // No notes: no passage, all of it is the rest.
+    const plain = systemText({ name: "A", persona, ownerAppellation: null }, { displayName: "主人" }, NOW, "normal", ZONE);
+    expect(plain).toEqual({ text: plain.rest, rest: plain.rest, passage: "" });
   });
 
   it("the passage's share of the estimate is at most passageShare of the room for input (plus a little rounding), in every script", () => {
     const [context, out, share] = [16_000, 4_000, 0.25];
     for (const [name, notes] of rooms) {
       const fitted = fitNotes(notes, false, ZONE, "主人", passageBudget(context, out, share)).notes;
-      const system = systemPrompt({ name: "A", persona: "你是一个说话简洁的助手。", ownerAppellation: null }, { displayName: "主人" }, NOW, "normal", ZONE, fitted);
-      const { rest, passage } = splitPassage(system);
+      const system = systemText({ name: "A", persona: "你是一个说话简洁的助手。", ownerAppellation: null }, { displayName: "主人" }, NOW, "normal", ZONE, fitted);
+      const { rest, passage } = system;
       expect(passage.length, name).toBeGreaterThan(0);
       expect(weight(passage) * TOKENS_PER_WEIGHT, name).toBeLessThanOrEqual(share * (context - out) + 50);
       expect(systemTokens(system), name).toBe(estimateTokens(rest) + weight(passage));
       // A 16k model with a 4k output limit still has room for conversation, whatever the script.
       expect(contextBudget(context, out, system), name).toBeGreaterThan(5_000);
     }
+  });
+});
+
+describe("a run on a small model with full rooms", () => {
+  it("a site model of 16k context and a 4k output limit, with full English rooms (2000 and 3000 weight), replies to a conversation of 20 lines and is shown at least 10 of them", async () => {
+    const owner = await signUp(app, "mpsmall");
+    const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: "small16k" }, persona: "You are brief." });
+    // Notes of exactly 100 weight (300 letters): 20 fill the owner's room, 30 the Agent's own.
+    const english = (tag: string, i: number) => `${tag} ${String(i).padStart(2, "0")} ${"likes long walks by the sea ".repeat(12)}`.slice(0, 300);
+    for (let i = 0; i < 20; i++) await insertOwner(owner.id, english("owner", i), false);
+    for (let i = 0; i < 30; i++) await insertSelf(agent.id, english("self", i), false);
+    expect((await db.query<{ w: number }>("select sum(ceil(octet_length(text) / 3.0))::int as w from owner_notes where owner_id = $1", [owner.id])).rows[0]!.w).toBe(2000);
+    expect((await db.query<{ w: number }>("select sum(ceil(octet_length(text) / 3.0))::int as w from agent_notes where agent_id = $1", [agent.id])).rows[0]!.w).toBe(3000);
+    const conv = agent.conversationId as string;
+    for (let i = 1; i <= 10; i++) {
+      await say(owner, conv, `question ${i} about the trip`);
+      await answer(`answer ${i} about the trip`);
+    }
+    await say(owner, conv, "one more question");
+    await answer("one more answer");
+    const runs = (await db.query<{ status: string; error: string | null }>("select status, error from agent_runs where owner_id = $1 and purpose = 'reply' order by created_at", [owner.id])).rows;
+    expect(runs.at(-1)).toEqual({ status: "done", error: null });
+    const shown = textsOf(lastCall()).join("\n");
+    const lines = Array.from({ length: 10 }, (_, i) => [`question ${i + 1} about the trip`, `answer ${i + 1} about the trip`]).flat();
+    expect(lines.filter((l) => shown.includes(l)).length).toBeGreaterThanOrEqual(10);
+    // The notes were cut to their share of the context, and some are there.
+    expect(lastCall().system).toMatch(/owner \d\d likes long walks/);
   });
 });
 

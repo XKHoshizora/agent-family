@@ -251,6 +251,11 @@ export interface MemoryConfig {
    * for owners who chose a model of their own provider). Its own allowance: never the owner's free allowance or balance.
    */
   freeDailyPoints: number;
+  /**
+   * How often the record of memory changes is swept (memory/sweep.ts: what is over is deleted, and a pending change discarded, 30 days
+   * on), in ms; its own timer, apart from the attachment sweep's `SWEEP_INTERVAL_MINUTES`. 0: no timer (`attachments:sweep` still runs it).
+   */
+  changesSweepMs: number;
 }
 
 /** `reviewMessageChars` was this setting's name before sizes were measured in weight: still read, when the new name is absent. */
@@ -295,6 +300,7 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
+  changesSweepMs: z.number().int().min(0).max(86_400_000).default(3_600_000),
 }));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

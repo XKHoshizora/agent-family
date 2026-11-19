@@ -103,10 +103,10 @@ describe("the sweep of memory changes", () => {
     expect(rows.some((r) => /\(status, resolved_at\)/.test(r.indexdef))).toBe(true);
   });
 
-  it("runs on its own schedule: also when the attachment sweep is switched off (SWEEP_INTERVAL_MINUTES 0)", async () => {
+  it("runs on its own schedule (MEMORY.changesSweepMs): also when the attachment sweep is switched off (SWEEP_INTERVAL_MINUTES 0)", async () => {
     const w = await world();
     const old = await change(w, "applied", 40);
-    const sweeping = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 0 }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
+    const sweeping = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 0, memory: { ...app.deps.config.memory, changesSweepMs: 3_600_000 } }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
     try {
       await sweeping.ready();
       await vi.waitFor(async () => expect(await statusOf(old)).toBeNull(), { timeout: 5000 });
@@ -118,12 +118,26 @@ describe("the sweep of memory changes", () => {
   it("runs inside the app, with the attachment sweep the server already schedules", async () => {
     const w = await world();
     const old = await change(w, "applied", 40);
-    const sweeping = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 15 }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
+    const sweeping = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 15, memory: { ...app.deps.config.memory, changesSweepMs: 3_600_000 } }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
     try {
       await sweeping.ready();
       await vi.waitFor(async () => expect(await statusOf(old)).toBeNull(), { timeout: 5000 });
     } finally {
       await sweeping.close();
+    }
+  });
+
+  it("changesSweepMs 0 is no timer at all, whatever SWEEP_INTERVAL_MINUTES says; the test harness sets 0", async () => {
+    expect(app.deps.config.memory.changesSweepMs).toBe(0);
+    const w = await world();
+    const old = await change(w, "applied", 40);
+    const quiet = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 15, memory: { ...app.deps.config.memory, changesSweepMs: 0 } }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
+    try {
+      await quiet.ready();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await statusOf(old)).toBe("applied");
+    } finally {
+      await quiet.close();
     }
   });
 });

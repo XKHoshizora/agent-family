@@ -14,7 +14,8 @@ import { EXPLICIT } from "./review.ts";
  * something to be remembered, forgotten or locked, and at once when the owner starts a new topic. A trigger never fires
  * unless the owner said something after what the last attempt looked at, so a review that failed is not asked again for the
  * same words. One job per Agent at a time (a trigger meanwhile waits and runs once after it), at most
- * `MAX_REVIEWS_AT_ONCE` overall.
+ * `MAX_REVIEWS_AT_ONCE` overall. A review never reaches across a new topic (review.ts): one that left the owner's words of a later
+ * topic asks (`more`) for another review of the pair, queued at once and run after it.
  *
  * A flagged group message (`flagged`, after the judgement wrote its `memory_flags` row) waits for the group's quiet too:
  * the pair's wake-up (hearsay.ts `runFlags`: the owner's own remarks reviewed, then the hearsay) runs `MEMORY.groupQuietMs`
@@ -144,6 +145,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         closing,
         attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
         again: (afterMs) => void (job.kind === "flags" && armFlags(job, afterMs)),
+        // Queued now, it runs once this job is done (one job per Agent at a time).
+        more: () => void (job.kind === "review" && enqueueIfNew(job)),
         hearsayCalls: hearsayCalls.get(key) ?? [],
         changed: (agentId) => api.changed(agentId),
         dream,
