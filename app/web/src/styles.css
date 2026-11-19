@@ -288,6 +288,7 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .memory-foot, .memory-hint { margin: 6px 0 0; font-size: 13px; }
 .memory-card { width: min(420px, 100%); }
 /* The memory palace: a room's open entries as bordered rows, the vault block set apart under them. A row wraps (text, then its actions) on a phone. */
+.memory-stale { margin: 4px 0; font-size: 13px; }
 .memory-switches { margin: 0; padding: 0; border: 0; min-width: 0; }
 .memory-room { margin: 4px 0 22px; max-width: var(--field-w); }
 .memory-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }

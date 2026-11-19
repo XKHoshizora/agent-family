@@ -5,7 +5,7 @@ import { appellation as appellationProblem } from "../auth/validation.js";
 import { entity } from "../state/selectors.js";
 import { friendIds } from "../state/social.js";
 import { Btn, Tag, composing } from "../ui/primitives.jsx";
-import { refusalText, settled, useAction } from "./useAction.js";
+import { useRowWrite } from "./useAction.js";
 
 /**
  * Whom the owner may still name for this Agent, composed from what the app holds: my friends and the members (people
@@ -28,25 +28,17 @@ function candidatesFor(state, agent, entries) {
 }
 
 /**
- * The writes of one row, one at a time (`useAction`, which does not toast here): `pending` says one is running, `error` is
- * the sentence of the last refusal, shown under the row. `valid` says whether a typed appellation is one (and shows why not).
+ * The writes of one row (`useRowWrite`; a success needs nothing more, the row is replaced). `valid` says whether a typed
+ * appellation is one (and shows why not).
  */
 function useWrite() {
-  const { busy, run } = useAction();
-  const [error, setError] = useState("");
+  const { pending, error, setError, write } = useRowWrite();
   const valid = (typed) => {
     const problem = appellationProblem(typed);
     setError(problem);
     return !problem;
   };
-  /** Runs `call` (an action); true when the service took it. A refusal is kept for the row; a success needs nothing (the row is replaced). */
-  const write = async (call) => {
-    setError("");
-    const res = await run("write", () => settled(call()), () => "");
-    if (!res.ok && res.error?.code !== "busy_here") setError(refusalText(res.error));
-    return res.ok;
-  };
-  return { pending: busy !== null, error, valid, write };
+  return { pending, error, valid, write };
 }
 
 /** Enter saves a row (`save`), never the Agent's form it sits in; Enter that confirms an input method's candidate is not Enter. */

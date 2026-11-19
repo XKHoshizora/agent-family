@@ -169,12 +169,13 @@ function Conversations({ agent }) {
 
 /** 记忆宫殿 of an Agent: its own notes (with their vault) and what it heard, read together and again after each write. */
 function AgentMemory({ agent }) {
-  const { room, failure, reload } = useMemoryRoom(agent.id);
+  const memory = useMemoryRoom(agent.id);
+  const { room, failure } = memory;
   if (!room) return failure ? <p className="field-msg" role="alert">{failure}</p> : <p className="muted">正在读取…</p>;
   return (
     <>
-      <MemoryRoom agentId={agent.id} agentName={agent.name} title={`${agent.name}自己的笔记`} room={room} reload={reload} />
-      {room.hearsay && <MemoryHearsay agentId={agent.id} agentName={agent.name} room={room} reload={reload} />}
+      <MemoryRoom agentId={agent.id} agentName={agent.name} title={`${agent.name}自己的笔记`} memory={memory} />
+      {room.hearsay && <MemoryHearsay agentId={agent.id} agentName={agent.name} memory={memory} />}
     </>
   );
 }
@@ -218,8 +219,9 @@ function AgentDetail({ agent }) {
   const { busy, run } = useAction();
   const [deleting, setDeleting] = useState(false);
   const { nav } = state;
-  const tab = nav.agentTab ?? "profile";
   const live = agent.loaded && !agent.deleted;
+  // The memory tab is for a live Agent: one deleted while it is open falls back to the profile, as a tab not offered does.
+  const tab = nav.agentTab === "memory" && !live ? "profile" : (nav.agentTab ?? "profile");
   const note = nav.agentNote?.agentId === agent.id ? nav.agentNote.text : null;
   const toggle = () => run("pause", () => settled(agent.paused ? actions.resumeAgent(agent.id) : actions.pauseAgent(agent.id)), refusalText);
 

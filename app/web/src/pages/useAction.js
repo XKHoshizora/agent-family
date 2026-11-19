@@ -49,6 +49,51 @@ export function useAction() {
   return { busy, run };
 }
 
+/**
+ * The writes of a row that saves itself, one at a time: `pending` says one is running (or its follow-up, `after`, which
+ * runs once the service took the write, is: the row stays locked until it returns); `error` is the sentence of the last
+ * refusal, shown under the row (`setError` lets a row put its own there). `refused(res)` runs after a refusal.
+ * `write(call)` runs an action and says whether the service took it. Nothing is toasted.
+ */
+export function useRowWrite({ after, refused } = {}) {
+  const { busy, run } = useAction();
+  const [error, setError] = useState("");
+  const [settling, setSettling] = useState(false);
+  const alive = useRef(true);
+  const inflight = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  const write = async (call) => {
+    if (inflight.current) return false;
+    inflight.current = true;
+    setError("");
+    try {
+      const res = await run("write", () => settled(call()), () => "");
+      if (res.ok) {
+        if (after) {
+          setSettling(true);
+          try {
+            await after();
+          } finally {
+            if (alive.current) setSettling(false);
+          }
+        }
+      } else if (res.error?.code !== "busy_here") {
+        setError(refusalText(res.error));
+        refused?.(res.error);
+      }
+      return res.ok;
+    } finally {
+      inflight.current = false;
+    }
+  };
+  return { pending: busy !== null || settling, error, setError, write };
+}
+
 /** The current time, refreshed every `everyMs` while the component is mounted (shown). */
 export function useNow(everyMs = 60 * 1000) {
   const [now, setNow] = useState(() => Date.now());

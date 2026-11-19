@@ -4,7 +4,7 @@ import { ME } from "../data/identities.js";
 import { profileErrorText } from "../data/errorTexts.js";
 import { displayName as displayNameProblem } from "../auth/validation.js";
 import { entity, nameOf } from "../state/selectors.js";
-import { Avatar, Btn, Field, KV, Tag } from "../ui/primitives.jsx";
+import { Avatar, Btn, Field, KV, Reason, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
 import { BlockModal } from "./BlockModal.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
@@ -196,35 +196,50 @@ const NEW_NOTES = [
 function NewNotesSetting() {
   const { actions } = useStore();
   const { busy, run } = useAction();
+  // null: being read; "": could not be read (the box stays off and says so).
   const [value, setValue] = useState(null);
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     let alive = true;
     actions.loadNewNotes().then((res) => {
-      if (alive) setValue(res.ok ? res.value : "auto");
+      if (alive) setValue(res.ok ? res.value : "");
     });
     return () => {
       alive = false;
     };
-  }, [actions]);
+  }, [actions, attempt]);
+  const retry = () => {
+    setValue(null);
+    setAttempt((n) => n + 1);
+  };
   const change = async (event) => {
     const next = event.target.value;
     const res = await run("newNotes", () => settled(actions.setNewNotes(next)), refusalText);
     if (res.ok) setValue(res.value);
   };
   return (
+    <>
     <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
-      <select value={value ?? "auto"} disabled={value === null || busy !== null} onChange={change}>
+      <select value={value ?? ""} disabled={!value || busy !== null} onChange={change}>
+        {!value && <option value="" hidden>{value === null ? "正在读取…" : "读取失败"}</option>}
         {NEW_NOTES.map(([id, label]) => (
           <option key={id} value={id}>{label}</option>
         ))}
       </select>
     </Field>
+    {value === "" && (
+      <Reason>
+        没能读取这项设置，请重试。 <Btn small onClick={retry}>重试</Btn>
+      </Reason>
+    )}
+    </>
   );
 }
 
 /** 记忆宫殿: how new notes are sorted, and the room 关于我 (shared by all my Agents). */
 function MemoryPage() {
-  const { room, failure, reload } = useMemoryRoom(null);
+  const memory = useMemoryRoom(null);
+  const { room, failure } = memory;
   return (
     <section className="page" aria-label="记忆宫殿">
       <BackButton />
@@ -237,7 +252,7 @@ function MemoryPage() {
       <div className="page-body">
         <NewNotesSetting />
         {room ? (
-          <MemoryRoom title="关于我" helper="你名下的所有 Agent 共用这一份。" room={room} reload={reload} />
+          <MemoryRoom title="关于我" helper="你名下的所有 Agent 共用这一份。" memory={memory} />
         ) : failure ? (
           <p className="field-msg" role="alert">{failure}</p>
         ) : (
