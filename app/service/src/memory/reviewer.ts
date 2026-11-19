@@ -271,8 +271,14 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     const job: Job = { kind: "review", agentId, conversationId };
     const reviewed = await reviewedSeq(db, agentId, conversationId);
     const fresh = await ownerSince(agentId, conversationId, Math.max(reviewed, attempted.get(keyOf(agentId, conversationId)) ?? 0));
+    // The replies since the last review: those after the owner's first line it has not looked at (a review stops at the owner's last
+    // line, so the Agent's reply to it comes after `reviewed` but answers what was reviewed).
     const { rows } = await db.query<{ replies: number }>(
-      "select count(*)::int as replies from messages where conversation_id = $1 and sender_id = $2 and kind = 'text' and seq > $3 and (body -> 'fixed') is distinct from 'true'::jsonb",
+      `select count(*)::int as replies from messages m
+        where m.conversation_id = $1 and m.sender_id = $2 and m.kind = 'text' and m.seq > $3 and (m.body -> 'fixed') is distinct from 'true'::jsonb
+          and m.seq > coalesce((select min(o.seq) from messages o
+                                 where o.conversation_id = $1 and o.kind in ('text', 'file') and o.seq > $3
+                                   and o.sender_id = (select owner_id from principals where id = $2)), 9223372036854775807)`,
       [conversationId, agentId, reviewed],
     );
     if (fresh !== null && ((rows[0]?.replies ?? 0) >= config.memory.maxReplies || EXPLICIT.test(fresh.text))) {
@@ -320,7 +326,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
              join agents a on a.principal_id = m.sender_id and a.memory and not a.paused and a.deleted_at is null
              left join memory_review_state s on s.agent_id = m.sender_id and s.conversation_id = m.conversation_id
             where m.kind = 'text' and m.created_at > now() - interval '${RESUME_WINDOW}' and (m.body -> 'fixed') is distinct from 'true'::jsonb
-              and m.seq > coalesce(s.reviewed_seq, 0)`,
+              and m.seq > coalesce(s.reviewed_seq, 0)
+              and exists (select 1 from messages o
+                           where o.conversation_id = m.conversation_id and o.kind in ('text', 'file') and o.seq > coalesce(s.reviewed_seq, 0) and o.seq < m.seq
+                             and o.sender_id = (select owner_id from principals where id = m.sender_id))`,
         );
         for (const r of rows) {
           if (arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;

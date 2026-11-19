@@ -1901,7 +1901,7 @@ describe("the 记忆 section of the form", () => {
   const MEMORY = "记忆";
   const ASK = "先问我再记";
   const SHARED = "使用共用的“关于我”";
-  const HELPER = "它会记住关于你的事和自己学到的事。复盘花的是你的点。";
+  const HELPER = "它会记住关于你的事和自己学到的事。记忆每天有自己的额度，不占用你聊天的额度。";
   const sw = (label) => inMain().getByLabelText(label);
   const save = () => click(inMain().getByRole("button", { name: "保存" }));
   const openEditOf = async (fields = {}) => {

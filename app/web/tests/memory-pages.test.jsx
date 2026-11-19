@@ -38,11 +38,11 @@ const note = (id, text, fields = {}) => ({
  * A fake memory service: the rooms' routes over mutable notes; `used` counts the characters of both lists as the service does.
  * `over` replaces any route.
  */
-function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, fits = true, over = {} } = {}) {
-  const s = { notes: [...notes], hearsay: [...hearsay], limit, hearsayLimit, fits };
+function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, fits = true, maxNotes = undefined, over = {} } = {}) {
+  const s = { notes: [...notes], hearsay: [...hearsay], limit, hearsayLimit, fits, maxNotes };
   let n = 100;
   const used = () => weightOf(s.notes);
-  const room = () => ({ notes: structuredClone(s.notes), used: used(), limit: s.limit });
+  const room = () => ({ notes: structuredClone(s.notes), used: used(), limit: s.limit, ...(s.maxNotes === undefined ? {} : { maxNotes: s.maxNotes }) });
   const agentRoom = () => ({
     ...room(),
     hearsay: structuredClone(s.hearsay),
@@ -279,6 +279,24 @@ describe("the 关于我 room on the Settings page", () => {
     typeInto(scope.getByLabelText("新的笔记"), "字".repeat(10));
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(false);
     expect(scope.queryByText(/太长/)).toBeNull();
+  });
+
+  it("the text is measured as the service will store it: its line breaks and runs of spaces are one space, and it is trimmed", async () => {
+    await openPalace(service({ notes: [note("a", "茶".repeat(90))], limit: 100 }));
+    const scope = inRoom("关于我");
+    // 10 characters with a run of 5 spaces: stored as 10 + 1 + 1 = 12 > 10 left? no: "字"*5 + " " + "字"*5 is 11 weight, over by one.
+    typeInto(scope.getByLabelText("新的笔记"), `${"字".repeat(5)}     ${"字".repeat(5)}`);
+    expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
+    typeInto(scope.getByLabelText("新的笔记"), `${"字".repeat(5)}\n\n  ${"字".repeat(4)}`);
+    expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(false);
+  });
+
+  it("a room that already holds its most notes cannot take another, and says so", async () => {
+    await openPalace(service({ notes: [note("a", "我不吃辣"), note("b", "我住上海")], limit: 100, maxNotes: 2 }));
+    const scope = inRoom("关于我");
+    typeInto(scope.getByLabelText("新的笔记"), "喜欢茶");
+    expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
+    expect(scope.getByText("这个房间装不下了，先删掉或合并几条。")).toBeTruthy();
   });
 
   it("the room left is counted in weight (utf-8 bytes / 3), as the service counts it: an emoji is 4 bytes, an English letter a third", async () => {

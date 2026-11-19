@@ -62,7 +62,7 @@ function notesGiven(call) {
   }
   return {};
 }
-const aboutOwner = (call) => (notesGiven(call).about_owner ?? []).map((n) => n.text);
+const aboutOwner = (call) => (notesGiven(call).about_owner ?? []);
 
 /** Settings → 记忆宫殿: the room 关于我. */
 async function openPalace(page) {

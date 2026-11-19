@@ -857,7 +857,7 @@ const count = (n) => (Number.isFinite(n) && n >= 0 ? n : 0);
 export function memoryRoomOf(answer) {
   if (!answer || !Array.isArray(answer.notes) || !Number.isFinite(answer.limit)) return null;
   const notes = answer.notes.filter(isNote).map((n) => ({ ...n, vault: n.vault === true, unsure: n.unsure === true }));
-  const room = { notes, used: count(answer.used), limit: answer.limit, fits: answer.fits !== false, hearsay: null, hearsayUsed: 0, hearsayLimit: 0 };
+  const room = { notes, used: count(answer.used), limit: answer.limit, maxNotes: Number.isFinite(answer.maxNotes) && answer.maxNotes > 0 ? answer.maxNotes : undefined, fits: answer.fits !== false, hearsay: null, hearsayUsed: 0, hearsayLimit: 0 };
   if (Array.isArray(answer.hearsay)) {
     room.hearsay = answer.hearsay.filter(isHeard).map((h) => ({ ...h, group: h.group && typeof h.group === "object" ? h.group : null }));
     room.hearsayUsed = count(answer.hearsayUsed);

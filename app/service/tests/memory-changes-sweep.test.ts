@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.ts";
-import { CHANGE_KEEP_DAYS, sweepMemoryChanges } from "../src/memory/sweep.ts";
+import { CHANGE_KEEP_DAYS, CHANGE_SWEEP_BATCH, sweepMemoryChanges } from "../src/memory/sweep.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -83,6 +83,36 @@ describe("the sweep of memory changes", () => {
     const base = `/api/agents/${w.agent.id}/memory/changes`;
     expect((await api(app, w.owner, "POST", `${base}/${gone}/undo`)).status).toBe(404);
     expect((await api(app, w.owner, "POST", `${base}/${stale}/confirm`)).status).toBe(409);
+  });
+
+  it("is bounded: at most `batches` batches of `batch` rows a run (500 and 20 by default), the rest on the next run", async () => {
+    const w = await world();
+    for (let i = 0; i < 5; i++) await change(w, "applied", 40 + i);
+    for (let i = 0; i < 3; i++) await change(w, "pending", 40 + i);
+    expect(CHANGE_SWEEP_BATCH).toBe(500);
+    // 3 pending ones are discarded 2 + 1 (within 2 batches); then the deletes: 2 batches of 2 of the 5 applied (+ the 3 just discarded are not old by resolved_at).
+    const first = await sweepMemoryChanges(db, new Date(), { batch: 2, batches: 2 });
+    expect(first).toEqual({ discarded: 3, deleted: 4 });
+    expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(4);
+    const next = await sweepMemoryChanges(db, new Date(), { batch: 2, batches: 2 });
+    expect(next.deleted).toBe(1);
+  });
+
+  it("has an index on (status, resolved_at) for it", async () => {
+    const { rows } = await db.query<{ indexdef: string }>("select indexdef from pg_indexes where tablename = 'memory_changes'");
+    expect(rows.some((r) => /\(status, resolved_at\)/.test(r.indexdef))).toBe(true);
+  });
+
+  it("runs on its own schedule: also when the attachment sweep is switched off (SWEEP_INTERVAL_MINUTES 0)", async () => {
+    const w = await world();
+    const old = await change(w, "applied", 40);
+    const sweeping = await buildApp({ config: { ...app.deps.config, sweepIntervalMinutes: 0 }, db, blobs: app.deps.blobs }, { sweepInitialDelayMs: 20 });
+    try {
+      await sweeping.ready();
+      await vi.waitFor(async () => expect(await statusOf(old)).toBeNull(), { timeout: 5000 });
+    } finally {
+      await sweeping.close();
+    }
   });
 
   it("runs inside the app, with the attachment sweep the server already schedules", async () => {

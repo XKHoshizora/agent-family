@@ -30,7 +30,7 @@ export const OTHERS_BUDGET_DEFAULT = "20";
 /** 主动回复每天最多花 when nothing else is said, in points (the service's default); its amount is a budget like the others. */
 const PROACTIVE_BUDGET_DEFAULT = "20";
 /** The 记忆 switches: the form key, its label and what it says; the last two only matter while the first is on. */
-const MEMORY_HELPER = "它会记住关于你的事和自己学到的事。复盘花的是你的点。";
+const MEMORY_HELPER = "它会记住关于你的事和自己学到的事。记忆每天有自己的额度，不占用你聊天的额度。";
 const MEMORY_SWITCHES = [
   ["memoryAsk", "先问我再记", "记之前先在会话里问你，你同意了才记。"],
   ["sharedNotes", "使用共用的“关于我”", "和你名下其他开着这一项的 Agent 共用同一份。"],

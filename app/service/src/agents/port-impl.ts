@@ -29,7 +29,7 @@ import { postAsAgent } from "./conversation.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
-import { fitNotes, groupSystemPrompt, NO_NOTES, systemPrompt } from "./runtime/prompt.ts";
+import { fitNotes, groupSystemPrompt, NO_NOTES, passageBudget, systemPrompt } from "./runtime/prompt.ts";
 import {
   actOnTriggered,
   followUp,
@@ -352,7 +352,7 @@ export class DbAgentPort implements AgentPort {
       const notes =
         !group && agent.persona === ""
           ? NO_NOTES
-          : fitNotes(await loadNotes(t, agent, { conversationId: run.conversationId, group }), group, config.siteTimezone, displayName, config.memory.passageShare * resolved.contextTokens).notes;
+          : fitNotes(await loadNotes(t, agent, { conversationId: run.conversationId, group }), group, config.siteTimezone, displayName, passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare)).notes;
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
       // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).

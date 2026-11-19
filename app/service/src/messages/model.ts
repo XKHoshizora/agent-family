@@ -42,7 +42,8 @@ export type SystemEvent =
    * change) the Agent's notes. `changeId` is the `memory_changes` row; `lines` tell what changed, `vaultLines` (the same
    * length) whether each line's note is in the vault afterwards. `unlock`: a request to take notes out of the vault.
    * `full`: a room was too full to take an entry. `status` is stored as it was written; a reader is sent the change's
-   * current one (messages/read.ts). No other reader is sent the notice at all.
+   * current one (messages/read.ts), or `expired` (with the lines it was stored with) once the record of the change has been swept: the
+   * notice stays, and offers nothing to decide. No other reader is sent the notice at all.
    */
   | {
       event: "memory_changed";
@@ -53,7 +54,7 @@ export type SystemEvent =
       pending: boolean;
       unlock: boolean;
       full: boolean;
-      status: "applied" | "undone" | "pending" | "discarded";
+      status: "applied" | "undone" | "pending" | "discarded" | "expired";
       /** Which tier of memory wrote it: after a conversation went quiet (`rest`, the default, and what every notice stored before was) or a consolidation of the notes alone (`dream`). */
       phase?: "rest" | "dream";
       /** The number of lines (`lines.length`); added when it is stored. */

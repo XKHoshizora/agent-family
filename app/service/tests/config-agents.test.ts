@@ -397,7 +397,7 @@ describe("the memory configuration", () => {
     groupMaxWaitMs: 900_000,
     reviewMessages: 40,
     reviewMessageWeight: 500,
-    reviewMaxOutputTokens: 800,
+    reviewMaxOutputTokens: 2000,
     shareAt: 0.6,
     sameAt: 0.8,
     hearsayAt: 0.65,

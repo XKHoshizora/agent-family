@@ -77,7 +77,7 @@ function systemView(system, alias) {
   return out;
 }
 
-const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded"]);
+const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded", "expired"]);
 
 /**
  * A `memory_changed` event as the chip and the cards read it: `lines` (strings only), `vaultLines` the same length (absent

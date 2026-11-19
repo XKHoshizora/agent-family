@@ -6,9 +6,10 @@ import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, memoryModel, type MemoryCallReport } from "./call.ts";
-import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
+import { cleanText, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
+import { dreamLines } from "./lines.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { todayIn } from "./review.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
@@ -120,7 +121,7 @@ const dreamSystem = (today: string, language: MemoryLanguage | null): string =>
     ...(language === null ? [] : [`8. 有不是${languageName(language)}的笔记，用 rewrite 改写成${languageName(language)}，意思不变，一次最多改 8 条。`]),
     "",
     "规矩：",
-    `- 每条新写的笔记一句短话（最多 ${MODEL_NOTE_MAX} 个字）。`,
+    "- 每条新写的笔记一句短话。",
     `- ${languageRule(language)}`,
     "- 不要编造：不要写任何笔记里没有的事。",
     "- 不要删掉任何一条，除非它已经合并进了另一条。",
@@ -249,27 +250,7 @@ export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: {
   }
 }
 
-/** What a dream tells the owner, line by line: `合并了 {k} 条：…` (k notes merged), `改成了：…`, `拆成了：{part 1}；{part 2}…`, `锁进了保险箱：…`, and for each whether its note is in the vault afterwards (a split: whether any part is). */
-export function dreamLines(ops: ReadonlyArray<StoredOp>): { lines: string[]; vaultLines: boolean[] } {
-  const lines: string[] = [];
-  const vaultLines: boolean[] = [];
-  for (const s of ops) {
-    if (s.op === "merge") {
-      lines.push(`合并了 ${1 + s.removed!.length} 条：${s.after}`);
-      vaultLines.push(s.vaultAfter === true);
-    } else if (s.op === "replace") {
-      lines.push(`改成了：${s.after}`);
-      vaultLines.push(s.vaultAfter === true);
-    } else if (s.op === "split") {
-      lines.push(`拆成了：${s.parts!.map((p) => p.text).join("；")}`);
-      vaultLines.push(s.parts!.some((p) => p.vault));
-    } else if (s.op === "lock") {
-      lines.push(`锁进了保险箱：${s.after}`);
-      vaultLines.push(true);
-    }
-  }
-  return { lines, vaultLines };
-}
+export { dreamLines } from "./lines.ts";
 
 // --- jobs --------------------------------------------------------------------------------------------------------------
 
@@ -371,6 +352,9 @@ async function switchOn(db: Db, ownerId: string): Promise<boolean> {
   return rows[0]?.dream === true;
 }
 
+/** A room with this share of `roomNotes` notes in it naps too. */
+const NAP_NOTES_AT = 0.9;
+
 /** A change was made: if it left a room of its owner's at or above `napAt` and that room was not consolidated within `dreamEveryMs`, that room is consolidated now (never with the switch off). */
 async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<void> {
   const { db, config } = deps;
@@ -381,9 +365,12 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
   // As a dream: three failed calls in a day and it waits for the next.
   if ((ctx.dream.failures.get(agent.ownerId) ?? []).filter((t) => t > now - DAY).length >= TRIES_A_DAY) return;
   // How full a room is is its weight, as everywhere (weight.ts).
+  // Or its count of notes: at 90% of `roomNotes` a room is tidied before it is refused for having too many.
+  const [ownerNotes, selfNotes] = [await listOwnerNotes(db, agent.ownerId), await listAgentNotes(db, agent.id)];
+  const crowded = (n: number): boolean => n >= NAP_NOTES_AT * config.memory.roomNotes;
   const full = {
-    owner: weightOf(await listOwnerNotes(db, agent.ownerId)) >= config.memory.napAt * limits.owner,
-    self: weightOf(await listAgentNotes(db, agent.id)) >= config.memory.napAt * limits.self,
+    owner: weightOf(ownerNotes) >= config.memory.napAt * limits.owner || crowded(ownerNotes.length),
+    self: weightOf(selfNotes) >= config.memory.napAt * limits.self || crowded(selfNotes.length),
   };
   const wanted: Array<{ room: DreamRoom; carrier: AgentRow }> = [];
   if (full.self) wanted.push({ room: { kind: "self", agentId: agent.id }, carrier: agent });

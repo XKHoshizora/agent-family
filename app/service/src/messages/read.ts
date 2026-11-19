@@ -3,6 +3,8 @@ import { formatPoints } from "../accounts/store.ts";
 import type { Config, ReasoningLevel } from "../config.ts";
 import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
+import type { StoredOp } from "../memory/apply.ts";
+import { dreamLines, linesOf } from "../memory/lines.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
 
@@ -124,15 +126,26 @@ interface ChangeRow {
   owner_id: string;
   status: "applied" | "undone" | "pending" | "discarded";
   full: boolean;
+  /** What the change recorded: only for a notice that asked first and was decided since, whose lines are written again (never sent as they are). */
+  ops: Array<StoredOp | { op: "hearsay_add" | "hearsay_drop" }>;
 }
 
-/** The changes the memory notices in `msgs` name, by id: whose they are and how they stand now (never their operations). */
-async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<Map<string, ChangeRow>> {
-  const ids = [...new Set(msgs.filter(isMemoryNotice).map((m) => m.body.changeId).filter((id): id is string => typeof id === "string" && UUID.test(id)))];
-  if (ids.length === 0) return new Map();
-  const { rows } = await q.query<ChangeRow>(`select id, owner_id, status, "full" from memory_changes where id = any($1::uuid[])`, [ids]);
-  return new Map(rows.map((r) => [r.id, r]));
+/**
+ * The changes the memory notices in `msgs` name, by id: whose they are and how they stand now; and the owners of the Agents the notices
+ * speak for (`owners`, by Agent id), which says whose a notice is once its change has been swept away.
+ */
+async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<{ changes: Map<string, ChangeRow>; owners: Map<string, string> }> {
+  const notices = msgs.filter(isMemoryNotice);
+  const ids = [...new Set(notices.map((m) => m.body.changeId).filter((id): id is string => typeof id === "string" && UUID.test(id)))];
+  const actors = [...new Set(notices.map((m) => m.body.actorId).filter((id): id is string => typeof id === "string" && UUID.test(id)))];
+  if (ids.length === 0) return { changes: new Map(), owners: new Map() };
+  const { rows } = await q.query<ChangeRow>(`select id, owner_id, status, "full", ops from memory_changes where id = any($1::uuid[])`, [ids]);
+  const owned = actors.length === 0 ? [] : (await q.query<{ id: string; owner_id: string }>("select id, owner_id from principals where id = any($1::uuid[]) and owner_id is not null", [actors])).rows;
+  return { changes: new Map(rows.map((r) => [r.id, r])), owners: new Map(owned.map((r) => [r.id, r.owner_id])) };
 }
+
+/** Whether `op` is a note's own operation (a change holds only one kind: a hearsay change has none of these). */
+const isNoteOp = (op: ChangeRow["ops"][number]): op is StoredOp => op.op !== "hearsay_add" && op.op !== "hearsay_drop";
 
 /**
  * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told
@@ -269,7 +282,7 @@ export async function toWireForReaders(
     return p && p.message_id === m.id && p.owner_id === reader ? p : null;
   };
 
-  const changes = await memoryChangesOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
+  const { changes, owners } = await memoryChangesOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
 
   for (const reader of readers) {
     const list = out.get(reader)!;
@@ -279,18 +292,26 @@ export async function toWireForReaders(
       if (isMemoryNotice(m)) {
         // Only the owner whose change it is is sent it (with the change's state now); no one else, whatever their access.
         const change = changes.get(String(m.body.changeId));
-        if (!change || change.owner_id !== reader) continue;
+        // The change's record is swept 30 days after it is over: the notice stays then, as its own owner's (the Agent's), with the lines it was
+        // stored with and nothing to decide (`expired`).
+        if (change ? change.owner_id !== reader : owners.get(String(m.body.actorId)) !== reader) continue;
         const wire = toWire(m, null, null, false, null);
         // A notice stored before 入梦 existed has neither phase nor count: it is a `rest` one.
         const lines = Array.isArray(m.body.lines) ? m.body.lines.length : 0;
+        const phase = m.body.phase === "dream" ? "dream" : "rest";
         wire.system = {
           ...wire.system!,
-          phase: m.body.phase === "dream" ? "dream" : "rest",
+          phase,
           count: typeof m.body.count === "number" ? m.body.count : lines,
-          status: change.status,
-          pending: change.status === "pending",
-          full: change.full,
+          status: change ? change.status : "expired",
+          pending: change?.status === "pending",
+          full: change ? change.full : m.body.full === true,
         };
+        // A card that asked first (stored in the future tense) reads in the past once its change was done: written again from what the change recorded.
+        if (change && m.body.pending === true && m.body.unlock !== true && (change.status === "applied" || change.status === "undone")) {
+          const done = change.ops.filter(isNoteOp);
+          if (done.length > 0) Object.assign(wire.system, (phase === "dream" ? dreamLines : linesOf)(done, false));
+        }
         list.push(wire);
         continue;
       }

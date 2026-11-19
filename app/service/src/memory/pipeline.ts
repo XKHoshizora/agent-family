@@ -11,7 +11,7 @@ import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type AppliedOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
-import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
+import { lookedAt, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
 import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
 import { count, countNoteOps } from "./stats.ts";
@@ -112,13 +112,18 @@ export function announce(deps: Pick<PipelineDeps, "conversations" | "log">, noti
   }
 }
 
-/** What this owner has waiting for their yes: texts of added, replaced, merged or split entries, and the notes asked to be unlocked. */
-async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string> }> {
+/**
+ * What this owner has waiting for their yes: texts of added, replaced, merged or split entries, the notes asked to be unlocked, and
+ * each op that changes a note in place (replace, remove, lock) by what it names: an op identical to one of them is not proposed again.
+ */
+async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string>; held: Set<string> }> {
   const { rows } = await db.query<{ agent_id: string; ops: StoredOp[] }>("select agent_id, ops from memory_changes where owner_id = $1 and status = 'pending'", [agent.ownerId]);
   const texts: Array<{ kind: NoteKind; text: string }> = [];
   const unlocks = new Set<string>();
+  const held = new Set<string>();
   for (const row of rows) {
     for (const s of row.ops) {
+      if (s.noteId && (s.op === "replace" || s.op === "remove" || s.op === "lock")) held.add(heldKey(s.op, s.noteId, s.op === "replace" ? s.after : null));
       // The owner's room is shared by all their Agents; an Agent's own room is its own.
       if (s.kind === "self" && row.agent_id !== agent.id) continue;
       if ((s.op === "add" || s.op === "replace" || s.op === "merge") && s.after) texts.push({ kind: s.kind, text: s.after });
@@ -126,8 +131,11 @@ async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind
       if (s.op === "unlock" && s.noteId) unlocks.add(s.noteId);
     }
   }
-  return { texts, unlocks };
+  return { texts, unlocks, held };
 }
+
+/** One op that changes a note in place, as a pending change keeps it: what it does, to which note, with what text. */
+const heldKey = (op: string, noteId: string, text: string | null): string => `${op}|${noteId}|${text ?? ""}`;
 
 /** The kinds a review of `conversationId` may change; in a group the owner's room only for the owner's reviewing Agent there. */
 export async function kindsFor(db: Db, agent: AgentRow, conversationId: string, group: boolean): Promise<ReadonlySet<NoteKind>> {
@@ -148,7 +156,7 @@ export async function memoryNotice(
   t: Tx,
   locked: AgentRow,
   changeId: string,
-  how: { unlock: boolean; phase: "rest" | "dream"; linesOf: (ops: StoredOp[]) => { lines: string[]; vaultLines: boolean[] } },
+  how: { unlock: boolean; phase: "rest" | "dream"; linesOf: (ops: StoredOp[], pending: boolean) => { lines: string[]; vaultLines: boolean[] } },
 ): Promise<StoredMessage> {
   const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [changeId])).rows[0]!;
   let status = row.status;
@@ -156,7 +164,7 @@ export async function memoryNotice(
     await t.query("update memory_changes set status = 'applied', resolved_at = now() where id = $1", [changeId]);
     status = "applied";
   }
-  const { lines, vaultLines } = how.linesOf(row.ops);
+  const { lines, vaultLines } = how.linesOf(row.ops, status === "pending");
   return appendSystem(t, locked.conversationId, {
     event: "memory_changed",
     actorId: locked.id,
@@ -205,7 +213,10 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   if (answer === null && !ctx.closing.aborted) count(db, "review_failed");
   if (answer === null || ctx.closing.aborted) return;
 
-  const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
+  const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)])
+    .filter((op) => allowed(op, kinds, group, input.refs))
+    // What already waits in a pending change of this owner (the same op on the same note with the same text) is not proposed twice.
+    .filter((op) => !alreadyHeld(op, input.refs, pending.held));
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
   // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
@@ -232,8 +243,11 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     }
     strengthened = bumped.size;
     // In the owner's own conversation a destructive op needs the owner's words (`needsWords`): else it waits for their yes, all
-    // together in one pending change, the card 先问我再记 produces. With 先问我再记 on everything waits as one change anyway.
-    const held = group || locked.memoryAsk ? [] : changing.filter((op) => needsWords(op, input));
+    // together in one pending change, the card 先问我再记 produces. The ops that change a note in place depend on one another
+    // (a merge is a replace plus a remove, and the room check of the one counts on the space the other frees), so when ANY of them
+    // is held ALL of them are, together; adds apply at once. With 先问我再记 on everything waits as one change anyway.
+    const inPlace = changing.filter((op) => op.op === "replace" || op.op === "remove" || op.op === "lock");
+    const held: Op[] = group || locked.memoryAsk || !inPlace.some((op) => needsWords(op, input)) ? [] : inPlace;
     const direct = changing.filter((op) => !held.includes(op));
     const apply = (list: Op[], status: "applied" | "pending") =>
       applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, list, input.refs, {
@@ -277,15 +291,24 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
 }
 
 /**
- * Whether a destructive op of the owner's own conversation lacks the owner's words and so waits for their yes: a `remove` or a
- * `lock` unless some owner line of the review's window asks for it (`EXPLICIT`); a `replace` unless the owner said something
- * after the note was last changed. An `add` (or an `unlock`, which is only ever a request) never waits.
+ * Whether a destructive op of the owner's own conversation lacks the owner's words and so waits for their yes: a `remove` unless some
+ * owner line of the review's window asks to forget (`FORGET`), a `lock` unless one asks to lock (`LOCK`); a `replace` unless the window
+ * holds an owner line at all and one of them came after the note was last changed. An `add` (or an `unlock`, which is only ever a
+ * request) never waits.
  */
-function needsWords(op: Op, input: Pick<ReviewInput, "explicit" | "ownerAt" | "refs">): boolean {
-  if (op.op === "remove" || op.op === "lock") return !input.explicit;
+function needsWords(op: Op, input: Pick<ReviewInput, "forget" | "lock" | "ownerAt" | "refs">): boolean {
+  if (op.op === "remove") return !input.forget;
+  if (op.op === "lock") return !input.lock;
   if (op.op !== "replace") return false;
   const note = input.refs.get(op.ref);
-  return note === undefined || !input.ownerAt.some((at) => at > note.updatedAt);
+  return note === undefined || input.ownerAt.length === 0 || !input.ownerAt.some((at) => at > note.updatedAt);
+}
+
+/** Whether `op` is the same as one a pending change of this owner already holds (`pendingOf`). */
+function alreadyHeld(op: Op, refs: Map<string, RefNote>, held: ReadonlySet<string>): boolean {
+  if (op.op !== "replace" && op.op !== "remove" && op.op !== "lock") return false;
+  const note = refs.get(op.ref);
+  return note !== undefined && held.has(heldKey(op.op, note.id, op.op === "replace" ? op.text : null));
 }
 
 /** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */
@@ -348,7 +371,7 @@ async function exactRepeats(deps: PipelineDeps, agent: AgentRow, kinds: Readonly
   if (!Array.isArray(list)) return [];
   const keptKeys = new Set(kept.flatMap((o) => (o.op === "add" ? [sameKey(o.text)] : [])));
   const said = new Set<string>();
-  for (const raw of list.slice(0, MAX_OPS)) {
+  for (const raw of lookedAt(list)) {
     if (typeof raw !== "object" || raw === null) continue;
     const { op, kind, text } = raw as { op?: unknown; kind?: unknown; text?: unknown };
     if (op !== "add" || (kind !== "owner" && kind !== "self") || !kinds.has(kind) || typeof text !== "string") continue;

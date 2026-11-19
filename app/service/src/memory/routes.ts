@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { fitNotes } from "../agents/runtime/prompt.ts";
+import { fitNotes, passageBudget } from "../agents/runtime/prompt.ts";
 import { readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound, type ErrorDetails } from "../errors.ts";
@@ -53,7 +53,7 @@ const noteView = z.object({
   strength: z.number(),
   seenAt: z.string(),
 });
-const roomView = z.object({ notes: z.array(noteView), used: z.number(), limit: z.number() });
+const roomView = z.object({ notes: z.array(noteView), used: z.number(), limit: z.number(), maxNotes: z.number() });
 const hearsayView = z.object({
   id: z.string(),
   text: z.string(),
@@ -117,7 +117,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   async function view(room: Room): Promise<z.infer<typeof roomView>> {
     const notes = await listRoom(db, room);
     const sources = await sourcesOf(db, notes);
-    return { notes: notes.map((n) => toNoteView(n, sources)), used: weightOf(notes), limit: limitOf(room) };
+    return { notes: notes.map((n) => toNoteView(n, sources)), used: weightOf(notes), limit: limitOf(room), maxNotes: limits.notes! };
   }
 
   async function noteOf(q: Queryable, room: Room, id: string): Promise<z.infer<typeof noteView>> {
@@ -225,7 +225,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     }
     if (resolved === null) return true;
     const found = await loadNotes(db, agent, { conversationId: agent.conversationId, group: false });
-    return fitNotes(found, false, config.siteTimezone, ownerName, config.memory.passageShare * resolved.contextTokens).fits;
+    return fitNotes(found, false, config.siteTimezone, ownerName, passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare)).fits;
   }
   const mustLive = (agent: { deleted: boolean }): void => {
     if (agent.deleted) throw new AppError(409, "agent_deleted");

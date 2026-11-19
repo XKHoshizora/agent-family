@@ -327,6 +327,18 @@ describe("what a dream is shown", () => {
     ]);
   });
 
+  it("the dream's call may answer as much as a review's (config memory.reviewMaxOutputTokens, 2000 by default), and the prompt leaves the length of a note to the code", async () => {
+    const w = await owned("db1x");
+    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    gateway.reply(dreamAns());
+    await night();
+    const [call] = dreamCalls();
+    expect(call!.maxOutputTokens).toBe(app.deps.config.memory.reviewMaxOutputTokens);
+    expect(call!.maxOutputTokens).toBe(2000);
+    expect(call!.system).toContain("每条新写的笔记一句短话。");
+    expect(call!.system).not.toMatch(/最多 \d+ 个字/);
+  });
+
   it("the system text explains the jobs: today's notes, merging, the later date winning with bracketed history, moods as dated events, shortening when over 80%, no inventing, no deleting but by merging, notes as material, the answer's shape and the splitting", async () => {
     const w = await owned("db2");
     await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
@@ -659,10 +671,11 @@ describe("undo and asking first", () => {
     expect(await exactRows(w.owner.id)).toEqual(before);
     const cards = await chips(w.owner, w.conv);
     expect(cards).toHaveLength(1);
-    expect(cards[0].system).toMatchObject({ phase: "dream", pending: true, status: "pending", count: 2, lines: ["合并了 2 条：爱喝茶，不加糖", "拆成了：喜欢茶；对花生过敏"] });
+    expect(cards[0].system).toMatchObject({ phase: "dream", pending: true, status: "pending", count: 2, lines: ["要合并成：爱喝茶，不加糖", "要拆成：喜欢茶；对花生过敏"] });
     expect((await changeRows(w.owner.id)).map((r) => r.status)).toEqual(["pending"]);
     const done = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${cards[0].system.changeId}/confirm`);
     expect(done).toEqual({ status: 200, json: { status: "applied" } });
+    expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：爱喝茶，不加糖", "拆成了：喜欢茶；对花生过敏"]);
     expect((await ownerNotes(w.owner.id)).map((r) => [r.text, r.vault])).toEqual([
       ["爱喝茶，不加糖", false],
       ["喜欢茶", false],
@@ -733,6 +746,29 @@ describe("rooms, carriers and retries", () => {
     clock.advance(21 * HOUR);
     await memory().idle();
     expect(dreamCalls()).toHaveLength(2);
+  });
+
+  it("a nap also comes when a room reaches 90% of roomNotes (the count of notes), small as the notes are", async () => {
+    const was = app.deps.config.memory.roomNotes;
+    app.deps.config.memory.roomNotes = 20;
+    try {
+      const w = await owned("dg5");
+      for (let i = 0; i < 17; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [w.owner.id, `短${i}`]);
+      judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+      await exchange(w, "我喜欢喝咖啡");
+      gateway.reply(ops(add("喜欢喝咖啡")));
+      gateway.reply(dreamAns());
+      clock.advance(10 * MIN);
+      await memory().idle();
+      expect(dreamCalls()).toHaveLength(1);
+      const v = await owned("dg6");
+      for (let i = 0; i < 16; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [v.owner.id, `短${i}`]);
+      await exchange(v, "我喜欢喝咖啡");
+      await quietThen(ops(add("喜欢喝咖啡")));
+      expect(dreamCalls()).toHaveLength(1);
+    } finally {
+      app.deps.config.memory.roomNotes = was;
+    }
   });
 
   it("a room under 80% does not nap", async () => {

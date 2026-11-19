@@ -1,5 +1,6 @@
 import { randomInt } from "node:crypto";
 import { TOKENS_PER_WEIGHT, weight } from "../../memory/weight.ts";
+import { estimateTokens } from "../../metering/prices.ts";
 
 /**
  * The system text of a reply (spec 6.5 "发给模型的内容"). In the Agent's own conversation (`systemPrompt`): the site's
@@ -248,7 +249,9 @@ export function speakerShown(name: string, ownerName: string | null = null): str
  * The passage of the notes an Agent may use in this conversation (`group`: a group's), appended to the system text: a few
  * fixed sentences saying what follows and how to use it, then ONE `JSON.stringify` object, so that a note or a name is only
  * ever an escaped string and can never become another entry, another key or another speaker:
- * `{"about_owner":[{"text","date"}…],"own_notes":[{"text","date"}…],"heard":[{"said_by","said_by_owner":false,"group","text","date"}…]}`.
+ * `{"about_owner":["text"…],"own_notes":["text"…],"heard":[{"said_by","said_by_owner":false,"group","text","date"}…]}`: a note is its
+ * plain text (what changed is already written in the text when it matters, and a key and a date on every entry cost more than
+ * the note), a heard entry keeps its fields.
  * A key is there only for a room with entries; in a group `heard` entries leave out `group`. Every string is `cleanText`ed;
  * `said_by` is `speakerShown` with the owner's name (`ownerName`, as a label shows it: a stored name is checked again here, since
  * the owner may have been renamed since); `said_by_owner` is always false (what an Agent heard never came from its owner) and is there so
@@ -259,7 +262,7 @@ export function notesPassage(notes: PromptNotes, group: boolean, timeZone: strin
   const entries = (list: readonly PromptNote[]) =>
     list.flatMap((n) => {
       const text = cleanText(n.text);
-      return text === "" ? [] : [{ text, date: dateOf(n.updatedAt, timeZone) }];
+      return text === "" ? [] : [text];
     });
   const heard = notes.hearsay.flatMap((h) => {
     const text = cleanText(h.text);
@@ -318,6 +321,45 @@ export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, o
   }
   return { notes: without(low), fits: false };
 }
+
+/**
+ * The system text cut in the notes passage and the rest (`rest` is the text without it): the passage runs from its heading to the end of its
+ * JSON line, wherever in the text it stands (a group's has the persona after it). The first heading that is followed by a line holding a
+ * JSON object counts; no passage: all of it is `rest`.
+ */
+const PASSAGE_JSON_AT = String.fromCharCode(10, 10, 123);
+const LINE_END = String.fromCharCode(10);
+
+export function splitPassage(system: string): { rest: string; passage: string } {
+  for (let at = system.indexOf(NOTES_HEADING); at !== -1; at = system.indexOf(NOTES_HEADING, at + 1)) {
+    const json = system.indexOf(PASSAGE_JSON_AT, at);
+    if (json === -1) return { rest: system, passage: "" };
+    const start = json + 2;
+    const end = system.indexOf(LINE_END, start);
+    const line = system.slice(start, end === -1 ? undefined : end);
+    try {
+      if (typeof JSON.parse(line) !== "object") continue;
+    } catch {
+      continue;
+    }
+    const stop = end === -1 ? system.length : end;
+    return { rest: system.slice(0, at) + system.slice(stop), passage: system.slice(at, stop) };
+  }
+  return { rest: system, passage: "" };
+}
+
+/**
+ * What a system text counts in the context budget: the text without its notes passage a token a code point (`estimateTokens`), and the
+ * passage as `fitNotes` measures it, in weight (`TOKENS_PER_WEIGHT`). One function for every place that counts the system text, so the
+ * passage is never counted by two rules.
+ */
+export function systemTokens(system: string): number {
+  const { rest, passage } = splitPassage(system);
+  return estimateTokens(rest) + weight(passage) * TOKENS_PER_WEIGHT;
+}
+
+/** What the notes passage may take of a model's context (`MEMORY.passageShare` of the input the model has room for: its context less its output limit). */
+export const passageBudget = (contextTokens: number, maxOutputTokens: number, share: number): number => Math.max(0, share * (contextTokens - maxOutputTokens));
 
 /** A label's brackets and separator: what `speakerLabel` writes and `withoutMark` reads. */
 const OPEN = "〔";

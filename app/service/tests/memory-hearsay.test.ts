@@ -362,6 +362,17 @@ describe("before the paid call the judgement model is asked whether the batch is
     );
   });
 
+  it("a pre-check that answers nothing new counts towards hearsayPerHour: other members' chatter costs at most that many judge requests an hour per group", async () => {
+    const w = await world("jn");
+    verdict(0.1, 0.1);
+    for (let i = 1; i <= 6; i++) {
+      await flag(w.agent.id, w.g, await say(w.mia, w.g, `小李的第${i}句闲话`), "hearsay");
+      await wake();
+    }
+    expect(hearsayQuestions()).toHaveLength(app.deps.config.memory.hearsayPerHour);
+    expect(hearsayCalls()).toHaveLength(0);
+  });
+
   it("a batch with something new is paid for", async () => {
     const w = await world("jb");
     verdict(0.9, 0.1);

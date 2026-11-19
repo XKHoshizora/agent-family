@@ -3,7 +3,7 @@
 // is never given to the model in a group. Each row saves itself (as AgentAppellations' rows do): nothing here has a
 // 保存 for the room as a whole.
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { weight } from "../data/memoryWeight.js";
+import { storedWeight, weight } from "../data/memoryWeight.js";
 import { useStore } from "../data/store.jsx";
 import { formatAt } from "../data/viewmodel.js";
 import { Lock, Pencil, Trash2 } from "../icons.js";
@@ -154,16 +154,17 @@ export function DeleteButton({ onDelete, disabled, describedBy, icon = false }) 
 }
 
 /** Whether a text needs more of the room than is left (`left`, in weight, as the service counts it). No number is shown: a count of characters would be wrong for mixed text. */
-const tooLong = (text, left) => weight(text.trim()) > left;
+const tooLong = (text, left) => storedWeight(text) > left;
 const TOO_LONG = "这条太长了，这个房间装不下。";
+const ROOM_FULL = "这个房间装不下了，先删掉或合并几条。";
 
 /** The add row at the top of a room: a box and 添加; what was typed stays when the service refuses it. */
-function AddRow({ agentId, left, memory, inputRef }) {
+function AddRow({ agentId, left, full, memory, inputRef }) {
   const { actions } = useStore();
   const { pending, error, write } = useNoteWrite(memory);
   const [text, setText] = useState("");
   const typed = text.trim();
-  const over = tooLong(typed, left);
+  const over = typed !== "" && (full || tooLong(typed, left));
   const submit = async (event) => {
     event.preventDefault();
     if (!typed || over || pending) return;
@@ -175,7 +176,7 @@ function AddRow({ agentId, left, memory, inputRef }) {
         <input ref={inputRef} aria-label="新的笔记" value={text} onChange={(e) => setText(e.target.value)} placeholder="手动加一条" autoComplete="off" readOnly={pending} />
         <Btn type="submit" small variant="primary" disabled={pending || !typed || over}>添加</Btn>
       </div>
-      {over && <p className="field-msg">{TOO_LONG}</p>}
+      {over && <p className="field-msg">{full ? ROOM_FULL : TOO_LONG}</p>}
       {error && <p className="field-msg" role="alert">{error}</p>}
     </form>
   );
@@ -289,7 +290,7 @@ export function MemoryRoom({ agentId = null, agentName, title, helper, memory })
       {helper && <p className="muted">{helper}</p>}
       {agentId !== null && room.fits === false && <p className="muted">这个模型的上下文较小，每次只带得下一部分记忆。</p>}
       <StaleLine memory={memory} />
-      <AddRow agentId={agentId} left={left} memory={memory} inputRef={addBox} />
+      <AddRow agentId={agentId} left={left} full={room.maxNotes !== undefined && room.notes.length >= room.maxNotes} memory={memory} inputRef={addBox} />
       <ul className="memory-rows memory-open">
         {open.map(row)}
         {open.length === 0 && <li className="rows-empty">还没有记下的内容</li>}

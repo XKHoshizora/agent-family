@@ -39,7 +39,7 @@ function memoryAnswer(state, question) {
   const text = String(question.instructions ?? "");
   const has = (phrase) => text.includes(phrase);
   if (has("这是一个人的 AI 助手记下的一条关于主人的笔记") || has("这是一个 AI 助手给自己记的一条笔记")) return String(state ?? "").includes(VAULT_MARK) ? 0.05 : SURE;
-  if (has("这是一个 AI 助手关于主人的两条笔记")) return 0.05;
+  if (has("这是一个 AI 助手关于主人的笔记。state 是一个 JSON：new 是一条新的笔记")) return 0.05;
   if (has("新的这些说的全都是原来的笔记里已经有的事")) return SURE;
   if (has("有人（不是") && has("本人的、以后还用得上的事")) {
     const fresh = String(state ?? "").split("\n").filter((l) => l.startsWith("【新】"));

@@ -63,6 +63,9 @@ const HIDDEN_KEYS = [
   "memoryModel",
   "memoryModelUsable",
   "memoryLanguage",
+  "fits",
+  "noRoom",
+  "failedRooms",
   "dream",
   "strength",
   "seenAt",
@@ -271,6 +274,8 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
       for (const value of [...Object.values(HIDDEN), dedicated, provider]) expect([label, value, text.includes(value)]).toEqual([label, value, false]);
       const keys = keysOf(body);
       expect([label, HIDDEN_KEYS.filter((k) => keys.has(k))]).toEqual([label, []]);
+      // A memory notice that has expired (its change swept away) is the owner's alone, as any notice of memory is.
+      expect([label, text.includes('"expired"')]).toEqual([label, false]);
     }
     // Positive control: the reads did name the Agent, with what fellow members may see.
     for (const label of ["sync", "members", "history", "search"]) {

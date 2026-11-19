@@ -171,7 +171,7 @@ export async function duplicateOf(deps: SortDeps, text: string, existing: Readon
   const mine = bigrams(text);
   const ranked = existing
     .map((n, order) => ({ n, order, score: overlap(mine, bigrams(n.text)), at: n.updatedAt?.getTime() ?? Number.POSITIVE_INFINITY }))
-    .sort((a, b) => b.score - a.score || b.at - a.at || a.order - b.order)
+    .sort((a, b) => (a.score !== b.score ? b.score - a.score : a.at !== b.at ? (b.at > a.at ? 1 : -1) : a.order - b.order))
     .slice(0, CANDIDATES)
     .map((r) => r.n);
   const questions = ranked.map((_, i): Question => ({ key: `d${i}`, type: "noul", instructions: `${DUPLICATE_INSTRUCTIONS}

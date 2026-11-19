@@ -283,17 +283,24 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // Registered after the db's close hook: hooks run last-in first-out, so the timer stops (and a run in
   // flight finishes) before the pool closes.
   const sweeper = startSweeper({
-    run: async () => {
-      const counts = await runSweep(deps, config, app.log);
-      // The record of what memory changed is kept 30 days (memory/sweep.ts); a failure there is logged and never fails the run.
-      await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
-      return counts;
-    },
+    run: () => runSweep(deps, config, app.log),
     intervalMinutes: config.sweepIntervalMinutes,
     ...(options.sweepInitialDelayMs === undefined ? {} : { initialDelayMs: options.sweepInitialDelayMs }),
     log: app.log,
   });
   if (sweeper) app.addHook("onClose", async () => sweeper.stop());
+  // The record of what memory changed is kept 30 days (memory/sweep.ts): its own timer, so that it runs whether or not the attachment sweep
+  // is switched off (SWEEP_INTERVAL_MINUTES 0: then once an hour) and whatever that sweep does. A failure is logged (a code, never a note).
+  const changeSweeper = startSweeper({
+    run: async () => {
+      await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
+      return { unsent: 0, abandoned: 0 };
+    },
+    intervalMinutes: config.sweepIntervalMinutes > 0 ? config.sweepIntervalMinutes : 60,
+    ...(options.sweepInitialDelayMs === undefined ? {} : { initialDelayMs: options.sweepInitialDelayMs }),
+    log: app.log,
+  });
+  if (changeSweeper) app.addHook("onClose", async () => changeSweeper.stop());
 
   // The single source of throttling (Better Auth's own limiter is off). Routes that declare
   // `config.rateLimit` are counted per client address (`clientIp`); the rest use limits.ts / createRateLimit.

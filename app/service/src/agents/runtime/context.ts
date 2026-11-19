@@ -1,6 +1,7 @@
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../../metering/prices.ts";
 import type { ModelCall, Part } from "../../models/gateway.ts";
 import { stripUnsafeText } from "../../schemas.ts";
+import { systemTokens } from "./prompt.ts";
 
 /**
  * What the model is shown (spec 6.5 "发给模型的内容"; README "Agents and runs"), as pure functions: the budget, how a
@@ -67,7 +68,7 @@ export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): s
 
 /** Tokens left for the conversation: the model's context less its output limit and the system text. */
 export function contextBudget(contextTokens: number, maxOutputTokens: number, system: string): number {
-  return contextTokens - maxOutputTokens - estimateTokens(system);
+  return contextTokens - maxOutputTokens - systemTokens(system);
 }
 
 /** The first `QUOTE_MAX_CHARS` characters of a quoted message, each line as `> line`. */

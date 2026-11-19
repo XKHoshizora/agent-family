@@ -937,7 +937,7 @@ async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: Stored
 
 /**
  * What a pending change recorded of strength, seen time and origin, brought up to the notes as they are now (they are what the
- * change is applied to): a merge's note is the sum of its sources' strengths and the latest time any was seen, a split's parts take
+ * change is applied to): a remove's or a replace's note keeps what it has now, a merge's note is the sum of its sources' strengths and the latest time any was seen, a split's parts take
  * the source's, and a change written before the origin rule (no `originAfter`) clears the origin, as that rule does for any text
  * that is not the note's own. What undo puts back is refreshed the same way (the merged-away notes, the source).
  */
@@ -949,7 +949,12 @@ function refreshPending(state: State, ops: StoredOp[]): void {
       if (s.originAfter === undefined) s.originAfter = null;
     }
     const source = s.noteId === null ? undefined : state[s.kind].get(s.noteId);
-    if (s.op === "merge" && source) {
+    if ((s.op === "remove" || s.op === "replace") && source) {
+      // What the owner mentioned of the note while the card waited (no stale change: strength and seen time leave `updated_at` alone):
+      // undo puts back what the note is now, not what it was when the card was made.
+      s.strengthBefore = source.strength;
+      s.seenAtBefore = seenOf(s.kind, source.id, s.seenAtBefore ?? "");
+    } else if (s.op === "merge" && source) {
       const members = [source, ...s.removed!.map((r) => state[s.kind].get(r.noteId!)).filter((n): n is Note => n !== undefined)];
       s.strengthBefore = source.strength;
       s.seenAtBefore = seenOf(s.kind, source.id, s.seenAtBefore ?? "");

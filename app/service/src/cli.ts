@@ -6,6 +6,7 @@ import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
 import { formatStats, readStats } from "./memory/stats.ts";
+import { CHANGE_KEEP_DAYS, sweepMemoryChanges } from "./memory/sweep.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
@@ -88,6 +89,9 @@ if (command === "migrate") {
     };
     const { unsent, abandoned } = await runSweep({ db, blobs: createBlobStore(config) }, config, log, olderThan);
     console.log(`swept ${unsent} unsent attachment(s) older than ${olderThan} minutes and ${abandoned} abandoned blob(s)`);
+    // The record of what memory changed too (kept 30 days): the server does this on its own timer as well.
+    const changes = await sweepMemoryChanges(db);
+    console.log(`swept ${changes.deleted} memory change record(s) older than ${CHANGE_KEEP_DAYS} days and discarded ${changes.discarded} that nobody answered`);
   } finally {
     await db.close();
   }

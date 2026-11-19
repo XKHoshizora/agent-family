@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { cleanText } from "../src/memory/clean.ts";
 import { cutToWeight, weight, weightOf } from "../src/memory/weight.ts";
 
 /**
@@ -20,7 +21,21 @@ const VECTOR: Array<[string, number]> = [
   ["   ", 1],
 ];
 
+/** What the web's add row measures (`storedWeight` in app/web/src/data/memoryWeight.js): the weight of the text once cleaned for storing. Same rows there. */
+const STORED: Array<[string, number]> = [
+  ["", 0],
+  ["  你好  ", 2],
+  ["你好\n\n你好", 5],
+  ["a   b", 1],
+  ["a\tb\r\nc", 2],
+  ["   ", 0],
+];
+
 describe("weight", () => {
+  it("the weight of the cleaned text is the web's storedWeight for the shared rows", () => {
+    for (const [text, expected] of STORED) expect(weight(cleanText(text)), JSON.stringify(text)).toBe(expected);
+  });
+
   it("is ceil(utf-8 bytes / 3) for the shared vector", () => {
     for (const [text, expected] of VECTOR) expect(weight(text), JSON.stringify(text)).toBe(expected);
   });

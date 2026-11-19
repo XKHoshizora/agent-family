@@ -29,14 +29,19 @@ const URL_LIKE = [
 ];
 
 /** Words that address whoever reads the note: what makes it an instruction rather than a fact. */
-const ADDRESSES_THE_READER =
-  /你必须|你应该|以后都|忽略|无视|指令|听我的|从今以后|これからは必ず|今後は必ず|無視して|\bignore|\bdisregard|\byou must\b|\bfrom now on\b|\bforget (?:all|your)\b|\bsystem\b/i;
+const ADDRESSES_THE_READER = /你必须|你应该|忽略|无视|指令|听我的|無視して|\bignore|\bdisregard|\byou must\b|\bforget (?:all|your)\b|\bsystem\b/i;
 
-/** A password or passcode stated in plain words: a model never writes one into a note. */
-const STATES_A_PASSWORD = /密码是|密码：|\bpassword\s+is\b|\bpassword\s*:|パスワードは|\bpasscode\b/i;
+/**
+ * A password or passcode stated with its value: a model never writes one into a note. A bare mention of having or forgetting one is no secret,
+ * and `password is` followed by where or how it is kept (`stored`, `in`, `not`…) is not a value.
+ */
+const STATES_A_PASSWORD = /密码是\s*\S|密码[:：]\s*\S|\b(?:password|passcode)\s*(?:is\s+(?!(?:stored|kept|saved|written|managed|handled|in|on|not|always|never|too|very|long|strong|weak|hard|easy)\b)|[:=])\s*\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
 
-/** A bare domain with a path (`example.org/page`), which the list of known endings above does not catch. */
-const BARE_DOMAIN_PATH = /\b[a-z0-9-]+\.[a-z]{2,}\/\S+/i;
+/**
+ * A bare domain with a path (`example.org/page`), which the list of known endings above does not catch: a dot-separated host of at least two
+ * labels whose last is 2 to 6 letters, then `/` and a path of 3 characters or more; not where that last label is a file ending (`node.js/docs`).
+ */
+const BARE_DOMAIN_PATH = /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs)\b)[a-z]{2,6}\/\S{3,}/i;
 
 export { cleanText };
 

@@ -207,12 +207,13 @@ describe("the chip's sentence", () => {
 });
 
 describe("the confirmation cards", () => {
-  const pending = (fields = {}) => changed(3, { pending: true, status: "pending", ...fields });
+  // A card that asks first is in the future tense: the service writes its lines so.
+  const pending = (fields = {}) => changed(3, { pending: true, status: "pending", lines: ["要记住：不吃辣", "要记住：住在上海"], ...fields });
 
-  it("a pending change is the card 要记住这些吗？ with its lines, 记住 and 不用", async () => {
+  it("a pending change that only remembers is the card 要记住这些吗？ with its lines, 记住 and 不用", async () => {
     await openChat([...BASE, pending()]);
     expect(li(3).textContent).toContain("要记住这些吗？");
-    expect(li(3).textContent).toContain("记住了：不吃辣");
+    expect(li(3).textContent).toContain("要记住：不吃辣");
     expect(inLi(3).getByRole("button", { name: "记住" })).toBeTruthy();
     expect(inLi(3).getByRole("button", { name: "不用" })).toBeTruthy();
     expect(inLi(3).queryByRole("button", { name: "记忆已更新" })).toBeNull();
@@ -222,7 +223,8 @@ describe("the confirmation cards", () => {
     const { api } = await openChat([...BASE, pending()]);
     await click(inLi(3).getByRole("button", { name: "记住" }));
     expect(api.confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
-    expect(li(3).textContent).toBe(sentence());
+    // (The service pushes the notice again with its lines in the past tense; until then the sentence counts the lines it has.)
+    expect(li(3).textContent).toBe(sentence({ lines: ["要记住：不吃辣", "要记住：住在上海"] }));
   });
 
   it("不用 discards: the route is called and the card goes", async () => {
@@ -250,7 +252,34 @@ describe("the confirmation cards", () => {
     expect(inLi(3).getByRole("alert").textContent).toBe("这条改动已经过时了：记忆后来又变过。");
     expect(inLi(3).queryByRole("button", { name: "记住" })).toBeNull();
     expect(inLi(3).queryByRole("button", { name: "不用" })).toBeNull();
+    expect(li(3).textContent).toContain("要记住：不吃辣");
+  });
+
+  it("a card that also forgets, rewrites or locks asks 要这样整理记忆吗？ with 确认 and 不用: never 记住 above a line that forgets", async () => {
+    const { api } = await openChat([...BASE, pending({ lines: ["要忘掉：喜欢喝茶", "要锁进保险箱：住在上海"] })]);
+    expect(li(3).textContent).toContain("要这样整理记忆吗？");
+    expect(li(3).textContent).not.toContain("要记住这些吗？");
+    expect(inLi(3).queryByRole("button", { name: "记住" })).toBeNull();
+    await click(inLi(3).getByRole("button", { name: "确认" }));
+    expect(api.confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
+    // A dream's merge and split ask the same.
+    cleanup();
+    await openChat([...BASE, pending({ lines: ["要合并成：爱喝茶", "要拆成：喜欢茶；对花生过敏"], phase: "dream" })]);
+    expect(li(3).textContent).toContain("要这样整理记忆吗？");
+  });
+
+  it("an expired notice (its record swept away) keeps the chip and its lines with no 撤销; an expired card reads 已过期 and has no buttons", async () => {
+    await openChat([...BASE, changed(3, { status: "expired" })]);
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     expect(li(3).textContent).toContain("记住了：不吃辣");
+    expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
+    cleanup();
+    await openChat([...BASE, changed(3, { status: "expired", lines: ["要记住：不吃辣"], vaultLines: [false] })]);
+    expect(li(3).textContent).toBe("已过期");
+    expect(inLi(3).queryByRole("button")).toBeNull();
+    cleanup();
+    await openChat([...BASE, changed(3, { status: "expired", unlock: true, lines: ["住在上海"], vaultLines: [true] })]);
+    expect(li(3).textContent).toBe("已过期");
   });
 
   it("in a deleted Agent's conversation the card's buttons are off", async () => {

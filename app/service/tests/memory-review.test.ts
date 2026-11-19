@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { memoryCall } from "../src/memory/call.ts";
 import { runReview, type PipelineDeps } from "../src/memory/pipeline.ts";
 import { createReviewer, MAX_REVIEWS_AT_ONCE } from "../src/memory/reviewer.ts";
-import { EXPLICIT, reviewInput } from "../src/memory/review.ts";
+import { EXPLICIT, FORGET, LOCK, REMEMBER, reviewInput } from "../src/memory/review.ts";
 import { weight } from "../src/memory/weight.ts";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { toWireForReaders } from "../src/messages/read.ts";
@@ -124,7 +124,7 @@ describe("reviewInput", () => {
     expect(input.refs.get("n1")).toMatchObject({ kind: "owner" });
     expect(input.refs.get("n2")).toMatchObject({ kind: "self" });
     expect(input.existing).toEqual(["喜欢喝茶", "回答要简短"]);
-    expect(input.upToSeq).toBeGreaterThan(1);
+    expect(input.upToSeq).toBeGreaterThanOrEqual(1);
   });
 
   it("its system text says what is evidence, what to keep, how to write, replace, merge, forget, lock, unlock and answer", async () => {
@@ -185,6 +185,43 @@ describe("reviewInput", () => {
   it("flags an explicit request, in any of its languages", () => {
     for (const t of ["记住我不吃辣", "帮我记一下", "别忘了", "忘掉那个", "锁起来", "放进保险箱", "please remember this", "Forget it", "覚えてね", "忘れて"]) expect([t, EXPLICIT.test(t)]).toEqual([t, true]);
     expect(EXPLICIT.test("今天天气不错")).toBe(false);
+  });
+
+  it("three word lists: REMEMBER only asks for a review at once, FORGET and LOCK are what let a remove and a lock apply; EXPLICIT is their union", () => {
+    for (const t of ["记住我不吃辣", "帮我记一下", "记下来", "别忘了", "please remember this", "覚えてね"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, true, false, false]);
+    for (const t of ["忘掉那个", "忘了它吧", "别记这个", "不用记了", "删掉它", "Forget it", "忘れて", "消して"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, true, false]);
+    for (const t of ["锁起来", "锁上它", "放进保险箱", "别告诉别人", "please lock it", "秘密にして"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, false, true]);
+    for (const t of ["记住", "忘掉", "锁起来", "别记", "秘密にして", "消して"]) expect([t, EXPLICIT.test(t)]).toEqual([t, true]);
+    expect(EXPLICIT.test("今天天气不错")).toBe(false);
+  });
+
+  it("the review window ends at the owner's last line: two Agent lines before an owner line are both shown, a trailing Agent line is left for the next review, and the window stops at the owner's line", async () => {
+    const w = await owned("vera");
+    const agentSays = async (text: string): Promise<number> =>
+      Number(
+        (
+          await db.query<{ seq: string }>(
+            `with next as (update conversations set seq = seq + 1 where id = $1 returning seq)
+             insert into messages (conversation_id, seq, sender_id, kind, body)
+             select $1, next.seq, $2, 'text', jsonb_build_object('text', $3::text) from next returning seq::text`,
+            [w.conv, w.agent.id, text],
+          )
+        ).rows[0]!.seq,
+      );
+    await say(w.owner, w.conv, "我喜欢茶");
+    await agentSays("要加糖吗？");
+    await agentSays("还是加奶？");
+    const answered = await say(w.owner, w.conv, "都不加");
+    await agentSays("好的，我知道了。");
+    const agent = (await readOwnedAgent(db, w.owner.id, w.agent.id))!;
+    const input = (await reviewInput(db, agent, w.conv, 0, { kinds: new Set(["owner", "self"]), config: app.deps.config, now: new Date() }))!;
+    expect(JSON.parse(input.user).conversation).toEqual([
+      { who: "owner", text: "我喜欢茶" },
+      { who: "agent", text: "要加糖吗？" },
+      { who: "agent", text: "还是加奶？" },
+      { who: "owner", text: "都不加" },
+    ]);
+    expect(input.upToSeq).toBe(answered);
   });
 
   it("a note goes in as written: its brackets, full-width punctuation and quotes are byte-identical", async () => {
@@ -250,7 +287,7 @@ describe("when a review runs", () => {
 
     await quietThen(ops(add("喜欢喝茶，不加糖")), MIN);
     expect(reviewCalls()).toHaveLength(1);
-    expect(reviewCalls()[0]!.maxOutputTokens).toBe(800);
+    expect(reviewCalls()[0]!.maxOutputTokens).toBe(2000);
     const room = await roomOf(w.owner);
     expect(room.notes).toMatchObject([{ text: "喜欢喝茶，不加糖", vault: false, origin: "review", source: { kind: "agent" } }]);
     const [chip] = await chips(w.owner, w.conv);
@@ -261,7 +298,7 @@ describe("when a review runs", () => {
       system: { event: "memory_changed", actorId: w.agent.id, lines: ["记住了：喜欢喝茶，不加糖"], vaultLines: [false], pending: false, unlock: false, full: false, status: "applied" },
     });
     expect(chip.system.changeId).toEqual(expect.any(String));
-    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(2);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(1);
     // Nothing waits any more: another quiet stretch asks nothing.
     clock.advance(30 * MIN);
     await memory().idle();
@@ -290,7 +327,7 @@ describe("when a review runs", () => {
     await app.agentWorker.runOnce();
     await memory().idle();
     expect(reviewCalls()).toHaveLength(1);
-    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(16);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(15);
   });
 
   it("a topic reset: at once", async () => {
@@ -339,7 +376,7 @@ describe("what a review does with an answer", () => {
     await quietThen("我觉得你应该记住茶。");
     expect((await roomOf(w.owner)).notes).toEqual([]);
     expect(await chips(w.owner, w.conv)).toEqual([]);
-    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(2);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(1);
   });
 
   it("a model failure: nothing changes and reviewed_seq does not move", async () => {
@@ -369,7 +406,7 @@ describe("what a review does with an answer", () => {
     await quietThen(ops(add("喜欢茶")));
     expect((await roomOf(w.owner)).notes).toEqual([]);
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ pending: true, status: "pending", lines: ["记住了：喜欢茶"] });
+    expect(chip.system).toMatchObject({ pending: true, status: "pending", lines: ["要记住：喜欢茶"] });
     const done = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/confirm`);
     expect(done).toEqual({ status: 200, json: { status: "applied" } });
     expect((await roomOf(w.owner)).notes).toMatchObject([{ text: "喜欢茶" }]);
@@ -656,7 +693,8 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     const notices = await chips(w.owner, w.conv);
     expect(notices).toHaveLength(2);
     expect(notices[0].system).toMatchObject({ lines: ["记住了：养了一只猫"], pending: false, status: "applied" });
-    expect(notices[1].system).toMatchObject({ lines: ["忘掉了：喜欢喝茶", "锁进了保险箱：住在上海"], pending: true, status: "pending", unlock: false });
+    // A card that asks first speaks in the future: 记住 must never sit under a line that says something was forgotten.
+    expect(notices[1].system).toMatchObject({ lines: ["要忘掉：喜欢喝茶", "要锁进保险箱：住在上海"], pending: true, status: "pending", unlock: false });
     const rows = (await db.query("select status, jsonb_array_length(ops) as n from memory_changes order by created_at")).rows;
     expect(rows).toEqual([{ status: "applied", n: 1 }, { status: "pending", n: 2 }]);
     // Their yes applies it.
@@ -664,6 +702,87 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     expect((await api(app, w.owner, "POST", path)).status).toBe(200);
     expect(await texts(w)).toEqual(expect.arrayContaining([["住在上海", true]]));
     expect((await texts(w)).some(([t]: [string]) => t === "喜欢喝茶")).toBe(false);
+    // Once decided the notice reads in the past tense, rendered again from what the change recorded.
+    const decided = (await chips(w.owner, w.conv))[1].system;
+    expect(decided).toMatchObject({ lines: ["忘掉了：喜欢喝茶", "锁进了保险箱：住在上海"], pending: false, status: "applied", vaultLines: [false, true] });
+  });
+
+  it("记住 alone does not let a remove or a lock apply: both wait", async () => {
+    const w = await heldWorld("ora");
+    await sayAndReview(w, "记住我养了只猫", ops({ op: "remove", ref: "n1" }));
+    expect(await texts(w)).toEqual([["喜欢喝茶", false], ["住在上海", false]]);
+    expect((await chips(w.owner, w.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["要忘掉：喜欢喝茶"] });
+    const v = await heldWorld("ola");
+    await sayAndReview(v, "记住我养了只猫", ops({ op: "lock", ref: "n2" }));
+    expect(await texts(v)).toEqual([["喜欢喝茶", false], ["住在上海", false]]);
+    expect((await chips(v.owner, v.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["要锁进保险箱：住在上海"] });
+  });
+
+  it("忘掉 lets a remove apply but not a lock; 锁起来 lets a lock apply but not a remove", async () => {
+    const w = await heldWorld("fay");
+    await sayAndReview(w, "忘掉我喜欢喝茶这件事", ops({ op: "remove", ref: "n1" }));
+    expect(await texts(w)).toEqual([["住在上海", false]]);
+    expect((await chips(w.owner, w.conv)).at(-1).system).toMatchObject({ pending: false, lines: ["忘掉了：喜欢喝茶"] });
+    const v = await heldWorld("fin");
+    await sayAndReview(v, "忘掉这件事", ops({ op: "lock", ref: "n2" }));
+    expect(await texts(v)).toEqual([["喜欢喝茶", false], ["住在上海", false]]);
+    expect((await chips(v.owner, v.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["要锁进保险箱：住在上海"] });
+
+    const x = await heldWorld("lou");
+    await sayAndReview(x, "把住址锁起来", ops({ op: "lock", ref: "n2" }));
+    expect(await texts(x)).toEqual([["喜欢喝茶", false], ["住在上海", true]]);
+    expect((await chips(x.owner, x.conv)).at(-1).system).toMatchObject({ pending: false, lines: ["锁进了保险箱：住在上海"] });
+    const y = await heldWorld("lea");
+    await sayAndReview(y, "把住址锁起来", ops({ op: "remove", ref: "n1" }));
+    expect(await texts(y)).toEqual([["喜欢喝茶", false], ["住在上海", false]]);
+    expect((await chips(y.owner, y.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["要忘掉：喜欢喝茶"] });
+  });
+
+  it("when any of replace, remove and lock is held, all of them are held together in one pending change (an add still applies at once)", async () => {
+    const w = await heldWorld("gus");
+    await exchange(w, "我现在住在北京了，还养了只猫");
+    // The replace is allowed by itself (the owner spoke after the note); the lock lacks the owner's words: both wait.
+    await quietThen(ops({ op: "replace", ref: "n2", text: "住在北京" }, { op: "lock", ref: "n1" }, add("养了一只猫")));
+    expect(await texts(w)).toEqual(expect.arrayContaining([["喜欢喝茶", false], ["住在上海", false], ["养了一只猫", true]]));
+    const notices = await chips(w.owner, w.conv);
+    expect(notices.map((n) => n.system.lines)).toEqual([["记住了：养了一只猫"], ["要改成：住在北京", "要锁进保险箱：喜欢喝茶"]]);
+    expect(notices[1].system).toMatchObject({ pending: true, status: "pending" });
+  });
+
+  it("a replace plus a remove that frees its room, in a nearly full room and with no word of the owner's that asks for the remove: nothing applied, ONE pending change holding both; confirming applies both by the net room rule", async () => {
+    const w = await owned("hub");
+    // 1 + 1100 + 800 of 2000 weight: the longer text fits only once the second note is gone.
+    await seeded(w.owner, w.agent.id, "tea", false);
+    await seeded(w.owner, w.agent.id, "b".repeat(3300), false);
+    await seeded(w.owner, w.agent.id, "c".repeat(2400), false);
+    await exchange(w, "I drink tea and coffee and juice");
+    const longer = "tea ".repeat(112).trim();
+    await quietThen(ops({ op: "replace", ref: "n1", text: longer }, { op: "remove", ref: "n2" }));
+    expect((await texts(w)).map(([t]: [string]) => t.length)).toEqual([3, 3300, 2400]);
+    const rows = (await db.query('select status, "full", jsonb_array_length(ops) as n from memory_changes order by created_at')).rows;
+    expect(rows).toEqual([{ status: "pending", full: false, n: 2 }]);
+    const [card] = await chips(w.owner, w.conv);
+    expect(card.system).toMatchObject({ pending: true, count: 2 });
+    expect(card.system.lines[0]).toBe(`要改成：${longer}`);
+    expect(card.system.lines[1]).toBe(`要忘掉：${"b".repeat(3300)}`);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    expect((await texts(w)).map(([t]: [string]) => t.length)).toEqual([longer.length, 2400]);
+  });
+
+  it("a held op that is the same as one already waiting in a pending change of this owner (same op, same note, same text) is not held again", async () => {
+    const w = await heldWorld("ned");
+    await exchange(w, "今天天气不错");
+    await quietThen(ops({ op: "remove", ref: "n1" }));
+    expect(await chips(w.owner, w.conv)).toHaveLength(1);
+    await exchange(w, "天气真的不错");
+    await quietThen(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
+    // The remove is already waiting; the lock is new: one more card, holding the lock only.
+    const cards = await chips(w.owner, w.conv);
+    expect(cards.map((c) => c.system.lines)).toEqual([["要忘掉：喜欢喝茶"], ["要锁进保险箱：住在上海"]]);
+    await exchange(w, "还是不错");
+    await quietThen(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
+    expect(await chips(w.owner, w.conv)).toHaveLength(2);
+    expect((await db.query("select count(*)::int as n from memory_changes where status = 'pending'")).rows[0].n).toBe(2);
   });
 
   it("an owner line that asks for it (记住, 忘掉, 锁起来, remember, forget…) lets a remove and a lock apply at once", async () => {
@@ -681,7 +800,7 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
     await quietThen(ops({ op: "replace", ref: "n1", text: "不喝茶了" }));
     expect(await texts(w)).toEqual([["喜欢喝茶", false]]);
-    expect((await chips(w.owner, w.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["改成了：不喝茶了"] });
+    expect((await chips(w.owner, w.conv)).at(-1).system).toMatchObject({ pending: true, lines: ["要改成：不喝茶了"] });
 
     const v = await owned("kim");
     await seeded(v.owner, v.agent.id, "喜欢喝茶", false);
@@ -697,7 +816,7 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     await db.query("update owner_notes set origin = 'review', origin_conversation_id = $2 where id = $1", [note.id, w.conv]);
     await sayAndReview(w, "不对，我现在喝咖啡，记住了", ops({ op: "replace", ref: "n1", text: "喝咖啡" }));
     const [card] = await chips(w.owner, w.conv);
-    expect(card.system).toMatchObject({ pending: true, lines: ["改成了：喝咖啡"] });
+    expect(card.system).toMatchObject({ pending: true, lines: ["要改成：喝咖啡"] });
     await db.query(`update memory_changes set ops = (select jsonb_agg((o - 'originAfter') - 'originBefore') from jsonb_array_elements(ops) o) where id = $1`, [card.system.changeId]);
     expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
     const row = (await db.query("select text, origin_conversation_id from owner_notes where id = $1", [note.id])).rows[0];
@@ -710,7 +829,7 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     await sayAndReview(w, "忘掉喝茶，我养了只猫", ops({ op: "remove", ref: "n1" }, add("养了一只猫")));
     const notices = await chips(w.owner, w.conv);
     expect(notices).toHaveLength(1);
-    expect(notices[0].system).toMatchObject({ pending: true, lines: ["忘掉了：喜欢喝茶", "记住了：养了一只猫"] });
+    expect(notices[0].system).toMatchObject({ pending: true, lines: ["要忘掉：喜欢喝茶", "要记住：养了一只猫"] });
   });
 });
 
@@ -873,7 +992,7 @@ describe("what a trigger may ask again", () => {
     gateway.reply("好。").reply('{"ops":[', { truncated: true, usage: { inputTokens: 100, outputTokens: 50 } });
     await app.agentWorker.runOnce();
     await memory().idle();
-    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(2);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(1);
     expect((await memoryRecords(w.owner.id)).find((r) => r.purpose === "memory")?.n).toBe(1);
     for (let i = 0; i < 3; i++) memory().noted(w.agent.id, w.conv);
     await memory().idle();
@@ -982,7 +1101,7 @@ describe("pending changes count as known", () => {
     expect(reviewCalls()).toHaveLength(3);
     const cards = await chips(w.owner, w.conv);
     expect(cards).toHaveLength(1);
-    expect(cards[0].system).toMatchObject({ pending: true, lines: [`记住了：${TEXT}`] });
+    expect(cards[0].system).toMatchObject({ pending: true, lines: [`要记住：${TEXT}`] });
     expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(1);
   });
 
@@ -1042,6 +1161,43 @@ describe("deciding on a change", () => {
     const pushed = await socket.next((e) => e.type === "message" && e.message.system?.event === "memory_changed");
     expect(pushed.message.system).toMatchObject({ status: "discarded", pending: false });
     expect((await roomOf(w.owner)).notes).toMatchObject([{ text: "喜欢火锅" }]);
+  });
+
+  it("a notice whose change record has been swept stays, with status expired, its stored lines, and no pending flag; only its owner is sent it", async () => {
+    const w = await owned("exa", { memoryAsk: true });
+    const done = await owned("exb");
+    await sayAndReview(w, "记住我喜欢喝茶", ops(add("喜欢喝茶")));
+    await sayAndReview(done, "记住我喜欢喝茶", ops(add("喜欢喝茶")));
+    const [card] = await chips(w.owner, w.conv);
+    const [applied] = await chips(done.owner, done.conv);
+    expect(card.system).toMatchObject({ status: "pending", pending: true });
+    await db.query("delete from memory_changes");
+    const [expiredCard] = await chips(w.owner, w.conv);
+    expect(expiredCard.system).toMatchObject({ status: "expired", pending: false, lines: ["要记住：喜欢喝茶"], changeId: card.system.changeId, phase: "rest", unlock: false });
+    const [expiredApplied] = await chips(done.owner, done.conv);
+    expect(expiredApplied.system).toMatchObject({ status: "expired", pending: false, lines: ["记住了：喜欢喝茶"], changeId: applied.system.changeId });
+    // Nobody else gets it: another owner reading their own conversation sees none of it, and the conversation is not theirs to read.
+    expect((await api(app, done.owner, "GET", `/api/conversations/${w.conv}/messages`)).status).toBeGreaterThanOrEqual(400);
+    // Deciding on what is gone is a 404 as before.
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(404);
+  });
+
+  it("confirming a held remove refreshes what the note gained meanwhile (strength, seen time): undo then restores it with that strength", async () => {
+    const w = await owned("ref", { memoryAsk: true });
+    const note = await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    await sayAndReview(w, "那条可以忘掉了", ops({ op: "remove", ref: "n1" }));
+    const [card] = await chips(w.owner, w.conv);
+    expect(card.system).toMatchObject({ pending: true, lines: ["要忘掉：喜欢喝茶"] });
+    // The owner mentions the note again before answering the card: stronger, and seen later (updated_at untouched, so it is no stale change).
+    await db.query("update owner_notes set strength = 4, seen_at = '2031-01-02 03:04:05+00' where id = $1", [note.id]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    const [{ ops: stored }] = (await db.query("select ops from memory_changes where id = $1", [card.system.changeId])).rows;
+    expect(stored[0]).toMatchObject({ op: "remove", strengthBefore: 4 });
+    expect(new Date(stored[0].seenAtBefore).toISOString()).toBe("2031-01-02T03:04:05.000Z");
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/undo`)).status).toBe(200);
+    const back = (await db.query("select strength, seen_at from owner_notes where id = $1", [note.id])).rows[0];
+    expect(back.strength).toBe(4);
+    expect(back.seen_at.toISOString()).toBe("2031-01-02T03:04:05.000Z");
   });
 
   it("undoing a removal into a room that has filled up since is 409 room_full and changes nothing", async () => {

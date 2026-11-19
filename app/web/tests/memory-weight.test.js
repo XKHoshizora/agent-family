@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { weight, weightOf } from "../src/data/memoryWeight.js";
+import { storedWeight, weight, weightOf } from "../src/data/memoryWeight.js";
 
 // The web's mirror of the service's one measure (app/service/src/memory/weight.ts): ceil(utf-8 bytes / 3). This vector is the
 // same, verbatim, in app/service/tests/memory-weight.test.ts: a change on one side is a change on the other.
@@ -18,7 +18,21 @@ const VECTOR = [
   ["   ", 1],
 ];
 
+// What the add row measures: the text as the service stores it (whitespace collapsed to single spaces, trimmed). Same rows in the service's test.
+const STORED = [
+  ["", 0],
+  ["  你好  ", 2],
+  ["你好\n\n你好", 5],
+  ["a   b", 1],
+  ["a\tb\r\nc", 2],
+  ["   ", 0],
+];
+
 describe("memory weight", () => {
+  it("storedWeight is the weight of the text as stored, for the shared rows", () => {
+    for (const [text, expected] of STORED) expect(storedWeight(text), JSON.stringify(text)).toBe(expected);
+  });
+
   it("is ceil(utf-8 bytes / 3) for the shared vector", () => {
     for (const [text, expected] of VECTOR) expect(weight(text), JSON.stringify(text)).toBe(expected);
   });

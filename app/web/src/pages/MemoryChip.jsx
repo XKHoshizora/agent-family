@@ -24,9 +24,16 @@ function MemoryLines({ system }) {
   );
 }
 
+// A pending change's lines are in the future tense (the service writes them so): `要记住：…`, `要改成：…`, `要忘掉：…`, `要锁进保险箱：…`,
+// a dream's `要合并成：…`, `要拆成：…`. A card whose lines all say `要记住：` asks 要记住这些吗？; any other asks 要这样整理记忆吗？.
+const FUTURE = /^要(?:记住|改成|忘掉|锁进保险箱|合并成|拆成)：/;
+const asksToRemember = (lines) => lines.length > 0 && lines.every((l) => l.startsWith("要记住："));
+
 /**
  * One notice of a change to my Agent's memory, by its state: applied → the chip (closed; opened: the lines, 撤销 or 已撤销,
- * and — when the room is nearly full — a link to the palace's settings); pending → the card asking first; discarded → nothing.
+ * and — when the room is nearly full — a link to the palace's settings); pending → the card asking first; discarded → nothing;
+ * expired (the record of the change is gone, 30 days after it was over) → the chip and its lines with nothing to decide, and for a card that
+ * asked first, only 已过期.
  * A refusal (the change went stale meanwhile) stays on it as a sentence.
  */
 export function MemoryNotice({ msg, conv }) {
@@ -56,9 +63,18 @@ export function MemoryNotice({ msg, conv }) {
 
   if (system.status === "discarded") return <li className="msg-memory" data-msg={msg.id} hidden />;
 
+  if (system.status === "expired" && (system.unlock || system.lines.some((l) => FUTURE.test(l)))) {
+    return (
+      <li className="msg-memory" data-msg={msg.id}>
+        <span className="muted">已过期</span>
+      </li>
+    );
+  }
+
   if (system.status === "pending") {
-    const title = system.unlock ? "要把这条从保险箱取出来吗？" : "要记住这些吗？";
-    const yes = system.unlock ? "取出" : "记住";
+    const remember = asksToRemember(system.lines);
+    const title = system.unlock ? "要把这条从保险箱取出来吗？" : remember ? "要记住这些吗？" : "要这样整理记忆吗？";
+    const yes = system.unlock ? "取出" : remember ? "记住" : "确认";
     return (
       <li className="msg-memory" data-msg={msg.id}>
         <div className="card memory-card">
@@ -98,7 +114,8 @@ export function MemoryNotice({ msg, conv }) {
             {system.status === "undone" ? (
               <span className="muted">已撤销</span>
             ) : (
-              !stale && (
+              !stale &&
+              system.status !== "expired" && (
                 <Btn small variant="text" disabled={!decidable || busy !== null} onClick={undo}>
                   {busy === "undo" ? "处理中…" : "撤销"}
                 </Btn>

@@ -17,6 +17,7 @@ import {
   newMark,
   shownAppellation,
   speakerLabel,
+  systemTokens,
   withoutMark,
   type GroupPerson,
   type GroupScene,
@@ -614,6 +615,6 @@ export async function buildContext(
   plan.keepOlder();
   for (const [slot, attachment] of plan.attachments(true)) await show(slot, attachment);
   const { messages, tokens } = plan.build();
-  const inputTokensEstimate = estimateTokens(loaded.system) + tokens;
+  const inputTokensEstimate = systemTokens(loaded.system) + tokens;
   return { messages, inputTokensEstimate, inputChars: inputTokensEstimate };
 }
