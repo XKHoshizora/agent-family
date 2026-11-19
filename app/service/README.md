@@ -117,6 +117,7 @@ latest 80 messages, files included, by the service's estimate, plus the system t
 `{"model", "channels": [{"url", "apiKeyEnv"}], "timeoutMs", "dailyLimit"}`, one or two channels each naming in `apiKeyEnv`
 another variable that holds its key; unset or empty, the default: there are no proactive replies at all — Proactive
 replies, Configuration), `PROACTIVE` (their tunings, JSON, every field optional; same section),
+`MEMORY` (an Agent's memory tunings, JSON, every field optional; Memory calls, Configuration),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -400,7 +401,7 @@ free-plus-balance figure (`via.points`, Wire shapes).
 
 *Session: required.* Your own account, and nothing else: the route takes no parameter (any query string is 400
 `invalid_request`). → 200 `{"tier", "agentLimit", "agentCount", "balance", "free": {"allowance", "used", "resetsAt"},
-"canStartFreeReply", "recent": [{"agentId", "model", "source", "points", "replies"}]}`.
+"canStartFreeReply", "recent": [{"agentId", "purpose", "model", "source", "points", "replies"}]}`.
 
 - `tier` is the account's tier (`free` until the operator sets another); `agentLimit` is what `AGENT_TIERS` allows it
   (a tier the configuration no longer names gets the `free` limit); `agentCount` is your Agents that are not deleted.
@@ -409,11 +410,12 @@ free-plus-balance figure (`via.points`, Wire shapes).
 - `canStartFreeReply`: whether a reply on a free-tier model would be admitted now: what is left of today's free
   allowance, or of the balance, after what your running calls hold against it, is above zero (admission's own rule,
   read at that moment).
-- `recent`: the last 7 site-days (today included) summed per Agent, model and source: `model` is the site model's `id`
+- `recent`: the last 7 site-days (today included) summed per Agent, purpose, model and source: `purpose` is `reply`, `draft`
+  (persona drafts) or `memory` (an Agent's background memory calls, below), each apart; `model` is the site model's `id`
   or the provider model's name, `points` what you were charged for those calls — taken from the free allowance and the
   balance; what was forgiven is not in it, so it is not the true cost (`"0"` for `provider`, and for site calls that were
   forgiven in full) —, `replies` how many were
-  replies; `agentId` is `null` for persona drafts. Largest first. Runs that never reached a model (no model recorded)
+  replies; `agentId` is `null` for persona drafts and memory calls. Largest first. Runs that never reached a model (no model recorded)
   are not listed.
 - Limit: 60 per minute.
 - An account that has never been touched reads as tier `free`, balance `"0"`; reading creates nothing.
@@ -2364,12 +2366,25 @@ runs; a reply the old instance takes after the new one has started is ended by t
 above) when it is stopped in the middle of it, or, if the old instance is killed before that, left `running` with
 nobody working on it: the stale-run sweep (below) releases it.
 
+**Memory calls** (`src/memory/call.ts`; `tests/memory-call.test.ts`). The one way an Agent's memory calls a model in the
+background is `memoryCall`, paid for by the Agent's owner as a draft is: a run of purpose `memory` (no Agent, no
+conversation, the owner's own lane), admitted against the owner's allowance or balance, held for the model's input
+estimate and the call's own output limit, settled on what the upstream reported (one usage record of purpose `memory`;
+`GET /api/usage` lists it apart from replies and drafts). The model is `MEMORY.model` when it names a site model, else the
+free-tier site model with the lowest input plus output price (the lowest `id` among equals), else there is none and no
+call is made. A call returns the model's text, or nothing — after settling whatever was used — when there is no model,
+the owner is out of allowance and balance (402 inside, nothing recorded), the owner already has
+`AGENT_MAX_CONCURRENT_RUNS` calls running, the input does not fit the model's context, the call failed or ran past
+`AGENT_RUN_TIMEOUT_MS`, the answer was cut at its limit or empty. When the service stops, a call under way is abandoned
+(its run `failed`, nothing charged) and the stop waits for it; the stale-run sweep leaves a call this process is working on
+alone.
+
 **The stale-run sweep** (`port-impl.ts` `sweepStaleRuns`; `tests/runs-restart.test.ts`). Once a minute while the service
-runs (first a minute after start), every run — reply or persona draft — that has been `running` for longer than twice
+runs (first a minute after start), every run — reply, persona draft or memory call — that has been `running` for longer than twice
 `AGENT_RUN_TIMEOUT_MS` and a minute (the most attachments and then a call may take, and a minute to post and record;
 5 minutes with the default) is released exactly as start-up recovery releases one, each in a transaction of its own
 under the same locks — unless this process is working on it (a run its worker has claimed and not yet finished, a draft
-whose request is under way): those are never touched, however old. Unlike at start-up, the owner's sockets are told
+whose request is under way, a memory call under way): those are never touched, however old. Unlike at start-up, the owner's sockets are told
 (`run`), and a follow-up queued by the one rule wakes the worker. An instance still working on a run that old elsewhere
 is past its own limits: its `post` is refused (the run is no longer `running`) and nothing is recorded twice. So a run
 left behind by a process that is gone — a deploy's old instance killed mid-call, or whose stop could not write its runs'
@@ -2451,6 +2466,22 @@ calibrated on the real judgement model (`docs/acceptance/batch2d/calibration.md`
 | `fuse` | `{"perSeconds": 10, "perHour": 30}` (1–3 600, 1–100 000) | At most one proactive reply of an Agent in a group within this many seconds, and this many within an hour |
 | `perGroupHour` | 600 (1–100 000) | Judgements asked for within any hour about one group, at most; beyond, its messages are not judged until the hour slides on |
 | `perSenderHour` | 300 (1–100 000) | The same about the messages of one sender, in all groups together, so no account can use up the site's `dailyLimit` |
+
+`MEMORY`, JSON, every field optional (unset, empty or `{}`: every default; an unknown key or a value out of range stops the
+start, naming it): the numbers an Agent's memory is tuned by (`config.memory`). Lengths are in code points, times in
+milliseconds.
+
+| Field | Default (range) | What it does |
+|---|---|---|
+| `model` | none (a site model's `id`) | The site model memory calls use; none: the cheapest free-tier site model (Memory calls) |
+| `roomOwner`, `roomSelf`, `roomHearsay` | 2000, 3000, 2000 (1–100 000) | What the notes about the owner, an Agent's own notes and what it heard may hold, at most |
+| `modelEntryMax` | 200 (1–10 000) | The longest an entry a model wrote is |
+| `quietMs`, `maxReplies` | 600 000 (1–86 400 000), 8 (1–1 000) | A review of an Agent's own conversation runs after this much quiet, or this many replies since the last |
+| `groupQuietMs`, `groupMaxWaitMs` | 120 000, 900 000 (1–86 400 000) | A review of a group's messages runs after this much quiet, at most this long after the first flagged message |
+| `reviewMessages`, `reviewMessageChars` | 40 (1–500), 500 (1–20 000) | A review is shown at most this many messages, each cut to this many code points |
+| `reviewMaxOutputTokens` | 800 (1–100 000) | The most a review may answer |
+| `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.8, 0.6, 0.6, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging |
+| `flaggedMax`, `flaggedContext` | 20 (1–500), 3 (0–50) | At most this many flagged messages are reviewed together, each with this many messages of context |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored
 (`POST /api/conversations/:id/messages`, text or file; not a repeated `clientTxn`), the send route notes it after
@@ -2671,8 +2702,8 @@ at `info`, so the two `debug` lines show only when the level is lowered.
 
 ## Metering (`src/metering/`)
 
-Spec 6.3 and 6.4. A model call is a reply of an Agent or a persona draft (`POST /api/agents/draft-persona`): both are
-runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices and estimates in `prices.ts`). A call on a
+Spec 6.3 and 6.4. A model call is a reply of an Agent, a persona draft (`POST /api/agents/draft-persona`) or a memory
+call (below): all are runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices and estimates in `prices.ts`). A call on a
 provider model costs nothing and needs no points (it is still recorded). A call on a site model is admitted before it
 starts and settled when it ends, each in one transaction under the owner's `accounts` row lock (after the run's row), and
 never with a transaction open across the call.

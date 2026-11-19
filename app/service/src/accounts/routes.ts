@@ -20,6 +20,7 @@ const usageResponse = z.object({
   recent: z.array(
     z.object({
       agentId: z.string().nullable(),
+      purpose: z.enum(["reply", "draft", "memory"]),
       model: z.string(),
       source: z.enum(["site", "provider"]),
       points: z.string(),
@@ -57,16 +58,16 @@ export function registerAccountRoutes(app: FastifyInstance): void {
         const agentCount = await countLiveAgents(t, me.id);
         const used = await freeUsedToday(t, me.id, now, config.siteTimezone);
         const holds = await readHolds(t, me.id);
-        const recent = await t.query<{ agent_id: string | null; model: string; source: "site" | "provider"; points: string; replies: number }>(
+        const recent = await t.query<{ agent_id: string | null; purpose: "reply" | "draft" | "memory"; model: string; source: "site" | "provider"; points: string; replies: number }>(
           // What the person was charged (the allowance and the balance), not the true cost: what was forgiven is not
           // theirs to see as spent.
-          `select agent_id, model, source, sum(free_micro + balance_micro)::text as points,
+          `select agent_id, purpose, model, source, sum(free_micro + balance_micro)::text as points,
                   (count(*) filter (where purpose = 'reply'))::int as replies
              from usage_records
             -- A run settled without reaching a model has no model to list (and cost nothing).
             where owner_id = $1 and created_at >= $2 and source is not null
-            group by agent_id, model, source
-            order by sum(free_micro + balance_micro) desc, model, source, agent_id`,
+            group by agent_id, purpose, model, source
+            order by sum(free_micro + balance_micro) desc, model, source, agent_id, purpose`,
           [me.id, siteDayStart(now, config.siteTimezone, RECENT_DAYS - 1)],
         );
         return { account, agentCount, used, holds, recent };
@@ -89,6 +90,7 @@ export function registerAccountRoutes(app: FastifyInstance): void {
         canStartFreeReply: chargeSource("free", headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro: used, balanceMicro, holds })) !== null,
         recent: recent.rows.map((r) => ({
           agentId: r.agent_id,
+          purpose: r.purpose,
           model: r.model,
           source: r.source,
           points: formatPoints(BigInt(r.points)),

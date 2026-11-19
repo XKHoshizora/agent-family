@@ -524,7 +524,7 @@ describe("drafting a persona", () => {
     ]);
     expect((await api(app, owner, "GET", "/api/agents")).json).toEqual({ agents: [] });
     expect((await api(app, owner, "GET", "/api/usage")).json.recent).toEqual([
-      { agentId: null, model: "fast", source: "site", points: expect.any(String), replies: 0 },
+      { agentId: null, purpose: "draft", model: "fast", source: "site", points: expect.any(String), replies: 0 },
     ]);
   });
 

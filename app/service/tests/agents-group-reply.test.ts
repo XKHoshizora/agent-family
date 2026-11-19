@@ -915,7 +915,7 @@ describe("who pays", () => {
     expect(await usageOf(run)).toEqual([{ owner: owner.id, outcome: "done", source: "site", model: "pricey", cost: 150_000, charged: 150_000, estimated: false }]);
     const ownerNow = await usage(owner);
     expect(ownerNow.free.used).toBe("0.15");
-    expect(ownerNow.recent).toEqual([{ agentId: agent.id, model: "pricey", source: "site", points: "0.15", replies: 1 }]);
+    expect(ownerNow.recent).toEqual([{ agentId: agent.id, purpose: "reply", model: "pricey", source: "site", points: "0.15", replies: 1 }]);
     const miaNow = await usage(mia);
     expect(miaNow).toEqual(miaBefore);
     expect([miaNow.free.used, miaNow.balance, miaNow.recent]).toEqual(["0", "0", []]);
@@ -933,7 +933,7 @@ describe("who pays", () => {
     const run = (await db.query<{ id: string }>("select id from agent_runs where agent_id = $1 and conversation_id = $2", [other.id, w.g])).rows[0]!.id;
     expect(await usageOf(run)).toEqual([{ owner: w.ned.id, outcome: "done", source: "provider", model: "mine", cost: 0, charged: 0, estimated: false }]);
     const ned = await usage(w.ned);
-    expect([ned.free.used, ned.balance, ned.recent]).toEqual(["0", "0", [{ agentId: other.id, model: "mine", source: "provider", points: "0", replies: 1 }]]);
+    expect([ned.free.used, ned.balance, ned.recent]).toEqual(["0", "0", [{ agentId: other.id, purpose: "reply", model: "mine", source: "provider", points: "0", replies: 1 }]]);
     expect((await usage(w.mia)).recent).toEqual([]);
   });
 });

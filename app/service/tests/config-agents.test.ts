@@ -383,3 +383,42 @@ describe("the proactive replies' configuration", () => {
     }
   });
 });
+
+describe("the memory configuration", () => {
+  const defaults = {
+    model: null,
+    roomOwner: 2000,
+    roomSelf: 3000,
+    roomHearsay: 2000,
+    modelEntryMax: 200,
+    quietMs: 600_000,
+    maxReplies: 8,
+    groupQuietMs: 120_000,
+    groupMaxWaitMs: 900_000,
+    reviewMessages: 40,
+    reviewMessageChars: 500,
+    reviewMaxOutputTokens: 800,
+    shareAt: 0.8,
+    sameAt: 0.6,
+    hearsayAt: 0.6,
+    ownAt: 0.6,
+    flaggedMax: 20,
+    flaggedContext: 3,
+  };
+
+  test("unset or empty: every default", () => {
+    expect(loadConfig(base).memory).toEqual(defaults);
+    expect(loadConfig({ ...base, MEMORY: "" }).memory).toEqual(defaults);
+    expect(loadConfig({ ...base, MEMORY: "{}" }).memory).toEqual(defaults);
+  });
+
+  test("an override keeps the rest", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"model":"fast","quietMs":1000,"shareAt":0.9}' }).memory).toEqual({ ...defaults, model: "fast", quietMs: 1000, shareAt: 0.9 });
+  });
+
+  test("a threshold outside [0, 1], a non-whole or non-positive count, an unknown key and bad JSON refuse", () => {
+    for (const bad of ['{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
+      expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+    }
+  });
+});

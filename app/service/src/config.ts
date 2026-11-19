@@ -168,6 +168,60 @@ const proactiveSchema = z.strictObject({
   perSenderHour: positive(300, 100_000),
 });
 
+/**
+ * What an Agent's memory is tuned by (`MEMORY`); every number is a site setting with this default (the plan's Numbers;
+ * tuned and recorded in the last tasks). Lengths are in code points, times in milliseconds.
+ */
+export interface MemoryConfig {
+  /** The id of the site model the background memory calls use; null: the cheapest free-tier site model (`memoryModel`). */
+  model: string | null;
+  /** The most the notes of a room hold: about the owner, the Agent's own, and what it heard. */
+  roomOwner: number;
+  roomSelf: number;
+  roomHearsay: number;
+  /** The longest an entry a model wrote is (an entry the owner wrote may fill its room). */
+  modelEntryMax: number;
+  /** A review runs after this much quiet in the Agent's own conversation, or after `maxReplies` replies since the last. */
+  quietMs: number;
+  maxReplies: number;
+  /** A group review runs after this much quiet, at most `groupMaxWaitMs` after the first flagged message. */
+  groupQuietMs: number;
+  groupMaxWaitMs: number;
+  /** A review shows at most this many messages, each cut to `reviewMessageChars`, and may answer at most `reviewMaxOutputTokens`. */
+  reviewMessages: number;
+  reviewMessageChars: number;
+  reviewMaxOutputTokens: number;
+  /** Thresholds of the judgements: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging. */
+  shareAt: number;
+  sameAt: number;
+  hearsayAt: number;
+  ownAt: number;
+  /** At most this many flagged messages are reviewed together, each with `flaggedContext` messages of context. */
+  flaggedMax: number;
+  flaggedContext: number;
+}
+
+const memorySchema = z.strictObject({
+  model: z.string().min(1).max(200).nullable().default(null),
+  roomOwner: positive(2000, 100_000),
+  roomSelf: positive(3000, 100_000),
+  roomHearsay: positive(2000, 100_000),
+  modelEntryMax: positive(200, 10_000),
+  quietMs: positive(600_000, 86_400_000),
+  maxReplies: positive(8, 1000),
+  groupQuietMs: positive(120_000, 86_400_000),
+  groupMaxWaitMs: positive(900_000, 86_400_000),
+  reviewMessages: positive(40, 500),
+  reviewMessageChars: positive(500, 20_000),
+  reviewMaxOutputTokens: positive(800, 100_000),
+  shareAt: probability(0.8),
+  sameAt: probability(0.6),
+  hearsayAt: probability(0.6),
+  ownAt: probability(0.6),
+  flaggedMax: positive(20, 500),
+  flaggedContext: z.number().int().min(0).max(50).default(3),
+});
+
 const allowanceTokens = z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */
 const reasoningAllowanceSchema = z
@@ -295,6 +349,8 @@ const envSchema = z.object({
   JUDGE: jsonVariable(judgeSchema.nullable(), null),
   /** JSON object of the proactive-reply tunings (see ProactiveConfig); every field optional, unset or empty: all defaults. */
   PROACTIVE: jsonVariable(proactiveSchema, proactiveSchema.parse({})),
+  /** JSON object of an Agent's memory tunings (see MemoryConfig); every field optional, unset or empty: all defaults. */
+  MEMORY: jsonVariable(memorySchema, memorySchema.parse({})),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -417,6 +473,8 @@ export interface Config {
   judge: JudgeConfig | null;
   /** The proactive replies' tunings. */
   proactive: ProactiveConfig;
+  /** The memory tunings. */
+  memory: MemoryConfig;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -567,6 +625,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     agentGroupContextTokens: e.AGENT_GROUP_CONTEXT_TOKENS,
     judge: e.JUDGE,
     proactive: e.PROACTIVE,
+    memory: e.MEMORY,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

@@ -232,10 +232,10 @@ describe("GET /api/usage", () => {
     await insertUsage(a.id, null, { purpose: "draft", cost_micro: 250_000 });
     const res = await api(app, a, "GET", "/api/usage");
     expect(res.json.recent).toEqual([
-      { agentId: x, model: "fast", source: "site", points: "3.5", replies: 2 },
-      { agentId: x, model: "big", source: "site", points: "3", replies: 1 },
-      { agentId: null, model: "fast", source: "site", points: "0.25", replies: 0 },
-      { agentId: y, model: "my-model", source: "provider", points: "0", replies: 1 },
+      { agentId: x, purpose: "reply", model: "fast", source: "site", points: "3.5", replies: 2 },
+      { agentId: x, purpose: "reply", model: "big", source: "site", points: "3", replies: 1 },
+      { agentId: null, purpose: "draft", model: "fast", source: "site", points: "0.25", replies: 0 },
+      { agentId: y, purpose: "reply", model: "my-model", source: "provider", points: "0", replies: 1 },
     ]);
   });
 
@@ -249,8 +249,8 @@ describe("GET /api/usage", () => {
     // Cost 3 points on another model, charged in full to the balance: it is listed first.
     await insertUsage(a.id, x, { model: "big", cost_micro: 3_000_000, free_micro: 0, balance_micro: 3_000_000 });
     expect((await api(app, a, "GET", "/api/usage")).json.recent).toEqual([
-      { agentId: x, model: "big", source: "site", points: "3", replies: 1 },
-      { agentId: x, model: "fast", source: "site", points: "1.5", replies: 2 },
+      { agentId: x, purpose: "reply", model: "big", source: "site", points: "3", replies: 1 },
+      { agentId: x, purpose: "reply", model: "fast", source: "site", points: "1.5", replies: 2 },
     ]);
   });
 

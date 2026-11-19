@@ -518,7 +518,7 @@ describe("settlement", () => {
     const admittedRun = await runningRun(db, owner.id);
     await admitAt(admittedRun, owner, fast.resolved, new Date());
     await settleAt(admittedRun, { inputTokens: 0, outputTokens: 100 }, { now: new Date() });
-    expect((await api(app, owner, "GET", "/api/usage")).json.recent).toEqual([{ agentId: null, model: "meter_free", source: "site", points: "0.1", replies: 0 }]);
+    expect((await api(app, owner, "GET", "/api/usage")).json.recent).toEqual([{ agentId: null, purpose: "draft", model: "meter_free", source: "site", points: "0.1", replies: 0 }]);
   });
 });
 

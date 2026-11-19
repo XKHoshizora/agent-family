@@ -225,8 +225,8 @@ describe("which model and thinking level a reply used: its Agent's owner's only"
       (await db.query<{ p: string }>("select (free_micro + balance_micro)::text as p from usage_records where run_id = $1", [runId])).rows[0]!.p;
     expect(await charged(await runOf(w.g, w.sol.id))).toBe("6900000");
     expect(await charged(await runOf(w.g, w.prov.id))).toBe("0");
-    expect((await api(app, w.owen, "GET", "/api/usage")).json.recent).toEqual([{ agentId: w.sol.id, model: SOL.id, source: "site", points: "6.9", replies: 1 }]);
-    expect((await api(app, w.ned, "GET", "/api/usage")).json.recent).toEqual([{ agentId: w.prov.id, model: PROV.model, source: "provider", points: "0", replies: 1 }]);
+    expect((await api(app, w.owen, "GET", "/api/usage")).json.recent).toEqual([{ agentId: w.sol.id, purpose: "reply", model: SOL.id, source: "site", points: "6.9", replies: 1 }]);
+    expect((await api(app, w.ned, "GET", "/api/usage")).json.recent).toEqual([{ agentId: w.prov.id, purpose: "reply", model: PROV.model, source: "provider", points: "0", replies: 1 }]);
   });
 
   it("the model and level are the run's, as it was called: the Agent's later change does not touch them, and the call was sent that level", async () => {

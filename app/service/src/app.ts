@@ -20,6 +20,7 @@ import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
+import { endMemoryCalls } from "./memory/call.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { decideProactive } from "./agents/proactive/decide.ts";
 import { createProactiveScheduler, type ProactiveScheduler } from "./agents/proactive/scheduler.ts";
@@ -337,8 +338,10 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // The persona drafts this process is working on, by run id: the stale-run sweep leaves them alone, as it does the
   // worker's runs.
   const draftRuns = new Set<string>();
+  // The run ids of the memory calls this process is working on (memory/call.ts `memoryCall`'s `inFlight`): the stale-run sweep leaves them alone too.
+  const memoryRuns = new Set<string>();
   const staleRunSweep = {
-    run: (): Promise<number> => sweepStaleRuns(agentPort, deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id)),
+    run: (): Promise<number> => sweepStaleRuns(agentPort, deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id) || memoryRuns.has(id)),
   };
   app.decorate("staleRunSweep", staleRunSweep);
   let staleTimer: { stop(): Promise<void> } | undefined;
@@ -378,6 +381,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         if (!ended) app.log.warn(`persona drafts not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
       }),
       agentWorker.stop(),
+      within(endMemoryCalls(), SHUTDOWN_GRACE_MS).then((ended) => {
+        if (!ended) app.log.warn(`memory calls not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
+      }),
       proactive
         ? within(proactive.idle(), SHUTDOWN_GRACE_MS).then((ended) => {
             if (!ended) app.log.warn(`a proactive judgement was still in flight ${SHUTDOWN_GRACE_MS} ms after the stop; what it decides is dropped`);
