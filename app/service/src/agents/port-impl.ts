@@ -26,6 +26,7 @@ import {
 } from "./context.ts";
 import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
+import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
 import { groupSystemPrompt, NO_NOTES, systemPrompt } from "./runtime/prompt.ts";
@@ -60,6 +61,8 @@ export interface AgentPortDeps {
   drawMark?: () => string;
   /** The proactive scheduler (proactive/scheduler.ts), when there is one: an Agent's post drops the judgement waiting there. */
   proactive?: Pick<ProactiveScheduler, "cancelled"> | null;
+  /** The reviewer (memory/reviewer.ts), when there is one: told after a reply was posted, so it can look at the conversation once it is quiet. */
+  memory?: Pick<Reviewer, "noted"> | null;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -512,6 +515,8 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
+    // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself).
+    if (result.reply !== null) this.deps.memory?.noted(run.agentId, run.conversationId);
     if (result.followed.run) this.announce(result.followed.run);
     // A notice its follow-up appended (a chain budget or the others' daily budget spent): the group is told after the
     // run's end.

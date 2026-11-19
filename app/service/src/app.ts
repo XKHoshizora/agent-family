@@ -20,7 +20,8 @@ import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
-import { endMemoryCalls } from "./memory/call.ts";
+import { endMemoryCalls, memoryModel } from "./memory/call.ts";
+import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { decideProactive } from "./agents/proactive/decide.ts";
 import { createProactiveScheduler, type ProactiveScheduler } from "./agents/proactive/scheduler.ts";
@@ -79,6 +80,11 @@ export interface Deps {
    * reply worker's port, and null without a judgement model (and in tests unless they ask, `BuildOptions.proactive`).
    */
   proactive: ProactiveScheduler | null;
+  /**
+   * What an Agent remembers, decided in the background (src/memory/reviewer.ts); built with the reply worker's port, and
+   * null when no memory model resolves (and in tests unless they ask, `BuildOptions.memory`).
+   */
+  memory: Reviewer | null;
 }
 
 /** One registered route (a GET also yields its HEAD), as declared: method, URL pattern and schema. */
@@ -138,6 +144,11 @@ export interface BuildOptions {
    * `PROACTIVE.debounceMs`. Tests: `false` builds none, `{ delayMs }` a shorter wait.
    */
   proactive?: false | { delayMs?: number };
+  /**
+   * The reviewer (`Deps.memory`), built when a memory model resolves (`memoryModel`). Tests: `false` builds none, and
+   * `{ now, setTimer }` run its quiet timers on their own clock (tests/helpers/harness.ts `testClock`).
+   */
+  memory?: false | { now?: () => number; setTimer?: SetTimer };
 }
 
 /**
@@ -183,6 +194,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     judge: overrides.judge !== undefined ? overrides.judge : config.judge ? createJudge(config.judge, insecureLocal) : null,
     // Built with the reply worker's port, below.
     proactive: null,
+    memory: null,
   };
 
   const underTest = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
@@ -315,6 +327,29 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
             log: app.log,
           });
   const proactive = deps.proactive;
+  // The run ids of the memory calls this process is working on (memory/call.ts `memoryCall`'s `inFlight`): the stale-run sweep leaves them alone too.
+  const memoryRuns = new Set<string>();
+  // Aborted as the stop begins, before the calls are waited for: a call under way is abandoned, not finished.
+  const memoryClosing = new AbortController();
+  const memoryAsked = options.memory === false ? null : (options.memory ?? {});
+  deps.memory =
+    overrides.memory !== undefined
+      ? overrides.memory
+      : memoryAsked === null || memoryModel(config) === null
+        ? null
+        : createReviewer({
+            db: deps.db,
+            config,
+            models: deps.models,
+            judge: deps.judge,
+            log: app.log,
+            inFlight: memoryRuns,
+            closing: memoryClosing.signal,
+            conversations: deps.conversations,
+            now: memoryAsked.now ?? Date.now,
+            setTimer: memoryAsked.setTimer ?? realTimer,
+          });
+  const memory = deps.memory;
   const agentPort = createAgentPort({
     db: deps.db,
     config,
@@ -324,6 +359,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     reads: deps.reads,
     log: app.log,
     proactive,
+    memory,
   });
   const agentWorker = createAgentWorker({
     port: agentPort,
@@ -339,8 +375,6 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // The persona drafts this process is working on, by run id: the stale-run sweep leaves them alone, as it does the
   // worker's runs.
   const draftRuns = new Set<string>();
-  // The run ids of the memory calls this process is working on (memory/call.ts `memoryCall`'s `inFlight`): the stale-run sweep leaves them alone too.
-  const memoryRuns = new Set<string>();
   const staleRunSweep = {
     run: (): Promise<number> => sweepStaleRuns(agentPort, deps.db, config, app.log, (id) => agentWorker.isWorking(id) || draftRuns.has(id) || memoryRuns.has(id)),
   };
@@ -349,6 +383,9 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   app.addHook("onReady", async () => {
     const recovered = await recoverRuns(deps.db, config, app.log);
     if (recovered > 0) app.log.info({ recovered }, "agent runs left running by the previous start were recovered");
+    // Conversations with replies nobody has reviewed yet (a restart delays a review, never loses it) wait for their quiet again.
+    const armed = (await memory?.resume()) ?? 0;
+    if (armed > 0) app.log.info({ armed }, "conversations with replies still to review were armed");
     // A deleted Agent still in a group (its delete committed, its leaving did not happen) leaves it now.
     const left = await leaveGroupsOfDeleted({ db: deps.db, conversations: deps.conversations, log: app.log });
     if (left > 0) app.log.info({ left }, "deleted Agents left the groups they were still in");
@@ -378,11 +415,15 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // decides is dropped; a run it queued stays queued for the next start).
   app.addHook("preClose", async () => {
     proactive?.close();
+    // No review starts from here on, and a call under way is told it is abandoned before it is waited for.
+    memory?.close();
+    memoryClosing.abort();
     await Promise.all([
       within(endDrafts(), SHUTDOWN_GRACE_MS).then((ended) => {
         if (!ended) app.log.warn(`persona drafts not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
       }),
       agentWorker.stop(),
+      memory ? within(memory.idle(), SHUTDOWN_GRACE_MS) : undefined,
       within(endMemoryCalls(), SHUTDOWN_GRACE_MS).then((ended) => {
         if (!ended) app.log.warn(`memory calls not ended within ${SHUTDOWN_GRACE_MS} ms of the stop; their runs stay running until the stale-run sweep or the next start releases them`);
       }),

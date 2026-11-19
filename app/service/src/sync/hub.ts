@@ -227,6 +227,14 @@ export class Hub {
     this.enqueue(conversationId, { kind: "charged", principalId: ownerId, seq });
   }
 
+  /**
+   * A memory notice of the owner's whose status changed, pushed to them again as they may read it now (`toWireForReaders`
+   * sends it to its owner only); nobody else is pushed anything.
+   */
+  pushNoticeAgain(conversationId: string, ownerId: string, seq: number): void {
+    this.enqueue(conversationId, { kind: "charged", principalId: ownerId, seq });
+  }
+
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */
   attach(ws: WebSocket, owner: TicketOwner): Connection {
     const principalId = owner.principalId.toLowerCase();
@@ -369,7 +377,7 @@ export class Hub {
     );
     if (!rows[0]) return;
     const [message] = (await toWireForReaders(this.deps.db, [reader], [toStored(rows[0])], this.deps.config)).get(reader) ?? [];
-    if (message?.via) this.push(reader, { type: "message", message });
+    if (message?.via || message?.system?.event === "memory_changed") this.push(reader, { type: "message", message });
   }
 
   /**

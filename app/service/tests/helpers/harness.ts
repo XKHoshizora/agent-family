@@ -7,6 +7,48 @@ import { testDatabaseUrl } from "./env.ts";
 
 const MIGRATIONS_TABLE = "pgmigrations";
 
+/**
+ * The clock the reviewer's timers run on in tests (`memory: true`): nothing sleeps. `advance(ms)` moves `now()` and
+ * fires, in order of due time, every timer that has come due. `reset()` forgets every timer and puts the clock back on
+ * the wall clock.
+ */
+export interface TestClock {
+  now(): number;
+  setTimer(fn: () => void, ms: number): { clear(): void };
+  advance(ms: number): void;
+  /** Timers waiting. */
+  timers(): number;
+  reset(): void;
+}
+
+export function testClock(): TestClock {
+  let offset = 0;
+  const waiting = new Set<{ at: number; fn: () => void }>();
+  const now = (): number => Date.now() + offset;
+  return {
+    now,
+    setTimer(fn, ms) {
+      const timer = { at: now() + ms, fn };
+      waiting.add(timer);
+      return { clear: () => void waiting.delete(timer) };
+    },
+    advance(ms) {
+      offset += ms;
+      for (;;) {
+        const due = [...waiting].filter((t) => t.at <= now()).sort((a, b) => a.at - b.at)[0];
+        if (!due) return;
+        waiting.delete(due);
+        due.fn();
+      }
+    },
+    timers: () => waiting.size,
+    reset() {
+      waiting.clear();
+      offset = 0;
+    },
+  };
+}
+
 async function truncateAll(db: Db): Promise<void> {
   const { rows } = await db.query<{ t: string }>(
     `select format('%I.%I', schemaname, tablename) as t
@@ -41,14 +83,16 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & BuildOptions = {},
-): { app: FastifyInstance; db: Db } {
-  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, ...overrides } =
+  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory"> & { memory?: boolean } = {},
+): { app: FastifyInstance; db: Db; clock: TestClock } {
+  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, memory = false, ...overrides } =
     extra;
+  const clock = testClock();
   const options: BuildOptions = {
     answerFloor,
     staleRunSweep,
     proactive,
+    memory: memory ? { now: clock.now, setTimer: clock.setTimer } : false,
     ...(logStream ? { logStream } : {}),
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
     ...(allowInsecureLocal ? { allowInsecureLocal } : {}),
@@ -106,5 +150,5 @@ export function useApp(
     }
   });
 
-  return { app: forward(() => current(instance)), db: forward(() => current(database)) };
+  return { app: forward(() => current(instance)), db: forward(() => current(database)), clock };
 }

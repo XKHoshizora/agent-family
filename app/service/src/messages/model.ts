@@ -37,6 +37,24 @@ export type SystemEvent =
    * Agent.
    */
   | { event: "agent_quieted"; actorId: string; agentId: string }
+  /**
+   * In an Agent's own conversation, for its owner only: a review of what they said changed (or, when `pending`, proposes to
+   * change) the Agent's notes. `changeId` is the `memory_changes` row; `lines` tell what changed, `vaultLines` (the same
+   * length) whether each line's note is in the vault afterwards. `unlock`: a request to take notes out of the vault.
+   * `full`: a room was too full to take an entry. `status` is stored as it was written; a reader is sent the change's
+   * current one (messages/read.ts). No other reader is sent the notice at all.
+   */
+  | {
+      event: "memory_changed";
+      actorId: string;
+      changeId: string;
+      lines: string[];
+      vaultLines: boolean[];
+      pending: boolean;
+      unlock: boolean;
+      full: boolean;
+      status: "applied" | "undone" | "pending" | "discarded";
+    }
   | PairEvent;
 
 /** Notices in a pair's direct conversation: `actorId` acted on `principalId`. */

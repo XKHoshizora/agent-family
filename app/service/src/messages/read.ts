@@ -116,6 +116,24 @@ export const postingRun = (message: string, run: string): string =>
   `${run}.id = case when ${message}.client_txn ~ '${RUN_ID_TEXT}' then ${message}.client_txn::uuid end
    and ${run}.agent_id = ${message}.sender_id and ${run}.conversation_id = ${message}.conversation_id and ${run}.purpose = 'reply'`;
 
+/** A memory-change notice (`memory_changed`, written by the reviewer): for its owner alone. */
+const isMemoryNotice = (m: StoredMessage): boolean => m.kind === "system" && m.body.event === "memory_changed";
+
+interface ChangeRow {
+  id: string;
+  owner_id: string;
+  status: "applied" | "undone" | "pending" | "discarded";
+  full: boolean;
+}
+
+/** The changes the memory notices in `msgs` name, by id: whose they are and how they stand now (never their operations). */
+async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<Map<string, ChangeRow>> {
+  const ids = [...new Set(msgs.filter(isMemoryNotice).map((m) => m.body.changeId).filter((id): id is string => typeof id === "string" && UUID.test(id)))];
+  if (ids.length === 0) return new Map();
+  const { rows } = await q.query<ChangeRow>(`select id, owner_id, status, "full" from memory_changes where id = any($1::uuid[])`, [ids]);
+  return new Map(rows.map((r) => [r.id, r]));
+}
+
 /**
  * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told
  * to. Every exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether
@@ -251,11 +269,22 @@ export async function toWireForReaders(
     return p && p.message_id === m.id && p.owner_id === reader ? p : null;
   };
 
+  const changes = await memoryChangesOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
+
   for (const reader of readers) {
     const list = out.get(reader)!;
     for (const m of msgs) {
       if (!visible.has(`${reader}|${m.id}`)) continue;
       const key = `${reader}|${m.id}`;
+      if (isMemoryNotice(m)) {
+        // Only the owner whose change it is is sent it (with the change's state now); no one else, whatever their access.
+        const change = changes.get(String(m.body.changeId));
+        if (!change || change.owner_id !== reader) continue;
+        const wire = toWire(m, null, null, false, null);
+        wire.system = { ...wire.system!, status: change.status, pending: change.status === "pending", full: change.full };
+        list.push(wire);
+        continue;
+      }
       const quote = quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null;
       list.push(toWire(m, quote, proposalFor(reader, m), reasoningFor.has(key), viaFor.get(key) ?? null));
     }

@@ -2,11 +2,12 @@ import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { readOwnedAgent } from "../agents/store.ts";
-import type { Queryable } from "../db.ts";
+import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound, type ErrorDetails } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
+import { confirmChange, discardChange, undoChange } from "./apply.ts";
 import { ownerNote } from "./clean.ts";
 import { sortNote } from "./sort.ts";
 import { codePoints, getNewNotes, listHearsay, roomOf, used, type Note } from "./store.ts";
@@ -24,6 +25,8 @@ const agentParams = z.object({ id: uuidParam });
 const agentNoteParams = z.object({ id: uuidParam, noteId: uuidParam });
 const agentHearsayParams = z.object({ id: uuidParam, hearsayId: uuidParam });
 const noteParams = z.object({ id: uuidParam });
+const changeParams = z.object({ id: uuidParam, changeId: uuidParam });
+const changeStatus = z.object({ status: z.enum(["applied", "undone", "discarded"]) });
 
 // Far beyond any room: so a too-long entry is `room_full` with what is left, not a 400.
 const textField = z.string().max(10_000);
@@ -329,4 +332,56 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       return reply.code(201).send(await noteOf(db, room, id));
     },
   );
+  // --- the changes a review made, as the owner may take them back or decide on them -----------------------------------
+
+  /**
+   * One of the owner's decisions on a change of this Agent's: `run` does it in a transaction and says how it went. 404 for
+   * anyone else's change or another Agent's; asking again for what is already so answers it again; any other state of
+   * the change, or a note that moved on since, is 409 `stale_change`; a room that cannot take it back 409 `room_full`.
+   */
+  async function decide(
+    ownerId: string,
+    agentId: string,
+    changeId: string,
+    wanted: "applied" | "undone" | "discarded",
+    run: (t: Tx) => Promise<"ok" | "stale" | "full" | null>,
+  ): Promise<{ status: typeof wanted }> {
+    const found = await db.query<{ agent_id: string; status: string }>("select agent_id, status from memory_changes where id = $1 and owner_id = $2", [changeId, ownerId]);
+    if (found.rows[0]?.agent_id !== agentId) throw notFound();
+    const outcome = await db.tx(run);
+    if (outcome === "stale") throw new AppError(409, "stale_change");
+    if (outcome === "full") throw roomFull(0);
+    if (outcome === null) {
+      const now = await db.query<{ status: string }>("select status from memory_changes where id = $1", [changeId]);
+      if (now.rows[0]?.status === wanted) return { status: wanted };
+      throw new AppError(409, "stale_change");
+    }
+    return { status: wanted };
+  }
+
+  const changeRoute = (verb: "undo" | "confirm" | "discard", wanted: "undone" | "applied" | "discarded", act: (t: Tx, ownerId: string, changeId: string) => Promise<"ok" | "stale" | "full" | null>) =>
+    api.post(
+      `/api/agents/:id/memory/changes/:changeId/${verb}`,
+      { schema: { params: changeParams, querystring: empty, body: empty.nullish(), response: { 200: changeStatus } } },
+      async (req) => {
+        const me = await requirePrincipal(req);
+        await writeLimit(req, me.id);
+        const agent = await ownAgent(me.id, req.params.id);
+        const decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId));
+        // The notice of the change is pushed to its owner again, now with its new status (read when it is sent).
+        const notices = await db.query<{ seq: string }>(
+          "select seq::text from messages where conversation_id = $1 and kind = 'system' and body ->> 'changeId' = $2",
+          [agent.conversationId, req.params.changeId],
+        );
+        for (const n of notices.rows) app.realtime.pushNoticeAgain(agent.conversationId, me.id, Number(n.seq));
+        return decided;
+      },
+    );
+
+  changeRoute("undo", "undone", async (t, ownerId, changeId) => undoChange(t, ownerId, changeId, limits).then((r) => (r === "undone" ? "ok" : r)));
+  changeRoute("confirm", "applied", async (t, ownerId, changeId) => {
+    const r = await confirmChange(t, ownerId, changeId, limits);
+    return r === "stale" || r === "full" || r === null ? r : "ok";
+  });
+  changeRoute("discard", "discarded", async (t, ownerId, changeId) => ((await discardChange(t, ownerId, changeId)) === null ? null : "ok"));
 }

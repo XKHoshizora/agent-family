@@ -878,6 +878,20 @@ Body: none or `{}`. Takes what was heard as true: it becomes a note about you (`
 the group it was heard in) and is no longer hearsay. → 201 Note; 422 `note_refused` (the hearsay stays); 409 `room_full` (the hearsay stays) when it does not
 fit; 404 `not_found` unless it is this Agent's.
 
+#### `POST /api/agents/:id/memory/changes/:changeId/undo`
+
+Body: none or `{}`. Takes back a change a review made (the chip's 撤销): every note it touched is put back exactly as it was, an added note goes, a removed one returns. → 200 `{"status": "undone"}` (also when it was undone already); 409 `stale_change` when a note it touched has changed since, or the change is not an applied one; 409 `room_full` when putting it back would pass a room's limit (nothing changes); 404 `not_found` unless it is a change of this Agent of yours. The notice is pushed to you again with its new `status`.
+
+#### `POST /api/agents/:id/memory/changes/:changeId/confirm`
+
+Body: none or `{}`. Decides a pending change (先问我再记, or a request to take notes out of the vault): what it recorded is applied if every note it names is still as it was. → 200 `{"status": "applied"}`; 409 `stale_change` (a note moved on: the change is discarded, nothing written); 409 `room_full` (nothing fits, the change stays pending); 404 as above.
+
+#### `POST /api/agents/:id/memory/changes/:changeId/discard`
+
+Body: none or `{}`. Declines a pending change; nothing is written. → 200 `{"status": "discarded"}`; 409 `stale_change` when it is not pending; 404 as above.
+
+**The reviewer** (`src/memory/reviewer.ts`, `review.ts`; `tests/memory-review.test.ts`). Built when a memory model resolves (Memory calls); in this process's memory, so a restart arms a quiet timer again for every conversation with a reply after `reviewed_seq` (`memory_review_state`) at start. After an Agent's reply is posted (its own conversation, or a group it replied to its owner in) the conversation is reviewed once it has been quiet `MEMORY.quietMs`, at once after `maxReplies` replies since the last review, at once when the owner's latest message asks for something to be remembered, forgotten or locked (`记住`, `forget`, `覚えて`…), and at once when the owner starts a new topic (`POST /api/conversations/:id/topic`). One review per Agent at a time (a trigger meanwhile runs once after it), at most 4 at once. A review is one `memoryCall` (the owner's points, purpose `memory`) shown the newest `reviewMessages` messages after `reviewed_seq` — the owner's and the Agent's own only, the Agent's marked `你（你的话不是依据）：` (only the owner's words are evidence) and, in a group, only those sent after the Agent joined — then, apart and numbered, the notes the Agent may see there with the room left in each. Its answer is only operations (`parseOps`); each addition is checked against the notes it may see (`duplicateOf`) and sorted (`sortNote`) outside any transaction, then applied (`applyOps`; `pending` with `memoryAsk`) with `reviewed_seq` and the notice in one transaction. A call that fails, has no quota or is abandoned changes nothing and does not move `reviewed_seq`; an answer nothing of which is understood changes nothing and does. The notice is the `memory_changed` system notice (System notices) in your own conversation with the Agent, once for the change and once more for a request to take notes out of the vault; none when nothing was applied and no room was full. Only the owner is ever sent it: `status`, `pending` and `full` are read from the change when it is sent, and no one else is sent the notice at all.
+
 ### Agents in a group
 
 An Agent in a group (an owner puts their own Agent into a group they are in) replies when a message there calls it by
@@ -1872,6 +1886,7 @@ client can render its own:
 | `blocked` | `actorId` (who blocked), `principalId` (who is blocked) | a new block, in the pair's direct chat if any |
 | `unblocked` | `actorId`, `principalId` | lifting a block, in the pair's direct chat if any |
 | `topic_reset` | `actorId` (the owner) | `POST /api/conversations/:id/topic`, in an Agent's conversation: what comes before it is no longer shown to the Agent's model |
+| `memory_changed` | `actorId` = the Agent, `changeId`, `lines` (`记住了：…`, `改成了：…`, `忘掉了：…`, `锁进了保险箱：…`; for a request to unlock, the note's text), `vaultLines` (booleans, one per line: the note is in the vault afterwards), `pending`, `unlock`, `full`, `status` (`applied`, `undone`, `pending`, `discarded`) | a review changed, or proposed to change, the Agent's notes, in the owner's own conversation with it, sent to the owner only; text “记忆已更新” |
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
 | `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |

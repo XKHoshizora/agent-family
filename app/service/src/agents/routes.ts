@@ -538,13 +538,15 @@ export function registerAgentRoutes(
     async (req, reply) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      const { notice, wire } = await db.tx(async (t) => {
-        const notice = await resetTopic(t, me.id, req.params.id);
+      const { notice, wire, agentId } = await db.tx(async (t) => {
+        const { notice, agentId } = await resetTopic(t, me.id, req.params.id);
         const [wire] = await toWireFor(t, me.id, [notice], config);
         if (!wire) throw new Error("resetTopic: the owner cannot read the notice just written");
-        return { notice, wire };
+        return { notice, wire, agentId };
       });
       conversations.publish({ messages: [notice], conversations: [] }, req.log);
+      // What was said before the new topic is reviewed now, while it is still shown to the reviewer.
+      app.deps.memory?.topicReset(agentId, req.params.id);
       return reply.code(201).send({ message: wire });
     },
   );

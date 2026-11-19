@@ -53,6 +53,9 @@ export async function renderNotice(q: Queryable, conversationId: string, e: Syst
       );
       return `${n(e.actorId)} 开始了新话题，之前的对话不再发给 ${agent.rows[0]?.display_name ?? "某人"}`;
     }
+    // Only a title: what changed travels in the event, to the owner's client alone (messages/read.ts).
+    case "memory_changed":
+      return "记忆已更新";
     case "agents_halted":
       return `${n(e.actorId)} 让 Agent 停止了接话`;
     case "agent_chain_paused":

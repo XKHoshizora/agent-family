@@ -1,5 +1,4 @@
 import { randomInt } from "node:crypto";
-import type { Hearsay, Note } from "../../memory/store.ts";
 
 /**
  * The system text of a reply (spec 6.5 "发给模型的内容"). In the Agent's own conversation (`systemPrompt`): the site's
@@ -180,10 +179,24 @@ export function shownAppellation(appellation: string | null): string | null {
  * What a run is given of its Agent's memory (memory/passage.ts `loadNotes`, from `notesFor`): the notes about its owner
  * and its own, and what it heard in groups, each with the name of the group it was said in.
  */
+/** What the passage reads of a note: the memory store's `Note` satisfies it (this module may not import the store). */
+export interface PromptNote {
+  text: string;
+  updatedAt: Date;
+}
+
+/** What the passage reads of a heard thing, with the title of the group it was said in. */
+export interface PromptHearsay {
+  speakerName: string;
+  text: string;
+  saidAt: Date;
+  group: string;
+}
+
 export interface PromptNotes {
-  owner: readonly Note[];
-  self: readonly Note[];
-  hearsay: ReadonlyArray<Hearsay & { group: string }>;
+  owner: readonly PromptNote[];
+  self: readonly PromptNote[];
+  hearsay: readonly PromptHearsay[];
 }
 
 /** No notes: the system text is as it was before memory. */
