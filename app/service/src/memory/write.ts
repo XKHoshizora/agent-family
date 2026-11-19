@@ -27,7 +27,7 @@ export const listRoom = (q: Queryable, room: Room): Promise<Note[]> => (room.kin
  * A timestamp column as text in one explicit, session-independent format (UTC, microseconds): what a change records and
  * compares (a JS Date keeps milliseconds only, and the session's time zone must not matter). `$n::timestamptz` reads it back.
  */
-const exactTs = (column: string): string => `to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+export const exactTs = (column: string): string => `to_char(${column} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 export interface ExactNote {
   note: Note;
@@ -120,6 +120,61 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
 export async function deleteNote(q: Queryable, room: Room, id: string): Promise<boolean> {
   const { rowCount } = await q.query(`delete from ${TABLE[room.kind]} where id = $1 and ${COLUMN[room.kind]} = $2`, [id, keyOf(room)]);
   return rowCount === 1;
+}
+
+/** One entry of the Agent's hearsay with its timestamps exactly as stored (`exactTs`: what a change records to put it back). */
+export interface HearsayExact {
+  id: string;
+  conversationId: string;
+  speakerId: string | null;
+  speakerName: string;
+  text: string;
+  saidAt: string;
+  createdAt: string;
+}
+
+/** Holds the Agent's hearsay room until the transaction ends (the account lock is taken first): reading how much it holds and changing it are one step. */
+export async function lockHearsay(t: Tx, agentId: string): Promise<void> {
+  await t.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`memory-hearsay:${agentId}`]);
+}
+
+/** Every hearsay entry of the Agent (all its groups), oldest first, with exact timestamps. */
+export async function listHearsayExact(q: Queryable, agentId: string): Promise<HearsayExact[]> {
+  const { rows } = await q.query<{ id: string; conversation_id: string; speaker_id: string | null; speaker_name: string; text: string; said: string; created: string }>(
+    `select id, conversation_id, speaker_id, speaker_name, text, ${exactTs("said_at")} as said, ${exactTs("created_at")} as created
+       from agent_hearsay where agent_id = $1 order by created_at, id`,
+    [agentId],
+  );
+  return rows.map((r) => ({ id: r.id, conversationId: r.conversation_id, speakerId: r.speaker_id, speakerName: r.speaker_name, text: r.text, saidAt: r.said, createdAt: r.created }));
+}
+
+/** Adds an entry to the Agent's hearsay (under `lockHearsay`); returns its id. Entries added one after another list in that order. */
+export async function insertHearsay(
+  t: Tx,
+  agentId: string,
+  h: { conversationId: string; speakerId: string; speakerName: string; text: string; saidAt: Date },
+): Promise<string> {
+  const { rows } = await t.query<{ id: string }>(
+    `insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at, created_at)
+     select $1, $2, $3, $4, $5, $6, c.ts from (select clock_timestamp() as ts) c returning id`,
+    [agentId, h.conversationId, h.speakerId, h.speakerName, h.text, h.saidAt],
+  );
+  return rows[0]!.id;
+}
+
+/** Puts back an entry that was deleted, as it was (same id and times). False when its group is gone (the entry went with it); a speaker who is gone leaves the entry with no speaker id. */
+export async function restoreHearsay(t: Tx, agentId: string, h: HearsayExact): Promise<boolean> {
+  const { rowCount } = await t.query(
+    `insert into agent_hearsay (agent_id, id, conversation_id, speaker_id, speaker_name, text, said_at, created_at)
+     select $1, $2, c.id, (select id from principals where id = $4), $5, $6, $7::timestamptz, $8::timestamptz from conversations c where c.id = $3`,
+    [agentId, h.id, h.conversationId, h.speakerId, h.speakerName, h.text, h.saidAt, h.createdAt],
+  );
+  return rowCount === 1;
+}
+
+/** Deletes entries of the Agent's hearsay by id. */
+export async function deleteHearsay(q: Queryable, agentId: string, ids: ReadonlyArray<string>): Promise<void> {
+  if (ids.length > 0) await q.query("delete from agent_hearsay where agent_id = $1 and id = any($2::uuid[])", [agentId, ids]);
 }
 
 /** Deletes one of the Agent's hearsay entries and returns it; null when the Agent has no such one. */

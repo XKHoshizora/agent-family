@@ -3,7 +3,25 @@ import type { Tx } from "../db.ts";
 import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
 import { codePoints, used, type Note, type NoteKind, type Rooms } from "./store.ts";
-import { deleteNote, fits, insertNote, listRoomExact, lockRoom, restoreNote, roomLimit, updatedAtOf, updateNote, type ExactNote, type Room } from "./write.ts";
+import {
+  deleteHearsay,
+  deleteNote,
+  fits,
+  insertHearsay,
+  insertNote,
+  listHearsayExact,
+  listRoomExact,
+  lockHearsay,
+  lockRoom,
+  restoreHearsay,
+  restoreNote,
+  roomLimit,
+  updatedAtOf,
+  updateNote,
+  type ExactNote,
+  type HearsayExact,
+  type Room,
+} from "./write.ts";
 
 /**
  * Applying what a review may change, the one audited path: every change is recorded in `memory_changes` (so the owner
@@ -18,6 +36,11 @@ import { deleteNote, fits, insertNote, listRoomExact, lockRoom, restoreNote, roo
  *
  * `memory_changes.ops` holds a JSON array of `StoredOp`: the `AppliedOp` fields plus what undo and confirm need to
  * restore or to check that nothing changed since. A pending change's `add` has `noteId: null` until it is confirmed.
+ *
+ * A change of the other kind records hearsay (`applyHearsay`): its ops are `StoredHearsayOp`s only, and it is never
+ * pending (hearsay is a list of clues, not a note, so even an Agent that asks first writes it at once). Undo deletes the
+ * entries it inserted and puts back those it dropped; it is stale unless every inserted one is still there and no dropped
+ * one is.
  */
 
 export interface AppliedOp {
@@ -46,6 +69,24 @@ export interface StoredOp extends AppliedOp {
   updatedAtBefore: string | null;
   updatedAtAfter: string | null;
 }
+
+/**
+ * What a hearsay change stores of each entry it touched: `hearsay_add` an entry it inserted (`createdAt` null: undo only
+ * deletes it), `hearsay_drop` one it deleted — superseded by the new ones, or trimmed to fit the room — with the exact
+ * times it had, so undo puts it back whole.
+ */
+export interface StoredHearsayOp {
+  op: "hearsay_add" | "hearsay_drop";
+  hearsayId: string;
+  conversationId: string;
+  speakerId: string | null;
+  speakerName: string;
+  text: string;
+  saidAt: string;
+  createdAt: string | null;
+}
+
+const isHearsayOp = (s: StoredOp | StoredHearsayOp): s is StoredHearsayOp => s.op === "hearsay_add" || s.op === "hearsay_drop";
 
 export interface Who {
   ownerId: string;
@@ -283,7 +324,7 @@ async function stamp(t: Tx, w: Ids, ops: StoredOp[]): Promise<void> {
   }
 }
 
-async function writeChange(t: Tx, w: Ids, conversationId: string, status: "applied" | "pending", stored: StoredOp[], full: boolean): Promise<string> {
+async function writeChange(t: Tx, w: Ids, conversationId: string, status: "applied" | "pending", stored: ReadonlyArray<StoredOp | StoredHearsayOp>, full: boolean): Promise<string> {
   const { rows } = await t.query<{ id: string }>(
     `insert into memory_changes (owner_id, agent_id, conversation_id, status, ops, "full") values ($1, $2, $3, $4, $5::jsonb, $6) returning id`,
     [w.ownerId, w.agentId, conversationId, status, JSON.stringify(stored), full],
@@ -319,6 +360,66 @@ export async function applyOps(
   return { changeId, applied: stored.map(plain), full, unlocks };
 }
 
+/** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */
+export interface NewHearsay {
+  conversationId: string;
+  speakerId: string;
+  speakerName: string;
+  text: string;
+  saidAt: Date;
+}
+
+/**
+ * Writes hearsay entries, in the caller's transaction (which holds the Agent's row), under the account lock and the
+ * Agent's hearsay lock: deletes the entries of `drop` (ids of this Agent's), inserts `entries` in order, then deletes the
+ * oldest entries — of any group, the new ones last — until the room holds at most `room` code points, and records it all
+ * as one applied change. Nothing is written, and null comes back, when no entry is left to insert (none given, or the
+ * room cannot hold any) or the Agent is not the owner's: a drop alone is never applied. `added` lists what was inserted.
+ */
+export async function applyHearsay(
+  t: Tx,
+  w: Ids,
+  opts: { conversationId: string; entries: ReadonlyArray<NewHearsay>; drop: ReadonlySet<string>; room: number },
+): Promise<{ changeId: string; added: StoredHearsayOp[] } | null> {
+  if (opts.entries.length === 0) return null;
+  await lockAccount(t, w.ownerId);
+  if (!(await ownsAgent(t, w))) return null;
+  await lockHearsay(t, w.agentId);
+  const existing = await listHearsayExact(t, w.agentId);
+  const dropped = existing.filter((e) => opts.drop.has(e.id));
+  // In the order a room trims: what is kept, oldest first, then what comes in.
+  const line: Array<{ old: HearsayExact } | { entry: NewHearsay }> = [
+    ...existing.filter((e) => !opts.drop.has(e.id)).map((old) => ({ old })),
+    ...opts.entries.map((entry) => ({ entry })),
+  ];
+  const pointsOf = (l: (typeof line)[number]): number => codePoints("old" in l ? l.old.text : l.entry.text);
+  let usedNow = line.reduce((sum, l) => sum + pointsOf(l), 0);
+  const trimmed: HearsayExact[] = [];
+  const arriving: NewHearsay[] = [];
+  for (const l of line) {
+    if (usedNow > opts.room) {
+      usedNow -= pointsOf(l);
+      if ("old" in l) trimmed.push(l.old);
+    } else if ("entry" in l) {
+      arriving.push(l.entry);
+    }
+  }
+  if (arriving.length === 0) return null;
+
+  const gone = [...dropped, ...trimmed];
+  await deleteHearsay(t, w.agentId, gone.map((g) => g.id));
+  const added: StoredHearsayOp[] = [];
+  for (const entry of arriving) {
+    const hearsayId = await insertHearsay(t, w.agentId, entry);
+    added.push({ op: "hearsay_add", hearsayId, conversationId: entry.conversationId, speakerId: entry.speakerId, speakerName: entry.speakerName, text: entry.text, saidAt: entry.saidAt.toISOString(), createdAt: null });
+  }
+  const removed = gone.map(
+    (g): StoredHearsayOp => ({ op: "hearsay_drop", hearsayId: g.id, conversationId: g.conversationId, speakerId: g.speakerId, speakerName: g.speakerName, text: g.text, saidAt: g.saidAt, createdAt: g.createdAt }),
+  );
+  const changeId = await writeChange(t, w, opts.conversationId, "applied", [...removed, ...added], false);
+  return { changeId, added };
+}
+
 /**
  * Records, as one pending change, a request to take notes out of the vault: only those still in it. The owner confirms
  * (`confirmChange`) or declines (`discardChange`); nothing is opened here. Null when none is left in the vault, or the
@@ -342,18 +443,20 @@ export async function proposeUnlocks(t: Tx, who: Ids, conversationId: string, no
 interface ChangeRow {
   agentId: string;
   status: "applied" | "undone" | "pending" | "discarded";
+  /** The change's operations on notes, or (a hearsay change) its operations on hearsay: a change holds only one kind. */
   ops: StoredOp[];
+  hearsay: StoredHearsayOp[];
   full: boolean;
 }
 
 /** The owner's own change, locked for this transaction; null when it is nobody's of theirs. */
 async function readChange(t: Tx, ownerId: string, changeId: string): Promise<ChangeRow | null> {
-  const { rows } = await t.query<{ agent_id: string; status: ChangeRow["status"]; ops: StoredOp[]; full: boolean }>(
+  const { rows } = await t.query<{ agent_id: string; status: ChangeRow["status"]; ops: Array<StoredOp | StoredHearsayOp>; full: boolean }>(
     `select agent_id, status, ops, "full" from memory_changes where id = $1 and owner_id = $2 for update`,
     [changeId, ownerId],
   );
   const r = rows[0];
-  return r ? { agentId: r.agent_id, status: r.status, ops: r.ops, full: r.full } : null;
+  return r ? { agentId: r.agent_id, status: r.status, ops: r.ops.filter((s): s is StoredOp => !isHearsayOp(s)), hearsay: r.ops.filter(isHearsayOp), full: r.full } : null;
 }
 
 const resolve = (t: Tx, changeId: string, status: "undone" | "discarded" | "applied", extra?: { ops: StoredOp[]; full: boolean }) =>
@@ -388,6 +491,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "applied") return null;
+  if (change.hearsay.length > 0) return undoHearsay(t, changeId, change.agentId, change.hearsay, rooms);
   const w = { ownerId, agentId: change.agentId };
   const state = await loadState(t, w);
   for (const s of change.ops) {
@@ -418,6 +522,26 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
     } else {
       await updateNote(t, at, s.noteId!, { text: s.before!, vault: s.vaultBefore!, vaultBy: s.vaultByBefore!, unsure: s.unsureBefore!, updatedAt: s.updatedAtBefore! });
     }
+  }
+  await resolve(t, changeId, "undone");
+  return "undone";
+}
+
+/**
+ * Undoes a hearsay change (the account is locked): stale unless every entry it inserted is still there and none it dropped
+ * is (presence only: entries are never edited); full when putting the dropped ones back would pass the room. The entries
+ * it inserted go, those it dropped return with their ids and times (one whose group is gone stays gone).
+ */
+async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: StoredHearsayOp[], rooms: Rooms): Promise<"undone" | "stale" | "full"> {
+  await lockHearsay(t, agentId);
+  const existing = await listHearsayExact(t, agentId);
+  const present = new Set(existing.map((e) => e.id));
+  for (const s of ops) if ((s.op === "hearsay_add") !== present.has(s.hearsayId)) return "stale";
+  const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -codePoints(s.text) : codePoints(s.text)), 0);
+  if (!fits(used(existing), growth, rooms.hearsay)) return "full";
+  await deleteHearsay(t, agentId, ops.filter((s) => s.op === "hearsay_add").map((s) => s.hearsayId));
+  for (const s of ops) {
+    if (s.op === "hearsay_drop") await restoreHearsay(t, agentId, { id: s.hearsayId, conversationId: s.conversationId, speakerId: s.speakerId, speakerName: s.speakerName, text: s.text, saidAt: s.saidAt, createdAt: s.createdAt! });
   }
   await resolve(t, changeId, "undone");
   return "undone";

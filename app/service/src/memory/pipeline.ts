@@ -4,7 +4,7 @@ import { lockAgent, readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { appendSystem } from "../conversations/system.ts";
-import type { Db } from "../db.ts";
+import type { Db, Queryable } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
@@ -43,6 +43,11 @@ export interface ReviewJob {
   kind: "review";
   agentId: string;
   conversationId: string;
+  /**
+   * A review of a group for what the owner flagged as said about themselves (hearsay.ts `runFlags`): whatever else the
+   * Agent may write there, this review may add notes about the owner and nothing else.
+   */
+  own?: true;
 }
 
 export interface ReviewContext {
@@ -74,6 +79,16 @@ export async function reviewedSeq(db: Db, agentId: string, conversationId: strin
 const moveReviewed = `insert into memory_review_state (agent_id, conversation_id, reviewed_seq) values ($1, $2, $3)
   on conflict (agent_id, conversation_id) do update set reviewed_seq = greatest(memory_review_state.reviewed_seq, excluded.reviewed_seq)`;
 
+/** Moves `reviewed_seq` (never back), and with it deletes the owner's-own-remark flags it has now passed. */
+async function markReviewed(q: Queryable, agentId: string, conversationId: string, seq: number): Promise<void> {
+  await q.query(moveReviewed, [agentId, conversationId, seq]);
+  await q.query(
+    `delete from memory_flags where agent_id = $1 and conversation_id = $2 and kind = 'own'
+        and seq <= (select reviewed_seq from memory_review_state where agent_id = $1 and conversation_id = $2)`,
+    [agentId, conversationId],
+  );
+}
+
 /** What this owner has waiting for their yes: texts of added or replaced entries, and the notes asked to be unlocked. */
 async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string> }> {
   const { rows } = await db.query<{ agent_id: string; ops: StoredOp[] }>("select agent_id, ops from memory_changes where owner_id = $1 and status = 'pending'", [agent.ownerId]);
@@ -91,7 +106,7 @@ async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind
 }
 
 /** The kinds a review of `conversationId` may change; in a group the owner's room only for the owner's reviewing Agent there. */
-async function kindsFor(db: Db, agent: AgentRow, conversationId: string, group: boolean): Promise<ReadonlySet<NoteKind>> {
+export async function kindsFor(db: Db, agent: AgentRow, conversationId: string, group: boolean): Promise<ReadonlySet<NoteKind>> {
   if (!agent.sharedNotes) return new Set<NoteKind>(["self"]);
   if (!group) return new Set<NoteKind>(["owner", "self"]);
   const seq = await db.query<{ seq: string }>("select seq::text from conversations where id = $1", [conversationId]);
@@ -106,12 +121,15 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const agent = await reviewableAgent(db, agentId);
   if (agent === null || ctx.closing.aborted) return;
   const group = conversationId !== agent.conversationId;
-  const kinds = await kindsFor(db, agent, conversationId, group);
+  const allowedKinds = await kindsFor(db, agent, conversationId, group);
+  // An own-remark review writes about the owner only; where the Agent may not (it is not the reviewing one), nothing.
+  const kinds: ReadonlySet<NoteKind> = job.own ? new Set<NoteKind>(allowedKinds.has("owner") ? ["owner"] : []) : allowedKinds;
+  if (kinds.size === 0) return;
   const { input, seen } = await readReview(db, agent, conversationId, await reviewedSeq(db, agentId, conversationId), { kinds, config, now: new Date(deps.now()) });
   if (input === null) {
     // Nothing the owner said to look at: what the read saw is not looked at again, and nothing newer than what it saw is
     // marked (an owner message committed after the read is still to be reviewed).
-    if (seen !== null) await db.query(moveReviewed, [agentId, conversationId, seen]);
+    if (seen !== null) await markReviewed(db, agentId, conversationId, seen);
     return;
   }
   ctx.attempted(input.upToSeq);
@@ -158,7 +176,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
         if (unlockId) written.push({ changeId: unlockId, unlock: true });
       }
     }
-    await t.query(moveReviewed, [agentId, conversationId, input.upToSeq]);
+    await markReviewed(t, agentId, conversationId, input.upToSeq);
     const stored: StoredMessage[] = [];
     for (const w of written) {
       const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [w.changeId])).rows[0]!;

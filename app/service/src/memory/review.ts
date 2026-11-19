@@ -88,7 +88,7 @@ function todayIn(now: Date, timeZone: string): string {
   return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;
 }
 
-const cut = (text: string, max: number): string => {
+export const cut = (text: string, max: number): string => {
   const points = [...text];
   return points.length <= max ? text : points.slice(0, max).join("");
 };
