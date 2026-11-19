@@ -1,11 +1,12 @@
 // What the owner is told when their Agent remembered something (the `memory_changed` notice, only ever in their own
-// conversation with that Agent): a small closed chip, 记忆已更新, that opens to the lines of the change with 撤销; and the
+// conversation with that Agent): a small closed chip (one sentence with the Agent's name, `memorySentence`) that opens to the lines of the change with 撤销; and the
 // two confirmation cards (记住 / 不用 for new notes, 取出 / 不用 for a note to take out of the vault). Following
 // TopicDivider (a notice) and ProposalCard (decisions, one at a time, a refusal said on the card).
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ChevronDown, Lock } from "../icons.js";
-import { publishBlock } from "../state/selectors.js";
+import { memorySentence } from "../data/memoryPhrases.js";
+import { entity, publishBlock } from "../state/selectors.js";
 import { Btn, Tag } from "../ui/primitives.jsx";
 import { useDecision } from "./AgentChatBits.jsx";
 
@@ -82,10 +83,12 @@ export function MemoryNotice({ msg, conv }) {
     );
   }
 
+  // The Agent's name as the conversation shows it; one that cannot be named is 它.
+  const sentence = memorySentence({ ...system, name: entity(state, system.actorId)?.name || "它" });
   return (
     <li className="msg-memory" data-msg={msg.id}>
       <button type="button" className="memory-chip" aria-expanded={open} onClick={() => setOpen(!open)}>
-        {system.full ? "记忆已更新 · 快满了" : "记忆已更新"}
+        {sentence}
         <ChevronDown size={13} aria-hidden="true" />
       </button>
       {open && (

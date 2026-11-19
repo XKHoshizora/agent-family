@@ -81,7 +81,8 @@ const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded"]);
 
 /**
  * A `memory_changed` event as the chip and the cards read it: `lines` (strings only), `vaultLines` the same length (absent
- * or malformed: all false), the three flags as booleans, and a known `status` (else the flag `pending` says it).
+ * or malformed: all false), the three flags as booleans, and a known `status` (else the flag `pending` says it); `phase`
+ * "rest" (absent or unknown) or "dream"; `count` the number the sentence says (absent: the number of lines).
  */
 function memoryChangeView(event) {
   const lines = Array.isArray(event.lines) ? event.lines.filter((l) => typeof l === "string") : [];
@@ -96,6 +97,8 @@ function memoryChangeView(event) {
     pending,
     unlock: event.unlock === true,
     full: event.full === true,
+    phase: event.phase === "dream" ? "dream" : "rest",
+    count: Number.isInteger(event.count) && event.count >= 0 ? event.count : lines.length,
     status: MEMORY_STATUSES.has(event.status) ? event.status : pending ? "pending" : "applied",
   };
 }

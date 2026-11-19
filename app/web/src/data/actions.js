@@ -746,10 +746,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** What the Agent heard: forgotten, or taken as true (it becomes one of its own notes). */
     deleteHearsay: (agentId, hearsayId) => attempt(() => api.deleteHearsay(agentId, hearsayId), memoryWrite(agentId)),
     confirmHearsay: (agentId, hearsayId) => attempt(() => api.confirmHearsay(agentId, hearsayId), memoryWrite(agentId)),
-    /** value: `{newNotes: "auto" | "vault" | "open", memoryModel, memoryModelUsable}`, my memory settings (`GET /api/me`). */
+    /** value: `{newNotes: "auto" | "vault" | "open", dream, memoryModel, memoryModelUsable}`, my memory settings (`GET /api/me`). */
     loadMemorySettings: () => attempt(() => api.getMe(), { map: memorySettingsOf, text: commonErrorText }),
     /** value: the setting as sent (the answer does not echo it). */
     setNewNotes: (newNotes) => attempt(() => api.updateNewNotes(newNotes), { map: () => newNotes, text: commonErrorText }),
+    /** value: the setting as sent (the answer does not echo it). */
+    setDream: (dream) => attempt(() => api.updateDream(dream), { map: () => dream, text: commonErrorText }),
     /** value: the model as sent, or null (the site's). */
     setMemoryModel: (memoryModel) => attempt(() => api.updateMemoryModel(memoryModel), { map: () => memoryModel, text: commonErrorText }),
     discardProposal: (agentId, proposalId) =>

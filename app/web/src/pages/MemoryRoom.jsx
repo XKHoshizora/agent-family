@@ -15,6 +15,9 @@ const chars = (text) => [...text].length;
 /** `已用 N%` of a room: rounded, never above 100. */
 export const usedPercent = (used, limit) => (limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 100);
 
+/** From this many mentions a note is 常提起 (the service counts every time it was said again). */
+const OFTEN = 3;
+
 /** `{date} · {source}`: where an entry was learned. The service reports an origin that was deleted as manual. */
 function sourceLine(note, agentName) {
   const { kind, title } = note.source;
@@ -231,6 +234,7 @@ function NoteRow({ agentId, agentName, note, left, memory, leaving }) {
         )}
         <p className="memory-source muted">
           {sourceLine(note, agentName)}
+          {note.strength >= OFTEN && <Tag tone="muted">常提起</Tag>}
           {note.vault && note.unsure && <Tag tone="muted">拿不准，先锁上了</Tag>}
         </p>
         {editing && over && <p className="field-msg">{leftText(left + chars(note.text))}</p>}

@@ -25,6 +25,8 @@ export const resetPassword = (body) => request("POST", "/api/auth/reset-password
 export const getMe = () => request("GET", "/api/me");
 export const updateMe = (displayName) => request("PATCH", "/api/me", { displayName });
 /** How a new note is sorted for the vault: "auto" (judged), "vault" (all in) or "open" (none in). The answer does not echo it. */
+/** Whether my Agents tidy the day's notes while I rest (入梦). */
+export const updateDream = (dream) => request("PATCH", "/api/me", { dream });
 export const updateNewNotes = (newNotes) => request("PATCH", "/api/me", { newNotes });
 /** The model that tidies my memory: a model as an Agent's is written, or null for the site's. The answer does not echo it. */
 export const updateMemoryModel = (memoryModel) => request("PATCH", "/api/me", { memoryModel });

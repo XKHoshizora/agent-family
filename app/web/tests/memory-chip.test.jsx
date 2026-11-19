@@ -10,6 +10,7 @@ import { A1, AG1, ANN, ME_ID, MODELS, PRINCIPALS, agentConv, agentOf, agentPrinc
 import { StoreProvider, emptyState, useStore } from "../src/data/store.jsx";
 import { MemoryNotice } from "../src/pages/MemoryChip.jsx";
 import { click, installBrowser, mainText, openApp, push } from "./harness.jsx";
+import { memorySentence } from "../src/data/memoryPhrases.js";
 
 beforeEach(() => installBrowser());
 afterEach(() => {
@@ -56,22 +57,25 @@ async function openChat(messages, { api = {}, deleted = false } = {}) {
   return app;
 }
 
+/** The sentence the chip reads for `changeId` in the notice `fields` (the Agent is 小助手). */
+const sentence = (fields = {}) => memorySentence({ name: "小助手", changeId: "c1", phase: "rest", lines: LINES, count: LINES.length, full: false, ...fields });
 const timeline = () => document.querySelector("ol.messages");
 const li = (seq) => timeline().querySelector(`li[data-msg="m${seq}"]`);
 const inLi = (seq) => within(li(seq));
 
 describe("the 记忆已更新 chip", () => {
-  it("an applied change is a small chip, closed: it says only 记忆已更新", async () => {
+  it("an applied change is a small chip, closed: it says a sentence with the Agent's name and the count", async () => {
     await openChat([...BASE, changed(3)]);
-    expect(li(3).textContent).toBe("记忆已更新");
-    const chip = inLi(3).getByRole("button", { name: "记忆已更新" });
+    expect(li(3).textContent).toBe(sentence());
+    expect(sentence()).toMatch(/^小助手.*2 件事/);
+    const chip = inLi(3).getByRole("button", { name: sentence() });
     expect(chip.getAttribute("aria-expanded")).toBe("false");
     expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
   });
 
   it("opened, it lists the lines with the vault ones tagged 保险箱, and 撤销", async () => {
     await openChat([...BASE, changed(3)]);
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     const items = [...li(3).querySelectorAll("li, .memory-line")].map((x) => x.textContent);
     expect(items).toEqual(["记住了：不吃辣", "锁进了保险箱：住在上海保险箱"]);
     expect(inLi(3).getByRole("button", { name: "撤销" })).toBeTruthy();
@@ -80,7 +84,7 @@ describe("the 记忆已更新 chip", () => {
 
   it("撤销 calls the undo route and the chip then says 已撤销", async () => {
     const { api } = await openChat([...BASE, changed(3)]);
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     await click(inLi(3).getByRole("button", { name: "撤销" }));
     expect(api.undoMemoryChange).toHaveBeenCalledWith(AG1, "c1");
     expect(inLi(3).getByText("已撤销")).toBeTruthy();
@@ -89,7 +93,7 @@ describe("the 记忆已更新 chip", () => {
 
   it("a change already undone reads 已撤销 when opened", async () => {
     await openChat([...BASE, changed(3, { status: "undone" })]);
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     expect(inLi(3).getByText("已撤销")).toBeTruthy();
     expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
   });
@@ -99,7 +103,7 @@ describe("the 记忆已更新 chip", () => {
       throw apiError(409, "stale_change");
     });
     await openChat([...BASE, changed(3)], { api: { undoMemoryChange } });
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     await click(inLi(3).getByRole("button", { name: "撤销" }));
     expect(inLi(3).getByRole("alert").textContent).toBe("这条改动已经过时了：记忆后来又变过。");
     expect(inLi(3).queryByText("已撤销")).toBeNull();
@@ -109,8 +113,8 @@ describe("the 记忆已更新 chip", () => {
 
   it("full: the closed chip says 快满了; opened, the hint is there", async () => {
     await openChat([...BASE, changed(3, { full: true })]);
-    expect(li(3).textContent).toBe("记忆已更新 · 快满了");
-    await click(inLi(3).getByRole("button", { name: "记忆已更新 · 快满了" }));
+    expect(li(3).textContent).toBe(`${sentence()} · 快满了`);
+    await click(inLi(3).getByRole("button", { name: `${sentence()} · 快满了` }));
     expect(inLi(3).getByRole("button", { name: "记忆宫殿快满了，去整理一下。" })).toBeTruthy();
   });
 
@@ -128,22 +132,77 @@ describe("the 记忆已更新 chip", () => {
         </ol>
       </StoreProvider>,
     );
-    fireEvent.click(screen.getByRole("button", { name: "记忆已更新 · 快满了" }));
+    fireEvent.click(screen.getByRole("button", { name: `${memorySentence({ name: "它", changeId: "c1", phase: "rest", lines: LINES, count: 2, full: true })}` }));
     fireEvent.click(screen.getByRole("button", { name: "记忆宫殿快满了，去整理一下。" }));
     expect(screen.getByRole("status").textContent).toBe("settings/memory");
   });
 
   it("in a deleted Agent's conversation 撤销 is off", async () => {
     await openChat([...BASE, changed(3)], { deleted: true });
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     expect(inLi(3).getByRole("button", { name: "撤销" }).disabled).toBe(true);
   });
 
   it("a push of the same notice with a new status replaces it", async () => {
     const { transport } = await openChat([...BASE, changed(3)]);
-    await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
+    await click(inLi(3).getByRole("button", { name: sentence() }));
     await push(transport, { type: "message", message: changed(3, { status: "undone" }) });
     expect(inLi(3).getByText("已撤销")).toBeTruthy();
+  });
+});
+
+describe("the chip's sentence", () => {
+  it("a dream notice reads as a dream, with its count (not the number of lines)", async () => {
+    await openChat([...BASE, changed(3, { phase: "dream", count: 5, lines: ["合并了：爱吃面", "锁进了保险箱：住在上海"] })]);
+    expect(li(3).textContent).toBe(sentence({ phase: "dream", count: 5 }));
+    expect(li(3).textContent).toMatch(/^小助手.*5 条记忆/);
+    expect(li(3).textContent).toMatch(/入梦|梦里/);
+  });
+
+  it("a notice without phase or count is a rest, counting its lines", async () => {
+    await openChat([...BASE, changed(3, { phase: undefined, count: undefined })]);
+    expect(li(3).textContent).toBe(sentence());
+    expect(li(3).textContent).toMatch(/2 件事/);
+  });
+
+  it("only forgetting and locking: 理了理记忆; only hearsay: 想起听来的", async () => {
+    await openChat([
+      ...BASE,
+      changed(3, { changeId: "c3", lines: ["忘掉了：x"], vaultLines: [false] }),
+      changed(4, { changeId: "c4", lines: ["听说：「阿波」在「项目群」里说：y"], vaultLines: [false] }),
+    ]);
+    expect(li(3).textContent).toBe("小助手小憩时理了理记忆");
+    expect(li(4).textContent).toBe("小助手小憩时想起听来的 1 件事");
+  });
+
+  it("the same notice reads the same on a push again", async () => {
+    const { transport } = await openChat([...BASE, changed(3)]);
+    const first = li(3).textContent;
+    await push(transport, { type: "message", message: changed(3, { status: "undone" }) });
+    expect(li(3).textContent).toBe(first);
+  });
+
+  it("opened after dream lines, the lines are listed as they came", async () => {
+    await openChat([...BASE, changed(3, { phase: "dream", count: 2, lines: ["合并了：爱吃面", "拆成了：a；b"], vaultLines: [false, false] })]);
+    await click(inLi(3).getByRole("button", { name: sentence({ phase: "dream", count: 2 }) }));
+    expect([...li(3).querySelectorAll("li")].map((x) => x.textContent)).toEqual(["合并了：爱吃面", "拆成了：a；b"]);
+  });
+
+  it("a full notice with no lines says the palace is nearly full", async () => {
+    await openChat([...BASE, changed(3, { lines: [], vaultLines: [], count: 0, full: true })]);
+    expect(li(3).textContent).toBe("小助手的记忆宫殿快满了");
+  });
+
+  it("an Agent that cannot be named reads 它", () => {
+    const msg = { id: "m3", seq: 3, kind: "system", text: "x", system: { event: "memory_changed", changeId: "c1", lines: ["忘掉了：x"], vaultLines: [false], pending: false, unlock: false, full: false, status: "applied" } };
+    render(
+      <StoreProvider initialState={emptyState()}>
+        <ol>
+          <MemoryNotice msg={msg} conv={{ type: "agent", agentId: AG1, id: A1 }} />
+        </ol>
+      </StoreProvider>,
+    );
+    expect(screen.getByRole("button").textContent).toBe("它小憩时理了理记忆");
   });
 });
 
@@ -163,7 +222,7 @@ describe("the confirmation cards", () => {
     const { api } = await openChat([...BASE, pending()]);
     await click(inLi(3).getByRole("button", { name: "记住" }));
     expect(api.confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
-    expect(li(3).textContent).toBe("记忆已更新");
+    expect(li(3).textContent).toBe(sentence());
   });
 
   it("不用 discards: the route is called and the card goes", async () => {
@@ -179,7 +238,7 @@ describe("the confirmation cards", () => {
     expect(inLi(3).queryByRole("button", { name: "记住" })).toBeNull();
     await click(inLi(3).getByRole("button", { name: "取出" }));
     expect(api.confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
-    expect(inLi(3).getByRole("button", { name: "记忆已更新" })).toBeTruthy();
+    expect(inLi(3).getByRole("button", { name: sentence({ lines: ["取出来：住在上海"], count: 1 }) })).toBeTruthy();
   });
 
   it("a stale confirm (409) says so, keeps the lines and leaves no button", async () => {

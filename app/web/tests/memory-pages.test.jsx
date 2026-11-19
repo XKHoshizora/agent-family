@@ -67,6 +67,7 @@ function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, ove
     getMe: vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true })),
     updateNewNotes: vi.fn(async () => ({})),
     updateMemoryModel: vi.fn(async () => ({})),
+    updateDream: vi.fn(async () => ({})),
     getModels: vi.fn(async () => MODELS),
     listProviders: vi.fn(async () => ({ providers: [providerOf()] })),
     listMemoryNotes: vi.fn(async () => room()),
@@ -387,6 +388,100 @@ describe("新记下的内容", () => {
     await flush();
     expect(inMain().getByLabelText(SETTING).value).toBe("auto");
     expect(document.querySelector(".toast")).toBeTruthy();
+  });
+});
+
+describe("作息", () => {
+  const meWith = (extra) => vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, ...extra }));
+  const dreamBox = () => inMain().getByRole("switch", { name: "入梦" });
+
+  it("is a section above 新记下的内容: the line 小憩 with its helper and no control, and the switch 入梦 with its helper", async () => {
+    const svc = service({ over: { getMe: meWith({ dream: true }) } });
+    await openPalace(svc);
+    const section = inMain().getByRole("region", { name: "作息" });
+    expect(within(section).getByRole("heading", { name: "作息" })).toBeTruthy();
+    expect(section.compareDocumentPosition(inMain().getByLabelText("新记下的内容")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(section).getByText("小憩")).toBeTruthy();
+    expect(within(section).getByText("聊完一段后，它会回想刚才的对话，记下值得留的事。")).toBeTruthy();
+    expect(within(section).getAllByRole("switch")).toHaveLength(1);
+    expect(section.querySelectorAll("input, select, button")).toHaveLength(1);
+    expect(within(section).getByText("你休息的时候，它把这一天记下的整理一遍：合并重复的，分清一时的情绪和长久的事。")).toBeTruthy();
+    expect(dreamBox().checked).toBe(true);
+  });
+
+  it("an account without the field reads as off; the settings are read once for all three", async () => {
+    const svc = service();
+    await openPalace(svc);
+    expect(dreamBox().checked).toBe(false);
+    expect(svc.api.getMe).toHaveBeenCalledTimes(1);
+  });
+
+  it("turning it on sends { dream } and shows the new value once saved", async () => {
+    const wait = deferred();
+    const svc = service({ over: { getMe: meWith({ dream: false }), updateDream: vi.fn(() => wait.promise) } });
+    await openPalace(svc);
+    await click(dreamBox());
+    expect(svc.api.updateDream).toHaveBeenCalledWith(true);
+    expect(dreamBox().checked).toBe(false);
+    expect(dreamBox().matches(":disabled")).toBe(true);
+    wait.resolve({});
+    await flush();
+    expect(dreamBox().checked).toBe(true);
+    expect(dreamBox().matches(":disabled")).toBe(false);
+  });
+
+  it("a refused save leaves the switch as it was and says so", async () => {
+    const svc = service({
+      over: {
+        getMe: meWith({ dream: true }),
+        updateDream: vi.fn(async () => {
+          throw apiError(500, "internal");
+        }),
+      },
+    });
+    await openPalace(svc);
+    await click(dreamBox());
+    expect(dreamBox().checked).toBe(true);
+    expect(document.querySelector(".toast")).toBeTruthy();
+  });
+
+  it("when the settings cannot be read the switch is off with the same failure line, and retry brings it back", async () => {
+    let fail = true;
+    const svc = service({
+      over: {
+        getMe: vi.fn(async () => {
+          if (fail) throw apiError(500, "internal");
+          return { ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, dream: true };
+        }),
+      },
+    });
+    await openPalace(svc);
+    expect(dreamBox().matches(":disabled")).toBe(true);
+    expect(inMain().getByText(/没能读取这项设置/)).toBeTruthy();
+    fail = false;
+    await click(inMain().getByRole("button", { name: "重试" }));
+    expect(dreamBox().matches(":disabled")).toBe(false);
+    expect(dreamBox().checked).toBe(true);
+  });
+});
+
+describe("常提起", () => {
+  it("rows whose note has strength 3 or more carry the tag; others do not", async () => {
+    const svc = service({
+      notes: [
+        note("a", "爱吃面", { strength: 3 }),
+        note("b", "养了一只猫", { strength: 7, vault: true }),
+        note("c", "住在上海", { strength: 2 }),
+        note("d", "不吃辣"),
+      ],
+    });
+    await openPalace(svc);
+    const tagged = (text) => rowWith(room("关于我"), text).querySelector(".memory-source").textContent.includes("常提起");
+    expect(tagged("爱吃面")).toBe(true);
+    expect(tagged("养了一只猫")).toBe(true);
+    expect(tagged("住在上海")).toBe(false);
+    expect(tagged("不吃辣")).toBe(false);
+    expect(room("关于我").querySelectorAll(".tag-muted").length).toBe(2);
   });
 });
 

@@ -4,7 +4,7 @@ import { ME } from "../data/identities.js";
 import { profileErrorText } from "../data/errorTexts.js";
 import { displayName as displayNameProblem } from "../auth/validation.js";
 import { entity, nameOf } from "../state/selectors.js";
-import { Avatar, Btn, Field, KV, Reason, Tag } from "../ui/primitives.jsx";
+import { Avatar, Btn, Field, KV, Reason, Switch, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
 import { BlockModal } from "./BlockModal.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
@@ -191,9 +191,9 @@ const NEW_NOTES = [
 ];
 
 /**
- * My memory settings, read once (`GET /api/me`): 新记下的内容 (where a note goes when it is written, the vault or not) and
+ * My memory settings, read once (`GET /api/me`): 作息 (the switch 入梦), 新记下的内容 (where a note goes when it is written, the vault or not) and
  * 用哪个模型整理记忆 (the model that tidies it). Each box shows what the service holds; a change is shown once it is saved,
- * a refusal is toasted and the box stays as it was. `settings`: null while being read, "" when it could not be (both boxes
+ * a refusal is toasted and the box stays as it was. `settings`: null while being read, "" when it could not be (every control
  * stay off and say so).
  */
 function MemorySettings() {
@@ -218,6 +218,11 @@ function MemorySettings() {
   const off = !settings || busy !== null;
   const unread = <option value="" hidden>{settings === null ? "正在读取…" : "读取失败"}</option>;
 
+  const changeDream = async (event) => {
+    const res = await run("dream", () => settled(actions.setDream(event.target.checked)), refusalText);
+    if (res.ok) setSettings((cur) => ({ ...cur, dream: res.value }));
+  };
+
   const changeNewNotes = async (event) => {
     const res = await run("newNotes", () => settled(actions.setNewNotes(event.target.value)), refusalText);
     if (res.ok) setSettings((cur) => ({ ...cur, newNotes: res.value }));
@@ -236,6 +241,22 @@ function MemorySettings() {
   };
   return (
     <>
+      <section aria-label="作息">
+        <h3>作息</h3>
+        <p>
+          <strong>小憩</strong>
+        </p>
+        <p className="field-hint">聊完一段后，它会回想刚才的对话，记下值得留的事。</p>
+        <fieldset className="memory-switches" disabled={off}>
+          <Switch
+            checked={settings?.dream === true}
+            onChange={changeDream}
+            label="入梦"
+            hint="你休息的时候，它把这一天记下的整理一遍：合并重复的，分清一时的情绪和长久的事。"
+            hintClass="field-hint"
+          />
+        </fieldset>
+      </section>
       <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
         <select value={settings?.newNotes ?? ""} disabled={off} onChange={changeNewNotes}>
           {!settings && unread}

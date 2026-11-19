@@ -875,8 +875,8 @@ export const memoryModelOf = (me) => {
   return null;
 };
 
-/** What the memory settings of `GET /api/me` hold: how new notes are sorted, and the model that tidies them (and whether it can be used now). */
-export const memorySettingsOf = (me) => ({ newNotes: newNotesOf(me), memoryModel: memoryModelOf(me), memoryModelUsable: me?.memoryModelUsable !== false });
+/** What the memory settings of `GET /api/me` hold: how new notes are sorted, whether they are tidied while I rest (`dream`; absent: off), and the model that tidies them (and whether it can be used now). */
+export const memorySettingsOf = (me) => ({ newNotes: newNotesOf(me), dream: me?.dream === true, memoryModel: memoryModelOf(me), memoryModelUsable: me?.memoryModelUsable !== false });
 
 // ───────── persona proposal cards
 
