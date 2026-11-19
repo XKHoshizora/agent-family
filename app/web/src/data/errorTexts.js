@@ -163,7 +163,7 @@ const MODEL_FAILED = {
 };
 
 const MEMORY_CHANGE = {
-  stale_change: "这份提议已失效，请让它重新生成提议。",
+  stale_change: "这条改动已经过时了：记忆后来又变过。",
   agent_deleted: AGENT_DELETED,
   not_found: "这条记忆变更已经不存在了。",
 };

@@ -358,6 +358,30 @@ function useMounted() {
   return mounted;
 }
 
+/**
+ * One decision at a time on a card or notice (`busy` names it) and the sentence of a refusal (`refusal`, until the next
+ * decision). `pending(key, request)` resolves with the answer; `decide(key, request)` also keeps a refusal's text. A
+ * refusal's answer is the last thing it does: nothing is set once the component has gone.
+ */
+export function useDecision() {
+  const mounted = useMounted();
+  const [busy, setBusy] = useState(null);
+  const [refusal, setRefusal] = useState(null);
+  const pending = async (key, request) => {
+    setBusy(key);
+    const res = await request;
+    if (mounted.current) setBusy(null);
+    return res;
+  };
+  const decide = async (key, request) => {
+    setRefusal(null);
+    const res = await pending(key, request);
+    if (mounted.current && !res.ok) setRefusal(res.text);
+    return res;
+  };
+  return { mounted, busy, refusal, pending, decide };
+}
+
 /** How a reply in a group ended that trying again cannot change: a member halted it, or its Agent was taken out. */
 const NOT_RETRIED = new Set(["halted", "agent_removed"]);
 
@@ -565,30 +589,17 @@ function ProposalEditor({ proposal, busy, onClose, onConfirm }) {
  */
 export function ProposalCard({ msg, conv }) {
   const { state, actions } = useStore();
-  const mounted = useMounted();
+  const { busy, refusal, pending, decide } = useDecision();
   const p = msg.proposal;
   const [expanded, setExpanded] = useState(false);
   const [editing, setEditing] = useState(false);
-  const [busy, setBusy] = useState(null);
-  const [refusal, setRefusal] = useState(null);
   const persona = p.persona ?? "";
   const folded = foldedText(persona);
   const open = p.status === "open";
   // A deleted Agent's proposals can no longer be decided (an open one is then only "not confirmed").
   const decidable = open && !publishBlock(state, conv);
   const [label, tone] = open && !decidable ? ["未确认", "muted"] : PROPOSAL_STATUS[p.status] ?? [p.status, "muted"];
-  /** One decision at a time, from the card or its editor: `busy` names it ("confirm" | "discard" | "edit"). */
-  const pending = async (key, request) => {
-    setBusy(key);
-    const res = await request;
-    if (mounted.current) setBusy(null);
-    return res;
-  };
-  const decide = async (key, request) => {
-    setRefusal(null);
-    const res = await pending(key, request);
-    if (mounted.current && !res.ok) setRefusal(res.text);
-  };
+  // One decision at a time, from the card or its editor: `busy` names it ("confirm" | "discard" | "edit").
   const confirm = () => decide("confirm", actions.confirmProposal(conv.agentId, p.id));
   const discard = () => decide("discard", actions.discardProposal(conv.agentId, p.id));
   // (The editor says its own refusal; a card that went stale or was superseded meanwhile closes it.)

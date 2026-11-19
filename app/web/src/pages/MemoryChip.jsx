@@ -2,21 +2,12 @@
 // conversation with that Agent): a small closed chip, 记忆已更新, that opens to the lines of the change with 撤销; and the
 // two confirmation cards (记住 / 不用 for new notes, 取出 / 不用 for a note to take out of the vault). Following
 // TopicDivider (a notice) and ProposalCard (decisions, one at a time, a refusal said on the card).
-import React, { useEffect, useRef, useState } from "react";
+import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ChevronDown, Lock } from "../icons.js";
+import { publishBlock } from "../state/selectors.js";
 import { Btn, Tag } from "../ui/primitives.jsx";
-
-function useMounted() {
-  const mounted = useRef(true);
-  useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  return mounted;
-}
+import { useDecision } from "./AgentChatBits.jsx";
 
 /** The lines of a change, each with the vault tag when it went into (or came out of) the vault. */
 function MemoryLines({ system }) {
@@ -38,25 +29,22 @@ function MemoryLines({ system }) {
  * A refusal (the change went stale meanwhile) stays on it as a sentence.
  */
 export function MemoryNotice({ msg, conv }) {
-  const { actions, dispatch } = useStore();
-  const mounted = useMounted();
+  const { state, actions, dispatch } = useStore();
+  const { mounted, busy, refusal, decide } = useDecision();
   const system = msg.system;
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(null);
-  const [refusal, setRefusal] = useState(null);
+  // Refused as stale (the memory changed since): the notice keeps its lines and offers nothing more.
+  const [stale, setStale] = useState(false);
+  // A deleted Agent's changes can no longer be decided, as its proposals cannot.
+  const decidable = !stale && !publishBlock(state, conv);
 
-  /** One decision at a time; its refusal is said on the notice. */
-  const decide = async (key, request) => {
-    setRefusal(null);
-    setBusy(key);
-    const res = await request;
-    if (!mounted.current) return;
-    setBusy(null);
-    if (!res.ok) setRefusal(res.text);
+  const run = async (key, request) => {
+    const res = await decide(key, request);
+    if (mounted.current && !res.ok && res.error?.code === "stale_change") setStale(true);
   };
-  const undo = () => decide("undo", actions.undoMemoryChange(conv.agentId, system.changeId));
-  const confirm = () => decide("confirm", actions.confirmMemoryChange(conv.agentId, system.changeId));
-  const discard = () => decide("discard", actions.discardMemoryChange(conv.agentId, system.changeId));
+  const undo = () => run("undo", actions.undoMemoryChange(conv.agentId, system.changeId));
+  const confirm = () => run("confirm", actions.confirmMemoryChange(conv.agentId, system.changeId));
+  const discard = () => run("discard", actions.discardMemoryChange(conv.agentId, system.changeId));
   const openPalace = () => dispatch({ type: "nav", patch: { pane: "main", section: "settings", settingsPage: "memory" } });
 
   const alert = refusal && (
@@ -78,14 +66,16 @@ export function MemoryNotice({ msg, conv }) {
             <strong>{title}</strong>
           </div>
           <MemoryLines system={system} />
-          <div className="card-actions">
-            <Btn variant="primary" disabled={busy !== null} onClick={confirm}>
-              {busy === "confirm" ? "处理中…" : yes}
-            </Btn>
-            <Btn variant="text" disabled={busy !== null} onClick={discard}>
-              {busy === "discard" ? "处理中…" : "不用"}
-            </Btn>
-          </div>
+          {!stale && (
+            <div className="card-actions">
+              <Btn variant="primary" disabled={!decidable || busy !== null} onClick={confirm}>
+                {busy === "confirm" ? "处理中…" : yes}
+              </Btn>
+              <Btn variant="text" disabled={!decidable || busy !== null} onClick={discard}>
+                {busy === "discard" ? "处理中…" : "不用"}
+              </Btn>
+            </div>
+          )}
           {alert}
         </div>
       </li>
@@ -95,8 +85,8 @@ export function MemoryNotice({ msg, conv }) {
   return (
     <li className="msg-memory" data-msg={msg.id}>
       <button type="button" className="memory-chip" aria-expanded={open} onClick={() => setOpen(!open)}>
-        记忆已更新
-        <ChevronDown size={13} aria-hidden="true" style={open ? { transform: "rotate(180deg)" } : undefined} />
+        {system.full ? "记忆已更新 · 快满了" : "记忆已更新"}
+        <ChevronDown size={13} aria-hidden="true" />
       </button>
       {open && (
         <div className="memory-detail">
@@ -105,9 +95,11 @@ export function MemoryNotice({ msg, conv }) {
             {system.status === "undone" ? (
               <span className="muted">已撤销</span>
             ) : (
-              <Btn small variant="text" disabled={busy !== null} onClick={undo}>
-                {busy === "undo" ? "处理中…" : "撤销"}
-              </Btn>
+              !stale && (
+                <Btn small variant="text" disabled={!decidable || busy !== null} onClick={undo}>
+                  {busy === "undo" ? "处理中…" : "撤销"}
+                </Btn>
+              )
             )}
           </div>
           {system.full && (

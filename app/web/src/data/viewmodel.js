@@ -85,8 +85,9 @@ const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded"]);
  */
 function memoryChangeView(event) {
   const lines = Array.isArray(event.lines) ? event.lines.filter((l) => typeof l === "string") : [];
-  const marks = Array.isArray(event.vaultLines) && event.vaultLines.length === (event.lines?.length ?? -1) ? event.vaultLines : [];
-  const vaultLines = Array.isArray(event.lines) ? event.lines.flatMap((l, i) => (typeof l === "string" ? [marks[i] === true] : [])) : [];
+  // One mark per kept line; a vault array of another length is not trusted.
+  const trusted = Array.isArray(event.vaultLines) && event.vaultLines.length === event.lines?.length;
+  const vaultLines = (Array.isArray(event.lines) ? event.lines : []).flatMap((l, i) => (typeof l === "string" ? [trusted && event.vaultLines[i] === true] : []));
   const pending = event.pending === true;
   return {
     ...event,

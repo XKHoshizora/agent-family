@@ -4,8 +4,11 @@
 // only in the owner's own conversation with the Agent, never in a group.
 import "./markdown-ready.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import React from "react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { A1, AG1, ANN, ME_ID, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, deferred, group, notice, syncOf, wire } from "./fixtures.js";
+import { StoreProvider, emptyState, useStore } from "../src/data/store.jsx";
+import { MemoryNotice } from "../src/pages/MemoryChip.jsx";
 import { click, installBrowser, mainText, openApp, push } from "./harness.jsx";
 
 beforeEach(() => installBrowser());
@@ -34,10 +37,10 @@ const changed = (seq, fields = {}) =>
     ...fields,
   });
 
-async function openChat(messages, { api = {} } = {}) {
-  const record = agentOf(AG1, { model: SITE_FREE });
+async function openChat(messages, { api = {}, deleted = false } = {}) {
+  const record = agentOf(AG1, { model: SITE_FREE, deleted });
   const lastSeq = messages.reduce((max, m) => Math.max(max, m.seq), 0);
-  const conversation = agentConv(A1, AG1, { lastSeq, readSeq: lastSeq, agent: { paused: false, deleted: false }, canSend: { ok: true } });
+  const conversation = agentConv(A1, AG1, { lastSeq, readSeq: lastSeq, agent: { paused: false, deleted }, canSend: deleted ? { ok: false, reason: "agent_deleted" } : { ok: true } });
   const app = await openApp({
     sync: () => syncOf([conversation], messages, [...PRINCIPALS, agentPrincipal()]),
     api: {
@@ -91,23 +94,49 @@ describe("the 记忆已更新 chip", () => {
     expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
   });
 
-  it("a stale undo (409) says the proposal wording and keeps 撤销 off", async () => {
+  it("a stale undo (409) says so, keeps the lines and leaves no action button", async () => {
     const undoMemoryChange = vi.fn(async () => {
       throw apiError(409, "stale_change");
     });
     await openChat([...BASE, changed(3)], { api: { undoMemoryChange } });
     await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
     await click(inLi(3).getByRole("button", { name: "撤销" }));
-    expect(inLi(3).getByRole("alert").textContent).toBe("这份提议已失效，请让它重新生成提议。");
+    expect(inLi(3).getByRole("alert").textContent).toBe("这条改动已经过时了：记忆后来又变过。");
     expect(inLi(3).queryByText("已撤销")).toBeNull();
+    expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
+    expect(li(3).textContent).toContain("记住了：不吃辣");
   });
 
-  it("full: the opened chip has the hint, a link to the palace's settings", async () => {
+  it("full: the closed chip says 快满了; opened, the hint is there", async () => {
     await openChat([...BASE, changed(3, { full: true })]);
+    expect(li(3).textContent).toBe("记忆已更新 · 快满了");
+    await click(inLi(3).getByRole("button", { name: "记忆已更新 · 快满了" }));
+    expect(inLi(3).getByRole("button", { name: "记忆宫殿快满了，去整理一下。" })).toBeTruthy();
+  });
+
+  it("the hint's link goes to the settings page memory (the palace's)", () => {
+    const Probe = () => {
+      const { state } = useStore();
+      return <output>{`${state.nav.section}/${state.nav.settingsPage}`}</output>;
+    };
+    const msg = { id: "m3", seq: 3, kind: "system", text: "记忆已更新", system: { event: "memory_changed", changeId: "c1", lines: LINES, vaultLines: [false, true], pending: false, unlock: false, full: true, status: "applied" } };
+    render(
+      <StoreProvider initialState={emptyState()}>
+        <Probe />
+        <ol>
+          <MemoryNotice msg={msg} conv={{ type: "agent", agentId: AG1, id: A1 }} />
+        </ol>
+      </StoreProvider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "记忆已更新 · 快满了" }));
+    fireEvent.click(screen.getByRole("button", { name: "记忆宫殿快满了，去整理一下。" }));
+    expect(screen.getByRole("status").textContent).toBe("settings/memory");
+  });
+
+  it("in a deleted Agent's conversation 撤销 is off", async () => {
+    await openChat([...BASE, changed(3)], { deleted: true });
     await click(inLi(3).getByRole("button", { name: "记忆已更新" }));
-    await click(inLi(3).getByRole("button", { name: "记忆宫殿快满了，去整理一下。" }));
-    // (The settings section opened; its memory page is another task's.)
-    expect(document.querySelector(".list-col")?.textContent).toContain("用量与余额");
+    expect(inLi(3).getByRole("button", { name: "撤销" }).disabled).toBe(true);
   });
 
   it("a push of the same notice with a new status replaces it", async () => {
@@ -153,14 +182,22 @@ describe("the confirmation cards", () => {
     expect(inLi(3).getByRole("button", { name: "记忆已更新" })).toBeTruthy();
   });
 
-  it("a stale confirm (409) says the proposal wording and the card stays", async () => {
+  it("a stale confirm (409) says so, keeps the lines and leaves no button", async () => {
     const confirmMemoryChange = vi.fn(async () => {
       throw apiError(409, "stale_change");
     });
     await openChat([...BASE, pending()], { api: { confirmMemoryChange } });
     await click(inLi(3).getByRole("button", { name: "记住" }));
-    expect(inLi(3).getByRole("alert").textContent).toBe("这份提议已失效，请让它重新生成提议。");
-    expect(inLi(3).getByRole("button", { name: "记住" })).toBeTruthy();
+    expect(inLi(3).getByRole("alert").textContent).toBe("这条改动已经过时了：记忆后来又变过。");
+    expect(inLi(3).queryByRole("button", { name: "记住" })).toBeNull();
+    expect(inLi(3).queryByRole("button", { name: "不用" })).toBeNull();
+    expect(li(3).textContent).toContain("记住了：不吃辣");
+  });
+
+  it("in a deleted Agent's conversation the card's buttons are off", async () => {
+    await openChat([...BASE, pending()], { deleted: true });
+    expect(inLi(3).getByRole("button", { name: "记住" }).disabled).toBe(true);
+    expect(inLi(3).getByRole("button", { name: "不用" }).disabled).toBe(true);
   });
 
   it("one decision at a time while one is on its way", async () => {

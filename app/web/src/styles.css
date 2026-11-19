@@ -281,6 +281,7 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
   display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px; border: 0; border-radius: 10px; font: inherit; font-size: 13px;
   background: rgba(255, 255, 255, 0.5); color: var(--ink-2); cursor: pointer;
 }
+.memory-chip[aria-expanded="true"] svg { transform: rotate(180deg); }
 .memory-detail { width: min(420px, 100%); padding: 8px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--line); font-size: 13.5px; text-align: left; }
 .memory-lines { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .memory-lines .tag { margin-left: 6px; }
