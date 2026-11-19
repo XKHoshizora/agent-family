@@ -48,6 +48,8 @@ export interface Reviewer {
   topicReset(agentId: string, conversationId: string): void;
   /** After commit: a message of `conversationId` was flagged for the Agent (a later batch fills this in). */
   flagged(agentId: string, conversationId: string, kind: "hearsay" | "own"): void;
+  /** How many pairs the scheduler remembers an attempt for (for tests: it must not grow with the pairs reviewed). */
+  remembered(): number;
   /** At start: arms a quiet timer for every pair whose Agent replied in the last day and has replies after `reviewed_seq`; how many. */
   resume(): Promise<number>;
   close(): void;
@@ -78,6 +80,18 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     if (looking === 0 && running.size === 0 && waiting.length === 0) for (const done of idlers.splice(0)) done();
   };
 
+  /** An attempt is remembered only until `reviewed_seq` has caught up with it (then `reviewed_seq` says the same). */
+  const forgetReached = async (job: Job): Promise<void> => {
+    const key = keyOf(job.agentId, job.conversationId);
+    const tried = attempted.get(key);
+    if (tried === undefined) return;
+    try {
+      if ((await reviewedSeq(db, job.agentId, job.conversationId)) >= tried && attempted.get(key) === tried) attempted.delete(key);
+    } catch {
+      // Kept: the next trigger reads the database again.
+    }
+  };
+
   const pump = (): void => {
     if (closed) return;
     for (const job of [...waiting]) {
@@ -86,9 +100,11 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       waiting = waiting.filter((j) => j !== job);
       running.add(job.agentId);
       const key = keyOf(job.agentId, job.conversationId);
-      void deps
-        .run(job, { closing, attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)) })
+      // Called inside the chain: a `run` that throws before it returns a promise is a failed review, not a stuck Agent.
+      void Promise.resolve()
+        .then(() => deps.run(job, { closing, attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)) }))
         .catch((err: unknown) => log.error({ ...errInfo(err), agentId: job.agentId, conversationId: job.conversationId }, "a memory review failed; nothing was changed"))
+        .then(() => forgetReached(job))
         .finally(() => {
           running.delete(job.agentId);
           pump();
@@ -140,8 +156,9 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       enqueue(job);
     });
 
-  const arm = (job: Job): void => {
-    if (closed) return;
+  /** Arms the pair's quiet timer; false when the reviewer is closed and nothing was armed. */
+  const arm = (job: Job): boolean => {
+    if (closed) return false;
     const key = keyOf(job.agentId, job.conversationId);
     timers.get(key)?.clear();
     timers.set(
@@ -151,6 +168,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         void enqueueIfNew(job);
       }, config.memory.quietMs),
     );
+    return true;
   };
 
   const disarm = (job: Job): void => {
@@ -166,7 +184,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     const reviewed = await reviewedSeq(db, agentId, conversationId);
     const fresh = await ownerSince(agentId, conversationId, Math.max(reviewed, attempted.get(keyOf(agentId, conversationId)) ?? 0));
     const { rows } = await db.query<{ replies: number }>(
-      "select count(*)::int as replies from messages where conversation_id = $1 and sender_id = $2 and kind = 'text' and seq > $3",
+      "select count(*)::int as replies from messages where conversation_id = $1 and sender_id = $2 and kind = 'text' and seq > $3 and (body -> 'fixed') is distinct from 'true'::jsonb",
       [conversationId, agentId, reviewed],
     );
     if (fresh !== null && ((rows[0]?.replies ?? 0) >= config.memory.maxReplies || EXPLICIT.test(fresh.text))) {
@@ -191,6 +209,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     flagged() {
       // Filled in by the group listeners' batch: nothing is reviewed for a flag yet.
     },
+    remembered: () => attempted.size,
     async resume() {
       let armed = 0;
       await track(async () => {
@@ -203,8 +222,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
               and m.seq > coalesce(s.reviewed_seq, 0)`,
         );
         for (const r of rows) {
-          arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id });
-          armed++;
+          if (arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
         }
       });
       return armed;
@@ -213,6 +231,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       closed = true;
       for (const timer of timers.values()) timer.clear();
       timers.clear();
+      attempted.clear();
       waiting = [];
       stop.abort();
       settleIdle();

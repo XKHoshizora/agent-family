@@ -11,7 +11,7 @@ import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { parseOps, type Op } from "./ops.ts";
-import { linesOf, reviewInput, type RefNote } from "./review.ts";
+import { linesOf, readReview, type RefNote } from "./review.ts";
 import { duplicateOf, sortNote, type SortDeps } from "./sort.ts";
 import { getNewNotes, roomOf, type NoteKind } from "./store.ts";
 
@@ -107,15 +107,11 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   if (agent === null || ctx.closing.aborted) return;
   const group = conversationId !== agent.conversationId;
   const kinds = await kindsFor(db, agent, conversationId, group);
-  const input = await reviewInput(db, agent, conversationId, await reviewedSeq(db, agentId, conversationId), { kinds, config, now: new Date(deps.now()) });
+  const { input, seen } = await readReview(db, agent, conversationId, await reviewedSeq(db, agentId, conversationId), { kinds, config, now: new Date(deps.now()) });
   if (input === null) {
-    // Nothing the owner said to look at: what is there is not looked at again.
-    await db.query(
-      `insert into memory_review_state (agent_id, conversation_id, reviewed_seq)
-       select $1, $2, max(seq) from messages where conversation_id = $2 having max(seq) is not null
-       on conflict (agent_id, conversation_id) do update set reviewed_seq = greatest(memory_review_state.reviewed_seq, excluded.reviewed_seq)`,
-      [agentId, conversationId],
-    );
+    // Nothing the owner said to look at: what the read saw is not looked at again, and nothing newer than what it saw is
+    // marked (an owner message committed after the read is still to be reviewed).
+    if (seen !== null) await db.query(moveReviewed, [agentId, conversationId, seen]);
     return;
   }
   ctx.attempted(input.upToSeq);
