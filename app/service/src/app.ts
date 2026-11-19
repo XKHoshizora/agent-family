@@ -27,6 +27,7 @@ import { createProactiveScheduler, type ProactiveScheduler } from "./agents/proa
 import { actOnTriggered } from "./agents/runs.ts";
 import { registerRunRoutes } from "./agents/run-routes.ts";
 import { registerAgentRoutes } from "./agents/routes.ts";
+import { registerMemoryRoutes } from "./memory/routes.ts";
 import { createAgentWorker, SHUTDOWN_GRACE_MS, within, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createJudge, type Judge } from "./judge/client.ts";
@@ -370,6 +371,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // /api/providers, /api/conversations/:id/run, and a group's /api/conversations/:id/runs): 120 a minute together.
   const ownReads = perPrincipalLimit(app, 120);
   const { endDrafts } = registerAgentRoutes(app, { draftRuns, readLimit: ownReads });
+  registerMemoryRoutes(app, { readLimit: ownReads });
   // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —
   // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself). First of all the proactive scheduler is closed,
   // so that no debounce ends in a judgement once the stop has begun; a decision in flight is waited for as long (what it

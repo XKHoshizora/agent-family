@@ -807,6 +807,74 @@ nothing is learned. Nothing of memory — a note, a setting (`memory`, `memoryAs
 anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
 `memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`.
 
+**The owner reads and edits the palace.** Every route below is the owner's only: anyone else, a fellow member of a group
+the Agent is in, and an id that is nobody's (or another Agent's, another note) get the same 404 `not_found`. *Session:
+required* everywhere. Reads share the budget of `GET /api/agents` (120 a minute); the writes have one of their own, 30 a
+minute per owner. **Note** (`src/memory/routes.ts`): `{"id", "text", "vault": boolean, "unsure": boolean, "origin":
+"review" | "owner" | "hearsay", "source": {"kind": "agent" | "group" | "manual", "title": string | null}, "createdAt",
+"updatedAt"}` (`source` is where it was learned: the owner's chat with that Agent — `title` is the Agent's name — a group
+(its title), or typed by hand). What an owner types is put on one line and cleaned as a label is (`src/memory/clean.ts`
+`ownerNote`: folded, brackets, bars and invisible characters dropped); it is refused, 422 `note_refused`, when it is empty,
+looks like a key or secret (a run of 20 or more letters, digits, `_` and `-` holding both a letter and a digit, or
+`sk-…`, `ghp_…`, `AKIA…`, `-----BEGIN`), or holds an invisible format character. The owner may write instructions and
+links in their own notes; a model's entry (`modelNote`, for the reviewer) is held to 200 code points and also refused when
+cleaning had to drop anything but a line break, or it holds a link or addresses the reader (`你必须`, `ignore`, …). An entry
+may be as long as its room has space (`roomOwner` 2000, `roomSelf` 3000 code points); otherwise 409 `{"error":
+"room_full", "left": n}` (`left` is a number, the one detail that is: what text may still be as long as, counting the
+note being edited as freed) and nothing is stored. **The vault only fills by itself:** a note leaves it only when the
+owner sends `"vault": false` here. Any `vault` the owner sends is their choice, `unsure` becomes `false`, and no code
+sorts that note again; without one a new note goes by the owner's setting (`newNotes`: `vault`, `open`, or `auto`: asked
+of the judgement model, in the vault when that cannot be asked or is not sure), and a text edit alone may move a note
+outside the vault into it (judged again) but never out, and never touches a note the owner chose for.
+
+#### `GET /api/memory/notes`
+
+→ 200 `{"notes": [Note], "used": n, "limit": n}`: the notes about you that all your Agents share (those with `sharedNotes`),
+oldest first; `used` and `limit` in code points.
+
+#### `POST /api/memory/notes`
+
+Body (no other key): `text` (any string; 400 beyond 10 000 characters), `vault` (optional boolean). → 201 Note
+(`origin` `"owner"`); 422 `note_refused`; 409 `room_full`.
+
+#### `PATCH /api/memory/notes/:id`
+
+Body (no other key, at least one): `text`, `vault`. → 200 Note; 422 `note_refused`; 409 `room_full`; 404 `not_found`
+unless it is a note of yours.
+
+#### `DELETE /api/memory/notes/:id`
+
+Body: none or `{}`. → 200 `{"ok": true}`; 404 `not_found` unless it is a note of yours (also when it is gone).
+
+#### `GET /api/agents/:id/memory`
+
+→ 200 `{"notes": [Note], "used": n, "limit": n, "hearsay": [{"id", "text", "speakerName", "group": {"id", "title": string |
+null} | null, "saidAt"}], "hearsayUsed": n, "hearsayLimit": n}`: the Agent's own notes (a room of 3000) and what it
+heard in groups (a room of 2000), oldest first. `group` is `null` once the Agent has left that group. Also for a deleted
+Agent.
+
+#### `POST /api/agents/:id/memory/notes`
+
+As `POST /api/memory/notes`, into the Agent's own room. 409 `agent_deleted` for a deleted Agent.
+
+#### `PATCH /api/agents/:id/memory/notes/:noteId`
+
+As `PATCH /api/memory/notes/:id`, for one of the Agent's own notes. 409 `agent_deleted` for a deleted Agent.
+
+#### `DELETE /api/agents/:id/memory/notes/:noteId`
+
+As `DELETE /api/memory/notes/:id`, for one of the Agent's own notes (a deleted Agent's too).
+
+#### `DELETE /api/agents/:id/memory/hearsay/:hearsayId`
+
+Body: none or `{}`. Forgets what the Agent heard. → 200 `{"ok": true}`; 404 `not_found` unless it is this Agent's.
+
+#### `POST /api/agents/:id/memory/hearsay/:hearsayId/confirm`
+
+Body: none or `{}`. Takes what was heard as true: it becomes a note about you (`origin` `"hearsay"`, in the vault, learned in
+the group it was heard in) and is no longer hearsay. → 201 Note; 409 `room_full` (the hearsay stays) when it does not
+fit; 404 `not_found` unless it is this Agent's.
+
 ### Agents in a group
 
 An Agent in a group (an owner puts their own Agent into a group they are in) replies when a message there calls it by
