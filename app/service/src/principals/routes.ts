@@ -10,6 +10,7 @@ import { perPrincipalLimit } from "../limits.ts";
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
+import { setNewNotes } from "../memory/store.ts";
 import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
 
 const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
@@ -59,15 +60,19 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       schema: {
         params: z.object({}),
         querystring: z.object({}),
-        body: z.object({ displayName }),
+        body: z
+          .object({ displayName: displayName.optional(), newNotes: z.enum(["auto", "vault", "open"]).optional() })
+          .refine((b) => b.displayName !== undefined || b.newNotes !== undefined),
         response: { 200: publicPrincipal },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
-      await updateDisplayName(db, me.id, req.body.displayName);
-      return { id: me.id, handle: me.handle, displayName: req.body.displayName, avatarVersion: me.avatarVersion };
+      const { displayName: name, newNotes } = req.body;
+      if (name !== undefined) await updateDisplayName(db, me.id, name);
+      if (newNotes !== undefined) await setNewNotes(db, me.id, newNotes);
+      return { id: me.id, handle: me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
     },
   );
 

@@ -35,6 +35,10 @@ const HIDDEN = {
   /** What the Agent calls its owner, and what it calls mia: the owner's settings. */
   ownerAppellation: "OWNERNAME-zq7",
   appellation: "NAMED-zq7",
+  /** Memory: a note about the owner, one of the Agent's own, and something it heard in the group (never shown to anyone else). */
+  ownerNote: "OWNERNOTE-zq7 keeps bees",
+  selfNote: "SELFNOTE-zq7 likes tea",
+  hearsay: "HEARSAY-zq7 said in the group",
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
@@ -52,6 +56,10 @@ const HIDDEN_KEYS = [
   "proactiveSpentToday",
   "ownerAppellation",
   "appellations",
+  "memory",
+  "memoryAsk",
+  "sharedNotes",
+  "newNotes",
   "paused",
   "deleted",
   "provider",
@@ -158,6 +166,10 @@ async function world() {
   const g = await group(app, owner, "team", [mia, ned]);
   await befriend(app, mia, sam);
   await seat(g, agent.id);
+  // What its memory holds, out of the vault and in the group's own origin: the strongest case for a leak.
+  await db.query("insert into owner_notes (owner_id, text, vault, origin_conversation_id) values ($1, $2, false, $3)", [owner.id, HIDDEN.ownerNote, g]);
+  await db.query("insert into agent_notes (agent_id, text, vault, origin_conversation_id) values ($1, $2, false, $3)", [agent.id, HIDDEN.selfNote, g]);
+  await db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_name, text, said_at) values ($1, $2, 'mia', $3, now())", [agent.id, g, HIDDEN.hearsay]);
   expect((await api(app, owner, "PUT", `/api/agents/${agent.id}/appellations/${mia.id}`, { appellation: HIDDEN.appellation })).status).toBe(200);
   // Said as a reply its owner's provider model gave there at a thinking level, unasked (its owner's `via`).
   // A reply nobody asked for: the owner's copy says so (`via.proactive`), nobody else's has a `via`.
@@ -177,6 +189,9 @@ async function world() {
     proactiveLevel: "normal",
     proactiveBudget: "20",
     proactiveSpentToday: "0",
+    memory: true,
+    memoryAsk: false,
+    sharedNotes: true,
     ownerAppellation: HIDDEN.ownerAppellation,
     appellations: [{ principalId: mia.id, appellation: HIDDEN.appellation }],
     paused: true,

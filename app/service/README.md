@@ -449,13 +449,13 @@ conversation. Like a person who left, an Agent that left a group stays named by 
 still read them (a member who has since left too) gets its entry in those reads' `principals` — name, handle, intro,
 field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
 id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
-level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, `proactive`, `proactiveLevel`, `proactiveBudget`, `proactiveSpentToday`, `ownerAppellation`, `appellations`, provider, pause or persona proposals, whether a reply of it was one nobody called for (Proactive replies), or the reasoning of its replies there (A reply
+level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, `proactive`, `proactiveLevel`, `proactiveBudget`, `proactiveSpentToday`, `memory`, `memoryAsk`, `sharedNotes`, `ownerAppellation`, `appellations`, provider, pause or persona proposals, whether a reply of it was one nobody called for (Proactive replies), or the reasoning of its replies there (A reply
 there), or which model and reasoning level a reply of it used and what it cost (`via`, Wire shapes), in any response,
 push or error. Fellow members see a changed name, intro or field the next time they load
 principals, as for people; a changed avatar is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
-"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "proactive", "proactiveLevel": "less" | "normal" | "more", "proactiveBudget", "proactiveSpentToday", "ownerAppellation": string | null, "appellations": [{"principalId", "kind": "human" | "agent", "handle", "name", "appellation"}], "reasoning": "none" | "low" | "medium" | "high" |
+"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "proactive", "proactiveLevel": "less" | "normal" | "more", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "ownerAppellation": string | null, "appellations": [{"principalId", "kind": "human" | "agent", "handle", "name", "appellation"}], "reasoning": "none" | "low" | "medium" | "high" |
 "xhigh" | "max", "model": {"source": "site", "id"} | {"source": "provider", "providerId", "model"} | null, "paused",
 "deleted", "conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `groupMentions` says
 who may call the Agent with `@` in a group it is in: `members` (any member, and other Agents there) or `owner` (you
@@ -467,7 +467,9 @@ from people (Agents in a group). `othersBudget` is the most you pay, in points (
 counts once it is settled, so the number does not move while one is under way (Agents in a group). `proactive` says
 whether it may reply in a group to a message that called no Agent, when the judgement model picks it (Proactive replies;
 default false); `proactiveLevel` how readily (`less`, `normal` — the default —, `more`: the threshold it starts from);
-`proactiveBudget` the most you pay, in points (a string as `chainBudget`, `"1"` to `"100000"`, default `"20"`; never
+`memory` (default true) says whether it keeps notes (An Agent's memory); `memoryAsk` (default false) whether a change of
+its notes waits for your yes; `sharedNotes` (default true) whether it uses the notes about you that all your Agents
+share. `proactiveBudget` the most you pay, in points (a string as `chainBudget`, `"1"` to `"100000"`, default `"20"`; never
 `null`: a reply nobody asked for always has a limit), in a site day, for those replies; `proactiveSpentToday` (a string of
 points) what they were charged since the site day began, settled charges only, as `othersSpentToday`. `ownerAppellation`
 is what the Agent calls you (1–20 characters, `null`: it uses your display name); `appellations` is what it calls
@@ -495,7 +497,8 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
 (default `always`), `groupMentions` (`members` or `owner`, default `members`), `chainBudget` (a string of points from 1
 to 100 000 with at most 6 decimals, no sign or exponent: `"50"`, `"12.5"`; default `"50"`), `othersBudget` (the same
 string, or `null` for no limit; default `"20"`), `proactive` (default `false`), `proactiveLevel` (`less`, `normal` or
-`more`, default `normal`), `proactiveBudget` (the string of `chainBudget`, never `null`; default `"20"`), `ownerAppellation`
+`more`, default `normal`), `proactiveBudget` (the string of `chainBudget`, never `null`; default `"20"`), `memory` (default `true`), `memoryAsk`
+(default `false`), `sharedNotes` (default `true`; booleans, never `null`), `ownerAppellation`
 (an appellation, below; default `null`), `reasoning` (default `none`), `model` (default `null`). → 201 Agent.
 
 - 409 `proactive_unavailable` for `"proactive": true` while the site has no judgement model (`JUDGE`), before anything is
@@ -559,7 +562,7 @@ for `GET /api/agents`.
 #### `PATCH /api/agents/:id`
 
 *Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
-`persona`, `replyMode`, `groupMentions`, `chainBudget`, `othersBudget` (`null`: no limit), `proactive`, `proactiveLevel`, `proactiveBudget`, `ownerAppellation` (`null` clears it), `reasoning`, `model` (`null` clears it), under the rules of creation; the
+`persona`, `replyMode`, `groupMentions`, `chainBudget`, `othersBudget` (`null`: no limit), `proactive`, `proactiveLevel`, `proactiveBudget`, `memory`, `memoryAsk`, `sharedNotes`, `ownerAppellation` (`null` clears it), `reasoning`, `model` (`null` clears it), under the rules of creation; the
 model and the reasoning level are checked together when either is sent. A `persona` that differs from the stored one
 raises `personaVersion` by one. → 200 Agent; 400 `invalid_request` for a value, model or reasoning level that does not
 fit; 409 `agent_deleted`; 409 `proactive_unavailable` for `"proactive": true` while the site has no judgement model
@@ -790,6 +793,19 @@ notice (Agents and runs). History, search and unread counts are unchanged; two i
 `{"reason": "agent_deleted"}` once it is deleted. It starts no reply, and a reply already under way goes on with what it
 was given (the old topic); a reply still queued is given the new topic, so one with nothing after the notice to answer
 ends `cancelled` with no error. Limit: 30 per minute with the Agent writes.
+
+### An Agent's memory
+
+An Agent can keep notes (`memory`, an owner's setting per Agent). There are three rooms, each with a limit in code points
+(`MEMORY.roomOwner` 2000, `roomSelf` 3000, `roomHearsay` 2000): notes about the owner (shared by all their Agents unless
+an Agent's `sharedNotes` is off), the Agent's own notes, and what the Agent heard said in a group (hearsay, up to 200
+code points each, kept with the group and the speaker). A note is in the **vault** unless it was sorted out of it, and
+a group never gets a vault note: in the owner's own conversation with the Agent every note is shown; in a group, the
+notes of either kind that are not in the vault, those that were learned in that very group, and that group's hearsay,
+nothing else (`src/memory/store.ts` `notesFor`, the one place that decides). With `memory` off nothing is shown and
+nothing is learned. Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`) — reaches
+anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
+`memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`.
 
 ### Agents in a group
 
@@ -1323,15 +1339,18 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/me`
 
-*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email"}`: the signed-in principal.
+*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes"}`: the signed-in principal.
+`newNotes` (`"auto"`, `"vault"` or `"open"`; `"auto"` until chosen) is what newly written notes of their Agents' memory do
+about the vault (An Agent's memory); only they are ever shown it.
 
 ### Profiles and principals
 
 #### `PATCH /api/me`
 
-*Session: required.* Changes your display name (only yours: no route takes a target id).
+*Session: required.* Changes your display name and your memory setting (only yours: no route takes a target id).
 
-- Body: `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+- Body: `displayName` and `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
+  existing notes do not move), each optional but at least one; `newNotes` is read back with `GET /api/me`. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
   U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
@@ -1340,7 +1359,7 @@ accepted but not used: the mail links to the web app).
   text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
   as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
   same rule applies on registration and, with 1–60 characters, to group titles.
-- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored. Other members see it the next time they
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes` was sent). Other members see it the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
 

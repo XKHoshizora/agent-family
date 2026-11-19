@@ -5,6 +5,7 @@ import { z } from "zod";
 import { authCall } from "./auth/auth.ts";
 import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
+import { getNewNotes } from "./memory/store.ts";
 
 export interface Principal {
   id: string;
@@ -61,13 +62,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
         params: z.object({}),
         querystring: z.object({}),
         response: {
-          200: z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number(), email: z.string() }),
+          200: z.object({
+            id: z.string(),
+            handle: z.string(),
+            displayName: z.string(),
+            avatarVersion: z.number(),
+            email: z.string(),
+            newNotes: z.enum(["auto", "vault", "open"]),
+          }),
         },
       },
     },
     async (req) => {
       const p = await requirePrincipal(req);
-      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email };
+      const newNotes = await getNewNotes(app.deps.db, p.id);
+      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes };
     },
   );
 }

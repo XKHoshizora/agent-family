@@ -47,6 +47,9 @@ export interface NewAgent {
   proactive: boolean;
   proactiveLevel: ProactiveLevel;
   proactiveBudgetMicro: bigint;
+  memory: boolean;
+  memoryAsk: boolean;
+  sharedNotes: boolean;
   ownerAppellation: string | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
@@ -85,8 +88,8 @@ export async function createAgent(
   const created = await t.query<{ created_at: Date }>(
     `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
                          model_source, site_model_id, provider_id, provider_model, chain_budget_micro, others_budget_micro, owner_appellation,
-                         proactive, proactive_level, proactive_budget_micro)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18) returning created_at`,
+                         proactive, proactive_level, proactive_budget_micro, memory, memory_ask, shared_notes)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) returning created_at`,
     [
       id,
       input.intro,
@@ -103,6 +106,9 @@ export async function createAgent(
       input.proactive,
       input.proactiveLevel,
       input.proactiveBudgetMicro.toString(),
+      input.memory,
+      input.memoryAsk,
+      input.sharedNotes,
     ],
   );
   const conversation = await t.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [ownerId]);
@@ -136,6 +142,9 @@ export async function createAgent(
     proactive: input.proactive,
     proactiveLevel: input.proactiveLevel,
     proactiveBudgetMicro: input.proactiveBudgetMicro,
+    memory: input.memory,
+    memoryAsk: input.memoryAsk,
+    sharedNotes: input.sharedNotes,
     ownerAppellation: input.ownerAppellation,
     reasoning: input.reasoning,
     model: input.model,
