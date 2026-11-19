@@ -1,17 +1,11 @@
 import type { FastifyBaseLogger } from "fastify";
-import { lockAccount } from "../accounts/store.ts";
 import { draftDeadlineMs, type Config } from "../config.ts";
 import type { Db, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import { admitRun } from "../metering/admit.ts";
-import { estimateTokens } from "../metering/prices.ts";
-import { settle, type Usage } from "../metering/settle.ts";
-import { ModelError, type ModelErrorCode, type ModelGateway } from "../models/gateway.ts";
+import { ownerCall } from "../metering/owner-call.ts";
+import { ModelError, type ModelGateway } from "../models/gateway.ts";
 import { resolveModel } from "../models/resolve.ts";
-import { KeyUnreadableError } from "../providers/crypto.ts";
 import { characters, hasVisibleText, stripUnsafeText, userText } from "../schemas.ts";
-import { contextBudget } from "./runtime/context.ts";
-import { UNAVAILABLE } from "./runtime/port.ts";
 import { assertModelChoice, lockOwnedAgent, updateAgent, type AgentModel, type AgentRow } from "./store.ts";
 
 /**
@@ -320,121 +314,43 @@ export interface DraftDeps {
  * Returns `draftText` of what the model wrote.
  */
 export async function draftPersona(deps: DraftDeps, ownerId: string, input: DraftInput, closing: AbortSignal): Promise<string> {
-  const { db, config, models, log, inFlight, release } = deps;
-  const system = DRAFT_INSTRUCTION;
-  const data = draftData(input);
-  const inputChars = estimateTokens(system) + estimateTokens(data);
-
-  const started = await db.tx(async (t) => {
-    // The owner's own call, in the owner's own lane.
-    const inserted = await t.query<{ id: string }>(
-      "insert into agent_runs (purpose, owner_id, status, started_at, caller_id, lane) values ('draft', $1, 'running', now(), $1, 'own') returning id",
-      [ownerId],
-    );
-    const runId = inserted.rows[0]!.id;
-    await lockAccount(t, ownerId);
-    await assertModelChoice(t, ownerId, input.model, "none", config);
-    let resolved;
-    try {
-      resolved = await resolveModel(t, config, { model: input.model, ownerId });
-    } catch (err) {
-      if (!(err instanceof KeyUnreadableError)) throw err;
-      // As a key the provider refused: its owner must save it again.
-      log.error({ err }, "persona draft: the provider's saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged)");
-      throw new AppError(502, "provider_rejected");
-    }
-    if (!resolved) throw new AppError(502, "provider_unavailable");
-    const running = await t.query<{ n: number }>(
-      "select count(*)::int as n from agent_runs where owner_id = $1 and status = 'running' and id <> $2",
-      [ownerId, runId],
-    );
-    if (running.rows[0]!.n >= config.agentMaxConcurrentRuns) throw new AppError(429, "rate_limited");
-    if (contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, system) < estimateTokens(data)) {
-      throw new AppError(400, "context_too_small");
-    }
-    await admitRun(t, config, runId, ownerId, resolved, inputChars, new Date());
-    return { runId, call: resolved.call };
-  });
-
-  // From here until the draft has ended, the run is this process's: the stale-run sweep leaves it alone.
-  inFlight.add(started.runId);
-  try {
-    const deadline = AbortSignal.timeout(draftDeadlineMs(config));
-    let text = "";
-    let reasoning = "";
-    let finished: { usage: Usage | null } | null = null;
-    let failure: ModelErrorCode | null = null;
-    try {
-      const stream = models.stream({
-        ...started.call,
-        system,
-        messages: [{ role: "user", parts: [{ type: "text", text: data }] }],
-        reasoning: "none",
-        signal: AbortSignal.any([closing, deadline]),
-      });
-      for await (const event of stream) {
-        if (event.type === "finish") {
-          finished = { usage: event.usage };
-          break;
-        }
-        if (event.type === "text") text += event.delta;
-        else reasoning += event.delta;
-      }
-    } catch (err) {
-      if (closing.aborted) {
+  const { config, log, release } = deps;
+  const outcome = await ownerCall(
+    deps,
+    {
+      purpose: "draft",
+      label: "persona draft",
+      ownerId,
+      system: DRAFT_INSTRUCTION,
+      user: draftData(input),
+      choose: async (t) => {
+        await assertModelChoice(t, ownerId, input.model, "none", config);
+        return resolveModel(t, config, { model: input.model, ownerId });
+      },
+      keyUnreadableMessage: "persona draft: the provider's saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged)",
+      deadlineMs: draftDeadlineMs(config),
+      keepAnswerOnTimeout: true,
+      answer: (text) => {
+        const persona = draftText(text);
+        return hasVisibleText(persona) ? persona : null;
+      },
+      measure: characters,
+      onClosing: async (runId) => {
         try {
-          await release(started.runId);
+          await release(runId);
         } catch (releaseErr) {
-          log.error({ err: releaseErr, runId: started.runId }, "persona draft: could not be ended as the service closed; the run stays running until the stale-run sweep or the next start releases it");
+          log.error({ err: releaseErr, runId }, "persona draft: could not be ended as the service closed; the run stays running until the stale-run sweep or the next start releases it");
         }
-        throw new AppError(503, "busy");
-      }
-      if (!deadline.aborted) {
-        failure = err instanceof ModelError ? err.code : "provider_unavailable";
-        // A failure the upstream reported usage for (`thinking_exhausted`) is charged that usage.
-        if (err instanceof ModelError && err.usage) finished = { usage: err.usage };
-        if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "persona draft: the model call failed unexpectedly");
-      }
-    }
-
-    const persona = draftText(text);
-    const end =
-      failure !== null
-        ? ({ status: "failed", error: failure } as const)
-        : (finished === null && !deadline.aborted) || !hasVisibleText(persona)
-          ? UNAVAILABLE
-          : ({ status: "done" } as const);
-    const outputChars = end.status === "done" ? characters(text) + characters(reasoning) : 0;
-    let endedElsewhere: string | null = null;
-    try {
-      await db.tx(async (t) => {
-        // The run row first (the order `settle` keeps): one that is no longer running was ended elsewhere meanwhile —
-        // another instance's recovery or the stale-run sweep settled it already; nothing more is recorded.
-        const now = await t.query<{ status: string }>("select status from agent_runs where id = $1 for update", [started.runId]);
-        if (now.rows[0]?.status !== "running") {
-          endedElsewhere = now.rows[0]?.status ?? "gone";
-          return;
-        }
-        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { log });
-        await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
-          started.runId,
-          end.status,
-          end.status === "failed" ? end.error : null,
-        ]);
-      });
-    } catch (err) {
-      // Nothing of it was recorded: the run stays running, its hold counting, until the stale-run sweep or the next start
-      // releases it.
-      log.error({ err, runId: started.runId }, "persona draft: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
-      throw err;
-    }
-    if (endedElsewhere !== null) {
-      log.warn({ runId: started.runId, status: endedElsewhere }, "persona draft: ended elsewhere (another instance's recovery or the stale-run sweep) before it was settled; answered busy");
-      throw new AppError(503, "busy");
-    }
-    if (end.status === "failed") throw new ModelError(end.error);
-    return persona;
-  } finally {
-    inFlight.delete(started.runId);
+      },
+    },
+    closing,
+  );
+  if (outcome.kind === "not_started" || outcome.kind === "unsettled") throw outcome.error;
+  if (outcome.kind === "closed") throw new AppError(503, "busy");
+  if (outcome.endedElsewhere !== null) {
+    log.warn({ runId: outcome.runId, status: outcome.endedElsewhere }, "persona draft: ended elsewhere (another instance's recovery or the stale-run sweep) before it was settled; answered busy");
+    throw new AppError(503, "busy");
   }
+  if (outcome.end.status === "failed") throw new ModelError(outcome.end.error);
+  return outcome.answer!;
 }

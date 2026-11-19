@@ -1,14 +1,9 @@
 import type { FastifyBaseLogger } from "fastify";
-import { lockAccount } from "../accounts/store.ts";
-import { contextBudget } from "../agents/runtime/context.ts";
-import { UNAVAILABLE } from "../agents/runtime/port.ts";
 import type { Config, SiteModel } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
 import { AppError } from "../errors.ts";
-import { admitRun } from "../metering/admit.ts";
-import { estimateTokens } from "../metering/prices.ts";
-import { settle, type Usage } from "../metering/settle.ts";
-import { ModelError, type ModelErrorCode, type ModelGateway } from "../models/gateway.ts";
+import { ownerCall } from "../metering/owner-call.ts";
+import type { ModelGateway } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { getMemoryModel, type MemoryModelChoice } from "./store.ts";
@@ -139,112 +134,36 @@ export interface MemoryCallReport {
 }
 
 async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal, report?: MemoryCallReport): Promise<string | null> {
-  const { db, config, models, log, inFlight } = deps;
-  const { system, user } = input;
-  const inputChars = estimateTokens(system) + estimateTokens(user);
+  const { config, log } = deps;
   if (closing.aborted) return null;
 
-  let started: { runId: string; resolved: Resolved } | null;
-  try {
-    started = await db.tx(async (t) => {
-      const inserted = await t.query<{ id: string }>(
-        "insert into agent_runs (purpose, owner_id, status, started_at, caller_id, lane) values ('memory', $1, 'running', now(), $1, 'own') returning id",
-        [ownerId],
-      );
-      const runId = inserted.rows[0]!.id;
-      await lockAccount(t, ownerId);
-      let resolved: Resolved | null;
-      try {
-        resolved = await modelFor(t, config, ownerId, await getMemoryModel(t, ownerId));
-      } catch (err) {
-        if (!(err instanceof KeyUnreadableError)) throw err;
-        log.error({ err }, "memory call: the model's saved key cannot be opened");
-        throw new AppError(502, "provider_rejected");
-      }
-      if (!resolved) throw new AppError(502, "provider_unavailable");
-      const others = await t.query<{ n: number }>(
-        "select count(*)::int as n from agent_runs where owner_id = $1 and status = 'running' and id <> $2",
-        [ownerId, runId],
-      );
-      if (others.rows[0]!.n >= config.agentMaxConcurrentRuns) throw new AppError(429, "rate_limited");
-      // The output the call is sent, and the hold admission takes, are the same limit.
-      const sized: Resolved = { ...resolved, call: { ...resolved.call, maxOutputTokens: Math.min(input.maxOutputTokens, resolved.call.maxOutputTokens) } };
-      if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, system) < estimateTokens(user)) {
-        throw new AppError(400, "context_too_small");
-      }
-      await admitRun(t, config, runId, ownerId, sized, inputChars, new Date());
-      return { runId, resolved: sized };
-    });
-  } catch (err) {
+  const outcome = await ownerCall(
+    deps,
+    {
+      purpose: "memory",
+      label: "memory call",
+      ownerId,
+      system: input.system,
+      user: input.user,
+      choose: async (t) => modelFor(t, config, ownerId, await getMemoryModel(t, ownerId)),
+      keyUnreadableMessage: "memory call: the model's saved key cannot be opened",
+      maxOutputTokens: input.maxOutputTokens,
+      deadlineMs: config.agentRunTimeoutMs,
+      keepAnswerOnTimeout: false,
+      answer: (text) => text.trim() || null,
+      measure: (text) => text.length,
+    },
+    closing,
+  );
+  if (outcome.kind === "not_started") {
     // No model, no quota, too many calls running: nothing is recorded (the transaction rolled back).
+    const err = outcome.error;
     if (!(err instanceof AppError)) log.error({ err, ownerId }, "memory call: could not be started");
     else if (err.status === 400) log.warn({ ownerId }, "memory call: the input does not fit the model's context; skipped");
     return null;
   }
-  if (started === null) return null;
-
-  inFlight.add(started.runId);
-  try {
-    const deadline = AbortSignal.timeout(config.agentRunTimeoutMs);
-    let text = "";
-    let reasoning = "";
-    let finished: { usage: Usage | null; truncated: boolean } | null = null;
-    let failure: ModelErrorCode | null = null;
-    try {
-      const stream = models.stream({
-        ...started.resolved.call,
-        system,
-        messages: [{ role: "user", parts: [{ type: "text", text: user }] }],
-        reasoning: "none",
-        signal: AbortSignal.any([closing, deadline]),
-      });
-      for await (const event of stream) {
-        if (event.type === "finish") {
-          finished = { usage: event.usage, truncated: event.truncated };
-          break;
-        }
-        if (event.type === "text") text += event.delta;
-        else reasoning += event.delta;
-      }
-    } catch (err) {
-      if (!closing.aborted && !deadline.aborted) {
-        failure = err instanceof ModelError ? err.code : "provider_unavailable";
-        // A failure the upstream reported usage for (`thinking_exhausted`) is charged that usage.
-        if (err instanceof ModelError && err.usage) finished = { usage: err.usage, truncated: false };
-        if (!(err instanceof ModelError)) log.error({ err, runId: started.runId }, "memory call: the model call failed unexpectedly");
-      }
-    }
-
-    // The service is closing: the call is abandoned and the run ended as recovery ends one, nothing charged.
-    const abandoned = closing.aborted;
-    const answer = text.trim();
-    const end =
-      failure !== null
-        ? ({ status: "failed", error: failure } as const)
-        : abandoned || finished === null || answer === ""
-          ? UNAVAILABLE
-          : ({ status: "done" } as const);
-    const outputChars = end.status === "done" ? text.length + reasoning.length : 0;
-    try {
-      await db.tx(async (t) => {
-        const now = await t.query<{ status: string }>("select status from agent_runs where id = $1 for update", [started.runId]);
-        // Ended elsewhere meanwhile (recovery, the stale-run sweep): settled there already.
-        if (now.rows[0]?.status !== "running") return;
-        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { forgiveAll: abandoned, log });
-        await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
-          started.runId,
-          end.status,
-          end.status === "failed" ? end.error : null,
-        ]);
-      });
-    } catch (err) {
-      log.error({ err, runId: started.runId }, "memory call: could not be settled; the run stays running until the stale-run sweep or the next start releases it");
-      return null;
-    }
-    if (report && failure === null && !abandoned && finished !== null) report.answered = true;
-    if (end.status !== "done" || finished?.truncated === true) return null;
-    return answer;
-  } finally {
-    inFlight.delete(started.runId);
-  }
+  if (outcome.kind !== "ended") return null;
+  if (report && outcome.answered) report.answered = true;
+  if (outcome.end.status !== "done" || outcome.truncated) return null;
+  return outcome.answer;
 }
