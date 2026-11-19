@@ -1,0 +1,198 @@
+复核校准报告（review）  模型 deepseek-chat  样本 48  布局 apart + mixed
+  按生产的原样发：系统文本 + JSON 用户消息 {conversation, notes, room_left}，主人自己的对话（可以新增/替换/删除/锁/解锁），max_tokens 800，temperature 0；答案按 ops.ts 解析并过 modelNote 的拒绝规则。
+  通过 = 操作种类对（merge 要有 replace）、mustMention 都在结果笔记里、mustNot 都不在；none 的样本要求一个操作都没有。（样本文件没有写房间大小：默认房间；near-full 的样本被告知主人房间还剩 20 个字。）
+
+========== 布局 apart（笔记单独放在 notes 里并编号，生产的做法）  成功 48，失败 0
+一、通过 / 总（按类别）
+  agent-asks-owner-confirms    4 / 4
+  agent-restates               4 / 4
+  change                       4 / 4
+  chitchat                     4 / 4
+  correction                   1 / 4
+  explicit                     3 / 4
+  forget                       4 / 4
+  instruction-injection        4 / 4
+  near-full                    4 / 4
+  one-time                     4 / 4
+  preference                   4 / 4
+  secret                       4 / 4
+  （按语言）
+  zh                           19 / 19
+  ja                           11 / 12
+  en                           10 / 12
+  mix                          4 / 5
+  （按语言 / 类别）
+  en / agent-asks-owner-confirms 1 / 1
+  en / agent-restates          1 / 1
+  en / change                  1 / 1
+  en / chitchat                1 / 1
+  en / correction              0 / 1
+  en / explicit                0 / 1
+  en / forget                  1 / 1
+  en / instruction-injection   1 / 1
+  en / near-full               1 / 1
+  en / one-time                1 / 1
+  en / preference              1 / 1
+  en / secret                  1 / 1
+  ja / agent-asks-owner-confirms 1 / 1
+  ja / agent-restates          1 / 1
+  ja / change                  1 / 1
+  ja / chitchat                1 / 1
+  ja / correction              0 / 1
+  ja / explicit                1 / 1
+  ja / forget                  1 / 1
+  ja / instruction-injection   1 / 1
+  ja / near-full               1 / 1
+  ja / one-time                1 / 1
+  ja / preference              1 / 1
+  ja / secret                  1 / 1
+  mix / chitchat               1 / 1
+  mix / correction             0 / 1
+  mix / instruction-injection  1 / 1
+  mix / one-time               1 / 1
+  mix / preference             1 / 1
+  zh / agent-asks-owner-confirms 2 / 2
+  zh / agent-restates          2 / 2
+  zh / change                  2 / 2
+  zh / chitchat                1 / 1
+  zh / correction              1 / 1
+  zh / explicit                2 / 2
+  zh / forget                  2 / 2
+  zh / instruction-injection   1 / 1
+  zh / near-full               2 / 2
+  zh / one-time                1 / 1
+  zh / preference              1 / 1
+  zh / secret                  2 / 2
+  合计                           44 / 48    答案不是 JSON 对象的：0
+
+二、没通过的样本和它们返回的操作（样本是编出来的，这里可以打印笔记原文）
+  mr-008（en / explicit）期望 add 提到 window  → 结果里没有「window」
+    操作 [{"op":"add","kind":"owner","text":"坐飞机喜欢靠窗的座位；红眼航班则无所谓。"}]
+  mr-010（ja / correction）期望 replace 提到 木曜 不能有 水曜  → 结果里不该有「水曜」
+    操作 [{"op":"replace","ref":"n1","text":"木曜はバドミントン（以前は水曜と聞いていたが、2026年11月に本人が訂正）"}]
+  mr-011（en / correction）期望 replace 提到 Portland 不能有 Seattle  → 结果里不该有「Seattle」
+    操作 [{"op":"replace","ref":"n1","text":"Lives in Portland (previously Seattle, corrected 2026-11-20)"}]
+  mr-012（mix / correction）期望 replace 提到 大阪 不能有 东京  → 结果里不该有「东京」
+    操作 [{"op":"replace","ref":"n1","text":"在大阪读书（以前记成东京，2026 年 11 月改的）"}]
+
+三、用量
+  48 次有 usage：提示 39838 tokens，输出 1032 tokens，合计 40870；平均每次 提示 830 / 输出 22
+  延迟：中位数 736ms，最大 1031ms
+
+========== 布局 mixed（笔记混在 conversation 里当 agent 的话，notes 为空）  成功 48，失败 0
+一、通过 / 总（按类别）
+  agent-asks-owner-confirms    4 / 4
+  agent-restates               1 / 4
+  change                       0 / 4
+  chitchat                     4 / 4
+  correction                   0 / 4
+  explicit                     3 / 4
+  forget                       0 / 4
+  instruction-injection        4 / 4
+  near-full                    1 / 4
+  one-time                     4 / 4
+  preference                   4 / 4
+  secret                       4 / 4
+  （按语言）
+  zh                           12 / 19
+  ja                           7 / 12
+  en                           6 / 12
+  mix                          4 / 5
+  （按语言 / 类别）
+  en / agent-asks-owner-confirms 1 / 1
+  en / agent-restates          0 / 1
+  en / change                  0 / 1
+  en / chitchat                1 / 1
+  en / correction              0 / 1
+  en / explicit                0 / 1
+  en / forget                  0 / 1
+  en / instruction-injection   1 / 1
+  en / near-full               0 / 1
+  en / one-time                1 / 1
+  en / preference              1 / 1
+  en / secret                  1 / 1
+  ja / agent-asks-owner-confirms 1 / 1
+  ja / agent-restates          0 / 1
+  ja / change                  0 / 1
+  ja / chitchat                1 / 1
+  ja / correction              0 / 1
+  ja / explicit                1 / 1
+  ja / forget                  0 / 1
+  ja / instruction-injection   1 / 1
+  ja / near-full               0 / 1
+  ja / one-time                1 / 1
+  ja / preference              1 / 1
+  ja / secret                  1 / 1
+  mix / chitchat               1 / 1
+  mix / correction             0 / 1
+  mix / instruction-injection  1 / 1
+  mix / one-time               1 / 1
+  mix / preference             1 / 1
+  zh / agent-asks-owner-confirms 2 / 2
+  zh / agent-restates          1 / 2
+  zh / change                  0 / 2
+  zh / chitchat                1 / 1
+  zh / correction              0 / 1
+  zh / explicit                2 / 2
+  zh / forget                  0 / 2
+  zh / instruction-injection   1 / 1
+  zh / near-full               1 / 2
+  zh / one-time                1 / 1
+  zh / preference              1 / 1
+  zh / secret                  2 / 2
+  合计                           29 / 48    答案不是 JSON 对象的：0
+
+二、没通过的样本和它们返回的操作（样本是编出来的，这里可以打印笔记原文）
+  mr-008（en / explicit）期望 add 提到 window  → 结果里没有「window」
+    操作 [{"op":"add","kind":"owner","text":"坐飞机喜欢靠窗的座位；红眼航班则无所谓。"}]
+  mr-009（zh / correction）期望 replace 提到 香菜 不能有 不吃辣  → 没有 replace 操作；结果里不该有「不吃辣」
+    操作 [{"op":"add","kind":"owner","text":"不吃香菜，辣都可以吃"}]
+  mr-010（ja / correction）期望 replace 提到 木曜 不能有 水曜  → 没有 replace 操作；结果里不该有「水曜」
+    操作 [{"op":"add","kind":"owner","text":"バドミントンは木曜日（水曜ではない）"}]
+  mr-011（en / correction）期望 replace 提到 Portland 不能有 Seattle  → 没有 replace 操作；结果里不该有「Seattle」
+    操作 [{"op":"add","kind":"owner","text":"住在 Portland（以前助手记成 Seattle，2026 年 11 月改的）"}]
+  mr-012（mix / correction）期望 replace 提到 大阪 不能有 东京  → 没有 replace 操作；结果里不该有「东京」
+    操作 [{"op":"add","kind":"owner","text":"在大阪读书（不是东京），想找梅田附近的自习室。"}]
+  mr-013（zh / change）期望 replace 提到 麻婆、鱼香  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"现在最爱吃麻婆豆腐（以前爱吃鱼香肉丝，2026 年 11 月改的）"}]
+  mr-014（zh / change）期望 replace 提到 周四、周三  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"羽毛球球局现在改到周四晚上（以前是周三晚上，2026 年 11 月改的）。"}]
+  mr-015（ja / change）期望 replace 提到 ミルク、ブラック  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"コーヒーはミルク入りにしている（胃が弱くなってブラックは飲めなくなった）"}]
+  mr-016（en / change）期望 replace 提到 fish、egetarian  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"Pescatarian: started eating fish again in October 2026, but no other meat."}]
+  mr-017（zh / forget）期望 remove 提到 辣 不能有 女儿  → 没有 remove 操作；结果里不该有「女儿」
+    操作 []
+  mr-018（ja / forget）期望 remove 提到 猫 不能有 転職  → 没有 remove 操作；结果里不该有「転職」
+    操作 []
+  mr-019（en / forget）期望 remove 提到 peanut 不能有 therapist  → 没有 remove 操作；结果里不该有「therapist」
+    操作 []
+  mr-020（zh / forget）期望 remove 提到 深色 不能有 署名  → 没有 remove 操作；结果里不该有「署名」
+    操作 []
+  mr-026（zh / agent-restates）期望 none 不能有 早上开会  → 该什么都不做，却有操作；结果里不该有「早上开会」
+    操作 [{"op":"add","kind":"owner","text":"喜欢早上开会"}]（模型原本给了 2 个，被去重或拒绝了 1 个）
+  mr-027（en / agent-restates）期望 none 不能有 marathon  → 该什么都不做，却有操作
+    操作 [{"op":"add","kind":"owner","text":"主人是素食者，正在为马拉松训练。"}]
+  mr-028（ja / agent-restates）期望 none 不能有 十万  → 该什么都不做，却有操作
+    操作 [{"op":"add","kind":"owner","text":"猫を飼っているので、引っ越し先はペット可の部屋を探している。予算は月10万円くらい。"}]
+  mr-041（zh / near-full）期望 merge 提到 米线  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"喜欢吃面和米线"}]
+  mr-043（en / near-full）期望 add 提到 tennis  → 结果里没有「tennis」
+    操作 [{"op":"add","kind":"owner","text":"每周六上午打网球，到中午为止，这段时间要留空。"}]
+  mr-044（ja / near-full）期望 merge 提到 ヨガ  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"最近ヨガも始めた。寝る前のストレッチと一緒にやっていて、二十分くらい。"}]
+
+三、用量
+  48 次有 usage：提示 39047 tokens，输出 1036 tokens，合计 40083；平均每次 提示 813 / 输出 22
+  延迟：中位数 691ms，最大 1259ms
+
+重复新增（模型把已有的笔记又 add 了一遍；按 ops.ts 去重之前的原始答案算，一字不差的会被生产丢掉，换了说法的不会）
+  apart：带已有笔记的样本 24 条，其中重复新增 0 条（共 0 次）
+  mixed：带已有笔记的样本 24 条，其中重复新增 3 条（共 3 次）
+  差别（同一批 24 条样本）：mixed 比 apart 多 3 条重复新增的样本
+  只比较期望是 add / none 的样本（mixed 里没有 ref，replace / remove 做不了）：apart 通过 33 / 34，mixed 通过 29 / 34
+  apart 没有重复而 mixed 有的样本：mr-026、mr-028、mr-041
+
+需要决定的数字
+  - 没有门槛；看通过率：apart 合计 44 / 48。要看哪类掉得多，第一节按类别。
+  - 重复新增：apart 里 0 / 24 条带笔记的样本出现。对照 mixed 的数字决定“笔记单独编号放着”值不值得（它的好处还有 replace / remove 才有 ref 可用）。

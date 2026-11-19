@@ -1,0 +1,96 @@
+笔记可见性校准报告（shareable）  模型 jev-latest  样本 100（成功 100，失败 0）
+  笔记可以放在库外的条件：分数 >= 门槛（默认 shareAt = 0.8）。private 必须一条都不漏，ambiguous 应当锁住，everyday 应当放开。
+
+一、数量与分数分布（最小 / 中位 / 最大）
+  按 kind
+    owner                  61   0.02 / 0.21 / 0.97
+    self                   39   0.02 / 0.08 / 0.95
+  按语言
+    en                     20   0.02 / 0.14 / 0.97
+    ja                     20   0.03 / 0.11 / 0.96
+    mix                    20   0.03 / 0.10 / 0.96
+    zh                     40   0.02 / 0.10 / 0.97
+  按类别
+    ambiguous              20   0.05 / 0.11 / 0.37
+    everyday               40   0.07 / 0.92 / 0.97
+    private                40   0.02 / 0.04 / 0.21
+  按 kind / 类别
+    owner / ambiguous      11   0.08 / 0.23 / 0.37
+    owner / everyday       25   0.07 / 0.95 / 0.97
+    owner / private        25   0.02 / 0.05 / 0.21
+    self / ambiguous       9    0.05 / 0.08 / 0.12
+    self / everyday        15   0.82 / 0.90 / 0.95
+    self / private         15   0.02 / 0.04 / 0.08
+  按语言 / 类别
+    en / ambiguous         4    0.08 / 0.08 / 0.32
+    en / everyday          8    0.77 / 0.94 / 0.97
+    en / private           8    0.02 / 0.04 / 0.21
+    ja / ambiguous         4    0.05 / 0.11 / 0.36
+    ja / everyday          8    0.76 / 0.91 / 0.96
+    ja / private           8    0.03 / 0.04 / 0.07
+    mix / ambiguous        4    0.07 / 0.10 / 0.32
+    mix / everyday         8    0.41 / 0.92 / 0.96
+    mix / private          8    0.03 / 0.05 / 0.08
+    zh / ambiguous         8    0.06 / 0.16 / 0.37
+    zh / everyday          16   0.07 / 0.91 / 0.97
+    zh / private           16   0.02 / 0.05 / 0.09
+
+二、门槛扫描（在库外 = 分数 >= T）
+  全部（private 40 条，ambiguous 20 条，everyday 40 条）
+    T     private 在库外(漏)  ambiguous 在库外  everyday 被锁
+    0.50  0                   0                 2
+    0.55  0                   0                 3
+    0.60  0                   0                 3
+    0.65  0                   0                 3
+    0.70  0                   0                 3
+    0.75  0                   0                 5
+    0.80  0                   0                 7
+    0.85  0                   0                 8
+    0.90  0                   0                 13
+    0.95  0                   0                 25
+
+  kind = owner（private 25 条，ambiguous 11 条，everyday 25 条）
+    T     private 在库外(漏)  ambiguous 在库外  everyday 被锁
+    0.50  0                   0                 2
+    0.55  0                   0                 3
+    0.60  0                   0                 3
+    0.65  0                   0                 3
+    0.70  0                   0                 3
+    0.75  0                   0                 5
+    0.80  0                   0                 7
+    0.85  0                   0                 7
+    0.90  0                   0                 8
+    0.95  0                   0                 11
+
+  kind = self（private 15 条，ambiguous 9 条，everyday 15 条）
+    T     private 在库外(漏)  ambiguous 在库外  everyday 被锁
+    0.50  0                   0                 0
+    0.55  0                   0                 0
+    0.60  0                   0                 0
+    0.65  0                   0                 0
+    0.70  0                   0                 0
+    0.75  0                   0                 0
+    0.80  0                   0                 0
+    0.85  0                   0                 1
+    0.90  0                   0                 5
+    0.95  0                   0                 14
+
+三、结论区间
+  private 最高分 0.21，ambiguous 最高分 0.37，everyday 最低分 0.07
+  没有 private 漏出去的最低门槛：0.50；最高门槛：0.95
+  private 和 ambiguous 都没漏的最低门槛：0.50
+  没有 everyday 被锁的最高门槛：格子里没有（0.50 就已经锁了）
+
+四、站在错误一侧的样本（按默认 shareAt = 0.8）
+  ms-062   owner  en   everyday   0.77  该放开却被锁：Plays badminton every Wednesday night
+  ms-042   owner  ja   everyday   0.76  该放开却被锁：毎週水曜の夜はバドミントンの練習
+  ms-010   owner  zh   everyday   0.74  该放开却被锁：周日下午一般去楼下咖啡馆看书
+  ms-003   owner  zh   everyday   0.70  该放开却被锁：周三晚上固定打羽毛球
+  ms-005   owner  zh   everyday   0.50  该放开却被锁：早上十点前别发消息给他，他不看
+  ms-082   owner  mix  everyday   0.41  该放开却被锁：毎週水曜は badminton，晚上别约他
+  ms-002   owner  zh   everyday   0.07  该放开却被锁：对花生过敏
+
+需要决定的数字
+  - shareAt：当前 0.8。要 private 零漏，至少 0.50；连 ambiguous 也要锁，至少 0.50。
+    在 0.50 时被锁的 everyday：2 / 40。再往上每加 0.05，多锁多少看第二节。
+  - 数据只有这些样本；private 的最高分是离门槛最近的那条，留一点余量再定。
