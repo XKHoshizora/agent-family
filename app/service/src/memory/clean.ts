@@ -38,10 +38,11 @@ const URL_LIKE = [
 const ADDRESSES_THE_READER = /你必须|你应该|忽略|无视|指令|听我的|無視して|\bignore|\bdisregard|\byou must\b|\bforget (?:all|your)\b|\bsystem\b/i;
 
 /**
- * A password or passcode stated with its value: a model never writes one into a note. A bare mention of having or forgetting one is no secret,
- * and `password is` followed by where or how it is kept (`stored`, `in`, `not`…) is not a value.
+ * A password or passcode stated with its value: a model never writes one into a note. Whatever follows `password is`, `password was`,
+ * `password's` or `密码是` / `密码为` counts as a value, with one exception: where it is kept (`is stored in`, `is kept with`, `is managed by`…).
+ * A bare mention of having or forgetting one is no secret.
  */
-const STATES_A_PASSWORD = /密码是\s*\S|密码[:：]\s*\S|\b(?:password|passcode)\s*(?:is\s+(?!(?:stored|kept|saved|written|managed|handled|in|on|not|always|never|too|very|long|strong|weak|hard|easy)\b)|[:=])\s*\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
+const STATES_A_PASSWORD = /密码\s*(?:是|为)\s*\S|密码[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b)|[:=])\s*\S|\bpassword\s+was\s+\S|\bpassword's\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
 
 /**
  * A bare domain with a path (`example.org/page`), which the list of known endings above does not catch: a dot-separated host of at least two

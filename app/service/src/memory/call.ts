@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import type { Config, SiteModel } from "../config.ts";
 import type { Db, Queryable } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { memoryLeft } from "../metering/admit.ts";
 import { ownerCall } from "../metering/owner-call.ts";
 import type { ModelGateway } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
@@ -70,6 +71,21 @@ export async function memoryModelUsable(q: Queryable, config: Config, ownerId: s
     if (err instanceof KeyUnreadableError) return false;
     throw err;
   }
+}
+
+/**
+ * Whether a memory call for `ownerId` would be refused for the memory allowance right now: its model, resolved as `memoryCall` resolves
+ * it, is a site model, and the allowance of the site day `now` is in has nothing left (`memoryLeft`). False for a model of the owner's
+ * own provider (never limited by the allowance) and when there is no model to call (that refusal is another one). Reads only, no lock:
+ * a cheap look before something else is spent on a call (admission decides, under the lock).
+ */
+export async function allowanceRefuses(q: Queryable, config: Config, ownerId: string, now: Date): Promise<boolean> {
+  const own = await getMemoryModel(q, ownerId);
+  // A provider's model is never charged to the allowance: nothing to look at (and its saved key is not opened for it).
+  if (own?.source === "provider") return false;
+  const resolved = await modelFor(q, config, ownerId, own);
+  if (resolved === null || resolved.source !== "site") return false;
+  return (await memoryLeft(q, config, ownerId, now)) <= 0n;
 }
 
 export interface MemoryCallDeps {

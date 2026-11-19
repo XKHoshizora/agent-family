@@ -374,9 +374,10 @@ describe("before the paid call the judgement model is asked whether the batch is
     expect(hearsayCalls()).toHaveLength(0);
   });
 
-  it("with the memory allowance empty the judge is not asked either: the flags are kept, no try is counted", async () => {
+  it("with the memory allowance empty the judge is not asked either: the flags are kept, no try is counted, and the pair is woken again at the next site midnight plus the quiet time", async () => {
     const w = await world("jm");
     verdict(0.9, 0.1);
+    const { nextSiteMidnight } = await import("../src/accounts/store.ts");
     await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
     const seq = await say(w.mia, w.g, "小李下周要去北京出差");
     await flag(w.agent.id, w.g, seq, "hearsay");
@@ -385,6 +386,37 @@ describe("before the paid call the judgement model is asked whether the batch is
     expect(hearsayCalls()).toHaveLength(0);
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([seq]);
     expect((await db.query("select tries from memory_flags where agent_id = $1", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
+    // No new flag comes: the wake-up armed for the new site day acts on the kept flag, once the allowance is there again.
+    const due = nextSiteMidnight(new Date(clock.now()), app.deps.config.siteTimezone).getTime() - clock.now() + app.deps.config.memory.groupQuietMs;
+    await wake(due - MIN);
+    expect(hearsayCalls()).toHaveLength(0);
+    await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);
+    gateway.reply(answer([entry("m1", SAID)]));
+    // (The test clock runs on the wall clock: a second of slack for the time this test itself took.)
+    await wake(MIN + 1000);
+    expect(hearsayQuestions()).toHaveLength(1);
+    expect(hearsayCalls()).toHaveLength(1);
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+  });
+
+  it("an owner whose memory model is their own provider's is never held back by the site's allowance: with freeDailyPoints 0 the hearsay is asked and written", async () => {
+    const w = await world("jq");
+    const { providerBody } = await import("./helpers/providers.ts");
+    const created = await api(app, w.owner, "POST", "/api/providers", providerBody({ name: "Own", baseUrl: "https://own.example.test/v1", models: [{ name: "own-model", contextTokens: 50_000 }] }));
+    expect(created.status).toBe(201);
+    expect((await api(app, w.owner, "PATCH", "/api/me", { memoryModel: { source: "provider", providerId: created.json.id, model: "own-model" } })).status).toBe(200);
+    const allowance = app.deps.config.memory.freeDailyPoints;
+    app.deps.config.memory.freeDailyPoints = 0;
+    try {
+      verdict(0.9, 0.1);
+      await heard(w);
+      expect(hearsayQuestions()).toHaveLength(1);
+      expect(hearsayCalls().map((c) => c.model)).toEqual(["own-model"]);
+      expect((await hearsayRows(w.agent.id)).map((r) => r.text)).toEqual([SAID]);
+      expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    } finally {
+      app.deps.config.memory.freeDailyPoints = allowance;
+    }
   });
 
   it("a batch with something new is paid for", async () => {

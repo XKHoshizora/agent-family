@@ -114,16 +114,17 @@ export function announce(deps: Pick<PipelineDeps, "conversations" | "log">, noti
 
 /**
  * What this owner has waiting for their yes: texts of added, replaced, merged or split entries, the notes asked to be unlocked, and
- * each op that changes a note in place (replace, remove, lock) by what it names: an op identical to one of them is not proposed again.
+ * every note a pending change touches (whatever it does to it), by `noteKey`.
  */
-async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string>; held: Set<string> }> {
+async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string>; touched: Set<string> }> {
   const { rows } = await db.query<{ agent_id: string; ops: StoredOp[] }>("select agent_id, ops from memory_changes where owner_id = $1 and status = 'pending'", [agent.ownerId]);
   const texts: Array<{ kind: NoteKind; text: string }> = [];
   const unlocks = new Set<string>();
-  const held = new Set<string>();
+  const touched = new Set<string>();
   for (const row of rows) {
     for (const s of row.ops) {
-      if (s.noteId && (s.op === "replace" || s.op === "remove" || s.op === "lock")) held.add(heldKey(s.op, s.noteId, s.op === "replace" ? s.after : null));
+      if (s.noteId) touched.add(noteKey(s.kind, s.noteId));
+      for (const r of s.removed ?? []) if (r.noteId) touched.add(noteKey(s.kind, r.noteId));
       // The owner's room is shared by all their Agents; an Agent's own room is its own.
       if (s.kind === "self" && row.agent_id !== agent.id) continue;
       if ((s.op === "add" || s.op === "replace" || s.op === "merge") && s.after) texts.push({ kind: s.kind, text: s.after });
@@ -131,11 +132,14 @@ async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind
       if (s.op === "unlock" && s.noteId) unlocks.add(s.noteId);
     }
   }
-  return { texts, unlocks, held };
+  return { texts, unlocks, touched };
 }
 
-/** One op that changes a note in place, as a pending change keeps it: what it does, to which note, with what text. */
-const heldKey = (op: string, noteId: string, text: string | null): string => `${op}|${noteId}|${text ?? ""}`;
+/** A note, as `pendingOf` keeps the notes pending changes touch. */
+const noteKey = (kind: NoteKind, noteId: string): string => `${kind}|${noteId}`;
+
+/** An op that changes a note in place: what depends on the other such ops of its answer, and what a pending change may already ask about. */
+const inPlace = (op: Op): op is Extract<Op, { op: "replace" | "remove" | "lock" }> => op.op === "replace" || op.op === "remove" || op.op === "lock";
 
 /** The kinds a review of `conversationId` may change; in a group the owner's room only for the owner's reviewing Agent there. */
 export async function kindsFor(db: Db, agent: AgentRow, conversationId: string, group: boolean): Promise<ReadonlySet<NoteKind>> {
@@ -213,10 +217,15 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   if (answer === null && !ctx.closing.aborted && report.refused !== true) count(db, "review_failed");
   if (answer === null || ctx.closing.aborted) return;
 
-  const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)])
-    .filter((op) => allowed(op, kinds, group, input.refs))
-    // What already waits in a pending change of this owner (the same op on the same note with the same text) is not proposed twice.
-    .filter((op) => !alreadyHeld(op, input.refs, pending.held));
+  const answered = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
+  // The ops that change a note in place depend on one another (a merge is a replace plus a remove), so they are decided as one group,
+  // before anything else: when any of them names a note a pending change of this owner already touches, the waiting card already asks
+  // about it, and ALL of them are dropped (adds and `seen` still go on).
+  const waits = answered.some((op) => {
+    const note = inPlace(op) ? input.refs.get(op.ref) : undefined;
+    return note !== undefined && pending.touched.has(noteKey(note.kind, note.id));
+  });
+  const ops = waits ? answered.filter((op) => !inPlace(op)) : answered;
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
   // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
@@ -246,8 +255,8 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     // together in one pending change, the card 先问我再记 produces. The ops that change a note in place depend on one another
     // (a merge is a replace plus a remove, and the room check of the one counts on the space the other frees), so when ANY of them
     // is held ALL of them are, together; adds apply at once. With 先问我再记 on everything waits as one change anyway.
-    const inPlace = changing.filter((op) => op.op === "replace" || op.op === "remove" || op.op === "lock");
-    const held: Op[] = group || locked.memoryAsk || !inPlace.some((op) => needsWords(op, input)) ? [] : inPlace;
+    const changesInPlace = changing.filter(inPlace);
+    const held: Op[] = group || locked.memoryAsk || !changesInPlace.some((op) => needsWords(op, input)) ? [] : changesInPlace;
     const direct = changing.filter((op) => !held.includes(op));
     const apply = (list: Op[], status: "applied" | "pending") =>
       applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, list, input.refs, {
@@ -302,13 +311,6 @@ function needsWords(op: Op, input: Pick<ReviewInput, "forget" | "lock" | "ownerA
   if (op.op !== "replace") return false;
   const note = input.refs.get(op.ref);
   return note === undefined || input.ownerAt.length === 0 || !input.ownerAt.some((at) => at > note.updatedAt);
-}
-
-/** Whether `op` is the same as one a pending change of this owner already holds (`pendingOf`). */
-function alreadyHeld(op: Op, refs: Map<string, RefNote>, held: ReadonlySet<string>): boolean {
-  if (op.op !== "replace" && op.op !== "remove" && op.op !== "lock") return false;
-  const note = refs.get(op.ref);
-  return note !== undefined && held.has(heldKey(op.op, note.id, op.op === "replace" ? op.text : null));
 }
 
 /** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */

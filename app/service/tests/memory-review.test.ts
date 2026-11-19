@@ -792,20 +792,39 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     expect((await texts(w)).map(([t]: [string]) => t.length)).toEqual([longer.length, 2400]);
   });
 
-  it("a held op that is the same as one already waiting in a pending change of this owner (same op, same note, same text) is not held again", async () => {
+  it("when an in-place op names a note a pending change of this owner already touches, every in-place op of the answer is dropped (the card already asks); its add still applies", async () => {
     const w = await heldWorld("ned");
     await exchange(w, "今天天气不错");
     await quietThen(ops({ op: "remove", ref: "n1" }));
     expect(await chips(w.owner, w.conv)).toHaveLength(1);
-    await exchange(w, "天气真的不错");
-    await quietThen(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
-    // The remove is already waiting; the lock is new: one more card, holding the lock only.
+    await exchange(w, "天气真的不错，我养了只猫");
+    // The remove names n1, which the waiting card touches: the lock goes with it, not into a card of its own.
+    await quietThen(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }, add("养了一只猫")));
     const cards = await chips(w.owner, w.conv);
-    expect(cards.map((c) => c.system.lines)).toEqual([["要忘掉：喜欢喝茶"], ["要锁进保险箱：住在上海"]]);
-    await exchange(w, "还是不错");
-    await quietThen(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
-    expect(await chips(w.owner, w.conv)).toHaveLength(2);
-    expect((await db.query("select count(*)::int as n from memory_changes where status = 'pending'")).rows[0].n).toBe(2);
+    expect(cards.map((c) => c.system.lines)).toEqual([["要忘掉：喜欢喝茶"], ["记住了：养了一只猫"]]);
+    expect((await db.query("select count(*)::int as n from memory_changes where status = 'pending'")).rows[0].n).toBe(1);
+    expect(await texts(w)).toEqual(expect.arrayContaining([["喜欢喝茶", false], ["住在上海", false]]));
+  });
+
+  it("a merge held as replace n1 + remove n2, then a second review that answers a reworded replace n1 + remove n2: nothing in place is applied or newly held, and the first card still confirms both", async () => {
+    const w = await owned("hug");
+    // 1 + 1100 + 800 of 2000 weight: the longer text fits only once the second note is gone.
+    await seeded(w.owner, w.agent.id, "tea", false);
+    await seeded(w.owner, w.agent.id, "b".repeat(3300), false);
+    await seeded(w.owner, w.agent.id, "c".repeat(2400), false);
+    await exchange(w, "I drink tea and coffee and juice");
+    const first = "tea ".repeat(112).trim();
+    await quietThen(ops({ op: "replace", ref: "n1", text: first }, { op: "remove", ref: "n2" }));
+    const [card] = await chips(w.owner, w.conv);
+    expect(card.system).toMatchObject({ pending: true, count: 2 });
+    await exchange(w, "and I also drink milk");
+    const second = "tea, ".repeat(90).trim();
+    await quietThen(ops({ op: "replace", ref: "n1", text: second }, { op: "remove", ref: "n2" }));
+    expect((await texts(w)).map(([t]: [string]) => t.length)).toEqual([3, 3300, 2400]);
+    expect(await chips(w.owner, w.conv)).toHaveLength(1);
+    expect((await db.query("select status, jsonb_array_length(ops) as n from memory_changes")).rows).toEqual([{ status: "pending", n: 2 }]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    expect((await texts(w)).map(([t]: [string]) => t.length)).toEqual([first.length, 2400]);
   });
 
   it("an owner line that asks for it (记住, 忘掉, 锁起来, remember, forget…) lets a remove and a lock apply at once", async () => {

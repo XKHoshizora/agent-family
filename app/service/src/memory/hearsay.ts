@@ -6,13 +6,13 @@ import type { Queryable } from "../db.ts";
 import type { Question } from "../judge/client.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import { applyHearsay, type NewHearsay } from "./apply.ts";
-import { memoryCall, type MemoryCallReport } from "./call.ts";
+import { allowanceRefuses, memoryCall, type MemoryCallReport } from "./call.ts";
 import { cleanText, modelNote } from "./clean.ts";
 import { parseAnswer, sameKey } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, kindsFor, reviewableAgent, runReview, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { shown, UNSPOKEN } from "./review.ts";
 import { languageRule, type MemoryLanguage } from "./language.ts";
-import { memoryLeft } from "../metering/admit.ts";
+import { nextSiteMidnight } from "../accounts/store.ts";
 import { askAll } from "./sort.ts";
 import { count, countDroppedFlags } from "./stats.ts";
 import { getMemoryLanguage, listHearsay, roomOf } from "./store.ts";
@@ -397,10 +397,12 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     ctx.again(calls[calls.length - config.memory.hearsayPerHour]! + HOUR - now + config.memory.groupQuietMs);
     return;
   }
-  // With the memory allowance empty no call can be made: the judge is not asked either. The flags are kept, no try counted.
-  if ((await memoryLeft(db, config, agent.ownerId, new Date(now))) <= 0n) {
+  // A call the memory allowance would refuse (a site model, the allowance spent) is not made: the judge is not asked either. The flags
+  // are kept, no try counted, and the pair is woken again when the next site day has begun (and the group has had its quiet time).
+  if (await allowanceRefuses(db, config, agent.ownerId, new Date(now))) {
     count(db, "memory_refused_allowance");
     log.info({ metric: "memory_hearsay_no_allowance", agentId: agent.id, conversationId }, "the memory allowance is spent: the flags wait, nothing is asked");
+    ctx.again(nextSiteMidnight(new Date(now), config.siteTimezone).getTime() - now + config.memory.groupQuietMs);
     return;
   }
   const verdict = await worthACall(deps, agent.ownerId, input);
