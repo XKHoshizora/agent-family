@@ -95,8 +95,8 @@ const reviewSystem = (group: boolean, today: string, language: MemoryLanguage | 
     '没有值得记的，输出 {"ops":[]}。',
   ].join("\n");
 
-/** Today as the review is told it: `2026 年 11 月 19 日`, in the site's time zone. */
-function todayIn(now: Date, timeZone: string): string {
+/** Today as a review or a dream is told it: `2026 年 11 月 19 日`, in the site's time zone. */
+export function todayIn(now: Date, timeZone: string): string {
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "numeric", day: "numeric" }).formatToParts(now);
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;

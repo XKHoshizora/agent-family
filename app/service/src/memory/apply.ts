@@ -841,6 +841,10 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
     if (s.op === "add") {
       await deleteNote(t, at, s.noteId!);
     } else if (s.op === "split") {
+      // What the owner mentioned about the parts since is not lost: the source comes back with the strength they gained and the
+      // latest time any was seen (read now, before they go).
+      const gained = s.parts!.reduce((sum, p) => sum + Math.max(0, (state[s.kind].get(p.noteId!)?.strength ?? p.strength) - p.strength), 0);
+      const seen = [s.seenAtBefore, ...s.parts!.map((p) => state.exact.get(p.noteId!)?.seenAt ?? p.seenAt)].filter((x): x is string => x != null).sort().at(-1)!;
       for (const p of s.parts!) await deleteNote(t, at, p.noteId!);
       await restoreNote(t, at, {
         id: s.noteId!,
@@ -852,8 +856,8 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         originConversationId: s.originConversationId,
         createdAt: s.createdAt!,
         updatedAt: s.updatedAtBefore!,
-        ...(s.strengthBefore != null ? { strength: s.strengthBefore } : {}),
-        ...(s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
+        ...(s.strengthBefore != null ? { strength: s.strengthBefore + gained } : {}),
+        seenAt: seen,
       });
     } else if (s.op === "merge") {
       for (const r of s.removed!) {
@@ -923,6 +927,44 @@ async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: Stored
 }
 
 /**
+ * What a pending change recorded of strength, seen time and origin, brought up to the notes as they are now (they are what the
+ * change is applied to): a merge's note is the sum of its sources' strengths and the latest time any was seen, a split's parts take
+ * the source's, and a change written before the origin rule (no `originAfter`) clears the origin, as that rule does for any text
+ * that is not the note's own. What undo puts back is refreshed the same way (the merged-away notes, the source).
+ */
+function refreshPending(state: State, ops: StoredOp[]): void {
+  const seenOf = (kind: NoteKind, id: string, fallback: string): string => state.exact.get(id)?.seenAt ?? fallback;
+  for (const s of ops) {
+    if (s.op === "replace" || s.op === "merge") {
+      // Written before the origin rule: its origin is cleared, as the rule would have.
+      if (s.originAfter === undefined) s.originAfter = null;
+    }
+    const source = s.noteId === null ? undefined : state[s.kind].get(s.noteId);
+    if (s.op === "merge" && source) {
+      const members = [source, ...s.removed!.map((r) => state[s.kind].get(r.noteId!)).filter((n): n is Note => n !== undefined)];
+      s.strengthBefore = source.strength;
+      s.seenAtBefore = seenOf(s.kind, source.id, s.seenAtBefore ?? "");
+      s.strengthAfter = members.reduce((sum, n) => sum + n.strength, 0);
+      s.seenAtAfter = members.map((n) => seenOf(s.kind, n.id, "")).sort().at(-1)!;
+      for (const r of s.removed!) {
+        const n = state[s.kind].get(r.noteId!);
+        if (n) {
+          r.strength = n.strength;
+          r.seenAt = seenOf(s.kind, n.id, r.seenAt);
+        }
+      }
+    } else if (s.op === "split" && source) {
+      s.strengthBefore = source.strength;
+      s.seenAtBefore = seenOf(s.kind, source.id, s.seenAtBefore ?? "");
+      for (const p of s.parts!) {
+        p.strength = source.strength;
+        p.seenAt = s.seenAtBefore;
+      }
+    }
+  }
+}
+
+/**
  * Confirms a pending change of the owner's: applies what it recorded, if every note it names is still as it was
  * (`stale` otherwise: the change is discarded and nothing is written). The one code that opens a note nobody else has
  * opened: an `unlock` takes it out of the vault, `vault_by` the owner. When the whole change would put a room over its limit
@@ -944,6 +986,7 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
 
   // All or nothing, judged by the net effect of the whole change per room (shrinks count before growth): when a room would
   // end over its limit nothing is written and the change stays pending, for the owner to make room and confirm again.
+  refreshPending(state, change.ops);
   const room = usedIn(state);
   const growth = { owner: 0, self: 0 };
   const count = { owner: 0, self: 0 };

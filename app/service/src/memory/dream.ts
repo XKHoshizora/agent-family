@@ -9,6 +9,7 @@ import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
+import { todayIn } from "./review.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
 import { codePoints, getMemoryLanguage, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
@@ -33,7 +34,7 @@ import { listRoomExact, type ExactNote, type Room } from "./write.ts";
  *   once, without waiting for idleness, at most once per `dreamEveryMs` per room. A nap does not touch `dreamed_at`.
  *
  * What is called `new` is a note written or changed since `dreamed_at`. The split of an entry is checked by one judgement
- * question (sort.ts `splitAddsNothing`), fail closed. Never logs a note or an answer.
+ * question (sort.ts `addsNothing`, the one a merge and a rewrite share), fail closed. Never logs a note or an answer.
  *
  * One language (language.ts): a dream writes in the owner's chosen language, and when one is chosen it is also asked to restate, per
  * room, at most 8 notes that are not in it (no language is detected in code). `POST /api/memory/language/convert` runs a `ConvertJob`:
@@ -90,13 +91,6 @@ type DreamRoom = { kind: "owner" } | { kind: "self"; agentId: string };
 const roomKey = (ownerId: string, room: DreamRoom): string => (room.kind === "owner" ? `owner:${ownerId}` : `self:${room.agentId}`);
 
 // --- what the model is asked ----------------------------------------------------------------------------------------
-
-/** Today as the dream is told it: `2026 年 11 月 19 日`, in the site's time zone. */
-function todayIn(now: Date, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "numeric", day: "numeric" }).formatToParts(now);
-  const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
-  return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;
-}
 
 /**
  * The system text. The user message is JSON (`dreamInput`), so a note is only ever an escaped string: it can never become
@@ -381,6 +375,8 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
   if (agent === null || !(await switchOn(db, agent.ownerId))) return;
   const limits = roomOf(config);
   const now = deps.now();
+  // As a dream: three failed calls in a day and it waits for the next.
+  if ((ctx.dream.failures.get(agent.ownerId) ?? []).filter((t) => t > now - DAY).length >= TRIES_A_DAY) return;
   const rooms = await db.query<{ owner: string | null; self: string | null }>(
     `select (select coalesce(sum(char_length(text)), 0) from owner_notes where owner_id = $1)::text as owner,
             (select coalesce(sum(char_length(text)), 0) from agent_notes where agent_id = $2)::text as self`,
@@ -398,7 +394,7 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
     const key = roomKey(agent.ownerId, room);
     const last = ctx.dream.rooms.get(key);
     if (last !== undefined && now - last < config.memory.dreamEveryMs) continue;
-    ctx.dream.rooms.set(key, now);
+    // Marked consolidated only once the job has run (`dream`), so one that failed is tried again, by a dream's rule (below).
     ctx.enqueue(jobFor(carrier, room.kind === "owner" ? "owner" : `self:${room.agentId}`));
   }
 }
@@ -445,10 +441,9 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
   for (const { room, carrier: by } of todo) {
     if (ctx.closing.aborted) return;
     const key = roomKey(ownerId, room);
-    if (job.scope === "all") {
-      const last = ctx.dream.rooms.get(key);
-      if (cycle.rooms.has(key) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
-    }
+    // A room consolidated within `dreamEveryMs` (a nap, or an earlier job of the same room) is not consolidated again.
+    const last = ctx.dream.rooms.get(key);
+    if ((job.scope === "all" && cycle.rooms.has(key)) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
     let outcome: "done" | "failed" | "aborted";
     try {
       outcome = await dreamRoom(deps, ctx, by, room, since);
@@ -464,11 +459,12 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     cycle.rooms.add(key);
     ctx.dream.rooms.set(key, deps.now());
   }
-  if (job.scope !== "all") return;
+  // A call that failed (a night's or a nap's) is one of the day's three tries.
   if (failed) {
     ctx.dream.failures.set(ownerId, [...(ctx.dream.failures.get(ownerId) ?? []).filter((t) => t > deps.now() - DAY), deps.now()]);
     return;
   }
+  if (job.scope !== "all") return;
   // Dreamed, whether or not anything changed.
   await db.query(`insert into accounts (principal_id, dreamed_at) values ($1, now()) on conflict (principal_id) do update set dreamed_at = excluded.dreamed_at`, [ownerId]);
   ctx.dream.done.delete(ownerId);
@@ -622,24 +618,24 @@ async function judge(
     if (closing.aborted) break;
     if (op.op === "merge") {
       const sources = [op.into, ...op.from].map((r) => refs.get(r)!);
-      sources.forEach((n) => named.add(n.id));
       if (!(await addsNothing(sortDeps, { kind: "merge", sources: sources.map((n) => n.text), result: op.text }))) continue;
       checked.add(index);
+      sources.forEach((n) => named.add(n.id));
       // A result with a note in the vault is in the vault: nothing to ask.
       if (sources.every((n) => !n.vault)) await sort(sources[0]!.kind, op.text);
     } else if (op.op === "rewrite") {
       const note = refs.get(op.ref)!;
-      named.add(note.id);
       if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }))) continue;
       checked.add(index);
+      named.add(note.id);
       if (!note.vault) await sort(note.kind, op.text);
     } else if (op.op === "split") {
       const note = refs.get(op.ref)!;
-      named.add(note.id);
       // Parts that together are far longer than the note add something: not even asked about.
       if (op.texts.reduce((sum, t) => sum + codePoints(t), 0) > 2 * codePoints(note.text) + 40) continue;
       if (!(await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }))) continue;
       checked.add(index);
+      named.add(note.id);
       if (!note.vault) for (const text of op.texts) await sort(note.kind, text);
     } else {
       named.add(refs.get(op.ref)!.id);

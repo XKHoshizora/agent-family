@@ -812,9 +812,9 @@ anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `m
 the Agent is in, and an id that is nobody's (or another Agent's, another note) get the same 404 `not_found`. *Session:
 required* everywhere. Reads share the budget of `GET /api/agents` (120 a minute); the writes have one of their own, 30 a
 minute per owner. **Note** (`src/memory/routes.ts`): `{"id", "text", "vault": boolean, "unsure": boolean, "origin":
-"review" | "owner" | "hearsay", "source": {"kind": "agent" | "group" | "manual", "title": string | null}, "createdAt",
+"review" | "owner" | "hearsay", "source": {"kind": "agent" | "group" | "manual" | "mixed", "title": string | null}, "createdAt",
 "updatedAt"}` (`source` is where it was learned: the owner's chat with that Agent — `title` is the Agent's name — a group
-(its title), or typed by hand). `strength` (a number, 0 for a new note) and `seenAt` say how often the owner has mentioned the
+(its title), typed by hand, or `mixed` — decided from stored fields only: its origin conversation is gone (cleared by a merge, a rewrite from elsewhere or the owner's edit, or the conversation was deleted) and it is not one the owner typed; the web shows 多处整理而成). `strength` (a number, 0 for a new note) and `seenAt` say how often the owner has mentioned the
 same thing again and when it was last written or mentioned: a review that finds the owner repeating a note — an `add` of
 its words, word for word or by the judgement's call — makes it one stronger (once per review) and seen now, and that is
 all: no change is recorded, nothing is shown, and `updatedAt` stays, so an undo is never made stale by it. Text is stored as written (`src/memory/clean.ts`): line breaks and runs of whitespace become one space and invisible
@@ -823,7 +823,7 @@ punctuation stay (every prompt cleans a note again when it shows it). A note is 
 empty after that or looks like a key or secret (a run of 20 or more letters, digits, `_` and `-` holding both a letter and a
 digit, or `sk-…`, `ghp_…`, `AKIA…`, `-----BEGIN`); the owner may otherwise write instructions and links in their own
 notes. A model's entry (`modelNote`, for the reviewer) is also refused when it is over 200 code points, holds a link, or
-addresses the reader (`你必须`, `ignore`, …). Hearsay you confirm is held to the owner's rules too (422, it stays hearsay).
+addresses the reader (`你必须`, `ignore`, `disregard`, `from now on`, `forget all`, `今後は必ず`, …), states a password or passcode in plain words (`密码是`, `密码：`, `password is`, `password:`, `パスワードは`, `passcode`), or holds a bare domain with a path (`example.org/page`). Hearsay you confirm is held to the owner's rules too (422, it stays hearsay).
 An entry
 may be as long as its room has space (`roomOwner` 2000, `roomSelf` 3000 code points); otherwise 409 `{"error":
 "room_full", "left": n}` (`left` is a number, the one detail that is, and is about the room: for an addition what space is
@@ -941,7 +941,8 @@ as a review does (`memoryCall`, purpose `memory`: one call per room; the judgeme
   A room that napped, or was consolidated, within `dreamEveryMs` is not consolidated again by the sweep.
 - *A nap*: right after a change was applied or confirmed leaves a room at or above `napAt` of its limit, that room is
   consolidated at once, without waiting for idleness, at most once per `dreamEveryMs` per room (in this process's memory), and
-  never with the owner's 入梦 switch off. A nap does not set `dreamed_at`.
+  never with the owner's 入梦 switch off. A nap does not set `dreamed_at`. A room counts as consolidated only once the job has run, so
+  a nap whose call failed is tried again by a dream's rule: three failed calls of an owner in a day, then no call until the next.
 - *What the model is shown*: one JSON object `{"notes": [{"ref": "n1", "text", "date", "last_mentioned", "strength", "vault",
   "new"}…], "room": {"used", "limit"}}` — the room's notes cleaned (`cleanText`), `date` the day it was written and `last_mentioned`
   the day it was last mentioned (site time zone, `YYYY-MM-DD`), `new` for a note written or changed since `dreamed_at` (before a first
@@ -971,7 +972,7 @@ as a review does (`memoryCall`, purpose `memory`: one call per room; the judgeme
   only while all its content came from there (`memory/origin.ts`, the one place): a merge keeps `into`'s origin only when every
   source has it, a rewrite that was checked and a split keep it, a review of another conversation that replaces the note and the
   owner's own text edit clear it; an undo puts the recorded origin back. A
-  part keeps the source's origin, `strength` and `seen_at`, lists in order from the source's `created_at`, and is in the vault with
+  part keeps the source's origin, `strength` and `seen_at` (a pending merge or split recomputes them from the notes as they are when it is confirmed; the undo of a split gives the source back the strength and the latest `seen_at` its parts gained), lists in order from the source's `created_at`, and is in the vault with
   the source's `vault_by` when the source was, else sorted on its own (the vault when unsure).
 - *The audited path*: everything goes through `memory_changes` as one change per room (stored ops `merge` — with the notes it
   removed — `split` — with the parts it made —, `replace` for a rewrite and `lock`), a notice for the owner only, undo
@@ -3032,6 +3033,8 @@ server's `Content-Type` (markup such as HTML or SVG is always `application/octet
 ASCII `filename` and the exact name as `filename*=UTF-8''…`; `X-Content-Type-Options: nosniff`,
 `Content-Security-Policy: sandbox; default-src 'none'`, `Cache-Control: private, no-store`. No ranges.
 `HEAD /api/attachments/:id` answers the same status and headers without a body, and without reading the file.
+
+**Memory changes** (`memory_changes`) are cleaned by the same periodic run (`src/memory/sweep.ts`, `CHANGE_KEEP_DAYS` = 30): a change that is over (applied, undone, discarded) is deleted 30 days after it was resolved (made, for one applied at once), so an undo of it answers 404; a pending one 30 days old is discarded.
 
 **Unsent uploads** are deleted by the sweep once they are older than 60 minutes. The server runs it inside
 its own process (the service is one process by design): once a minute after start, then every

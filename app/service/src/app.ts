@@ -16,6 +16,7 @@ import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerBodyDeadline } from "./body-deadline.ts";
 import { runSweep, startSweeper } from "./attachments/sweeper.ts";
+import { sweepMemoryChanges } from "./memory/sweep.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
@@ -281,7 +282,12 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // Registered after the db's close hook: hooks run last-in first-out, so the timer stops (and a run in
   // flight finishes) before the pool closes.
   const sweeper = startSweeper({
-    run: () => runSweep(deps, config, app.log),
+    run: async () => {
+      const counts = await runSweep(deps, config, app.log);
+      // The record of what memory changed is kept 30 days (memory/sweep.ts); a failure there is logged and never fails the run.
+      await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
+      return counts;
+    },
     intervalMinutes: config.sweepIntervalMinutes,
     ...(options.sweepInitialDelayMs === undefined ? {} : { initialDelayMs: options.sweepInitialDelayMs }),
     log: app.log,

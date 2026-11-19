@@ -1214,3 +1214,115 @@ describe("a pending dream counts as known to the review", () => {
     expect(asked!.state).toContain("对花生过敏");
   });
 });
+
+describe("loose ends of the last review", () => {
+  const SRC = "喜欢茶，对花生过敏";
+
+  it("undo of a split puts the source back with the strength and seen time its parts gained since", async () => {
+    const w = await owned("dk1");
+    const src = await seeded(w.owner, w.agent.id, SRC, false);
+    await db.query("update owner_notes set strength = 4, seen_at = '2026-11-12 00:00:00+00' where id = $1", [src.id]);
+    judge.answer(splitJudge(0.9));
+    gateway.reply(dreamAns(split("n1", ["喜欢茶", "对花生过敏"])));
+    await night();
+    const [chip] = await chips(w.owner, w.conv);
+    // The owner mentions the parts again: +2 on one (seen on the 15th), +1 on the other (the 14th).
+    await db.query("update owner_notes set strength = strength + 2, seen_at = '2026-11-15 00:00:00+00' where owner_id = $1 and text = '喜欢茶'", [w.owner.id]);
+    await db.query("update owner_notes set strength = strength + 1, seen_at = '2026-11-14 00:00:00+00' where owner_id = $1 and text = '对花生过敏'", [w.owner.id]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
+    const rows = await ownerNotes(w.owner.id);
+    expect(rows.map((r) => r.text)).toEqual([SRC]);
+    expect(rows[0].strength).toBe(4 + 3);
+    expect(rows[0].seen_at.toISOString()).toBe("2026-11-15T00:00:00.000Z");
+  });
+
+  it("confirming a pending merge or split recomputes strength and seen time from the notes as they are at the confirm", async () => {
+    const w = await owned("dk2", { memoryAsk: true });
+    const a = await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    const b = await seeded(w.owner, w.agent.id, "爱喝茶", false);
+    const c = await seeded(w.owner, w.agent.id, SRC, false);
+    await db.query("update owner_notes set strength = 1, seen_at = '2026-11-10 00:00:00+00' where id = $1", [a.id]);
+    await db.query("update owner_notes set strength = 2, seen_at = '2026-11-11 00:00:00+00' where id = $1", [b.id]);
+    await db.query("update owner_notes set strength = 3, seen_at = '2026-11-11 00:00:00+00' where id = $1", [c.id]);
+    judge.answer(splitJudge());
+    gateway.reply(dreamAns(merge("n1", ["n2"], "爱喝茶，不加糖"), split("n3", ["喜欢茶", "对花生过敏"])));
+    await night();
+    const [card] = await chips(w.owner, w.conv);
+    // Mentioned again while the card waits (a bump touches no updated_at, so nothing is stale).
+    await db.query("update owner_notes set strength = 5, seen_at = '2026-11-16 00:00:00+00' where id = $1", [b.id]);
+    await db.query("update owner_notes set strength = 6, seen_at = '2026-11-17 00:00:00+00' where id = $1", [c.id]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    const rows = await ownerNotes(w.owner.id);
+    const byText = new Map(rows.map((r) => [r.text, r]));
+    expect(byText.get("爱喝茶，不加糖")).toMatchObject({ strength: 1 + 5 });
+    expect(byText.get("爱喝茶，不加糖")!.seen_at.toISOString()).toBe("2026-11-16T00:00:00.000Z");
+    for (const part of ["喜欢茶", "对花生过敏"]) {
+      expect(byText.get(part)).toMatchObject({ strength: 6 });
+      expect(byText.get(part)!.seen_at.toISOString()).toBe("2026-11-17T00:00:00.000Z");
+    }
+    // And its undo gives the merged-away note back as it was at the confirm.
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/undo`)).status).toBe(200);
+    expect((await noteRow(b.id)).strength).toBe(5);
+  });
+
+  it("a nap counts as done only after its job ran: one whose call failed is not marked, and is tried again by the next change", async () => {
+    const w = await owned("dk3");
+    for (let i = 0; i < 8; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [w.owner.id, `${"茶".repeat(199)}${i}`]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    await exchange(w, "我喜欢喝咖啡");
+    gateway.reply(ops(add("喜欢喝咖啡")));
+    gateway.fail("provider_unavailable");
+    clock.advance(10 * MIN);
+    await memory().idle();
+    const failed = dreamCalls().length;
+    expect(failed).toBeGreaterThan(0);
+    expect(await dreamedAt(w.owner.id)).toBeNull();
+    // The room was not marked consolidated: the next change naps it again, and this time it answers.
+    await exchange(w, "我也喜欢喝红茶");
+    gateway.reply(ops(add("喜欢喝红茶")));
+    gateway.reply(dreamAns());
+    clock.advance(10 * MIN);
+    await memory().idle();
+    expect(dreamCalls().length).toBeGreaterThan(failed);
+  });
+
+  it("a failed nap is retried by a dream's rule: three tries a day, then no call until the next day", async () => {
+    const w = await owned("dk4");
+    for (let i = 0; i < 8; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [w.owner.id, `${"茶".repeat(199)}${i}`]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    const tries = async (n: number) => {
+      for (let i = 0; i < n; i++) {
+        await exchange(w, `我喜欢喝第${i}种茶`);
+        gateway.reply(ops(add(`喜欢喝第${i}种茶`)));
+        gateway.fail("provider_unavailable");
+        clock.advance(10 * MIN);
+        await memory().idle();
+      }
+    };
+    await tries(3);
+    const after3 = dreamCalls().length;
+    await exchange(w, "还喜欢喝第三种茶");
+    gateway.reply(ops(add("喜欢喝第三种茶")));
+    clock.advance(10 * MIN);
+    await memory().idle();
+    expect(dreamCalls().length).toBe(after3);
+  });
+
+  it("a new open note named by a dream op that is then dropped is still sorted again in that dream", async () => {
+    const w = await owned("dk5");
+    const id = await openAuto(w.owner.id, "借了朋友三万块");
+    judge.answer((_s, qs): ScriptedAnswers => (qs[0]!.key === "faithful" ? { faithful: 0.1 } : { sort: 0.1 }));
+    gateway.reply(dreamAns(rewrite("n1", "朋友借了三万块")));
+    await night();
+    // The rewrite was not applied (the judgement was not sure it adds nothing); the note was sorted, and locked.
+    expect(await ownerNotes(w.owner.id)).toMatchObject([{ id, text: "借了朋友三万块", vault: true }]);
+    expect(sortCalls().length).toBeGreaterThan(0);
+  });
+
+  it("the review and the dream tell the same today, from one function", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { todayIn } = await import("../src/memory/review.ts");
+    expect(todayIn(new Date("2026-11-19T20:00:00Z"), "Asia/Shanghai")).toBe("2026 年 11 月 20 日");
+    expect(readFileSync(new URL("../src/memory/dream.ts", import.meta.url), "utf8")).not.toMatch(/function todayIn|splitAddsNothing/);
+  });
+});

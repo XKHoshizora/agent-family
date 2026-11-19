@@ -18,12 +18,13 @@ export const usedPercent = (used, limit) => (limit > 0 ? Math.min(100, Math.roun
 /** From this many mentions a note is 常提起 (the service counts every time it was said again). */
 const OFTEN = 3;
 
-/** `{date} · {source}`: where an entry was learned. The service reports an origin that was deleted as manual. */
+/** `{date} · {source}`: where an entry was learned. A note made of words from more than one place (a merge, a rewrite, an edit) is `mixed`; one whose origin was deleted is manual, not the owner's. */
 function sourceLine(note, agentName) {
   const { kind, title } = note.source;
   let source;
   if (kind === "agent") source = `和${title ?? agentName ?? "Agent"}的对话`;
   else if (kind === "group") source = title ?? "已离开的群";
+  else if (kind === "mixed") source = "多处整理而成";
   else source = note.origin === "owner" ? "手动添加" : "来源已删除";
   return `${formatAt(Date.parse(note.createdAt), Date.now())} · ${source}`;
 }

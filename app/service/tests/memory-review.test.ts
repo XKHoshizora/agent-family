@@ -685,6 +685,19 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     expect((await chips(v.owner, v.conv)).at(-1).system).toMatchObject({ pending: false, lines: ["改成了：喝咖啡"] });
   });
 
+  it("a pending change recorded before the origin rule (no originAfter) clears the note's origin when confirmed", async () => {
+    const w = await owned("old", { memoryAsk: true });
+    const note = await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    await db.query("update owner_notes set origin = 'review', origin_conversation_id = $2 where id = $1", [note.id, w.conv]);
+    await sayAndReview(w, "不对，我现在喝咖啡，记住了", ops({ op: "replace", ref: "n1", text: "喝咖啡" }));
+    const [card] = await chips(w.owner, w.conv);
+    expect(card.system).toMatchObject({ pending: true, lines: ["改成了：喝咖啡"] });
+    await db.query(`update memory_changes set ops = (select jsonb_agg((o - 'originAfter') - 'originBefore') from jsonb_array_elements(ops) o) where id = $1`, [card.system.changeId]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    const row = (await db.query("select text, origin_conversation_id from owner_notes where id = $1", [note.id])).rows[0];
+    expect(row).toEqual({ text: "喝咖啡", origin_conversation_id: null });
+  });
+
   it("with 先问我再记 everything still waits as one change", async () => {
     const w = await owned("lia", { memoryAsk: true });
     await seeded(w.owner, w.agent.id, "喜欢喝茶", false);

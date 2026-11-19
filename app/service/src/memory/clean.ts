@@ -30,7 +30,13 @@ const URL_LIKE = [
 
 /** Words that address whoever reads the note: what makes it an instruction rather than a fact. */
 const ADDRESSES_THE_READER =
-  /你必须|你应该|以后都|忽略|无视|指令|听我的|从今以后|これからは必ず|無視して|\bignore|\byou must\b|\bsystem\b/i;
+  /你必须|你应该|以后都|忽略|无视|指令|听我的|从今以后|これからは必ず|今後は必ず|無視して|\bignore|\bdisregard|\byou must\b|\bfrom now on\b|\bforget (?:all|your)\b|\bsystem\b/i;
+
+/** A password or passcode stated in plain words: a model never writes one into a note. */
+const STATES_A_PASSWORD = /密码是|密码：|\bpassword\s+is\b|\bpassword\s*:|パスワードは|\bpasscode\b/i;
+
+/** A bare domain with a path (`example.org/page`), which the list of known endings above does not catch. */
+const BARE_DOMAIN_PATH = /\b[a-z0-9-]+\.[a-z]{2,}\/\S+/i;
 
 export { cleanText };
 
@@ -45,9 +51,9 @@ export function ownerNote(text: string): string | null {
   return tidy(text);
 }
 
-/** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over 200 code points, with a link, or addressing the reader as an instruction does. */
+/** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over 200 code points, with a link or a bare domain with a path, stating a password or passcode, or addressing the reader as an instruction does. */
 export function modelNote(text: string): string | null {
   const clean = tidy(text);
   if (clean === null || codePoints(clean) > MODEL_NOTE_MAX) return null;
-  return URL_LIKE.some((p) => p.test(clean)) || ADDRESSES_THE_READER.test(clean) ? null : clean;
+  return URL_LIKE.some((p) => p.test(clean)) || BARE_DOMAIN_PATH.test(clean) || STATES_A_PASSWORD.test(clean) || ADDRESSES_THE_READER.test(clean) ? null : clean;
 }

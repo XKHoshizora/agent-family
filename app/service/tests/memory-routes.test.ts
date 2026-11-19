@@ -216,6 +216,22 @@ describe("the owner's room: /api/memory/notes", () => {
     expect((await api(app, owner, "POST", "/api/memory/notes", { text: "字".repeat(500) })).status).toBe(201);
   });
 
+  it("a note whose origin was cleared (a merge, a rewrite from elsewhere, the owner's edit) while it was not the owner's own is source.kind mixed; one the owner typed stays manual", async () => {
+    const { owner, agent } = await world();
+    const typed = await insertOwnerNote(owner.id, "自己写的", false, "owner", "owner");
+    const merged = await insertOwnerNote(owner.id, "整理而成的", false, "auto", "review", null);
+    const heardThenKept = await insertOwnerNote(owner.id, "听说后属实的", true, "auto", "hearsay", null);
+    const mine = (await api(app, owner, "GET", "/api/memory/notes")).json.notes as Array<{ id: string; source: unknown }>;
+    expect(Object.fromEntries(mine.map((n) => [n.id, n.source]))).toEqual({
+      [typed]: { kind: "manual", title: null },
+      [merged]: { kind: "mixed", title: null },
+      [heardThenKept]: { kind: "mixed", title: null },
+    });
+    await db.query("insert into agent_notes (agent_id, text, vault, origin, origin_conversation_id) values ($1, $2, false, 'review', null)", [agent.id, "它自己整理的"]);
+    const own = (await api(app, owner, "GET", `/api/agents/${agent.id}/memory`)).json.notes as Array<{ source: unknown }>;
+    expect(own.map((n) => n.source)).toEqual([{ kind: "mixed", title: null }]);
+  });
+
   it("a room of 150 notes takes no more, however short: 409 room_full with nothing left; deleting one makes room", async () => {
     const { owner } = await world();
     await db.query("insert into owner_notes (owner_id, text) select $1, 'n' || g from generate_series(1, 150) g", [owner.id]);
@@ -366,7 +382,7 @@ describe("an Agent's room: /api/agents/:id/memory", () => {
       vault: false,
       unsure: false,
       origin: "review",
-      source: { kind: "manual", title: null },
+      source: { kind: "mixed", title: null },
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
       strength: 0,

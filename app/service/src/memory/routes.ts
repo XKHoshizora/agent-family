@@ -45,7 +45,7 @@ const noteView = z.object({
   vault: z.boolean(),
   unsure: z.boolean(),
   origin: z.enum(["review", "owner", "hearsay"]),
-  source: z.object({ kind: z.enum(["agent", "group", "manual"]), title: z.string().nullable() }),
+  source: z.object({ kind: z.enum(["agent", "group", "manual", "mixed"]), title: z.string().nullable() }),
   createdAt: z.string(),
   updatedAt: z.string(),
   strength: z.number(),
@@ -63,7 +63,7 @@ const hearsayView = z.object({
 });
 const ok = z.object({ ok: z.literal(true) });
 
-type Source = { kind: "agent" | "group" | "manual"; title: string | null };
+type Source = { kind: "agent" | "group" | "manual" | "mixed"; title: string | null };
 
 /** Where each conversation a note was learned in stands: the Agent's own chat (named after the Agent) or a group (its title). */
 async function sourcesOf(q: Queryable, notes: ReadonlyArray<Note>): Promise<Map<string, Source>> {
@@ -81,6 +81,8 @@ async function sourcesOf(q: Queryable, notes: ReadonlyArray<Note>): Promise<Map<
 }
 
 const MANUAL: Source = { kind: "manual", title: null };
+/** Made of words from more than one place: no conversation is its origin any more, and it was not typed by the owner. */
+const MIXED: Source = { kind: "mixed", title: null };
 
 const toNoteView = (n: Note, sources: Map<string, Source>): z.infer<typeof noteView> => ({
   id: n.id,
@@ -88,7 +90,7 @@ const toNoteView = (n: Note, sources: Map<string, Source>): z.infer<typeof noteV
   vault: n.vault,
   unsure: n.unsure,
   origin: n.origin,
-  source: (n.originConversationId && sources.get(n.originConversationId)) || MANUAL,
+  source: (n.originConversationId && sources.get(n.originConversationId)) || (n.originConversationId === null && n.origin !== "owner" ? MIXED : MANUAL),
   createdAt: n.createdAt.toISOString(),
   updatedAt: n.updatedAt.toISOString(),
   strength: n.strength,

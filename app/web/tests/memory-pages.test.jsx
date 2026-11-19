@@ -876,6 +876,11 @@ describe("fix round 1", () => {
     expect(inRoom("关于我").getByText("还没有记下的内容")).toBeTruthy();
   });
 
+  it("a mixed source (an entry made of words from more than one place) reads 多处整理而成", async () => {
+    await openPalace(service({ notes: [note("a", "整理出来的事", { origin: "review", source: { kind: "mixed", title: null } })] }));
+    expect(rowWith(room("关于我"), "整理出来的事").querySelector(".memory-source").textContent).toBe("11月10日 · 多处整理而成");
+  });
+
   it("a manual source of an entry that did not come from the owner is a deleted origin; a group without a title is a left group", async () => {
     await openPalace(
       service({
