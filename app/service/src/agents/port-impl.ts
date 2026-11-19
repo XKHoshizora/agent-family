@@ -7,6 +7,7 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
+import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
@@ -342,13 +343,15 @@ export class DbAgentPort implements AgentPort {
       await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
+      // What its Agent may be shown of its memory here (`notesFor`'s rules), read once with the rest, under the same locks.
+      const notes = await loadNotes(t, agent, { conversationId: run.conversationId, group });
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
       // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
       const system = (mark: string, speakers: readonly Speaker[]): string =>
         scene
-          ? groupSystemPrompt(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive")
-          : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone);
+          ? groupSystemPrompt(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes)
+          : systemPrompt(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const loaded = await loadContext(
