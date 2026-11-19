@@ -105,7 +105,8 @@ describe("parseOps", () => {
       "token a1b2c3d4e5f6a7b8c9d0e1",
       "see https://example.com/page",
       "visit www.example.com",
-      "a".repeat(201),
+      "字".repeat(201),
+      "word ".repeat(121).trim(),
       "   ",
       // A password or passcode stated in plain words, a bare domain with a path, and more ways of addressing the reader.
       "我的密码是 hunter2",
@@ -132,7 +133,8 @@ describe("parseOps", () => {
       expect(parseOps(answer([op]), REFS)).toEqual([op]);
     }
     // The limit itself is fine, and the stored text is the cleaned one.
-    expect(parseOps(answer([{ op: "add", kind: "owner", text: "a".repeat(200) }]), REFS)).toHaveLength(1);
+    expect(parseOps(answer([{ op: "add", kind: "owner", text: "字".repeat(200) }]), REFS)).toHaveLength(1);
+    expect(parseOps(answer([{ op: "add", kind: "owner", text: "word ".repeat(120).trim() }]), REFS)).toHaveLength(1);
     expect(parseOps(answer([{ op: "add", kind: "owner", text: "  喜欢\n爬山 " }]), REFS)).toEqual([{ op: "add", kind: "owner", text: "喜欢 爬山" }]);
   });
 

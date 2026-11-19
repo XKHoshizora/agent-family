@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { modelNote, ownerNote } from "../src/memory/clean.ts";
 import { setNewNotes } from "../src/memory/store.ts";
+import { weight } from "../src/memory/weight.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -82,11 +83,17 @@ describe("ownerNote and modelNote", () => {
     expect(modelNote("prefers an ecosystem of small tools")).toBe("prefers an ecosystem of small tools");
   });
 
-  it("a model's entry is at most 200 code points, the owner's has no such limit", () => {
+  it("a model's entry is at most 200 weight (a Chinese 200 characters, an English 600 letters), the owner's has no such limit", () => {
+    // The same sentence of prose, n letters long: no key-like run, ends in a letter.
+    const prose = (n: number): string => `${"abcdefg ".repeat(Math.ceil(n / 8)).slice(0, n - 1)}z`;
     expect(modelNote("字".repeat(200))).toBe("字".repeat(200));
     expect(modelNote("字".repeat(201))).toBeNull();
-    expect(modelNote("😀".repeat(200))).toBe("😀".repeat(200));
-    expect(modelNote("😀".repeat(201))).toBeNull();
+    expect(modelNote(prose(450))).toBe(prose(450));
+    expect(modelNote(prose(600))).toBe(prose(600));
+    expect(modelNote(prose(601))).toBeNull();
+    // An emoji is 4 bytes: 150 of them are 600 bytes, 200 weight; 151 are not.
+    expect(modelNote("😀".repeat(150))).toBe("😀".repeat(150));
+    expect(modelNote("😀".repeat(151))).toBeNull();
     expect(ownerNote("字".repeat(1500))).toBe("字".repeat(1500));
   });
 });
@@ -214,6 +221,27 @@ describe("the owner's room: /api/memory/notes", () => {
     expect(more.status).toBe(409);
     expect(more.json).toEqual({ error: "room_full", left: 500 });
     expect((await api(app, owner, "POST", "/api/memory/notes", { text: "字".repeat(500) })).status).toBe(201);
+  });
+
+  it("a room holds 2000 weight whatever the language: 2000 Chinese characters or 6000 English letters; used and left are the weight of what is stored", async () => {
+    const english = (n: number): string => `${"abcdefg ".repeat(Math.ceil(n / 8)).slice(0, n - 1)}z`;
+    const zh = await world();
+    expect((await api(app, zh.owner, "POST", "/api/memory/notes", { text: "字".repeat(2000), vault: true })).status).toBe(201);
+    expect((await notes(zh.owner)).json).toMatchObject({ used: 2000, limit: 2000 });
+    expect((await api(app, zh.owner, "POST", "/api/memory/notes", { text: "字", vault: true })).json).toEqual({ error: "room_full", left: 0 });
+    const en = await signUp(app, "memr_english");
+    expect((await api(app, en, "POST", "/api/memory/notes", { text: english(6001), vault: true })).json).toEqual({ error: "room_full", left: 2000 });
+    expect((await api(app, en, "POST", "/api/memory/notes", { text: english(6000), vault: true })).status).toBe(201);
+    expect((await notes(en)).json).toMatchObject({ used: 2000, limit: 2000 });
+    expect((await api(app, en, "POST", "/api/memory/notes", { text: "a", vault: true })).json).toEqual({ error: "room_full", left: 0 });
+    // Mixed notes: used is the sum of each note's weight (each rounded up on its own), left is the limit less that.
+    const mixed = await signUp(app, "memr_mixed");
+    const texts = ["我喜欢咖啡", "I like coffee in the morning", "🙂", "café"];
+    for (const text of texts) expect((await api(app, mixed, "POST", "/api/memory/notes", { text, vault: true })).status).toBe(201);
+    const expected = texts.reduce((sum, t) => sum + weight(t), 0);
+    expect(expected).toBe(5 + 10 + 2 + 2);
+    expect((await notes(mixed)).json).toMatchObject({ used: expected, limit: 2000 });
+    expect((await api(app, mixed, "POST", "/api/memory/notes", { text: english(6000), vault: true })).json).toEqual({ error: "room_full", left: 2000 - expected });
   });
 
   it("a note whose origin was cleared (a merge, a rewrite from elsewhere, the owner's edit) while it was not the owner's own is source.kind mixed; one the owner typed stays manual", async () => {
@@ -388,10 +416,8 @@ describe("an Agent's room: /api/agents/:id/memory", () => {
       strength: 0,
       seenAt: expect.any(String),
     });
-    // The hearsay room counts each entry's text and its speaker's name.
-    const hearsayPoints = res.json.hearsay.reduce((n: number, h: { text: string; speakerName: string }) => n + [...h.text].length + [...h.speakerName].length, 0);
-    expect(hearsayPoints).toBeGreaterThan(4 + 4);
-    expect(res.json).toMatchObject({ used: 6, limit: 3000, hearsayUsed: hearsayPoints, hearsayLimit: 2000 });
+    // The hearsay room counts each entry's text and its speaker's name, in weight: 4 for the text and 1 for "Mia" (3 bytes), twice.
+    expect(res.json).toMatchObject({ used: 6, limit: 3000, hearsayUsed: 2 * (4 + 1), hearsayLimit: 2000 });
     expect(res.json.hearsay).toEqual([
       { id: h1, text: "周五聚餐", speakerName: "Mia", speakerHandle: "memr_mia", group: { id: g, title: "Book club" }, saidAt: expect.any(String) },
       { id: h2, text: "说了别的", speakerName: "Mia", speakerHandle: "memr_mia", group: null, saidAt: expect.any(String) },

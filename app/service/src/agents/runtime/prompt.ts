@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { estimateTokens } from "../../metering/prices.ts";
+import { TOKENS_PER_WEIGHT, weight } from "../../memory/weight.ts";
 
 /**
  * The system text of a reply (spec 6.5 "发给模型的内容"). In the Agent's own conversation (`systemPrompt`): the site's
@@ -279,15 +279,15 @@ export function notesPassage(notes: PromptNotes, group: boolean, timeZone: strin
 }
 
 /**
- * The notes a run is given when the passage may take at most `maxTokens` of the model's context (`MEMORY.passageShare` of it, by the
- * token estimate the context budget uses, `estimateTokens`): the notes as they are when their passage fits; else entries are left
+ * The notes a run is given when the passage may take at most `maxTokens` of the model's context (`MEMORY.passageShare` of it; the
+ * passage is measured in weight, one weight a token, `TOKENS_PER_WEIGHT`: the one measure of memory, memory/weight.ts): the notes as they are when their passage fits; else entries are left
  * out, in this order, until it does — hearsay (oldest said first), the Agent's own notes (lowest `strength`, then the oldest
  * `seenAt`), notes about the owner (the same order). Nothing tells the model so. `fits` is false when anything was left out. No
  * model call: it is arithmetic on the text the passage would be.
  */
 export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, ownerName: string, maxTokens: number): { notes: PromptNotes; fits: boolean } {
   const label = labelSafe(ownerName);
-  const size = (n: PromptNotes): number => estimateTokens(notesPassage(n, group, timeZone, label));
+  const size = (n: PromptNotes): number => weight(notesPassage(n, group, timeZone, label)) * TOKENS_PER_WEIGHT;
   if (size(notes) <= maxTokens) return { notes, fits: true };
   const weakest = (list: readonly PromptNote[]): number[] =>
     list

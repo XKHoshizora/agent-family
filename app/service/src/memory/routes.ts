@@ -14,7 +14,8 @@ import { loadNotes } from "./passage.ts";
 import { ownerNote } from "./clean.ts";
 import { keptOrigin } from "./origin.ts";
 import { sortNote } from "./sort.ts";
-import { codePoints, getMemoryLanguage, getNewNotes, hearsayUsed, listHearsay, roomOf, used, type Note } from "./store.ts";
+import { getMemoryLanguage, getNewNotes, hearsayUsed, listHearsay, roomOf, type Note } from "./store.ts";
+import { weight, weightOf } from "./weight.ts";
 import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
@@ -115,7 +116,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   async function view(room: Room): Promise<z.infer<typeof roomView>> {
     const notes = await listRoom(db, room);
     const sources = await sourcesOf(db, notes);
-    return { notes: notes.map((n) => toNoteView(n, sources)), used: used(notes), limit: limitOf(room) };
+    return { notes: notes.map((n) => toNoteView(n, sources)), used: weightOf(notes), limit: limitOf(room) };
   }
 
   async function noteOf(q: Queryable, room: Room, id: string): Promise<z.infer<typeof noteView>> {
@@ -125,9 +126,9 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   }
 
   /** Room left for text of `room` once `without` is not counted (a note being replaced). */
-  const leftIn = (room: Room, notes: ReadonlyArray<Note>, without?: Note): number => Math.max(0, limitOf(room) - used(notes) + (without ? codePoints(without.text) : 0));
+  const leftIn = (room: Room, notes: ReadonlyArray<Note>, without?: Note): number => Math.max(0, limitOf(room) - weightOf(notes) + (without ? weight(without.text) : 0));
 
-  /** What is left of a room for a new note: its code points, or nothing at all once it holds `roomNotes` notes. */
+  /** What is left of a room for a new note: its weight, or nothing at all once it holds `roomNotes` notes. */
   const leftForNew = (room: Room, notes: ReadonlyArray<Note>): number => (notes.length >= limits.notes! ? 0 : leftIn(room, notes));
 
   async function add(room: Room, ownerId: string, body: z.infer<typeof newNote>, log: FastifyBaseLogger) {
@@ -135,14 +136,14 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     if (text === null) throw refused();
     // Over the room already (no judgement is spent on it); asked again under the lock.
     const before = leftForNew(room, await listRoom(db, room));
-    if (before === 0 || codePoints(text) > before) throw roomFull(before);
+    if (before === 0 || weight(text) > before) throw roomFull(before);
     // The owner's own choice is final; otherwise their setting decides, `auto` by the judge (sort.ts: vault when it cannot answer).
     const sorted =
       body.vault === undefined ? await sortNote(sortDeps(log, ownerId), text, room.kind, await getNewNotes(db, ownerId)) : { vault: body.vault, unsure: false };
     const id = await db.tx(async (t) => {
       await lockRoom(t, room);
       const left = leftForNew(room, await listRoom(t, room));
-      if (left === 0 || codePoints(text) > left) throw roomFull(left);
+      if (left === 0 || weight(text) > left) throw roomFull(left);
       return insertNote(t, room, {
         text,
         vault: sorted.vault,
@@ -162,7 +163,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     const before = notesBefore.find((n) => n.id === noteId);
     if (!before) throw notFound();
     // Over the room already (no judgement is spent on it); asked again under the lock.
-    if (text !== undefined && codePoints(text) > leftIn(room, notesBefore, before)) throw roomFull(leftIn(room, notesBefore, before));
+    if (text !== undefined && weight(text) > leftIn(room, notesBefore, before)) throw roomFull(leftIn(room, notesBefore, before));
     // A text change alone re-sorts, and only a note outside the vault that the owner never chose for: towards the vault.
     const resort = body.vault === undefined && text !== undefined && text !== before.text && !before.vault && before.vaultBy === "auto";
     const sorted = resort ? await sortNote(sortDeps(log, ownerId), text, room.kind, await getNewNotes(db, ownerId)) : null;
@@ -171,7 +172,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const notes = await listRoom(t, room);
       const note = notes.find((n) => n.id === noteId);
       if (!note) throw notFound();
-      if (text !== undefined && codePoints(text) > leftIn(room, notes, note)) throw roomFull(leftIn(room, notes, note));
+      if (text !== undefined && weight(text) > leftIn(room, notes, note)) throw roomFull(leftIn(room, notes, note));
       const patch =
         body.vault !== undefined
           ? { vault: body.vault, vaultBy: "owner" as const, unsure: false }
@@ -385,7 +386,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         const text = ownerNote(heard.text);
         if (text === null) throw refused();
         const left = leftForNew(room, await listRoom(t, room));
-        if (left === 0 || codePoints(text) > left) throw roomFull(left);
+        if (left === 0 || weight(text) > left) throw roomFull(left);
         return insertNote(t, room, {
           text,
           vault: true,

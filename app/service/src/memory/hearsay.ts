@@ -118,7 +118,7 @@ interface SaidRow {
  * latest, as the Agent itself may read them (`VISIBLE_JOIN`: nothing from before it joined), `id` on the flagged ones
  * (at most the newest `flaggedMax`, and never more than `WINDOW_MAX`). When that would be more than `WINDOW_MAX` messages
  * each flagged message keeps its nearest neighbours, the nearest first, and the middle goes. Names and texts are
- * `cleanText`ed, a text cut to `reviewMessageChars` code points. A flagged message is read only if it is a person's (not
+ * `cleanText`ed, a text cut to `reviewMessageWeight` weight. A flagged message is read only if it is a person's (not
  * the owner's, not an Agent's) with no block either way with the owner, checked now, at the time of the call.
  * `candidates` is empty when none is: the caller deletes `seqs` and asks nothing.
  */
@@ -133,7 +133,7 @@ export async function hearsayInput(
   if (seqs.length === 0) return null;
   const newest = seqs.slice(-Math.min(memory.flaggedMax, WINDOW_MAX));
 
-  const said = (r: SaidRow): string => shown(r.text ?? "", memory.reviewMessageChars);
+  const said = (r: SaidRow): string => shown(r.text ?? "", memory.reviewMessageWeight);
   const nameOf = (r: SaidRow): string => labelName(r.display_name, r.handle);
   const owner = (await q.query<{ display_name: string; handle: string }>("select display_name, handle::text as handle from principals where id = $1", [agent.ownerId])).rows[0];
   const ownerName = owner ? labelName(owner.display_name, owner.handle) : "";

@@ -6,13 +6,14 @@ import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, memoryModel, type MemoryCallReport } from "./call.ts";
-import { cleanText, conversionMax, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
+import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { todayIn } from "./review.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
-import { codePoints, getMemoryLanguage, getMemoryModel, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
+import { getMemoryLanguage, getMemoryModel, getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
+import { weight, weightOf } from "./weight.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
 
 /**
@@ -170,7 +171,7 @@ export function dreamInput(
   const { refs, shown } = numbered(notes, kind);
   const user = JSON.stringify({
     notes: shown.map(({ ref, text, note }) => ({ ref, text, date: siteDay(note.createdAt, timeZone), last_mentioned: siteDay(note.seenAt, timeZone), strength: note.strength, vault: note.vault, new: fresh.has(note.id) })),
-    room: { used: used(notes.map((n) => n.note)), limit },
+    room: { used: weightOf(notes.map((n) => n.note)), limit },
   });
   return { system: dreamSystem(todayIn(now, timeZone), language), user, refs };
 }
@@ -188,7 +189,7 @@ const hasExactly = (o: Record<string, unknown>, keys: string[]): boolean => {
   return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k));
 };
 
-function one(raw: unknown, refs: ReadonlySet<string>, entryMax?: (ref: string) => number): DreamOp | null {
+function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   const known = (v: unknown): v is string => typeof v === "string" && refs.has(v);
@@ -202,7 +203,7 @@ function one(raw: unknown, refs: ReadonlySet<string>, entryMax?: (ref: string) =
     }
     case "rewrite": {
       if (!hasExactly(o, ["op", "ref", "text"]) || !known(o.ref) || typeof o.text !== "string") return null;
-      const text = modelNote(o.text, entryMax?.(o.ref));
+      const text = modelNote(o.text);
       return text === null ? null : { op: "rewrite", ref: o.ref, text };
     }
     case "split": {
@@ -223,9 +224,9 @@ function one(raw: unknown, refs: ReadonlySet<string>, entryMax?: (ref: string) =
  * shapes are kept — no add, no bare remove, no unlock — with refs from `refs`, every text through `modelNote`; a note is named
  * by one op only (the first), so an op naming one already used, a merge of a note into itself or a split into fewer than two
  * or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8), only `ops`
- * `["rewrite"]`, and a per-note limit on a restatement's length (`entryMax`). Pure and total: it never throws.
+ * `["rewrite"]`. Pure and total: it never throws.
  */
-export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]>; entryMax?: (ref: string) => number } = {}): DreamOp[] {
+export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]> } = {}): DreamOp[] {
   try {
     const parsed = parseAnswer(answer);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
@@ -234,7 +235,7 @@ export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: {
     const named = new Set<string>();
     const ops: DreamOp[] = [];
     for (const raw of list.slice(0, only.max ?? MAX_OPS)) {
-      const op = one(raw, refs, only.entryMax);
+      const op = one(raw, refs);
       if (op === null || (only.ops && !only.ops.includes(op.op))) continue;
       const names = op.op === "merge" ? [op.into, ...op.from] : [op.ref];
       if (names.some((n) => named.has(n))) continue;
@@ -378,13 +379,11 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
   const now = deps.now();
   // As a dream: three failed calls in a day and it waits for the next.
   if ((ctx.dream.failures.get(agent.ownerId) ?? []).filter((t) => t > now - DAY).length >= TRIES_A_DAY) return;
-  const rooms = await db.query<{ owner: string | null; self: string | null }>(
-    `select (select coalesce(sum(char_length(text)), 0) from owner_notes where owner_id = $1)::text as owner,
-            (select coalesce(sum(char_length(text)), 0) from agent_notes where agent_id = $2)::text as self`,
-    [agent.ownerId, agent.id],
-  );
-  // `char_length` counts code points, as the rooms do.
-  const full = { owner: Number(rooms.rows[0]!.owner) >= config.memory.napAt * limits.owner, self: Number(rooms.rows[0]!.self) >= config.memory.napAt * limits.self };
+  // How full a room is is its weight, as everywhere (weight.ts).
+  const full = {
+    owner: weightOf(await listOwnerNotes(db, agent.ownerId)) >= config.memory.napAt * limits.owner,
+    self: weightOf(await listAgentNotes(db, agent.id)) >= config.memory.napAt * limits.self,
+  };
   const wanted: Array<{ room: DreamRoom; carrier: AgentRow }> = [];
   if (full.self) wanted.push({ room: { kind: "self", agentId: agent.id }, carrier: agent });
   if (full.owner) {
@@ -491,11 +490,11 @@ interface Conversion {
 
 /**
  * The most a conversion's answer may be, in tokens: it restates a whole room, which is more than a dream's few operations, sized to
- * the room — twice what it holds in code points, 40 a note for the rest of each operation, and 200 over — and never more than the
+ * the room — twice what it holds in weight, 40 a note for the rest of each operation, and 200 over — and never more than the
  * model it is made on gives (the owner's choice, else the site's memory model; unknown when it does not resolve: then the size alone).
  */
 async function conversionTokens(db: Db, config: Config, ownerId: string, notes: ReadonlyArray<ExactNote>): Promise<number> {
-  const wanted = 2 * used(notes.map((n) => n.note)) + 40 * notes.length + 200;
+  const wanted = 2 * weightOf(notes.map((n) => n.note)) + 40 * notes.length + 200;
   try {
     const own = await getMemoryModel(db, ownerId);
     const site = memoryModel(config);
@@ -553,7 +552,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   const ops = parseDreamOps(
     answer,
     new Set(input.refs.keys()),
-    conversion ? { max: input.refs.size, ops: ["rewrite"], entryMax: (ref) => conversionMax(input.refs.get(ref)!.text) } : {},
+    conversion ? { max: input.refs.size, ops: ["rewrite"] } : {},
   );
   // The open notes that are new, the newest first: what the re-sort may look at (a conversion re-sorts nothing).
   const candidates = notes
@@ -664,7 +663,7 @@ async function judge(
     } else if (op.op === "split") {
       const note = refs.get(op.ref)!;
       // Parts that together are far longer than the note add something: not even asked about.
-      if (op.texts.reduce((sum, t) => sum + codePoints(t), 0) > 2 * codePoints(note.text) + 40) continue;
+      if (weightOf(op.texts.map((text) => ({ text }))) > 2 * weight(note.text) + 40) continue;
       if (!(await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }))) continue;
       checked.add(index);
       named.add(note.id);

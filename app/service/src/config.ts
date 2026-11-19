@@ -170,7 +170,7 @@ const proactiveSchema = z.strictObject({
 
 /**
  * What an Agent's memory is tuned by (`MEMORY`); every number is a site setting with this default (the plan's Numbers;
- * tuned and recorded in the last tasks). Lengths are in code points, times in milliseconds.
+ * tuned and recorded in the last tasks). Sizes are in weight (memory/weight.ts: ceil(utf-8 bytes / 3), about a token), times in milliseconds.
  */
 export interface MemoryConfig {
   /** The id of the site model the background memory calls use; null: the cheapest free-tier site model (`memoryModel`). */
@@ -187,9 +187,9 @@ export interface MemoryConfig {
   /** A group review runs after this much quiet, at most `groupMaxWaitMs` after the first flagged message. */
   groupQuietMs: number;
   groupMaxWaitMs: number;
-  /** A review shows at most this many messages, each cut to `reviewMessageChars`, and may answer at most `reviewMaxOutputTokens`. */
+  /** A review shows at most this many messages, each cut to `reviewMessageWeight`, and may answer at most `reviewMaxOutputTokens`. */
   reviewMessages: number;
-  reviewMessageChars: number;
+  reviewMessageWeight: number;
   reviewMaxOutputTokens: number;
   /** Thresholds of the judgements: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging. */
   shareAt: number;
@@ -253,7 +253,14 @@ export interface MemoryConfig {
   freeDailyPoints: number;
 }
 
-const memorySchema = z.strictObject({
+/** `reviewMessageChars` was this setting's name before sizes were measured in weight: still read, when the new name is absent. */
+const renamedReviewWeight = (v: unknown): unknown => {
+  if (typeof v !== "object" || v === null || Array.isArray(v) || !Object.hasOwn(v, "reviewMessageChars")) return v;
+  const { reviewMessageChars, ...rest } = v as Record<string, unknown>;
+  return Object.hasOwn(rest, "reviewMessageWeight") ? rest : { ...rest, reviewMessageWeight: reviewMessageChars };
+};
+
+const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   model: z.string().min(1).max(200).nullable().default(null),
   roomOwner: positive(2000, 100_000),
   roomSelf: positive(3000, 100_000),
@@ -264,7 +271,7 @@ const memorySchema = z.strictObject({
   groupQuietMs: positive(120_000, 86_400_000),
   groupMaxWaitMs: positive(900_000, 86_400_000),
   reviewMessages: positive(40, 500),
-  reviewMessageChars: positive(500, 20_000),
+  reviewMessageWeight: positive(500, 20_000),
   reviewMaxOutputTokens: positive(800, 100_000),
   shareAt: probability(0.6),
   sameAt: probability(0.5),
@@ -287,7 +294,7 @@ const memorySchema = z.strictObject({
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
-});
+}));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */

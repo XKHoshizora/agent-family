@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { languageRule, MEMORY_LANGUAGES, MEMORY_LANGUAGE_CODES } from "../src/memory/language.ts";
 import { reviewInput } from "../src/memory/review.ts";
+import { weight } from "../src/memory/weight.ts";
 import { siteDay } from "../src/accounts/store.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -382,25 +383,37 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect((await db.query("select status from memory_changes where owner_id = $1", [owner.id])).rows).toEqual([{ status: "applied" }]);
   });
 
-  it("a restatement in another script may be longer than the usual limit: up to three times the source, at most 600; longer is left as it was", async () => {
+  it("a restatement is limited like any model entry, in weight: one of the source's weight applies whatever the script; one past 200 weight is left as it was", async () => {
     const owner = await signUp(app, "cf4");
     const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
     await seeded(owner, agent.id, "茶".repeat(80), false);
     await seeded(owner, agent.id, "爱".repeat(80), false);
     expect((await setLanguage(owner, "en")).status).toBe(200);
-    // 227 code points (within 3 x 80 = 240, past the usual 200); 243 is past 240.
-    const within = "tea ".repeat(57).trim();
-    const past = "tea ".repeat(61).trim();
-    expect([...within].length).toBeGreaterThan(200);
-    expect([...within].length).toBeLessThanOrEqual(240);
-    expect([...past].length).toBeGreaterThan(240);
+    // 239 letters weigh 80 (the source's weight) though they are three times its code points; 639 letters weigh 213, past the entry limit of 200.
+    const within = "tea ".repeat(60).trim();
+    const past = "tea ".repeat(160).trim();
+    expect(weight(within)).toBe(80);
+    expect(weight(past)).toBeGreaterThan(200);
     gateway.reply(ops(rewrite("n1", within), rewrite("n2", past)));
     expect((await convert(owner)).json).toMatchObject({ converted: 1, kept: 1, noRoom: 0 });
     expect((await ownerTexts(owner.id)).map((r) => r.text)).toEqual([within, "爱".repeat(80)]);
-    // The prompt says so.
+    // The prompt no longer promises a length of three times the source.
     const system = callsOf("笔记语言整理员")[0]!.system;
-    expect(system).toContain("原来那条的 3 倍");
-    expect(system).toContain("600");
+    expect(system).not.toContain("3 倍");
+    expect(system).not.toContain("600");
+  });
+
+  it("a full Chinese room converted to English, each note restated with the same weight, applies every note: no noRoom", async () => {
+    const owner = await signUp(app, "cf4b");
+    await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    // Twenty notes of 100 weight: the room of 2000 is full.
+    for (let i = 0; i < 20; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(99)}${String.fromCharCode(97 + i)}`]);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    const english = Array.from({ length: 20 }, (_, i) => `${"tea ".repeat(74)}n${i}`);
+    for (const text of english) expect(weight(text)).toBe(100);
+    gateway.reply(ops(...english.map((text, i) => rewrite(`n${i + 1}`, text))));
+    expect((await convert(owner)).json).toEqual({ rooms: 1, converted: 20, kept: 0, noRoom: 0, failedRooms: 0 });
+    expect((await ownerTexts(owner.id)).map((r) => r.text).sort()).toEqual([...english].sort());
   });
 
   it("the call's output limit is sized to the room: twice what it holds, 40 a note and 200, never above the model's limit", async () => {
@@ -411,7 +424,7 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect((await setLanguage(owner, "en")).status).toBe(200);
     gateway.reply(ops());
     await convert(owner);
-    // 4 + 3 = 7 code points in 2 notes: 2 x 7 + 40 x 2 + 200.
+    // 4 + 3 = 7 weight in 2 notes: 2 x 7 + 40 x 2 + 200.
     expect(callsOf("笔记语言整理员")[0]!.maxOutputTokens).toBe(2 * 7 + 40 * 2 + 200);
     // A room that would ask for more than the model gives is cut to what it gives (FAST: 4096).
     for (let i = 0; i < 9; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(190)}${i}`]);
@@ -423,11 +436,11 @@ describe("a conversion changes the language and nothing else, and says what it c
   it("a restatement the room cannot hold is left as it is and counted in noRoom (and in kept)", async () => {
     const owner = await signUp(app, "cf6");
     await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
-    // 19 notes of 100 code points and one of 50: 1950 of the room's 2000.
-    for (let i = 0; i < 19; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(97)}${String(i).padStart(3, "0")}`]);
+    // 19 notes of 100 weight and one of 50: 1950 of the room's 2000.
+    for (let i = 0; i < 19; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(99)}${String.fromCharCode(97 + i)}`]);
     await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, "爱".repeat(50)]);
     expect((await setLanguage(owner, "en")).status).toBe(200);
-    gateway.reply(ops(rewrite("n20", "love ".repeat(28).trim())));
+    gateway.reply(ops(rewrite("n20", "love ".repeat(72).trim())));
     const done = await convert(owner);
     expect(done.json).toEqual({ rooms: 1, converted: 0, kept: 20, noRoom: 1, failedRooms: 0 });
     expect((await ownerTexts(owner.id)).at(-1)!.text).toBe("爱".repeat(50));

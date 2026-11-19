@@ -12,10 +12,10 @@ export type Room = { kind: "owner"; ownerId: string } | { kind: "self"; agentId:
 
 const TABLE = { owner: "owner_notes", self: "agent_notes" } as const;
 const COLUMN = { owner: "owner_id", self: "agent_id" } as const;
-/** What `room` holds at most, in code points. */
+/** What `room` holds at most, in weight. */
 export const roomLimit = (rooms: Rooms, kind: Room["kind"]): number => (kind === "owner" ? rooms.owner : rooms.self);
 
-/** Whether `growth` more code points fit a room that holds `usedNow` of `limit` (a change that shrinks it always fits). */
+/** Whether `growth` more weight fits a room that holds `usedNow` of `limit` (a change that shrinks it always fits). */
 export const fits = (usedNow: number, growth: number, limit: number): boolean => growth <= 0 || usedNow + growth <= limit;
 
 const keyOf = (room: Room): string => (room.kind === "owner" ? room.ownerId : room.agentId);

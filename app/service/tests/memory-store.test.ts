@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { listAgentNotes, listHearsay, listOwnerNotes, notesFor, roomOf, used } from "../src/memory/store.ts";
+import { listAgentNotes, listHearsay, listOwnerNotes, notesFor, roomOf } from "../src/memory/store.ts";
+import { weightOf } from "../src/memory/weight.ts";
 import { api, group, signUp } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -43,20 +44,27 @@ describe("tables", () => {
       expect(rows).toEqual([{ vault: true, vault_by: "auto", unsure: false, origin: "review", origin_conversation_id: null }]);
     }
     await reject(CHECK_VIOLATION, "insert into owner_notes (owner_id, text) values ($1, '')", [owner.id]);
-    await reject(CHECK_VIOLATION, "insert into owner_notes (owner_id, text) values ($1, $2)", [owner.id, "x".repeat(3001)]);
-    await db.query("insert into owner_notes (owner_id, text) values ($1, $2)", [owner.id, "x".repeat(3000)]);
+    // The column's check is a coarse guard of 9000 characters, not the limit: a room of 3000 weight holds 9000 one-byte characters.
+    await reject(CHECK_VIOLATION, "insert into owner_notes (owner_id, text) values ($1, $2)", [owner.id, "x".repeat(9001)]);
+    await db.query("insert into owner_notes (owner_id, text) values ($1, $2)", [owner.id, "x".repeat(9000)]);
+    await db.query("insert into agent_notes (agent_id, text) values ($1, $2)", [agent.id, "x".repeat(9000)]);
+    await reject(CHECK_VIOLATION, "insert into agent_notes (agent_id, text) values ($1, $2)", [agent.id, "x".repeat(9001)]);
+    // Whatever the language, a text within a room's weight limit is within the column's 9000 characters: a character weighs at least a third.
+    const { roomOwner, roomSelf, modelEntryMax } = app.deps.config.memory;
+    for (const limit of [roomOwner, roomSelf]) expect(3 * limit).toBeLessThanOrEqual(9000);
+    expect(3 * modelEntryMax).toBeLessThanOrEqual(600);
     await reject(CHECK_VIOLATION, "insert into agent_notes (agent_id, text, vault_by) values ($1, 'x', 'code')", [agent.id]);
     await reject(CHECK_VIOLATION, "insert into agent_notes (agent_id, text, origin) values ($1, 'x', 'dream')", [agent.id]);
     await reject(FOREIGN_KEY_VIOLATION, "insert into agent_notes (agent_id, text, origin_conversation_id) values ($1, 'x', gen_random_uuid())", [agent.id]);
   });
 
-  it("hearsay is 1 to 200 code points and needs its group; flags and changes have their kinds and statuses", async () => {
+  it("hearsay is 1 to 600 characters (a model entry of 200 weight is at most that) and needs its group; flags and changes have their kinds and statuses", async () => {
     const { owner, agent, g1 } = await world();
     const hear = (text: string) =>
       db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_name, text, said_at) values ($1, $2, 'Mia', $3, now())", [agent.id, g1, text]);
-    await hear("x".repeat(200));
+    await hear("x".repeat(600));
     await expect(hear("")).rejects.toMatchObject({ code: CHECK_VIOLATION });
-    await expect(hear("x".repeat(201))).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    await expect(hear("x".repeat(601))).rejects.toMatchObject({ code: CHECK_VIOLATION });
     await reject(
       FOREIGN_KEY_VIOLATION,
       "insert into agent_hearsay (agent_id, conversation_id, speaker_name, text, said_at) values ($1, gen_random_uuid(), 'Mia', 'x', now())",
@@ -97,7 +105,7 @@ describe("tables", () => {
 });
 
 describe("the lists and the room", () => {
-  it("lists come oldest first and used() counts code points", async () => {
+  it("lists come oldest first and a room is measured in weight", async () => {
     const { owner, agent, g1 } = await world();
     await db.query("insert into owner_notes (owner_id, text, created_at) values ($1, 'second', now()), ($1, 'first', now() - interval '1 hour')", [owner.id]);
     await db.query("insert into agent_notes (agent_id, text, created_at) values ($1, 'two', now()), ($1, 'one', now() - interval '1 hour')", [agent.id]);
@@ -120,7 +128,7 @@ describe("the lists and the room", () => {
     expect(heard[0]).toMatchObject({ agentId: agent.id, conversationId: g1, speakerId: null, speakerName: "Mia" });
     expect(await listHearsay(db, agent.id, "00000000-0000-4000-8000-000000000000")).toEqual([]);
     expect((await listHearsay(db, agent.id, g1)).length).toBe(2);
-    expect(used([{ text: "ab" }, { text: "你好😀" }])).toBe(5);
+    expect(weightOf([{ text: "ab" }, { text: "你好😀" }])).toBe(1 + 4);
     expect(roomOf(app.deps.config)).toEqual({ owner: 2000, self: 3000, hearsay: 2000, notes: 150 });
   });
 });

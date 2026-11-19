@@ -396,7 +396,7 @@ describe("the memory configuration", () => {
     groupQuietMs: 120_000,
     groupMaxWaitMs: 900_000,
     reviewMessages: 40,
-    reviewMessageChars: 500,
+    reviewMessageWeight: 500,
     reviewMaxOutputTokens: 800,
     shareAt: 0.6,
     sameAt: 0.5,
@@ -429,6 +429,16 @@ describe("the memory configuration", () => {
 
   test("an override keeps the rest", () => {
     expect(loadConfig({ ...base, MEMORY: '{"model":"fast","quietMs":1000,"shareAt":0.9}' }).memory).toEqual({ ...defaults, model: "fast", quietMs: 1000, shareAt: 0.9 });
+  });
+
+  test("the review's per-message cut is reviewMessageWeight; the old name reviewMessageChars is still read when the new one is absent", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"reviewMessageWeight":300}' }).memory.reviewMessageWeight).toBe(300);
+    const old = loadConfig({ ...base, MEMORY: '{"reviewMessageChars":300,"quietMs":1000}' }).memory;
+    expect(old).toMatchObject({ reviewMessageWeight: 300, quietMs: 1000, roomOwner: 2000 });
+    expect(old).not.toHaveProperty("reviewMessageChars");
+    // Both: the new name wins.
+    expect(loadConfig({ ...base, MEMORY: '{"reviewMessageChars":300,"reviewMessageWeight":700}' }).memory.reviewMessageWeight).toBe(700);
+    for (const bad of ['{"reviewMessageChars":0}', '{"reviewMessageWeight":0}', '{"reviewMessageChars":"5"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
   });
 
   test("the hearsay limits can be set", () => {

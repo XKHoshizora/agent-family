@@ -3,6 +3,7 @@ import { memoryCall } from "../src/memory/call.ts";
 import { runReview, type PipelineDeps } from "../src/memory/pipeline.ts";
 import { createReviewer, MAX_REVIEWS_AT_ONCE } from "../src/memory/reviewer.ts";
 import { EXPLICIT, reviewInput } from "../src/memory/review.ts";
+import { weight } from "../src/memory/weight.ts";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { toWireForReaders } from "../src/messages/read.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -158,7 +159,7 @@ describe("reviewInput", () => {
     for (const op of ["add", "replace", "remove", "lock", "unlock"]) expect([op, system.includes(op)]).toEqual([op, true]);
   });
 
-  it("is null without an owner message; counts only text and file captions, newest 40, each cut to 500 code points; notices are not shown", async () => {
+  it("is null without an owner message; counts only text and file captions, newest 40, each cut to 500 weight (500 Chinese characters, 1500 English letters); notices are not shown", async () => {
     const w = await owned("tess");
     const agent = (await readOwnedAgent(db, w.owner.id, w.agent.id))!;
     const run = (after: number) => reviewInput(db, agent, w.conv, after, { kinds: new Set(["owner"]), config: app.deps.config, now: new Date() });
@@ -174,6 +175,11 @@ describe("reviewInput", () => {
     expect(input.user).not.toContain("开始了新话题");
     const after = (await run(input.upToSeq))!;
     expect(after).toBeNull();
+    // An English message is cut by the same weight: 1500 letters, not 500.
+    await say(w.owner, w.conv, "abcdefg ".repeat(300));
+    const englishLines = JSON.parse((await run(input.upToSeq))!.user).conversation as Array<{ who: string; text: string }>;
+    expect(weight(englishLines.at(-1)!.text)).toBeLessThanOrEqual(500);
+    expect(englishLines.at(-1)!.text).toBe("abcdefg ".repeat(300).trim().slice(0, 1500));
   });
 
   it("flags an explicit request, in any of its languages", () => {
@@ -434,7 +440,7 @@ describe("what a review does with an answer", () => {
 
   it("a full room: no entry is added, a chip with full and no lines says so", async () => {
     const w = await owned("ann");
-    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${i}`.repeat(200), true);
+    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${"字".repeat(199)}${i}`, true);
     await exchange(w, "我喜欢茶");
     await quietThen(ops(add("喜欢茶")));
     expect((await roomOf(w.owner)).notes).toHaveLength(10);
@@ -992,7 +998,7 @@ describe("pending changes count as known", () => {
 
   it("with 先问我再记 and a full room only the full notice is posted, not a card with no lines", async () => {
     const w = await owned("nat", { memoryAsk: true });
-    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${i}`.repeat(200), true);
+    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${"字".repeat(199)}${i}`, true);
     await exchange(w, "我喜欢茶");
     await quietThen(ops(add("喜欢茶")));
     const [chip] = await chips(w.owner, w.conv);
@@ -1020,7 +1026,7 @@ describe("pending changes count as known", () => {
 
 describe("deciding on a change", () => {
   const fill = async (w: World) => {
-    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${i}`.repeat(200), true);
+    for (let i = 0; i < 10; i++) await seeded(w.owner, w.agent.id, `${"字".repeat(199)}${i}`, true);
   };
 
   it("a confirmation that finds a note moved on is 409 stale_change, discards the change and pushes the notice again", async () => {
@@ -1040,7 +1046,7 @@ describe("deciding on a change", () => {
 
   it("undoing a removal into a room that has filled up since is 409 room_full and changes nothing", async () => {
     const w = await owned("quo");
-    await seeded(w.owner, w.agent.id, "x".repeat(200), true);
+    await seeded(w.owner, w.agent.id, "字".repeat(200), true);
     await sayAndReview(w, "那条可以忘掉了", ops({ op: "remove", ref: "n1" }));
     const [chip] = await chips(w.owner, w.conv);
     await fill(w);

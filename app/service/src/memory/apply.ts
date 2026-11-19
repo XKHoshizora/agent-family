@@ -1,9 +1,10 @@
 import { lockAccount } from "../accounts/store.ts";
 import type { Tx } from "../db.ts";
-import { conversionMax, modelNote } from "./clean.ts";
+import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
 import { keptOrigin } from "./origin.ts";
-import { codePoints, hearsayCost, hearsayUsed, used, type Note, type NoteKind, type Rooms } from "./store.ts";
+import { hearsayCost, hearsayUsed, type Note, type NoteKind, type Rooms } from "./store.ts";
+import { weight, weightOf } from "./weight.ts";
 import {
   deleteHearsay,
   deleteNote,
@@ -195,7 +196,7 @@ async function loadState(t: Tx, w: Ids): Promise<State> {
   return { owner: byId(o), self: byId(s), exact };
 }
 
-const usedIn = (state: State): { owner: number; self: number } => ({ owner: used([...state.owner.values()]), self: used([...state.self.values()]) });
+const usedIn = (state: State): { owner: number; self: number } => ({ owner: weightOf([...state.owner.values()]), self: weightOf([...state.self.values()]) });
 
 const base = (op: AppliedOp["op"], kind: NoteKind, noteId: string | null): StoredOp => ({
   op,
@@ -230,7 +231,7 @@ const snapshot = (s: StoredOp, n: Note, state: State): StoredOp => ({
 /**
  * The net rule of a room's limit, judged once for a whole change: every step that shrinks a room is counted first (it frees
  * room), then every step that grows one, in the order the ops came, each dropped (and `full` set) when its room would pass its
- * limit. `room` is what each holds now; a step is one op's net growth in code points.
+ * limit. `room` is what each holds now; a step is one op's net growth in weight.
  */
 function netRule(room: { owner: number; self: number }, steps: ReadonlyArray<{ index: number; kind: NoteKind; growth: number }>, limits: Rooms): { rejected: Set<number>; full: boolean } {
   const left = { ...room };
@@ -324,12 +325,12 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
       candidates.push({ index, op: "lock", note, text: note.text, growth: 0 });
     } else if (op.op === "remove") {
       touched.add(note.id);
-      candidates.push({ index, op: "remove", note, text: note.text, growth: -codePoints(note.text) });
+      candidates.push({ index, op: "remove", note, text: note.text, growth: -weight(note.text) });
     } else {
       const text = modelNote(op.text);
       if (text === null || text === note.text) return;
       touched.add(note.id);
-      candidates.push({ index, op: "replace", note, text, growth: codePoints(text) - codePoints(note.text) });
+      candidates.push({ index, op: "replace", note, text, growth: weight(text) - weight(note.text) });
     }
   });
 
@@ -337,7 +338,7 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
     usedIn(state),
     [
       ...candidates.map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
-      ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: codePoints(a.text) })),
+      ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: weight(a.text) })),
     ],
     opts.rooms,
   );
@@ -571,7 +572,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       steps.push({
         index,
         kind: into.kind,
-        growth: codePoints(text) - total(sources),
+        growth: weight(text) - weightOf(sources),
         stored: {
           ...snapshot(base("merge", into.kind, into.id), into, state),
           after: text,
@@ -587,14 +588,14 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       });
     } else if (op.op === "rewrite") {
       const note = opts.checked.has(index) ? noteOf(op.ref) : null;
-      const text = note ? modelNote(op.text, opts.conversion ? conversionMax(note.text) : undefined) : null;
+      const text = note ? modelNote(op.text) : null;
       if (!note || text === null || text === note.text) return;
       touched.add(note.id);
       const vault = opts.conversion ? { vault: note.vault, by: note.vaultBy, unsure: note.unsure } : keep(note, text);
       steps.push({
         index,
         kind: note.kind,
-        growth: codePoints(text) - codePoints(note.text),
+        growth: weight(text) - weight(note.text),
         stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true, originBefore: note.originConversationId, originAfter: keptOrigin(note.originConversationId, { from: "nothing-new" }) },
       });
     } else if (op.op === "split") {
@@ -610,7 +611,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       steps.push({
         index,
         kind: note.kind,
-        growth: total(parts) - codePoints(note.text),
+        growth: weightOf(parts) - weight(note.text),
         stored: { ...snapshot(base("split", note.kind, note.id), note, state), after: parts.map((p) => p.text).join("；"), originConversationId: note.originConversationId, origin: note.origin, createdAt: at.createdAt, parts },
       });
     } else {
@@ -676,7 +677,7 @@ export interface NewHearsay {
 /**
  * Writes hearsay entries, in the caller's transaction (which holds the Agent's row), under the account lock and the
  * Agent's hearsay lock: deletes the entries of `drop` (ids of this Agent's), inserts `entries` in order, then deletes the
- * oldest entries — of any group, the new ones last — until the room holds at most `room` code points, and records it all
+ * oldest entries — of any group, the new ones last — until the room holds at most `room` weight, and records it all
  * as one applied change. Nothing is written, and null comes back, when no entry is left to insert (none given, or the
  * room cannot hold any) or the Agent is not the owner's: a drop alone is never applied. `added` lists what was inserted.
  */
@@ -799,20 +800,19 @@ const operationStands = (state: State, s: StoredOp, side: "before" | "after"): b
   return stands(state, s, side);
 };
 
-const total = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + codePoints(n.text), 0);
 
-/** How many code points a stored op adds to its room when undone (negative: frees). */
+/** How much weight a stored op adds to its room when undone (negative: frees). */
 const undoGrowth = (s: StoredOp): number =>
   s.op === "add"
-    ? -codePoints(s.after!)
+    ? -weight(s.after!)
     : s.op === "remove"
-      ? codePoints(s.before!)
+      ? weight(s.before!)
       : s.op === "replace"
-        ? codePoints(s.before!) - codePoints(s.after!)
+        ? weight(s.before!) - weight(s.after!)
         : s.op === "merge"
-          ? codePoints(s.before!) - codePoints(s.after!) + total(s.removed!)
+          ? weight(s.before!) - weight(s.after!) + weightOf(s.removed!)
           : s.op === "split"
-            ? codePoints(s.before!) - total(s.parts!)
+            ? weight(s.before!) - weightOf(s.parts!)
             : 0;
 
 /**

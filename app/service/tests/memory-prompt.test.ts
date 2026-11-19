@@ -4,6 +4,7 @@ import { isRunEnd, NOTHING } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import { fitNotes, groupSystemPrompt, notesPassage, systemPrompt, type PromptNotes } from "../src/agents/runtime/prompt.ts";
 import { estimateTokens } from "../src/metering/prices.ts";
+import { TOKENS_PER_WEIGHT, weight } from "../src/memory/weight.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import type { Note } from "../src/memory/store.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -441,7 +442,7 @@ describe("fitNotes", () => {
   // What is left out, in order: hearsay oldest first, then own notes (least strength, then oldest seen), then the owner's the same way.
   const ORDER = ["HA", "HB", "SC", "SB", "SA", "OB", "OA"];
   const tagsOf = (n: PromptNotes): string[] => [...n.owner, ...n.self, ...n.hearsay].map((x) => x.text.slice(0, 2)).sort();
-  const sizeOf = (n: PromptNotes, group = false) => estimateTokens(notesPassage(n, group, ZONE, "主人"));
+  const sizeOf = (n: PromptNotes, group = false) => weight(notesPassage(n, group, ZONE, "主人")) * TOKENS_PER_WEIGHT;
 
   it("leaves the notes as they are while the passage fits, and says it fits", () => {
     const r = fitNotes(ALL, false, ZONE, "主人", sizeOf(ALL));
@@ -466,6 +467,19 @@ describe("fitNotes", () => {
     expect(fitNotes(ALL, false, ZONE, "主人", 0).notes).toEqual(EMPTY);
   });
 
+  it("the passage is measured in weight, one weight a token: the same notes in English take the room Chinese ones do, not three times", () => {
+    const zh: PromptNotes = { owner: Array.from({ length: 5 }, (_, i) => note("owner", `${"字".repeat(59)}${i}`)), self: [], hearsay: [] };
+    // 180 one-byte letters weigh 60, as 60 Chinese characters do.
+    const en: PromptNotes = { owner: Array.from({ length: 5 }, (_, i) => note("owner", `${"word ".repeat(35)}wor${i}`)), self: [], hearsay: [] };
+    expect(en.owner[0]!.text.length).toBe(179);
+    expect(weight(en.owner[0]!.text)).toBe(60);
+    const budget = sizeOf(zh);
+    expect(fitNotes(zh, false, ZONE, "主人", budget)).toEqual({ notes: zh, fits: true });
+    expect(fitNotes(en, false, ZONE, "主人", budget + 10).fits).toBe(true);
+    // The weight of the passage, not its code points, is what is compared (by code points the English one would be far over).
+    expect(estimateTokens(notesPassage(en, false, ZONE, "主人"))).toBeGreaterThan(budget + 10);
+  });
+
   it("a group's passage is measured as a group's (its own sentence, no group name on what was heard)", () => {
     const whole = sizeOf(ALL, true);
     expect(whole).not.toBe(sizeOf(ALL, false));
@@ -483,14 +497,14 @@ describe("the passage takes at most a quarter of the model's context", () => {
   it("a run on a model with a small context is shown the strongest and newest notes only, within a quarter of its context; the conversation is not crowded out", async () => {
     const owner = await signUp(app, "mpquarter");
     const agent = await mustCreateAgent(app, owner, { handle: "quarter_bot", model: { source: "site", id: "mid" }, persona: "你说话简短。" });
-    for (let i = 0; i < 20; i++) await insertSelf(agent.id, `自${String(i).padStart(2, "0")}${"自".repeat(97)}`, false);
-    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(97)}`, false);
+    for (let i = 0; i < 20; i++) await insertSelf(agent.id, `自${String(i).padStart(2, "0")}${"自".repeat(197)}`, false);
+    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(197)}`, false);
     await say(owner, agent.conversationId, "你好");
     await answer("好的。");
     const system = lastCall().system;
     // 11 000 tokens of context: a quarter is 2 750; the passage is what is between the heading and the end of the JSON.
     const passage = system.slice(system.indexOf("以下是你记下的笔记"));
-    expect(estimateTokens(passage)).toBeLessThanOrEqual(2750);
+    expect(weight(passage) * TOKENS_PER_WEIGHT).toBeLessThanOrEqual(2750);
     // The Agent's own, weakest and oldest first, went before any note about the owner; of those about the owner the newest stay.
     expect(system).not.toContain("自00");
     expect(system).not.toContain("自19");
@@ -503,8 +517,8 @@ describe("the passage takes at most a quarter of the model's context", () => {
     const large = await mustCreateAgent(app, owner, { handle: "fits_large", model: FAST, persona: "你说话简短。" });
     const fitsOf = async (id: string) => (await api(app, owner, "GET", `/api/agents/${id}/memory`)).json.fits;
     expect([await fitsOf(small.id), await fitsOf(large.id)]).toEqual([true, true]);
-    for (let i = 0; i < 20; i++) await insertSelf(small.id, `自${String(i).padStart(2, "0")}${"自".repeat(97)}`, false);
-    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(97)}`, false);
+    for (let i = 0; i < 20; i++) await insertSelf(small.id, `自${String(i).padStart(2, "0")}${"自".repeat(197)}`, false);
+    for (let i = 0; i < 20; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(197)}`, false);
     expect(await fitsOf(small.id)).toBe(false);
     expect(await fitsOf(large.id)).toBe(true);
     // The Agent's current model: after a change of model it is measured against the new one.

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { createReviewer } from "../src/memory/reviewer.ts";
+import { weight } from "../src/memory/weight.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
@@ -740,6 +741,25 @@ describe("rooms, carriers and retries", () => {
     await exchange(w, "我喜欢喝咖啡");
     await quietThen(ops(add("喜欢喝咖啡")));
     expect(dreamCalls()).toHaveLength(0);
+  });
+
+  it("how full a room is is its weight: English notes of 4200 letters (1400 weight) leave it under 80% and do not nap; 4800 (1600) do", async () => {
+    const english = (i: number) => `${"word ".repeat(119)}ends${i}`;
+    expect(weight(english(0))).toBe(200);
+    const w = await owned("dg3");
+    for (let i = 0; i < 7; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [w.owner.id, english(i)]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    await exchange(w, "我喜欢喝咖啡");
+    await quietThen(ops(add("喜欢喝咖啡")));
+    expect(dreamCalls()).toHaveLength(0);
+    const w2 = await owned("dg4");
+    for (let i = 0; i < 8; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [w2.owner.id, english(i)]);
+    await exchange(w2, "我喜欢喝咖啡");
+    gateway.reply(ops(add("喜欢喝咖啡")));
+    gateway.reply(dreamAns());
+    clock.advance(10 * MIN);
+    await memory().idle();
+    expect(dreamCalls()).toHaveLength(1);
   });
 
   it("a call that fails is tried again at the next sweep, at most twice more that day, and dreamed_at stays empty until one answers", async () => {

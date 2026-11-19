@@ -4,7 +4,8 @@ import type { Queryable } from "../db.ts";
 import type { StoredOp } from "./apply.ts";
 import { cleanText, MODEL_NOTE_MAX } from "./clean.ts";
 import { languageRule, type MemoryLanguage } from "./language.ts";
-import { getMemoryLanguage, listAgentNotes, listOwnerNotes, notesFor, roomOf, used, type Note, type NoteKind } from "./store.ts";
+import { getMemoryLanguage, listAgentNotes, listOwnerNotes, notesFor, roomOf, type Note, type NoteKind } from "./store.ts";
+import { cutToWeight, weightOf } from "./weight.ts";
 
 /**
  * What a review is asked, and how its outcome is told to the owner. A review is one cheap model call that sees what the
@@ -102,13 +103,8 @@ export function todayIn(now: Date, timeZone: string): string {
   return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;
 }
 
-const cut = (text: string, max: number): string => {
-  const points = [...text];
-  return points.length <= max ? text : points.slice(0, max).join("");
-};
-
-/** A message text as a memory call is shown it: cleaned (`cleanText`), cut to `max` code points. */
-export const shown = (text: string, max: number): string => cut(cleanText(text), max);
+/** A message text as a memory call is shown it: cleaned (`cleanText`), cut to `max` weight (whole characters). */
+export const shown = (text: string, max: number): string => cutToWeight(cleanText(text), max);
 
 /**
  * The review of `conversationId` for `agent` from the messages after `afterSeq`. `input` is null when there is no owner
@@ -122,7 +118,7 @@ export const shown = (text: string, max: number): string => cut(cleanText(text),
  * a group nothing of the vault) as `{ ref: "n1"…, room, text }` — the owner's room first, then its own; `room_left` the
  * space left in each room this review may change (counted over all its notes: a number, not a note). Texts go in as
  * stored: line breaks collapsed to a space and invisible and control characters removed (`cleanText`, as before storing),
- * a message cut to `reviewMessageChars` code points; nothing is folded, stripped or rewritten.
+ * a message cut to `reviewMessageWeight` weight; nothing is folded, stripped or rewritten.
  */
 export async function readReview(
   q: Queryable,
@@ -144,7 +140,7 @@ export async function readReview(
   const window = rows.reverse();
   const seen = window.length > 0 ? Number(window.at(-1)!.newest ?? window.at(-1)!.seq) : null;
   const spoken = window.flatMap((m) => {
-    const text = shown(m.text, memory.reviewMessageChars);
+    const text = shown(m.text, memory.reviewMessageWeight);
     return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq: Number(m.seq), at: m.created_at }];
   });
   if (!spoken.some((m) => m.who === "owner")) return { input: null, seen };
@@ -166,7 +162,7 @@ export async function readReview(
   for (const kind of ["owner", "self"] as const) {
     if (!opts.kinds.has(kind)) continue;
     const mine: readonly Note[] = visible[kind];
-    roomLeft[kind] = Math.max(0, rooms[kind] - used(all[kind]));
+    roomLeft[kind] = Math.max(0, rooms[kind] - weightOf(all[kind]));
     existing.push(...all[kind].map((n) => n.text));
     for (const n of mine) {
       const text = cleanText(n.text);

@@ -139,38 +139,41 @@ describe("applyOps", () => {
 
   it("does removes and replaces before adds: a merge frees room for its add", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "x".repeat(10));
-    const b = await seed(w, "owner", "y".repeat(10));
+    const a = await seed(w, "owner", "地".repeat(10));
+    const b = await seed(w, "owner", "玄".repeat(10));
     const rooms = { ...ROOMS, owner: 25 };
     const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
     // The add is listed first and fits only after the merge.
-    const add: Op = { op: "add", kind: "owner", text: "z".repeat(12) };
+    const add: Op = { op: "add", kind: "owner", text: "黄".repeat(12) };
     const alone = await run(w, [add], refs, { rooms });
     expect(alone).toMatchObject({ applied: [], full: true });
-    const r = await run(w, [add, { op: "replace", ref: "a", text: "m".repeat(8) }, { op: "remove", ref: "b" }], refs, { rooms });
+    const r = await run(w, [add, { op: "replace", ref: "a", text: "寅".repeat(8) }, { op: "remove", ref: "b" }], refs, { rooms });
     expect(r!.full).toBe(false);
     expect(r!.applied.map((x) => x.op)).toEqual(["replace", "remove", "add"]);
-    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["m".repeat(8), "z".repeat(12)].sort());
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["寅".repeat(8), "黄".repeat(12)].sort());
   });
 
   it("an add that does not fit is dropped and sets full; the ones that fit are kept; the row says full", async () => {
     const w = await world();
-    await seed(w, "owner", "x".repeat(15));
+    await seed(w, "owner", "地".repeat(15));
     const rooms = { ...ROOMS, owner: 20 };
-    const r = await run(w, [{ op: "add", kind: "owner", text: "y".repeat(10) }, { op: "add", kind: "owner", text: "z".repeat(5) }], new Map(), { rooms });
+    const r = await run(w, [{ op: "add", kind: "owner", text: "玄".repeat(10) }, { op: "add", kind: "owner", text: "黄".repeat(5) }], new Map(), { rooms });
     expect(r!.full).toBe(true);
-    expect(r!.applied.map((a) => a.after)).toEqual(["z".repeat(5)]);
+    expect(r!.applied.map((a) => a.after)).toEqual(["黄".repeat(5)]);
     expect((await changeRow(r!.changeId!)).full).toBe(true);
-    // Counted in code points, not UTF-16 units.
+    // Counted in weight (utf-8 bytes / 3, rounded up), not code points or UTF-16 units: three emoji are 12 bytes, 4 weight; four are 6.
     const w2 = await world();
-    const r2 = await run(w2, [{ op: "add", kind: "self", text: "😀".repeat(5) }], new Map(), { rooms: { ...ROOMS, self: 5 } });
+    const r2 = await run(w2, [{ op: "add", kind: "self", text: "😀".repeat(3) }], new Map(), { rooms: { ...ROOMS, self: 5 } });
     expect(r2!.full).toBe(false);
     expect(await selfNotes(w2)).toHaveLength(1);
+    const w3 = await world();
+    const r3 = await run(w3, [{ op: "add", kind: "self", text: "😀".repeat(4) }], new Map(), { rooms: { ...ROOMS, self: 5 } });
+    expect(r3).toMatchObject({ applied: [], full: true });
   });
 
   it("when only the fullness is left, the change row still says full (the hint is shown with it)", async () => {
     const w = await world();
-    await seed(w, "owner", "x".repeat(20));
+    await seed(w, "owner", "地".repeat(20));
     const r = await run(w, [{ op: "add", kind: "owner", text: "no room" }], new Map(), { rooms: { ...ROOMS, owner: 20 } });
     expect(r).toMatchObject({ applied: [], full: true, unlocks: [] });
     expect(await changeRow(r!.changeId!)).toMatchObject({ status: "applied", ops: [], full: true });
@@ -178,7 +181,7 @@ describe("applyOps", () => {
 
   it("the room of an Agent's own notes is its own: a full owner room does not stop a self note", async () => {
     const w = await world();
-    await seed(w, "owner", "x".repeat(20));
+    await seed(w, "owner", "地".repeat(20));
     const r = await run(w, [{ op: "add", kind: "owner", text: "no room" }, { op: "add", kind: "self", text: "room here" }], new Map(), { rooms: { ...ROOMS, owner: 20 } });
     expect(r!.full).toBe(true);
     expect(r!.applied.map((a) => a.kind)).toEqual(["self"]);
@@ -186,10 +189,10 @@ describe("applyOps", () => {
 
   it("a replace that would pass the room is dropped and sets full", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "x".repeat(10));
-    const r = await run(w, [{ op: "replace", ref: "a", text: "y".repeat(30) }], new Map([["a", ref("owner", a)]]), { rooms: { ...ROOMS, owner: 20 } });
+    const a = await seed(w, "owner", "地".repeat(10));
+    const r = await run(w, [{ op: "replace", ref: "a", text: "玄".repeat(30) }], new Map([["a", ref("owner", a)]]), { rooms: { ...ROOMS, owner: 20 } });
     expect(r).toMatchObject({ applied: [], full: true });
-    expect((await ownerNotes(w))[0]!.text).toBe("x".repeat(10));
+    expect((await ownerNotes(w))[0]!.text).toBe("地".repeat(10));
   });
 
   it("drops owner-kind ops when the notes are not shared or the kind is not allowed", async () => {
@@ -550,18 +553,18 @@ describe("proposeUnlocks, confirmChange and discardChange", () => {
 
   it("confirming the other ops of a pending change never opens a vault note; an add that does not fit makes the whole change full, pending", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "locked a", { vault: true });
-    const r = await run(w, [{ op: "replace", ref: "a", text: "locked a2" }, { op: "add", kind: "owner", text: "q".repeat(10) }], new Map([["a", ref("owner", a)]]), {
+    const a = await seed(w, "owner", "锁".repeat(8), { vault: true });
+    const r = await run(w, [{ op: "replace", ref: "a", text: "锁".repeat(9) }, { op: "add", kind: "owner", text: "午".repeat(10) }], new Map([["a", ref("owner", a)]]), {
       status: "pending",
-      vaults: new Map([[vaultKey("owner", "locked a2"), OPEN], [vaultKey("owner", "q".repeat(10)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "锁".repeat(9)), OPEN], [vaultKey("owner", "午".repeat(10)), OPEN]]),
     });
-    const z = await seed(w, "owner", "z".repeat(10));
+    const z = await seed(w, "owner", "黄".repeat(10));
     expect(await confirm(w, r!.changeId!, { ...ROOMS, owner: 25 })).toBe("full");
-    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["locked a", "z".repeat(10)]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["锁".repeat(8), "黄".repeat(10)].sort());
     await db.query("delete from owner_notes where id = $1", [z]);
     const done = await confirm(w, r!.changeId!, { ...ROOMS, owner: 25 });
     expect(Array.isArray(done) && done.map((x) => x.op)).toEqual(["replace", "add"]);
-    expect((await ownerNotes(w)).map((n) => [n.text, n.vault]).sort()).toEqual([["locked a2", true], ["q".repeat(10), false]].sort());
+    expect((await ownerNotes(w)).map((n) => [n.text, n.vault]).sort()).toEqual([["锁".repeat(9), true], ["午".repeat(10), false]].sort());
   });
 });
 
@@ -569,9 +572,9 @@ describe("the follow-up rulings", () => {
   it("undo checks the rooms: restoring a removed note into a room refilled since answers full and changes nothing", async () => {
     const w = await world();
     const rooms = { ...ROOMS, owner: 2000 };
-    const big = await seed(w, "owner", "b".repeat(1900));
+    const big = await seed(w, "owner", "乙".repeat(1900));
     const r = await run(w, [{ op: "remove", ref: "big" }], new Map([["big", ref("owner", big)]]), { rooms });
-    await seed(w, "owner", "c".repeat(200));
+    await seed(w, "owner", "丙".repeat(200));
     expect(await undo(w, r!.changeId!, rooms)).toBe("full");
     expect((await ownerNotes(w)).map((n) => n.text.length)).toEqual([200]);
     expect((await changeRow(r!.changeId!)).status).toBe("applied");
@@ -580,11 +583,11 @@ describe("the follow-up rulings", () => {
     expect((await ownerNotes(w)).map((n) => n.id)).toEqual([big]);
     // Undoing a replace that shrank a note is checked the same way.
     const w2 = await world();
-    const x = await seed(w2, "self", "x".repeat(100));
-    const r2 = await run(w2, [{ op: "replace", ref: "x", text: "y".repeat(10) }], new Map([["x", ref("self", x)]]), { vaults: new Map([[vaultKey("self", "y".repeat(10)), OPEN]]) });
-    await seed(w2, "self", "z".repeat(2950));
+    const x = await seed(w2, "self", "地".repeat(100));
+    const r2 = await run(w2, [{ op: "replace", ref: "x", text: "玄".repeat(10) }], new Map([["x", ref("self", x)]]), { vaults: new Map([[vaultKey("self", "玄".repeat(10)), OPEN]]) });
+    await seed(w2, "self", "黄".repeat(2950));
     expect(await undo(w2, r2!.changeId!, { ...ROOMS, self: 3000 })).toBe("full");
-    expect((await selfNotes(w2)).find((n) => n.id === x)!.text).toBe("y".repeat(10));
+    expect((await selfNotes(w2)).find((n) => n.id === x)!.text).toBe("玄".repeat(10));
   });
 
   it("a text with control characters or a lone surrogate applies cleanly, without them", async () => {
@@ -626,16 +629,16 @@ describe("the follow-up rulings", () => {
 
   it("subtracts the removes before judging a replace's growth, whatever the order of the ops", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "a".repeat(10));
-    const b = await seed(w, "owner", "b".repeat(10));
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const b = await seed(w, "owner", "乙".repeat(10));
     const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
-    const r = await run(w, [{ op: "replace", ref: "a", text: "c".repeat(20) }, { op: "remove", ref: "b" }], refs, {
+    const r = await run(w, [{ op: "replace", ref: "a", text: "丙".repeat(20) }, { op: "remove", ref: "b" }], refs, {
       rooms: { ...ROOMS, owner: 25 },
-      vaults: new Map([[vaultKey("owner", "c".repeat(20)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "丙".repeat(20)), OPEN]]),
     });
     expect(r!.full).toBe(false);
     expect(r!.applied.map((x) => x.op).sort()).toEqual(["remove", "replace"]);
-    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["c".repeat(20)]);
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["丙".repeat(20)]);
   });
 
   it("does nothing for an Agent that is not the owner's", async () => {
@@ -661,47 +664,47 @@ describe("the follow-up rulings", () => {
 describe("fix round 2", () => {
   it("a held merge confirms cleanly when its net effect fits, whatever the order of its ops", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "a".repeat(10));
-    const b = await seed(w, "owner", "b".repeat(10));
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const b = await seed(w, "owner", "乙".repeat(10));
     const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
-    const r = await run(w, [{ op: "replace", ref: "a", text: "c".repeat(20) }, { op: "remove", ref: "b" }], refs, {
+    const r = await run(w, [{ op: "replace", ref: "a", text: "丙".repeat(20) }, { op: "remove", ref: "b" }], refs, {
       status: "pending",
-      vaults: new Map([[vaultKey("owner", "c".repeat(20)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "丙".repeat(20)), OPEN]]),
     });
     const done = await confirm(w, r!.changeId!, { ...ROOMS, owner: 25 });
     expect(Array.isArray(done) && done.map((x) => x.op).sort()).toEqual(["remove", "replace"]);
-    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["c".repeat(20)]);
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["丙".repeat(20)]);
   });
 
   it("a held change whose net effect does not fit answers full, writes nothing and stays pending; it confirms once there is room", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "a".repeat(10));
-    const b = await seed(w, "owner", "b".repeat(10));
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const b = await seed(w, "owner", "乙".repeat(10));
     const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
-    const r = await run(w, [{ op: "replace", ref: "a", text: "c".repeat(30) }, { op: "remove", ref: "b" }], refs, {
+    const r = await run(w, [{ op: "replace", ref: "a", text: "丙".repeat(30) }, { op: "remove", ref: "b" }], refs, {
       status: "pending",
-      vaults: new Map([[vaultKey("owner", "c".repeat(30)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "丙".repeat(30)), OPEN]]),
     });
-    const e = await seed(w, "owner", "e".repeat(10));
+    const e = await seed(w, "owner", "戊".repeat(10));
     const rooms = { ...ROOMS, owner: 35 };
     expect(await confirm(w, r!.changeId!, rooms)).toBe("full");
-    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["a".repeat(10), "b".repeat(10), "e".repeat(10)]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["甲".repeat(10), "乙".repeat(10), "戊".repeat(10)].sort());
     expect((await changeRow(r!.changeId!)).status).toBe("pending");
     await db.query("delete from owner_notes where id = $1", [e]);
     const done = await confirm(w, r!.changeId!, rooms);
     expect(Array.isArray(done) && done.map((x) => x.op).sort()).toEqual(["remove", "replace"]);
-    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["c".repeat(30)]);
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["丙".repeat(30)]);
     expect((await changeRow(r!.changeId!)).status).toBe("applied");
   });
 
   it("applyOps judges a change by its net effect: a growing replace listed before a shrinking one is kept", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "a".repeat(10));
-    const b = await seed(w, "owner", "b".repeat(20));
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const b = await seed(w, "owner", "乙".repeat(20));
     const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
-    const r = await run(w, [{ op: "replace", ref: "a", text: "c".repeat(20) }, { op: "replace", ref: "b", text: "d".repeat(10) }], refs, {
+    const r = await run(w, [{ op: "replace", ref: "a", text: "丙".repeat(20) }, { op: "replace", ref: "b", text: "丁".repeat(10) }], refs, {
       rooms: { ...ROOMS, owner: 35 },
-      vaults: new Map([[vaultKey("owner", "c".repeat(20)), OPEN], [vaultKey("owner", "d".repeat(10)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "丙".repeat(20)), OPEN], [vaultKey("owner", "丁".repeat(10)), OPEN]]),
     });
     expect(r!.full).toBe(false);
     expect(r!.applied).toHaveLength(2);
@@ -788,14 +791,14 @@ describe("fix round 3", () => {
 
   it("growth is judged in op order across adds and replaces together", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "a".repeat(10));
-    const r = await run(w, [{ op: "add", kind: "owner", text: "n".repeat(10) }, { op: "replace", ref: "a", text: "c".repeat(20) }], new Map([["a", ref("owner", a)]]), {
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const r = await run(w, [{ op: "add", kind: "owner", text: "卯".repeat(10) }, { op: "replace", ref: "a", text: "丙".repeat(20) }], new Map([["a", ref("owner", a)]]), {
       rooms: { ...ROOMS, owner: 25 },
-      vaults: new Map([[vaultKey("owner", "c".repeat(20)), OPEN]]),
+      vaults: new Map([[vaultKey("owner", "丙".repeat(20)), OPEN]]),
     });
     expect(r!.full).toBe(true);
     expect(r!.applied.map((x) => x.op)).toEqual(["add"]);
-    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["a".repeat(10), "n".repeat(10)]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["甲".repeat(10), "卯".repeat(10)].sort());
   });
 });
 

@@ -573,13 +573,13 @@ describe("a speaker's name can never pass for another claim or for the owner", (
 });
 
 describe("the hearsay room counts the speaker's name as well as the text", () => {
-  /** Ten entries of 100 code points of text and a 100-point name each: exactly the 2000 of the room. */
+  /** Ten entries of 100 weight of text and a 100-weight name each: exactly the 2000 of the room. */
   async function fillRoom(w: World): Promise<string[]> {
     const ids: string[] = [];
     for (let i = 0; i < 10; i++) {
       const { rows } = await db.query<{ id: string }>(
         "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at, created_at) values ($1, $2, $3, $4, $5, now(), now() - interval '1 hour' + $6::int * interval '1 second') returning id",
-        [w.agent.id, w.g, w.mia.id, "名".repeat(100), `${i}`.repeat(100), i],
+        [w.agent.id, w.g, w.mia.id, "名".repeat(100), `${"字".repeat(99)}${i}`, i],
       );
       ids.push(rows[0]!.id);
     }
@@ -731,14 +731,14 @@ describe("what comes of the answer", () => {
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
   });
 
-  it("a room over 2000 code points drops the oldest entries, of any group, until it fits", async () => {
+  it("a room over 2000 weight drops the oldest entries, of any group, until it fits", async () => {
     const w = await world("j");
     const other = await group(app, w.mia, "别的群", [w.owner, w.third]);
     const ids: string[] = [];
     for (let i = 0; i < 10; i++) {
       const { rows } = await db.query<{ id: string }>(
         "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at, created_at) values ($1, $2, $3, 'x', $4, now(), now() - interval '1 hour' + $5::int * interval '1 second') returning id",
-        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${i}`.repeat(200), i],
+        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${"字".repeat(199)}${i}`, i],
       );
       ids.push(rows[0]!.id);
     }
@@ -939,7 +939,7 @@ describe("undoing hearsay", () => {
     for (let i = 0; i < 10; i++) {
       const { rows } = await db.query<{ id: string }>(
         "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at, created_at) values ($1, $2, $3, 'x', $4, now(), now() - interval '1 hour' + $5::int * interval '1 second') returning id",
-        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${i}`.repeat(199), i],
+        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${"字".repeat(198)}${i}`, i],
       );
       ids.push(rows[0]!.id);
     }
@@ -983,7 +983,7 @@ describe("undoing hearsay", () => {
     const [chip] = await chips(w.owner, w.agent.conversationId);
     expect((await hearsayRows(w.agent.id)).map((r) => r.id)).not.toContain(rows[0]!.id);
     // The owner fills the room by hand meanwhile.
-    for (let i = 0; i < 10; i++) await db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at) values ($1, $2, $3, 'x', $4, now())", [w.agent.id, w.g, w.mia.id, `${i}`.repeat(200)]);
+    for (let i = 0; i < 10; i++) await db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at) values ($1, $2, $3, 'x', $4, now())", [w.agent.id, w.g, w.mia.id, `${"字".repeat(199)}${i}`]);
     expect(await undo(w, chip.system.changeId)).toEqual({ status: 409, json: { error: "room_full", left: 0 } });
   });
 
@@ -1004,7 +1004,7 @@ describe("undoing hearsay", () => {
     for (let i = 0; i < 10; i++) {
       const { rows } = await db.query<{ id: string }>(
         "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at, created_at) values ($1, $2, $3, 'x', $4, now(), now() - interval '1 hour' + $5::int * interval '1 second') returning id",
-        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${i}`.repeat(200), i],
+        [w.agent.id, i === 0 ? other : w.g, w.mia.id, `${"字".repeat(199)}${i}`, i],
       );
       ids.push(rows[0]!.id);
     }

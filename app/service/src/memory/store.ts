@@ -2,6 +2,7 @@ import type { AgentModel } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { Queryable } from "../db.ts";
 import { isMemoryLanguage, type MemoryLanguage } from "./language.ts";
+import { weight } from "./weight.ts";
 
 /**
  * The notes of an Agent's memory as stored, and the one function that decides which of them a conversation may show
@@ -43,7 +44,7 @@ export interface Hearsay {
   saidAt: Date;
 }
 
-/** What each room holds at most, in code points (`MEMORY.roomOwner`, `roomSelf`, `roomHearsay`), and how many notes a room of notes holds (`roomNotes`; absent: no count limit). */
+/** What each room holds at most, in weight (`MEMORY.roomOwner`, `roomSelf`, `roomHearsay`), and how many notes a room of notes holds (`roomNotes`; absent: no count limit). */
 export interface Rooms {
   owner: number;
   self: number;
@@ -58,14 +59,8 @@ export const roomOf = (config: Pick<Config, "memory">): Rooms => ({
   notes: config.memory.roomNotes,
 });
 
-/** How much of a room `notes` fill: the sum of their code points. */
-/** The length of `text` in code points: the one counter of every limit here. */
-export const codePoints = (text: string): number => [...text].length;
-
-export const used = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + codePoints(n.text), 0);
-
-/** What one hearsay entry costs its room: its text and the speaker's name, which every prompt that shows the entry carries. */
-export const hearsayCost = (h: { speakerName: string; text: string }): number => codePoints(h.speakerName) + codePoints(h.text);
+/** What one hearsay entry costs its room, in weight: its text and the speaker's name, which every prompt that shows the entry carries. */
+export const hearsayCost = (h: { speakerName: string; text: string }): number => weight(h.speakerName) + weight(h.text);
 
 /** How much of the hearsay room `entries` fill: the one measure of it, in trimming, in undo and in the routes. */
 export const hearsayUsed = (entries: ReadonlyArray<{ speakerName: string; text: string }>): number => entries.reduce((sum, h) => sum + hearsayCost(h), 0);
