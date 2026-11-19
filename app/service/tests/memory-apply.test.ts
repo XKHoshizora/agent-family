@@ -41,6 +41,12 @@ async function seed(w: World, kind: NoteKind, text: string, over: SeedOver = {})
 
 const otherOwner = async (w: World): Promise<string> => (await signUp(app, `ap_other${w.n}`)).id as string;
 
+/** The owner's own edit of a note, through the route. */
+const patchNote = async (w: World, id: string, body: Record<string, unknown>) => {
+  const res = await api(app, { cookie: w.cookie }, "PATCH", `/api/memory/notes/${id}`, body);
+  expect(res.status).toBe(200);
+};
+
 const ownerNotes = (w: World) => listOwnerNotes(db, w.ownerId);
 const selfNotes = (w: World) => listAgentNotes(db, w.agentId);
 
@@ -408,7 +414,7 @@ describe("undoChange", () => {
     const r1 = await run(w, [{ op: "replace", ref: "a", text: "alpha 2" }, { op: "add", kind: "owner", text: "added" }], new Map([["a", ref("owner", a)]]), {
       vaults: new Map([[vaultKey("owner", "alpha 2"), OPEN]]),
     });
-    await db.query("update owner_notes set text = 'edited by hand' where id = $1", [a]);
+    await patchNote(w, a, { text: "edited by hand" });
     expect(await undo(w, r1!.changeId!)).toBe("stale");
     expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["added", "edited by hand"]);
     expect((await changeRow(r1!.changeId!)).status).toBe("applied");
@@ -416,7 +422,7 @@ describe("undoChange", () => {
     const w2 = await world();
     const x = await seed(w2, "owner", "x1", { vault: false });
     const r2 = await run(w2, [{ op: "lock", ref: "x" }], new Map([["x", ref("owner", x)]]));
-    await db.query("update owner_notes set vault_by = 'auto' where id = $1", [x]);
+    await patchNote(w2, x, { vault: true });
     expect(await undo(w2, r2!.changeId!)).toBe("stale");
 
     const w3 = await world();
@@ -454,7 +460,7 @@ describe("undoChange", () => {
 
     // A vault note the owner has since moved out is stale, not restored.
     const r2 = await run(w, [{ op: "replace", ref: "b", text: "edited locked" }], refs, { vaults: new Map([[vaultKey("owner", "edited locked"), OPEN]]) });
-    await db.query("update owner_notes set vault = false, vault_by = 'owner' where id = $1", [b]);
+    await patchNote(w, b, { vault: false });
     expect(await undo(w, r2!.changeId!)).toBe("stale");
     expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ text: "edited locked", vault: false });
 
@@ -735,7 +741,7 @@ describe("fix round 2", () => {
     const a = await seed(w, "owner", "lock me", { vault: false, unsure: true });
     const r = await run(w, [{ op: "lock", ref: "a" }], new Map([["a", ref("owner", a)]]));
     expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner", unsure: true });
-    await db.query("update owner_notes set unsure = false where id = $1", [a]);
+    await patchNote(w, a, { vault: true });
     expect(await undo(w, r!.changeId!)).toBe("stale");
     expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner", unsure: false });
   });
@@ -790,5 +796,47 @@ describe("fix round 3", () => {
     expect(r!.full).toBe(true);
     expect(r!.applied.map((x) => x.op)).toEqual(["add"]);
     expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["a".repeat(10), "n".repeat(10)]);
+  });
+});
+
+describe("undo walks back through changes to one note", () => {
+  const twoChanges = async () => {
+    const w = await world();
+    const n = await seed(w, "owner", "version zero", { vault: false });
+    const refs = new Map([["n", ref("owner", n)]]);
+    const open = (text: string) => new Map([[vaultKey("owner", text), OPEN]]);
+    const r1 = await run(w, [{ op: "replace", ref: "n", text: "version one" }], refs, { vaults: open("version one") });
+    const r2 = await run(w, [{ op: "replace", ref: "n", text: "version two" }], refs, { vaults: open("version two") });
+    return { w, n, r1: r1!.changeId!, r2: r2!.changeId! };
+  };
+
+  it("undoing newest first works, ends with the original text, and both changes are undone", async () => {
+    const { w, r1, r2 } = await twoChanges();
+    expect(await undo(w, r2)).toBe("undone");
+    expect((await ownerNotes(w))[0]!.text).toBe("version one");
+    expect(await undo(w, r1)).toBe("undone");
+    expect((await ownerNotes(w))[0]).toMatchObject({ text: "version zero", vault: false });
+    expect((await changeRow(r1)).status).toBe("undone");
+    expect((await changeRow(r2)).status).toBe("undone");
+  });
+
+  it("undoing in the wrong order is stale, and so is the second undo after an owner edit in between", async () => {
+    const { w, n, r1, r2 } = await twoChanges();
+    expect(await undo(w, r1)).toBe("stale");
+    expect(await undo(w, r2)).toBe("undone");
+    await patchNote(w, n, { text: "edited between" });
+    expect(await undo(w, r1)).toBe("stale");
+    expect((await ownerNotes(w))[0]!.text).toBe("edited between");
+  });
+
+  it("a removed note comes back with the updated_at it had, so an earlier change to it can still be undone", async () => {
+    const w = await world();
+    const n = await seed(w, "owner", "before");
+    const refs = new Map([["n", ref("owner", n)]]);
+    const r1 = await run(w, [{ op: "replace", ref: "n", text: "after" }], refs);
+    const r2 = await run(w, [{ op: "remove", ref: "n" }], refs);
+    expect(await undo(w, r2!.changeId!)).toBe("undone");
+    expect(await undo(w, r1!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w))[0]).toMatchObject({ id: n, text: "before" });
   });
 });

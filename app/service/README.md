@@ -828,7 +828,7 @@ owner sends `"vault": false` here. Any `vault` the owner sends is their choice, 
 sorts that note again; without one a new note goes by the owner's setting (`newNotes`: `vault`, `open`, or `auto`: asked
 of the judgement model, in the vault when that cannot be asked or is not sure), and a text edit alone may move a note
 outside the vault into it (judged again; `unsure` then comes from that judgement) but never out, and never touches a note
-the owner chose for.
+the owner chose for. A text edit that changes nothing (the same text, no `vault`) is not a write: `updatedAt` stays.
 
 #### `GET /api/memory/notes`
 

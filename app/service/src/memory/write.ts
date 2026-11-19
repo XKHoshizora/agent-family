@@ -87,11 +87,11 @@ export async function insertNote(t: Tx, room: Room, n: NewNote): Promise<string>
 }
 
 /** Puts back a note that was deleted (under `lockRoom`), as it was: same id, creation time and state. Its conversation may be gone by now: the column then goes null, as it would have. */
-export async function restoreNote(t: Tx, room: Room, n: Pick<Note, "id" | "text" | "vault" | "vaultBy" | "unsure" | "origin" | "originConversationId"> & { createdAt: Date | string }): Promise<void> {
+export async function restoreNote(t: Tx, room: Room, n: Pick<Note, "id" | "text" | "vault" | "vaultBy" | "unsure" | "origin" | "originConversationId"> & { createdAt: Date | string; updatedAt: Date | string }): Promise<void> {
   await t.query(
-    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, id, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at)
-     values ($1, $2, $3, $4, $5, $6, $7, (select id from conversations where id = $8), $9::timestamptz)`,
-    [keyOf(room), n.id, n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.createdAt],
+    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, id, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at, updated_at)
+     values ($1, $2, $3, $4, $5, $6, $7, (select id from conversations where id = $8), $9::timestamptz, $10::timestamptz)`,
+    [keyOf(room), n.id, n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.createdAt, n.updatedAt],
   );
 }
 
@@ -100,6 +100,8 @@ export interface NotePatch {
   vault?: boolean;
   vaultBy?: "auto" | "owner";
   unsure?: boolean;
+  /** Writes this exact `updated_at` (an undo putting a note back as it was) instead of a new clock value. */
+  updatedAt?: string;
 }
 
 /** Changes the fields given of a note of `room` (under `lockRoom`); false when `room` has no such note. Every call bumps `updated_at`, even when no value changes: it is how a change knows the owner touched a note since. */
@@ -107,9 +109,9 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
   const { rowCount } = await t.query(
     `update ${TABLE[room.kind]}
         set text = coalesce($3, text), vault = coalesce($4, vault), vault_by = coalesce($5, vault_by),
-            unsure = coalesce($6, unsure), updated_at = clock_timestamp()
+            unsure = coalesce($6, unsure), updated_at = coalesce($7::timestamptz, clock_timestamp())
       where id = $1 and ${COLUMN[room.kind]} = $2`,
-    [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null],
+    [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null, patch.updatedAt ?? null],
   );
   return rowCount === 1;
 }

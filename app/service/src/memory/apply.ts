@@ -293,10 +293,12 @@ async function writeChange(t: Tx, w: Ids, conversationId: string, status: "appli
 
 /**
  * Applies a review's operations (or, with status `pending`, only records them for the owner to confirm), in the
- * caller's transaction, under the account lock. `refs` maps the numbers the model saw to notes. Removes, replaces and
- * locks go first, then adds: an add that would pass its room is dropped and sets `full`; an `unlock` is never applied
- * (its refs come back in `unlocks`). Null when there is nothing to report: no op left, no unlock, not full; also when
- * the Agent is not the owner's. A change that only found the room full is still recorded (`ops: []`, `full`).
+ * caller's transaction, under the account lock. `refs` maps the numbers the model saw to notes. The change is judged by its
+ * net effect on each room: every remove and shrinking replace is counted first, then every growth (a growing replace or
+ * an add) in the order the ops came; one that would pass its room's limit is dropped and sets `full`. The result lists
+ * removes, replaces and locks, then adds. An `unlock` is never applied (its refs come back in `unlocks`). Null when there is
+ * nothing to report: no op left, no unlock, not full; also when the Agent is not the owner's. A change that only found
+ * the room full is still recorded (`ops: []`, `full`).
  */
 export async function applyOps(
   t: Tx,
@@ -379,7 +381,8 @@ const undoGrowth = (s: StoredOp): number =>
  * `vault_by`, `unsure`), an added note goes, a removed one returns (same id). Refused as `stale` (nothing changed) when
  * any touched note is not as the change left it, and as `full` (nothing changed) when restoring would put a room over
  * its limit. A note that was in the vault before the change is in it after; one the change moved in from outside goes
- * back outside (the stale check proves nothing touched it since). Null when the change is not the owner's or not applied.
+ * back outside (the stale check proves nothing touched it since). A note is put back with the `updated_at` it had before the
+ * change, so changes to one note undo newest first. Null when the change is not the owner's or not applied.
  */
 export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms): Promise<"undone" | "stale" | "full" | null> {
   await lockAccount(t, ownerId);
@@ -410,9 +413,10 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         origin: s.origin!,
         originConversationId: s.originConversationId,
         createdAt: s.createdAt!,
+        updatedAt: s.updatedAtBefore!,
       });
     } else {
-      await updateNote(t, at, s.noteId!, { text: s.before!, vault: s.vaultBefore!, vaultBy: s.vaultByBefore!, unsure: s.unsureBefore! });
+      await updateNote(t, at, s.noteId!, { text: s.before!, vault: s.vaultBefore!, vaultBy: s.vaultByBefore!, unsure: s.unsureBefore!, updatedAt: s.updatedAtBefore! });
     }
   }
   await resolve(t, changeId, "undone");
