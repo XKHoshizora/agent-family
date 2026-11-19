@@ -88,6 +88,23 @@ export async function allowanceRefuses(q: Queryable, config: Config, ownerId: st
   return (await memoryLeft(q, config, ownerId, now)) <= 0n;
 }
 
+/**
+ * Whether it is known now that no memory call for `ownerId` could start: no model resolves for it (none configured, the choice gone,
+ * a saved key that cannot be opened), or `allowanceRefuses`. Reads only, no lock (admission decides each call): what a request that
+ * would only start calls asks first. The calls running at once are not looked at: that changes from one moment to the next.
+ */
+export async function noCallCanStart(q: Queryable, config: Config, ownerId: string, now: Date): Promise<boolean> {
+  let resolved: Resolved | null;
+  try {
+    resolved = await modelFor(q, config, ownerId, await getMemoryModel(q, ownerId));
+  } catch (err) {
+    if (err instanceof KeyUnreadableError) return true;
+    throw err;
+  }
+  if (resolved === null) return true;
+  return resolved.source === "site" && (await memoryLeft(q, config, ownerId, now)) <= 0n;
+}
+
 export interface MemoryCallDeps {
   db: Db;
   config: Config;

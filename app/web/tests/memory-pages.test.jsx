@@ -71,7 +71,8 @@ function service({ notes = [], hearsay = [], limit = 100, hearsayLimit = 60, fit
     updateMemoryModel: vi.fn(async () => ({})),
     updateDream: vi.fn(async () => ({})),
     updateMemoryLanguage: vi.fn(async () => ({})),
-    convertMemoryLanguage: vi.fn(async () => ({ rooms: 0, converted: 0, kept: 0 })),
+    convertMemoryLanguage: vi.fn(async () => ({ started: true })),
+    getMemoryConversion: vi.fn(async () => ({ state: "done", result: { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 } })),
     getModels: vi.fn(async () => MODELS),
     listProviders: vi.fn(async () => ({ providers: [providerOf()] })),
     listMemoryNotes: vi.fn(async () => room()),
@@ -589,17 +590,39 @@ describe("记忆用的语言", () => {
     expect(inMain().queryByText(/把已有的笔记也转成/)).toBeNull();
   });
 
-  it("转换 calls the route, says 正在转换… while it runs, then how many were converted and how many kept", async () => {
-    const wait = deferred();
-    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(() => wait.promise) } });
+  /** The GET's answers in turn (the last one repeats). */
+  const stands = (...answers) => {
+    let i = 0;
+    return vi.fn(async () => {
+      const answer = answers[Math.min(i, answers.length - 1)];
+      i += 1;
+      if (answer instanceof Error) throw answer;
+      return answer;
+    });
+  };
+  const RUNNING = { state: "running" };
+  const done = (result, extra = {}) => ({ state: "done", result: { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0, ...result }, ...extra });
+
+  it("转换 starts the conversion, says 正在转换… and asks how it stands every 3 s until it is done, then how many were converted and how many kept", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(RUNNING, RUNNING, done({ rooms: 2, converted: 3, kept: 1 })) } });
     await openPalace(svc);
     await choose("en");
     await click(inMain().getByRole("button", { name: "转换" }));
     expect(svc.api.convertMemoryLanguage).toHaveBeenCalledTimes(1);
     expect(inMain().getByText("正在转换…")).toBeTruthy();
     expect(pick().matches(":disabled")).toBe(true);
-    wait.resolve({ rooms: 2, converted: 3, kept: 1 });
+    // Not asked before 3 s, then once every 3 s.
+    await elapse(2999);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(0);
+    await elapse(1);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(1);
+    expect(inMain().getByText("正在转换…")).toBeTruthy();
+    await elapse(3000);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(2);
+    expect(inMain().getByText("正在转换…")).toBeTruthy();
+    await elapse(3000);
     await flush();
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(3);
     expect(inMain().queryByText("正在转换…")).toBeNull();
     expect(inMain().getByText("转了 3 条，1 条保持原样。")).toBeTruthy();
     expect(inMain().queryByRole("button", { name: "转换" })).toBeNull();
@@ -618,26 +641,71 @@ describe("记忆用的语言", () => {
     ];
     for (const [answer, line] of answers) {
       cleanup();
-      const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(async () => answer) } });
+      const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(done(answer)) } });
       await openPalace(svc);
       await choose("en");
       await click(inMain().getByRole("button", { name: "转换" }));
+      await elapse(3000);
       await flush();
       expect(inMain().getByRole("status").textContent).toBe(line);
     }
   });
 
   it("keeps the language select off while a conversion runs, and back on after it", async () => {
-    const wait = deferred();
-    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(() => wait.promise) } });
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(RUNNING, done({ rooms: 1, converted: 1 })) } });
     await openPalace(svc);
     await choose("en");
     expect(pick().matches(":disabled")).toBe(false);
     await click(inMain().getByRole("button", { name: "转换" }));
     expect(pick().matches(":disabled")).toBe(true);
-    wait.resolve({ rooms: 1, converted: 1, kept: 0, noRoom: 0, failedRooms: 0 });
+    await elapse(3000);
+    expect(pick().matches(":disabled")).toBe(true);
+    await elapse(3000);
     await flush();
     expect(pick().matches(":disabled")).toBe(false);
+  });
+
+  it("a conversion the service no longer knows of (asked, it is idle: it restarted) says so, and asking stops", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(RUNNING, { state: "idle" }) } });
+    await openPalace(svc);
+    await choose("en");
+    await click(inMain().getByRole("button", { name: "转换" }));
+    await elapse(6000);
+    await flush();
+    expect(inMain().getByRole("status").textContent).toBe("转换可能还在进行，稍后在这里看结果。");
+    expect(pick().matches(":disabled")).toBe(false);
+    await elapse(9000);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(2);
+  });
+
+  it("a conversion that could do nothing at all (unavailable) is told as the refusal unavailable, and the question stays", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(done({ rooms: 1, failedRooms: 1 }, { unavailable: true })) } });
+    await openPalace(svc);
+    await choose("en");
+    await click(inMain().getByRole("button", { name: "转换" }));
+    await elapse(3000);
+    await flush();
+    expect(document.querySelector(".toast")?.textContent).toBe("现在转不了，稍后再试。");
+    expect(inMain().queryByText(/转了/)).toBeNull();
+    expect(inMain().queryByText("正在转换…")).toBeNull();
+    expect(inMain().getByRole("button", { name: "转换" })).toBeTruthy();
+  });
+
+  it("a failed look is asked again 3 s later; leaving the page stops the asking", async () => {
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), getMemoryConversion: stands(apiError(500, "internal"), RUNNING) } });
+    await openPalace(svc);
+    await choose("en");
+    await click(inMain().getByRole("button", { name: "转换" }));
+    await elapse(6000);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(2);
+    expect(inMain().getByText("正在转换…")).toBeTruthy();
+    // Away from the page: no more asking.
+    await click(screen.getByText("我的资料", { selector: ".list-col .row-name" }));
+    await elapse(3000);
+    const asked = svc.api.getMemoryConversion.mock.calls.length;
+    await elapse(12000);
+    expect(svc.api.getMemoryConversion).toHaveBeenCalledTimes(asked);
+    expect(asked).toBeLessThanOrEqual(3);
   });
 
   it("a refused conversion says why in its own words: no_language, busy, unavailable", async () => {

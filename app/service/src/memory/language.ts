@@ -83,6 +83,12 @@ export interface ConvertResult {
   unanswered?: number;
 }
 
+/**
+ * Where an owner's conversion stands, as `GET /api/memory/language/convert` tells it: none known (`idle`: never started in this process, or
+ * it did not run), under way or waiting (`running`), or over with what it did (`done`, kept until the next conversion or a restart).
+ */
+export type ConversionState = { state: "idle" } | { state: "running" } | { state: "done"; result: ConvertResult };
+
 /** One owner's conversion: every room of theirs that has notes, one after another, in the language chosen. `settle` tells the caller how it went (null: it did not run). */
 export interface ConvertJob {
   kind: "convert";

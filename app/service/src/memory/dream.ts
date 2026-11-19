@@ -38,7 +38,8 @@ import { listRoomExact, type ExactNote, type Room } from "./write.ts";
  * - A nap: a change that leaves a room at or above `napAt` of its limit asks (`NapJob`) for that room to be consolidated at
  *   once, without waiting for idleness, at most once per `dreamEveryMs` per room. A nap does not touch `dreamed_at`.
  *
- * What is called `new` is a note written or changed since `dreamed_at`. The split of an entry is checked by one judgement
+ * What is called `new` is a note written or changed since `dreamed_at`, unless its last change was a dream's own (a dream, a nap, a
+ * conversion: `memory_changes.phase` `dream`). The split of an entry is checked by one judgement
  * question (sort.ts `addsNothing`, the one a merge and a rewrite share), fail closed. Never logs a note or an answer.
  *
  * One language (language.ts): a dream writes in the owner's chosen language, and when one is chosen it is also asked to restate, per
@@ -496,6 +497,25 @@ const RESORT_AT_MOST = 20;
 /** Before a first dream, a note counts as new only when it was written within this long. */
 const NEW_WITHIN = DAY;
 
+/**
+ * The notes of `ownerId` a dream-phase change (a dream, a nap, a conversion) applied or confirmed since `since` wrote, each with the exact
+ * `updated_at` that write left: a note that still has it was last changed by that change.
+ */
+async function dreamWritten(db: Db, ownerId: string, since: Date): Promise<Map<string, string>> {
+  const { rows } = await db.query<{ ops: StoredOp[] }>(
+    "select ops from memory_changes where owner_id = $1 and phase = 'dream' and status = 'applied' and coalesce(resolved_at, created_at) > $2 order by coalesce(resolved_at, created_at)",
+    [ownerId, since],
+  );
+  const written = new Map<string, string>();
+  for (const { ops } of rows) {
+    for (const s of ops) {
+      if (s.noteId && s.updatedAtAfter) written.set(s.noteId, s.updatedAtAfter);
+      for (const p of s.parts ?? []) if (p.noteId && p.updatedAt) written.set(p.noteId, p.updatedAt);
+    }
+  }
+  return written;
+}
+
 /** Whether an answer is something a dream can use: an object with an `ops` list (an empty one is a fine answer too). */
 function usable(answer: string): boolean {
   const parsed = parseAnswer(answer);
@@ -538,9 +558,13 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   const where: Room = room.kind === "owner" ? { kind: "owner", ownerId } : { kind: "self", agentId: room.agentId };
   const notes = await listRoomExact(db, where);
   if (notes.length === 0) return "done";
-  // New: written or changed since the last dream; before a first one, written in the last day.
+  // New: written or changed since the last dream; before a first one, written in the last day. Not a note whose last change was a dream's
+  // own (a dream, a nap or a conversion: a restatement of what was there, nothing new to sort again).
   const recent = new Date(deps.now() - NEW_WITHIN);
-  const fresh = new Set(notes.filter((n) => (since === null ? n.note.createdAt > recent : n.note.updatedAt > since)).map((n) => n.note.id));
+  const dreamt = await dreamWritten(db, ownerId, since ?? recent);
+  const fresh = new Set(
+    notes.filter((n) => (since === null ? n.note.createdAt > recent : n.note.updatedAt > since) && dreamt.get(n.note.id) !== n.updatedAt).map((n) => n.note.id),
+  );
   const read = new Map(notes.map((n) => [n.note.id, n.updatedAt]));
   const now = new Date(deps.now());
   const input = conversion
@@ -623,7 +647,8 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
 /**
  * One owner's conversion (`POST /api/memory/language/convert`): the shared room (carried out by the owner's Agent that keeps notes
  * and uses them, the lowest id) and then each live Agent's own room, one after another, a room with no notes skipped. A room whose
- * call fails or is not usable leaves its notes as they are (counted as kept) and the next room goes on. `job.settle` is told the
+ * call fails or is not usable leaves its notes as they are (a failed room) and the next room goes on; once the memory allowance refused
+ * a room's call no further room is asked (each of them that has notes is a failed room that could not start). `job.settle` is told the
  * tally; it is not called when the service is stopping.
  */
 async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): Promise<void> {
@@ -635,16 +660,36 @@ async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): 
     ...agents.map((agent) => ({ room: { kind: "self", agentId: agent.id } as DreamRoom, carrier: agent })),
   ];
   const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
-  for (const { room, carrier } of todo) {
+  for (const [i, { room, carrier }] of todo.entries()) {
     if (ctx.closing.aborted) return;
+    let outcome: Awaited<ReturnType<typeof dreamRoom>> | "threw";
     try {
-      if ((await dreamRoom(deps, ctx, carrier, room, null, { language: job.language, tally })) === "aborted") return;
+      outcome = await dreamRoom(deps, ctx, carrier, room, null, { language: job.language, tally });
     } catch (err) {
       tally.failedRooms++;
+      outcome = "threw";
       log.error({ ...errInfo(err), ownerId: job.ownerId }, "the conversion of one room failed; nothing was changed in it");
+    }
+    if (outcome === "aborted") return;
+    // The allowance is the owner's: the rooms after this one would be refused too. They are not asked; each that has notes is a room that
+    // could not start.
+    if (outcome === "refused") {
+      for (const rest of todo.slice(i + 1)) {
+        if ((await convertibleNotes(deps.db, job.ownerId, rest.room)) === 0) continue;
+        tally.rooms++;
+        tally.failedRooms++;
+        tally.unanswered = (tally.unanswered ?? 0) + 1;
+      }
+      break;
     }
   }
   job.settle(tally);
+}
+
+/** How many notes of a room a conversion would show its model (`numbered`: those with text left once cleaned). */
+async function convertibleNotes(db: Db, ownerId: string, room: DreamRoom): Promise<number> {
+  const notes = await listRoomExact(db, room.kind === "owner" ? { kind: "owner", ownerId } : { kind: "self", agentId: room.agentId });
+  return numbered(notes, room.kind).refs.size;
 }
 
 /**

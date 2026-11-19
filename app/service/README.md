@@ -866,15 +866,27 @@ Body: none or `{}`. → 200 `{"ok": true}`; 404 `not_found` unless it is a note 
 
 #### `POST /api/memory/language/convert`
 
-Body: none or `{}`. Restates your existing notes in the language you chose (`PATCH /api/me` `memoryLanguage`; An Agent's memory, *One
-language*): the shared room and then each of your live Agents' own rooms that has notes, one call each, one room after another;
-hearsay is not converted. → 200 `{"rooms": n, "converted": n, "kept": n, "noRoom": n, "failedRooms": n}` — the rooms that had notes, the notes rewritten,
-the notes left as they were (a rewrite the judgement did not find faithful or that was too long, a note already in the language, a
-restatement the room could not hold), of which `noRoom` were left only because the room could not hold the restated text, and
-`failedRooms`, the rooms whose call failed (no quota, a model that did not answer) or whose answer could not be used (cut, not
-JSON): the notes of those rooms are in neither `converted` nor `kept`. The memory allowance the site pays for is spent, not your points. When no room's call could even start (the allowance is empty, no memory model resolves, too many of your calls are running) the answer is 503 `unavailable` instead; a call that started and then failed is a room in `failedRooms` of a 200, as are rooms whose call could not start when another room's did. 409 `no_language` while the setting is automatic; 409
-`busy` while a dream or a conversion of yours is under way or waiting; 503 `unavailable` when the service is stopping or no room's call could start. Limit: 6
-per minute.
+Body: none or `{}`. Starts restating your existing notes in the language you chose (`PATCH /api/me` `memoryLanguage`; An Agent's
+memory, *One language*): the shared room and then each of your live Agents' own rooms that has notes, one call each, one room after
+another; hearsay is not converted. The job runs on its own (it can take longer than a request may wait): → 202 `{"started": true}` at
+once, and `GET /api/memory/language/convert` says how it stands. The memory allowance the site pays for is spent, not your points; once
+the allowance refuses a room's call no further room is asked (each of those that has notes is a failed room). 409 `no_language` while
+the setting is automatic; 409 `busy` while a dream or a conversion of yours is under way or waiting; 503 `unavailable` when it is known
+before starting that no call could start (the memory allowance is spent, no memory model resolves for you) or the service is stopping:
+nothing was started. Limit: 6 per minute.
+
+#### `GET /api/memory/language/convert`
+
+How your latest conversion stands → 200 `{"state": "idle" | "running" | "done", "result"?: {"rooms": n, "converted": n, "kept": n,
+"noRoom": n, "failedRooms": n}, "unavailable"?: true}`. `running` from the `POST` until its job ends; then `done`, with `result`, kept
+until your next conversion: the rooms that had notes, the notes rewritten, the notes left as they were (a rewrite the judgement did not
+find faithful or that was too long, a note already in the language, a restatement the room could not hold), of which `noRoom` were left
+only because the room could not hold the restated text, and `failedRooms`, the rooms whose call failed (no quota, a model that did not
+answer) or whose answer could not be used (cut, not JSON): the notes of those rooms are in neither `converted` nor `kept`. `unavailable`
+is true when no room's call could even start (too many of your calls running, the allowance spent meanwhile): nothing happened. A call
+that started and then failed is a room in `failedRooms`, as are rooms whose call could not start when another room's did. `idle` when
+there is none: never started, or the service restarted since (what it remembers is in its memory only; a conversion under way then is
+not finished). Yours only. Limit: as the other reads of your memory.
 
 #### `GET /api/agents/:id/memory`
 
@@ -959,7 +971,8 @@ as a review is (`memoryCall`, purpose `memory`: one call per room; the judgement
 - *What the model is shown*: one JSON object `{"notes": [{"ref": "n1", "text", "date", "last_mentioned", "strength", "vault",
   "new"}…], "room": {"used", "limit"}}` — the room's notes cleaned (`cleanText`), `date` the day it was written and `last_mentioned`
   the day it was last mentioned (site time zone, `YYYY-MM-DD`), `new` for a note written or changed since `dreamed_at` (before a first
-  dream: written in the last 24 hours). Its
+  dream: written in the last 24 hours), unless its last change was a dream-phase change — a dream's, a nap's or a conversion's
+  (`memory_changes.phase` `dream`; the note still has the `updated_at` that change left): a restatement is nothing new. Its
   system text (Chinese) names the jobs: look at what is new, merge what says the same thing, let the later date win (the earlier
   becomes `现在…（以前…，YYYY 年 M 月改的）`), write a passing mood or one day's event as a dated event, shorten low-`strength`,
   long-ago entries when the room is over 80% full, split an entry only when it plainly holds unrelated facts, lock one that
@@ -1017,7 +1030,10 @@ note keeps its `vault`, `vault_by` and `unsure` exactly as they are, and its ori
 to the ordinary limit of a model's entry (200 weight: weight follows tokens, so a note restated in another script weighs about what it
 did, and no special length is allowed; the prompt asks for it as short as the original), and the call's output limit is sized to the room (twice what it holds
 in weight + 40 a note + 200, never above the model's own). A note that fails stays as it is; a restatement the room cannot hold is
-left and counted in `noRoom`; a room whose call or answer fails is counted in `failedRooms` (and when no room's call could even start, the request is a 503 `unavailable`).
+left and counted in `noRoom`; a room whose call or answer fails is counted in `failedRooms` (and when no room's call could even start, the
+result says `unavailable`). The request only starts the job (202) and the result is read with `GET /api/memory/language/convert`: a
+conversion takes a call per room, one after another, which may be longer than a request may wait. A note a conversion (or a dream or a
+nap) restated is not new to the next dream (*What the model is shown*).
 
 ### Agents in a group
 

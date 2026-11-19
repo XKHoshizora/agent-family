@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { useApp } from "./helpers/harness.ts";
 
@@ -230,5 +231,24 @@ describe("schema guarantees enforced by the database", () => {
     await rejectedWith(CHECK_VIOLATION, `insert into friendships (a_id, b_id) values ($1, $2)`, [hi, lo]);
     const { rowCount } = await db.query(`insert into friendships (a_id, b_id) values ($1, $2)`, [lo, hi]);
     expect(rowCount).toBe(1);
+  });
+
+  test("migration 030's Down runs once memory calls are recorded: its old checks are added not valid, so a rollback is not stopped half way", async () => {
+    const owner = await human("down_030");
+    const sql = readFileSync(new URL("../migrations/030_memory_purpose.sql", import.meta.url), "utf8");
+    const down = sql.split("-- Down Migration")[1]!;
+    const ran = await db
+      .tx(async (t) => {
+        await t.query("insert into agent_runs (purpose, owner_id, status, started_at) values ('memory', $1, 'running', now())", [owner]);
+        await t.query(down);
+        // Rolled back whatever happened: the schema stays as it is.
+        throw new Error("rollback");
+      })
+      .catch((err: Error) => err.message);
+    expect(ran).toBe("rollback");
+    const still = await db.query("select count(*)::int as n from agent_runs where owner_id = $1", [owner]);
+    expect(still.rows[0].n).toBe(0);
+    await db.query("insert into agent_runs (purpose, owner_id, status, started_at) values ('memory', $1, 'running', now())", [owner]);
+    await db.query("delete from agent_runs where owner_id = $1", [owner]);
   });
 });

@@ -10,6 +10,7 @@ import { resolveModel } from "../models/resolve.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { confirmChange, discardChange, undoChange } from "./apply.ts";
+import { noCallCanStart } from "./call.ts";
 import { loadNotes } from "./passage.ts";
 import { ownerNote } from "./clean.ts";
 import { keptOrigin } from "./origin.ts";
@@ -64,6 +65,11 @@ const hearsayView = z.object({
   saidAt: z.string(),
 });
 const ok = z.object({ ok: z.literal(true) });
+const conversionView = z.object({
+  state: z.enum(["idle", "running", "done"]),
+  result: z.object({ rooms: z.number(), converted: z.number(), kept: z.number(), noRoom: z.number(), failedRooms: z.number() }).optional(),
+  unavailable: z.literal(true).optional(),
+});
 
 type Source = { kind: "agent" | "group" | "manual" | "mixed"; title: string | null };
 
@@ -260,23 +266,40 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   // --- one language for the palace ---------------------------------------------------------------------------------
 
   // The owner's existing notes (the shared room and each Agent's own, never hearsay) restated in the language they chose, by the
-  // dream's own rewrite path (dream.ts): 409 `no_language` while the setting is automatic, 409 `busy` while a dream or a
-  // conversion of theirs is under way.
+  // dream's own rewrite path (dream.ts). It takes a call per room, one after another, which may be longer than a request may wait:
+  // the POST starts the job and answers at once (202), the GET says how it stands. 409 `no_language` while the setting is automatic,
+  // 409 `busy` while a dream or a conversion of theirs is under way, 503 `unavailable` when it is known before starting that no call
+  // could start (the allowance is spent, no model resolves) or the service is stopping.
   api.post(
     "/api/memory/language/convert",
-    { schema: { params: empty, querystring: empty, body: empty.nullish(), response: { 200: z.object({ rooms: z.number(), converted: z.number(), kept: z.number(), noRoom: z.number(), failedRooms: z.number() }) } } },
-    async (req) => {
+    { schema: { params: empty, querystring: empty, body: empty.nullish(), response: { 202: z.object({ started: z.literal(true) }) } } },
+    async (req, reply) => {
       const me = await requirePrincipal(req);
       await convertLimit(req, me.id);
       const language = await getMemoryLanguage(db, me.id);
       if (language === null) throw new AppError(409, "no_language");
-      const result = await app.deps.memory?.convert(me.id, language);
-      if (result === "busy") throw new AppError(409, "busy");
-      if (!result) throw new AppError(503, "unavailable");
-      // No room's call could even start (the allowance is empty, no model resolves, too many calls running): nothing happened, say so. A call
-      // that started and failed is a failed room of a 200.
-      if (result.rooms > 0 && result.unanswered === result.rooms) throw new AppError(503, "unavailable");
-      return result;
+      const memory = app.deps.memory;
+      if (!memory || (await noCallCanStart(db, config, me.id, new Date()))) throw new AppError(503, "unavailable");
+      const started = await memory.convert(me.id, language);
+      if (started === "busy") throw new AppError(409, "busy");
+      if (started === null) throw new AppError(503, "unavailable");
+      return reply.code(202).send({ started: true as const });
+    },
+  );
+
+  // How the owner's latest conversion stands (in this process's memory: `idle` after a restart). `unavailable` when no room's call could
+  // even start (too many calls running, the allowance spent meanwhile): nothing happened, as a 503 would have said. A call that started
+  // and failed is a failed room.
+  api.get(
+    "/api/memory/language/convert",
+    { schema: { params: empty, querystring: empty, response: { 200: conversionView } } },
+    async (req) => {
+      const me = await requirePrincipal(req);
+      await readLimit(req, me.id);
+      const now = app.deps.memory?.conversion(me.id) ?? { state: "idle" as const };
+      if (now.state !== "done") return { state: now.state };
+      const { unanswered, ...result } = now.result;
+      return { state: "done" as const, result, ...(result.rooms > 0 && unanswered === result.rooms ? { unavailable: true as const } : {}) };
     },
   );
 

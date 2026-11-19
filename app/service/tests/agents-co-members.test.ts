@@ -66,6 +66,8 @@ const HIDDEN_KEYS = [
   "fits",
   "noRoom",
   "failedRooms",
+  "converted",
+  "unavailable",
   "dream",
   "strength",
   "seenAt",

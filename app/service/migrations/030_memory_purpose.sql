@@ -8,7 +8,8 @@ alter table usage_records drop constraint usage_records_purpose_check;
 alter table usage_records add constraint usage_records_purpose_check check (purpose in ('reply', 'draft', 'memory'));
 
 -- Down Migration
+-- `not valid`: runs and usage records of purpose 'memory' may exist, and the old checks must not be proved against them (as 038's Down does).
 alter table usage_records drop constraint usage_records_purpose_check;
-alter table usage_records add constraint usage_records_purpose_check check (purpose in ('reply', 'draft'));
+alter table usage_records add constraint usage_records_purpose_check check (purpose in ('reply', 'draft')) not valid;
 alter table agent_runs drop constraint agent_runs_purpose_check;
-alter table agent_runs add constraint agent_runs_purpose_check check (purpose in ('reply', 'draft'));
+alter table agent_runs add constraint agent_runs_purpose_check check (purpose in ('reply', 'draft')) not valid;

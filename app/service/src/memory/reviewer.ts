@@ -3,7 +3,7 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { liveAgents, newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
-import type { ConvertJob, ConvertResult, MemoryLanguage } from "./language.ts";
+import type { ConversionState, ConvertJob, ConvertResult, MemoryLanguage } from "./language.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { countDroppedFlags } from "./stats.ts";
 import { EXPLICIT } from "./review.ts";
@@ -71,11 +71,16 @@ export interface Reviewer {
   /** After commit: a change was applied (or confirmed) in the notes of this Agent's owner, which may have left a room nearly full. */
   changed(agentId: string): void;
   /**
-   * The owner asked for their notes to be restated in `language` (dream.ts `ConvertJob`): resolves when every room that has notes
-   * has been looked at; "busy" when a dream or a conversion of theirs is already under way or waiting; null when it did not run
-   * (the service is stopping, or the job was dropped).
+   * The owner asked for their notes to be restated in `language` (dream.ts `ConvertJob`): "started" once the job is queued (it runs
+   * on its own; `conversion` says how it stands); "busy" when a dream or a conversion of theirs is already under way or waiting; null
+   * when the service is stopping.
    */
-  convert(ownerId: string, language: MemoryLanguage): Promise<ConvertResult | "busy" | null>;
+  convert(ownerId: string, language: MemoryLanguage): Promise<"started" | "busy" | null>;
+  /**
+   * Where the owner's latest conversion stands, in this process's memory: `running` from `convert` until its job ends, then `done`
+   * with what it did until the next conversion (or a restart: `idle`); `idle` too when the job did not run (the service stopping).
+   */
+  conversion(ownerId: string): ConversionState;
   /** How many pairs the scheduler remembers an attempt for (for tests: it must not grow with the pairs reviewed). */
   remembered(): number;
   /**
@@ -109,6 +114,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   let sweepTimer: { clear(): void } | null = null;
   /** The owners with a dream job under way: the rooms of one owner are never consolidated in parallel. */
   const dreaming = new Set<string>();
+  /** Each owner's latest conversion: under way, or what it did (until the next one; a restart forgets them all). */
+  const conversions = new Map<string, { state: "running" } | { state: "done"; result: ConvertResult }>();
   let waiting: Job[] = [];
   const running = new Set<string>();
   /** Evaluations of a trigger under way (they read the database before deciding). */
@@ -315,9 +322,23 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       // Decided and queued with nothing awaited in between: two requests never both get in.
       if (closed) return null;
       if (dreaming.has(ownerId) || waiting.some((j) => alone(j) && j.ownerId === ownerId)) return "busy";
-      if (agents.length === 0) return { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
-      return new Promise((settle) => enqueue({ kind: "convert", agentId: agents[0]!.id, conversationId: "convert", ownerId, language, settle }));
+      if (agents.length === 0) {
+        conversions.set(ownerId, { state: "done", result: { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 } });
+        return "started";
+      }
+      conversions.set(ownerId, { state: "running" });
+      // Told once: what the job did, or null (it did not run) when the scheduler ends it without a tally.
+      let settled = false;
+      const settle = (result: ConvertResult | null): void => {
+        if (settled) return;
+        settled = true;
+        if (result === null) conversions.delete(ownerId);
+        else conversions.set(ownerId, { state: "done", result });
+      };
+      enqueue({ kind: "convert", agentId: agents[0]!.id, conversationId: "convert", ownerId, language, settle });
+      return "started";
     },
+    conversion: (ownerId) => conversions.get(ownerId) ?? { state: "idle" },
     remembered: () => attempted.size,
     async resume() {
       armSweep();

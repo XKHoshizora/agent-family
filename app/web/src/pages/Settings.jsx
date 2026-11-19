@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { profileErrorText } from "../data/errorTexts.js";
@@ -206,8 +206,14 @@ const CONVERT_REFUSED = {
 };
 const convertRefusalText = (error) => CONVERT_REFUSED[error?.error?.code] ?? refusalText(error);
 
+/** How often a conversion under way is asked how it stands. */
+const CONVERT_POLL_MS = 3000;
+/** A conversion the service no longer knows of (it restarted while it ran). */
+const LOST = "lost";
+
 /** How a conversion went: what was converted and kept, and — only when there is something — what it could not do. */
 function convertedLine(result) {
+  if (result === LOST) return "转换可能还在进行，稍后在这里看结果。";
   return [
     `转了 ${result.converted} 条，${result.kept} 条保持原样。`,
     result.noRoom > 0 ? `有 ${result.noRoom} 条因为房间装不下没有转，可以先整理再试。` : "",
@@ -256,9 +262,32 @@ function MemorySettings() {
     setAsked(res.value);
   };
 
+  // The conversion runs on the service by itself: started, then asked how it stands every `CONVERT_POLL_MS` until it is done (never once
+  // this page is gone). Not knowing it any more (`idle`: the service restarted meanwhile) is said as such.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const followConversion = async () => {
+    await settled(actions.convertMemoryLanguage());
+    for (;;) {
+      await new Promise((wake) => setTimeout(wake, CONVERT_POLL_MS));
+      if (!mounted.current) return null;
+      const now = await actions.loadMemoryConversion();
+      if (!mounted.current) return null;
+      if (!now.ok || now.value.state === "running") continue;
+      if (now.value.state === "idle") return LOST;
+      // Nothing could be done at all: refused as a request that could not start is.
+      if (now.value.unavailable) throw { error: { code: "unavailable" } };
+      return now.value.result;
+    }
+  };
   const convertNotes = async () => {
-    const res = await run("convert", () => settled(actions.convertMemoryLanguage()), convertRefusalText);
-    if (!res.ok) return;
+    const res = await run("convert", followConversion, convertRefusalText);
+    if (!res.ok || res.value === null) return;
     setConverted(res.value);
     setAsked(null);
   };

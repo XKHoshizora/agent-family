@@ -754,15 +754,24 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     setDream: (dream) => attempt(() => api.updateDream(dream), { map: () => dream, text: commonErrorText }),
     /** value: the language code as sent, or null (automatic). */
     setMemoryLanguage: (memoryLanguage) => attempt(() => api.updateMemoryLanguage(memoryLanguage), { map: () => memoryLanguage, text: commonErrorText }),
-    /** value: `{rooms, converted, kept, noRoom, failedRooms}`, how my existing notes were restated in the chosen language (what could not be done is counted). */
-    convertMemoryLanguage: () =>
-      attempt(() => api.convertMemoryLanguage(), {
+    /** Starts restating my existing notes in the chosen language; value: true (how it stands is `loadMemoryConversion`'s). */
+    convertMemoryLanguage: () => attempt(() => api.convertMemoryLanguage(), { map: () => true, text: commonErrorText }),
+    /**
+     * value: `{state: "idle" | "running" | "done", result, unavailable}`, how my latest conversion stands: once `done`, `result` is
+     * `{rooms, converted, kept, noRoom, failedRooms}` (what could not be done is counted), and `unavailable` is true when nothing could be done at all.
+     */
+    loadMemoryConversion: () =>
+      attempt(() => api.getMemoryConversion(), {
         map: (answer) => ({
-          rooms: Number(answer?.rooms) || 0,
-          converted: Number(answer?.converted) || 0,
-          kept: Number(answer?.kept) || 0,
-          noRoom: Number(answer?.noRoom) || 0,
-          failedRooms: Number(answer?.failedRooms) || 0,
+          state: answer?.state === "running" || answer?.state === "done" ? answer.state : "idle",
+          result: {
+            rooms: Number(answer?.result?.rooms) || 0,
+            converted: Number(answer?.result?.converted) || 0,
+            kept: Number(answer?.result?.kept) || 0,
+            noRoom: Number(answer?.result?.noRoom) || 0,
+            failedRooms: Number(answer?.result?.failedRooms) || 0,
+          },
+          unavailable: answer?.unavailable === true,
         }),
         text: commonErrorText,
       }),
