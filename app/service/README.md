@@ -2728,7 +2728,7 @@ milliseconds.
 | `groupQuietMs`, `groupMaxWaitMs` | 120 000, 900 000 (1–86 400 000) | A pair of Agent and group is acted on (Acting on flags) after this much quiet since its latest flag, at most this long after the first flagged message |
 | `reviewMessages`, `reviewMessageWeight` | 40 (1–500), 500 (1–20 000) | A review is shown at most this many messages, each cut to this much weight (`reviewMessageChars`, the field's name before weight, is still read when `reviewMessageWeight` is absent) |
 | `reviewMaxOutputTokens` | 800 (1–100 000) | The most a review may answer |
-| `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.6, 0.5, 0.65, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging |
+| `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.6, 0.8, 0.65, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging. `sameAt` is 0.8 because the single-request duplicate check, measured on the real judgement model, made false "same" verdicts below it (2 at 0.5, 1 at 0.55–0.75, none from 0.8 up) |
 | `flaggedMax`, `flaggedContext` | 20 (1–500), 3 (0–50) | At most this many flagged messages are reviewed together, each with this many messages of context |
 | `hearsayPerHour` | 4 (1–1000) | At most this many paid hearsay calls (Acting on flags) per Agent and group in a rolling hour; over it the flags wait |
 | `hearsayNewAt`, `hearsayAbuseAt` | 0.7, 0.6 (0–1) | Before a hearsay call the judgement model is asked whether the batch holds something new (below the first: no call) and whether it looks like flooding or probing (at or above the second: with `hearsayMute` `"on"`, a speaker with at least 3 of the batch's flagged messages and more than half of them is muted and the batch is dropped) |
@@ -2881,6 +2881,9 @@ called for: a queued one is `cancelled` `halted`, a running one is never posted 
 what it used; and no message sent before the halt is judged (a decision under way finds the halt in phase 3). A pause or
 delete ends a proactive reply as any reply (Agents and runs, Pause and delete), and a paused Agent is no option.
 
+**`memory_stats`** (migration `040_memory_stats.sql`; the memory counters below): `(day, name, n)`, one row per site day (midnight in
+`SITE_TIMEZONE`) and counter name.
+
 **`memory_judge_usage`** (migration `037_memory_judge_usage.sql`): `(owner_id, day, calls)`, one row per owner and site day, kept like `judge_usage` for the judgement calls made on behalf of one owner's memory (`MEMORY.judgePerOwnerDay`); a failed check means no answer, a failed count changes no answer.
 
 **`judge_usage`** (migration `028_judge_usage.sql`): `(day, calls)`, one row per site day (midnight in `SITE_TIMEZONE`);
@@ -2998,6 +3001,40 @@ the new day's); a call on the balance is charged in full (up to its hold) and ma
 below zero nothing more starts on the balance until the operator's grants bring it above zero. Settlement releases the
 hold in the transaction that moves the run out of `running` (Agents and runs, `finish`), so a hold never stops counting
 before its cost lands.
+
+**Memory counters** (`src/memory/stats.ts`; migration `040_memory_stats.sql`; `tests/memory-stats.test.ts`). So that the site's operators can
+see how the feature really behaves, the code counts, per site day, what it decided and what owners did about it: `count(db, name, by = 1)`
+adds `by` to the row `(site day, name)` of `memory_stats` and logs one `metric` line (`{"metric":"memory_stat","name","by"}`). A count has no
+owner, conversation, Agent or text in it, only a name from the list below and an amount; it is fire and forget and never throws or waits (a
+count that cannot be written is lost, and the operation it counts is never affected). Read them with
+`node scripts/memory-stats.mjs [--days N]` (reads only `DATABASE_URL`; days as columns, names as rows, 7 days by default) or in a running
+container `node dist/cli.js memory:stats --days 7` (`npm run memory:stats`, `memory:stats:prod`; deploy/README.md). The names, and where each is counted:
+
+| Name | Counted |
+|---|---|
+| `review_run` | a review reached its call (`pipeline.ts` `runReview`; group reviews of flags included) |
+| `review_skipped_no_owner_words` | a review found nothing the owner said to look at, no call made |
+| `review_failed` | a review's call returned nothing: no model or no memory allowance to call on, or it failed (not an answer that cannot be used, and not the service stopping) |
+| `note_added`, `note_replaced`, `note_removed`, `note_locked` | a review's op was applied (not a pending card's; a confirmed card counts `pending_confirmed` only) |
+| `strength_bump` | notes a review made one stronger (one per note per review) |
+| `flag_hearsay`, `flag_own` | flags the group judgement wrote (`proactive/decide.ts`), by kind |
+| `hearsay_call` | a paid hearsay call was made |
+| `hearsay_skipped_nothing_new` | the pre-check found nothing new: no call |
+| `hearsay_would_mute` | the pre-check found a flooding speaker the rule would mute (`hearsay.ts` `worthACall`: both in `observe` and in `on`) |
+| `hearsay_held_by_cap` | a wake-up waited for the hour's cap |
+| `flags_dropped_overflow` | flags older than the newest `flaggedMax` (at most 60), dropped with their batch |
+| `flags_dropped_age`, `flags_dropped_tries` | flags deleted for being over a day old, or tried twice (at a wake-up, at a failed try, and at start-up) |
+| `dream_run`, `nap_run` | a job consolidated at least one room: a night's dream, or a nap |
+| `dream_failed` | a dream or nap job had a room whose call failed |
+| `dream_merge`, `dream_rewrite`, `dream_split`, `dream_lock` | the model's op was applied (not a pending card's, not a language conversion's) |
+| `dream_resort_locked` | a new open note locked again by the dream's re-sort (not by an op of the model) |
+| `judge_memory_call_sort`, `_same`, `_faithful`, `_precheck` | the judgement model was asked, by purpose (after the owner's and the site's limits let it) |
+| `judge_memory_skipped_share` | a listening-only judgement was skipped at `listenShare` of the day's limit |
+| `undo_rest`, `undo_dream`, `undo_hearsay` | the owner undid a review's, a dream's or a hearsay change (once, however often they ask) |
+| `owner_deleted_auto_note`, `owner_edited_auto_note` | the owner deleted, or changed the text of, a note a review made (`origin` `review`) |
+| `owner_unlocked`, `owner_locked` | the owner took a note out of, or put one into, the vault (`PATCH`, or confirming an unlock card) |
+| `hearsay_confirmed`, `hearsay_deleted` | the owner took an entry as true, or deleted it |
+| `pending_confirmed`, `pending_discarded` | the owner confirmed or discarded a pending card |
 
 **The memory allowance** (`MEMORY.freeDailyPoints`, default 20 whole points per owner and site day, 0: none; migration
 `038_memory_allowance.sql`). What an owner's Agents' memory does in the background (reviews, hearsay, dreams, language

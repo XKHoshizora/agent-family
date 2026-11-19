@@ -37,6 +37,7 @@ Other commands run in the same image, e.g. the first invitation, the mail outbox
 docker exec <container> node dist/cli.js invite:create --ttl-hours 72
 docker exec <container> node dist/cli.js inbox:list --to someone@example.com
 docker exec <container> node dist/cli.js attachments:sweep      # by hand only; the server sweeps by itself
+docker exec <container> node dist/cli.js memory:stats --days 7  # the memory feature's counters (counts only), days as columns
 ```
 
 ## Environment

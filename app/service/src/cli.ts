@@ -5,13 +5,14 @@ import { applyLedger, ensureAccount, formatPoints, lockAccount, parsePoints } fr
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
+import { formatStats, readStats } from "./memory/stats.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
 
 const USAGE =
   "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | attachments:sweep [--older-than <minutes>] | " +
-  "credits:grant --handle <h> --points <n> [--note <text>] | credits:show --handle <h> | tier:set --handle <h> --tier <name> | models:list";
+  "credits:grant --handle <h> --points <n> [--note <text>] | credits:show --handle <h> | tier:set --handle <h> --tier <name> | models:list | memory:stats [--days <n>]";
 
 function databaseUrl(): string {
   const url = process.env.DATABASE_URL;
@@ -139,6 +140,16 @@ if (command === "migrate") {
   // Prices are micro-points per token. The upstream key (apiKeyEnv) is deliberately never read or printed.
   for (const m of loadConfig().siteModels) {
     console.log(`${m.id}  "${m.label}"  tier ${m.tier}  protocol ${m.protocol}  in ${m.inputMicroPerToken}  out ${m.outputMicroPerToken}  (micro-points per token)`);
+  }
+} else if (command === "memory:stats") {
+  // The memory counters (README "Memory counters"): counts only, no owner, conversation or text; days as columns.
+  const days = Number(flag(args, "--days") ?? "7");
+  if (!Number.isInteger(days) || days < 1 || days > 366) throw new Error("--days needs a whole number from 1 to 366");
+  const db = createDb(databaseUrl());
+  try {
+    console.log(formatStats(await readStats(db, days), days));
+  } finally {
+    await db.close();
   }
 } else {
   console.error(USAGE);

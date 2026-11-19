@@ -168,8 +168,8 @@ describe("duplicateOf", () => {
     return Object.fromEntries(qs.map((q, k) => [q.key, scores[existing[k]!.replace("note ", "n")] ?? 0]));
   };
 
-  it("one request: the new note and the existing ones as the state's JSON, one fixed yes/no question each, the pair's note named by its place; picks the note at 0.5, not below; counts one call", async () => {
-    judge.answer(scoring({ n1: 0.5 }));
+  it("one request: the new note and the existing ones as the state's JSON, one fixed yes/no question each, the pair's note named by its place; picks the note at 0.8, not below; counts one call", async () => {
+    judge.answer(scoring({ n1: 0.8 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBe("n1");
     expect(judge.calls).toHaveLength(1);
     const state = JSON.parse(judge.calls[0]!.state);
@@ -178,7 +178,7 @@ describe("duplicateOf", () => {
     expect(judge.calls[0]!.questions).toEqual([0, 1, 2].map((i) => ({ key: `d${i}`, type: "noul", instructions: dupInstructions(i) })));
     expect(await used()).toBe(1);
     expect(await ownerUsed()).toBe(1);
-    judge.answer(scoring({ n1: 0.49 }));
+    judge.answer(scoring({ n1: 0.79 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBeNull();
   });
 

@@ -7,6 +7,7 @@ import type { Db, Queryable, Tx } from "../../db.ts";
 import { AppError } from "../../errors.ts";
 import { JudgeError, type Answer, type Judge } from "../../judge/client.ts";
 import type { StoredMessage } from "../../messages/model.ts";
+import { count } from "../../memory/stats.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, toldSince, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
 import { judgeable, judgedAgentIds, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type Option } from "./candidates.ts";
@@ -80,7 +81,10 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   const day = siteDay(new Date(), config.siteTimezone);
   if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
   // Listening alone never uses up what unasked replies need: with no Agent to pick, past `listenShare` of the limit, skip.
-  if (options.length === 0 && (await judgementsOn(db, day)) >= config.memory.listenShare * config.judge.dailyLimit) return noneTriggered();
+  if (options.length === 0 && (await judgementsOn(db, day)) >= config.memory.listenShare * config.judge.dailyLimit) {
+    count(db, "judge_memory_skipped_share");
+    return noneTriggered();
+  }
   const request = await requestFor(db, conversationId, seq, options, config.proactive, listeners);
   if (request === null) return noneTriggered();
   const { state, questions, flaggable } = request;
@@ -108,6 +112,8 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
     log.info({ metric: "memory_flags_failed", conversationId, reason: err instanceof Error ? err.name : "error" }, "the memory flags could not be written: none are");
     return [];
   });
+  count(db, "flag_hearsay", flags.filter((x) => x.kind === "hearsay").length);
+  count(db, "flag_own", flags.filter((x) => x.kind === "own").length);
   const done = <T extends Triggered>(t: T): T & Pick<Decided, "flags"> => (flags.length === 0 ? t : { ...t, flags });
   // Nobody can reply when no Agent was offered: the listeners' questions only flag.
   if (options.length === 0) return done(noneTriggered());

@@ -8,12 +8,13 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
-import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
+import { applyOps, proposeUnlocks, vaultKey, type AppliedOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
 import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
+import { count, countNoteOps } from "./stats.ts";
 import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { bumpNotes } from "./write.ts";
 
@@ -180,6 +181,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const kinds = await kindsFor(db, agent, conversationId, group);
   const { input, seen } = await readReview(db, agent, conversationId, await reviewedSeq(db, agentId, conversationId), { kinds, config, now: new Date(deps.now()) });
   if (input === null) {
+    count(db, "review_skipped_no_owner_words");
     // Nothing the owner said to look at: what the read saw is not looked at again, and nothing newer than what it saw is
     // marked (an owner message committed after the read is still to be reviewed).
     if (seen !== null) await markReviewed(db, agentId, conversationId, seen);
@@ -189,6 +191,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const pending = await pendingOf(db, agent);
 
   const report: MemoryCallReport = { answered: false };
+  count(db, "review_run");
   let answer = await memoryCall(
     { db, models: deps.models, config, log, inFlight: deps.inFlight },
     agent.ownerId,
@@ -198,6 +201,8 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   );
   // Charged for an answer that cannot be used: reviewed all the same (nothing is asked again for the same words).
   if (answer === null && report.answered) answer = "";
+  // No answer at all: no model or allowance to call on, the call failed, or the service is stopping (that one is no failure).
+  if (answer === null && !ctx.closing.aborted) count(db, "review_failed");
   if (answer === null || ctx.closing.aborted) return;
 
   const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
@@ -212,6 +217,9 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   // A `seen` only says the owner mentioned a note again (above): there is nothing in it to apply, record or tell.
   const changing = ops.filter((o) => o.op !== "seen");
 
+  // What took effect, counted once the transaction has committed (`stats.ts`).
+  const made: AppliedOp[] = [];
+  let strengthened = 0;
   const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[]> => {
     const ids = { ownerId: locked.ownerId, agentId };
     const written: Array<{ changeId: string; unlock: boolean }> = [];
@@ -222,6 +230,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       for (const id of ids) bumped.add(id);
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
+    strengthened = bumped.size;
     // In the owner's own conversation a destructive op needs the owner's words (`needsWords`): else it waits for their yes, all
     // together in one pending change, the card 先问我再记 produces. With 先问我再记 on everything waits as one change anyway.
     const held = group || locked.memoryAsk ? [] : changing.filter((op) => needsWords(op, input));
@@ -237,6 +246,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       });
     if (direct.length > 0) {
       const result = await apply(direct, locked.memoryAsk ? "pending" : "applied");
+      if (result && !locked.memoryAsk) made.push(...result.applied);
       if (result?.changeId) written.push({ changeId: result.changeId, unlock: false });
       if (result && result.unlocks.length > 0) {
         const targets = result.unlocks.flatMap((ref) => {
@@ -257,6 +267,10 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     return stored;
   });
   announce(deps, notices, agentId);
+  if (notices !== null) {
+    countNoteOps(db, made);
+    count(db, "strength_bump", strengthened);
+  }
   // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
   if (notices?.some((n) => n.body.status === "applied" && n.body.unlock !== true && Array.isArray(n.body.lines) && n.body.lines.length > 0)) ctx.changed?.(agentId);
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");

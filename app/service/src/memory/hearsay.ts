@@ -13,6 +13,7 @@ import { announce, errInfo, inLockedAgent, kindsFor, reviewableAgent, runReview,
 import { shown, UNSPOKEN } from "./review.ts";
 import { languageRule, type MemoryLanguage } from "./language.ts";
 import { askAll } from "./sort.ts";
+import { count, countDroppedFlags } from "./stats.ts";
 import { getMemoryLanguage, listHearsay, roomOf } from "./store.ts";
 
 /**
@@ -270,7 +271,11 @@ export async function runFlags(deps: PipelineDeps, job: FlagsJob, ctx: FlagsCont
     return;
   }
   // No call is made for flags tried twice or kept for more than a day.
-  await db.query("delete from memory_flags where agent_id = $1 and conversation_id = $2 and (tries >= 2 or created_at < now() - interval '24 hours')", [agentId, conversationId]);
+  const stale = await db.query<{ tries: boolean }>(
+    "delete from memory_flags where agent_id = $1 and conversation_id = $2 and (tries >= 2 or created_at < now() - interval '24 hours') returning (tries >= 2) as tries",
+    [agentId, conversationId],
+  );
+  countDroppedFlags(db, stale.rows);
   // Mutes that have run out are of no use to anyone: this owner's go at every wake-up (a mute is checked and written only here).
   await db.query("delete from hearsay_mutes where owner_id = $1 and until <= now()", [agent.ownerId]);
   for (const [kind, run] of [
@@ -299,7 +304,8 @@ async function failedTry(deps: PipelineDeps, ctx: FlagsContext, agentId: string,
   if (seqs.length === 0) return;
   const { db } = deps;
   await db.query("update memory_flags set tries = tries + 1 where agent_id = $1 and conversation_id = $2 and kind = $3 and seq = any($4::bigint[])", [agentId, conversationId, kind, seqs]);
-  await db.query("delete from memory_flags where agent_id = $1 and conversation_id = $2 and tries >= 2", [agentId, conversationId]);
+  const tried = await db.query("delete from memory_flags where agent_id = $1 and conversation_id = $2 and tries >= 2", [agentId, conversationId]);
+  count(db, "flags_dropped_tries", tried.rowCount ?? 0);
   const left = await db.query("select 1 from memory_flags where agent_id = $1 and conversation_id = $2 and tries > 0 limit 1", [agentId, conversationId]);
   if (left.rows.length > 0) ctx.again();
 }
@@ -350,13 +356,14 @@ async function worthACall(deps: PipelineDeps, ownerId: string, input: HearsayInp
   });
   const questions: Question[] = [{ key: NEW_KEY, type: "noul", instructions: NEW_INSTRUCTIONS }];
   if (mode !== "off") questions.push({ key: ABUSE_KEY, type: "noul", instructions: ABUSE_INSTRUCTIONS });
-  const answers = await askAll({ db: deps.db, judge: deps.judge, ownerId, config, log }, state, questions);
+  const answers = await askAll({ db: deps.db, judge: deps.judge, ownerId, config, log }, state, questions, "precheck");
   const abuse = answers?.get(ABUSE_KEY);
   if (abuse?.type === "noul" && abuse.p >= config.memory.hearsayAbuseAt) {
     const counts = new Map<string, number>();
     for (const c of batch) counts.set(c.speakerId, (counts.get(c.speakerId) ?? 0) + 1);
     const [flooder, n] = [...counts].reduce((top, e) => (e[1] > top[1] ? e : top));
     if (n >= MUTE_AT_LEAST && n * 2 > batch.length) {
+      count(deps.db, "hearsay_would_mute");
       if (mode === "on") return { call: false, mute: [flooder] };
       log.info({ metric: "memory_mute_would", flagged: batch.length, share: Math.round((n / batch.length) * 100) / 100, abuse: Math.round(abuse.p * 100) / 100 }, "a speaker would have been muted");
     }
@@ -370,13 +377,19 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
   const { db, config, log } = deps;
   const input = await hearsayInput(db, agent, conversationId, { config });
   if (input === null) return;
-  const done = async (): Promise<void> => void (await db.query(DELETE_FLAGS, [agent.id, conversationId, "hearsay", input.seqs]));
+  // Flags older than the newest window are never read: they are dropped when the batch's flags are (counted then, once).
+  const overflow = Math.max(0, input.seqs.length - Math.min(config.memory.flaggedMax, WINDOW_MAX));
+  const done = async (): Promise<void> => {
+    await db.query(DELETE_FLAGS, [agent.id, conversationId, "hearsay", input.seqs]);
+    count(db, "flags_dropped_overflow", overflow);
+  };
   if (input.candidates.size === 0) return done();
 
   // At most `hearsayPerHour` paid calls per pair in a rolling hour: over it the flags wait for a later wake-up (no try is counted).
   const now = deps.now();
   ctx.hearsayCalls.splice(0, ctx.hearsayCalls.length, ...ctx.hearsayCalls.filter((t) => t > now - HOUR));
   if (ctx.hearsayCalls.length >= config.memory.hearsayPerHour) {
+    count(db, "hearsay_held_by_cap");
     log.info({ metric: "memory_hearsay_capped", agentId: agent.id, conversationId }, "the hearsay calls of the hour are used up for this group: the flags wait");
     // Woken again, with no new flag needed, a quiet time after the call that leaves the hour lets the next one through (not a failed try).
     const calls = [...ctx.hearsayCalls].sort((x, y) => x - y);
@@ -392,11 +405,13 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
         [agent.ownerId, speakerId, config.memory.hearsayMuteMs],
       );
     }
+    if (verdict.mute.length === 0) count(db, "hearsay_skipped_nothing_new");
     log.info({ metric: "memory_hearsay_skipped", agentId: agent.id, conversationId, muted: verdict.mute.length }, "a hearsay batch was not worth a call");
     return done();
   }
 
   ctx.hearsayCalls.push(now);
+  count(db, "hearsay_call");
   const report: MemoryCallReport = { answered: false };
   const answer = await memoryCall(
     { db, models: deps.models, config, log, inFlight: deps.inFlight },
@@ -436,5 +451,6 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     ];
   });
   announce(deps, notices, agent.id);
+  if (notices !== null) count(db, "flags_dropped_overflow", overflow);
   log.info({ metric: "memory_hearsay", agentId: agent.id, conversationId, entries: fresh.length, notices: notices?.length ?? 0 }, "a hearsay consolidation ended");
 }

@@ -399,7 +399,7 @@ describe("the memory configuration", () => {
     reviewMessageWeight: 500,
     reviewMaxOutputTokens: 800,
     shareAt: 0.6,
-    sameAt: 0.5,
+    sameAt: 0.8,
     hearsayAt: 0.65,
     ownAt: 0.6,
     flaggedMax: 20,

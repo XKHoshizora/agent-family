@@ -5,6 +5,7 @@ import { liveAgents, newDreamState, SWEEP_JOB, type DreamContext, type DreamJob,
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
 import type { ConvertJob, ConvertResult, MemoryLanguage } from "./language.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
+import { countDroppedFlags } from "./stats.ts";
 import { EXPLICIT } from "./review.ts";
 
 /**
@@ -325,7 +326,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
           if (arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
         }
         // Flags a restart left: a day's worth is acted on after the quiet; older ones are no longer worth a call.
-        await db.query(`delete from memory_flags where created_at < now() - interval '${RESUME_WINDOW}' or tries >= 2`);
+        const dropped = await db.query<{ tries: boolean }>(`delete from memory_flags where created_at < now() - interval '${RESUME_WINDOW}' or tries >= 2 returning (tries >= 2) as tries`);
+        countDroppedFlags(db, dropped.rows);
         const flags = await db.query<{ agent_id: string; conversation_id: string }>(
           `select distinct f.agent_id, f.conversation_id from memory_flags f
              join agents a on a.principal_id = f.agent_id and a.memory and not a.paused and a.deleted_at is null`,

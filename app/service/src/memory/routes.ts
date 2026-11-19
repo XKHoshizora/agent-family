@@ -14,6 +14,7 @@ import { loadNotes } from "./passage.ts";
 import { ownerNote } from "./clean.ts";
 import { keptOrigin } from "./origin.ts";
 import { sortNote } from "./sort.ts";
+import { changeKind, count, countDecision } from "./stats.ts";
 import { getMemoryLanguage, getNewNotes, hearsayUsed, listHearsay, roomOf, type Note } from "./store.ts";
 import { weight, weightOf } from "./weight.ts";
 import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
@@ -184,6 +185,10 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const typed = text !== undefined && text !== note.text ? { text, originConversationId: keptOrigin(note.originConversationId, { from: "owner" }) } : {};
       if (changed) await updateNote(t, room, noteId, { ...patch, ...typed });
     });
+    // What the owner did to what the model had put there (`stats.ts`): a change of mind about it.
+    if (body.vault === false && before.vault) count(db, "owner_unlocked");
+    if (body.vault === true && !before.vault) count(db, "owner_locked");
+    if (text !== undefined && text !== before.text && before.origin === "review") count(db, "owner_edited_auto_note");
     return noteOf(db, room, noteId);
   }
 
@@ -191,10 +196,12 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     // Under the room's lock like every write: an undo or a confirm of a change holds it while it reads the room.
     const gone = await db.tx(async (t) => {
       await lockRoom(t, room);
-      return deleteNote(t, room, noteId);
+      const note = await readNote(t, room, noteId);
+      return (await deleteNote(t, room, noteId)) ? { origin: note?.origin ?? null } : null;
     });
     if (!gone) throw notFound();
     return { ok: true };
+    if (gone.origin === "review") count(db, "owner_deleted_auto_note");
   }
 
   /** The owner's Agent `agentId` as its owner sees it (also a deleted one: its notes stay theirs to read and delete); 404 for anyone else's. */
@@ -364,6 +371,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       });
       if (!taken) throw notFound();
       return { ok: true as const };
+      count(db, "hearsay_deleted");
     },
   );
 
@@ -397,6 +405,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         });
       });
       return reply.code(201).send(await noteOf(db, room, id));
+      count(db, "hearsay_confirmed");
     },
   );
   // --- the changes a review made, as the owner may take them back or decide on them -----------------------------------
@@ -413,10 +422,12 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     wanted: "applied" | "undone" | "discarded",
     run: (t: Tx) => Promise<"ok" | "stale" | "full" | null>,
   ): Promise<{ status: typeof wanted }> {
+    acted: () => void = () => undefined,
     const found = await db.query<{ agent_id: string; status: string }>("select agent_id, status from memory_changes where id = $1 and owner_id = $2", [changeId, ownerId]);
     if (found.rows[0]?.agent_id !== agentId) throw notFound();
     const outcome = await db.tx(run);
     if (outcome === "stale") throw new AppError(409, "stale_change");
+    if (outcome === "ok") acted();
     if (outcome === "full") throw roomFull(0);
     if (outcome === null) {
       const now = await db.query<{ status: string }>("select status from memory_changes where id = $1", [changeId]);
@@ -445,7 +456,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         };
         let decided: { status: typeof wanted };
         try {
-          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId));
+          const kind = verb === "discard" ? null : await changeKind(db, req.params.changeId);
+          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId), () => countDecision(db, verb, kind));
         } catch (err) {
           if (verb === "confirm" && err instanceof AppError && err.code === "stale_change") await again();
           throw err;

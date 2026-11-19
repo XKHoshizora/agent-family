@@ -16,6 +16,7 @@ import { registerSessionRoutes } from "./session.ts";
 import { createBlobStore, type BlobStore } from "./attachments/blob.ts";
 import { registerBodyDeadline } from "./body-deadline.ts";
 import { runSweep, startSweeper } from "./attachments/sweeper.ts";
+import { configureStats } from "./memory/stats.ts";
 import { sweepMemoryChanges } from "./memory/sweep.ts";
 import { registerAttachmentRoutes } from "./attachments/routes.ts";
 import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
@@ -341,6 +342,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
             log: app.log,
           });
   const proactive = deps.proactive;
+  // The memory counters (memory/stats.ts) count on the site's day and log through the app's logger.
+  configureStats({ siteTimezone: config.siteTimezone, log: app.log });
   // The run ids of the memory calls this process is working on (memory/call.ts `memoryCall`'s `inFlight`): the stale-run sweep leaves them alone too.
   const memoryRuns = new Set<string>();
   // Aborted as the stop begins, before the calls are waited for: a call under way is abandoned, not finished.

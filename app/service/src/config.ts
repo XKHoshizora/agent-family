@@ -274,7 +274,7 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   reviewMessageWeight: positive(500, 20_000),
   reviewMaxOutputTokens: positive(800, 100_000),
   shareAt: probability(0.6),
-  sameAt: probability(0.5),
+  sameAt: probability(0.8),
   hearsayAt: probability(0.65),
   ownAt: probability(0.6),
   flaggedMax: positive(20, 500),

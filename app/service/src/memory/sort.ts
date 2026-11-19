@@ -5,6 +5,7 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import type { Answer, Judge, Question } from "../judge/client.ts";
 import { sameKey } from "./ops.ts";
+import { count } from "./stats.ts";
 
 /** Mirrors the store's `NoteKind` (a later task merges them). */
 type NoteKind = "owner" | "self";
@@ -35,6 +36,9 @@ const CANDIDATES = 20;
 /** A score from here up to `shareAt` is "unsure". */
 const UNSURE_FROM = 0.2;
 
+/** What a memory judgement is for (`judge_memory_call_<purpose>` counts them): sorting a note, the duplicate test, the faithful check, the hearsay pre-check. */
+export type JudgePurpose = "sort" | "same" | "faithful" | "precheck";
+
 /** Whether the owner has used their memory judgements of site day `day` up (`memory_judge_usage`). A read that fails throws: not asked. */
 async function ownerAtLimit(db: Db, ownerId: string, day: string, limit: number): Promise<boolean> {
   const { rows } = await db.query<{ calls: number }>("select calls from memory_judge_usage where owner_id = $1 and day = $2::date", [ownerId, day]);
@@ -54,7 +58,7 @@ async function countOwner(db: Db, ownerId: string, day: string): Promise<void> {
  * channel its `timeoutMs`). Null when it cannot be asked (no judge, the site's day used up) or gave no answer for any reason;
  * else the answers it did give, by key.
  */
-export async function askAll(deps: SortDeps, state: string, questions: readonly Question[]): Promise<Map<string, Answer> | null> {
+export async function askAll(deps: SortDeps, state: string, questions: readonly Question[], purpose: JudgePurpose): Promise<Map<string, Answer> | null> {
   const { db, judge, config, log } = deps;
   if (judge === null || config.judge === null) return null;
   try {
@@ -65,6 +69,7 @@ export async function askAll(deps: SortDeps, state: string, questions: readonly 
     }
     if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return null;
     const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
+    count(db, `judge_memory_call_${purpose}`);
     let answers: Map<string, Answer> | null = null;
     try {
       answers = await judge.ask(state, questions, deadline);
@@ -82,8 +87,8 @@ export async function askAll(deps: SortDeps, state: string, questions: readonly 
   }
 }
 
-async function ask(deps: SortDeps, state: string, question: Question): Promise<Answer | null> {
-  return (await askAll(deps, state, [question]))?.get(question.key) ?? null;
+async function ask(deps: SortDeps, state: string, question: Question, purpose: JudgePurpose): Promise<Answer | null> {
+  return (await askAll(deps, state, [question], purpose))?.get(question.key) ?? null;
 }
 
 /**
@@ -108,7 +113,7 @@ export async function sortNote(
  */
 export async function resortNote(deps: SortDeps, text: string, kind: NoteKind): Promise<{ vault: boolean; unsure: boolean } | null> {
   const instructions = kind === "owner" ? OWNER_INSTRUCTIONS : SELF_INSTRUCTIONS;
-  const answer = await ask(deps, `笔记：${text}`, { key: SORT, type: "noul", instructions });
+  const answer = await ask(deps, `笔记：${text}`, { key: SORT, type: "noul", instructions }, "sort");
   if (answer?.type !== "noul") return null;
   const { shareAt } = deps.config.memory;
   if (answer.p >= shareAt) return { vault: false, unsure: false };
@@ -127,7 +132,7 @@ export type DreamChange = { kind: "split"; source: string; parts: ReadonlyArray<
 export async function addsNothing(deps: SortDeps, change: DreamChange): Promise<boolean> {
   const sources = change.kind === "split" ? [change.source] : change.sources;
   const results = change.kind === "split" ? change.parts : [change.result];
-  const answer = await ask(deps, JSON.stringify({ sources, results }), { key: FAITHFUL, type: "noul", instructions: FAITHFUL_INSTRUCTIONS });
+  const answer = await ask(deps, JSON.stringify({ sources, results }), { key: FAITHFUL, type: "noul", instructions: FAITHFUL_INSTRUCTIONS }, "faithful");
   return answer?.type === "noul" && answer.p >= deps.config.memory.faithfulAt;
 }
 
@@ -171,7 +176,7 @@ export async function duplicateOf(deps: SortDeps, text: string, existing: Readon
     .map((r) => r.n);
   const questions = ranked.map((_, i): Question => ({ key: `d${i}`, type: "noul", instructions: `${DUPLICATE_INSTRUCTIONS}
 （这道题问的是 existing 里的第 ${i + 1} 条）` }));
-  const answers = await askAll(deps, JSON.stringify({ new: text, existing: ranked.map((n) => n.text) }), questions);
+  const answers = await askAll(deps, JSON.stringify({ new: text, existing: ranked.map((n) => n.text) }), questions, "same");
   if (answers === null) return null;
   let best: { id: string; p: number } | null = null;
   ranked.forEach((n, i) => {

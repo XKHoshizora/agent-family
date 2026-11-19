@@ -4,7 +4,7 @@ import type { Config } from "../config.ts";
 import { resolveModel } from "../models/resolve.ts";
 import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
-import { applyDream, vaultKey, type DreamOp, type StoredOp } from "./apply.ts";
+import { applyDream, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, memoryModel, type MemoryCallReport } from "./call.ts";
 import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
@@ -12,6 +12,7 @@ import { MAX_OPS, parseAnswer } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { todayIn } from "./review.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
+import { count, countDreamOps } from "./stats.ts";
 import { getMemoryLanguage, getMemoryModel, getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { weight, weightOf } from "./weight.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
@@ -438,6 +439,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
   if (!cycle || now - cycle.at > DAY) cycle = { at: now, rooms: new Set<string>() };
   ctx.dream.done.set(ownerId, cycle);
   let failed = false;
+  let ran = 0;
   for (const { room, carrier: by } of todo) {
     if (ctx.closing.aborted) return;
     const key = roomKey(ownerId, room);
@@ -445,6 +447,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     const last = ctx.dream.rooms.get(key);
     if ((job.scope === "all" && cycle.rooms.has(key)) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
     let outcome: "done" | "failed" | "aborted";
+    ran++;
     try {
       outcome = await dreamRoom(deps, ctx, by, room, since);
     } catch (err) {
@@ -459,8 +462,11 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     cycle.rooms.add(key);
     ctx.dream.rooms.set(key, deps.now());
   }
+  // A night's dream and a nap are counted apart: a job that consolidated at least one room is one run.
+  if (ran > 0) count(db, job.scope === "all" ? "dream_run" : "nap_run");
   // A call that failed (a night's or a nap's) is one of the day's three tries.
   if (failed) {
+    count(db, "dream_failed");
     ctx.dream.failures.set(ownerId, [...(ctx.dream.failures.get(ownerId) ?? []).filter((t) => t > deps.now() - DAY), deps.now()]);
     return;
   }
@@ -565,6 +571,8 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   const refs = new Map([...input.refs].map(([ref, n]) => [ref, { kind: n.kind, id: n.id }]));
   let rewritten = 0;
   let noRoom = 0;
+  // What a dream's change did, counted once it has committed (a conversion and a pending card are no dream's doing).
+  let made: AppliedOp[] = [];
   const notices = await inLockedAgent(db, by.id, async (t, locked): Promise<StoredMessage[]> => {
     const applied = await applyDream(t, { ownerId: locked.ownerId, agentId: locked.id, sharedNotes: locked.sharedNotes, kinds: new Set<NoteKind>([room.kind]) }, ops, refs, {
       conversationId: locked.conversationId,
@@ -577,6 +585,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
       ...(conversion ? { conversion: true } : {}),
     });
     noRoom = applied?.noRoom ?? 0;
+    if (applied && !conversion && !locked.memoryAsk) made = applied.applied;
     if (applied?.changeId == null) return [];
     rewritten = applied.applied.filter((o) => o.op === "replace").length;
     return [await memoryNotice(t, locked, applied.changeId, { unlock: false, phase: "dream", linesOf: dreamLines })];
@@ -588,6 +597,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     conversion.tally.noRoom += noRoom;
   }
   announce(deps, notices, by.id);
+  if (notices !== null) countDreamOps(db, made, new Set(ops.flatMap((o) => (o.op === "lock" ? [refs.get(o.ref)!.id] : []))));
   log.info({ metric: "memory_dream", agentId: by.id, room: room.kind, ops: ops.length, notices: notices?.length ?? 0 }, "a memory dream ended");
   return "done";
 }
