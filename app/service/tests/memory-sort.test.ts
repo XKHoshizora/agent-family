@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { beforeEach, describe, expect, it } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
 import type { Config } from "../src/config.ts";
+import type { Db } from "../src/db.ts";
 import { JudgeError } from "../src/judge/client.ts";
 import { duplicateOf, sortNote, type SortDeps } from "../src/memory/sort.ts";
 import { SITE_ENV } from "./helpers/agents.ts";
@@ -91,6 +92,41 @@ describe("sortNote", () => {
     await db.query("insert into judge_usage (day, calls) values ($1::date, 5) on conflict (day) do update set calls = 5", [today()]);
     expect(await sortNote(deps({}, { judge: { ...JUDGE, dailyLimit: 5 } }), "x", "owner", "auto")).toEqual(vault);
     expect(judge.calls).toHaveLength(before);
+  });
+});
+
+describe("failures of the database around the call", () => {
+  /** A db whose statements matching `when` reject. */
+  const failing = (when: RegExp): Db =>
+    new Proxy(db, {
+      get(target, prop, receiver) {
+        if (prop !== "query") return Reflect.get(target, prop, receiver);
+        return (sql: string, ...rest: unknown[]) =>
+          when.test(sql) ? Promise.reject(new Error("db hiccup")) : (target.query as (...a: unknown[]) => unknown)(sql, ...rest);
+      },
+    });
+  const notes = [{ id: "n1", text: "note 1" }];
+
+  it("a failing limit check: vault / null, nothing thrown, no call made", async () => {
+    judge.answer(() => ({ sort: 0.99, dup: { n1: 0.99, "都不是": 0 } }));
+    expect(await sortNote(deps({ db: failing(/^\s*select calls from judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
+    expect(await duplicateOf(deps({ db: failing(/^\s*select calls from judge_usage/) }), "新", notes)).toBeNull();
+    expect(judge.calls).toHaveLength(0);
+  });
+
+  it("a failing count does not change the judge's answer", async () => {
+    judge.answer(() => ({ sort: 0.9, dup: { n1: 0.9, "都不是": 0 } }));
+    expect(await sortNote(deps({ db: failing(/insert into judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    expect(await duplicateOf(deps({ db: failing(/insert into judge_usage/) }), "新", notes)).toBe("n1");
+  });
+
+  it("a failed or hung judge call is still counted", async () => {
+    judge.answer(() => new JudgeError("auth"));
+    await sortNote(deps(), "x", "owner", "auto");
+    expect(await used()).toBe(1);
+    judge.answer(() => "hang");
+    await sortNote(deps(), "x", "owner", "auto");
+    expect(await used()).toBe(2);
   });
 });
 

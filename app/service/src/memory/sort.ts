@@ -3,7 +3,7 @@ import { siteDay } from "../accounts/store.ts";
 import { atDailyLimit, countJudgement } from "../agents/proactive/decide.ts";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import type { Judge, Question } from "../judge/client.ts";
+import type { Answer, Judge, Question } from "../judge/client.ts";
 
 /** Mirrors the store's `NoteKind` (a later task merges them). */
 type NoteKind = "owner" | "self";
@@ -34,19 +34,26 @@ const UNSURE_FROM = 0.2;
  * One judgement call, counted in `judge_usage`, bounded as the proactive decision is (each channel its `timeoutMs`).
  * Null when it cannot be asked (no judge, the site's day used up) or gave no answer for any reason.
  */
-async function ask(deps: SortDeps, state: string, question: Question) {
+async function ask(deps: SortDeps, state: string, question: Question): Promise<Answer | null> {
   const { db, judge, config, log } = deps;
   if (judge === null || config.judge === null) return null;
-  const day = siteDay(new Date(), config.siteTimezone);
-  if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return null;
-  const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
   try {
-    const answers = await judge.ask(state, [question], deadline);
-    return answers.get(question.key) ?? null;
-  } catch {
+    const day = siteDay(new Date(), config.siteTimezone);
+    if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return null;
+    const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
+    let answer: Answer | null = null;
+    try {
+      answer = (await judge.ask(state, [question], deadline)).get(question.key) ?? null;
+    } catch {
+      // No answer: the callers fail closed.
+    }
+    // Counted whatever came of the call; a failure of the count itself never changes the result.
+    await countJudgement(db, day).catch((err: unknown) => log.info({ metric: "judge_count_failed", err }, "a judgement could not be counted"));
+    return answer;
+  } catch (err) {
+    // The limit check could not be read: not asked.
+    log.info({ metric: "judge_limit_check_failed", err }, "the judgement limit could not be read: the note is not judged");
     return null;
-  } finally {
-    await countJudgement(db, day);
   }
 }
 
