@@ -274,7 +274,6 @@ function AgentDetail({ agent }) {
               ["profile", "资料"],
               ["convs", "参与的会话"],
               ...(live ? [["memory", "记忆宫殿"]] : []),
-              ["ability", "能力与设备"],
             ]}
           />
           <div className="page-body">
@@ -317,7 +316,6 @@ function AgentDetail({ agent }) {
             )}
             {tab === "convs" && <Conversations agent={agent} />}
             {tab === "memory" && live && <AgentMemory agent={agent} />}
-            {tab === "ability" && <p className="muted">尚未开放</p>}
           </div>
         </>
       )}

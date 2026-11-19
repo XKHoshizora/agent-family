@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { isAgent, isMyAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
-import { formatSize, replyPoints } from "../data/viewmodel.js";
+import { formatSize, namesAgent, replyPoints } from "../data/viewmodel.js";
 import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
@@ -149,6 +149,14 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   const thinking = ownChat || (agent && conv.type === "group" && isMyAgent(state, msg.from));
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
   const showReceipt = mine && (conv.type === "human" || conv.type === "agent");
+  // Why my message to my own Agent may get no reply (shown after 已发送, nothing else changes): it is paused, or it
+  // answers only when named and this message did not name it.
+  const ownAgent = mine && conv.type === "agent" ? state.agents[conv.agentId] : null;
+  const sentNote = ownAgent?.paused
+    ? " · 它暂停中"
+    : ownAgent?.replyMode === "mention" && !namesAgent(msg.kind === "text" ? msg.text : msg.caption, ownAgent)
+      ? " · 没点名，它不会回复"
+      : "";
   const cancelUpload = () => actions.cancelUpload(msg.clientTxn);
   const retry = () => {
     const block = publishBlock(state, conv);
@@ -213,7 +221,7 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
                     <Check size={13} aria-hidden="true" /> 已读
                   </>
                 ) : (
-                  "已发送"
+                  `已发送${sentNote}`
                 )}
               </span>
             )

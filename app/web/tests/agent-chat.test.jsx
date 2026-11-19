@@ -158,6 +158,28 @@ describe("the header and the list row", () => {
     expect(storedLi(3).querySelector(".receipt").textContent.trim()).toBe("已发送");
   });
 
+  it("a message of mine that the Agent will not answer says why under 已发送: paused, or not named in 只在点名时回复", async () => {
+    const receipt = (seq) => storedLi(seq).querySelector(".receipt").textContent.trim();
+    await openAgentChat({ agent: { paused: true } });
+    expect(receipt(2)).toBe("已发送 · 它暂停中");
+    cleanup();
+
+    await openAgentChat({ agent: { replyMode: "mention" } });
+    expect(receipt(2)).toBe("已发送 · 没点名，它不会回复");
+    cleanup();
+
+    // Named by handle or by name (any case), it will answer: plain 已发送.
+    await openAgentChat({ agent: { replyMode: "mention" }, messages: [...BASE, wire(A1, 3, ME_ID, "@Helper 在吗"), wire(A1, 4, ME_ID, "@小助手 在吗")] });
+    expect(receipt(3)).toBe("已发送");
+    expect(receipt(4)).toBe("已发送");
+    cleanup();
+
+    // Paused wins over the mode; read stays 已读.
+    await openAgentChat({ agent: { paused: true, replyMode: "mention" }, conv: { peerReadSeq: 2 }, messages: [...BASE, wire(A1, 3, ME_ID, "还在吗")] });
+    expect(receipt(2)).toBe("已读");
+    expect(receipt(3)).toBe("已发送 · 它暂停中");
+  });
+
   it("the list's preview is the stored message, never the streamed text", async () => {
     const { transport } = await openAgentChat();
     await runPush(transport, runOf(R1, "running"));
@@ -1136,6 +1158,8 @@ describe("a new topic", () => {
     await openDetails();
     const side = document.querySelector(".side-col");
     expect(side.textContent).not.toMatch(/任务|设备|好友|拉黑/);
+    expect(side.textContent).toContain("不随关系获得对方的其他会话");
+    expect(side.textContent).not.toMatch(/文件夹|电脑/);
     await click(within(side).getByRole("button", { name: "管理这个 Agent" }));
     expect(document.querySelector(".main-col .eyebrow").textContent).toBe("我的 Agent");
     expect(document.querySelector(".main-col h2").textContent).toContain("小助手");

@@ -1096,7 +1096,7 @@ describe("the model's logo", () => {
 describe("the Agent's page", () => {
   const live = () => agentOf(AG1, { intro: "陪你规划旅行", field: "旅行", persona: "你是旅行家。", model: SITE_MODEL });
 
-  it("shows the profile; the device tab only says 尚未开放", async () => {
+  it("shows the profile; there is no device tab", async () => {
     await openAgents({ agents: [live()] });
     await openRow("小助手");
     expect(document.querySelector(".main-col .profile-head h2").textContent).toContain("可回复");
@@ -1106,9 +1106,7 @@ describe("the Agent's page", () => {
     expect(kv).not.toContain("群内回复方式");
     expect(document.querySelector(".main-col .kv img")).toBeNull();
     const tabs = within(inMain().getByRole("tablist", { name: "Agent 分区" })).getAllByRole("tab").map((t) => t.textContent);
-    expect(tabs).toEqual(["资料", "参与的会话", "记忆宫殿", "能力与设备"]);
-    await click(inMain().getByRole("tab", { name: "能力与设备" }));
-    expect(document.querySelector(".main-col .page-body").textContent).toBe("尚未开放");
+    expect(tabs).toEqual(["资料", "参与的会话", "记忆宫殿"]);
     expect(document.querySelector(".main-col input, .main-col select")).toBeNull();
   });
 
@@ -1713,6 +1711,9 @@ describe("主动参与群聊 (proactive replies)", () => {
     ]);
     expect(inMain().getByLabelText(LEVEL).value).toBe("normal");
     expect(inMain().getByLabelText(AMOUNT).value).toBe("20");
+    expect(document.getElementById(inMain().getByLabelText(AMOUNT).getAttribute("aria-describedby"))?.textContent).toBe(
+      "每天零点（站点时间）重新计算；用完后它当天不再主动接话，被 @ 时照常回复。只对站点的模型有效，用你自己的密钥时不受限。",
+    );
     // A typed amount only: no 不限 choice.
     expect(inMain().getByLabelText(AMOUNT).tagName).toBe("INPUT");
     fireEvent.click(box());

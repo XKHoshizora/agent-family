@@ -81,7 +81,7 @@ describe("the model picker", () => {
     await openForm({ usage: usageOf({ balance: "0" }) });
     await chooseModel("大模型 · 需余额");
     expect(within(modelBox()).getByRole("option", { name: "大模型 · 需余额" }).selected).toBe(true);
-    expect(mainText()).toContain("需要余额：这个模型按用量从余额扣点，你现在的余额是 0 点，余额不足时它不会回复。");
+    expect(mainText()).toContain("需要余额：这个模型按用量从余额扣点，你现在的余额是 0 点，余额用完后它不会回复；最后一次回复可能把余额扣成负数。");
     fireEvent.change(inMain().getByLabelText("名称"), { target: { value: "MyBot" } });
     expect(createButton().disabled).toBe(false);
   });

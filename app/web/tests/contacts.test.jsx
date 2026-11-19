@@ -381,6 +381,7 @@ describe("blocks", () => {
     await openRow("小安");
     await click(button("拉黑小安"));
     expect(dialog().textContent).toContain("你们之间的私聊不能再发送新消息");
+    expect(dialog().textContent).toContain("你们各自的 Agent 也不会再回应对方：在群里 @ 不到，也不会主动接对方的话。");
     await click(dialogButton("取消"));
     expect(blockPrincipal).not.toHaveBeenCalled();
     await click(button("拉黑小安"));

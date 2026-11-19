@@ -119,7 +119,7 @@ export const addMemoryNote = (body) => request("POST", "/api/memory/notes", body
 /** patch: {text?, vault?} → Note */
 export const patchMemoryNote = (noteId, patch) => request("PATCH", `/api/memory/notes/${seg(noteId)}`, patch);
 export const deleteMemoryNote = (noteId) => request("DELETE", `/api/memory/notes/${seg(noteId)}`);
-/** → {notes, used, limit, hearsay: [{id, text, speakerName, group: {id, title} | null, saidAt}], hearsayUsed, hearsayLimit} */
+/** → {notes, used, limit, hearsay: [{id, text, speakerName, speakerHandle: string | null, group: {id, title} | null, saidAt}], hearsayUsed, hearsayLimit} */
 export const getAgentMemory = (agentId) => request("GET", `/api/agents/${seg(agentId)}/memory`);
 export const addAgentMemoryNote = (agentId, body) => request("POST", `/api/agents/${seg(agentId)}/memory/notes`, body);
 export const patchAgentMemoryNote = (agentId, noteId, patch) => request("PATCH", `/api/agents/${seg(agentId)}/memory/notes/${seg(noteId)}`, patch);

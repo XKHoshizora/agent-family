@@ -584,7 +584,11 @@ export function AgentForm({ agent = null }) {
                     ))}
                   </select>
                 </Field>
-                <Field label="主动回复每天最多花" error={shown("proactiveBudget")}>
+                <Field
+                  label="主动回复每天最多花"
+                  hint="每天零点（站点时间）重新计算；用完后它当天不再主动接话，被 @ 时照常回复。只对站点的模型有效，用你自己的密钥时不受限。"
+                  error={shown("proactiveBudget")}
+                >
                   {budgetBox("proactiveBudget")}
                 </Field>
               </>

@@ -205,6 +205,17 @@ export function mentionsHandle(text, handle) {
 }
 
 /**
+ * Whether `text` names the Agent by `@handle` or `@name` (case ignored, anywhere in the text): the service's rule for
+ * a message in the Agent's own conversation when its reply mode is 仅在我点名时回复 (`runs.ts` `mentions`).
+ */
+export function namesAgent(text, agent) {
+  const lower = String(text ?? "").toLowerCase();
+  const handle = String(agent?.handle ?? "").replace(/^@/, "").toLowerCase();
+  const name = String(agent?.name ?? "").toLowerCase();
+  return (handle !== "" && lower.includes(`@${handle}`)) || (name !== "" && lower.includes(`@${name}`));
+}
+
+/**
  * Points (a decimal string from the service) for display: digits grouped in threes, every digit of the string kept
  * (no float maths, no rounding), trailing zeros after the point trimmed. What is not a decimal string is shown as it is.
  */

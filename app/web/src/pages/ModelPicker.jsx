@@ -126,9 +126,9 @@ export function useModelSources() {
 const positive = (balance) => typeof balance === "string" && !balance.trim().startsWith("-") && /[1-9]/.test(balance);
 
 function paidText(usage) {
-  if (!usage || typeof usage.balance !== "string") return "需要余额：这个模型按用量从余额扣点，余额不足时它不会回复。";
+  if (!usage || typeof usage.balance !== "string") return "需要余额：这个模型按用量从余额扣点，余额用完后它不会回复；最后一次回复可能把余额扣成负数。";
   if (positive(usage.balance)) return `这个模型按用量从余额扣点，你现在的余额是 ${usage.balanceText} 点。`;
-  return `需要余额：这个模型按用量从余额扣点，你现在的余额是 ${usage.balanceText} 点，余额不足时它不会回复。`;
+  return `需要余额：这个模型按用量从余额扣点，你现在的余额是 ${usage.balanceText} 点，余额用完后它不会回复；最后一次回复可能把余额扣成负数。`;
 }
 
 /**

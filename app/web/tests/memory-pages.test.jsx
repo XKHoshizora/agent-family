@@ -660,6 +660,15 @@ describe("an Agent's page: its own notes and what it heard", () => {
     expect(rowWith(scope, "他想换工作").querySelector(".memory-source").textContent).toBe("11月11日 · 已离开的群");
   });
 
+  it("a heard line names the speaker's account name when the service gives it: {speakerName}（@{speakerHandle}）说：{text}", async () => {
+    await openAgentPalace(
+      service({ hearsay: [{ ...HEARD, speakerHandle: "abo" }, { ...GONE, speakerHandle: null }] }),
+    );
+    const scope = room("小助手听说的");
+    expect(rowWith(scope, "周五发布会推迟了").querySelector(".memory-text").textContent).toBe("阿波（@abo）说：周五发布会推迟了");
+    expect(rowWith(scope, "他想换工作").querySelector(".memory-text").textContent).toBe("小陈说：他想换工作");
+  });
+
   it("属实 confirms the line: it leaves what it heard and becomes one of its own notes", async () => {
     const svc = service({ hearsay: [HEARD] });
     await openAgentPalace(svc);

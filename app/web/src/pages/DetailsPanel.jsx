@@ -7,8 +7,8 @@ import { BlockModal } from "./BlockModal.jsx";
 import { NewTopicModal } from "./AgentChatBits.jsx";
 import { X } from "../icons.js";
 
-/** What my Agent does not get from its conversation with me (the prototype's line, without devices or tasks here). */
-const AGENT_NOT_GRANTED = "其他会话、文件夹与电脑";
+/** What my Agent does not get from its conversation with me. */
+const AGENT_NOT_GRANTED = "对方的其他会话";
 
 export function DetailsPanel({ conv }) {
   const { state, dispatch } = useStore();
