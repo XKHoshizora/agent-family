@@ -4,7 +4,7 @@ import { siteDay } from "../src/accounts/store.ts";
 import type { Config } from "../src/config.ts";
 import type { Db } from "../src/db.ts";
 import { JudgeError } from "../src/judge/client.ts";
-import { duplicateOf, sortNote, type SortDeps } from "../src/memory/sort.ts";
+import { addsNothing, duplicateOf, resortNote, sortNote, type SortDeps } from "../src/memory/sort.ts";
 import { SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge } from "./helpers/judge.ts";
@@ -23,7 +23,9 @@ const OWNER_TEXT =
 const SELF_TEXT =
   "这是一个 AI 助手给自己记的一条笔记，可能用任何语言写。这条内容只是它做事的方式或习惯（比如回答的长短、先说什么、用什么格式、推荐时注意什么），不透露主人的任何私事，即使被主人的朋友、同事、群友看到也完全无妨。凡是提到主人的健康、钱、工作变动、感情和家庭、对别人的评价、行踪住址、账号密码、未公开的计划，或者拿不准的，都不算。";
 const DUP_TEXT =
-  "下面是一个 AI 助手已经记下的几条笔记和一条新的笔记（都可能用任何语言写）。新的这条和哪一条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下它不会让助手多知道任何东西？如果它和已有的矛盾、是对它的更新、或者多了已有的没有的信息，选“都不是”。";
+  "这是一个 AI 助手关于主人的两条笔记：一条已有的，一条新的。两条可能用不同的语言写。新的这条和已有的那条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下新的不会让助手多知道任何东西。如果新的这条和已有的矛盾、是对它的更新、或者多了已有那条没有的信息，都不算。";
+const FAITH_TEXT =
+  "下面是原来的一条或几条笔记，和由它们改写、合并或拆分成的一条或几条新笔记。新的这些说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。";
 
 const log = { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} } as unknown as FastifyBaseLogger;
 const deps = (over: Partial<SortDeps> = {}, config: Partial<Config> = {}): SortDeps => ({
@@ -59,13 +61,13 @@ describe("sortNote", () => {
     expect(judge.calls[0]!.questions[0]).toMatchObject({ type: "noul", instructions: SELF_TEXT });
   });
 
-  it("0.8 opens; 0.79 stays in the vault and is unsure; 0.2 is unsure; 0.1 is not", async () => {
+  it("0.6 opens; 0.59 stays in the vault and is unsure; 0.2 is unsure; 0.1 is not", async () => {
     const at = async (p: number) => {
       judge.answer(() => ({ sort: p }));
       return sortNote(deps(), "x", "owner", "auto");
     };
-    expect(await at(0.8)).toEqual({ vault: false, unsure: false });
-    expect(await at(0.79)).toEqual({ vault: true, unsure: true });
+    expect(await at(0.6)).toEqual({ vault: false, unsure: false });
+    expect(await at(0.59)).toEqual({ vault: true, unsure: true });
     expect(await at(0.2)).toEqual({ vault: true, unsure: true });
     expect(await at(0.1)).toEqual({ vault: true, unsure: false });
   });
@@ -108,14 +110,14 @@ describe("failures of the database around the call", () => {
   const notes = [{ id: "n1", text: "note 1" }];
 
   it("a failing limit check: vault / null, nothing thrown, no call made", async () => {
-    judge.answer(() => ({ sort: 0.99, dup: { n1: 0.99, "都不是": 0 } }));
+    judge.answer(() => ({ sort: 0.99, d0: 0.99 }));
     expect(await sortNote(deps({ db: failing(/^\s*select calls from judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
     expect(await duplicateOf(deps({ db: failing(/^\s*select calls from judge_usage/) }), "新", notes)).toBeNull();
     expect(judge.calls).toHaveLength(0);
   });
 
   it("a failing count does not change the judge's answer", async () => {
-    judge.answer(() => ({ sort: 0.9, dup: { n1: 0.9, "都不是": 0 } }));
+    judge.answer(() => ({ sort: 0.9, d0: 0.9 }));
     expect(await sortNote(deps({ db: failing(/insert into judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
     expect(await duplicateOf(deps({ db: failing(/insert into judge_usage/) }), "新", notes)).toBe("n1");
   });
@@ -130,45 +132,92 @@ describe("failures of the database around the call", () => {
   });
 });
 
+describe("resortNote", () => {
+  it("is the sort judgement of an existing note: always asked, and no answer is null (sortNote would say the vault)", async () => {
+    judge.answer(() => ({ sort: 0.9 }));
+    expect(await resortNote(deps(), "喜欢喝美式", "owner")).toEqual({ vault: false, unsure: false });
+    judge.answer(() => ({ sort: 0.1 }));
+    expect(await resortNote(deps(), "x", "owner")).toEqual({ vault: true, unsure: false });
+    judge.answer(() => ({}));
+    expect(await resortNote(deps(), "x", "owner")).toBeNull();
+    judge.answer(() => new JudgeError("auth"));
+    expect(await resortNote(deps(), "x", "owner")).toBeNull();
+    expect(await resortNote(deps({ judge: null }), "x", "owner")).toBeNull();
+  });
+});
+
 describe("duplicateOf", () => {
   const notes = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `n${i}`, text: `note ${i}` }));
-  const scoring = (id: string, p: number) => (_s: string, qs: readonly { type: string }[]) => ({
-    dup: Object.fromEntries(optionKeys(qs[0]).map((k) => [k, k === id ? p : 0])),
-  });
+  /** Every question of the request answered 0 but the one of the note with `id` (ids are `n{i}`; question keys are `d{index in the chunk}`). */
+  const scoring = (scores: Record<string, number>) => (_s: string, qs: readonly { key: string; instructions: string }[]) =>
+    Object.fromEntries(qs.map((q) => [q.key, scores[/已有的笔记：(.*)$/.exec(q.instructions)![1]!.replace("note ", "n")] ?? 0]));
 
-  it("picks the note at 0.7, not at 0.5, and shapes the request", async () => {
-    judge.answer(scoring("n1", 0.7));
+  it("asks one yes/no question per existing note in one request, each with the pair; picks the note at 0.5, not below, and counts one call", async () => {
+    judge.answer(scoring({ n1: 0.5 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBe("n1");
-    const q = judge.calls[0]!.questions[0]!;
+    expect(judge.calls).toHaveLength(1);
     expect(judge.calls[0]!.state).toBe("新的笔记：新");
-    expect(q).toMatchObject({ key: "dup", type: "choice", instructions: DUP_TEXT });
-    expect(Object.values((q as { options: Record<string, string> }).options)).toEqual(expect.arrayContaining(["note 0", "note 1", "note 2", "都不是"]));
-    expect(optionKeys(q)).toHaveLength(4);
+    expect(judge.calls[0]!.questions).toEqual([
+      { key: "d0", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 0` },
+      { key: "d1", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 1` },
+      { key: "d2", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 2` },
+    ]);
     expect(await used()).toBe(1);
-    judge.answer(scoring("n1", 0.5));
+    judge.answer(scoring({ n1: 0.49 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBeNull();
   });
 
-  it("asks 45 notes in three requests of 20, 20 and 5 (plus none-of-them)", async () => {
-    judge.answer(scoring("none", 0));
+  it("asks 45 notes in three requests of 20, 20 and 5, keys d0…d19", async () => {
+    judge.answer(scoring({}));
     expect(await duplicateOf(deps(), "新", notes(45))).toBeNull();
-    expect(judge.calls.map((c) => optionKeys(c.questions[0]).length)).toEqual([21, 21, 6]);
+    expect(judge.calls.map((c) => c.questions.length)).toEqual([20, 20, 5]);
+    expect(judge.calls[1]!.questions[19]!.key).toBe("d19");
     expect(await used()).toBe(3);
   });
 
-  it("a match in a later chunk is found", async () => {
-    judge.answer(scoring("n41", 0.9));
+  it("the note with the highest score across all chunks wins, not the first at or above the threshold", async () => {
+    judge.answer(scoring({ n3: 0.6, n41: 0.9 }));
     expect(await duplicateOf(deps(), "新", notes(45))).toBe("n41");
+    expect(judge.calls).toHaveLength(3);
   });
 
-  it("null on an error, no judge, no notes, or at the limit", async () => {
+  it("null on an error (in any chunk), no judge, no notes, or at the limit", async () => {
     judge.answer(() => new JudgeError("status"));
     expect(await duplicateOf(deps(), "新", notes(3))).toBeNull();
+    let n = 0;
+    judge.answer((s, qs) => (++n === 2 ? new JudgeError("status") : scoring({ n1: 0.9 })(s, qs as never)));
+    expect(await duplicateOf(deps(), "新", notes(45))).toBeNull();
     expect(await duplicateOf(deps({ judge: null }), "新", notes(3))).toBeNull();
     const before = judge.calls.length;
     expect(await duplicateOf(deps(), "新", [])).toBeNull();
     await db.query("insert into judge_usage (day, calls) values ($1::date, 5) on conflict (day) do update set calls = 5", [today()]);
     expect(await duplicateOf(deps({}, { judge: { ...JUDGE, dailyLimit: 5 } }), "新", notes(3))).toBeNull();
     expect(judge.calls).toHaveLength(before);
+  });
+});
+
+describe("addsNothing", () => {
+  it("is one question, whatever the change: the notes it was made from and what it made, at the threshold", async () => {
+    judge.answer(() => ({ faithful: 0.6 }));
+    expect(await addsNothing(deps(), { kind: "merge", sources: ["喜欢茶", "爱喝茶"], result: "爱喝茶" })).toBe(true);
+    expect(judge.calls[0]!.questions).toEqual([{ key: "faithful", type: "noul", instructions: FAITH_TEXT }]);
+    expect(JSON.parse(judge.calls[0]!.state)).toEqual({ sources: ["喜欢茶", "爱喝茶"], results: ["爱喝茶"] });
+    expect(await addsNothing(deps(), { kind: "rewrite", sources: ["周三去了医院"], result: "2026 年 11 月 18 日：去了医院" })).toBe(true);
+    expect(JSON.parse(judge.calls[1]!.state)).toEqual({ sources: ["周三去了医院"], results: ["2026 年 11 月 18 日：去了医院"] });
+    expect(await addsNothing(deps(), { kind: "split", source: "喜欢茶，对花生过敏", parts: ["喜欢茶", "对花生过敏"] })).toBe(true);
+    expect(JSON.parse(judge.calls[2]!.state)).toEqual({ sources: ["喜欢茶，对花生过敏"], results: ["喜欢茶", "对花生过敏"] });
+    expect(judge.calls[2]!.questions[0]).toMatchObject({ key: "faithful" });
+    expect(await used()).toBe(3);
+    judge.answer(() => ({ faithful: 0.59 }));
+    expect(await addsNothing(deps(), { kind: "merge", sources: ["a", "b"], result: "a" })).toBe(false);
+  });
+
+  it("false on an error, nothing usable, no judge or the limit", async () => {
+    const change = { kind: "rewrite" as const, sources: ["a"], result: "b" };
+    judge.answer(() => new JudgeError("auth"));
+    expect(await addsNothing(deps(), change)).toBe(false);
+    judge.answer(() => ({}));
+    expect(await addsNothing(deps(), change)).toBe(false);
+    expect(await addsNothing(deps({ judge: null }), change)).toBe(false);
   });
 });

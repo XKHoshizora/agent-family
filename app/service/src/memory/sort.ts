@@ -20,20 +20,14 @@ const OWNER_INSTRUCTIONS =
 const SELF_INSTRUCTIONS =
   "这是一个 AI 助手给自己记的一条笔记，可能用任何语言写。这条内容只是它做事的方式或习惯（比如回答的长短、先说什么、用什么格式、推荐时注意什么），不透露主人的任何私事，即使被主人的朋友、同事、群友看到也完全无妨。凡是提到主人的健康、钱、工作变动、感情和家庭、对别人的评价、行踪住址、账号密码、未公开的计划，或者拿不准的，都不算。";
 const DUPLICATE_INSTRUCTIONS =
-  "下面是一个 AI 助手已经记下的几条笔记和一条新的笔记（都可能用任何语言写）。新的这条和哪一条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下它不会让助手多知道任何东西？如果它和已有的矛盾、是对它的更新、或者多了已有的没有的信息，选“都不是”。";
-
-const SPLIT_INSTRUCTIONS =
-  "下面是一条笔记和由它拆出来的几条。拆出来的这几条加在一起，说的全都是原来那条里已经有的事，没有多出任何原来没有的内容、推测或细节。都可能是任何语言。";
+  "这是一个 AI 助手关于主人的两条笔记：一条已有的，一条新的。两条可能用不同的语言写。新的这条和已有的那条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下新的不会让助手多知道任何东西。如果新的这条和已有的矛盾、是对它的更新、或者多了已有那条没有的信息，都不算。";
 
 const FAITHFUL_INSTRUCTIONS =
-  "下面是原来的一条或几条笔记，和由它们改写或合并成的一条新笔记。新的这一条说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。";
+  "下面是原来的一条或几条笔记，和由它们改写、合并或拆分成的一条或几条新笔记。新的这些说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。";
 
-const SPLIT = "split";
 const FAITHFUL = "faithful";
 const SORT = "sort";
-const DUP = "dup";
-const NONE = "都不是";
-/** Existing notes per question: the choice form is calibrated to about 20 options. */
+/** Existing notes per request: one yes/no question each, in one call. */
 const CHUNK = 20;
 /** A score from here up to `shareAt` is "unsure". */
 const UNSURE_FROM = 0.2;
@@ -103,31 +97,35 @@ export async function resortNote(deps: SortDeps, text: string, kind: NoteKind): 
 export type DreamChange = { kind: "split"; source: string; parts: ReadonlyArray<string> } | { kind: "merge" | "rewrite"; sources: ReadonlyArray<string>; result: string };
 
 /**
- * Whether what a dream made holds nothing the notes did not say (checked by meaning, not by length: parts repeat a subject or a
- * date, and languages differ in length): one question to the site's judgement model, `splitAt` (a split) or `faithfulAt` (a merge
- * or a rewrite, which must also keep what the notes said) or more sure. False whenever it cannot be asked or answers nothing
- * usable: the change is dropped then.
+ * Whether what a dream made holds nothing the notes did not say and keeps what they said (checked by meaning, not by length:
+ * parts repeat a subject or a date, and languages differ in length): one question to the site's judgement model, `faithfulAt` or
+ * more sure — the same question and the same threshold for a split, a merge and a rewrite. False whenever it cannot be asked or
+ * answers nothing usable: the change is dropped then.
  */
 export async function addsNothing(deps: SortDeps, change: DreamChange): Promise<boolean> {
-  const split = change.kind === "split";
-  const state = JSON.stringify(split ? { source: change.source, parts: change.parts } : { sources: change.sources, result: change.result });
-  const answer = await ask(deps, state, { key: split ? SPLIT : FAITHFUL, type: "noul", instructions: split ? SPLIT_INSTRUCTIONS : FAITHFUL_INSTRUCTIONS });
-  const { splitAt, faithfulAt } = deps.config.memory;
-  return answer?.type === "noul" && answer.p >= (split ? splitAt : faithfulAt);
+  const sources = change.kind === "split" ? [change.source] : change.sources;
+  const results = change.kind === "split" ? change.parts : [change.result];
+  const answer = await ask(deps, JSON.stringify({ sources, results }), { key: FAITHFUL, type: "noul", instructions: FAITHFUL_INSTRUCTIONS });
+  return answer?.type === "noul" && answer.p >= deps.config.memory.faithfulAt;
 }
 
-/** The id of the existing note that `text` repeats, or null (also whenever it cannot be asked: the note is then added). */
+/**
+ * The id of the existing note that `text` repeats, or null (also whenever it cannot be asked: the note is then added). For each
+ * chunk of up to `CHUNK` existing notes one request with one yes/no question per note (`d0`…), each about the pair; the note with
+ * the highest score at or above `sameAt` over all the chunks wins. No answer for a chunk (an error, the limit, nothing usable)
+ * makes it null: no judgement is guessed at.
+ */
 export async function duplicateOf(deps: SortDeps, text: string, existing: ReadonlyArray<{ id: string; text: string }>): Promise<string | null> {
+  let best: { id: string; p: number } | null = null;
   for (let i = 0; i < existing.length; i += CHUNK) {
     const chunk = existing.slice(i, i + CHUNK);
-    const options: Record<string, string> = Object.fromEntries(chunk.map((n) => [n.id, n.text]));
-    options[NONE] = NONE;
-    const answer = await ask(deps, `新的笔记：${text}`, { key: DUP, type: "choice", instructions: DUPLICATE_INSTRUCTIONS, options });
-    // No answer (error, limit, nothing usable): stop here, asking further chunks would only spend more calls.
-    if (answer?.type !== "choice") return null;
-    for (const note of chunk) {
-      if ((answer.probabilities.get(note.id) ?? 0) >= deps.config.memory.sameAt) return note.id;
-    }
+    const questions = chunk.map((n, k): Question => ({ key: `d${k}`, type: "noul", instructions: `${DUPLICATE_INSTRUCTIONS}\n已有的笔记：${n.text}` }));
+    const answers = await askAll(deps, `新的笔记：${text}`, questions);
+    if (answers === null) return null;
+    chunk.forEach((n, k) => {
+      const answer = answers.get(`d${k}`);
+      if (answer?.type === "noul" && answer.p >= deps.config.memory.sameAt && (best === null || answer.p > best.p)) best = { id: n.id, p: answer.p };
+    });
   }
-  return null;
+  return (best as { id: string } | null)?.id ?? null;
 }

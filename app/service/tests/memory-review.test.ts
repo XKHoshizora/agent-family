@@ -563,7 +563,7 @@ describe("not looping on what it already knows", () => {
   it("the same with a paraphrase the judge reports as the same note", async () => {
     const w = await owned("lou");
     const note = await seeded(w.owner, w.agent.id, TEXT, false);
-    judge.answer((_s, qs) => ({ dup: Object.fromEntries(Object.keys((qs[0] as { options: object }).options).map((k) => [k, k === note.id ? 0.95 : 0])) }));
+    judge.answer((_s, qs) => Object.fromEntries(qs.map((q) => [q.key, 0.95])));
     const before = await twenty(w, () => ops(add("茶要喝无糖的")));
     expect(reviewCalls()).toHaveLength(3);
     expect(stable(await roomOf(w.owner))).toBe(before);

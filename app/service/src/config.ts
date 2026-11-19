@@ -224,14 +224,13 @@ export interface MemoryConfig {
    * 入梦: the sweep that looks for owners to consolidate comes every `dreamSweepMs`. An owner dreams after they have sent no
    * message anywhere for `dreamIdleMs`, with something new since their last dream, and not twice within `dreamEveryMs`.
    * A room left at `napAt` of its limit by a change is consolidated at once (a nap), at most once per `dreamEveryMs`.
-   * A split of one entry into several is applied when the judgement model is `splitAt` sure it adds nothing; a merge or a rewrite
-   * when it is `faithfulAt` sure it adds nothing and loses nothing.
+   * A merge, a rewrite or a split of entries is applied when the judgement model is `faithfulAt` sure the result adds nothing the
+   * entries did not say and loses nothing they did.
    */
   dreamSweepMs: number;
   dreamIdleMs: number;
   dreamEveryMs: number;
   napAt: number;
-  splitAt: number;
   faithfulAt: number;
 }
 
@@ -248,15 +247,15 @@ const memorySchema = z.strictObject({
   reviewMessages: positive(40, 500),
   reviewMessageChars: positive(500, 20_000),
   reviewMaxOutputTokens: positive(800, 100_000),
-  shareAt: probability(0.8),
-  sameAt: probability(0.6),
-  hearsayAt: probability(0.6),
+  shareAt: probability(0.6),
+  sameAt: probability(0.5),
+  hearsayAt: probability(0.65),
   ownAt: probability(0.6),
   flaggedMax: positive(20, 500),
   flaggedContext: z.number().int().min(0).max(50).default(3),
   hearsayPerHour: positive(4, 1000),
-  hearsayNewAt: probability(0.5),
-  hearsayAbuseAt: probability(0.7),
+  hearsayNewAt: probability(0.7),
+  hearsayAbuseAt: probability(0.6),
   hearsayMuteMs: positive(21_600_000, 31_536_000_000),
   hearsayMute: z.enum(["off", "observe", "on"]).default("observe"),
   listenShare: probability(0.5),
@@ -264,7 +263,6 @@ const memorySchema = z.strictObject({
   dreamIdleMs: positive(10_800_000, 604_800_000),
   dreamEveryMs: positive(72_000_000, 2_592_000_000),
   napAt: probability(0.8),
-  splitAt: probability(0.6),
   faithfulAt: probability(0.6),
 });
 
