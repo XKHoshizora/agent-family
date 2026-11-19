@@ -1,0 +1,85 @@
+复核校准报告（review）  模型 claude-haiku-5-5  样本 60  布局 apart
+  按生产的原样发：系统文本 + JSON 用户消息 {conversation, notes, room_left}，主人自己的对话（可以新增/替换/删除/锁/解锁），max_tokens 800，temperature 0；答案按 ops.ts 解析并过 modelNote 的拒绝规则。
+  通过 = 操作种类对（merge 要有 replace）、mustMention 都在结果笔记里、mustNot 都不在；none 的样本要求一个操作都没有。（样本文件没有写房间大小：默认房间；near-full 的样本被告知主人房间还剩 20 个字。）
+
+========== 布局 apart（笔记单独放在 notes 里并编号，生产的做法）  成功 59，失败 1
+一、通过 / 总（按类别）
+  agent-asks-owner-confirms    4 / 4
+  agent-restates               4 / 4
+  change                       4 / 4
+  chitchat                     4 / 4
+  correction                   10 / 10
+  cross-language               6 / 6
+  explicit                     4 / 4
+  forget                       3 / 4
+  instruction-injection        4 / 4
+  near-full                    3 / 3
+  one-time                     4 / 4
+  preference                   4 / 4
+  secret                       4 / 4
+  （按语言）
+  zh                           20 / 21
+  ja                           13 / 13
+  en                           13 / 13
+  mix                          6 / 6
+  cross                        6 / 6
+  （按语言 / 类别）
+  cross / cross-language       6 / 6
+  en / agent-asks-owner-confirms 1 / 1
+  en / agent-restates          1 / 1
+  en / change                  1 / 1
+  en / chitchat                1 / 1
+  en / correction              3 / 3
+  en / explicit                1 / 1
+  en / forget                  1 / 1
+  en / instruction-injection   1 / 1
+  en / one-time                1 / 1
+  en / preference              1 / 1
+  en / secret                  1 / 1
+  ja / agent-asks-owner-confirms 1 / 1
+  ja / agent-restates          1 / 1
+  ja / change                  1 / 1
+  ja / chitchat                1 / 1
+  ja / correction              2 / 2
+  ja / explicit                1 / 1
+  ja / forget                  1 / 1
+  ja / instruction-injection   1 / 1
+  ja / near-full               1 / 1
+  ja / one-time                1 / 1
+  ja / preference              1 / 1
+  ja / secret                  1 / 1
+  mix / chitchat               1 / 1
+  mix / correction             2 / 2
+  mix / instruction-injection  1 / 1
+  mix / one-time               1 / 1
+  mix / preference             1 / 1
+  zh / agent-asks-owner-confirms 2 / 2
+  zh / agent-restates          2 / 2
+  zh / change                  2 / 2
+  zh / chitchat                1 / 1
+  zh / correction              3 / 3
+  zh / explicit                2 / 2
+  zh / forget                  1 / 2
+  zh / instruction-injection   1 / 1
+  zh / near-full               2 / 2
+  zh / one-time                1 / 1
+  zh / preference              1 / 1
+  zh / secret                  2 / 2
+  合计                           58 / 59    答案不是 JSON 对象的：0
+
+二、没通过的样本和它们返回的操作（样本是编出来的，这里可以打印笔记原文）
+  mr-020（zh / forget）期望 remove 提到 深色 不能有 署名  → 结果里不该有「署名」
+    操作 [{"op":"remove","ref":"n1"},{"op":"add","kind":"owner","text":"邮件署名由主人自己决定，不替他定"}]
+
+三、用量
+  59 次有 usage：提示 125460 tokens，输出 12350 tokens，合计 137810；平均每次 提示 2126 / 输出 209
+  延迟：中位数 1654ms，最大 4621ms
+
+请求失败的样本（不计入上面任何一项）：mr-043（返回里没有 choices[0].message.content）
+
+重复新增（模型把已有的笔记又 add 了一遍；按 ops.ts 去重之前的原始答案算，一字不差的会被生产丢掉，换了说法的不会）
+  apart：带已有笔记的样本 35 条，其中重复新增 0 条（共 0 次）
+
+需要决定的数字
+  - 没有门槛；看通过率：apart 合计 58 / 59。要看哪类掉得多，第一节按类别。
+  - 重复新增：apart 里 0 / 35 条带笔记的样本出现。加 --mixed-notes 可以和“笔记混在对话里”对比。
