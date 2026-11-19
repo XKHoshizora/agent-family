@@ -42,6 +42,7 @@ import {
   removeProvider,
   setCanSend,
   setDraft,
+  setMemoryChangeStatus,
   setProposalStatus,
   setUploaded,
   setUploadProgress,
@@ -653,6 +654,17 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     return Object.keys(out).length > 0 ? out : null;
   };
 
+  const memoryDecision = (action, agentId, changeId, route) =>
+    attempt(() => route(agentId, changeId), {
+      map: (answer) => (typeof answer?.status === "string" ? answer.status : null),
+      after: (status) => {
+        if (status !== null) setModel(setMemoryChangeStatus(getModel(), conversationOfAgent(agentId), changeId, status));
+      },
+      refetch: refetchAgent(agentId),
+      text: agentText(action),
+      onFail: staleAgent(agentId),
+    });
+
   const agentActions = {
     loadAgents: () => attempt(() => api.listAgents(), { after: (res) => setModel(applyAgents(getModel(), res?.agents)), text: commonErrorText }),
     /**
@@ -700,6 +712,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
           setModel(setProposalStatus(getModel(), conversationOfAgent(agentId), proposalId, "confirmed"));
         }),
       ),
+    /**
+     * Undoes, confirms or discards one change of my Agent's memory (the chip and the cards): the answer's `status` is kept on
+     * the notice at once. A refusal (stale: something changed since) fetches the Agent and its open cards again.
+     */
+    undoMemoryChange: (agentId, changeId) => memoryDecision("memoryUndo", agentId, changeId, api.undoMemoryChange),
+    confirmMemoryChange: (agentId, changeId) => memoryDecision("memoryConfirm", agentId, changeId, api.confirmMemoryChange),
+    discardMemoryChange: (agentId, changeId) => memoryDecision("memoryDiscard", agentId, changeId, api.discardMemoryChange),
     discardProposal: (agentId, proposalId) =>
       attempt(
         () => api.discardProposal(agentId, proposalId),

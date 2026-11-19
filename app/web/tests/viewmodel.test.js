@@ -460,6 +460,24 @@ describe("Agents (batch 2A)", () => {
     expect(v.convs[A1].messages[0].text).toBe("你开始了新话题，之前的对话不再发给小助手");
   });
 
+  it("a memory_changed notice reads 记忆已更新 and keeps its lines, vault marks and flags; in a group it is hidden", () => {
+    const event = { event: "memory_changed", actorId: AG1, changeId: "c1", lines: ["记住了：不吃辣", "记住了：住上海"], vaultLines: [false, true], pending: false, unlock: false, full: true, status: "applied" };
+    const messages = [notice(A1, 1, "记忆已更新", event)];
+    const v = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 })], messages }), { now: NOW });
+    const m = v.convs[A1].messages[0];
+    expect(m.text).toBe("记忆已更新");
+    expect(m.hidden).toBeUndefined();
+    expect(m.system).toMatchObject({ changeId: "c1", lines: ["记住了：不吃辣", "记住了：住上海"], vaultLines: [false, true], pending: false, unlock: false, full: true, status: "applied" });
+    // vaultLines absent → all false; malformed lines are dropped.
+    const bare = [notice(A1, 1, "记忆已更新", { ...event, vaultLines: undefined, lines: ["a", 3, "b"] })];
+    const b = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 })], messages: bare }), { now: NOW });
+    expect(b.convs[A1].messages[0].system).toMatchObject({ lines: ["a", "b"], vaultLines: [false, false] });
+    // In a group the notice has no Agent conversation: nothing is shown.
+    const inGroup = [notice(G1, 1, "记忆已更新", event)];
+    const g = toView(M.applySync(M.initial(), syncOf([group(G1, { lastSeq: 1, readSeq: 1 })], inGroup)), { now: NOW });
+    expect(g.convs[G1].messages[0].hidden).toBe(true);
+  });
+
   it("a deleted Agent's conversation can only be read, and says so", () => {
     const conversations = [agentConv(A2, AG2, { agent: { paused: false, deleted: true }, canSend: { ok: false, reason: "agent_deleted" } })];
     const v = toView(agentModel({ conversations, agents: [agentOf(AG2, { deleted: true, conversationId: A2 })], principals: [...PRINCIPALS, agentPrincipal(AG2)] }), { now: NOW });

@@ -122,5 +122,6 @@ export const APP_CLASSES = new Set(
   settings-me share-items side side-body side-col side-head side-hero side-list slim spacer sr-only stack-actions steps
   sync-added sync-failed sync-name sync-others sync-rows sync-tags sync-tools
   tag tag-human tag-muted tag-ok tag-pending tag-row tag-solid tag-warn task-controls task-list-item theirs thinking
-  thinking-text toast typed up upload-progress vis-banner`.split(/\s+/),
+  thinking-text toast typed up upload-progress vis-banner
+  memory-card memory-chip memory-detail memory-foot memory-hint memory-lines msg-memory`.split(/\s+/),
 );

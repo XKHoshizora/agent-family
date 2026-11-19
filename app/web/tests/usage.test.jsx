@@ -90,6 +90,20 @@ describe("usage and balance", () => {
     ]);
   });
 
+  it("a row with purpose memory reads 记忆, apart from persona drafts (which have no Agent either)", async () => {
+    const recent = [
+      { agentId: null, purpose: "draft", model: "free-1", source: "site", points: "0.2", replies: 0 },
+      { agentId: null, purpose: "memory", model: "free-1", source: "site", points: "0.05", replies: 0 },
+      { agentId: AG1, purpose: "reply", model: "paid-1", source: "site", points: "3", replies: 2 },
+    ];
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ recent })) });
+    expect(recentRows()).toEqual([
+      ["起草人格文档", "小模型（本站）", "0.2 点"],
+      ["记忆", "小模型（本站）", "0.05 点"],
+      ["小助手", "大模型（本站）", "3 点 · 2 次回复"],
+    ]);
+  });
+
   it("with no recent usage says so plainly", async () => {
     await openUsage();
     expect(inMain().queryByRole("list", { name: "最近用量" })).toBeNull();

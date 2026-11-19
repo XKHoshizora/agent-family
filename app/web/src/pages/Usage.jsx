@@ -94,7 +94,9 @@ export function UsagePage({ back }) {
   const { state } = useStore();
   const { usage, failed, reload } = useUsage();
 
-  const agentName = (agentId) => {
+  // A row with no Agent is a call of mine of its own: reviewing what my Agents remember (purpose "memory"), else a persona draft.
+  const agentName = (agentId, purpose) => {
+    if (purpose === "memory") return "记忆";
     if (agentId === null || agentId === undefined) return "起草人格文档";
     const agent = state.agents[agentId];
     return agent && !agent.deleted ? agent.name : "已删除的 Agent";
@@ -153,9 +155,9 @@ export function UsagePage({ back }) {
         ) : (
           <ul className="member-rows" aria-label="最近用量">
             {recent.map((r) => (
-              <li key={`${r.agentId}|${r.source}|${r.model}`}>
+              <li key={`${r.agentId}|${r.purpose ?? ""}|${r.source}|${r.model}`}>
                 <div className="member-body">
-                  <strong>{agentName(r.agentId)}</strong>
+                  <strong>{agentName(r.agentId, r.purpose)}</strong>
                   <p>{modelName(r)}</p>
                 </div>
                 <span>

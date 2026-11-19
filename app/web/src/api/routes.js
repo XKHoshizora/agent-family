@@ -99,6 +99,11 @@ export const confirmProposal = (agentId, proposalId, edits) =>
   request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/confirm`, edits);
 export const discardProposal = (agentId, proposalId) => request("POST", `/api/agents/${seg(agentId)}/proposals/${seg(proposalId)}/discard`);
 
+// ───────── memory changes (the chip and the confirmation cards) → { status }
+export const undoMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/undo`);
+export const confirmMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/confirm`);
+export const discardMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/discard`);
+
 // ───────── an Agent's replies (runs) and new topics, by its conversation; in a group, by the group and the Agent
 export const getRun = (conversationId) => request("GET", `/api/conversations/${seg(conversationId)}/run`); // → {run: Run | null}
 /** A group's Agent replies → {runs: [{agentId, state: "replying" | "unavailable", run?}]} (`run` only for my Agents) */

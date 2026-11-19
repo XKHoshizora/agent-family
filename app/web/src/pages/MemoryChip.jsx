@@ -1,0 +1,125 @@
+// What the owner is told when their Agent remembered something (the `memory_changed` notice, only ever in their own
+// conversation with that Agent): a small closed chip, 记忆已更新, that opens to the lines of the change with 撤销; and the
+// two confirmation cards (记住 / 不用 for new notes, 取出 / 不用 for a note to take out of the vault). Following
+// TopicDivider (a notice) and ProposalCard (decisions, one at a time, a refusal said on the card).
+import React, { useEffect, useRef, useState } from "react";
+import { useStore } from "../data/store.jsx";
+import { ChevronDown, Lock } from "../icons.js";
+import { Btn, Tag } from "../ui/primitives.jsx";
+
+function useMounted() {
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  return mounted;
+}
+
+/** The lines of a change, each with the vault tag when it went into (or came out of) the vault. */
+function MemoryLines({ system }) {
+  return (
+    <ul className="memory-lines">
+      {system.lines.map((line, i) => (
+        <li key={i}>
+          {line}
+          {system.vaultLines[i] && <Tag tone="muted">保险箱</Tag>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * One notice of a change to my Agent's memory, by its state: applied → the chip (closed; opened: the lines, 撤销 or 已撤销,
+ * and — when the room is nearly full — a link to the palace's settings); pending → the card asking first; discarded → nothing.
+ * A refusal (the change went stale meanwhile) stays on it as a sentence.
+ */
+export function MemoryNotice({ msg, conv }) {
+  const { actions, dispatch } = useStore();
+  const mounted = useMounted();
+  const system = msg.system;
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const [refusal, setRefusal] = useState(null);
+
+  /** One decision at a time; its refusal is said on the notice. */
+  const decide = async (key, request) => {
+    setRefusal(null);
+    setBusy(key);
+    const res = await request;
+    if (!mounted.current) return;
+    setBusy(null);
+    if (!res.ok) setRefusal(res.text);
+  };
+  const undo = () => decide("undo", actions.undoMemoryChange(conv.agentId, system.changeId));
+  const confirm = () => decide("confirm", actions.confirmMemoryChange(conv.agentId, system.changeId));
+  const discard = () => decide("discard", actions.discardMemoryChange(conv.agentId, system.changeId));
+  const openPalace = () => dispatch({ type: "nav", patch: { pane: "main", section: "settings", settingsPage: "memory" } });
+
+  const alert = refusal && (
+    <p className="field-msg" role="alert">
+      {refusal}
+    </p>
+  );
+
+  if (system.status === "discarded") return <li className="msg-memory" data-msg={msg.id} hidden />;
+
+  if (system.status === "pending") {
+    const title = system.unlock ? "要把这条从保险箱取出来吗？" : "要记住这些吗？";
+    const yes = system.unlock ? "取出" : "记住";
+    return (
+      <li className="msg-memory" data-msg={msg.id}>
+        <div className="card memory-card">
+          <div className="card-head">
+            {system.unlock && <Lock size={16} aria-hidden="true" />}
+            <strong>{title}</strong>
+          </div>
+          <MemoryLines system={system} />
+          <div className="card-actions">
+            <Btn variant="primary" disabled={busy !== null} onClick={confirm}>
+              {busy === "confirm" ? "处理中…" : yes}
+            </Btn>
+            <Btn variant="text" disabled={busy !== null} onClick={discard}>
+              {busy === "discard" ? "处理中…" : "不用"}
+            </Btn>
+          </div>
+          {alert}
+        </div>
+      </li>
+    );
+  }
+
+  return (
+    <li className="msg-memory" data-msg={msg.id}>
+      <button type="button" className="memory-chip" aria-expanded={open} onClick={() => setOpen(!open)}>
+        记忆已更新
+        <ChevronDown size={13} aria-hidden="true" style={open ? { transform: "rotate(180deg)" } : undefined} />
+      </button>
+      {open && (
+        <div className="memory-detail">
+          <MemoryLines system={system} />
+          <div className="memory-foot">
+            {system.status === "undone" ? (
+              <span className="muted">已撤销</span>
+            ) : (
+              <Btn small variant="text" disabled={busy !== null} onClick={undo}>
+                {busy === "undo" ? "处理中…" : "撤销"}
+              </Btn>
+            )}
+          </div>
+          {system.full && (
+            <p className="memory-hint">
+              <Btn small variant="text" onClick={openPalace}>
+                记忆宫殿快满了，去整理一下。
+              </Btn>
+            </p>
+          )}
+          {alert}
+        </div>
+      )}
+    </li>
+  );
+}

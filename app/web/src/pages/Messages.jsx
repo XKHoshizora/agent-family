@@ -9,6 +9,7 @@ import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
 import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 import { levelLabel } from "./ModelPicker.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
+import { MemoryNotice } from "./MemoryChip.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
 /** The quoted message as the reader may see it: the service says whether it is visible to them. */
@@ -130,6 +131,8 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
   if (msg.hidden) return null;
   if (msg.kind === "system") {
     if (msg.system?.event === "topic_reset") return <TopicDivider msg={msg} />;
+    // What my Agent remembered: only in my own conversation with it, never in a group.
+    if (msg.system?.event === "memory_changed") return conv.type === "agent" ? <MemoryNotice msg={msg} conv={conv} /> : null;
     return (
       <li className="msg-system" data-msg={msg.id}>
         <span>{msg.text}</span>

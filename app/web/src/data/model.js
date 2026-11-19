@@ -842,14 +842,20 @@ export function dropAgent(state, agentId) {
 
 // ───────── persona proposal cards
 
-/** The conversation of `agentId` (held) and the seqs of its messages, held or in a window, whose proposal is still open. */
+/** Whether `m` is a memory-change notice (`memory_changed`) still waiting for the owner's decision. */
+const pendingMemoryChange = (m) => m.system?.event === "memory_changed" && m.system.status === "pending";
+
+/**
+ * The conversation of `agentId` (held) and the seqs of its messages, held or in a window, whose proposal is still open
+ * or whose memory-change card still waits for a decision (both are cards that may be decided elsewhere).
+ */
 export function openProposals(state, agentId) {
   const conversationId =
     state.agents[agentId]?.conversationId ?? Object.values(state.conversations).find((c) => c.agentId === agentId)?.id ?? null;
   if (!conversationId || !state.conversations[conversationId]) return { conversationId: null, seqs: [] };
   const seqs = new Set();
   const shown = [...(state.messages[conversationId] ?? []), ...(state.windows[conversationId]?.messages ?? [])];
-  for (const m of shown) if (m.proposal?.status === "open") seqs.add(m.seq);
+  for (const m of shown) if (m.proposal?.status === "open" || pendingMemoryChange(m)) seqs.add(m.seq);
   return { conversationId, seqs: [...seqs].sort((a, b) => a - b) };
 }
 
@@ -869,7 +875,8 @@ function replaceBySeq(list, wire) {
  */
 function chargedCopy(state, conv, wire) {
   const [kept] = withoutOthersPrivate(state, conv.type, [wire]);
-  return kept?.via === undefined ? state : applyMessageUpdate(state, kept);
+  // (A memory-change notice is pushed again when its status changes: undone, confirmed, discarded.)
+  return kept?.via === undefined && kept?.system?.event !== "memory_changed" ? state : applyMessageUpdate(state, kept);
 }
 
 /**
@@ -893,6 +900,22 @@ export function applyMessageUpdate(state, wire) {
 /** My confirmation or discard was answered: the card says so at once (the `agent` push refetches the others). */
 export function setProposalStatus(state, conversationId, proposalId, status) {
   const mark = (list) => list.map((m) => (m.proposal?.id === proposalId ? { ...m, proposal: { ...m.proposal, status } } : m));
+  if (!state.conversations[conversationId]) return state;
+  const win = state.windows[conversationId];
+  return {
+    ...state,
+    messages: { ...state.messages, [conversationId]: mark(state.messages[conversationId] ?? []) },
+    windows: win ? { ...state.windows, [conversationId]: { ...win, messages: mark(win.messages) } } : state.windows,
+  };
+}
+
+/**
+ * My undo, confirmation or discard of a memory change was answered with its new `status`: the notice says so at once (the
+ * service pushes it again with the same status). Nothing changes for a change not held.
+ */
+export function setMemoryChangeStatus(state, conversationId, changeId, status) {
+  const mark = (list) =>
+    list.map((m) => (m.system?.event === "memory_changed" && m.system.changeId === changeId ? { ...m, system: { ...m.system, status, pending: status === "pending" } } : m));
   if (!state.conversations[conversationId]) return state;
   const win = state.windows[conversationId];
   return {

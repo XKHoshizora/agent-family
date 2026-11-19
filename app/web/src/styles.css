@@ -275,6 +275,17 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 /* An Agent's conversation: a new topic's divider, the folded thinking, a proposal's persona */
 .msg-divider { align-self: stretch; display: flex; align-items: center; gap: 10px; color: var(--ink-2); font-size: 13px; }
 .msg-divider::before, .msg-divider::after { content: ""; flex: 1; height: 1px; background: var(--line-strong); }
+/* What my Agent remembered: a small closed chip that opens to the lines (and 撤销), or a card asking first */
+.msg-memory { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: 78%; }
+.memory-chip {
+  display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px; border: 0; border-radius: 10px; font: inherit; font-size: 13px;
+  background: rgba(255, 255, 255, 0.5); color: var(--ink-2); cursor: pointer;
+}
+.memory-detail { width: min(420px, 100%); padding: 8px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--line); font-size: 13.5px; text-align: left; }
+.memory-lines { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
+.memory-lines .tag { margin-left: 6px; }
+.memory-foot, .memory-hint { margin: 6px 0 0; font-size: 13px; }
+.memory-card { width: min(420px, 100%); }
 .thinking { font-size: 13px; color: var(--ink-2); }
 .thinking > summary { width: fit-content; cursor: pointer; }
 .thinking-text { margin-top: 4px; padding: 4px 10px; border-left: 3px solid var(--line-strong); white-space: pre-wrap; word-break: break-word; }

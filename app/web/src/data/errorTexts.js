@@ -162,6 +162,12 @@ const MODEL_FAILED = {
   address_not_allowed: "这个接口地址不被允许：需要是 https 开头的公网地址。",
 };
 
+const MEMORY_CHANGE = {
+  stale_change: "这份提议已失效，请让它重新生成提议。",
+  agent_deleted: AGENT_DELETED,
+  not_found: "这条记忆变更已经不存在了。",
+};
+
 const AGENT = {
   create: {
     handle_taken: "这个账号名已被占用，请换一个。",
@@ -210,10 +216,14 @@ const AGENT = {
     agent_deleted: AGENT_DELETED,
     not_found: "这份提议已经不存在了。",
   },
+  // A memory change (the chip's 撤销, the cards' 记住 / 取出 / 不用): stale is worded as a proposal's.
+  memoryUndo: MEMORY_CHANGE,
+  memoryConfirm: MEMORY_CHANGE,
+  memoryDiscard: MEMORY_CHANGE,
 };
 
 /**
- * Why an Agent action was refused. action: create | edit | appellation | pause | resume | delete | avatar | draft | confirm | discard.
+ * Why an Agent action was refused. action: create | edit | appellation | pause | resume | delete | avatar | draft | confirm | discard | memoryUndo | memoryConfirm | memoryDiscard.
  * `now` places a `no_quota` reset time.
  */
 export function agentErrorText(action, error, now = Date.now()) {

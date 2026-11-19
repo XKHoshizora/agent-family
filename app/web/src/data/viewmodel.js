@@ -73,7 +73,30 @@ function systemView(system, alias) {
   const out = { ...system };
   for (const key of ["actorId", "principalId", "newCreatorId"]) if (typeof out[key] === "string") out[key] = alias(out[key]);
   if (Array.isArray(out.memberIds)) out.memberIds = out.memberIds.map(alias);
+  if (out.event === "memory_changed") return memoryChangeView(out);
   return out;
+}
+
+const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded"]);
+
+/**
+ * A `memory_changed` event as the chip and the cards read it: `lines` (strings only), `vaultLines` the same length (absent
+ * or malformed: all false), the three flags as booleans, and a known `status` (else the flag `pending` says it).
+ */
+function memoryChangeView(event) {
+  const lines = Array.isArray(event.lines) ? event.lines.filter((l) => typeof l === "string") : [];
+  const marks = Array.isArray(event.vaultLines) && event.vaultLines.length === (event.lines?.length ?? -1) ? event.vaultLines : [];
+  const vaultLines = Array.isArray(event.lines) ? event.lines.flatMap((l, i) => (typeof l === "string" ? [marks[i] === true] : [])) : [];
+  const pending = event.pending === true;
+  return {
+    ...event,
+    lines,
+    vaultLines,
+    pending,
+    unlock: event.unlock === true,
+    full: event.full === true,
+    status: MEMORY_STATUSES.has(event.status) ? event.status : pending ? "pending" : "applied",
+  };
 }
 
 /** How many invited members `group_created` names before "等N人" (as the service writes it). */
@@ -134,6 +157,11 @@ export function noticeText(system, fallback, nameOf, where = {}) {
       break;
     case "unblocked":
       text = `${n(system.actorId)}解除了对${n(system.principalId)}的拉黑`;
+      break;
+    case "memory_changed":
+      // Only the owner's own conversation with the Agent shows it (the chip), never a group; the lines travel in the event.
+      if (!where.agentId || !Array.isArray(system.lines)) return null;
+      text = "记忆已更新";
       break;
     case "topic_reset":
       if (!where.agentId) return fallback;
