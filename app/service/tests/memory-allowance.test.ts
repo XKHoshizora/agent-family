@@ -63,8 +63,20 @@ describe("the memory allowance", () => {
     expect(json.recent).toEqual([{ agentId: null, purpose: "memory", model: "meter_free", source: "site", points: "0.06", replies: 0, paidBy: "site" }]);
   });
 
+  it("a memory row is paid by the site only when nothing of it was charged to the owner: a row from before the allowance (charged to free points) is not mislabelled", async () => {
+    const owner = await signUp(app, "alwold");
+    gateway.reply("好", { usage: USAGE });
+    await memoryCall(deps(), owner.id, INPUT, never);
+    await db.query("update usage_records set free_micro = 60000, memory_micro = 0 where owner_id = $1 and purpose = 'memory'", [owner.id]);
+    const { json } = await api(app, owner, "GET", "/api/usage");
+    expect(json.recent[0]).toMatchObject({ purpose: "memory", points: "0.06" });
+    expect(json.recent[0].paidBy).toBeUndefined();
+  });
+
   it("while a memory call runs its hold counts against the memory allowance only", async () => {
     const owner = await signUp(app, "alwhold");
+    // The free allowance is nearly all used: a memory hold must not take the little that is left of it.
+    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, $2::date, $3)", [owner.id, today(), app.deps.config.freeDailyMicro - 1000n]);
     const hold = gateway.hang();
     const pending = memoryCall(deps(), owner.id, INPUT, never);
     await hold.reached;
@@ -75,6 +87,35 @@ describe("the memory allowance", () => {
     // The hold is about 0.1 point of the 1 point: nine more would not all fit, but the free allowance is whole.
     hold.release("好", { usage: USAGE });
     await pending;
+  });
+
+  it("two memory calls of one owner started together overrun the allowance by at most one call: the second sees the first's hold", async () => {
+    const owner = await signUp(app, "alwtwo");
+    await fill(owner.id, today(), 950_000);
+    const hold = gateway.hang();
+    const first = memoryCall(deps(), owner.id, INPUT, never);
+    await hold.reached;
+    const before = gateway.calls.length;
+    expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
+    expect(gateway.calls).toHaveLength(before);
+    hold.release("好", { usage: USAGE });
+    await first;
+    expect(BigInt((await memoryUsed(owner.id))[0]!.used)).toBeLessThanOrEqual(1_000_000n + costOf(USAGE));
+  });
+
+  it("a stale run charged to memory (a crash) is swept: nothing is charged and its hold is released", async () => {
+    const owner = await signUp(app, "alwcrash");
+    await fill(owner.id, today(), 100_000);
+    await db.query(
+      `insert into agent_runs (owner_id, purpose, lane, status, charge_to, hold_micro, source, model, reasoning, created_at, started_at)
+       values ($1, 'memory', 'own', 'running', 'memory', 500000, 'site', 'meter_free', 'none', now() - interval '1 day', now() - interval '1 day')`,
+      [owner.id],
+    );
+    const { rows } = await db.query("select hold_micro::text as hold from agent_runs where owner_id = $1", [owner.id]);
+    expect(rows[0]).toEqual({ hold: "500000" });
+    expect(await app.staleRunSweep.run()).toBe(1);
+    expect(await memoryUsed(owner.id)).toEqual([{ day: today(), used: "100000" }]);
+    expect((await db.query("select status from agent_runs where owner_id = $1 and status = 'running'", [owner.id])).rows).toEqual([]);
   });
 
   it("at the allowance no call is made and nothing is recorded, while a reply still starts", async () => {

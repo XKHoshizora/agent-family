@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { siteDay } from "../src/accounts/store.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { parseEntries } from "../src/memory/hearsay.ts";
@@ -371,6 +372,19 @@ describe("before the paid call the judgement model is asked whether the batch is
     }
     expect(hearsayQuestions()).toHaveLength(app.deps.config.memory.hearsayPerHour);
     expect(hearsayCalls()).toHaveLength(0);
+  });
+
+  it("with the memory allowance empty the judge is not asked either: the flags are kept, no try is counted", async () => {
+    const w = await world("jm");
+    verdict(0.9, 0.1);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
+    const seq = await say(w.mia, w.g, "小李下周要去北京出差");
+    await flag(w.agent.id, w.g, seq, "hearsay");
+    await wake();
+    expect(hearsayQuestions()).toHaveLength(0);
+    expect(hearsayCalls()).toHaveLength(0);
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([seq]);
+    expect((await db.query("select tries from memory_flags where agent_id = $1", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
   });
 
   it("a batch with something new is paid for", async () => {

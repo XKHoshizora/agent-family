@@ -164,6 +164,15 @@ describe("a review", () => {
     expect(await stats()).toEqual({ review_run: 2, review_failed: 1 });
   });
 
+  it("a review that is not started because the memory allowance is empty is counted as refused by the allowance, not as a failure", async () => {
+    const w = await owned("st4b");
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
+    await say(w.owner, w.conv, "请记住我不吃香菜");
+    gateway.reply("好的。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await stats()).toEqual({ review_run: 1, memory_refused_allowance: 1 });
+  });
+
   it("with nothing the owner said to look at is counted as skipped, and makes no call", async () => {
     const w = await world("s5");
     await say(w.mia, w.g, `@${w.agent.handle} 你好`);
@@ -423,7 +432,7 @@ describe("a dream", () => {
     await seeded(w.owner, "喜欢喝茶", false);
     gateway.fail("provider_unavailable");
     await night();
-    expect(await stats()).toEqual({ dream_run: 1, dream_failed: 1 });
+    expect(await stats()).toEqual({ dream_failed: 1 });
   });
 
   it("a room left nearly full by a change is a nap, not a dream", async () => {

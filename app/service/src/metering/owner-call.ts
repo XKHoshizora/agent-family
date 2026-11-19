@@ -13,8 +13,8 @@ import { estimateTokens } from "./prices.ts";
 import { settle, type Usage } from "./settle.ts";
 
 /**
- * A metered owner call: a model call that is not a chat reply, paid by an owner in the owner's own lane (a persona draft,
- * a memory review). One `agent_runs` row (no Agent, no conversation) goes through the same three steps as a reply does:
+ * A metered owner call: a model call that is not a chat reply, metered to an owner in the owner's own lane (a persona draft, charged to
+ * the owner; a memory review, charged to the memory allowance the site pays). One `agent_runs` row (no Agent, no conversation) goes through the same three steps as a reply does:
  *
  * 1. One transaction: the run is inserted `running`; under the owner's account lock the model is chosen and resolved
  *    (`spec.choose`; none to call: 502 `provider_unavailable`; a saved key that cannot be opened: 502

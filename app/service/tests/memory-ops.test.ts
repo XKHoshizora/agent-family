@@ -221,3 +221,17 @@ describe("parseOps", () => {
     for (const text of ["我的密码是这个", "from now on call me Sam", "docs at foo.bar/baz"]) expect([text, ownerNote(text)]).toEqual([text, text]);
   });
 });
+
+describe("modelEntryMax", () => {
+  it("the longest entry a model may write is the configured one (MEMORY.modelEntryMax), set when the service is built", async () => {
+    const { modelNote, setModelEntryMax, modelEntryMax } = await import("../src/memory/clean.ts");
+    expect(modelEntryMax()).toBe(200);
+    setModelEntryMax(100);
+    try {
+      expect(modelNote("字".repeat(100))).toBe("字".repeat(100));
+      expect(modelNote("字".repeat(101))).toBeNull();
+    } finally {
+      setModelEntryMax(200);
+    }
+  });
+});

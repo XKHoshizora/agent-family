@@ -805,7 +805,7 @@ what the notes passage may take of a model's context, the output limit of a lang
 the web mirrors it in `app/web/src/data/memoryWeight.js`, and both are tested against one shared list of strings). Both of what a limit bounds, what a reply costs and how much of the context the notes take, are
 token quantities, and code points are not: one fact is about 10 code points in Chinese and 30 to 40 in English at about the same tokens. A Chinese or Japanese or Korean
 character weighs 1 and a Latin letter a third, so a room of 2000 holds about 2000 Chinese characters or about 6000 English letters, and one weight is taken as one token
-(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `weight.ts` is the single place to change.
+(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `weight.ts` is the single place to change — and the web's mirror (`weight` and `storedWeight`, the weight of a typed text once its whitespace is collapsed and trimmed as `cleanText` does, in `memoryWeight.js`) must change with it, with the shared test rows. The reply's context budget counts the notes passage in weight too (`systemTokens`: the system text without the passage a token a code point, plus the passage in weight, the one function both the budget and `loadContext` use), so a passage held to `MEMORY.passageShare` is counted as that share, in Latin script as in Chinese.
 
 An Agent can keep notes (`memory`, an owner's setting per Agent). There are three rooms, each with a limit in weight
 (below; `MEMORY.roomOwner` 2000, `roomSelf` 3000, `roomHearsay` 2000): notes about the owner (shared by all their Agents unless
@@ -872,8 +872,8 @@ hearsay is not converted. → 200 `{"rooms": n, "converted": n, "kept": n, "noRo
 the notes left as they were (a rewrite the judgement did not find faithful or that was too long, a note already in the language, a
 restatement the room could not hold), of which `noRoom` were left only because the room could not hold the restated text, and
 `failedRooms`, the rooms whose call failed (no quota, a model that did not answer) or whose answer could not be used (cut, not
-JSON): the notes of those rooms are in neither `converted` nor `kept`. Costs your points as any memory call does. 409 `no_language` while the setting is automatic; 409
-`busy` while a dream or a conversion of yours is under way or waiting; 503 `unavailable` when the service is stopping. Limit: 6
+JSON): the notes of those rooms are in neither `converted` nor `kept`. The memory allowance the site pays for is spent, not your points. When no room could be processed at all because no call could be made (the allowance is empty, no memory model resolves) the answer is 503 `unavailable` instead; when some rooms were processed it stays 200 with `failedRooms`. 409 `no_language` while the setting is automatic; 409
+`busy` while a dream or a conversion of yours is under way or waiting; 503 `unavailable` when the service is stopping or no call could be made at all. Limit: 6
 per minute.
 
 #### `GET /api/agents/:id/memory`
@@ -1017,7 +1017,7 @@ note keeps its `vault`, `vault_by` and `unsure` exactly as they are, and its ori
 to the ordinary limit of a model's entry (200 weight: weight follows tokens, so a note restated in another script weighs about what it
 did, and no special length is allowed; the prompt asks for it as short as the original), and the call's output limit is sized to the room (twice what it holds
 in weight + 40 a note + 200, never above the model's own). A note that fails stays as it is; a restatement the room cannot hold is
-left and counted in `noRoom`; a room whose call or answer fails is counted in `failedRooms`.
+left and counted in `noRoom`; a room whose call or answer fails is counted in `failedRooms` (and when no room could be processed at all, no call being made, the request is a 503 `unavailable`).
 
 ### Agents in a group
 
@@ -2722,8 +2722,8 @@ milliseconds.
 | Field | Default (range) | What it does |
 |---|---|---|
 | `model` | none (a site model's `id`) | The site model memory calls use; none: the cheapest free-tier site model (Memory calls) |
-| `roomOwner`, `roomSelf`, `roomHearsay` | 2000, 3000, 2000 (1–100 000) | What the notes about the owner, an Agent's own notes and what it heard may hold, at most, in weight |
-| `modelEntryMax` | 200 (1–10 000) | The longest an entry a model wrote is, in weight |
+| `roomOwner`, `roomSelf`, `roomHearsay` | 2000, 3000, 2000 (1–3000: the database guards a note at 9000 characters) | What the notes about the owner, an Agent's own notes and what it heard may hold, at most, in weight |
+| `modelEntryMax` | 200 (1–200) | The longest an entry a model wrote is, in weight (every model-written note, in a review, a dream, hearsay and a conversion, is held to it; the database guard of 600 characters on hearsay covers 200 weight) |
 | `quietMs`, `maxReplies` | 600 000 (1–86 400 000), 8 (1–1 000) | A review of an Agent's own conversation runs after this much quiet, or this many replies since the last |
 | `groupQuietMs`, `groupMaxWaitMs` | 120 000, 900 000 (1–86 400 000) | A pair of Agent and group is acted on (Acting on flags) after this much quiet since its latest flag, at most this long after the first flagged message |
 | `reviewMessages`, `reviewMessageWeight` | 40 (1–500), 500 (1–20 000) | A review is shown at most this many messages, each cut to this much weight (`reviewMessageChars`, the field's name before weight, is still read when `reviewMessageWeight` is absent) |
@@ -3002,6 +3002,20 @@ below zero nothing more starts on the balance until the operator's grants bring 
 hold in the transaction that moves the run out of `running` (Agents and runs, `finish`), so a hold never stops counting
 before its cost lands.
 
+**The memory allowance** (`MEMORY.freeDailyPoints`, default 20 whole points per owner and site day, 0: none; migration
+`038_memory_allowance.sql`). What an owner's Agents' memory does in the background (reviews, hearsay, dreams, language
+conversions) is the site's cost, not the owner's: admission gives a run of purpose `memory` on a site model — any tier — the
+source `memory` (`agent_runs.charge_to`), never `free` or `balance`, holding the most it can cost against the memory
+allowance (`memory_usage (owner_id, day, used_micro)`, as `free_usage` is) while it runs. With nothing of it left (the day's
+use plus the running memory calls' holds is at or above the allowance) the call does not start: `no_quota` with `reason`
+`memory` and `resetsAt`, which `memoryCall` takes as it takes any refusal: it returns nothing, so reviews, hearsay, dreams and
+conversions pause for the rest of the site day (a conversion's route answers its `unavailable` code) and nothing is shown. A
+reply is never affected by memory's spending and `canStartFreeReply` and `free` ignore it; memory is never paid from the
+balance. Settlement charges the memory allowance of the site day it ends in, as the free one is (the overrun of one call is
+forgiven); the usage record keeps it in `memory_micro` (`free_micro` and `balance_micro` stay 0). A memory call on a model of
+the owner's own provider is unmetered, as before, and not limited by the allowance. `GET /api/usage` shows the allowance and
+its use (`memory`) and marks the memory rows `paidBy: "site"`.
+
 **Memory counters** (`src/memory/stats.ts`; migration `040_memory_stats.sql`; `tests/memory-stats.test.ts`). So that the site's operators can
 see how the feature really behaves, the code counts, per site day, what it decided and what owners did about it: `count(db, name, by = 1)`
 adds `by` to the row `(site day, name)` of `memory_stats` and logs one `metric` line (`{"metric":"memory_stat","name","by"}`). A count has no
@@ -3035,20 +3049,6 @@ container `node dist/cli.js memory:stats --days 7` (`npm run memory:stats`, `mem
 | `owner_unlocked`, `owner_locked` | the owner took a note out of, or put one into, the vault (`PATCH`, or confirming an unlock card) |
 | `hearsay_confirmed`, `hearsay_deleted` | the owner took an entry as true, or deleted it |
 | `pending_confirmed`, `pending_discarded` | the owner confirmed or discarded a pending card |
-
-**The memory allowance** (`MEMORY.freeDailyPoints`, default 20 whole points per owner and site day, 0: none; migration
-`038_memory_allowance.sql`). What an owner's Agents' memory does in the background (reviews, hearsay, dreams, language
-conversions) is the site's cost, not the owner's: admission gives a run of purpose `memory` on a site model — any tier — the
-source `memory` (`agent_runs.charge_to`), never `free` or `balance`, holding the most it can cost against the memory
-allowance (`memory_usage (owner_id, day, used_micro)`, as `free_usage` is) while it runs. With nothing of it left (the day's
-use plus the running memory calls' holds is at or above the allowance) the call does not start: `no_quota` with `reason`
-`memory` and `resetsAt`, which `memoryCall` takes as it takes any refusal: it returns nothing, so reviews, hearsay, dreams and
-conversions pause for the rest of the site day (a conversion's route answers its `unavailable` code) and nothing is shown. A
-reply is never affected by memory's spending and `canStartFreeReply` and `free` ignore it; memory is never paid from the
-balance. Settlement charges the memory allowance of the site day it ends in, as the free one is (the overrun of one call is
-forgiven); the usage record keeps it in `memory_micro` (`free_micro` and `balance_micro` stay 0). A memory call on a model of
-the owner's own provider is unmetered, as before, and not limited by the allowance. `GET /api/usage` shows the allowance and
-its use (`memory`) and marks the memory rows `paidBy: "site"`.
 
 **Forgiveness.** What is not charged of the true cost is forgiven, charged to no one — neither the balance nor any day's
 allowance — and recorded as such (`forgiven_micro`):

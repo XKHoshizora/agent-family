@@ -210,7 +210,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   // Charged for an answer that cannot be used: reviewed all the same (nothing is asked again for the same words).
   if (answer === null && report.answered) answer = "";
   // No answer at all: no model or allowance to call on, the call failed, or the service is stopping (that one is no failure).
-  if (answer === null && !ctx.closing.aborted) count(db, "review_failed");
+  if (answer === null && !ctx.closing.aborted && report.refused !== true) count(db, "review_failed");
   if (answer === null || ctx.closing.aborted) return;
 
   const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)])

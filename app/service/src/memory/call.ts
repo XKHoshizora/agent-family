@@ -6,19 +6,20 @@ import { ownerCall } from "../metering/owner-call.ts";
 import type { ModelGateway } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
+import { count } from "./stats.ts";
 import { getMemoryModel, type MemoryModelChoice } from "./store.ts";
 
 /**
  * The one way an Agent's memory calls a model in the background (a review of what the owner said, a consolidation).
- * It is paid for as a reply and a persona draft are (`draftPersona`, README "Usage and points"): an `agent_runs` row of
+ * It is metered as a reply and a persona draft are (`draftPersona`, README "Usage and points"): an `agent_runs` row of
  * purpose `memory` with no Agent and no conversation, belonging to the Agent's owner in the owner's own lane, admitted
- * against the owner's allowance or balance and settled on what the upstream reported. Nothing else of memory calls a
- * model on the owner's account.
+ * against the owner's MEMORY allowance (`memory_usage`, paid by the site: never the owner's free allowance or balance) and
+ * settled on what the upstream reported. Nothing else of memory calls a model on the owner's account.
  *
  * Whose model: the owner's own choice (`accounts.memory_model`, a model they could give an Agent: a site model or a
  * model of their own provider) when they made one, else the site's memory model. A choice that cannot be used is never
- * replaced by the site's model — that would spend points the owner chose not to spend: the call is not made. Metering is
- * a reply's: a site model is charged to the owner, a model of their own provider costs no site points (`admitRun`).
+ * replaced by the site's model — that would spend what the owner chose not to spend: the call is not made. A site model is
+ * charged to the memory allowance, a model of their own provider costs the site nothing (`admitRun`).
  */
 
 /**
@@ -96,7 +97,7 @@ export async function endMemoryCalls(): Promise<void> {
 
 /**
  * One metered model call for `ownerId`; the model's text, trimmed, or null — after settling whatever was used — when
- * there is no model to call (none configured, its key unset), the owner has no quota, the owner already has as many
+ * there is no model to call (none configured, its key unset), the memory allowance is spent, the owner already has as many
  * calls running as `agentMaxConcurrentRuns`, the input does not fit the model's context, the call failed or timed out
  * (`agentRunTimeoutMs`), the answer was cut at its limit, or it said nothing. Never throws for any of these.
  *
@@ -131,6 +132,8 @@ export async function memoryCall(
  */
 export interface MemoryCallReport {
   answered: boolean;
+  /** Set when no call was started because the owner's memory allowance was empty (counted as `memory_refused_allowance`, no failure). */
+  refused?: boolean;
 }
 
 async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal, report?: MemoryCallReport): Promise<string | null> {
@@ -158,6 +161,10 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
   if (outcome.kind === "not_started") {
     // No model, no quota, too many calls running: nothing is recorded (the transaction rolled back).
     const err = outcome.error;
+    if (err instanceof AppError && err.status === 402) {
+      count(deps.db, "memory_refused_allowance");
+      if (report) report.refused = true;
+    }
     if (!(err instanceof AppError)) log.error({ err, ownerId }, "memory call: could not be started");
     else if (err.status === 400) log.warn({ ownerId }, "memory call: the input does not fit the model's context; skipped");
     return null;

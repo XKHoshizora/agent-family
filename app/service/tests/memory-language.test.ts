@@ -446,6 +446,18 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect((await ownerTexts(owner.id)).at(-1)!.text).toBe("爱".repeat(50));
   });
 
+  it("with the memory allowance empty no room can be processed at all: 503 unavailable, nothing changed, nothing charged; with some rooms processed it is a 200 with failedRooms", async () => {
+    const owner = await signUp(app, "cf9");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    const day = siteDay(new Date(), app.deps.config.siteTimezone);
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [owner.id, day]);
+    const res = await convert(owner);
+    expect([res.status, res.json]).toEqual([503, { error: "unavailable" }]);
+    expect(await ownerTexts(owner.id)).toEqual([{ text: "喜欢喝茶", vault: false }]);
+  });
+
   it("a truncated answer is a failed room: not counted in kept", async () => {
     const owner = await signUp(app, "cf7");
     const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });

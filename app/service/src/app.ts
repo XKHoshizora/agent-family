@@ -26,6 +26,7 @@ import { endMemoryCalls } from "./memory/call.ts";
 import { runDreamJob } from "./memory/dream.ts";
 import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
+import { setModelEntryMax } from "./memory/clean.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
 import { decideProactive } from "./agents/proactive/decide.ts";
@@ -178,6 +179,8 @@ const logSerializers = {
 
 export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOptions = {}): Promise<FastifyInstance> {
   const config = overrides.config ?? loadConfig();
+  // The longest note a model may write is a number of the configuration that a pure function (`modelNote`) reads.
+  setModelEntryMax(config.memory.modelEntryMax);
   const ownsDb = overrides.db === undefined;
   const insecureLocal = options.allowInsecureLocal === true ? { allowInsecureLocal: true } : {};
   // One count of the calls to providers and site models in flight, for every guard the app builds.

@@ -10,8 +10,14 @@ import { weight } from "./weight.ts";
  * slip an instruction, a link or a secret in.
  */
 
-/** Longest entry a model writes, in weight (the plan's Numbers; weight.ts): 200 Chinese characters, about 600 English letters. */
-export const MODEL_NOTE_MAX = 200;
+/**
+ * Longest entry a model writes, in weight (`MEMORY.modelEntryMax`, at most 200: the database guard on hearsay holds 600 characters, which is
+ * 200 weight of the shortest kind; weight.ts): 200 Chinese characters, about 600 English letters. The service sets it from its configuration
+ * when it is built (`setModelEntryMax`); `modelNote` is a pure function of its text and this one number.
+ */
+let modelEntryMaxNow = 200;
+export const setModelEntryMax = (max: number): void => void (modelEntryMaxNow = max);
+export const modelEntryMax = (): number => modelEntryMaxNow;
 
 const KEY_RUN = /[A-Za-z0-9_-]{20,}/g;
 const KEY_PREFIX = /\b(?:sk-[\w-]|ghp_\w|AKIA\w)|-----BEGIN/;
@@ -56,9 +62,9 @@ export function ownerNote(text: string): string | null {
   return tidy(text);
 }
 
-/** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over 200 weight, with a link or a bare domain with a path, stating a password or passcode, or addressing the reader as an instruction does. */
+/** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over `modelEntryMax` (200) weight, with a link or a bare domain with a path, stating a password or passcode, or addressing the reader as an instruction does. */
 export function modelNote(text: string): string | null {
   const clean = tidy(text);
-  if (clean === null || weight(clean) > MODEL_NOTE_MAX) return null;
+  if (clean === null || weight(clean) > modelEntryMaxNow) return null;
   return URL_LIKE.some((p) => p.test(clean)) || BARE_DOMAIN_PATH.test(clean) || STATES_A_PASSWORD.test(clean) || ADDRESSES_THE_READER.test(clean) ? null : clean;
 }

@@ -12,6 +12,7 @@ import { parseAnswer, sameKey } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, kindsFor, reviewableAgent, runReview, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { shown, UNSPOKEN } from "./review.ts";
 import { languageRule, type MemoryLanguage } from "./language.ts";
+import { memoryLeft } from "../metering/admit.ts";
 import { askAll } from "./sort.ts";
 import { count, countDroppedFlags } from "./stats.ts";
 import { getMemoryLanguage, listHearsay, roomOf } from "./store.ts";
@@ -29,7 +30,7 @@ import { getMemoryLanguage, listHearsay, roomOf } from "./store.ts";
  *   message, never from the answer; an entry the rules refuse (`modelNote`) is dropped. They are written under the
  *   Agent's hearsay room limit, the oldest going when it is full, with a notice only the owner is sent. Before the paid
  *   call the site's judgement model is asked whether the batch is worth it, and a pair makes at most
- *   `MEMORY.hearsayPerHour` such calls in a rolling hour, so that a member cannot spend the owner's points at will.
+ *   `MEMORY.hearsayPerHour` such calls in a rolling hour, so that a member cannot spend the owner's memory allowance (or the site's judge requests) at will.
  *
  * Failure: a flag is tried at most twice (`memory_flags.tries`). A call that could not be made, or a step that threw, counts a
  * try for the flags it covered and the pair is woken again after the quiet time; at a wake-up flags tried twice, and
@@ -394,6 +395,12 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     // Woken again, with no new flag needed, a quiet time after the call that leaves the hour lets the next one through (not a failed try).
     const calls = [...ctx.hearsayCalls].sort((x, y) => x - y);
     ctx.again(calls[calls.length - config.memory.hearsayPerHour]! + HOUR - now + config.memory.groupQuietMs);
+    return;
+  }
+  // With the memory allowance empty no call can be made: the judge is not asked either. The flags are kept, no try counted.
+  if ((await memoryLeft(db, config, agent.ownerId, new Date(now))) <= 0n) {
+    count(db, "memory_refused_allowance");
+    log.info({ metric: "memory_hearsay_no_allowance", agentId: agent.id, conversationId }, "the memory allowance is spent: the flags wait, nothing is asked");
     return;
   }
   const verdict = await worthACall(deps, agent.ownerId, input);

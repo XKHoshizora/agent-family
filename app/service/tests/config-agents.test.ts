@@ -446,6 +446,9 @@ describe("the memory configuration", () => {
   });
 
   test("a threshold outside [0, 1], a non-whole or non-positive count, an unknown key and bad JSON refuse", () => {
+    // A room cannot be configured past what the database guards (a note is held to 9000 characters), nor a model's entry past 200.
+    for (const bad of ['{"roomOwner":3001}', '{"roomSelf":3001}', '{"roomHearsay":3001}', '{"modelEntryMax":201}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+    expect(loadConfig({ ...base, MEMORY: '{"roomOwner":3000,"modelEntryMax":100}' }).memory).toMatchObject({ roomOwner: 3000, modelEntryMax: 100 });
     for (const bad of ['{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"hearsayMute":"yes"}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"judgePerOwnerDay":0}', '{"roomNotes":1.5}', '{"passageShare":0}', '{"passageShare":1.5}', '{"freeDailyPoints":-1}', '{"freeDailyPoints":1.5}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }

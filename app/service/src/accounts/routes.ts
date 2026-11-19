@@ -63,10 +63,11 @@ export function registerAccountRoutes(app: FastifyInstance): void {
         const used = await freeUsedToday(t, me.id, now, config.siteTimezone);
         const memoryUsed = await memoryUsedToday(t, me.id, now, config.siteTimezone);
         const holds = await readHolds(t, me.id);
-        const recent = await t.query<{ agent_id: string | null; purpose: "reply" | "draft" | "memory"; model: string; source: "site" | "provider"; points: string; replies: number }>(
+        const recent = await t.query<{ agent_id: string | null; purpose: "reply" | "draft" | "memory"; model: string; source: "site" | "provider"; points: string; charged: string; replies: number }>(
           // What the person was charged (the allowance and the balance), not the true cost: what was forgiven is not
           // theirs to see as spent. A memory call's `memory_micro` is the site's, shown as such (`paidBy`).
           `select agent_id, purpose, model, source, sum(free_micro + balance_micro + memory_micro)::text as points,
+                  sum(free_micro + balance_micro)::text as charged,
                   (count(*) filter (where purpose = 'reply'))::int as replies
              from usage_records
             -- A run settled without reaching a model has no model to list (and cost nothing).
@@ -105,7 +106,8 @@ export function registerAccountRoutes(app: FastifyInstance): void {
           source: r.source,
           points: formatPoints(BigInt(r.points)),
           replies: r.replies,
-          ...(r.purpose === "memory" && r.source === "site" ? { paidBy: "site" as const } : {}),
+          // The site pays for a memory row only when nothing of it was charged to the owner (rows from before the allowance were).
+          ...(r.purpose === "memory" && r.source === "site" && BigInt(r.charged) === 0n ? { paidBy: "site" as const } : {}),
         })),
       };
     },

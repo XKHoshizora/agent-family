@@ -199,7 +199,7 @@ export interface MemoryConfig {
   /** At most this many flagged messages are reviewed together, each with `flaggedContext` messages of context. */
   flaggedMax: number;
   flaggedContext: number;
-  /** At most this many hearsay calls (the owner's points) per Agent and group in a rolling hour. */
+  /** At most this many hearsay calls (the owner's memory allowance) per Agent and group in a rolling hour. */
   hearsayPerHour: number;
   /**
    * Before a hearsay call the judgement model is asked whether the batch holds something new (below `hearsayNewAt`: no
@@ -262,10 +262,11 @@ const renamedReviewWeight = (v: unknown): unknown => {
 
 const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   model: z.string().min(1).max(200).nullable().default(null),
-  roomOwner: positive(2000, 100_000),
-  roomSelf: positive(3000, 100_000),
-  roomHearsay: positive(2000, 100_000),
-  modelEntryMax: positive(200, 10_000),
+  // At most 3000: the database guards a note at 9000 characters (migration 039), 3 characters to a weight of the shortest kind; and a model's entry at 200 (hearsay: 600 characters).
+  roomOwner: positive(2000, 3000),
+  roomSelf: positive(3000, 3000),
+  roomHearsay: positive(2000, 3000),
+  modelEntryMax: positive(200, 200),
   quietMs: positive(600_000, 86_400_000),
   maxReplies: positive(8, 1000),
   groupQuietMs: positive(120_000, 86_400_000),

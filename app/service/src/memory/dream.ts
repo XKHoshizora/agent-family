@@ -21,7 +21,7 @@ import { listRoomExact, type ExactNote, type Room } from "./write.ts";
 /**
  * 入梦, the second tier of memory (小憩 is the review after a conversation goes quiet, pipeline.ts). A dream reads only the
  * notes of one room — never a conversation, hearsay or a name, so nobody can speak into it — and asks one cheap model call
- * (`memoryCall`, the owner's points) to tidy them: merge entries that say the same thing, let the later one win where they
+ * (`memoryCall`, the memory allowance the site pays) to tidy them: merge entries that say the same thing, let the later one win where they
  * contradict, turn a passing mood into a dated event, shorten entries when the room is nearly full, split an entry that holds
  * separate facts, lock one that should not be shown in groups. Everything it changes goes through the audited path
  * (apply.ts `applyDream`: a notice for the owner, undo, 先问我再记, the vault rules).
@@ -426,7 +426,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
   if (!cycle || now - cycle.at > DAY) cycle = { at: now, rooms: new Set<string>() };
   ctx.dream.done.set(ownerId, cycle);
   let failed = false;
-  let ran = 0;
+  let consolidated = 0;
   for (const { room, carrier: by } of todo) {
     if (ctx.closing.aborted) return;
     const key = roomKey(ownerId, room);
@@ -434,7 +434,6 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     const last = ctx.dream.rooms.get(key);
     if ((job.scope === "all" && cycle.rooms.has(key)) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
     let outcome: "done" | "failed" | "aborted";
-    ran++;
     try {
       outcome = await dreamRoom(deps, ctx, by, room, since);
     } catch (err) {
@@ -448,9 +447,10 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     }
     cycle.rooms.add(key);
     ctx.dream.rooms.set(key, deps.now());
+    consolidated++;
   }
-  // A night's dream and a nap are counted apart: a job that consolidated at least one room is one run.
-  if (ran > 0) count(db, job.scope === "all" ? "dream_run" : "nap_run");
+  // A night's dream and a nap are counted apart: one for each room actually consolidated (a failed one is only a `dream_failed`).
+  count(db, job.scope === "all" ? "dream_run" : "nap_run", consolidated);
   // A call that failed (a night's or a nap's) is one of the day's three tries.
   if (failed) {
     count(db, "dream_failed");
@@ -532,7 +532,10 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   );
   if (ctx.closing.aborted) return "aborted";
   if (answer === null && !report.answered) {
-    if (conversion) conversion.tally.failedRooms++;
+    if (conversion) {
+      conversion.tally.failedRooms++;
+      conversion.tally.unanswered = (conversion.tally.unanswered ?? 0) + 1;
+    }
     return "failed";
   }
   // Charged for an answer that cannot be used (a cut one too): a dream all the same (nothing is asked again for the same notes), and no

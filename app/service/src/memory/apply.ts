@@ -523,8 +523,8 @@ export interface DreamApplyOpts {
   rooms: Rooms;
   /**
    * A language conversion: a rewrite keeps the note's vault state (`vault`, `vault_by`, `unsure`) exactly as it is, whatever `vaults` says
-   * (a faithful restatement has the same meaning), and may be as long as `conversionMax` allows (the usual limit for a model's entry is
-   * too short for another script).
+   * (a faithful restatement has the same meaning). It is held to the same limit of a model's entry as any other rewrite (weight follows
+   * tokens, so a restatement in another script weighs about what the original did).
    */
   conversion?: boolean;
 }

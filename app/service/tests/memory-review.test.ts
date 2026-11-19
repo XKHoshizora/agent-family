@@ -3,6 +3,7 @@ import { memoryCall } from "../src/memory/call.ts";
 import { runReview, type PipelineDeps } from "../src/memory/pipeline.ts";
 import { createReviewer, MAX_REVIEWS_AT_ONCE } from "../src/memory/reviewer.ts";
 import { EXPLICIT, FORGET, LOCK, REMEMBER, reviewInput } from "../src/memory/review.ts";
+import { siteDay } from "../src/accounts/store.ts";
 import { weight } from "../src/memory/weight.ts";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { toWireForReaders } from "../src/messages/read.ts";
@@ -377,6 +378,28 @@ describe("what a review does with an answer", () => {
     expect((await roomOf(w.owner)).notes).toEqual([]);
     expect(await chips(w.owner, w.conv)).toEqual([]);
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(1);
+  });
+
+  it("one review end to end is charged to the memory allowance (memory_usage), and to nothing of the owner's", async () => {
+    const w = await owned("mua");
+    await sayAndReview(w, "记住我喜欢喝茶", ops(add("喜欢喝茶")));
+    const used = (await db.query<{ used: string }>("select coalesce(sum(used_micro), 0)::text as used from memory_usage where owner_id = $1", [w.owner.id])).rows[0]!.used;
+    expect(BigInt(used)).toBeGreaterThan(0n);
+    const memoryRow = (await db.query("select free_micro::text, balance_micro::text, memory_micro::text from usage_records where owner_id = $1 and purpose = 'memory'", [w.owner.id])).rows;
+    expect(memoryRow).toHaveLength(1);
+    expect(memoryRow[0]).toMatchObject({ free_micro: "0", balance_micro: "0" });
+  });
+
+  it("a reply still starts with the memory allowance spent (a real message and the worker), and no review call is made", async () => {
+    const w = await owned("mub");
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
+    await say(w.owner, w.conv, "记住我喜欢喝茶");
+    gateway.reply("好的。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await memory().idle();
+    expect((await messagesOf(w.owner, w.conv)).some((m: any) => m.text === "好的。")).toBe(true);
+    expect(reviewCalls()).toHaveLength(0);
+    expect(await chips(w.owner, w.conv)).toEqual([]);
   });
 
   it("a model failure: nothing changes and reviewed_seq does not move", async () => {

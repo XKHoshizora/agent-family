@@ -103,7 +103,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   const { db, config, judge } = app.deps;
   const api = app.withTypeProvider<ZodTypeProvider>();
   const writeLimit = perPrincipalLimit(app, 30);
-  // A conversion is paid for in the owner's points, one call per room.
+  // A conversion is paid for from the owner's memory allowance (the site's, not their points), one call per room.
   const convertLimit = perPrincipalLimit(app, 6);
   const limits = roomOf(config);
   const limitOf = (room: Room): number => roomLimit(limits, room.kind);
@@ -273,6 +273,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const result = await app.deps.memory?.convert(me.id, language);
       if (result === "busy") throw new AppError(409, "busy");
       if (!result) throw new AppError(503, "unavailable");
+      // No room could be processed at all because no call could be made (the allowance is empty, no model resolves): nothing happened, say so.
+      if (result.rooms > 0 && result.unanswered === result.rooms) throw new AppError(503, "unavailable");
       return result;
     },
   );
