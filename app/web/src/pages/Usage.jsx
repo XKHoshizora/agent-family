@@ -150,6 +150,7 @@ export function UsagePage({ back }) {
 
         <h3>最近用量</h3>
         <p className="muted">最近 7 天（含今天），按 Agent 和模型汇总。用你自己的供应商不扣点。</p>
+        {usage.memory && <p className="muted">记忆今天的额度：已用 {usage.memory.usedText} / {usage.memory.allowanceText}</p>}
         {recent.length === 0 ? (
           <p className="muted">最近 7 天还没有用量。</p>
         ) : (
@@ -160,9 +161,7 @@ export function UsagePage({ back }) {
                   <strong>{agentName(r.agentId, r.purpose)}</strong>
                   <p>{modelName(r)}</p>
                 </div>
-                <span>
-                  {r.pointsText} 点{r.agentId ? ` · ${r.replies} 次回复` : ""}
-                </span>
+                <span>{r.paidBy === "site" ? "由站点承担" : `${r.pointsText} 点${r.agentId ? ` · ${r.replies} 次回复` : ""}`}</span>
               </li>
             ))}
           </ul>

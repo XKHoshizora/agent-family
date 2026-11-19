@@ -104,6 +104,25 @@ describe("usage and balance", () => {
     ]);
   });
 
+  it("a memory row paid by the site says so instead of a charge, and one quiet line gives memory's own allowance for today", async () => {
+    const recent = [
+      { agentId: null, purpose: "memory", model: "free-1", source: "site", points: "0.05", replies: 0, paidBy: "site" },
+      { agentId: AG1, purpose: "reply", model: "paid-1", source: "site", points: "3", replies: 2 },
+    ];
+    await openUsage({ getUsage: vi.fn(async () => usageOf({ recent, memory: { allowance: "20", used: "1.5", resetsAt: "2026-11-16T16:00:00.000Z" } })) });
+    expect(recentRows()).toEqual([
+      ["记忆", "小模型（本站）", "由站点承担"],
+      ["小助手", "大模型（本站）", "3 点 · 2 次回复"],
+    ]);
+    expect(mainText()).toContain("记忆今天的额度：已用 1.5 / 20");
+    expect(mainText()).not.toContain("0.05 点");
+  });
+
+  it("without memory figures (an older service) shows no allowance line", async () => {
+    await openUsage();
+    expect(mainText()).not.toContain("记忆今天的额度");
+  });
+
   it("with no recent usage says so plainly", async () => {
     await openUsage();
     expect(inMain().queryByRole("list", { name: "最近用量" })).toBeNull();

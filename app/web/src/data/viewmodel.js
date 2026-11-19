@@ -576,6 +576,7 @@ function usageView(u) {
     ...u,
     balanceText: formatPoints(u.balance),
     free: u.free ? { ...u.free, allowanceText: formatPoints(u.free.allowance), usedText: formatPoints(u.free.used) } : null,
+    memory: u.memory ? { ...u.memory, allowanceText: formatPoints(u.memory.allowance), usedText: formatPoints(u.memory.used) } : null,
     recent: (Array.isArray(u.recent) ? u.recent : []).map((r) => ({ ...r, pointsText: formatPoints(r.points) })),
   };
 }
