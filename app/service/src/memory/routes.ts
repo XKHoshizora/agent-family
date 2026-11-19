@@ -10,7 +10,7 @@ import { requirePrincipal } from "../session.ts";
 import { confirmChange, discardChange, undoChange } from "./apply.ts";
 import { ownerNote } from "./clean.ts";
 import { sortNote } from "./sort.ts";
-import { codePoints, getNewNotes, listHearsay, roomOf, used, type Note } from "./store.ts";
+import { codePoints, getNewNotes, hearsayUsed, listHearsay, roomOf, used, type Note } from "./store.ts";
 import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
@@ -52,6 +52,8 @@ const hearsayView = z.object({
   id: z.string(),
   text: z.string(),
   speakerName: z.string(),
+  /** The speaker's account name now (read at request time); null when the account is gone. For the owner only, never shown to a model. */
+  speakerHandle: z.string().nullable(),
   group: z.object({ id: z.string(), title: z.string().nullable() }).nullable(),
   saidAt: z.string(),
 });
@@ -232,7 +234,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
       const agent = await ownAgent(me.id, req.params.id);
-      const [room, heard, groups] = await Promise.all([
+      const [room, heard, groups, speakers] = await Promise.all([
         view({ kind: "self", agentId: agent.id }),
         listHearsay(db, agent.id),
         // The groups the Agent is in now: once it has left one, what it heard there no longer says which.
@@ -241,18 +243,21 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
             where m.principal_id = $1 and m.left_seq is null`,
           [agent.id],
         ),
+        db.query<{ id: string; handle: string }>("select id, handle::text as handle from principals where id in (select speaker_id from agent_hearsay where agent_id = $1)", [agent.id]),
       ]);
       const titles = new Map(groups.rows.map((g) => [g.id, g.title]));
+      const handles = new Map(speakers.rows.map((s) => [s.id, s.handle]));
       return {
         ...room,
         hearsay: heard.map((h) => ({
           id: h.id,
           text: h.text,
           speakerName: h.speakerName,
+          speakerHandle: (h.speakerId === null ? undefined : handles.get(h.speakerId)) ?? null,
           group: titles.has(h.conversationId) ? { id: h.conversationId, title: titles.get(h.conversationId)! } : null,
           saidAt: h.saidAt.toISOString(),
         })),
-        hearsayUsed: used(heard),
+        hearsayUsed: hearsayUsed(heard),
         hearsayLimit: limits.hearsay,
       };
     },

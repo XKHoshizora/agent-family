@@ -360,10 +360,13 @@ describe("an Agent's room: /api/agents/:id/memory", () => {
       strength: 0,
       seenAt: expect.any(String),
     });
-    expect(res.json).toMatchObject({ used: 6, limit: 3000, hearsayUsed: 4 + 4, hearsayLimit: 2000 });
+    // The hearsay room counts each entry's text and its speaker's name.
+    const hearsayPoints = res.json.hearsay.reduce((n: number, h: { text: string; speakerName: string }) => n + [...h.text].length + [...h.speakerName].length, 0);
+    expect(hearsayPoints).toBeGreaterThan(4 + 4);
+    expect(res.json).toMatchObject({ used: 6, limit: 3000, hearsayUsed: hearsayPoints, hearsayLimit: 2000 });
     expect(res.json.hearsay).toEqual([
-      { id: h1, text: "周五聚餐", speakerName: "Mia", group: { id: g, title: "Book club" }, saidAt: expect.any(String) },
-      { id: h2, text: "说了别的", speakerName: "Mia", group: null, saidAt: expect.any(String) },
+      { id: h1, text: "周五聚餐", speakerName: "Mia", speakerHandle: "memr_mia", group: { id: g, title: "Book club" }, saidAt: expect.any(String) },
+      { id: h2, text: "说了别的", speakerName: "Mia", speakerHandle: "memr_mia", group: null, saidAt: expect.any(String) },
     ]);
   });
 

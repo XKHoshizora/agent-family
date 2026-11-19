@@ -61,6 +61,12 @@ export const codePoints = (text: string): number => [...text].length;
 
 export const used = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + codePoints(n.text), 0);
 
+/** What one hearsay entry costs its room: its text and the speaker's name, which every prompt that shows the entry carries. */
+export const hearsayCost = (h: { speakerName: string; text: string }): number => codePoints(h.speakerName) + codePoints(h.text);
+
+/** How much of the hearsay room `entries` fill: the one measure of it, in trimming, in undo and in the routes. */
+export const hearsayUsed = (entries: ReadonlyArray<{ speakerName: string; text: string }>): number => entries.reduce((sum, h) => sum + hearsayCost(h), 0);
+
 export interface NoteRow {
   id: string;
   text: string;

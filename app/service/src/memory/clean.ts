@@ -4,8 +4,8 @@ import { codePoints } from "./store.ts";
 /**
  * What may be stored as a note. A note is stored as it was written (no folding, no stripping of brackets, quotes or
  * punctuation: an owner's words, and a model's history entry such as `现在喜欢麻婆豆腐（以前喜欢鱼香肉丝）`, stay as they
- * are); only line breaks and runs of whitespace become one space and invisible format characters go. Notes are data,
- * not instructions: every prompt path cleans them again when it renders them (`labelSafe`, `oneLine`). Two rule sets,
+ * are); only line breaks and runs of whitespace become one space and invisible format characters go (`cleanText`, which
+ * the notes passage applies again when it renders a note: a note is data, never structure). Two rule sets,
  * because two kinds of writer: the owner, who may write what they like in their own notes, and a model, which may not
  * slip an instruction, a link or a secret in.
  */
@@ -13,11 +13,6 @@ import { codePoints } from "./store.ts";
 /** Longest entry a model writes, in code points (the plan's Numbers). */
 export const MODEL_NOTE_MAX = 200;
 
-const FORMAT_CHARACTERS = /\p{Cf}/gu;
-const WHITESPACE_RUN = /\s+/g;
-// What the database refuses and no one can read: control characters, and a surrogate with no partner (with `u` a proper
-// pair is one astral character, so what is left in the surrogate range is lone).
-const CONTROL_OR_LONE_SURROGATE = /\p{Cc}|[\ud800-\udfff]/gu;
 const KEY_RUN = /[A-Za-z0-9_-]{20,}/g;
 const KEY_PREFIX = /\b(?:sk-[\w-]|ghp_\w|AKIA\w)|-----BEGIN/;
 

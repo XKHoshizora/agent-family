@@ -2,7 +2,7 @@ import { lockAccount } from "../accounts/store.ts";
 import type { Tx } from "../db.ts";
 import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
-import { codePoints, used, type Note, type NoteKind, type Rooms } from "./store.ts";
+import { codePoints, hearsayCost, hearsayUsed, used, type Note, type NoteKind, type Rooms } from "./store.ts";
 import {
   deleteHearsay,
   deleteNote,
@@ -399,7 +399,7 @@ export async function applyHearsay(
     ...existing.filter((e) => !opts.drop.has(e.id)).map((old) => ({ old })),
     ...opts.entries.map((entry) => ({ entry })),
   ];
-  const pointsOf = (l: (typeof line)[number]): number => codePoints("old" in l ? l.old.text : l.entry.text);
+  const pointsOf = (l: (typeof line)[number]): number => hearsayCost("old" in l ? l.old : l.entry);
   let usedNow = line.reduce((sum, l) => sum + pointsOf(l), 0);
   const trimmed: HearsayExact[] = [];
   const arriving: NewHearsay[] = [];
@@ -556,8 +556,8 @@ async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: Stored
   for (const s of ops) if ((s.op === "hearsay_add") !== present.has(s.hearsayId)) return "stale";
   // An entry whose group is gone cannot come back (restoreHearsay), so it takes no room.
   const alive = new Set((await t.query<{ id: string }>("select id from conversations where id = any($1::uuid[])", [ops.map((s) => s.conversationId)])).rows.map((r) => r.id));
-  const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -codePoints(s.text) : alive.has(s.conversationId) ? codePoints(s.text) : 0), 0);
-  if (!fits(used(existing), growth, rooms.hearsay)) return "full";
+  const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -hearsayCost(s) : alive.has(s.conversationId) ? hearsayCost(s) : 0), 0);
+  if (!fits(hearsayUsed(existing), growth, rooms.hearsay)) return "full";
   await deleteHearsay(t, agentId, ops.filter((s) => s.op === "hearsay_add").map((s) => s.hearsayId));
   for (const s of ops) {
     if (s.op === "hearsay_drop") await restoreHearsay(t, agentId, { id: s.hearsayId, conversationId: s.conversationId, speakerId: s.speakerId, speakerName: s.speakerName, text: s.text, saidAt: s.saidAt, createdAt: s.createdAt! });

@@ -210,6 +210,12 @@ export interface MemoryConfig {
   hearsayAbuseAt: number;
   hearsayMuteMs: number;
   /**
+   * What a flooding judgement does: "on" mutes a speaker who sent at least 3 of the batch's flagged messages and more than
+   * half of them (and drops the batch as abuse); "observe" (default) mutes nobody and drops nothing, and logs when it would
+   * have (`memory_mute_would`); "off" does not ask the abuse question at all.
+   */
+  hearsayMute: "off" | "observe" | "on";
+  /**
    * Listening for memory (a judgement with no Agent to pick, only listeners) is skipped once the day's judgements have
    * reached this share of the judge's daily limit, so that it never uses up what unasked replies need.
    */
@@ -250,6 +256,7 @@ const reasoningAllowanceSchema = z
     medium: allowanceTokens.optional(),
     high: allowanceTokens.optional(),
     xhigh: allowanceTokens.optional(),
+  hearsayMute: z.enum(["off", "observe", "on"]).default("observe"),
     max: allowanceTokens.optional(),
   })
   .transform(

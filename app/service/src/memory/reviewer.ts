@@ -117,7 +117,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       const ctx: FlagsContext = {
         closing,
         attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
-        again: () => void (job.kind === "flags" && armFlags(job)),
+        again: (afterMs) => void (job.kind === "flags" && armFlags(job, afterMs)),
         hearsayCalls: hearsayCalls.get(key) ?? [],
       };
       if (job.kind === "flags") hearsayCalls.set(key, ctx.hearsayCalls);
@@ -194,9 +194,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
 
   /**
    * (Re)arms the pair's flag wake-up: the quiet timer starts over, the maximum one starts only with the batch's first flag.
-   * False when the reviewer is closed and nothing was armed.
+   * `afterMs` (a wake-up that must wait for something, the hour's cap) is the time to wait instead of the quiet time, and
+   * the maximum wait does not cut it short. False when the reviewer is closed and nothing was armed.
    */
-  const armFlags = (job: FlagsJob): boolean => {
+  const armFlags = (job: FlagsJob, afterMs: number = config.memory.groupQuietMs): boolean => {
     if (closed) return false;
     const key = keyOf(job.agentId, job.conversationId);
     const [quiet, max] = flagTimers.get(key) ?? [];
@@ -206,7 +207,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       flagTimers.delete(key);
       enqueue(job);
     };
-    flagTimers.set(key, [deps.setTimer(wake, config.memory.groupQuietMs), max ?? deps.setTimer(wake, config.memory.groupMaxWaitMs)]);
+    flagTimers.set(key, [deps.setTimer(wake, afterMs), max ?? deps.setTimer(wake, Math.max(afterMs, config.memory.groupMaxWaitMs))]);
     return true;
   };
 
