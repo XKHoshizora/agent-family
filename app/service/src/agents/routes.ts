@@ -6,6 +6,7 @@ import { PROACTIVE_LEVELS, REASONING_LEVELS } from "../config.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
+import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
 import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
@@ -41,12 +42,6 @@ const idParams = z.object({ id: uuidParam });
  */
 const appellationParams = z.object({ id: uuidParam, principalId: z.string() });
 
-/** A model as a request names it (`providerId` is normalised to lower case), and as a response shows it. */
-export const chosenModel = (providerId: z.ZodType<string>) =>
-  z.union([
-    z.strictObject({ source: z.literal("site"), id: z.string().min(1).max(64) }),
-    z.strictObject({ source: z.literal("provider"), providerId, model: z.string().min(1).max(200) }),
-  ]);
 /** An Agent's model, `null` until one is chosen. */
 const modelChoice = (providerId: z.ZodType<string>) => chosenModel(providerId).nullable();
 const model = modelChoice(uuidParam);

@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Readable } from "node:stream";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
-import { chosenModel } from "../agents/routes.ts";
+import { chosenModel } from "../models/choice.ts";
 import { displayName, uuidParam } from "../schemas.ts";
 import { isMissingBlob } from "../attachments/blob.ts";
 import { sniff } from "../attachments/sniff.ts";
