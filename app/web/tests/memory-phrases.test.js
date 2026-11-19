@@ -29,13 +29,21 @@ describe("memorySentence", () => {
     expect(seen).toEqual(new Set(["小助手小憩时记下了 3 件事", "小助手歇了一会儿，记住了 3 件事", "小助手趁着小憩，把 3 件事记了下来"]));
   });
   it("a rest of only forgetting and locking: 理了理记忆", () => {
-    for (const lines of [["忘掉了：x"], ["锁进了保险箱：y"], ["忘掉了：x", "锁进了保险箱：y"]]) {
+    for (const lines of [["忘掉了：x"], ["锁进了保险箱：y"], ["取出来：z"], ["忘掉了：x", "锁进了保险箱：y", "取出来：z"]]) {
       expect(memorySentence(notice({ lines, count: lines.length }))).toBe("小助手小憩时理了理记忆");
     }
     expect(TIDY).toHaveLength(1);
   });
-  it("a rest with one recording among removals is a recording one", () => {
-    expect(memorySentence(notice({ lines: ["忘掉了：x", "记住了：y"], count: 2, changeId: "c1" }))).toMatch(/2 件事/);
+  it("a mixed rest uses the record sentences counting only the lines that record", () => {
+    const lines = ["忘掉了：x", "记住了：y", "改成了：z", "锁进了保险箱：w", "取出来：v"];
+    const seen = new Set(ids.map((changeId) => memorySentence(notice({ lines, count: 5, changeId }))));
+    expect(seen).toEqual(new Set(["小助手小憩时记下了 2 件事", "小助手歇了一会儿，记住了 2 件事", "小助手趁着小憩，把 2 件事记了下来"]));
+  });
+  it("a confirmed unlock never reads as a recording", () => {
+    expect(memorySentence(notice({ lines: ["取出来：住在上海"], count: 1 }))).toBe("小助手小憩时理了理记忆");
+  });
+  it("a mixed rest with nothing that records falls back to 理了理记忆", () => {
+    expect(memorySentence(notice({ lines: ["忘掉了：x", "听说：「阿波」在「群」里说：y"], count: 2 }))).toBe("小助手小憩时理了理记忆");
   });
   it("a rest of only hearsay", () => {
     expect(memorySentence(notice({ lines: ["听说：「阿波」在「项目群」里说：x", "听说：「小陈」在「项目群」里说：y"], count: 2 }))).toBe("小助手小憩时想起听来的 2 件事");

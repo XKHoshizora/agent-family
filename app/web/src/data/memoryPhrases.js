@@ -27,20 +27,25 @@ export function pickIndex(id, size) {
 
 const startsWith = (prefix) => (line) => line.startsWith(prefix);
 const isHearsay = startsWith("听说：");
-const isTidy = (line) => line.startsWith("忘掉了：") || line.startsWith("锁进了保险箱：");
+const isTidy = (line) => line.startsWith("忘掉了：") || line.startsWith("锁进了保险箱：") || line.startsWith("取出来：");
+const isRecord = (line) => line.startsWith("记住了：") || line.startsWith("改成了：");
 
 /**
  * The sentence of an applied notice: `{name, changeId, phase, lines, count, full}`. `phase` "dream" has its own set; a rest
- * with only hearsay, or only forgetting and locking, has its own; any other rest records.
+ * with only hearsay has its own; one of only tidying (forgetting, locking, taking out) or of tidying mixed with records counts only the records.
  */
 export function memorySentence({ name, changeId, phase, lines, count, full }) {
-  const n = Number.isFinite(count) ? count : lines.length;
+  let n = Number.isFinite(count) ? count : lines.length;
   let set;
   if (lines.length === 0 && full) return `${name}的记忆宫殿快满了`;
   if (phase === "dream") set = DREAM;
   else if (lines.length > 0 && lines.every(isHearsay)) set = HEARSAY;
   else if (lines.length === 0 || lines.every(isTidy)) set = TIDY;
-  else set = RECORD;
+  else if (lines.some(isTidy) || lines.some(isHearsay)) {
+    // Mixed: only the lines that record are counted; with none, it was tidying.
+    n = lines.filter(isRecord).length;
+    set = n > 0 ? RECORD : TIDY;
+  } else set = RECORD;
   const sentence = set[pickIndex(changeId, set.length)]({ name, n });
   return full ? `${sentence} · 快满了` : sentence;
 }

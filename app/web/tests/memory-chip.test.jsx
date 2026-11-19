@@ -58,7 +58,7 @@ async function openChat(messages, { api = {}, deleted = false } = {}) {
 }
 
 /** The sentence the chip reads for `changeId` in the notice `fields` (the Agent is 小助手). */
-const sentence = (fields = {}) => memorySentence({ name: "小助手", changeId: "c1", phase: "rest", lines: LINES, count: LINES.length, full: false, ...fields });
+const sentence = (fields = {}) => memorySentence({ name: "小助手", changeId: "c1", phase: "rest", lines: LINES, count: 2, full: false, ...fields });
 const timeline = () => document.querySelector("ol.messages");
 const li = (seq) => timeline().querySelector(`li[data-msg="m${seq}"]`);
 const inLi = (seq) => within(li(seq));
@@ -67,7 +67,7 @@ describe("the 记忆已更新 chip", () => {
   it("an applied change is a small chip, closed: it says a sentence with the Agent's name and the count", async () => {
     await openChat([...BASE, changed(3)]);
     expect(li(3).textContent).toBe(sentence());
-    expect(sentence()).toMatch(/^小助手.*2 件事/);
+    expect(sentence()).toMatch(/^小助手.*1 件事/);
     const chip = inLi(3).getByRole("button", { name: sentence() });
     expect(chip.getAttribute("aria-expanded")).toBe("false");
     expect(inLi(3).queryByRole("button", { name: "撤销" })).toBeNull();
@@ -162,7 +162,7 @@ describe("the chip's sentence", () => {
   it("a notice without phase or count is a rest, counting its lines", async () => {
     await openChat([...BASE, changed(3, { phase: undefined, count: undefined })]);
     expect(li(3).textContent).toBe(sentence());
-    expect(li(3).textContent).toMatch(/2 件事/);
+    expect(li(3).textContent).toMatch(/1 件事/);
   });
 
   it("only forgetting and locking: 理了理记忆; only hearsay: 想起听来的", async () => {
@@ -238,7 +238,7 @@ describe("the confirmation cards", () => {
     expect(inLi(3).queryByRole("button", { name: "记住" })).toBeNull();
     await click(inLi(3).getByRole("button", { name: "取出" }));
     expect(api.confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
-    expect(inLi(3).getByRole("button", { name: sentence({ lines: ["取出来：住在上海"], count: 1 }) })).toBeTruthy();
+    expect(inLi(3).getByRole("button", { name: "小助手小憩时理了理记忆" })).toBeTruthy();
   });
 
   it("a stale confirm (409) says so, keeps the lines and leaves no button", async () => {
