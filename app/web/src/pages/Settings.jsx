@@ -228,8 +228,11 @@ function MemorySettings() {
   const changeModel = async (event) => {
     const next = options.find((o) => o.key === event.target.value)?.model ?? null;
     const res = await run("memoryModel", () => settled(actions.setMemoryModel(next)), refusalText);
-    // A model the service accepted can be used (it checked it as it does for an Agent).
-    if (res.ok) setSettings((cur) => ({ ...cur, memoryModel: res.value, memoryModelUsable: true }));
+    if (!res.ok) return;
+    // Whether it can be used is the service's to say (its key may be unset or unreadable): read the settings again; when
+    // that fails, what was saved is shown and the warning waits for the next read.
+    const again = await actions.loadMemorySettings();
+    setSettings((cur) => (again.ok ? again.value : { ...cur, memoryModel: res.value }));
   };
   return (
     <>

@@ -394,6 +394,20 @@ describe("用哪个模型整理记忆", () => {
   const PICK = "用哪个模型整理记忆";
   const OWN = { source: "provider", providerId: P1, model: "gpt-x" };
   const me = (extra) => vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, ...extra }));
+  /** A service that keeps what was saved, as `GET /api/me` reads it back. */
+  const keeping = (stored = {}) => {
+    const held = { memoryModel: null, memoryModelUsable: true, ...stored };
+    return service({
+      over: {
+        getMe: vi.fn(async () => ({ ...ME, newNotes: "auto", ...held })),
+        updateMemoryModel: vi.fn(async (memoryModel) => {
+          held.memoryModel = memoryModel;
+          held.memoryModelUsable = true;
+          return {};
+        }),
+      },
+    });
+  };
 
   it("sits right under 新记下的内容: the site's calibrated model first, then the site's and my providers' models as the Agent form groups them", async () => {
     const svc = service();
@@ -420,7 +434,7 @@ describe("用哪个模型整理记忆", () => {
   });
 
   it("choosing a model sends memoryModel and keeps it; choosing the site's sends null", async () => {
-    const svc = service();
+    const svc = keeping();
     await openPalace(svc);
     const select = () => inMain().getByLabelText(PICK);
     const optionOf = (label) => [...select().options].find((o) => o.textContent === label).value;
@@ -454,12 +468,23 @@ describe("用哪个模型整理记忆", () => {
   });
 
   it("says so when the chosen model cannot be used now, and not after a new choice was saved", async () => {
-    const svc = service({ over: { getMe: me({ memoryModel: OWN, memoryModelUsable: false }) } });
+    const svc = keeping({ memoryModel: OWN, memoryModelUsable: false });
     await openPalace(svc);
     expect(inMain().getByText("选的模型现在用不了，记忆暂时不会更新。")).toBeTruthy();
     fireEvent.change(inMain().getByLabelText(PICK), { target: { value: "" } });
     await flush();
     expect(inMain().queryByText("选的模型现在用不了，记忆暂时不会更新。")).toBeNull();
+  });
+
+  it("a saved model that cannot be used shows the warning at once (the settings are read again after the save)", async () => {
+    const svc = service();
+    await openPalace(svc);
+    svc.api.getMe.mockImplementation(async () => ({ ...ME, newNotes: "auto", memoryModel: OWN, memoryModelUsable: false }));
+    const select = inMain().getByLabelText(PICK);
+    fireEvent.change(select, { target: { value: [...select.options].find((o) => o.textContent === "gpt-x").value } });
+    await flush();
+    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(OWN);
+    expect(inMain().getByText("选的模型现在用不了，记忆暂时不会更新。")).toBeTruthy();
   });
 
   it("a choice that is no longer offered stays shown (as the Agent form shows its current model)", async () => {
