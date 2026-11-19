@@ -58,11 +58,7 @@ npm start
 
 ## 文档
 
-- [使用与 LINE 接入](docs/USER-GUIDE.md)
-- [架构、权限、工具与执行流程](docs/ARCHITECTURE.md)
-- [部署、备份、恢复与维护](docs/OPERATIONS.md)
 - [安全边界](SECURITY.md)
-- [测试与交付证据](docs/ACCEPTANCE.md)
 - [0.2 初版范围、分工与交付记录](docs/design/2026-11-15-initial-release.md)
 - [Agent 好友与监督群 API 合同](docs/design/2026-11-15-family-api.md)
 - [Matrix 部署与独立服务许可](deploy/README.md)
