@@ -1,4 +1,4 @@
-import { oneLine } from "../agents/runtime/prompt.ts";
+import { cleanText } from "../agents/runtime/prompt.ts";
 import { codePoints } from "./store.ts";
 
 /**
@@ -37,17 +37,7 @@ const URL_LIKE = [
 const ADDRESSES_THE_READER =
   /你必须|你应该|以后都|忽略|无视|指令|听我的|从今以后|これからは必ず|無視して|\bignore|\byou must\b|\bsystem\b/i;
 
-/**
- * The text as it is stored, before any rule of refusal: on one line with its whitespace runs collapsed, its invisible
- * format characters (zero-width, bidi controls; they could hide anything), control characters and lone surrogates removed,
- * trimmed. Nothing else is changed (no folding, no stripping of brackets or quotes). Empty when nothing is left. The
- * review input is cleaned the same way, so what the review model reads is what would be stored.
- */
-export function cleanText(text: string): string {
-  // Line breaks and tabs become a space first; the other control characters and lone surrogates are then dropped silently.
-  const spaced = oneLine(text.replace(FORMAT_CHARACTERS, "")).replace(WHITESPACE_RUN, " ");
-  return spaced.replace(CONTROL_OR_LONE_SURROGATE, "").replace(WHITESPACE_RUN, " ").trim();
-}
+export { cleanText };
 
 /** The cleaned text; null when nothing is left or it looks like a key or secret. */
 function tidy(text: string): string | null {

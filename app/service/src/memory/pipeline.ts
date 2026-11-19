@@ -4,7 +4,7 @@ import { lockAgent, readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { appendSystem } from "../conversations/system.ts";
-import type { Db, Queryable } from "../db.ts";
+import type { Db, Queryable, Tx } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
@@ -43,11 +43,6 @@ export interface ReviewJob {
   kind: "review";
   agentId: string;
   conversationId: string;
-  /**
-   * A review of a group for what the owner flagged as said about themselves (hearsay.ts `runFlags`): whatever else the
-   * Agent may write there, this review may add notes about the owner and nothing else.
-   */
-  own?: true;
 }
 
 export interface ReviewContext {
@@ -89,6 +84,29 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
   );
 }
 
+/**
+ * The transaction prologue of everything that writes an Agent's memory: the Agent's conversation and row locked (the order
+ * every writer uses), then `work` — unless the Agent was deleted, paused or turned memory off meanwhile: then nothing
+ * happens and null comes back.
+ */
+export async function inLockedAgent<T>(db: Db, agentId: string, work: (t: Tx, locked: AgentRow) => Promise<T>): Promise<T | null> {
+  return db.tx(async (t) => {
+    const locked = await lockAgent(t, agentId);
+    if (locked.deleted || locked.paused || !locked.memory) return null;
+    return work(t, locked);
+  });
+}
+
+/** After commit: the notices go out to the owner (never to anyone else). A failure to announce is logged (ids, no text): they are stored. */
+export function announce(deps: Pick<PipelineDeps, "conversations" | "log">, notices: readonly StoredMessage[] | null, agentId: string): void {
+  if (notices === null || notices.length === 0) return;
+  try {
+    deps.conversations.publish({ messages: [...notices], conversations: [] }, deps.log);
+  } catch (err) {
+    deps.log.error({ ...errInfo(err), agentId }, "a memory notice could not be announced after it was stored; it is there when the owner next opens the conversation");
+  }
+}
+
 /** What this owner has waiting for their yes: texts of added or replaced entries, and the notes asked to be unlocked. */
 async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string> }> {
   const { rows } = await db.query<{ agent_id: string; ops: StoredOp[] }>("select agent_id, ops from memory_changes where owner_id = $1 and status = 'pending'", [agent.ownerId]);
@@ -121,10 +139,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const agent = await reviewableAgent(db, agentId);
   if (agent === null || ctx.closing.aborted) return;
   const group = conversationId !== agent.conversationId;
-  const allowedKinds = await kindsFor(db, agent, conversationId, group);
-  // An own-remark review writes about the owner only; where the Agent may not (it is not the reviewing one), nothing.
-  const kinds: ReadonlySet<NoteKind> = job.own ? new Set<NoteKind>(allowedKinds.has("owner") ? ["owner"] : []) : allowedKinds;
-  if (kinds.size === 0) return;
+  const kinds = await kindsFor(db, agent, conversationId, group);
   const { input, seen } = await readReview(db, agent, conversationId, await reviewedSeq(db, agentId, conversationId), { kinds, config, now: new Date(deps.now()) });
   if (input === null) {
     // Nothing the owner said to look at: what the read saw is not looked at again, and nothing newer than what it saw is
@@ -151,10 +166,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
 
-  const notices = await db.tx(async (t): Promise<StoredMessage[] | null> => {
-    // The order every writer uses: the Agent's conversation and its row first, then (applyOps) the account.
-    const locked = await lockAgent(t, agentId);
-    if (locked.deleted || locked.paused || !locked.memory) return null;
+  const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[]> => {
     const ids = { ownerId: locked.ownerId, agentId };
     const written: Array<{ changeId: string; unlock: boolean }> = [];
     if (ops.length > 0) {
@@ -201,13 +213,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     }
     return stored;
   });
-  if (notices !== null && notices.length > 0) {
-    try {
-      deps.conversations.publish({ messages: notices, conversations: [] }, log);
-    } catch (err) {
-      log.error({ ...errInfo(err), agentId }, "a memory notice could not be announced after it was stored; it is there when the owner next opens the conversation");
-    }
-  }
+  announce(deps, notices, agentId);
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");
 }
 

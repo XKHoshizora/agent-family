@@ -199,6 +199,16 @@ export interface MemoryConfig {
   /** At most this many flagged messages are reviewed together, each with `flaggedContext` messages of context. */
   flaggedMax: number;
   flaggedContext: number;
+  /** At most this many hearsay calls (the owner's points) per Agent and group in a rolling hour. */
+  hearsayPerHour: number;
+  /**
+   * Before a hearsay call the judgement model is asked whether the batch holds something new (below `hearsayNewAt`: no
+   * call) and whether it looks like flooding or probing (`hearsayAbuseAt` or more: no call, and the speaker is not
+   * listened to for `hearsayMuteMs`).
+   */
+  hearsayNewAt: number;
+  hearsayAbuseAt: number;
+  hearsayMuteMs: number;
   /**
    * Listening for memory (a judgement with no Agent to pick, only listeners) is skipped once the day's judgements have
    * reached this share of the judge's daily limit, so that it never uses up what unasked replies need.
@@ -225,6 +235,10 @@ const memorySchema = z.strictObject({
   ownAt: probability(0.6),
   flaggedMax: positive(20, 500),
   flaggedContext: z.number().int().min(0).max(50).default(3),
+  hearsayPerHour: positive(4, 1000),
+  hearsayNewAt: probability(0.5),
+  hearsayAbuseAt: probability(0.7),
+  hearsayMuteMs: positive(21_600_000, 31_536_000_000),
   listenShare: probability(0.5),
 });
 

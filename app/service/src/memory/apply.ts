@@ -406,8 +406,9 @@ export async function applyHearsay(
   }
   if (arriving.length === 0) return null;
 
-  const gone = [...dropped, ...trimmed];
-  await deleteHearsay(t, w.agentId, gone.map((g) => g.id));
+  // Only what the delete really removed is recorded as dropped: an undo must never put back what was not taken.
+  const deleted = new Set(await deleteHearsay(t, w.agentId, [...dropped, ...trimmed].map((g) => g.id)));
+  const gone = [...dropped, ...trimmed].filter((g) => deleted.has(g.id));
   const added: StoredHearsayOp[] = [];
   for (const entry of arriving) {
     const hearsayId = await insertHearsay(t, w.agentId, entry);
@@ -537,7 +538,9 @@ async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: Stored
   const existing = await listHearsayExact(t, agentId);
   const present = new Set(existing.map((e) => e.id));
   for (const s of ops) if ((s.op === "hearsay_add") !== present.has(s.hearsayId)) return "stale";
-  const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -codePoints(s.text) : codePoints(s.text)), 0);
+  // An entry whose group is gone cannot come back (restoreHearsay), so it takes no room.
+  const alive = new Set((await t.query<{ id: string }>("select id from conversations where id = any($1::uuid[])", [ops.map((s) => s.conversationId)])).rows.map((r) => r.id));
+  const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -codePoints(s.text) : alive.has(s.conversationId) ? codePoints(s.text) : 0), 0);
   if (!fits(used(existing), growth, rooms.hearsay)) return "full";
   await deleteHearsay(t, agentId, ops.filter((s) => s.op === "hearsay_add").map((s) => s.hearsayId));
   for (const s of ops) {

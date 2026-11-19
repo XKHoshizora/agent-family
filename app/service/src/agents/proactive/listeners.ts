@@ -72,7 +72,8 @@ export async function listenersFor(q: Queryable, conversationId: string, seq: nu
 
 /**
  * Writes `flags` (rows already there are left as they are) and returns those it wrote. A flag for an Agent that no longer
- * listens (left, memory off, deleted) or a conversation that is gone is not written: the flag would be read by nobody.
+ * listens (left, memory off, deleted) or a conversation that is gone is not written: the flag would be read by nobody. Nor is
+ * a hearsay flag of a message whose sender the Agent's owner has muted (`hearsay_mutes`, memory/hearsay.ts) for now.
  */
 export async function writeFlags(q: Queryable, flags: readonly MemoryFlag[]): Promise<MemoryFlag[]> {
   if (flags.length === 0) return [];
@@ -82,6 +83,11 @@ export async function writeFlags(q: Queryable, flags: readonly MemoryFlag[]): Pr
        from unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[]) as f (agent_id, conversation_id, seq, kind)
        join agents a on a.principal_id = f.agent_id and a.memory and a.deleted_at is null
        join memberships m on m.principal_id = f.agent_id and m.conversation_id = f.conversation_id and m.left_seq is null
+      where not (f.kind = 'hearsay' and exists (
+              select 1 from messages x
+                join principals ap on ap.id = f.agent_id
+                join hearsay_mutes hm on hm.owner_id = ap.owner_id and hm.speaker_id = x.sender_id and hm.until > now()
+               where x.conversation_id = f.conversation_id and x.seq = f.seq))
      on conflict do nothing
      returning agent_id, conversation_id, seq::text as seq, kind`,
     [flags.map((f) => f.agentId), flags.map((f) => f.conversationId), flags.map((f) => f.seq), flags.map((f) => f.kind)],

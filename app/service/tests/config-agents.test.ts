@@ -404,6 +404,10 @@ describe("the memory configuration", () => {
     ownAt: 0.6,
     flaggedMax: 20,
     flaggedContext: 3,
+    hearsayPerHour: 4,
+    hearsayNewAt: 0.5,
+    hearsayAbuseAt: 0.7,
+    hearsayMuteMs: 21_600_000,
     listenShare: 0.5,
   };
 
@@ -417,8 +421,12 @@ describe("the memory configuration", () => {
     expect(loadConfig({ ...base, MEMORY: '{"model":"fast","quietMs":1000,"shareAt":0.9}' }).memory).toEqual({ ...defaults, model: "fast", quietMs: 1000, shareAt: 0.9 });
   });
 
+  test("the hearsay limits can be set", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"hearsayPerHour":2,"hearsayNewAt":0.3,"hearsayAbuseAt":0.9,"hearsayMuteMs":1000}' }).memory).toMatchObject({ hearsayPerHour: 2, hearsayNewAt: 0.3, hearsayAbuseAt: 0.9, hearsayMuteMs: 1000 });
+  });
+
   test("a threshold outside [0, 1], a non-whole or non-positive count, an unknown key and bad JSON refuse", () => {
-    for (const bad of ['{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
+    for (const bad of ['{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }
   });

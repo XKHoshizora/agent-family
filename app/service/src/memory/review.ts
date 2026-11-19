@@ -14,6 +14,9 @@ import { listAgentNotes, listOwnerNotes, notesFor, roomOf, used, type Note, type
 /** An owner's message that asks for something to be remembered, forgotten or locked: reviewed at once. */
 export const EXPLICIT = /记住|记一下|记下来|别忘了|忘掉|忘了它|锁起来|保险箱|remember|forget|覚えて|忘れて/i;
 
+/** What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote. */
+export const UNSPOKEN = "coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb";
+
 /** A note the review model can name (`n1`…): where it is, what it says and whether it is in the vault. */
 export interface RefNote {
   kind: NoteKind;
@@ -88,10 +91,13 @@ function todayIn(now: Date, timeZone: string): string {
   return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;
 }
 
-export const cut = (text: string, max: number): string => {
+const cut = (text: string, max: number): string => {
   const points = [...text];
   return points.length <= max ? text : points.slice(0, max).join("");
 };
+
+/** A message text as a memory call is shown it: cleaned (`cleanText`), cut to `max` code points. */
+export const shown = (text: string, max: number): string => cut(cleanText(text), max);
 
 /**
  * The review of `conversationId` for `agent` from the messages after `afterSeq`. `input` is null when there is no owner
@@ -120,14 +126,14 @@ export async function readReview(
             (select max(x.seq)::text from messages x where x.conversation_id = $2) as newest
        from messages m ${VISIBLE_JOIN}
       where m.conversation_id = $2 and m.seq > $3 and m.kind in ('text', 'file') and m.sender_id in ($1, $4)
-        and coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb
+        and ${UNSPOKEN}
       order by m.seq desc limit $5`,
     [agent.id, conversationId, afterSeq, agent.ownerId, memory.reviewMessages],
   );
   const window = rows.reverse();
   const seen = window.length > 0 ? Number(window.at(-1)!.newest ?? window.at(-1)!.seq) : null;
   const spoken = window.flatMap((m) => {
-    const text = cut(cleanText(m.text), memory.reviewMessageChars);
+    const text = shown(m.text, memory.reviewMessageChars);
     return text === "" ? [] : [{ who: m.sender_id === agent.ownerId ? ("owner" as const) : ("agent" as const), text, seq: Number(m.seq) }];
   });
   if (!spoken.some((m) => m.who === "owner")) return { input: null, seen };

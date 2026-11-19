@@ -31,30 +31,35 @@ const CHUNK = 20;
 const UNSURE_FROM = 0.2;
 
 /**
- * One judgement call, counted in `judge_usage`, bounded as the proactive decision is (each channel its `timeoutMs`).
- * Null when it cannot be asked (no judge, the site's day used up) or gave no answer for any reason.
+ * One judgement call with `questions` about `state`, counted in `judge_usage`, bounded as the proactive decision is (each
+ * channel its `timeoutMs`). Null when it cannot be asked (no judge, the site's day used up) or gave no answer for any reason;
+ * else the answers it did give, by key.
  */
-async function ask(deps: SortDeps, state: string, question: Question): Promise<Answer | null> {
+export async function askAll(deps: SortDeps, state: string, questions: readonly Question[]): Promise<Map<string, Answer> | null> {
   const { db, judge, config, log } = deps;
   if (judge === null || config.judge === null) return null;
   try {
     const day = siteDay(new Date(), config.siteTimezone);
     if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return null;
     const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
-    let answer: Answer | null = null;
+    let answers: Map<string, Answer> | null = null;
     try {
-      answer = (await judge.ask(state, [question], deadline)).get(question.key) ?? null;
+      answers = await judge.ask(state, questions, deadline);
     } catch {
-      // No answer: the callers fail closed.
+      // No answer: the callers fail closed (or open, as they decide).
     }
     // Counted whatever came of the call; a failure of the count itself never changes the result.
     await countJudgement(db, day).catch((err: unknown) => log.info({ metric: "judge_count_failed", err }, "a judgement could not be counted"));
-    return answer;
+    return answers;
   } catch (err) {
     // The limit check could not be read: not asked.
-    log.info({ metric: "judge_limit_check_failed", err }, "the judgement limit could not be read: the note is not judged");
+    log.info({ metric: "judge_limit_check_failed", err }, "the judgement limit could not be read: not judged");
     return null;
   }
+}
+
+async function ask(deps: SortDeps, state: string, question: Question): Promise<Answer | null> {
+  return (await askAll(deps, state, [question]))?.get(question.key) ?? null;
 }
 
 /**

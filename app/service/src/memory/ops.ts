@@ -20,7 +20,7 @@ export const MAX_OPS = 8;
 const FENCE = /```(?:json)?[ \t]*\r?\n?([\s\S]*?)```/i;
 
 /** The parsed JSON of the whole answer, or of the first fenced block in it; undefined when neither is JSON. */
-function parseAnswer(answer: string): unknown {
+export function parseAnswer(answer: string): unknown {
   const attempt = (s: string): unknown => {
     try {
       return JSON.parse(s);

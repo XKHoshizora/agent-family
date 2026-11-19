@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import type { FlagKind, FlagsContext, FlagsJob } from "./hearsay.ts";
+import type { FlagsContext, FlagsJob } from "./hearsay.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { EXPLICIT } from "./review.ts";
 
@@ -16,7 +16,8 @@ import { EXPLICIT } from "./review.ts";
  * A flagged group message (`flagged`, after the judgement wrote its `memory_flags` row) waits for the group's quiet too:
  * the pair's wake-up (hearsay.ts `runFlags`: the owner's own remarks reviewed, then the hearsay) runs `MEMORY.groupQuietMs`
  * after the pair's latest flag, or `MEMORY.groupMaxWaitMs` after the first of the batch, whichever comes first. A wake-up
- * that could not ask its model keeps the flags for exactly one more try (the pair's next wake-up).
+ * that could not ask its model keeps the flags for one more try and asks to be woken again after the quiet time (`again`);
+ * how often a flag has been tried is stored with it (hearsay.ts).
  *
  * In memory, in this one process, as the proactive scheduler is: it never throws and never rejects (what goes wrong is
  * logged with ids, never a note or an answer). `close()` cancels every timer and waiting job and abandons calls under way.
@@ -78,8 +79,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   const timers = new Map<string, { clear(): void }>();
   /** The waiting wake-ups of pairs with flags: the quiet timer (moved by every flag) and the one from the batch's first flag. */
   const flagTimers = new Map<string, Array<{ clear(): void }>>();
-  /** How many times in a row a kind of flags of a pair could not be asked (`FlagsContext.failures`), by `pair|kind`. */
-  const failures = new Map<string, number>();
+  /** When each pair's paid hearsay calls were made, for the hour's cap (`FlagsContext.hearsayCalls`), by pair. */
+  const hearsayCalls = new Map<string, number[]>();
   /** The newest seq the last attempt of each pair looked at (a failed call is not asked again for the same words). */
   const attempted = new Map<string, number>();
   let waiting: Job[] = [];
@@ -113,22 +114,19 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       waiting = waiting.filter((j) => j !== job);
       running.add(job.agentId);
       const key = keyOf(job.agentId, job.conversationId);
-      // Called inside the chain: a `run` that throws before it returns a promise is a failed review, not a stuck Agent.
-      const failed = (kind: FlagKind): string => `${key}|${kind}`;
       const ctx: FlagsContext = {
         closing,
         attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
-        failures: {
-          count: (kind) => failures.get(failed(kind)) ?? 0,
-          add: (kind) => failures.set(failed(kind), (failures.get(failed(kind)) ?? 0) + 1),
-          clear: (kind) => void failures.delete(failed(kind)),
-        },
+        again: () => void (job.kind === "flags" && armFlags(job)),
+        hearsayCalls: hearsayCalls.get(key) ?? [],
       };
+      if (job.kind === "flags") hearsayCalls.set(key, ctx.hearsayCalls);
       void Promise.resolve()
         .then(() => deps.run(job, ctx))
         .catch((err: unknown) => log.error({ ...errInfo(err), agentId: job.agentId, conversationId: job.conversationId }, "a memory review failed; nothing was changed"))
         .then(() => forgetReached(job))
         .finally(() => {
+          if (ctx.hearsayCalls.length === 0) hearsayCalls.delete(key);
           running.delete(job.agentId);
           pump();
           settleIdle();
@@ -266,7 +264,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
           if (arm({ kind: "review", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
         }
         // Flags a restart left: a day's worth is acted on after the quiet; older ones are no longer worth a call.
-        await db.query(`delete from memory_flags where created_at < now() - interval '${RESUME_WINDOW}'`);
+        await db.query(`delete from memory_flags where created_at < now() - interval '${RESUME_WINDOW}' or tries >= 2`);
         const flags = await db.query<{ agent_id: string; conversation_id: string }>(
           `select distinct f.agent_id, f.conversation_id from memory_flags f
              join agents a on a.principal_id = f.agent_id and a.memory and not a.paused and a.deleted_at is null`,
@@ -283,7 +281,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       timers.clear();
       for (const pair of flagTimers.values()) for (const timer of pair) timer.clear();
       flagTimers.clear();
-      failures.clear();
+      hearsayCalls.clear();
       attempted.clear();
       waiting = [];
       stop.abort();

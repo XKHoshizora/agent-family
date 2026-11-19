@@ -172,9 +172,11 @@ export async function restoreHearsay(t: Tx, agentId: string, h: HearsayExact): P
   return rowCount === 1;
 }
 
-/** Deletes entries of the Agent's hearsay by id. */
-export async function deleteHearsay(q: Queryable, agentId: string, ids: ReadonlyArray<string>): Promise<void> {
-  if (ids.length > 0) await q.query("delete from agent_hearsay where agent_id = $1 and id = any($2::uuid[])", [agentId, ids]);
+/** Deletes entries of the Agent's hearsay by id; the ids of those it really deleted. */
+export async function deleteHearsay(q: Queryable, agentId: string, ids: ReadonlyArray<string>): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const { rows } = await q.query<{ id: string }>("delete from agent_hearsay where agent_id = $1 and id = any($2::uuid[]) returning id", [agentId, ids]);
+  return rows.map((r) => r.id);
 }
 
 /** Deletes one of the Agent's hearsay entries and returns it; null when the Agent has no such one. */

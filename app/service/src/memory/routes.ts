@@ -11,7 +11,7 @@ import { confirmChange, discardChange, undoChange } from "./apply.ts";
 import { ownerNote } from "./clean.ts";
 import { sortNote } from "./sort.ts";
 import { codePoints, getNewNotes, listHearsay, roomOf, used, type Note } from "./store.ts";
-import { deleteNote, insertNote, listRoom, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
+import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
  * The owner reads and edits the palace: the notes about them (shared by their Agents), each Agent's own notes, and the
@@ -296,7 +296,12 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
       const agent = await ownAgent(me.id, req.params.id);
-      if (!(await takeHearsay(db, agent.id, req.params.hearsayId))) throw notFound();
+      // Under the Agent's hearsay lock, as a consolidation and an undo are: an undo can never put back what this deleted.
+      const taken = await db.tx(async (t) => {
+        await lockHearsay(t, agent.id);
+        return takeHearsay(t, agent.id, req.params.hearsayId);
+      });
+      if (!taken) throw notFound();
       return { ok: true as const };
     },
   );
@@ -313,6 +318,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const room: Room = { kind: "owner", ownerId: me.id };
       const id = await db.tx(async (t) => {
         await lockRoom(t, room);
+        await lockHearsay(t, agent.id);
         const heard = await takeHearsay(t, agent.id, req.params.hearsayId);
         if (!heard) throw notFound();
         // Held to the owner's rules as anything entering their room is; refused, it rolls back and the hearsay stays.
