@@ -147,10 +147,12 @@ describe("the owner's room: /api/memory/notes", () => {
       source: { kind: "manual", title: null },
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
+      strength: 0,
+      seenAt: expect.any(String),
     });
     expect(res.json.notes[1]).toMatchObject({ vault: true, origin: "review", source: { kind: "agent", title: "Ava" } });
     expect(res.json.notes[2]).toMatchObject({ source: { kind: "group", title: "Book club" } });
-    expect(Object.keys(res.json.notes[0]).sort()).toEqual(["createdAt", "id", "origin", "source", "text", "unsure", "updatedAt", "vault"]);
+    expect(Object.keys(res.json.notes[0]).sort()).toEqual(["createdAt", "id", "origin", "seenAt", "source", "strength", "text", "unsure", "updatedAt", "vault"]);
   });
 
   it("another user sees none of it", async () => {
@@ -355,6 +357,8 @@ describe("an Agent's room: /api/agents/:id/memory", () => {
       source: { kind: "manual", title: null },
       createdAt: expect.any(String),
       updatedAt: expect.any(String),
+      strength: 0,
+      seenAt: expect.any(String),
     });
     expect(res.json).toMatchObject({ used: 6, limit: 3000, hearsayUsed: 4 + 4, hearsayLimit: 2000 });
     expect(res.json.hearsay).toEqual([

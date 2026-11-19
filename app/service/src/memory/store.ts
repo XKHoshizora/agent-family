@@ -26,6 +26,10 @@ export interface Note {
   origin: "review" | "owner" | "hearsay";
   createdAt: Date;
   updatedAt: Date;
+  /** How many times the owner has mentioned it again (a review that found it repeated); never changes `updatedAt`. */
+  strength: number;
+  /** When it was last written or mentioned again. */
+  seenAt: Date;
 }
 
 export interface Hearsay {
@@ -67,9 +71,11 @@ export interface NoteRow {
   origin: "review" | "owner" | "hearsay";
   created_at: Date;
   updated_at: Date;
+  strength: number;
+  seen_at: Date;
 }
 
-export const NOTE_COLUMNS = "id, text, vault, vault_by, unsure, origin_conversation_id, origin, created_at, updated_at";
+export const NOTE_COLUMNS = "id, text, vault, vault_by, unsure, origin_conversation_id, origin, created_at, updated_at, strength, seen_at";
 
 export const toNote = (kind: NoteKind, r: NoteRow): Note => ({
   id: r.id,
@@ -82,6 +88,8 @@ export const toNote = (kind: NoteKind, r: NoteRow): Note => ({
   origin: r.origin,
   createdAt: r.created_at,
   updatedAt: r.updated_at,
+  strength: r.strength,
+  seenAt: r.seen_at,
 });
 
 /** Every note about the owner, oldest first. */

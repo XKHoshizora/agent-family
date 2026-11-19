@@ -68,6 +68,10 @@ export interface StoredOp extends AppliedOp {
   /** The exact `updated_at` of the note before the change (what it was found as) and after it (what the change left): undo and confirm are stale unless the note still has it. */
   updatedAtBefore: string | null;
   updatedAtAfter: string | null;
+  /** The exact `seen_at` of the note before the change (a replace sets it to now; undo puts it back). Absent in changes made before strength existed. */
+  seenAtBefore?: string | null;
+  /** A `remove` also keeps the deleted note's strength, so undo restores it whole. */
+  strengthBefore?: number | null;
 }
 
 /**
@@ -124,7 +128,7 @@ export interface ApplyResult {
 /** The key of a sorting verdict in `ApplyOpts.vaults`: the kind of the note and its text (the sorter's answer depends on the kind). */
 export const vaultKey = (kind: NoteKind, text: string): string => `${kind}:${text}`;
 
-type State = { owner: Map<string, Note>; self: Map<string, Note>; exact: Map<string, { createdAt: string; updatedAt: string }> };
+type State = { owner: Map<string, Note>; self: Map<string, Note>; exact: Map<string, { createdAt: string; updatedAt: string; seenAt: string }> };
 type Ids = { ownerId: string; agentId: string };
 
 const roomFor = (kind: NoteKind, w: Ids): Room => (kind === "owner" ? { kind, ownerId: w.ownerId } : { kind, agentId: w.agentId });
@@ -144,7 +148,7 @@ async function loadState(t: Tx, w: Ids): Promise<State> {
   await lockRoom(t, self);
   const [o, s] = [await listRoomExact(t, owner), await listRoomExact(t, self)];
   const byId = (list: ExactNote[]) => new Map(list.map((e) => [e.note.id, e.note]));
-  const exact = new Map([...o, ...s].map((e) => [e.note.id, { createdAt: e.createdAt, updatedAt: e.updatedAt }]));
+  const exact = new Map([...o, ...s].map((e) => [e.note.id, { createdAt: e.createdAt, updatedAt: e.updatedAt, seenAt: e.seenAt }]));
   return { owner: byId(o), self: byId(s), exact };
 }
 
@@ -172,6 +176,8 @@ const base = (op: Op["op"], kind: NoteKind, noteId: string | null): StoredOp => 
 const snapshot = (s: StoredOp, n: Note, state: State): StoredOp => ({
   ...s,
   updatedAtBefore: state.exact.get(n.id)!.updatedAt,
+  seenAtBefore: state.exact.get(n.id)!.seenAt,
+  strengthBefore: n.strength,
   before: n.text,
   vaultBefore: n.vault,
   vaultByBefore: n.vaultBy,
@@ -302,7 +308,8 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
       });
     } else if (s.op === "replace") {
       const movedIn = s.vaultBefore === false && s.vaultAfter === true;
-      took = await updateNote(t, room, s.noteId!, movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! });
+      // A note a review rewrote is seen now.
+      took = await updateNote(t, room, s.noteId!, { ...(movedIn ? { text: s.after!, vault: true, vaultBy: s.vaultByAfter!, unsure: s.unsureAfter! } : { text: s.after! }), seenAt: "now" });
     } else if (s.op === "remove") {
       took = await deleteNote(t, room, s.noteId!);
     } else if (s.op === "lock") {
@@ -519,9 +526,18 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         originConversationId: s.originConversationId,
         createdAt: s.createdAt!,
         updatedAt: s.updatedAtBefore!,
+        ...(s.strengthBefore != null ? { strength: s.strengthBefore } : {}),
+        ...(s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
       });
     } else {
-      await updateNote(t, at, s.noteId!, { text: s.before!, vault: s.vaultBefore!, vaultBy: s.vaultByBefore!, unsure: s.unsureBefore!, updatedAt: s.updatedAtBefore! });
+      await updateNote(t, at, s.noteId!, {
+        text: s.before!,
+        vault: s.vaultBefore!,
+        vaultBy: s.vaultByBefore!,
+        unsure: s.unsureBefore!,
+        updatedAt: s.updatedAtBefore!,
+        ...(s.op === "replace" && s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
+      });
     }
   }
   await resolve(t, changeId, "undone");

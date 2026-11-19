@@ -44,6 +44,8 @@ const noteView = z.object({
   source: z.object({ kind: z.enum(["agent", "group", "manual"]), title: z.string().nullable() }),
   createdAt: z.string(),
   updatedAt: z.string(),
+  strength: z.number(),
+  seenAt: z.string(),
 });
 const roomView = z.object({ notes: z.array(noteView), used: z.number(), limit: z.number() });
 const hearsayView = z.object({
@@ -83,6 +85,8 @@ const toNoteView = (n: Note, sources: Map<string, Source>): z.infer<typeof noteV
   source: (n.originConversationId && sources.get(n.originConversationId)) || MANUAL,
   createdAt: n.createdAt.toISOString(),
   updatedAt: n.updatedAt.toISOString(),
+  strength: n.strength,
+  seenAt: n.seenAt.toISOString(),
 });
 
 export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { readLimit: PrincipalLimit }): void {

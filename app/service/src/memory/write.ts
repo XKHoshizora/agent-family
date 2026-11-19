@@ -31,19 +31,20 @@ export const exactTs = (column: string): string => `to_char(${column} at time zo
 
 export interface ExactNote {
   note: Note;
-  /** `created_at` and `updated_at` as `exactTs` prints them. */
+  /** `created_at`, `updated_at` and `seen_at` as `exactTs` prints them. */
   createdAt: string;
   updatedAt: string;
+  seenAt: string;
 }
 
 /** The notes of `room`, oldest first, with their exact timestamps from the same read. */
 export async function listRoomExact(q: Queryable, room: Room): Promise<ExactNote[]> {
-  const { rows } = await q.query<NoteRow & { created_x: string; updated_x: string }>(
-    `select ${NOTE_COLUMNS}, ${exactTs("created_at")} as created_x, ${exactTs("updated_at")} as updated_x
+  const { rows } = await q.query<NoteRow & { created_x: string; updated_x: string; seen_x: string }>(
+    `select ${NOTE_COLUMNS}, ${exactTs("created_at")} as created_x, ${exactTs("updated_at")} as updated_x, ${exactTs("seen_at")} as seen_x
        from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1 order by created_at, id`,
     [keyOf(room)],
   );
-  return rows.map((r) => ({ note: toNote(room.kind, r), createdAt: r.created_x, updatedAt: r.updated_x }));
+  return rows.map((r) => ({ note: toNote(room.kind, r), createdAt: r.created_x, updatedAt: r.updated_x, seenAt: r.seen_x }));
 }
 
 /** The exact `updated_at` of the notes `ids` of `room`, by id. */
@@ -74,24 +75,34 @@ export interface NewNote {
   unsure: boolean;
   origin: "review" | "owner" | "hearsay";
   originConversationId: string | null;
+  /** A part split off another note keeps its strength, last-mentioned time and (`createdAt`, a microsecond later by `createdOffsetUs` each) the creation time; else 0, now, now. */
+  strength?: number;
+  seenAt?: string;
+  createdAt?: string;
+  createdOffsetUs?: number;
 }
 
 /** Adds a note to `room` (under `lockRoom`); returns its id. Notes added one after another list in that order (`clock_timestamp`, not the transaction's time). */
 export async function insertNote(t: Tx, room: Room, n: NewNote): Promise<string> {
   const { rows } = await t.query<{ id: string }>(
-    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at, updated_at)
-     select $1, $2, $3, $4, $5, $6, $7, c.ts, c.ts from (select clock_timestamp() as ts) c returning id`,
-    [keyOf(room), n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId],
+    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, text, vault, vault_by, unsure, origin, origin_conversation_id, strength, seen_at, created_at, updated_at)
+     select $1, $2, $3, $4, $5, $6, $7, coalesce($8::int, 0), coalesce($9::timestamptz, c.ts), coalesce($10::timestamptz + $11::int * interval '1 microsecond', c.ts), c.ts
+       from (select clock_timestamp() as ts) c returning id`,
+    [keyOf(room), n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.strength ?? null, n.seenAt ?? null, n.createdAt ?? null, n.createdOffsetUs ?? 0],
   );
   return rows[0]!.id;
 }
 
 /** Puts back a note that was deleted (under `lockRoom`), as it was: same id, creation time and state. Its conversation may be gone by now: the column then goes null, as it would have. */
-export async function restoreNote(t: Tx, room: Room, n: Pick<Note, "id" | "text" | "vault" | "vaultBy" | "unsure" | "origin" | "originConversationId"> & { createdAt: Date | string; updatedAt: Date | string }): Promise<void> {
+export async function restoreNote(
+  t: Tx,
+  room: Room,
+  n: Pick<Note, "id" | "text" | "vault" | "vaultBy" | "unsure" | "origin" | "originConversationId"> & { createdAt: Date | string; updatedAt: Date | string; strength?: number; seenAt?: Date | string },
+): Promise<void> {
   await t.query(
-    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, id, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at, updated_at)
-     values ($1, $2, $3, $4, $5, $6, $7, (select id from conversations where id = $8), $9::timestamptz, $10::timestamptz)`,
-    [keyOf(room), n.id, n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.createdAt, n.updatedAt],
+    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, id, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at, updated_at, strength, seen_at)
+     values ($1, $2, $3, $4, $5, $6, $7, (select id from conversations where id = $8), $9::timestamptz, $10::timestamptz, coalesce($11::int, 0), coalesce($12::timestamptz, now()))`,
+    [keyOf(room), n.id, n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.createdAt, n.updatedAt, n.strength ?? null, n.seenAt ?? null],
   );
 }
 
@@ -102,6 +113,9 @@ export interface NotePatch {
   unsure?: boolean;
   /** Writes this exact `updated_at` (an undo putting a note back as it was) instead of a new clock value. */
   updatedAt?: string;
+  /** Writes this exact strength / last-mentioned time (an undo, a merge), or `"now"` for the seen time (a review that wrote the note). Neither touches `updated_at`. */
+  strength?: number;
+  seenAt?: string;
 }
 
 /** Changes the fields given of a note of `room` (under `lockRoom`); false when `room` has no such note. Every call bumps `updated_at`, even when no value changes: it is how a change knows the owner touched a note since. */
@@ -109,11 +123,25 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
   const { rowCount } = await t.query(
     `update ${TABLE[room.kind]}
         set text = coalesce($3, text), vault = coalesce($4, vault), vault_by = coalesce($5, vault_by),
-            unsure = coalesce($6, unsure), updated_at = coalesce($7::timestamptz, clock_timestamp())
+            unsure = coalesce($6, unsure), updated_at = coalesce($7::timestamptz, clock_timestamp()),
+            strength = coalesce($8::int, strength),
+            seen_at = case when $9::text = 'now' then clock_timestamp() when $9::text is not null then $9::timestamptz else seen_at end
       where id = $1 and ${COLUMN[room.kind]} = $2`,
-    [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null, patch.updatedAt ?? null],
+    [id, keyOf(room), patch.text ?? null, patch.vault ?? null, patch.vaultBy ?? null, patch.unsure ?? null, patch.updatedAt ?? null, patch.strength ?? null, patch.seenAt ?? null],
   );
   return rowCount === 1;
+}
+
+/**
+ * The owner mentioned these notes of `room` again: each is one stronger and seen now. `updated_at` is not touched (this is
+ * not a change anybody is told of, and it must never make an undo stale). Notes that are gone are skipped.
+ */
+export async function bumpNotes(q: Queryable, room: Room, ids: ReadonlyArray<string>): Promise<void> {
+  if (ids.length === 0) return;
+  await q.query(
+    `update ${TABLE[room.kind]} set strength = strength + 1, seen_at = clock_timestamp() where ${COLUMN[room.kind]} = $1 and id = any($2::uuid[])`,
+    [keyOf(room), ids],
+  );
 }
 
 /** Deletes a note of `room`; false when `room` has no such note. */

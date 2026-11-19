@@ -80,6 +80,8 @@ const note = (kind: "owner" | "self", text: string, over: Partial<Note> = {}): N
   origin: "review",
   createdAt: new Date("2026-11-01T00:00:00Z"),
   updatedAt: new Date("2026-11-02T10:00:00Z"),
+  strength: 0,
+  seenAt: new Date("2026-11-02T10:00:00Z"),
   ...over,
 });
 const heard = (speakerName: string, text: string, group: string, saidAt = "2026-11-03T08:00:00Z") => ({

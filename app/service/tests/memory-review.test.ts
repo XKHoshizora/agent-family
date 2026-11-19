@@ -525,8 +525,10 @@ describe("only the owner", () => {
 
 describe("not looping on what it already knows", () => {
   const TEXT = "喜欢喝茶，不加糖";
+  /** The room as the owner sees it, but for how often each note was mentioned again: that is what a repeat changes. */
+  const stable = (room: { notes: Array<Record<string, unknown>> }): string => JSON.stringify({ ...room, notes: room.notes.map(({ strength: _s, seenAt: _t, ...n }) => n) });
   async function twenty(w: World, answerFor: () => string) {
-    const before = JSON.stringify(await roomOf(w.owner));
+    const before = stable(await roomOf(w.owner));
     for (let i = 1; i <= 20; i++) {
       await say(w.owner, w.conv, "今天还是想喝茶");
       gateway.reply(`记得，${TEXT}。`);
@@ -546,7 +548,9 @@ describe("not looping on what it already knows", () => {
     await seeded(w.owner, w.agent.id, TEXT, false);
     const before = await twenty(w, () => ops(add(TEXT)));
     expect(reviewCalls()).toHaveLength(3);
-    expect(JSON.stringify(await roomOf(w.owner))).toBe(before);
+    expect(stable(await roomOf(w.owner))).toBe(before);
+    // Each of the three reviews found the owner repeating the note: three times stronger, and nothing else.
+    expect((await roomOf(w.owner)).notes[0].strength).toBe(3);
     expect(await chips(w.owner, w.conv)).toEqual([]);
     expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(0);
     expect(await memoryRecords(w.owner.id)).toEqual([
@@ -562,7 +566,8 @@ describe("not looping on what it already knows", () => {
     judge.answer((_s, qs) => ({ dup: Object.fromEntries(Object.keys((qs[0] as { options: object }).options).map((k) => [k, k === note.id ? 0.95 : 0])) }));
     const before = await twenty(w, () => ops(add("茶要喝无糖的")));
     expect(reviewCalls()).toHaveLength(3);
-    expect(JSON.stringify(await roomOf(w.owner))).toBe(before);
+    expect(stable(await roomOf(w.owner))).toBe(before);
+    expect((await roomOf(w.owner)).notes[0].strength).toBe(3);
     expect(await chips(w.owner, w.conv)).toEqual([]);
     expect(judge.calls).toHaveLength(3);
     expect(await memoryRecords(w.owner.id)).toEqual([

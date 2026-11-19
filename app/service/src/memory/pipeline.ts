@@ -10,10 +10,12 @@ import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
-import { parseOps, type Op } from "./ops.ts";
+import { modelNote } from "./clean.ts";
+import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote } from "./review.ts";
 import { duplicateOf, sortNote, type SortDeps } from "./sort.ts";
-import { getNewNotes, roomOf, type NoteKind } from "./store.ts";
+import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
+import { bumpNotes } from "./write.ts";
 
 /**
  * One review, start to finish (the scheduler, reviewer.ts, decides when): the input (`reviewInput`), one metered call
@@ -165,10 +167,19 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const ops = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
+  // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
+  const repeats = [...sorted.repeats, ...(await exactRepeats(deps, agent, kinds, answer, ops))];
 
   const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[]> => {
     const ids = { ownerId: locked.ownerId, agentId };
     const written: Array<{ changeId: string; unlock: boolean }> = [];
+    // Strength is no change anybody is told of: no change row, no notice, `updated_at` untouched (so no undo goes stale).
+    const bumped = new Set<string>();
+    for (const kind of ["owner", "self"] as const) {
+      const ids = [...new Set(repeats.filter((r) => r.kind === kind).map((r) => r.id))].filter((id) => !bumped.has(id));
+      for (const id of ids) bumped.add(id);
+      await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
+    }
     if (ops.length > 0) {
       const result = await applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, ops, input.refs, {
         conversationId: locked.conversationId,
@@ -233,10 +244,11 @@ async function sortOps(
   refs: Map<string, RefNote>,
   pending: ReadonlyArray<{ kind: NoteKind; text: string }>,
   closing: AbortSignal,
-): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; duplicates: Set<string> }> {
+): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; duplicates: Set<string>; repeats: Array<{ kind: NoteKind; id: string }> }> {
   const vaults = new Map<string, { vault: boolean; unsure: boolean }>();
   const duplicates = new Set<string>();
-  if (ops.every((o) => o.op !== "add" && o.op !== "replace")) return { vaults, duplicates };
+  const repeats: Array<{ kind: NoteKind; id: string }> = [];
+  if (ops.every((o) => o.op !== "add" && o.op !== "replace")) return { vaults, duplicates, repeats };
   const { db, config, log } = deps;
   const sortDeps: SortDeps = { db, judge: deps.judge, config, log };
   const setting = await getNewNotes(db, agent.ownerId);
@@ -248,13 +260,44 @@ async function sortOps(
   for (const op of ops) {
     if (closing.aborted) break;
     if (op.op === "add") {
-      if (await duplicateOf(sortDeps, op.text, known(op.kind))) duplicates.add(op.text);
-      else vaults.set(vaultKey(op.kind, op.text), await sortNote(sortDeps, op.text, op.kind, setting));
+      const same = await duplicateOf(sortDeps, op.text, known(op.kind));
+      if (same !== null) {
+        duplicates.add(op.text);
+        // A repeat of a note (not of what only waits for the owner's yes) makes that note stronger.
+        const note = [...refs.values()].find((n) => n.id === same);
+        if (note) repeats.push({ kind: note.kind, id: note.id });
+      } else vaults.set(vaultKey(op.kind, op.text), await sortNote(sortDeps, op.text, op.kind, setting));
     } else if (op.op === "replace") {
       const target = refs.get(op.ref);
       // A note inside the vault stays inside whatever the new text says: nothing to ask.
       if (target && !target.vault) vaults.set(vaultKey(target.kind, op.text), await sortNote(sortDeps, op.text, target.kind, setting));
     }
   }
-  return { vaults, duplicates };
+  return { vaults, duplicates, repeats };
+}
+
+/**
+ * The notes the answer's `add`s repeat word for word (case, whitespace and punctuation aside): `parseOps` drops such an add
+ * (it is not new), and what the owner said again is what makes the note stronger. Only notes of the rooms this review may
+ * change, whether or not it was shown them (in a group the vault is not shown, but is repeated all the same).
+ */
+async function exactRepeats(deps: PipelineDeps, agent: AgentRow, kinds: ReadonlySet<NoteKind>, answer: string, kept: Op[]): Promise<Array<{ kind: NoteKind; id: string }>> {
+  const parsed = parseAnswer(answer);
+  const list = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as { ops?: unknown }).ops : undefined;
+  if (!Array.isArray(list)) return [];
+  const keptKeys = new Set(kept.flatMap((o) => (o.op === "add" ? [sameKey(o.text)] : [])));
+  const said = new Set<string>();
+  for (const raw of list.slice(0, MAX_OPS)) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const { op, kind, text } = raw as { op?: unknown; kind?: unknown; text?: unknown };
+    if (op !== "add" || (kind !== "owner" && kind !== "self") || !kinds.has(kind) || typeof text !== "string") continue;
+    const clean = modelNote(text);
+    if (clean !== null && !keptKeys.has(sameKey(clean))) said.add(sameKey(clean));
+  }
+  if (said.size === 0) return [];
+  const rooms: Array<[NoteKind, Array<{ id: string; text: string }>]> = [
+    ["owner", kinds.has("owner") && agent.sharedNotes ? await listOwnerNotes(deps.db, agent.ownerId) : []],
+    ["self", kinds.has("self") ? await listAgentNotes(deps.db, agent.id) : []],
+  ];
+  return rooms.flatMap(([kind, notes]) => notes.filter((n) => said.has(sameKey(n.text))).map((n) => ({ kind, id: n.id })));
 }

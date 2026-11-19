@@ -813,7 +813,10 @@ required* everywhere. Reads share the budget of `GET /api/agents` (120 a minute)
 minute per owner. **Note** (`src/memory/routes.ts`): `{"id", "text", "vault": boolean, "unsure": boolean, "origin":
 "review" | "owner" | "hearsay", "source": {"kind": "agent" | "group" | "manual", "title": string | null}, "createdAt",
 "updatedAt"}` (`source` is where it was learned: the owner's chat with that Agent — `title` is the Agent's name — a group
-(its title), or typed by hand). Text is stored as written (`src/memory/clean.ts`): line breaks and runs of whitespace become one space and invisible
+(its title), or typed by hand). `strength` (a number, 0 for a new note) and `seenAt` say how often the owner has mentioned the
+same thing again and when it was last written or mentioned: a review that finds the owner repeating a note — an `add` of
+its words, word for word or by the judgement's call — makes it one stronger (once per review) and seen now, and that is
+all: no change is recorded, nothing is shown, and `updatedAt` stays, so an undo is never made stale by it. Text is stored as written (`src/memory/clean.ts`): line breaks and runs of whitespace become one space and invisible
 format characters (zero-width, bidi controls) are removed; nothing else is changed — no folding, and brackets, quotes and
 punctuation stay (every prompt cleans a note again when it shows it). A note is refused, 422 `note_refused`, when it is
 empty after that or looks like a key or secret (a run of 20 or more letters, digits, `_` and `-` holding both a letter and a
