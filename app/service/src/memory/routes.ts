@@ -200,8 +200,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       return (await deleteNote(t, room, noteId)) ? { origin: note?.origin ?? null } : null;
     });
     if (!gone) throw notFound();
-    return { ok: true };
     if (gone.origin === "review") count(db, "owner_deleted_auto_note");
+    return { ok: true };
   }
 
   /** The owner's Agent `agentId` as its owner sees it (also a deleted one: its notes stay theirs to read and delete); 404 for anyone else's. */
@@ -370,8 +370,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         return takeHearsay(t, agent.id, req.params.hearsayId);
       });
       if (!taken) throw notFound();
-      return { ok: true as const };
       count(db, "hearsay_deleted");
+      return { ok: true as const };
     },
   );
 
@@ -404,8 +404,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
           originConversationId: heard.conversationId,
         });
       });
-      return reply.code(201).send(await noteOf(db, room, id));
       count(db, "hearsay_confirmed");
+      return reply.code(201).send(await noteOf(db, room, id));
     },
   );
   // --- the changes a review made, as the owner may take them back or decide on them -----------------------------------
@@ -421,13 +421,13 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     changeId: string,
     wanted: "applied" | "undone" | "discarded",
     run: (t: Tx) => Promise<"ok" | "stale" | "full" | null>,
-  ): Promise<{ status: typeof wanted }> {
     acted: () => void = () => undefined,
+  ): Promise<{ status: typeof wanted }> {
     const found = await db.query<{ agent_id: string; status: string }>("select agent_id, status from memory_changes where id = $1 and owner_id = $2", [changeId, ownerId]);
     if (found.rows[0]?.agent_id !== agentId) throw notFound();
     const outcome = await db.tx(run);
-    if (outcome === "stale") throw new AppError(409, "stale_change");
     if (outcome === "ok") acted();
+    if (outcome === "stale") throw new AppError(409, "stale_change");
     if (outcome === "full") throw roomFull(0);
     if (outcome === null) {
       const now = await db.query<{ status: string }>("select status from memory_changes where id = $1", [changeId]);
