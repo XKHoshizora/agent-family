@@ -305,7 +305,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       // Decided and queued with nothing awaited in between: two requests never both get in.
       if (closed) return null;
       if (dreaming.has(ownerId) || waiting.some((j) => alone(j) && j.ownerId === ownerId)) return "busy";
-      if (agents.length === 0) return { rooms: 0, converted: 0, kept: 0 };
+      if (agents.length === 0) return { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
       return new Promise((settle) => enqueue({ kind: "convert", agentId: agents[0]!.id, conversationId: "convert", ownerId, language, settle }));
     },
     remembered: () => attempted.size,

@@ -1,6 +1,6 @@
 import { lockAccount } from "../accounts/store.ts";
 import type { Tx } from "../db.ts";
-import { modelNote } from "./clean.ts";
+import { conversionMax, modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
 import { keptOrigin } from "./origin.ts";
 import { codePoints, hearsayCost, hearsayUsed, used, type Note, type NoteKind, type Rooms } from "./store.ts";
@@ -159,6 +159,8 @@ export interface ApplyOpts {
 export interface ApplyResult {
   /** The change row; null when nothing was recorded (no op was left, or only unlocks remain). */
   changeId: string | null;
+  /** A dream: how many of its ops were left out because the room could not hold what they wrote (the size rule). */
+  noRoom?: number;
   applied: AppliedOp[];
   /** An `add` or `replace` was dropped because the room is full. */
   full: boolean;
@@ -518,6 +520,12 @@ export interface DreamApplyOpts {
   /** The sorting verdict (sort.ts `resortNote`) of each open note that is new since the last dream: one that no op touched, that is not the owner's choice and has not changed since it was read is locked when its verdict says so. A note with no entry has no verdict and stays. */
   resorted: ReadonlyMap<string, { vault: boolean; unsure: boolean }>;
   rooms: Rooms;
+  /**
+   * A language conversion: a rewrite keeps the note's vault state (`vault`, `vault_by`, `unsure`) exactly as it is, whatever `vaults` says
+   * (a faithful restatement has the same meaning), and may be as long as `conversionMax` allows (the usual limit for a model's entry is
+   * too short for another script).
+   */
+  conversion?: boolean;
 }
 
 /**
@@ -527,7 +535,7 @@ export interface DreamApplyOpts {
  * took, or whose notes are not all of one room, is dropped. The vault only fills here: a merge with a note in the vault, and
  * every part of a split vault note, is in the vault; no op takes a note out of it. Nothing is written.
  */
-function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): { stored: StoredOp[]; full: boolean } {
+function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): { stored: StoredOp[]; full: boolean; noRoom: number } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
   const touched = new Set<string>();
   const noteOf = (ref: string): Note | null => {
@@ -579,10 +587,10 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       });
     } else if (op.op === "rewrite") {
       const note = opts.checked.has(index) ? noteOf(op.ref) : null;
-      const text = note ? modelNote(op.text) : null;
+      const text = note ? modelNote(op.text, opts.conversion ? conversionMax(note.text) : undefined) : null;
       if (!note || text === null || text === note.text) return;
       touched.add(note.id);
-      const vault = keep(note, text);
+      const vault = opts.conversion ? { vault: note.vault, by: note.vaultBy, unsure: note.unsure } : keep(note, text);
       steps.push({
         index,
         kind: note.kind,
@@ -591,7 +599,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       });
     } else if (op.op === "split") {
       const note = opts.checked.has(index) ? noteOf(op.ref) : null;
-      const texts = op.texts.map(modelNote);
+      const texts = op.texts.map((t) => modelNote(t));
       if (!note || texts.length < 2 || texts.length > 4 || texts.some((t) => t === null)) return;
       touched.add(note.id);
       const at = state.exact.get(note.id)!;
@@ -623,6 +631,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
   const rejected = new Set([...sized.rejected, ...tooMany]);
   const full = sized.full || tooMany.size > 0;
   const stored = steps.filter((s) => !rejected.has(s.index)).map((s) => s.stored);
+  const noRoom = rejected.size;
 
   // An open note that is new since the last dream and that no op touched is locked on a vault verdict; the owner's own choice is final.
   for (const kind of ["owner", "self"] as const) {
@@ -633,7 +642,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       stored.push({ ...snapshot(base("lock", kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: verdict.unsure });
     }
   }
-  return { stored, full };
+  return { stored, full, noRoom };
 }
 
 /**
@@ -649,10 +658,10 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   const planned = planDream(state, who, ops, refs, opts);
   const stored = opts.status === "applied" ? await execute(t, who, planned.stored) : planned.stored;
   if (opts.status === "applied") await stamp(t, who, stored);
-  // A room too full to take a longer text is nothing a dream has to say.
-  if (stored.length === 0) return null;
+  // A room too full to take a longer text is nothing a dream has to say (a conversion is told how many it left for that: `noRoom`).
+  if (stored.length === 0) return planned.noRoom > 0 ? { changeId: null, applied: [], full: planned.full, unlocks: [], noRoom: planned.noRoom } : null;
   const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, "dream");
-  return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [] };
+  return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [], noRoom: planned.noRoom };
 }
 
 /** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */

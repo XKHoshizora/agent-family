@@ -1,17 +1,18 @@
 import { siteDay } from "../accounts/store.ts";
 import type { AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
+import { resolveModel } from "../models/resolve.ts";
 import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type DreamOp, type StoredOp } from "./apply.ts";
-import { memoryCall, type MemoryCallReport } from "./call.ts";
-import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
+import { memoryCall, memoryModel, type MemoryCallReport } from "./call.ts";
+import { cleanText, conversionMax, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
 import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
 import { todayIn } from "./review.ts";
 import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
-import { codePoints, getMemoryLanguage, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
+import { codePoints, getMemoryLanguage, getMemoryModel, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
 
 /**
@@ -187,7 +188,7 @@ const hasExactly = (o: Record<string, unknown>, keys: string[]): boolean => {
   return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k));
 };
 
-function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
+function one(raw: unknown, refs: ReadonlySet<string>, entryMax?: (ref: string) => number): DreamOp | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
   const known = (v: unknown): v is string => typeof v === "string" && refs.has(v);
@@ -201,7 +202,7 @@ function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
     }
     case "rewrite": {
       if (!hasExactly(o, ["op", "ref", "text"]) || !known(o.ref) || typeof o.text !== "string") return null;
-      const text = modelNote(o.text);
+      const text = modelNote(o.text, entryMax?.(o.ref));
       return text === null ? null : { op: "rewrite", ref: o.ref, text };
     }
     case "split": {
@@ -221,10 +222,10 @@ function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
  * anything else answers `[]`. Of the first `MAX_OPS` entries only `merge`, `rewrite`, `split` and `lock` of exactly their
  * shapes are kept — no add, no bare remove, no unlock — with refs from `refs`, every text through `modelNote`; a note is named
  * by one op only (the first), so an op naming one already used, a merge of a note into itself or a split into fewer than two
- * or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8) and only `ops`
- * `["rewrite"]`. Pure and total: it never throws.
+ * or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8), only `ops`
+ * `["rewrite"]`, and a per-note limit on a restatement's length (`entryMax`). Pure and total: it never throws.
  */
-export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]> } = {}): DreamOp[] {
+export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]>; entryMax?: (ref: string) => number } = {}): DreamOp[] {
   try {
     const parsed = parseAnswer(answer);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return [];
@@ -233,7 +234,7 @@ export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: {
     const named = new Set<string>();
     const ops: DreamOp[] = [];
     for (const raw of list.slice(0, only.max ?? MAX_OPS)) {
-      const op = one(raw, refs);
+      const op = one(raw, refs, only.entryMax);
       if (op === null || (only.ops && !only.ops.includes(op.op))) continue;
       const names = op.op === "merge" ? [op.into, ...op.from] : [op.ref];
       if (names.some((n) => named.has(n))) continue;
@@ -488,8 +489,23 @@ interface Conversion {
   tally: ConvertResult;
 }
 
-/** The most a conversion's answer may be, in tokens: it restates a whole room, which is more than a dream's few operations. */
-const CONVERT_OUTPUT_TOKENS = 4000;
+/**
+ * The most a conversion's answer may be, in tokens: it restates a whole room, which is more than a dream's few operations, sized to
+ * the room — twice what it holds in code points, 40 a note for the rest of each operation, and 200 over — and never more than the
+ * model it is made on gives (the owner's choice, else the site's memory model; unknown when it does not resolve: then the size alone).
+ */
+async function conversionTokens(db: Db, config: Config, ownerId: string, notes: ReadonlyArray<ExactNote>): Promise<number> {
+  const wanted = 2 * used(notes.map((n) => n.note)) + 40 * notes.length + 200;
+  try {
+    const own = await getMemoryModel(db, ownerId);
+    const site = memoryModel(config);
+    const choice = own ?? (site ? ({ source: "site", id: site.id } as const) : null);
+    const resolved = choice === null ? null : await resolveModel(db, config, { model: choice, ownerId });
+    return resolved === null ? wanted : Math.min(resolved.call.maxOutputTokens, wanted);
+  } catch {
+    return wanted;
+  }
+}
 
 /**
  * One room, one call: read, ask, parse, judge what needs judging (outside any transaction), apply in one. With a `conversion` the
@@ -512,35 +528,44 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     ? convertInput(notes, room.kind, conversion.language, now, config.siteTimezone)
     : dreamInput(notes, room.kind, fresh, room.kind === "owner" ? config.memory.roomOwner : config.memory.roomSelf, now, config.siteTimezone, await getMemoryLanguage(db, ownerId));
   if (input.refs.size === 0) return "done";
-  if (conversion) {
-    conversion.tally.rooms++;
-    conversion.tally.kept += input.refs.size;
-  }
+  if (conversion) conversion.tally.rooms++;
 
   const report: MemoryCallReport = { answered: false };
   const answer = await memoryCall(
     { db, models: deps.models, config, log, inFlight: deps.inFlight },
     ownerId,
-    { system: input.system, user: input.user, maxOutputTokens: conversion ? Math.max(CONVERT_OUTPUT_TOKENS, config.memory.reviewMaxOutputTokens) : config.memory.reviewMaxOutputTokens },
+    { system: input.system, user: input.user, maxOutputTokens: conversion ? await conversionTokens(db, config, ownerId, notes) : config.memory.reviewMaxOutputTokens },
     ctx.closing,
     report,
   );
   if (ctx.closing.aborted) return "aborted";
-  if (answer === null && !report.answered) return "failed";
-  // Charged for an answer that cannot be used: a dream all the same (nothing is asked again for the same notes), and no
-  // judgement is spent on it.
-  if (answer === null || !usable(answer)) return "done";
+  if (answer === null && !report.answered) {
+    if (conversion) conversion.tally.failedRooms++;
+    return "failed";
+  }
+  // Charged for an answer that cannot be used (a cut one too): a dream all the same (nothing is asked again for the same notes), and no
+  // judgement is spent on it. A conversion counts the room as one that failed: its notes are neither converted nor kept.
+  if (answer === null || !usable(answer)) {
+    if (conversion) conversion.tally.failedRooms++;
+    return "done";
+  }
 
-  const ops = parseDreamOps(answer, new Set(input.refs.keys()), conversion ? { max: input.refs.size, ops: ["rewrite"] } : {});
+  const ops = parseDreamOps(
+    answer,
+    new Set(input.refs.keys()),
+    conversion ? { max: input.refs.size, ops: ["rewrite"], entryMax: (ref) => conversionMax(input.refs.get(ref)!.text) } : {},
+  );
   // The open notes that are new, the newest first: what the re-sort may look at (a conversion re-sorts nothing).
   const candidates = notes
     .filter((n) => !conversion && fresh.has(n.note.id) && !n.note.vault && n.note.vaultBy === "auto")
     .sort((a, b) => b.note.updatedAt.getTime() - a.note.updatedAt.getTime())
     .map((n) => n.note.id);
-  const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing);
+  const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing, conversion !== undefined);
   if (ctx.closing.aborted) return "aborted";
 
   const refs = new Map([...input.refs].map(([ref, n]) => [ref, { kind: n.kind, id: n.id }]));
+  let rewritten = 0;
+  let noRoom = 0;
   const notices = await inLockedAgent(db, by.id, async (t, locked): Promise<StoredMessage[]> => {
     const applied = await applyDream(t, { ownerId: locked.ownerId, agentId: locked.id, sharedNotes: locked.sharedNotes, kinds: new Set<NoteKind>([room.kind]) }, ops, refs, {
       conversationId: locked.conversationId,
@@ -550,15 +575,19 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
       read,
       resorted,
       rooms: roomOf(config),
+      ...(conversion ? { conversion: true } : {}),
     });
+    noRoom = applied?.noRoom ?? 0;
     if (applied?.changeId == null) return [];
-    if (conversion) {
-      const rewritten = applied.applied.filter((o) => o.op === "replace").length;
-      conversion.tally.converted += rewritten;
-      conversion.tally.kept -= rewritten;
-    }
+    rewritten = applied.applied.filter((o) => o.op === "replace").length;
     return [await memoryNotice(t, locked, applied.changeId, { unlock: false, phase: "dream", linesOf: dreamLines })];
   });
+  // What came of the room: the notes rewritten, the others left as they were (those among them the room could not hold the restated text of, told apart).
+  if (conversion) {
+    conversion.tally.converted += rewritten;
+    conversion.tally.kept += input.refs.size - rewritten;
+    conversion.tally.noRoom += noRoom;
+  }
   announce(deps, notices, by.id);
   log.info({ metric: "memory_dream", agentId: by.id, room: room.kind, ops: ops.length, notices: notices?.length ?? 0 }, "a memory dream ended");
   return "done";
@@ -578,12 +607,13 @@ async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): 
     ...(shared ? [{ room: { kind: "owner" } as DreamRoom, carrier: shared }] : []),
     ...agents.map((agent) => ({ room: { kind: "self", agentId: agent.id } as DreamRoom, carrier: agent })),
   ];
-  const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0 };
+  const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
   for (const { room, carrier } of todo) {
     if (ctx.closing.aborted) return;
     try {
       if ((await dreamRoom(deps, ctx, carrier, room, null, { language: job.language, tally })) === "aborted") return;
     } catch (err) {
+      tally.failedRooms++;
       log.error({ ...errInfo(err), ownerId: job.ownerId }, "the conversion of one room failed; nothing was changed in it");
     }
   }
@@ -603,6 +633,7 @@ async function judge(
   refs: DreamInput["refs"],
   candidates: ReadonlyArray<string>,
   closing: AbortSignal,
+  conversion = false,
 ): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; checked: Set<number>; resorted: Map<string, { vault: boolean; unsure: boolean }> }> {
   const { db, config, log } = deps;
   const vaults = new Map<string, { vault: boolean; unsure: boolean }>();
@@ -628,7 +659,8 @@ async function judge(
       if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }))) continue;
       checked.add(index);
       named.add(note.id);
-      if (!note.vault) await sort(note.kind, op.text);
+      // A faithful restatement of a conversion has the same meaning: the note stays where it is, nothing is sorted.
+      if (!note.vault && !conversion) await sort(note.kind, op.text);
     } else if (op.op === "split") {
       const note = refs.get(op.ref)!;
       // Parts that together are far longer than the note add something: not even asked about.

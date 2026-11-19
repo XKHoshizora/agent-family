@@ -1,4 +1,4 @@
-import { MODEL_NOTE_MAX } from "./clean.ts";
+import { CONVERSION_NOTE_MAX, MODEL_NOTE_MAX } from "./clean.ts";
 
 /**
  * One language for the palace. The notes of an owner and of their Agents read like one person's notebook: written in one
@@ -58,7 +58,8 @@ export const convertSystem = (language: MemoryLanguage, today: string): string =
     "",
     "怎么写：",
     `- ${languageRule(language)}`,
-    `- 每条改写后的笔记一句短话（最多 ${MODEL_NOTE_MAX} 个字），意思和原来的完全一样：不要多出任何原来没有的事、推测或细节，原来说的事也不要漏。括号里的旧经过（比如“以前……”）照原意保留。`,
+    `- 每条改写后的笔记一句话，意思和原来的完全一样：不要多出任何原来没有的事、推测或细节，原来说的事也不要漏。括号里的旧经过（比如“以前……”）照原意保留。`,
+    `- 改写后的长度不能超过原来那条的 3 倍（原来很短的，也最多写 ${MODEL_NOTE_MAX} 个字），最多 ${CONVERSION_NOTE_MAX} 个字；在这个范围内，写得和原来一样短。`,
     `- 已经是${languageName(language)}的笔记不要动，也不要输出它。`,
     "- 不要合并、拆分、删除或锁任何笔记。",
     "",
@@ -67,11 +68,17 @@ export const convertSystem = (language: MemoryLanguage, today: string): string =
     `都已经是${languageName(language)}，输出 {"ops":[]}。`,
   ].join("\n");
 
-/** What a conversion did, over the rooms that had notes: the notes rewritten, and the notes left as they were. */
+/**
+ * What a conversion did, over the rooms that had notes: the notes rewritten (`converted`), the notes left as they were (`kept`),
+ * how many of those were left because the room could not hold the restated text (`noRoom`), and the rooms whose call failed or whose
+ * answer could not be used (`failedRooms`: their notes are in neither `converted` nor `kept`).
+ */
 export interface ConvertResult {
   rooms: number;
   converted: number;
   kept: number;
+  noRoom: number;
+  failedRooms: number;
 }
 
 /** One owner's conversion: every room of theirs that has notes, one after another, in the language chosen. `settle` tells the caller how it went (null: it did not run). */

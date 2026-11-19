@@ -256,7 +256,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   // conversion of theirs is under way.
   api.post(
     "/api/memory/language/convert",
-    { schema: { params: empty, querystring: empty, body: empty.nullish(), response: { 200: z.object({ rooms: z.number(), converted: z.number(), kept: z.number() }) } } },
+    { schema: { params: empty, querystring: empty, body: empty.nullish(), response: { 200: z.object({ rooms: z.number(), converted: z.number(), kept: z.number(), noRoom: z.number(), failedRooms: z.number() }) } } },
     async (req) => {
       const me = await requirePrincipal(req);
       await convertLimit(req, me.id);

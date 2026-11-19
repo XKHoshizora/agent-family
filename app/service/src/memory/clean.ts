@@ -51,9 +51,15 @@ export function ownerNote(text: string): string | null {
   return tidy(text);
 }
 
+/** The longest a restatement may be in a language conversion, at most: a restatement in another script is legitimately longer than its source. */
+export const CONVERSION_NOTE_MAX = 600;
+
+/** The longest a conversion's restatement of a note of `source` may be: three times the source, never less than a model's usual entry, never more than `CONVERSION_NOTE_MAX`. */
+export const conversionMax = (source: string): number => Math.min(CONVERSION_NOTE_MAX, Math.max(MODEL_NOTE_MAX, 3 * codePoints(source)));
+
 /** What a model wrote as a note (the reviewer's): the owner's rules, and refused when over 200 code points, with a link or a bare domain with a path, stating a password or passcode, or addressing the reader as an instruction does. */
-export function modelNote(text: string): string | null {
+export function modelNote(text: string, max: number = MODEL_NOTE_MAX): string | null {
   const clean = tidy(text);
-  if (clean === null || codePoints(clean) > MODEL_NOTE_MAX) return null;
+  if (clean === null || codePoints(clean) > max) return null;
   return URL_LIKE.some((p) => p.test(clean)) || BARE_DOMAIN_PATH.test(clean) || STATES_A_PASSWORD.test(clean) || ADDRESSES_THE_READER.test(clean) ? null : clean;
 }

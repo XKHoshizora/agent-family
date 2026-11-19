@@ -570,6 +570,60 @@ describe("记忆用的语言", () => {
     expect(inMain().getByText("把已有的笔记也转成Français吗？")).toBeTruthy();
   });
 
+  it("says what the conversion could not do, and only when there is something: notes the room could not hold, rooms that did not go through", async () => {
+    const answers = [
+      [{ rooms: 2, converted: 3, kept: 1, noRoom: 0, failedRooms: 0 }, "转了 3 条，1 条保持原样。"],
+      [{ rooms: 2, converted: 3, kept: 4, noRoom: 2, failedRooms: 0 }, "转了 3 条，4 条保持原样。有 2 条因为房间装不下没有转，可以先整理再试。"],
+      [{ rooms: 2, converted: 0, kept: 0, noRoom: 0, failedRooms: 1 }, "转了 0 条，0 条保持原样。有 1 个房间这次没转成，稍后可以再试。"],
+      [{ rooms: 3, converted: 1, kept: 2, noRoom: 1, failedRooms: 2 }, "转了 1 条，2 条保持原样。有 1 条因为房间装不下没有转，可以先整理再试。有 2 个房间这次没转成，稍后可以再试。"],
+    ];
+    for (const [answer, line] of answers) {
+      cleanup();
+      const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(async () => answer) } });
+      await openPalace(svc);
+      await choose("en");
+      await click(inMain().getByRole("button", { name: "转换" }));
+      await flush();
+      expect(inMain().getByRole("status").textContent).toBe(line);
+    }
+  });
+
+  it("keeps the language select off while a conversion runs, and back on after it", async () => {
+    const wait = deferred();
+    const svc = service({ over: { getMe: meWith({ memoryLanguage: null }), convertMemoryLanguage: vi.fn(() => wait.promise) } });
+    await openPalace(svc);
+    await choose("en");
+    expect(pick().matches(":disabled")).toBe(false);
+    await click(inMain().getByRole("button", { name: "转换" }));
+    expect(pick().matches(":disabled")).toBe(true);
+    wait.resolve({ rooms: 1, converted: 1, kept: 0, noRoom: 0, failedRooms: 0 });
+    await flush();
+    expect(pick().matches(":disabled")).toBe(false);
+  });
+
+  it("a refused conversion says why in its own words: no_language, busy, unavailable", async () => {
+    const reasons = [
+      ["no_language", 409, "先选一种语言。"],
+      ["busy", 409, "正在整理记忆，稍等一会儿再试。"],
+      ["unavailable", 503, "现在转不了，稍后再试。"],
+    ];
+    for (const [code, status, text] of reasons) {
+      cleanup();
+      const svc = service({
+        over: {
+          getMe: meWith({ memoryLanguage: null }),
+          convertMemoryLanguage: vi.fn(async () => {
+            throw apiError(status, code);
+          }),
+        },
+      });
+      await openPalace(svc);
+      await choose("en");
+      await click(inMain().getByRole("button", { name: "转换" }));
+      expect([code, document.querySelector(".toast")?.textContent]).toEqual([code, text]);
+    }
+  });
+
   it("a refused conversion is toasted, no result line is shown, and the question stays", async () => {
     const svc = service({
       over: {

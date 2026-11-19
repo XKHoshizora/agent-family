@@ -857,9 +857,11 @@ Body: none or `{}`. → 200 `{"ok": true}`; 404 `not_found` unless it is a note 
 
 Body: none or `{}`. Restates your existing notes in the language you chose (`PATCH /api/me` `memoryLanguage`; An Agent's memory, *One
 language*): the shared room and then each of your live Agents' own rooms that has notes, one call each, one room after another;
-hearsay is not converted. → 200 `{"rooms": n, "converted": n, "kept": n}` — the rooms that had notes, the notes rewritten, and
-the notes left as they were (a rewrite that the judgement did not find faithful, a note already in the language, a room whose
-call could not be made). Costs your points as any memory call does. 409 `no_language` while the setting is automatic; 409
+hearsay is not converted. → 200 `{"rooms": n, "converted": n, "kept": n, "noRoom": n, "failedRooms": n}` — the rooms that had notes, the notes rewritten,
+the notes left as they were (a rewrite the judgement did not find faithful or that was too long, a note already in the language, a
+restatement the room could not hold), of which `noRoom` were left only because the room could not hold the restated text, and
+`failedRooms`, the rooms whose call failed (no quota, a model that did not answer) or whose answer could not be used (cut, not
+JSON): the notes of those rooms are in neither `converted` nor `kept`. Costs your points as any memory call does. 409 `no_language` while the setting is automatic; 409
 `busy` while a dream or a conversion of yours is under way or waiting; 503 `unavailable` when the service is stopping. Limit: 6
 per minute.
 
@@ -998,7 +1000,13 @@ M 月改的）`). `POST /api/memory/language/convert` restates the existing note
 `笔记语言整理员`, restricted to `rewrite`, answering up to a room's worth of notes), every rewrite checked by the same
 faithful question as a dream's (it reads across languages), the vault only ever inwards, the origin rule of `origin.ts`, and one
 audited, undoable change per room (`phase: "dream"`, lines `改成了：{text}`) — applied at once, since the owner has just asked for it,
-whatever `memoryAsk` says. A note that fails stays as it is.
+whatever `memoryAsk` says ("ask me first" does not apply to a conversion you asked for). A conversion restates and nothing else: it
+asks the judgement model only the faithful question (a faithful restatement has the same meaning, so no note is sorted again), every
+note keeps its `vault`, `vault_by` and `unsure` exactly as they are, and its origin conversation is not changed. A restatement in another
+script is legitimately longer, so its limit is three times the source note (at least a model's usual 200, at most 600 code points; the
+prompt says so and asks for it as short as the original allows), and the call's output limit is sized to the room (twice what it holds
+in code points + 40 a note + 200, never above the model's own). A note that fails stays as it is; a restatement the room cannot hold is
+left and counted in `noRoom`; a room whose call or answer fails is counted in `failedRooms`.
 
 ### Agents in a group
 

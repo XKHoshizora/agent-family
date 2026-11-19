@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { languageRule, MEMORY_LANGUAGES, MEMORY_LANGUAGE_CODES } from "../src/memory/language.ts";
 import { reviewInput } from "../src/memory/review.ts";
+import { siteDay } from "../src/accounts/store.ts";
 import { api, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -241,7 +242,7 @@ describe("converting the existing notes", () => {
     gateway.reply(ops(rewrite("n1", "Keep answers short")));
 
     const done = await convert(w.owner);
-    expect([done.status, done.json]).toEqual([200, { rooms: 2, converted: 3, kept: 1 }]);
+    expect([done.status, done.json]).toEqual([200, { rooms: 2, converted: 3, kept: 1, noRoom: 0, failedRooms: 0 }]);
 
     const calls = convertCalls();
     expect(calls).toHaveLength(2);
@@ -297,14 +298,14 @@ describe("converting the existing notes", () => {
     expect(spicy.id).toBeTruthy();
   });
 
-  it("a room whose call fails, and an owner with no notes, are only counted as kept: 200 and nothing changed", async () => {
+  it("a room whose answer cannot be used is a failed room (not counted as kept), an owner with no notes counts nothing: 200 and nothing changed", async () => {
     const owner = await signUp(app, "cv2");
     const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
     expect((await setLanguage(owner, "ja")).status).toBe(200);
-    expect((await convert(owner)).json).toEqual({ rooms: 0, converted: 0, kept: 0 });
+    expect((await convert(owner)).json).toEqual({ rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 });
     await seeded(owner, agent.id, "喜欢喝茶", false);
     gateway.reply("not json at all");
-    expect((await convert(owner)).json).toEqual({ rooms: 1, converted: 0, kept: 1 });
+    expect((await convert(owner)).json).toEqual({ rooms: 1, converted: 0, kept: 0, noRoom: 0, failedRooms: 1 });
     expect(await ownerTexts(owner.id)).toEqual([{ text: "喜欢喝茶", vault: false }]);
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1", [owner.id])).rows[0].n).toBe(0);
   });
@@ -321,7 +322,7 @@ describe("converting the existing notes", () => {
     const second = await convert(owner);
     expect([second.status, second.json.error]).toEqual([409, "busy"]);
     hold.release(ops(rewrite("n1", "Likes tea")));
-    expect((await running).json).toEqual({ rooms: 1, converted: 1, kept: 0 });
+    expect((await running).json).toEqual({ rooms: 1, converted: 1, kept: 0, noRoom: 0, failedRooms: 0 });
 
     // A dream under way.
     const dreaming = gateway.hang();
@@ -333,5 +334,142 @@ describe("converting the existing notes", () => {
     expect([during.status, during.json.error]).toEqual([409, "busy"]);
     dreaming.release(ops());
     await memory().idle();
+  });
+});
+
+
+describe("a conversion changes the language and nothing else, and says what it could not do", () => {
+  const rewrite = (ref: string, text: string) => ({ op: "rewrite", ref, text });
+  const convert = (who: Actor) => api(app, who, "POST", "/api/memory/language/convert");
+  const rows = async (ownerId: string) => (await db.query("select text, vault, vault_by, unsure, origin_conversation_id from owner_notes where owner_id = $1 order by created_at, id", [ownerId])).rows;
+  const faithfulOnly = (_s: string, qs: ReadonlyArray<{ key: string }>): ScriptedAnswers => (qs[0]!.key === "faithful" ? { faithful: 0.9 } : { sort: 0.05 });
+
+  it("keeps every note's vault, vault_by and unsure exactly as they are, and asks the judge only the faithful question", async () => {
+    const owner = await signUp(app, "cf1");
+    await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    for (const [text, vault, by, unsure] of [["喜欢喝茶", false, "auto", false], ["爱吃辣", false, "owner", false], ["对花生过敏", true, "auto", true], ["住在上海", true, "owner", false]] as const) {
+      await db.query("insert into owner_notes (owner_id, text, vault, vault_by, unsure) values ($1, $2, $3, $4, $5)", [owner.id, text, vault, by, unsure]);
+    }
+    const before = (await rows(owner.id)).map(({ vault, vault_by, unsure }) => ({ vault, vault_by, unsure }));
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    // A sorter that would lock everything, were it ever asked.
+    judge.answer(faithfulOnly);
+    gateway.reply(ops(rewrite("n1", "Likes tea"), rewrite("n2", "Eats spicy food"), rewrite("n3", "Allergic to peanuts"), rewrite("n4", "Lives in Shanghai")));
+    const done = await convert(owner);
+    expect(done.json).toMatchObject({ converted: 4, kept: 0 });
+    expect((await rows(owner.id)).map((r) => r.text)).toEqual(["Likes tea", "Eats spicy food", "Allergic to peanuts", "Lives in Shanghai"]);
+    expect((await rows(owner.id)).map(({ vault, vault_by, unsure }) => ({ vault, vault_by, unsure }))).toEqual(before);
+    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key))).toEqual(["faithful", "faithful", "faithful", "faithful"]);
+  });
+
+  it("origin_conversation_id is not changed by a conversion", async () => {
+    const w = await world("cf2");
+    await db.query("insert into owner_notes (owner_id, text, vault, origin, origin_conversation_id) values ($1, '喜欢喝茶', false, 'review', $2)", [w.owner.id, w.g]);
+    expect((await setLanguage(w.owner, "en")).status).toBe(200);
+    gateway.reply(ops(rewrite("n1", "Likes tea")));
+    expect((await convert(w.owner)).json).toMatchObject({ converted: 1 });
+    expect(await rows(w.owner.id)).toMatchObject([{ text: "Likes tea", origin_conversation_id: w.g }]);
+  });
+
+  it("with 先问我再记 on, a conversion the owner asked for is applied at once, not left pending", async () => {
+    const owner = await signUp(app, "cf3");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA, memoryAsk: true });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    gateway.reply(ops(rewrite("n1", "Likes tea")));
+    expect((await convert(owner)).json).toMatchObject({ converted: 1 });
+    expect(await ownerTexts(owner.id)).toEqual([{ text: "Likes tea", vault: false }]);
+    expect((await db.query("select status from memory_changes where owner_id = $1", [owner.id])).rows).toEqual([{ status: "applied" }]);
+  });
+
+  it("a restatement in another script may be longer than the usual limit: up to three times the source, at most 600; longer is left as it was", async () => {
+    const owner = await signUp(app, "cf4");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "茶".repeat(80), false);
+    await seeded(owner, agent.id, "爱".repeat(80), false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    // 227 code points (within 3 x 80 = 240, past the usual 200); 243 is past 240.
+    const within = "tea ".repeat(57).trim();
+    const past = "tea ".repeat(61).trim();
+    expect([...within].length).toBeGreaterThan(200);
+    expect([...within].length).toBeLessThanOrEqual(240);
+    expect([...past].length).toBeGreaterThan(240);
+    gateway.reply(ops(rewrite("n1", within), rewrite("n2", past)));
+    expect((await convert(owner)).json).toMatchObject({ converted: 1, kept: 1, noRoom: 0 });
+    expect((await ownerTexts(owner.id)).map((r) => r.text)).toEqual([within, "爱".repeat(80)]);
+    // The prompt says so.
+    const system = callsOf("笔记语言整理员")[0]!.system;
+    expect(system).toContain("原来那条的 3 倍");
+    expect(system).toContain("600");
+  });
+
+  it("the call's output limit is sized to the room: twice what it holds, 40 a note and 200, never above the model's limit", async () => {
+    const owner = await signUp(app, "cf5");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    await seeded(owner, agent.id, "爱吃辣", false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    gateway.reply(ops());
+    await convert(owner);
+    // 4 + 3 = 7 code points in 2 notes: 2 x 7 + 40 x 2 + 200.
+    expect(callsOf("笔记语言整理员")[0]!.maxOutputTokens).toBe(2 * 7 + 40 * 2 + 200);
+    // A room that would ask for more than the model gives is cut to what it gives (FAST: 4096).
+    for (let i = 0; i < 9; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(190)}${i}`]);
+    gateway.reply(ops());
+    await convert(owner);
+    expect(callsOf("笔记语言整理员")[1]!.maxOutputTokens).toBe(Math.min(4096, 2 * (7 + 9 * 191) + 40 * 11 + 200));
+  });
+
+  it("a restatement the room cannot hold is left as it is and counted in noRoom (and in kept)", async () => {
+    const owner = await signUp(app, "cf6");
+    await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    // 19 notes of 100 code points and one of 50: 1950 of the room's 2000.
+    for (let i = 0; i < 19; i++) await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, `${"茶".repeat(97)}${String(i).padStart(3, "0")}`]);
+    await db.query("insert into owner_notes (owner_id, text, vault) values ($1, $2, false)", [owner.id, "爱".repeat(50)]);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    gateway.reply(ops(rewrite("n20", "love ".repeat(28).trim())));
+    const done = await convert(owner);
+    expect(done.json).toEqual({ rooms: 1, converted: 0, kept: 20, noRoom: 1, failedRooms: 0 });
+    expect((await ownerTexts(owner.id)).at(-1)!.text).toBe("爱".repeat(50));
+  });
+
+  it("a truncated answer is a failed room: not counted in kept", async () => {
+    const owner = await signUp(app, "cf7");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    gateway.reply('{"ops":[{"op":"rewrite","ref":"n1","text":"Likes');
+    expect((await convert(owner)).json).toEqual({ rooms: 1, converted: 0, kept: 0, noRoom: 0, failedRooms: 1 });
+    expect(await ownerTexts(owner.id)).toEqual([{ text: "喜欢喝茶", vault: false }]);
+  });
+
+  it("when the owner's points run out midway, the rooms after that are failed rooms", async () => {
+    const owner = await signUp(app, "cf8");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: PERSONA });
+    await seeded(owner, agent.id, "喜欢喝茶", false);
+    await seeded(owner, agent.id, "回答要简短", false, "self");
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    const hold = gateway.hang();
+    const running = convert(owner);
+    await hold.reached;
+    const day = siteDay(new Date(), app.deps.config.siteTimezone);
+    await db.query("insert into free_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [owner.id, day]);
+    hold.release(ops(rewrite("n1", "Likes tea")));
+    expect((await running).json).toEqual({ rooms: 2, converted: 1, kept: 0, noRoom: 0, failedRooms: 1 });
+    expect(await ownerTexts(owner.id)).toEqual([{ text: "Likes tea", vault: false }]);
+  });
+
+  it("the nightly dream restates up to 8 notes that are not in the chosen language, and they are applied", async () => {
+    const w = await world("cf9");
+    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    expect((await setLanguage(w.owner, "en")).status).toBe(200);
+    gateway.reply(ops(rewrite("n1", "Likes tea")));
+    clock.advance(3 * HOUR + MIN);
+    await memory().idle();
+    expect(callsOf("梦中整理员")).toHaveLength(1);
+    expect(callsOf("梦中整理员")[0]!.system).toContain("最多改 8 条");
+    expect(await ownerTexts(w.owner.id)).toEqual([{ text: "Likes tea", vault: false }]);
+    const [change] = (await db.query("select phase, status from memory_changes where owner_id = $1", [w.owner.id])).rows;
+    expect(change).toEqual({ phase: "dream", status: "applied" });
   });
 });

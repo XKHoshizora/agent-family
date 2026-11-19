@@ -754,10 +754,16 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     setDream: (dream) => attempt(() => api.updateDream(dream), { map: () => dream, text: commonErrorText }),
     /** value: the language code as sent, or null (automatic). */
     setMemoryLanguage: (memoryLanguage) => attempt(() => api.updateMemoryLanguage(memoryLanguage), { map: () => memoryLanguage, text: commonErrorText }),
-    /** value: `{rooms, converted, kept}`, how my existing notes were restated in the chosen language. */
+    /** value: `{rooms, converted, kept, noRoom, failedRooms}`, how my existing notes were restated in the chosen language (what could not be done is counted). */
     convertMemoryLanguage: () =>
       attempt(() => api.convertMemoryLanguage(), {
-        map: (answer) => ({ rooms: Number(answer?.rooms) || 0, converted: Number(answer?.converted) || 0, kept: Number(answer?.kept) || 0 }),
+        map: (answer) => ({
+          rooms: Number(answer?.rooms) || 0,
+          converted: Number(answer?.converted) || 0,
+          kept: Number(answer?.kept) || 0,
+          noRoom: Number(answer?.noRoom) || 0,
+          failedRooms: Number(answer?.failedRooms) || 0,
+        }),
         text: commonErrorText,
       }),
     /** value: the model as sent, or null (the site's). */

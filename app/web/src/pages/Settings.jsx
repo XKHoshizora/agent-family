@@ -198,6 +198,25 @@ const NEW_NOTES = [
  * a refusal is toasted and the box stays as it was. `settings`: null while being read, "" when it could not be (every control
  * stay off and say so).
  */
+/** What the conversion's refusals say (`POST /api/memory/language/convert`); any other refusal is said as everywhere else. */
+const CONVERT_REFUSED = {
+  no_language: "先选一种语言。",
+  busy: "正在整理记忆，稍等一会儿再试。",
+  unavailable: "现在转不了，稍后再试。",
+};
+const convertRefusalText = (error) => CONVERT_REFUSED[error?.error?.code] ?? refusalText(error);
+
+/** How a conversion went: what was converted and kept, and — only when there is something — what it could not do. */
+function convertedLine(result) {
+  return [
+    `转了 ${result.converted} 条，${result.kept} 条保持原样。`,
+    result.noRoom > 0 ? `有 ${result.noRoom} 条因为房间装不下没有转，可以先整理再试。` : "",
+    result.failedRooms > 0 ? `有 ${result.failedRooms} 个房间这次没转成，稍后可以再试。` : "",
+  ]
+    .filter(Boolean)
+    .join("");
+}
+
 function MemorySettings() {
   const { actions } = useStore();
   const { busy, run } = useAction();
@@ -238,7 +257,7 @@ function MemorySettings() {
   };
 
   const convertNotes = async () => {
-    const res = await run("convert", () => settled(actions.convertMemoryLanguage()), refusalText);
+    const res = await run("convert", () => settled(actions.convertMemoryLanguage()), convertRefusalText);
     if (!res.ok) return;
     setConverted(res.value);
     setAsked(null);
@@ -289,7 +308,7 @@ function MemorySettings() {
         {busy === "convert" ? (
           <p className="field-hint" role="status">正在转换…</p>
         ) : converted ? (
-          <p className="field-hint" role="status">转了 {converted.converted} 条，{converted.kept} 条保持原样。</p>
+          <p className="field-hint" role="status">{convertedLine(converted)}</p>
         ) : asked ? (
           <p className="field-hint">
             <span>把已有的笔记也转成{languageName(asked)}吗？</span>{" "}
