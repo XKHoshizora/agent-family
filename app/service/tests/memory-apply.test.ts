@@ -911,3 +911,55 @@ describe("a note keeps its origin conversation only while all its content came f
     expect(await shownIn(w, g, true)).toEqual([]);
   });
 });
+
+describe("a room holds at most roomNotes notes", () => {
+  const CAP = (notes: number): Rooms => ({ ...ROOMS, notes });
+
+  it("an add beyond the count is dropped as a full room; a remove of the same change frees one", async () => {
+    const w = await world();
+    await seed(w, "owner", "one");
+    const two = await seed(w, "owner", "two");
+    const r = await run(w, [{ op: "add", kind: "owner", text: "three" }], new Map(), { rooms: CAP(2) });
+    expect(r).toMatchObject({ full: true, applied: [] });
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["one", "two"]);
+    const swapped = await run(w, [{ op: "remove", ref: "n1" }, { op: "add", kind: "owner", text: "three" }], new Map([["n1", ref("owner", two)]]), { rooms: CAP(2) });
+    expect(swapped!.full).toBe(false);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["one", "three"]);
+  });
+
+  it("each room is counted on its own; adds that fit are kept, later ones dropped", async () => {
+    const w = await world();
+    await seed(w, "self", "mine");
+    await seed(w, "self", "mine too");
+    const r = await run(w, [{ op: "add", kind: "owner", text: "a" }, { op: "add", kind: "owner", text: "b" }, { op: "add", kind: "owner", text: "c" }, { op: "add", kind: "self", text: "d" }], new Map(), { rooms: CAP(2) });
+    expect(r!.full).toBe(true);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["a", "b"]);
+    expect((await selfNotes(w)).map((n) => n.text).sort()).toEqual(["mine", "mine too"]);
+  });
+
+  it("without a count in the rooms nothing is counted", async () => {
+    const w = await world();
+    for (let i = 0; i < 5; i++) await seed(w, "owner", `n${i}`);
+    expect((await run(w, [{ op: "add", kind: "owner", text: "more" }], new Map()))!.full).toBe(false);
+  });
+
+  it("confirming a pending add that would pass the count answers full and writes nothing", async () => {
+    const w = await world();
+    const r = await run(w, [{ op: "add", kind: "owner", text: "waiting" }], new Map(), { status: "pending", rooms: CAP(5) });
+    await seed(w, "owner", "x");
+    await seed(w, "owner", "y");
+    expect(await confirm(w, r!.changeId!, CAP(2))).toBe("full");
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["x", "y"]);
+    expect(await confirm(w, r!.changeId!, CAP(3))).not.toBe("full");
+  });
+
+  it("undoing a remove that would put the room over the count answers full", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "a");
+    await seed(w, "owner", "b");
+    const r = await run(w, [{ op: "remove", ref: "n1" }], new Map([["n1", ref("owner", a)]]), { rooms: CAP(2) });
+    await seed(w, "owner", "c");
+    expect(await undo(w, r!.changeId!, CAP(2))).toBe("full");
+    expect(await undo(w, r!.changeId!, CAP(3))).toBe("undone");
+  });
+});

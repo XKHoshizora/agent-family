@@ -157,4 +157,14 @@ describe("parseOps", () => {
       { op: "replace", ref: "o2", text: "moved to berlin" },
     ]);
   });
+
+  it("reads a seen: the owner mentioned an existing note again; once per note; only of the exact shape and a known ref", () => {
+    expect(parseOps(answer([{ op: "seen", ref: "o1" }, { op: "seen", ref: "o1" }, { op: "seen", ref: "s1" }]), REFS)).toEqual([
+      { op: "seen", ref: "o1" },
+      { op: "seen", ref: "s1" },
+    ]);
+    for (const bad of [{ op: "seen" }, { op: "seen", ref: "ghost" }, { op: "seen", ref: "o1", text: "x" }, { op: "seen", ref: 3 }]) {
+      expect(parseOps(answer([bad]), REFS), JSON.stringify(bad)).toEqual([]);
+    }
+  });
 });

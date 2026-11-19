@@ -43,17 +43,19 @@ export interface Hearsay {
   saidAt: Date;
 }
 
-/** What each room holds at most, in code points (`MEMORY.roomOwner`, `roomSelf`, `roomHearsay`). */
+/** What each room holds at most, in code points (`MEMORY.roomOwner`, `roomSelf`, `roomHearsay`), and how many notes a room of notes holds (`roomNotes`; absent: no count limit). */
 export interface Rooms {
   owner: number;
   self: number;
   hearsay: number;
+  notes?: number;
 }
 
 export const roomOf = (config: Pick<Config, "memory">): Rooms => ({
   owner: config.memory.roomOwner,
   self: config.memory.roomSelf,
   hearsay: config.memory.roomHearsay,
+  notes: config.memory.roomNotes,
 });
 
 /** How much of a room `notes` fill: the sum of their code points. */

@@ -106,6 +106,25 @@ describe("the owner's own remark, flagged", () => {
     expect(own.json.notes.map((n: any) => n.text)).toEqual(["回答要简短", "答案要带例子"]);
   });
 
+  it("a seen is allowed in a group: the note it names is one stronger, with no change row, no chip, no judge call; the group prompt offers add and seen only", async () => {
+    const w = await world("bs");
+    const seeded = (await api(app, w.owner, "POST", "/api/memory/notes", { text: "喜欢喝茶", vault: false })).json;
+    const seq = await say(w.owner, w.g, "我还是爱喝茶");
+    gateway.reply(ops({ op: "seen", ref: "n1" }, { op: "seen", ref: "n7" }));
+    await flag(w.agent.id, w.g, seq, "own");
+    await wake();
+    const [call] = reviewCalls();
+    expect(call!.system).toContain('{"op":"seen","ref":"n3"}');
+    expect(call!.system).toContain('主人又提到了已有的某一条、没有新内容：用 {"op":"seen","ref":"n1"} 记一下，不要重复新增。');
+    const note = (await notesOf(w.owner)).find((n) => n.id === seeded.id);
+    expect(note).toBeDefined();
+    expect((await api(app, w.owner, "GET", "/api/memory/notes")).json.notes[0].strength).toBe(1);
+    expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(0);
+    // The group's own listening is asked of the judge; the review asked it nothing (no duplicate test, no sorting).
+    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key)).filter((k) => k === "sort" || /^d\d+$/.test(k))).toEqual([]);
+    expect(await chips(w.owner, w.agent.conversationId)).toEqual([]);
+  });
+
   it("whichever trigger comes first does the whole job: the flag's wake-up after the Agent replied adds both the owner's note and the Agent's own, and the later quiet timer makes no second call", async () => {
     const w = await world("bb");
     await say(w.owner, w.g, `@${w.agent.handle} 以后回答短点`);

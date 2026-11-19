@@ -13,7 +13,7 @@ import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote } from "./review.ts";
-import { duplicateOf, sortNote, type SortDeps } from "./sort.ts";
+import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
 import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { bumpNotes } from "./write.ts";
 
@@ -204,7 +204,13 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
   // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
-  const repeats = [...sorted.repeats, ...(await exactRepeats(deps, agent, kinds, answer, ops))];
+  const mentioned = ops.flatMap((o) => {
+    const n = o.op === "seen" ? input.refs.get(o.ref) : undefined;
+    return n ? [{ kind: n.kind, id: n.id }] : [];
+  });
+  const repeats = [...sorted.repeats, ...mentioned, ...(await exactRepeats(deps, agent, kinds, answer, ops))];
+  // A `seen` only says the owner mentioned a note again (above): there is nothing in it to apply, record or tell.
+  const changing = ops.filter((o) => o.op !== "seen");
 
   const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[]> => {
     const ids = { ownerId: locked.ownerId, agentId };
@@ -216,8 +222,8 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       for (const id of ids) bumped.add(id);
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
-    if (ops.length > 0) {
-      const result = await applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, ops, input.refs, {
+    if (changing.length > 0) {
+      const result = await applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, changing, input.refs, {
         conversationId: locked.conversationId,
         originConversationId: conversationId,
         status: locked.memoryAsk ? "pending" : "applied",
@@ -246,10 +252,11 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   log.info({ metric: "memory_review", agentId, conversationId, ops: ops.length, notices: notices?.length ?? 0 }, "a memory review ended");
 }
 
-/** Whether an op may be applied here: in a group only an addition; only to a room this review may change. */
+/** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */
 function allowed(op: Op, kinds: ReadonlySet<NoteKind>, group: boolean, refs: Map<string, RefNote>): boolean {
   if (op.op === "add") return kinds.has(op.kind);
-  if (group) return false;
+  // That the owner mentioned a note again is no change to it: also in a group.
+  if (group && op.op !== "seen") return false;
   const target = refs.get(op.ref);
   return target !== undefined && kinds.has(target.kind);
 }
@@ -268,10 +275,10 @@ async function sortOps(
   const repeats: Array<{ kind: NoteKind; id: string }> = [];
   if (ops.every((o) => o.op !== "add" && o.op !== "replace")) return { vaults, duplicates, repeats };
   const { db, config, log } = deps;
-  const sortDeps: SortDeps = { db, judge: deps.judge, config, log };
+  const sortDeps: SortDeps = { db, judge: deps.judge, ownerId: agent.ownerId, config, log };
   const setting = await getNewNotes(db, agent.ownerId);
   // Newest first: what a new note most likely repeats; what waits for the owner's yes counts as known.
-  const known = (kind: NoteKind) => [
+  const known = (kind: NoteKind): KnownNote[] => [
     ...pending.flatMap((p, i) => (p.kind === kind ? [{ id: `pending-${i}`, text: p.text }] : [])).reverse(),
     ...[...refs.values()].filter((n) => n.kind === kind).reverse(),
   ];

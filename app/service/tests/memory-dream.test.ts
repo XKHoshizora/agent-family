@@ -1210,7 +1210,7 @@ describe("a pending dream counts as known to the review", () => {
     await quietThen(ops(add("爱喝茶，只是不加糖")));
     const asked = judge.calls.find((c) => c.questions.some((q) => q.key === "d0"));
     expect(asked).toBeDefined();
-    expect(JSON.stringify(asked!.questions)).toContain("爱喝茶，不加糖");
-    expect(JSON.stringify(asked!.questions)).toContain("对花生过敏");
+    expect(asked!.state).toContain("爱喝茶，不加糖");
+    expect(asked!.state).toContain("对花生过敏");
   });
 });

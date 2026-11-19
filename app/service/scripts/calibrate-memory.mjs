@@ -124,7 +124,7 @@ const SELF_INSTRUCTIONS = S(
 const DUPLICATE_INSTRUCTIONS = S(
   F.sort,
   'DUPLICATE_INSTRUCTIONS',
-  '这是一个 AI 助手关于主人的两条笔记：一条已有的，一条新的。两条可能用不同的语言写。新的这条和已有的那条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下新的不会让助手多知道任何东西。如果新的这条和已有的矛盾、是对它的更新、或者多了已有那条没有的信息，都不算。',
+  '这是一个 AI 助手关于主人的笔记。state 是一个 JSON：new 是一条新的笔记，existing 是已有的几条笔记，都可能用不同的语言写。下面这道题只问 new 和 existing 里指定的那一条：new 说的和那一条是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下 new 不会让助手多知道任何东西。如果 new 和那一条矛盾、是对它的更新、或者多了那一条没有的信息，都不算。',
 )
 // One two-sided question for a merge, a rewrite and a split: nothing added, nothing lost.
 const FAITHFUL_INSTRUCTIONS = S(
@@ -133,11 +133,14 @@ const FAITHFUL_INSTRUCTIONS = S(
   '下面是原来的一条或几条笔记，和由它们改写、合并或拆分成的一条或几条新笔记。新的这些说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。',
 )
 SN(F.sort, 'FAITHFUL key', 'const FAITHFUL = "faithful";')
-SN(F.sort, 'CHUNK', 'const CHUNK = 20;')
-const CHUNK = 20
+SN(F.sort, 'CANDIDATES', 'const CANDIDATES = 20;')
+const CANDIDATES = 20
 SN(F.sort, 'sort state', '`笔记：${text}`')
-SN(F.sort, 'dup state', '`新的笔记：${text}`')
-SN(F.sort, 'dup question', 'const questions = chunk.map((n, k): Question => ({ key: `d${k}`, type: "noul", instructions: `${DUPLICATE_INSTRUCTIONS}\\n已有的笔记：${n.text}` }));')
+SN(F.sort, 'dup state', 'JSON.stringify({ new: text, existing: ranked.map((n) => n.text) })')
+SN(F.sort, 'dup question', 'const questions = ranked.map((_, i): Question => ({ key: `d${i}`, type: "noul", instructions: `${DUPLICATE_INSTRUCTIONS}\n（这道题问的是 existing 里的第 ${i + 1} 条）` }));')
+SN(F.sort, 'dup ranking', '.sort((a, b) => b.score - a.score || b.at - a.at || a.order - b.order)')
+SN(F.sort, 'dup bigrams', 'chars.slice(1).map((c, i) => chars[i]! + c)')
+SN(F.sort, 'dup overlap', 'return (2 * shared) / (a.size + b.size);')
 SN(F.sort, 'sort question', '{ key: SORT, type: "noul", instructions }')
 SN(F.sort, 'faithful sources', 'const sources = change.kind === "split" ? [change.source] : change.sources;')
 SN(F.sort, 'faithful results', 'const results = change.kind === "split" ? change.parts : [change.result];')
@@ -1045,35 +1048,46 @@ function sameCases(samples, padTo) {
   })
 }
 
+/** As sort.ts `sameKey`, `bigrams`, `overlap`: the character bigrams of the normalised text, and their Dice overlap. */
+function bigrams(t) {
+  const chars = [...sameKey(t)]
+  return new Set(chars.length < 2 ? chars : chars.slice(1).map((c, i) => chars[i] + c))
+}
+function overlap(a, b) {
+  if (a.size === 0 || b.size === 0) return 0
+  let shared = 0
+  for (const g of a) if (b.has(g)) shared++
+  return (2 * shared) / (a.size + b.size)
+}
+/** As sort.ts duplicateOf: the at most CANDIDATES existing notes with the highest bigram overlap (ties: the later one in the list, standing for the more recent), as indexes into `existing`. */
+function ranked(fresh, existing) {
+  const mine = bigrams(fresh)
+  return existing
+    .map((t, order) => ({ order, score: overlap(mine, bigrams(t)) }))
+    .sort((a, b) => b.score - a.score || b.order - a.order)
+    .slice(0, CANDIDATES)
+    .map((r) => r.order)
+}
+
 function sameTasks(cases, model) {
-  const tasks = []
-  for (const s of cases) {
-    for (let i = 0; i < s.existing.length; i += CHUNK) {
-      const chunk = s.existing.slice(i, i + CHUNK)
-      // As sort.ts duplicateOf: one question per existing note (d0…), each about the pair, the new note as the state.
-      const questions = Object.fromEntries(chunk.map((t, j) => [`d${j}`, { type: 'noul', instructions: `${DUPLICATE_INSTRUCTIONS}\n已有的笔记：${t}` }]))
-      tasks.push({ key: `${s.id}|${i}`, caseId: s.id, start: i, size: chunk.length, body: { model, state: `新的笔记：${s.fresh}`, questions } })
-    }
-  }
-  return tasks
+  return cases.map((s) => {
+    // As sort.ts duplicateOf: ONE request per new note; the candidates and the new note as the state's JSON, one question per candidate (d0…), the note named by its place.
+    const picked = ranked(s.fresh, s.existing)
+    const questions = Object.fromEntries(picked.map((_, i) => [`d${i}`, { type: 'noul', instructions: `${DUPLICATE_INSTRUCTIONS}
+（这道题问的是 existing 里的第 ${i + 1} 条）` }]))
+    return { key: s.id, caseId: s.id, picked, body: { model, state: JSON.stringify({ new: s.fresh, existing: picked.map((i) => s.existing[i]) }), questions } }
+  })
 }
 
 function sameAssemble(cases, results) {
-  const by = groupBy(results, (r) => r.caseId)
+  const by = new Map(results.map((r) => [r.caseId, r]))
   return cases.map((s) => {
     const scores = new Array(s.existing.length).fill(0)
-    let ok = true
-    let error = ''
-    for (const r of by.get(s.id) ?? []) {
-      if (!r.ok) {
-        ok = false
-        error ||= r.error
-        continue
-      }
-      // As production: a question with no usable answer counts as "not the same".
-      for (let j = 0; j < r.size; j++) scores[r.start + j] = noulOf(r, `d${j}`) ?? 0
-    }
-    return { id: s.id, lang: s.lang, cat: s.cat, expect: s.expect, existing: s.existing, fresh: s.fresh, ok, error, scores }
+    const r = by.get(s.id)
+    const ok = r?.ok === true
+    // As production: a question with no usable answer counts as "not the same"; a note that was not a candidate was never asked (0).
+    if (ok) r.picked.forEach((idx, j) => (scores[idx] = noulOf(r, `d${j}`) ?? 0))
+    return { id: s.id, lang: s.lang, cat: s.cat, expect: s.expect, existing: s.existing, fresh: s.fresh, ok, error: ok ? '' : (r?.error ?? ''), scores }
   })
 }
 
@@ -1101,7 +1115,7 @@ function sameReport(cases, model, padTo) {
   const failed = cases.filter((c) => !c.ok)
   const pred = (c, T) => predict(c.scores, T)
   out(`同一条笔记校准报告（same）  模型 ${model}  样本 ${cases.length}（成功 ${ok.length}，失败 ${failed.length}）${padTo ? `（existing 补到至少 ${padTo} 条）` : ''}  默认 sameAt = ${DEFAULTS.sameAt}`)
-  out('  生产的形式（sort.ts duplicateOf）：已有的笔记每 20 条一块，每块一个请求，每条已有的笔记一个是非题（d0…d19），只和新的这条比；取分数 >= sameAt 里最高的那条。')
+  out('  生产的形式（sort.ts duplicateOf）：不管已有多少条笔记，一个请求：和新笔记字符二元组重叠最多的至多 20 条（按 sameKey 归一化）连同新笔记作为 state 的 JSON {new, existing}，每条一个是非题（d0…d19，题面只有固定文字和第几条）；取分数 >= sameAt 里最高的那条。')
   out()
   out('一、对 / 总（按类别）')
   tableOf(out, [...groupBy(ok, (c) => c.cat)].sort(), ths, (items, T) => `${items.filter((c) => outcome(c.expect, pred(c, T)) === 'correct').length}/${items.length}`)

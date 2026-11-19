@@ -147,6 +147,8 @@ describe("reviewInput", () => {
       "unlock",
       '只输出一个 JSON 对象 {"ops":[…]}',
       '{"ops":[]}',
+      '主人又提到了已有的某一条、没有新内容：用 {"op":"seen","ref":"n1"} 记一下，不要重复新增。',
+      '{"op":"seen","ref":"n3"}',
     ]) expect([part, system.includes(part)]).toEqual([part, true]);
     for (const op of ["add", "replace", "remove", "lock", "unlock"]) expect([op, system.includes(op)]).toEqual([op, true]);
   });
@@ -558,6 +560,47 @@ describe("not looping on what it already knows", () => {
       { purpose: "reply", n: 20 },
     ]);
     expect(judge.calls).toHaveLength(0);
+  });
+
+  it("a seen op records a repeat with no judge call: the note is one stronger per review, no change row, no chip, updated_at untouched", async () => {
+    const w = await owned("seen");
+    await seeded(w.owner, w.agent.id, TEXT, false);
+    const stamp = async () => (await db.query<{ u: string }>("select updated_at::text as u from owner_notes")).rows[0]!.u;
+    const was = await stamp();
+    const before = await twenty(w, () => ops({ op: "seen", ref: "n1" }, { op: "seen", ref: "n1" }, { op: "seen", ref: "n9" }));
+    expect(reviewCalls()).toHaveLength(3);
+    expect(stable(await roomOf(w.owner))).toBe(before);
+    expect((await roomOf(w.owner)).notes[0].strength).toBe(3);
+    expect(await stamp()).toBe(was);
+    expect(await chips(w.owner, w.conv)).toEqual([]);
+    expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(0);
+    expect(judge.calls).toHaveLength(0);
+  });
+
+  it("a seen and an add of the same text in one review are one repeat", async () => {
+    const w = await owned("seen2");
+    await seeded(w.owner, w.agent.id, TEXT, false);
+    await say(w.owner, w.conv, "还是喝茶");
+    gateway.reply("好的。");
+    await app.agentWorker.runOnce();
+    await memory().idle();
+    await quietThen(ops({ op: "seen", ref: "n1" }, add(TEXT)));
+    expect((await roomOf(w.owner)).notes[0].strength).toBe(1);
+  });
+
+  it("a review with only seen ops and a new add: the add is judged once for the duplicate (one request) and applied; seen changes no text", async () => {
+    const w = await owned("seen3");
+    await seeded(w.owner, w.agent.id, TEXT, false);
+    await say(w.owner, w.conv, "还是喝茶，另外我养猫");
+    gateway.reply("好的。");
+    await app.agentWorker.runOnce();
+    await memory().idle();
+    judge.answer(() => ({ sort: 0.95 }));
+    await quietThen(ops({ op: "seen", ref: "n1" }, add("养了一只猫")));
+    const dup = judge.calls.filter((c) => c.questions[0]?.key === "d0");
+    expect(dup).toHaveLength(1);
+    expect(JSON.parse(dup[0]!.state)).toEqual({ new: "养了一只猫", existing: [TEXT] });
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text).sort()).toEqual([TEXT, "养了一只猫"].sort());
   });
 
   it("the same with a paraphrase the judge reports as the same note", async () => {

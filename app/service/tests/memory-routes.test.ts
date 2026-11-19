@@ -216,6 +216,18 @@ describe("the owner's room: /api/memory/notes", () => {
     expect((await api(app, owner, "POST", "/api/memory/notes", { text: "字".repeat(500) })).status).toBe(201);
   });
 
+  it("a room of 150 notes takes no more, however short: 409 room_full with nothing left; deleting one makes room", async () => {
+    const { owner } = await world();
+    await db.query("insert into owner_notes (owner_id, text) select $1, 'n' || g from generate_series(1, 150) g", [owner.id]);
+    const res = await api(app, owner, "POST", "/api/memory/notes", { text: "短" });
+    expect(res.status).toBe(409);
+    expect(res.json).toEqual({ error: "room_full", left: 0 });
+    expect((await db.query("select 1 from owner_notes")).rowCount).toBe(150);
+    const first = (await notes(owner)).json.notes[0].id;
+    expect((await api(app, owner, "DELETE", `/api/memory/notes/${first}`)).status).toBe(200);
+    expect((await api(app, owner, "POST", "/api/memory/notes", { text: "短" })).status).toBe(201);
+  });
+
   it("refused text is 422 note_refused and nothing is stored; a body that does not fit is 400", async () => {
     const { owner } = await world();
     for (const text of ["", "   ", "key sk-abcdef123456", "\u200b"]) {

@@ -12,7 +12,9 @@ export type Op =
   | { op: "replace"; ref: string; text: string }
   | { op: "remove"; ref: string }
   | { op: "lock"; ref: string }
-  | { op: "unlock"; ref: string };
+  | { op: "unlock"; ref: string }
+  /** The owner mentioned this existing note again: one stronger, seen now (no change is recorded, nobody is told). */
+  | { op: "seen"; ref: string };
 
 /** The most operations of one answer that are looked at; the rest are dropped. */
 export const MAX_OPS = 8;
@@ -60,6 +62,7 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
     case "remove":
     case "lock":
     case "unlock":
+    case "seen":
       return hasExactly(o, ["op", "ref"]) && ref !== null ? { op: o.op, ref } : null;
     default:
       return null;
@@ -71,7 +74,7 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
  * block is ignored); anything else answers `[]`. Of the first `MAX_OPS` entries, an entry with an unknown key, an unknown
  * `ref` (one not in `refs`), the wrong shape, or a text `modelNote` refuses is dropped. An `add` whose text equals one of
  * `existing`, or the text of an earlier `add` or `replace` of this answer, once case, whitespace and punctuation are
- * ignored, is dropped as well.
+ * ignored, is dropped as well. A `seen` of a note already `seen` in this answer is dropped.
  */
 export function parseOps(answer: string, refs: ReadonlySet<string>, existing: ReadonlyArray<string> = []): Op[] {
   try {
@@ -80,10 +83,16 @@ export function parseOps(answer: string, refs: ReadonlySet<string>, existing: Re
     const list = (parsed as { ops?: unknown }).ops;
     if (!Array.isArray(list)) return [];
     const seen = new Set(existing.map(sameKey));
+    const mentioned = new Set<string>();
     const ops: Op[] = [];
     for (const raw of list.slice(0, MAX_OPS)) {
       const op = one(raw, refs);
       if (op === null) continue;
+      // Once per note per review.
+      if (op.op === "seen") {
+        if (mentioned.has(op.ref)) continue;
+        mentioned.add(op.ref);
+      }
       if (op.op === "add" || op.op === "replace") {
         const key = sameKey(op.text);
         if (op.op === "add" && (key === "" || seen.has(key))) continue;

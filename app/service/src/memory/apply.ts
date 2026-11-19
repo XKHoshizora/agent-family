@@ -256,6 +256,31 @@ function intoVaultOnly(note: Note, verdict: { vault: boolean; unsure: boolean } 
   return v.vault ? { vault: true, by: "auto", unsure: v.unsure } : { vault: false, by: note.vaultBy, unsure: note.unsure };
 }
 
+/** How many notes a room may hold (`Rooms.notes`; none given: no count limit). */
+const noteCap = (rooms: Rooms): number => rooms.notes ?? Number.POSITIVE_INFINITY;
+
+/** How many more notes a stored op leaves its room holding once applied (negative: fewer). */
+const countGrowth = (s: StoredOp): number => (s.op === "add" ? 1 : s.op === "remove" ? -1 : s.op === "merge" ? -s.removed!.length : s.op === "split" ? s.parts!.length - 1 : 0);
+
+/** Whether a room of `size` notes may grow by `growth` notes under `cap` (a change that does not grow it always fits). */
+const fitsCount = (size: number, growth: number, cap: number): boolean => growth <= 0 || size + growth <= cap;
+
+/**
+ * The count rule of a change, after the size rule: what shrinks a room is counted first, then each step that grows one, in the
+ * order the steps came, is dropped (it is `full`) when its room would hold more than `cap` notes. `steps` are only those the size
+ * rule kept. Returns the indexes dropped.
+ */
+function countRule(size: { owner: number; self: number }, steps: ReadonlyArray<{ index: number; kind: NoteKind; count: number }>, cap: number): Set<number> {
+  const left = { ...size };
+  for (const s of steps) if (s.count < 0) left[s.kind] += s.count;
+  const rejected = new Set<number>();
+  for (const s of [...steps].filter((x) => x.count > 0).sort((a, b) => a.index - b.index)) {
+    if (fitsCount(left[s.kind], s.count, cap)) left[s.kind] += s.count;
+    else rejected.add(s.index);
+  }
+  return rejected;
+}
+
 type Candidate = { index: number; op: "remove" | "lock" | "replace"; note: Note; text: string; growth: number };
 type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
 
@@ -274,6 +299,8 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
   const unlocks: string[] = [];
 
   ops.forEach((op, index) => {
+    // The owner mentioning a note again is no change (the review counts it, pipeline.ts).
+    if (op.op === "seen") return;
     if (op.op === "add") {
       if (!allowed(op.kind)) return;
       const text = modelNote(op.text);
@@ -304,7 +331,7 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
     }
   });
 
-  const { rejected, full } = netRule(
+  const sized = netRule(
     usedIn(state),
     [
       ...candidates.map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
@@ -312,6 +339,17 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
     ],
     opts.rooms,
   );
+  // A room holds at most so many notes besides its size: an add beyond it is dropped as a full room.
+  const tooMany = countRule(
+    { owner: state.owner.size, self: state.self.size },
+    [
+      ...candidates.filter((c) => c.op === "remove" && !sized.rejected.has(c.index)).map((c) => ({ index: c.index, kind: c.note.kind, count: -1 })),
+      ...adds.filter((a) => !sized.rejected.has(a.index)).map((a) => ({ index: a.index, kind: a.op.kind, count: 1 })),
+    ],
+    noteCap(opts.rooms),
+  );
+  const rejected = new Set([...sized.rejected, ...tooMany]);
+  const full = sized.full || tooMany.size > 0;
 
   const stored: StoredOp[] = [];
   for (const { index, op, note, text } of candidates) {
@@ -576,7 +614,14 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
     }
   });
 
-  const { rejected, full } = netRule(usedIn(state), steps, opts.rooms);
+  const sized = netRule(usedIn(state), steps, opts.rooms);
+  const tooMany = countRule(
+    { owner: state.owner.size, self: state.self.size },
+    steps.filter((s) => !sized.rejected.has(s.index)).map((s) => ({ index: s.index, kind: s.kind, count: countGrowth(s.stored) })),
+    noteCap(opts.rooms),
+  );
+  const rejected = new Set([...sized.rejected, ...tooMany]);
+  const full = sized.full || tooMany.size > 0;
   const stored = steps.filter((s) => !rejected.has(s.index)).map((s) => s.stored);
 
   // An open note that is new since the last dream and that no op touched is locked on a vault verdict; the owner's own choice is final.
@@ -782,8 +827,14 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
   }
   const room = usedIn(state);
   const growth = { owner: 0, self: 0 };
-  for (const s of change.ops) growth[s.kind] += undoGrowth(s);
-  for (const kind of ["owner", "self"] as const) if (!fits(room[kind], growth[kind], roomLimit(rooms, kind))) return "full";
+  const count = { owner: 0, self: 0 };
+  for (const s of change.ops) {
+    growth[s.kind] += undoGrowth(s);
+    count[s.kind] -= countGrowth(s);
+  }
+  for (const kind of ["owner", "self"] as const) {
+    if (!fits(room[kind], growth[kind], roomLimit(rooms, kind)) || !fitsCount(state[kind].size, count[kind], noteCap(rooms))) return "full";
+  }
 
   for (const s of [...change.ops].reverse()) {
     const at = roomFor(s.kind, w);
@@ -895,8 +946,14 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
   // end over its limit nothing is written and the change stays pending, for the owner to make room and confirm again.
   const room = usedIn(state);
   const growth = { owner: 0, self: 0 };
-  for (const s of change.ops) growth[s.kind] -= undoGrowth(s);
-  for (const kind of ["owner", "self"] as const) if (!fits(room[kind], growth[kind], roomLimit(rooms, kind))) return "full";
+  const count = { owner: 0, self: 0 };
+  for (const s of change.ops) {
+    growth[s.kind] -= undoGrowth(s);
+    if (s.op !== "unlock") count[s.kind] += countGrowth(s);
+  }
+  for (const kind of ["owner", "self"] as const) {
+    if (!fits(room[kind], growth[kind], roomLimit(rooms, kind)) || !fitsCount(state[kind].size, count[kind], noteCap(rooms))) return "full";
+  }
   const done = await execute(t, w, change.ops.filter((s) => s.op !== "unlock"));
   for (const s of change.ops) {
     // Here and nowhere else a note leaves the vault by a decision that was not its own owner's earlier choice.

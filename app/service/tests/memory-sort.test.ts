@@ -5,6 +5,7 @@ import type { Config } from "../src/config.ts";
 import type { Db } from "../src/db.ts";
 import { JudgeError } from "../src/judge/client.ts";
 import { addsNothing, duplicateOf, resortNote, sortNote, type SortDeps } from "../src/memory/sort.ts";
+import { signUp } from "./helpers/actors.ts";
 import { SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge } from "./helpers/judge.ts";
@@ -23,18 +24,28 @@ const OWNER_TEXT =
 const SELF_TEXT =
   "这是一个 AI 助手给自己记的一条笔记，可能用任何语言写。这条内容只是它做事的方式或习惯（比如回答的长短、先说什么、用什么格式、推荐时注意什么），不透露主人的任何私事，即使被主人的朋友、同事、群友看到也完全无妨。凡是提到主人的健康、钱、工作变动、感情和家庭、对别人的评价、行踪住址、账号密码、未公开的计划，或者拿不准的，都不算。";
 const DUP_TEXT =
-  "这是一个 AI 助手关于主人的两条笔记：一条已有的，一条新的。两条可能用不同的语言写。新的这条和已有的那条说的是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下新的不会让助手多知道任何东西。如果新的这条和已有的矛盾、是对它的更新、或者多了已有那条没有的信息，都不算。";
+  "这是一个 AI 助手关于主人的笔记。state 是一个 JSON：new 是一条新的笔记，existing 是已有的几条笔记，都可能用不同的语言写。下面这道题只问 new 和 existing 里指定的那一条：new 说的和那一条是同一件事（换了说法、换了语言、更简略或更啰嗦都算），记下 new 不会让助手多知道任何东西。如果 new 和那一条矛盾、是对它的更新、或者多了那一条没有的信息，都不算。";
+const dupInstructions = (i: number) => `${DUP_TEXT}
+（这道题问的是 existing 里的第 ${i + 1} 条）`;
 const FAITH_TEXT =
   "下面是原来的一条或几条笔记，和由它们改写、合并或拆分成的一条或几条新笔记。新的这些说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。";
 
 const log = { info: () => {}, debug: () => {}, warn: () => {}, error: () => {} } as unknown as FastifyBaseLogger;
+// The owner the checks are made for: a real account (the allowance table points at it).
+let ownerId = "";
+let rival = "";
+let names = 0;
 const deps = (over: Partial<SortDeps> = {}, config: Partial<Config> = {}): SortDeps => ({
   db,
   judge,
+  ownerId,
   config: { ...app.deps.config, ...config },
   log,
   ...over,
 });
+const withMemory = (memory: Partial<Config["memory"]>): Partial<Config> => ({ memory: { ...app.deps.config.memory, ...memory } });
+const ownerUsed = async (id = ownerId) =>
+  (await db.query<{ calls: number }>("select coalesce(sum(calls), 0)::int as calls from memory_judge_usage where owner_id = $1", [id])).rows[0]!.calls;
 const used = async () => (await db.query<{ calls: number }>("select coalesce(sum(calls), 0)::int as calls from judge_usage")).rows[0]!.calls;
 const optionKeys = (q: unknown): string[] => Object.keys((q as { options: object }).options);
 const today = () => siteDay(new Date(), app.deps.config.siteTimezone);
@@ -43,6 +54,9 @@ beforeEach(async () => {
   judge.calls.splice(0);
   judge.answer(() => ({}));
   await db.query("delete from judge_usage");
+  await db.query("delete from memory_judge_usage");
+  ownerId = (await signUp(app, `sortowner${++names}`)).id;
+  rival = (await signUp(app, `sortrival${++names}`)).id;
 });
 
 describe("sortNote", () => {
@@ -148,51 +162,159 @@ describe("resortNote", () => {
 
 describe("duplicateOf", () => {
   const notes = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `n${i}`, text: `note ${i}` }));
-  /** Every question of the request answered 0 but the one of the note with `id` (ids are `n{i}`; question keys are `d{index in the chunk}`). */
-  const scoring = (scores: Record<string, number>) => (_s: string, qs: readonly { key: string; instructions: string }[]) =>
-    Object.fromEntries(qs.map((q) => [q.key, scores[/已有的笔记：(.*)$/.exec(q.instructions)![1]!.replace("note ", "n")] ?? 0]));
+  /** Every question of the request answered 0 but the one about the note with `id` (`note {i}` is `n{i}`): question `d{k}` is about `existing[k]` of the request's state. */
+  const scoring = (scores: Record<string, number>) => (state: string, qs: readonly { key: string }[]) => {
+    const existing = (JSON.parse(state) as { existing: string[] }).existing;
+    return Object.fromEntries(qs.map((q, k) => [q.key, scores[existing[k]!.replace("note ", "n")] ?? 0]));
+  };
 
-  it("asks one yes/no question per existing note in one request, each with the pair; picks the note at 0.5, not below, and counts one call", async () => {
+  it("one request: the new note and the existing ones as the state's JSON, one fixed yes/no question each, the pair's note named by its place; picks the note at 0.5, not below; counts one call", async () => {
     judge.answer(scoring({ n1: 0.5 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBe("n1");
     expect(judge.calls).toHaveLength(1);
-    expect(judge.calls[0]!.state).toBe("新的笔记：新");
-    expect(judge.calls[0]!.questions).toEqual([
-      { key: "d0", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 0` },
-      { key: "d1", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 1` },
-      { key: "d2", type: "noul", instructions: `${DUP_TEXT}\n已有的笔记：note 2` },
-    ]);
+    const state = JSON.parse(judge.calls[0]!.state);
+    expect(state.new).toBe("新");
+    expect([...state.existing].sort()).toEqual(["note 0", "note 1", "note 2"]);
+    expect(judge.calls[0]!.questions).toEqual([0, 1, 2].map((i) => ({ key: `d${i}`, type: "noul", instructions: dupInstructions(i) })));
     expect(await used()).toBe(1);
+    expect(await ownerUsed()).toBe(1);
     judge.answer(scoring({ n1: 0.49 }));
     expect(await duplicateOf(deps(), "新", notes(3))).toBeNull();
   });
 
-  it("asks 45 notes in three requests of 20, 20 and 5, keys d0…d19", async () => {
+  it("however many notes there are, ONE request about at most 20 of them, d0…d19", async () => {
     judge.answer(scoring({}));
     expect(await duplicateOf(deps(), "新", notes(45))).toBeNull();
-    expect(judge.calls.map((c) => c.questions.length)).toEqual([20, 20, 5]);
-    expect(judge.calls[1]!.questions[19]!.key).toBe("d19");
-    expect(await used()).toBe(3);
+    expect(judge.calls).toHaveLength(1);
+    expect(judge.calls[0]!.questions.map((q) => q.key)).toEqual(Array.from({ length: 20 }, (_, i) => `d${i}`));
+    expect(JSON.parse(judge.calls[0]!.state).existing).toHaveLength(20);
+    expect(await used()).toBe(1);
   });
 
-  it("the note with the highest score across all chunks wins, not the first at or above the threshold", async () => {
-    judge.answer(scoring({ n3: 0.6, n41: 0.9 }));
-    expect(await duplicateOf(deps(), "新", notes(45))).toBe("n41");
-    expect(judge.calls).toHaveLength(3);
+  it("the 20 are those with the most bigrams in common with the new note (after sameKey's normalisation), best first", async () => {
+    const filler = Array.from({ length: 30 }, (_, i) => ({ id: `f${i}`, text: `无关内容${i}` }));
+    const rel = [
+      { id: "weak", text: "绿茶" },
+      { id: "strong", text: "喝绿茶，不加糖！" },
+      { id: "mid", text: "不加糖的咖啡" },
+    ];
+    // The relevant ones are the oldest of all: recency does not save them, overlap does.
+    const existing = [rel[0]!, ...filler.slice(0, 14), rel[1]!, ...filler.slice(14), rel[2]!];
+    judge.answer(scoring({}));
+    await duplicateOf(deps(), "喜欢喝绿茶不加糖", existing);
+    const sent = JSON.parse(judge.calls[0]!.state).existing as string[];
+    expect(sent).toHaveLength(20);
+    expect(sent.slice(0, 3)).toEqual(["喝绿茶，不加糖！", "不加糖的咖啡", "绿茶"]);
   });
 
-  it("null on an error (in any chunk), no judge, no notes, or at the limit", async () => {
+  it("the normalisation is sameKey's: case, whitespace and punctuation do not count", async () => {
+    const filler = Array.from({ length: 25 }, (_, i) => ({ id: `f${i}`, text: `zzqq ${i}` }));
+    judge.answer(scoring({}));
+    await duplicateOf(deps(), "Likes   TEA!", [{ id: "x", text: "likes tea" }, ...filler]);
+    expect(JSON.parse(judge.calls[0]!.state).existing[0]).toBe("likes tea");
+  });
+
+  it("ties go to the most recently updated; a note with no time (what waits for the owner's yes) is the most recent", async () => {
+    const at = (i: number) => new Date(Date.UTC(2026, 10, 1, 0, 0, i));
+    const list = Array.from({ length: 25 }, (_, i) => ({ id: `n${i}`, text: `zzqq ${i}`, updatedAt: at(i) }));
+    judge.answer(scoring({}));
+    await duplicateOf(deps(), "完全不同", list);
+    expect((JSON.parse(judge.calls[0]!.state).existing as string[]).sort()).toEqual(list.slice(5).map((n) => n.text).sort());
+    judge.calls.splice(0);
+    await duplicateOf(deps(), "完全不同", [{ id: "pending-0", text: "waiting" }, ...list]);
+    const sent = JSON.parse(judge.calls[0]!.state).existing as string[];
+    expect(sent).toHaveLength(20);
+    expect(sent[0]).toBe("waiting");
+  });
+
+  it("the questions carry no text of the user, only the fixed instruction and a number", async () => {
+    judge.answer(scoring({}));
+    await duplicateOf(deps(), "秘密新笔记XYZ", [{ id: "a", text: "秘密旧笔记ABC" }]);
+    const asked = JSON.stringify(judge.calls[0]!.questions);
+    expect(asked).not.toContain("XYZ");
+    expect(asked).not.toContain("ABC");
+  });
+
+  it("the highest score at or above the threshold wins", async () => {
+    judge.answer(scoring({ n3: 0.6, n11: 0.9, n12: 0.55 }));
+    expect(await duplicateOf(deps(), "新", notes(15))).toBe("n11");
+  });
+
+  it("null on an error, no judge, no notes, or the site's limit", async () => {
     judge.answer(() => new JudgeError("status"));
     expect(await duplicateOf(deps(), "新", notes(3))).toBeNull();
-    let n = 0;
-    judge.answer((s, qs) => (++n === 2 ? new JudgeError("status") : scoring({ n1: 0.9 })(s, qs as never)));
-    expect(await duplicateOf(deps(), "新", notes(45))).toBeNull();
     expect(await duplicateOf(deps({ judge: null }), "新", notes(3))).toBeNull();
     const before = judge.calls.length;
     expect(await duplicateOf(deps(), "新", [])).toBeNull();
     await db.query("insert into judge_usage (day, calls) values ($1::date, 5) on conflict (day) do update set calls = 5", [today()]);
     expect(await duplicateOf(deps({}, { judge: { ...JUDGE, dailyLimit: 5 } }), "新", notes(3))).toBeNull();
     expect(judge.calls).toHaveLength(before);
+  });
+});
+
+describe("the owner's allowance", () => {
+  const lim = () => withMemory({ judgePerOwnerDay: 2 });
+
+  it("every call is counted for its owner; past judgePerOwnerDay that owner's checks are skipped as no answer (no call, not counted anywhere), whatever they are", async () => {
+    judge.answer(() => ({ sort: 0.9, faithful: 0.9, d0: 0.9 }));
+    expect(await sortNote(deps({}, lim()), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    expect(await resortNote(deps({}, lim()), "x", "owner")).toEqual({ vault: false, unsure: false });
+    expect(await ownerUsed()).toBe(2);
+    const before = judge.calls.length;
+    // Each caller's own no-answer behaviour: the vault, null, false.
+    expect(await sortNote(deps({}, lim()), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
+    expect(await resortNote(deps({}, lim()), "x", "owner")).toBeNull();
+    expect(await duplicateOf(deps({}, lim()), "新", [{ id: "a", text: "a" }])).toBeNull();
+    expect(await addsNothing(deps({}, lim()), { kind: "rewrite", sources: ["a"], result: "b" })).toBe(false);
+    expect(judge.calls).toHaveLength(before);
+    expect(await ownerUsed()).toBe(2);
+    expect(await used()).toBe(2);
+  });
+
+  it("another owner is not touched; the allowance is per site day; a setting that asks nothing counts nothing", async () => {
+    judge.answer(() => ({ sort: 0.9 }));
+    await sortNote(deps({}, lim()), "x", "owner", "auto");
+    await sortNote(deps({}, lim()), "x", "owner", "auto");
+    expect(await sortNote(deps({ ownerId: rival }, lim()), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    expect(await ownerUsed(rival)).toBe(1);
+    expect(await ownerUsed()).toBe(2);
+    await db.query("insert into memory_judge_usage (owner_id, day, calls) values ($1, '2020-01-01', 99)", [rival]);
+    expect(await sortNote(deps({ ownerId: rival }, lim()), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    await sortNote(deps({ ownerId: rival }, lim()), "x", "owner", "vault");
+    expect(await ownerUsed(rival)).toBe(99 + 2);
+  });
+
+  it("the site's daily limit stays the last fuse, and is still counted", async () => {
+    judge.answer(() => ({ sort: 0.9 }));
+    await sortNote(deps(), "x", "owner", "auto");
+    expect(await used()).toBe(1);
+    await db.query("insert into judge_usage (day, calls) values ($1::date, 5) on conflict (day) do update set calls = 5", [today()]);
+    expect(await sortNote(deps({}, { judge: { ...JUDGE, dailyLimit: 5 } }), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
+    expect(await ownerUsed()).toBe(1);
+  });
+
+  it("a failed or hung call is still counted for the owner", async () => {
+    judge.answer(() => new JudgeError("auth"));
+    await sortNote(deps(), "x", "owner", "auto");
+    judge.answer(() => "hang");
+    await sortNote(deps(), "x", "owner", "auto");
+    expect(await ownerUsed()).toBe(2);
+  });
+
+  it("a failing allowance check means no answer; a failing count changes no answer", async () => {
+    const failing = (when: RegExp): Db =>
+      new Proxy(db, {
+        get(target, prop, receiver) {
+          if (prop !== "query") return Reflect.get(target, prop, receiver);
+          return (sql: string, ...rest: unknown[]) => (when.test(sql) ? Promise.reject(new Error("db hiccup")) : (target.query as (...a: unknown[]) => unknown)(sql, ...rest));
+        },
+      });
+    judge.answer(() => ({ sort: 0.9, d0: 0.9 }));
+    expect(await sortNote(deps({ db: failing(/select calls from memory_judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
+    expect(await duplicateOf(deps({ db: failing(/select calls from memory_judge_usage/) }), "新", [{ id: "a", text: "a" }])).toBeNull();
+    expect(judge.calls).toHaveLength(0);
+    expect(await sortNote(deps({ db: failing(/insert into memory_judge_usage/) }), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    expect(await duplicateOf(deps({ db: failing(/insert into memory_judge_usage/) }), "新", [{ id: "a", text: "a" }])).toBe("a");
   });
 });
 

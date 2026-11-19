@@ -121,7 +121,7 @@ describe("the lists and the room", () => {
     expect(await listHearsay(db, agent.id, "00000000-0000-4000-8000-000000000000")).toEqual([]);
     expect((await listHearsay(db, agent.id, g1)).length).toBe(2);
     expect(used([{ text: "ab" }, { text: "你好😀" }])).toBe(5);
-    expect(roomOf(app.deps.config)).toEqual({ owner: 2000, self: 3000, hearsay: 2000 });
+    expect(roomOf(app.deps.config)).toEqual({ owner: 2000, self: 3000, hearsay: 2000, notes: 150 });
   });
 });
 

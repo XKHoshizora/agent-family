@@ -232,6 +232,14 @@ export interface MemoryConfig {
   dreamEveryMs: number;
   napAt: number;
   faithfulAt: number;
+  /**
+   * The site's judgement model is asked at most this many times a site day on behalf of one owner's memory (sorting, the duplicate
+   * test, the faithful check, the hearsay pre-check): past it that owner's memory checks are skipped as "no answer", so one heavy
+   * owner can never use up what everyone else's checks need. The site's own daily limit stays as the last fuse.
+   */
+  judgePerOwnerDay: number;
+  /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
+  roomNotes: number;
 }
 
 const memorySchema = z.strictObject({
@@ -264,6 +272,8 @@ const memorySchema = z.strictObject({
   dreamEveryMs: positive(72_000_000, 2_592_000_000),
   napAt: probability(0.8),
   faithfulAt: probability(0.6),
+  judgePerOwnerDay: positive(300, 1_000_000),
+  roomNotes: positive(150, 100_000),
 });
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

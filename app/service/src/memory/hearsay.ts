@@ -335,7 +335,7 @@ async function ownRemarks(deps: PipelineDeps, agent: Agent, conversationId: stri
  * than half of them, if there is one; with none the batch goes on as if abuse had not been asked. "observe" mutes nobody
  * and drops nothing, and logs, counts only, when it would have; "off" does not ask.
  */
-async function worthACall(deps: PipelineDeps, input: HearsayInput): Promise<{ call: true } | { call: false; mute: string[] }> {
+async function worthACall(deps: PipelineDeps, ownerId: string, input: HearsayInput): Promise<{ call: true } | { call: false; mute: string[] }> {
   const { config, log } = deps;
   const mode = config.memory.hearsayMute;
   const batch = [...input.candidates.values()];
@@ -350,7 +350,7 @@ async function worthACall(deps: PipelineDeps, input: HearsayInput): Promise<{ ca
   });
   const questions: Question[] = [{ key: NEW_KEY, type: "noul", instructions: NEW_INSTRUCTIONS }];
   if (mode !== "off") questions.push({ key: ABUSE_KEY, type: "noul", instructions: ABUSE_INSTRUCTIONS });
-  const answers = await askAll({ db: deps.db, judge: deps.judge, config, log }, state, questions);
+  const answers = await askAll({ db: deps.db, judge: deps.judge, ownerId, config, log }, state, questions);
   const abuse = answers?.get(ABUSE_KEY);
   if (abuse?.type === "noul" && abuse.p >= config.memory.hearsayAbuseAt) {
     const counts = new Map<string, number>();
@@ -383,7 +383,7 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     ctx.again(calls[calls.length - config.memory.hearsayPerHour]! + HOUR - now + config.memory.groupQuietMs);
     return;
   }
-  const verdict = await worthACall(deps, input);
+  const verdict = await worthACall(deps, agent.ownerId, input);
   if (!verdict.call) {
     for (const speakerId of verdict.mute) {
       await db.query(

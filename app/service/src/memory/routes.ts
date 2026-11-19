@@ -100,7 +100,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   const convertLimit = perPrincipalLimit(app, 6);
   const limits = roomOf(config);
   const limitOf = (room: Room): number => roomLimit(limits, room.kind);
-  const sortDeps = (log: FastifyBaseLogger) => ({ db, judge, config, log });
+  const sortDeps = (log: FastifyBaseLogger, ownerId: string) => ({ db, judge, config, log, ownerId });
 
   // `left` is a number: `ErrorDetails` only types strings, but the handler sends whatever it is given as it is.
   const roomFull = (left: number) => new AppError(409, "room_full", { left } as unknown as ErrorDetails);
@@ -122,19 +122,22 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   /** Room left for text of `room` once `without` is not counted (a note being replaced). */
   const leftIn = (room: Room, notes: ReadonlyArray<Note>, without?: Note): number => Math.max(0, limitOf(room) - used(notes) + (without ? codePoints(without.text) : 0));
 
+  /** What is left of a room for a new note: its code points, or nothing at all once it holds `roomNotes` notes. */
+  const leftForNew = (room: Room, notes: ReadonlyArray<Note>): number => (notes.length >= limits.notes! ? 0 : leftIn(room, notes));
+
   async function add(room: Room, ownerId: string, body: z.infer<typeof newNote>, log: FastifyBaseLogger) {
     const text = ownerNote(body.text);
     if (text === null) throw refused();
     // Over the room already (no judgement is spent on it); asked again under the lock.
-    const before = leftIn(room, await listRoom(db, room));
-    if (codePoints(text) > before) throw roomFull(before);
+    const before = leftForNew(room, await listRoom(db, room));
+    if (before === 0 || codePoints(text) > before) throw roomFull(before);
     // The owner's own choice is final; otherwise their setting decides, `auto` by the judge (sort.ts: vault when it cannot answer).
     const sorted =
-      body.vault === undefined ? await sortNote(sortDeps(log), text, room.kind, await getNewNotes(db, ownerId)) : { vault: body.vault, unsure: false };
+      body.vault === undefined ? await sortNote(sortDeps(log, ownerId), text, room.kind, await getNewNotes(db, ownerId)) : { vault: body.vault, unsure: false };
     const id = await db.tx(async (t) => {
       await lockRoom(t, room);
-      const left = leftIn(room, await listRoom(t, room));
-      if (codePoints(text) > left) throw roomFull(left);
+      const left = leftForNew(room, await listRoom(t, room));
+      if (left === 0 || codePoints(text) > left) throw roomFull(left);
       return insertNote(t, room, {
         text,
         vault: sorted.vault,
@@ -157,7 +160,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     if (text !== undefined && codePoints(text) > leftIn(room, notesBefore, before)) throw roomFull(leftIn(room, notesBefore, before));
     // A text change alone re-sorts, and only a note outside the vault that the owner never chose for: towards the vault.
     const resort = body.vault === undefined && text !== undefined && text !== before.text && !before.vault && before.vaultBy === "auto";
-    const sorted = resort ? await sortNote(sortDeps(log), text, room.kind, await getNewNotes(db, ownerId)) : null;
+    const sorted = resort ? await sortNote(sortDeps(log, ownerId), text, room.kind, await getNewNotes(db, ownerId)) : null;
     await db.tx(async (t) => {
       await lockRoom(t, room);
       const notes = await listRoom(t, room);
@@ -358,8 +361,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         // Held to the owner's rules as anything entering their room is; refused, it rolls back and the hearsay stays.
         const text = ownerNote(heard.text);
         if (text === null) throw refused();
-        const left = leftIn(room, await listRoom(t, room));
-        if (codePoints(text) > left) throw roomFull(left);
+        const left = leftForNew(room, await listRoom(t, room));
+        if (left === 0 || codePoints(text) > left) throw roomFull(left);
         return insertNote(t, room, {
           text,
           vault: true,

@@ -612,7 +612,7 @@ async function judge(
   const vaults = new Map<string, { vault: boolean; unsure: boolean }>();
   const checked = new Set<number>();
   const resorted = new Map<string, { vault: boolean; unsure: boolean }>();
-  const sortDeps: SortDeps = { db, judge: deps.judge, config, log };
+  const sortDeps: SortDeps = { db, judge: deps.judge, ownerId: by.ownerId, config, log };
   const setting = await getNewNotes(db, by.ownerId);
   const sort = async (kind: NoteKind, text: string): Promise<void> => {
     if (!closing.aborted && !vaults.has(vaultKey(kind, text))) vaults.set(vaultKey(kind, text), await sortNote(sortDeps, text, kind, setting));
