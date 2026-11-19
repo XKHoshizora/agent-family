@@ -1,5 +1,5 @@
 import type { Queryable, Tx } from "../db.ts";
-import { listAgentNotes, listOwnerNotes, NOTE_COLUMNS, toNote, type Note, type NoteRow } from "./store.ts";
+import { listAgentNotes, listOwnerNotes, NOTE_COLUMNS, toNote, type Note, type NoteRow, type Rooms } from "./store.ts";
 
 /**
  * Changing notes and hearsay: what the owner's routes need on top of the reads of store.ts. A room is the owner's
@@ -12,6 +12,12 @@ export type Room = { kind: "owner"; ownerId: string } | { kind: "self"; agentId:
 
 const TABLE = { owner: "owner_notes", self: "agent_notes" } as const;
 const COLUMN = { owner: "owner_id", self: "agent_id" } as const;
+/** What `room` holds at most, in code points. */
+export const roomLimit = (rooms: Rooms, kind: Room["kind"]): number => (kind === "owner" ? rooms.owner : rooms.self);
+
+/** Whether `growth` more code points fit a room that holds `usedNow` of `limit` (a change that shrinks it always fits). */
+export const fits = (usedNow: number, growth: number, limit: number): boolean => growth <= 0 || usedNow + growth <= limit;
+
 const keyOf = (room: Room): string => (room.kind === "owner" ? room.ownerId : room.agentId);
 
 /** The notes of `room`, oldest first. */
@@ -37,14 +43,23 @@ export interface NewNote {
   originConversationId: string | null;
 }
 
-/** Adds a note to `room` (under `lockRoom`); returns its id. */
+/** Adds a note to `room` (under `lockRoom`); returns its id. Notes added one after another list in that order (`clock_timestamp`, not the transaction's time). */
 export async function insertNote(t: Tx, room: Room, n: NewNote): Promise<string> {
   const { rows } = await t.query<{ id: string }>(
-    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, text, vault, vault_by, unsure, origin, origin_conversation_id)
-     values ($1, $2, $3, $4, $5, $6, $7) returning id`,
+    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, clock_timestamp()) returning id`,
     [keyOf(room), n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId],
   );
   return rows[0]!.id;
+}
+
+/** Puts back a note that was deleted (under `lockRoom`), as it was: same id, creation time and state. Its conversation may be gone by now: the column then goes null, as it would have. */
+export async function restoreNote(t: Tx, room: Room, n: Pick<Note, "id" | "text" | "vault" | "vaultBy" | "unsure" | "origin" | "originConversationId" | "createdAt">): Promise<void> {
+  await t.query(
+    `insert into ${TABLE[room.kind]} (${COLUMN[room.kind]}, id, text, vault, vault_by, unsure, origin, origin_conversation_id, created_at)
+     values ($1, $2, $3, $4, $5, $6, $7, (select id from conversations where id = $8), $9)`,
+    [keyOf(room), n.id, n.text, n.vault, n.vaultBy, n.unsure, n.origin, n.originConversationId, n.createdAt],
+  );
 }
 
 export interface NotePatch {

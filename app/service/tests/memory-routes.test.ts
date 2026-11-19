@@ -23,6 +23,20 @@ const judge = scriptedJudge();
 const { app, db } = useApp({ env: { ...SITE_ENV, RATE_LIMIT_SCALE: "1000" }, judge, agentWorker: false, config: { judge: JUDGE } });
 
 describe("ownerNote and modelNote", () => {
+  it("both remove control characters and lone surrogates (the database refuses them) but still turn tabs and line breaks into a space", () => {
+    for (const clean of [ownerNote, modelNote]) {
+      expect(clean("likes\u0000tea")).toBe("likestea");
+      expect(clean("a\ud800b")).toBe("ab");
+      expect(clean("a\udc00b")).toBe("ab");
+      expect(clean("a\u0007\u001bb\u007fc")).toBe("abc");
+      expect(clean("a\tb\nc\r\nd")).toBe("a b c d");
+      expect(clean("a \u0000 b")).toBe("a b");
+      expect(clean("\u0000\ud800")).toBeNull();
+      // A proper pair is not lone.
+      expect(clean("ok \u{1F600}")).toBe("ok \u{1F600}");
+    }
+  });
+
   it("both put the text on one line, trimmed, and refuse the empty and key-like ones", () => {
     for (const clean of [ownerNote, modelNote]) {
       expect(clean("  喜欢\n喝  美式 ")).toBe("喜欢 喝 美式");

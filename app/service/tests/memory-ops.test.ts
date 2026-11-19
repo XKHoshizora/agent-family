@@ -107,15 +107,23 @@ describe("parseOps", () => {
       "visit www.example.com",
       "a".repeat(201),
       "   ",
-      "喜欢《三体》",
     ];
     for (const text of refusals) {
       expect(parseOps(answer([{ op: "add", kind: "owner", text }]), REFS), text).toEqual([]);
       expect(parseOps(answer([{ op: "replace", ref: "o1", text }]), REFS), text).toEqual([]);
     }
+    // Brackets and quotes are kept as written, for an add and for a replace.
+    for (const op of [{ op: "add", kind: "owner", text: "喜欢《三体》" }, { op: "replace", ref: "o1", text: "喜欢《三体》" }]) {
+      expect(parseOps(answer([op]), REFS)).toEqual([op]);
+    }
     // The limit itself is fine, and the stored text is the cleaned one.
     expect(parseOps(answer([{ op: "add", kind: "owner", text: "a".repeat(200) }]), REFS)).toHaveLength(1);
     expect(parseOps(answer([{ op: "add", kind: "owner", text: "  喜欢\n爬山 " }]), REFS)).toEqual([{ op: "add", kind: "owner", text: "喜欢 爬山" }]);
+  });
+
+  it("removes control characters and lone surrogates from a text instead of passing them on", () => {
+    expect(parseOps(answer([{ op: "add", kind: "owner", text: "likes\u0000tea" }]), REFS)).toEqual([{ op: "add", kind: "owner", text: "likestea" }]);
+    expect(parseOps(answer([{ op: "replace", ref: "o1", text: "a\ud800b\u0007c" }]), REFS)).toEqual([{ op: "replace", ref: "o1", text: "abc" }]);
   });
 
   it("drops an add whose text repeats an existing or an earlier one once case, spaces and punctuation are ignored", () => {
@@ -131,7 +139,7 @@ describe("parseOps", () => {
       REFS,
       ["lives in paris"],
     );
-    expect(ops.map((o) => (o.op === "add" ? o.text : ""))).toEqual(["Likes  Hiking!", "是素食者", "works nights"]);
+    expect(ops.map((o) => (o.op === "add" ? o.text : ""))).toEqual(["Likes Hiking!", "是素食者", "works nights"]);
   });
 
   it("an add that repeats the text of an earlier replace is dropped too; a replace is never dropped for repeating", () => {

@@ -10,7 +10,7 @@ import { requirePrincipal } from "../session.ts";
 import { ownerNote } from "./clean.ts";
 import { sortNote } from "./sort.ts";
 import { codePoints, getNewNotes, listHearsay, roomOf, used, type Note } from "./store.ts";
-import { deleteNote, insertNote, listRoom, lockRoom, readNote, takeHearsay, updateNote, type Room } from "./write.ts";
+import { deleteNote, insertNote, listRoom, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
  * The owner reads and edits the palace: the notes about them (shared by their Agents), each Agent's own notes, and the
@@ -87,7 +87,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   const api = app.withTypeProvider<ZodTypeProvider>();
   const writeLimit = perPrincipalLimit(app, 30);
   const limits = roomOf(config);
-  const limitOf = (room: Room): number => (room.kind === "owner" ? limits.owner : limits.self);
+  const limitOf = (room: Room): number => roomLimit(limits, room.kind);
   const sortDeps = (log: FastifyBaseLogger) => ({ db, judge, config, log });
 
   // `left` is a number: `ErrorDetails` only types strings, but the handler sends whatever it is given as it is.
@@ -165,7 +165,12 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   }
 
   async function remove(room: Room, noteId: string): Promise<{ ok: true }> {
-    if (!(await deleteNote(db, room, noteId))) throw notFound();
+    // Under the room's lock like every write: an undo or a confirm of a change holds it while it reads the room.
+    const gone = await db.tx(async (t) => {
+      await lockRoom(t, room);
+      return deleteNote(t, room, noteId);
+    });
+    if (!gone) throw notFound();
     return { ok: true };
   }
 

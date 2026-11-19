@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { lockAccount } from "../src/accounts/store.ts";
+import { lockRoom } from "../src/memory/write.ts";
 import { applyOps, confirmChange, discardChange, proposeUnlocks, undoChange } from "../src/memory/apply.ts";
 import type { Op } from "../src/memory/ops.ts";
 import { listAgentNotes, listOwnerNotes, type NoteKind, type Rooms } from "../src/memory/store.ts";
-import { signUp } from "./helpers/actors.ts";
+import { api, signUp } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 
@@ -23,7 +24,7 @@ async function world() {
   const n = ++counter;
   const owner = await signUp(app, `ap_owner${n}`);
   const agent = await mustCreateAgent(app, owner);
-  return { n, conv: agent.conversationId as string, ownerId: owner.id as string, agentId: agent.id as string };
+  return { n, cookie: owner.cookie as string, conv: agent.conversationId as string, ownerId: owner.id as string, agentId: agent.id as string };
 }
 type World = Awaited<ReturnType<typeof world>>;
 
@@ -63,7 +64,7 @@ const run = (w: World, ops: Op[], refs: Map<string, { kind: NoteKind; id: string
     }),
   );
 const ref = (kind: NoteKind, id: string) => ({ kind, id });
-const undo = (w: World, id: string) => db.tx((t) => undoChange(t, w.ownerId, id));
+const undo = (w: World, id: string, rooms = ROOMS) => db.tx((t) => undoChange(t, w.ownerId, id, rooms));
 const confirm = (w: World, id: string, rooms = ROOMS) => db.tx((t) => confirmChange(t, w.ownerId, id, rooms));
 const propose = (w: World, notes: Array<{ kind: NoteKind; id: string }>) => db.tx((t) => proposeUnlocks(t, { ownerId: w.ownerId, agentId: w.agentId }, w.conv, notes));
 const changeRow = async (id: string) =>
@@ -300,36 +301,51 @@ describe("applyOps", () => {
     expect((await selfNotes(w))[0]).toMatchObject({ text: "also harmless", vault: true });
   });
 
-  it("a replace never touches the vault state of a note the owner chose; auto notes outside move in only", async () => {
+  it("a replace of a note the owner locked keeps it locked; one the owner opened is re-sorted towards the vault like an auto note", async () => {
     const w = await world();
-    const ownerOpen = await seed(w, "owner", "owner opened", { vault: false, vaultBy: "owner" });
     const ownerLocked = await seed(w, "owner", "owner locked", { vault: true, vaultBy: "owner" });
+    const openA = await seed(w, "owner", "owner opened a", { vault: false, vaultBy: "owner" });
+    const openB = await seed(w, "owner", "owner opened b", { vault: false, vaultBy: "owner" });
+    const openC = await seed(w, "owner", "owner opened c", { vault: false, vaultBy: "owner" });
     const autoOpen = await seed(w, "owner", "auto open", { vault: false });
     const autoOpen2 = await seed(w, "owner", "auto open 2", { vault: false });
-    const refs = new Map([["a", ref("owner", ownerOpen)], ["b", ref("owner", ownerLocked)], ["c", ref("owner", autoOpen)], ["d", ref("owner", autoOpen2)]]);
+    const refs = new Map([
+      ["l", ref("owner", ownerLocked)],
+      ["a", ref("owner", openA)],
+      ["b", ref("owner", openB)],
+      ["c", ref("owner", openC)],
+      ["d", ref("owner", autoOpen)],
+      ["e", ref("owner", autoOpen2)],
+    ]);
     await run(
       w,
       [
+        { op: "replace", ref: "l", text: "now harmless l" },
         { op: "replace", ref: "a", text: "now private a" },
-        { op: "replace", ref: "b", text: "now harmless b" },
-        { op: "replace", ref: "c", text: "now private c" },
-        { op: "replace", ref: "d", text: "still harmless d" },
+        { op: "replace", ref: "b", text: "still harmless b" },
+        { op: "replace", ref: "c", text: "no verdict c" },
+        { op: "replace", ref: "d", text: "now private d" },
+        { op: "replace", ref: "e", text: "still harmless e" },
       ],
       refs,
       {
         vaults: new Map([
+          ["now harmless l", OPEN],
           ["now private a", { vault: true, unsure: false }],
-          ["now harmless b", OPEN],
-          ["now private c", { vault: true, unsure: true }],
-          ["still harmless d", OPEN],
+          ["still harmless b", OPEN],
+          ["now private d", { vault: true, unsure: true }],
+          ["still harmless e", OPEN],
         ]),
       },
     );
     const byText = new Map((await ownerNotes(w)).map((n) => [n.text, n]));
-    expect(byText.get("now private a")).toMatchObject({ vault: false, vaultBy: "owner" });
-    expect(byText.get("now harmless b")).toMatchObject({ vault: true, vaultBy: "owner" });
-    expect(byText.get("now private c")).toMatchObject({ vault: true, vaultBy: "auto", unsure: true });
-    expect(byText.get("still harmless d")).toMatchObject({ vault: false });
+    expect(byText.get("now harmless l")).toMatchObject({ vault: true, vaultBy: "owner" });
+    // The owner opened it, but this text is new and the owner never approved it for groups.
+    expect(byText.get("now private a")).toMatchObject({ vault: true, vaultBy: "auto", unsure: false });
+    expect(byText.get("still harmless b")).toMatchObject({ vault: false, vaultBy: "owner" });
+    expect(byText.get("no verdict c")).toMatchObject({ vault: true, vaultBy: "auto", unsure: true });
+    expect(byText.get("now private d")).toMatchObject({ vault: true, vaultBy: "auto", unsure: true });
+    expect(byText.get("still harmless e")).toMatchObject({ vault: false });
   });
 
   it("a replace of an open auto note with no verdict goes into the vault, unsure (fail closed)", async () => {
@@ -380,8 +396,8 @@ describe("undoChange", () => {
     // The removed note is back, with its id, vault state and unsure flag.
     expect(owners.get(b)).toMatchObject({ text: "beta", vault: true, vaultBy: "owner", unsure: true });
     expect([...owners.keys()].sort()).toEqual([a, b].sort());
-    // The locked note keeps its lock (undo never opens a note); the added one is gone.
-    expect((await selfNotes(w)).map((n) => [n.id, n.text, n.vault])).toEqual([[c, "gamma", true]]);
+    // The note the change locked was open before: it is open again, with its old vault_by. The added one is gone.
+    expect((await selfNotes(w)).map((n) => [n.id, n.text, n.vault, n.vaultBy])).toEqual([[c, "gamma", false, "auto"]]);
     expect((await changeRow(r!.changeId!)).status).toBe("undone");
     expect(await undo(w, r!.changeId!)).toBeNull();
   });
@@ -415,18 +431,29 @@ describe("undoChange", () => {
     expect(await undo(w4, r4!.changeId!)).toBe("stale");
   });
 
-  it("never leaves a note outside the vault that was inside before the change", async () => {
+  it("restores the vault state exactly, but never opens a note that was inside before the change", async () => {
     const w = await world();
-    const a = await seed(w, "owner", "open one", { vault: false });
+    const a = await seed(w, "owner", "open one", { vault: false, vaultBy: "owner" });
     const b = await seed(w, "owner", "locked one", { vault: true });
-    const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
-    // A note moved into the vault by a replace: undoing restores its text, but it stays in.
-    const r = await run(w, [{ op: "replace", ref: "a", text: "now private" }], refs, { vaults: new Map([["now private", { vault: true, unsure: false }]]) });
+    const l = await seed(w, "owner", "to lock", { vault: false });
+    const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)], ["l", ref("owner", l)]]);
+    // Moved into the vault by a replace, or by a lock, from outside: undo puts it back outside, as it was.
+    const r = await run(w, [{ op: "replace", ref: "a", text: "now private" }, { op: "lock", ref: "l" }], refs, { vaults: new Map([["now private", { vault: true, unsure: true }]]) });
+    expect((await ownerNotes(w)).find((n) => n.id === a)).toMatchObject({ vault: true, vaultBy: "auto", unsure: true });
     expect(await undo(w, r!.changeId!)).toBe("undone");
-    expect((await ownerNotes(w)).find((n) => n.id === a)).toMatchObject({ text: "open one", vault: true });
+    expect((await ownerNotes(w)).find((n) => n.id === a)).toMatchObject({ text: "open one", vault: false, vaultBy: "owner", unsure: false });
+    expect((await ownerNotes(w)).find((n) => n.id === l)).toMatchObject({ text: "to lock", vault: false, vaultBy: "auto" });
+
+    // A note that was inside stays inside, and a lock of one already inside gets its vault_by back.
+    const r1 = await run(w, [{ op: "replace", ref: "b", text: "edited locked" }], refs, { vaults: new Map([["edited locked", OPEN]]) });
+    expect(await undo(w, r1!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ text: "locked one", vault: true });
+    const r1b = await run(w, [{ op: "lock", ref: "b" }], refs);
+    expect(await undo(w, r1b!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ vault: true, vaultBy: "auto" });
 
     // A vault note the owner has since moved out is stale, not restored.
-    const r2 = await run(w, [{ op: "replace", ref: "b", text: "edited locked" }], refs);
+    const r2 = await run(w, [{ op: "replace", ref: "b", text: "edited locked" }], refs, { vaults: new Map([["edited locked", OPEN]]) });
     await db.query("update owner_notes set vault = false, vault_by = 'owner' where id = $1", [b]);
     expect(await undo(w, r2!.changeId!)).toBe("stale");
     expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ text: "edited locked", vault: false });
@@ -441,7 +468,7 @@ describe("undoChange", () => {
   it("is the owner's: another owner, an unknown id, and a change that is not applied answer null", async () => {
     const w = await world();
     const r = await run(w, [{ op: "add", kind: "owner", text: "kept" }], new Map());
-    expect(await db.tx(async (t) => undoChange(t, await otherOwner(w), r!.changeId!))).toBeNull();
+    expect(await db.tx(async (t) => undoChange(t, await otherOwner(w), r!.changeId!, ROOMS))).toBeNull();
     expect(await undo(w, "00000000-0000-4000-8000-000000000000")).toBeNull();
     const p = await run(w, [{ op: "add", kind: "owner", text: "pending one" }], new Map(), { status: "pending" });
     expect(await undo(w, p!.changeId!)).toBeNull();
@@ -527,5 +554,98 @@ describe("proposeUnlocks, confirmChange and discardChange", () => {
     expect(Array.isArray(done) && done.map((x) => x.op)).toEqual(["replace"]);
     expect((await ownerNotes(w)).map((n) => [n.text, n.vault]).sort()).toEqual([["locked a2", true], ["z".repeat(10), true]].sort());
     expect((await changeRow(r!.changeId!)).full).toBe(true);
+  });
+});
+
+describe("the follow-up rulings", () => {
+  it("undo checks the rooms: restoring a removed note into a room refilled since answers full and changes nothing", async () => {
+    const w = await world();
+    const rooms = { ...ROOMS, owner: 2000 };
+    const big = await seed(w, "owner", "b".repeat(1900));
+    const r = await run(w, [{ op: "remove", ref: "big" }], new Map([["big", ref("owner", big)]]), { rooms });
+    await seed(w, "owner", "c".repeat(200));
+    expect(await undo(w, r!.changeId!, rooms)).toBe("full");
+    expect((await ownerNotes(w)).map((n) => n.text.length)).toEqual([200]);
+    expect((await changeRow(r!.changeId!)).status).toBe("applied");
+    await db.query("delete from owner_notes where owner_id = $1", [w.ownerId]);
+    expect(await undo(w, r!.changeId!, rooms)).toBe("undone");
+    expect((await ownerNotes(w)).map((n) => n.id)).toEqual([big]);
+    // Undoing a replace that shrank a note is checked the same way.
+    const w2 = await world();
+    const x = await seed(w2, "self", "x".repeat(100));
+    const r2 = await run(w2, [{ op: "replace", ref: "x", text: "y".repeat(10) }], new Map([["x", ref("self", x)]]), { vaults: new Map([["y".repeat(10), OPEN]]) });
+    await seed(w2, "self", "z".repeat(2950));
+    expect(await undo(w2, r2!.changeId!, { ...ROOMS, self: 3000 })).toBe("full");
+    expect((await selfNotes(w2)).find((n) => n.id === x)!.text).toBe("y".repeat(10));
+  });
+
+  it("a text with control characters or a lone surrogate applies cleanly, without them", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "old", { vault: false });
+    const r = await run(
+      w,
+      [{ op: "add", kind: "owner", text: "likes\u0000tea" }, { op: "add", kind: "self", text: "a\ud800b\u0007" }, { op: "replace", ref: "a", text: "new\u0000er" }],
+      new Map([["a", ref("owner", a)]]),
+      { vaults: new Map([["newer", OPEN]]) },
+    );
+    expect(r!.applied.map((x) => x.after)).toEqual(["newer", "likestea", "ab"]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["likestea", "newer"]);
+    expect((await selfNotes(w)).map((n) => n.text)).toEqual(["ab"]);
+  });
+
+  it("deleting a note by the route waits for the room lock, as every write does", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "to delete");
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const holder = db.tx(async (t) => {
+      await lockRoom(t, { kind: "owner", ownerId: w.ownerId });
+      await held;
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    let finished = false;
+    const pending = api(app, { cookie: w.cookie }, "DELETE", `/api/memory/notes/${a}`).then((x) => {
+      finished = true;
+      return x;
+    });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(finished).toBe(false);
+    release();
+    await holder;
+    expect((await pending).status).toBe(200);
+    expect(await ownerNotes(w)).toEqual([]);
+  });
+
+  it("subtracts the removes before judging a replace's growth, whatever the order of the ops", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "a".repeat(10));
+    const b = await seed(w, "owner", "b".repeat(10));
+    const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
+    const r = await run(w, [{ op: "replace", ref: "a", text: "c".repeat(20) }, { op: "remove", ref: "b" }], refs, {
+      rooms: { ...ROOMS, owner: 25 },
+      vaults: new Map([["c".repeat(20), OPEN]]),
+    });
+    expect(r!.full).toBe(false);
+    expect(r!.applied.map((x) => x.op).sort()).toEqual(["remove", "replace"]);
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["c".repeat(20)]);
+  });
+
+  it("does nothing for an Agent that is not the owner's", async () => {
+    const w = await world();
+    const stranger = await world();
+    const bad = { ...w, agentId: stranger.agentId };
+    const r = await run(bad, [{ op: "add", kind: "owner", text: "sneaky" }], new Map());
+    expect(r).toBeNull();
+    const a = await seed(w, "owner", "p", { vault: true });
+    expect(await propose(bad, [ref("owner", a)])).toBeNull();
+    expect(await ownerNotes(w)).toHaveLength(1);
+    expect((await db.query("select count(*)::int as n from memory_changes")).rows[0].n).toBe(0);
+  });
+
+  it("lists the notes a change adds in the order of its ops", async () => {
+    const w = await world();
+    const texts = ["fact one", "fact two", "fact three", "fact four", "fact five"];
+    await run(w, texts.map((text): Op => ({ op: "add", kind: "owner", text })), new Map());
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(texts);
   });
 });

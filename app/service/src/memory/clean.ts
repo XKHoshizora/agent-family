@@ -15,6 +15,9 @@ export const MODEL_NOTE_MAX = 200;
 
 const FORMAT_CHARACTERS = /\p{Cf}/gu;
 const WHITESPACE_RUN = /\s+/g;
+// What the database refuses and no one can read: control characters, and a surrogate with no partner (with `u` a proper
+// pair is one astral character, so what is left in the surrogate range is lone).
+const CONTROL_OR_LONE_SURROGATE = /\p{Cc}|[\ud800-\udfff]/gu;
 const KEY_RUN = /[A-Za-z0-9_-]{20,}/g;
 const KEY_PREFIX = /\b(?:sk-[\w-]|ghp_\w|AKIA\w)|-----BEGIN/;
 
@@ -39,7 +42,9 @@ const ADDRESSES_THE_READER =
  * controls; they could hide anything) removed, trimmed; null when nothing is left or it looks like a key or secret.
  */
 function tidy(text: string): string | null {
-  const clean = oneLine(text.replace(FORMAT_CHARACTERS, "")).replace(WHITESPACE_RUN, " ");
+  // Line breaks and tabs become a space first; the other control characters and lone surrogates are then dropped silently.
+  const spaced = oneLine(text.replace(FORMAT_CHARACTERS, "")).replace(WHITESPACE_RUN, " ");
+  const clean = spaced.replace(CONTROL_OR_LONE_SURROGATE, "").replace(WHITESPACE_RUN, " ").trim();
   return clean === "" || keyLike(clean) ? null : clean;
 }
 
