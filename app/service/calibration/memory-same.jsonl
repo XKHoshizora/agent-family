@@ -1,0 +1,106 @@
+{"id":"sm-001","lang":"zh","cat":"same","existing":["不吃辣"],"fresh":"他不能吃辣的","expect":0}
+{"id":"sm-002","lang":"zh","cat":"same","existing":["对花生过敏"],"fresh":"花生过敏","expect":0}
+{"id":"sm-003","lang":"zh","cat":"same","existing":["周三晚上固定打羽毛球"],"fresh":"每个星期三晚上都去打羽毛球","expect":0}
+{"id":"sm-004","lang":"zh","cat":"same","existing":["喜欢喝美式，不加糖"],"fresh":"咖啡只喝美式，不放糖","expect":0}
+{"id":"sm-005","lang":"zh","cat":"same","existing":["早上十点前别发消息"],"fresh":"十点之前不要给我发消息","expect":0}
+{"id":"sm-006","lang":"zh","cat":"same","existing":["有一个三岁的女儿"],"fresh":"女儿今年三岁","expect":0}
+{"id":"sm-007","lang":"zh","cat":"same","existing":["在北京工作"],"fresh":"人在北京上班","expect":0}
+{"id":"sm-008","lang":"zh","cat":"same","existing":["看电影只看字幕版"],"fresh":"电影不看配音的，只看字幕","expect":0}
+{"id":"sm-009","lang":"ja","cat":"same","existing":["辛いものが苦手"],"fresh":"辛いのは食べられない","expect":0}
+{"id":"sm-010","lang":"ja","cat":"same","existing":["毎週水曜はバドミントン"],"fresh":"水曜の夜はいつもバドの日","expect":0}
+{"id":"sm-011","lang":"ja","cat":"same","existing":["コーヒーはブラック"],"fresh":"ブラックコーヒーしか飲まない","expect":0}
+{"id":"sm-012","lang":"ja","cat":"same","existing":["猫を二匹飼っている"],"fresh":"家に猫が二匹いる","expect":0}
+{"id":"sm-013","lang":"ja","cat":"same","existing":["朝は弱い"],"fresh":"朝が苦手","expect":0}
+{"id":"sm-014","lang":"en","cat":"same","existing":["Doesn't eat cilantro"],"fresh":"Hates cilantro, won't touch it","expect":0}
+{"id":"sm-015","lang":"en","cat":"same","existing":["Allergic to peanuts"],"fresh":"Has a peanut allergy","expect":0}
+{"id":"sm-016","lang":"en","cat":"same","existing":["Plays badminton on Wednesday nights"],"fresh":"Wednesday evening is badminton night","expect":0}
+{"id":"sm-017","lang":"en","cat":"same","existing":["Prefers voice messages"],"fresh":"Likes sending voice notes rather than typing","expect":0}
+{"id":"sm-018","lang":"en","cat":"same","existing":["Works from home on Fridays"],"fresh":"Fridays are WFH days","expect":0}
+{"id":"sm-019","lang":"en","cat":"same","existing":["Vegetarian"],"fresh":"Doesn't eat meat","expect":0}
+{"id":"sm-020","lang":"cross","cat":"same","existing":["不吃辣"],"fresh":"I can't eat spicy food","expect":0}
+{"id":"sm-021","lang":"cross","cat":"same","existing":["对花生过敏"],"fresh":"落花生アレルギーがある","expect":0}
+{"id":"sm-022","lang":"cross","cat":"same","existing":["Allergic to shellfish"],"fresh":"贝类过敏","expect":0}
+{"id":"sm-023","lang":"cross","cat":"same","existing":["毎週水曜はバドミントン"],"fresh":"每周三打羽毛球","expect":0}
+{"id":"sm-024","lang":"cross","cat":"same","existing":["Has a three-year-old daughter"],"fresh":"三歳の娘がいる","expect":0}
+{"id":"sm-025","lang":"cross","cat":"same","existing":["喜欢喝美式，不加糖"],"fresh":"Drinks Americano, no sugar","expect":0}
+{"id":"sm-026","lang":"cross","cat":"same","existing":["在东京留学"],"fresh":"Studying abroad in Tokyo","expect":0}
+{"id":"sm-027","lang":"cross","cat":"same","existing":["犬を飼っている"],"fresh":"养了一只狗","expect":0}
+{"id":"sm-028","lang":"cross","cat":"same","existing":["早上不看消息"],"fresh":"I don't check messages in the morning","expect":0}
+{"id":"sm-029","lang":"cross","cat":"same","existing":["Doesn't drink alcohol"],"fresh":"お酒は飲まない","expect":0}
+{"id":"sm-030","lang":"zh","cat":"more","existing":["不吃辣"],"fresh":"不吃辣，连微辣都不行，一点辣椒味都受不了","expect":null}
+{"id":"sm-031","lang":"zh","cat":"more","existing":["对花生过敏"],"fresh":"对花生和腰果都过敏","expect":null}
+{"id":"sm-032","lang":"zh","cat":"more","existing":["周三晚上打羽毛球"],"fresh":"周三晚上七点在体育馆打羽毛球，一般打两个小时","expect":null}
+{"id":"sm-033","lang":"zh","cat":"more","existing":["有一个三岁的女儿"],"fresh":"有一个三岁的女儿，叫朵朵","expect":null}
+{"id":"sm-034","lang":"zh","cat":"more","existing":["喜欢喝美式"],"fresh":"喜欢喝美式，下午三点以后不碰咖啡","expect":null}
+{"id":"sm-035","lang":"zh","cat":"more","existing":["早上十点前别发消息"],"fresh":"工作日早上十点前别发消息，周末随时可以","expect":null}
+{"id":"sm-036","lang":"ja","cat":"more","existing":["辛いものが苦手"],"fresh":"辛いものが苦手で、特にカレーは食べられない","expect":null}
+{"id":"sm-037","lang":"ja","cat":"more","existing":["猫を飼っている"],"fresh":"猫を飼っていて、名前はミケ。三歳のメス","expect":null}
+{"id":"sm-038","lang":"ja","cat":"more","existing":["毎週水曜はバド"],"fresh":"水曜はバド、そのあと同僚と飲みに行くことが多い","expect":null}
+{"id":"sm-039","lang":"en","cat":"more","existing":["Allergic to peanuts"],"fresh":"Allergic to peanuts and tree nuts","expect":null}
+{"id":"sm-040","lang":"en","cat":"more","existing":["Vegetarian"],"fresh":"Vegetarian, but still eats eggs and dairy","expect":null}
+{"id":"sm-041","lang":"en","cat":"more","existing":["Plays badminton on Wednesday nights"],"fresh":"Plays badminton Wednesday nights and tennis on Sundays","expect":null}
+{"id":"sm-042","lang":"en","cat":"more","existing":["Works at a bank"],"fresh":"Works at a bank, on the compliance team","expect":null}
+{"id":"sm-043","lang":"en","cat":"more","existing":["Prefers voice messages"],"fresh":"Prefers voice messages, except during meetings","expect":null}
+{"id":"sm-044","lang":"cross","cat":"more","existing":["不吃香菜"],"fresh":"I don't eat cilantro, and I don't like mint either","expect":null}
+{"id":"sm-045","lang":"cross","cat":"more","existing":["Studying in Tokyo"],"fresh":"在东京留学，读的是经济学硕士","expect":null}
+{"id":"sm-046","lang":"cross","cat":"more","existing":["三歳の娘がいる"],"fresh":"有个三岁的女儿，每周六要送她去游泳课","expect":null}
+{"id":"sm-047","lang":"cross","cat":"more","existing":["Allergic to shellfish"],"fresh":"贝类过敏，尤其是虾，吃了会起疹子","expect":null}
+{"id":"sm-048","lang":"zh","cat":"changed","existing":["不吃辣"],"fresh":"最近开始能吃微辣了","expect":null}
+{"id":"sm-049","lang":"zh","cat":"changed","existing":["周三晚上打羽毛球"],"fresh":"羽毛球改到周四晚上了","expect":null}
+{"id":"sm-050","lang":"zh","cat":"changed","existing":["在北京工作"],"fresh":"上个月搬到上海工作了","expect":null}
+{"id":"sm-051","lang":"zh","cat":"changed","existing":["喜欢喝美式"],"fresh":"最近戒咖啡了，改喝茶","expect":null}
+{"id":"sm-052","lang":"zh","cat":"changed","existing":["有一个三岁的女儿"],"fresh":"女儿上个月刚过完四岁生日","expect":null}
+{"id":"sm-053","lang":"zh","cat":"changed","existing":["早上十点前别发消息"],"fresh":"现在九点以后就可以发了","expect":null}
+{"id":"sm-054","lang":"ja","cat":"changed","existing":["コーヒーはブラック"],"fresh":"最近はカフェラテしか飲まない","expect":null}
+{"id":"sm-055","lang":"ja","cat":"changed","existing":["毎週水曜バド"],"fresh":"水曜じゃなくて金曜になった","expect":null}
+{"id":"sm-056","lang":"ja","cat":"changed","existing":["辛いものが苦手"],"fresh":"最近は辛いものも食べられるようになった","expect":null}
+{"id":"sm-057","lang":"en","cat":"changed","existing":["Vegetarian"],"fresh":"Started eating fish again last month","expect":null}
+{"id":"sm-058","lang":"en","cat":"changed","existing":["Works from home on Fridays"],"fresh":"Now goes to the office five days a week","expect":null}
+{"id":"sm-059","lang":"en","cat":"changed","existing":["Lives in Seattle"],"fresh":"Moved to Portland in October","expect":null}
+{"id":"sm-060","lang":"en","cat":"changed","existing":["Plays badminton on Wednesday nights"],"fresh":"Quit badminton, now climbs on Wednesdays","expect":null}
+{"id":"sm-061","lang":"cross","cat":"changed","existing":["不吃香菜"],"fresh":"I actually like cilantro now","expect":null}
+{"id":"sm-062","lang":"cross","cat":"changed","existing":["在东京留学"],"fresh":"先週ロンドンに引っ越した","expect":null}
+{"id":"sm-063","lang":"cross","cat":"changed","existing":["Allergic to peanuts"],"fresh":"花生过敏后来测过了，其实不过敏了，只是不爱吃","expect":null}
+{"id":"sm-064","lang":"cross","cat":"changed","existing":["毎朝ジョギング"],"fresh":"最近跑步停了，改成晚上游泳","expect":null}
+{"id":"sm-065","lang":"cross","cat":"changed","existing":["Doesn't drink alcohol"],"fresh":"最近开始偶尔喝点红酒","expect":null}
+{"id":"sm-066","lang":"zh","cat":"different","existing":["不吃辣"],"fresh":"不吃香菜","expect":null}
+{"id":"sm-067","lang":"zh","cat":"different","existing":["对花生过敏"],"fresh":"对海鲜过敏","expect":null}
+{"id":"sm-068","lang":"zh","cat":"different","existing":["周三晚上打羽毛球"],"fresh":"周三晚上要上日语课","expect":null}
+{"id":"sm-069","lang":"zh","cat":"different","existing":["有一个三岁的女儿"],"fresh":"有个妹妹在上海","expect":null}
+{"id":"sm-070","lang":"zh","cat":"different","existing":["喜欢喝美式"],"fresh":"喜欢喝红茶，尤其是正山小种","expect":null}
+{"id":"sm-071","lang":"zh","cat":"different","existing":["早上十点前别发消息"],"fresh":"晚上十一点以后别发消息","expect":null}
+{"id":"sm-072","lang":"ja","cat":"different","existing":["辛いものが苦手"],"fresh":"甘いものが苦手","expect":null}
+{"id":"sm-073","lang":"ja","cat":"different","existing":["猫を二匹飼っている"],"fresh":"犬は好きだけど飼ってはいない","expect":null}
+{"id":"sm-074","lang":"ja","cat":"different","existing":["毎週水曜はバド"],"fresh":"毎週土曜は料理教室","expect":null}
+{"id":"sm-075","lang":"en","cat":"different","existing":["Allergic to peanuts"],"fresh":"Allergic to penicillin","expect":null}
+{"id":"sm-076","lang":"en","cat":"different","existing":["Doesn't eat cilantro"],"fresh":"Doesn't eat mushrooms","expect":null}
+{"id":"sm-077","lang":"en","cat":"different","existing":["Works from home on Fridays"],"fresh":"Has a standing 1:1 with his manager every Friday","expect":null}
+{"id":"sm-078","lang":"en","cat":"different","existing":["Prefers voice messages"],"fresh":"Prefers email for anything formal","expect":null}
+{"id":"sm-079","lang":"cross","cat":"different","existing":["不吃辣"],"fresh":"パクチーは食べない","expect":null}
+{"id":"sm-080","lang":"cross","cat":"different","existing":["Plays badminton on Wednesdays"],"fresh":"毎週日曜はテニス","expect":null}
+{"id":"sm-081","lang":"cross","cat":"different","existing":["在东京留学"],"fresh":"Visiting Osaka next month","expect":null}
+{"id":"sm-082","lang":"cross","cat":"different","existing":["三歳の娘がいる"],"fresh":"有个三岁的外甥","expect":null}
+{"id":"sm-083","lang":"zh","cat":"same","existing":["不吃辣，也不吃香菜","周三晚上固定打羽毛球","对花生过敏","喜欢喝美式","通勤骑车","周末睡到九点","在一家做物流软件的公司上班"],"fresh":"吃饭别给他点辣的，香菜也不要","expect":0}
+{"id":"sm-084","lang":"zh","cat":"same","existing":["住在杭州","做前端开发","不喝酒","每周日晚上跟爸妈视频","喜欢看科幻小说","养了一只橘猫"],"fresh":"他滴酒不沾","expect":2}
+{"id":"sm-085","lang":"zh","cat":"same","existing":["住在杭州","做前端开发","不喝酒","每周日晚上跟爸妈视频","喜欢看科幻小说","养了一只橘猫"],"fresh":"家里有只橘色的猫","expect":5}
+{"id":"sm-086","lang":"ja","cat":"same","existing":["東京に住んでいる","在宅は火曜と金曜","毎朝ジョギング","魚が好き","猫アレルギー","毎週木曜は日本語教室"],"fresh":"火曜と金曜はリモートワーク","expect":1}
+{"id":"sm-087","lang":"ja","cat":"same","existing":["朝は紅茶派","電車では本を読む","週末は実家に帰ることが多い","妹が一人いる","納豆は食べられない","歯医者が苦手","旅行は電車より車","甘党"],"fresh":"納豆だけはどうしても無理","expect":4}
+{"id":"sm-088","lang":"en","cat":"same","existing":["Lives in Austin","Runs before work","Allergic to shellfish","Hates cilantro","Watches F1","Has two cats","Works in finance","Drives a Honda"],"fresh":"Can't eat shrimp or crab, shellfish allergy","expect":2}
+{"id":"sm-089","lang":"en","cat":"same","existing":["Prefers voice messages","Takes the train to work","Reads before bed","Has a sister in Denver","Bakes sourdough on weekends","Does not own a TV","Hates being called before 9am","Vegetarian except for fish","Uses a Mac","Favorite team is the Giants"],"fresh":"Would rather send a voice note than type","expect":0}
+{"id":"sm-090","lang":"cross","cat":"same","existing":["在上海上班","对花生过敏","周三晚上打羽毛球","不喝咖啡","喜欢爬山"],"fresh":"Allergic to peanuts","expect":1}
+{"id":"sm-091","lang":"cross","cat":"same","existing":["Works night shifts on weekends","Prefers tea over coffee","Lives near Shinjuku","Takes the 8:10 train","Has a younger brother in Osaka"],"fresh":"弟が大阪にいる","expect":4}
+{"id":"sm-092","lang":"zh","cat":"same","existing":["喜欢吃面，不爱吃米饭","周五下班后固定去游泳","不看恐怖片","手机用的是安卓","喜欢听播客","每个月读两本书","怕冷，办公室常穿外套","不喜欢视频会议","养了一盆绿萝","早餐习惯喝豆浆"],"fresh":"每个周五下班都会去游个泳","expect":1}
+{"id":"sm-093","lang":"zh","cat":"more","existing":["不吃辣","对花生过敏","周三晚上打羽毛球","喜欢喝美式","住在深圳"],"fresh":"对花生过敏，吃到会起荨麻疹，包里一直带着抗过敏药","expect":null}
+{"id":"sm-094","lang":"ja","cat":"more","existing":["東京に住んでいる","猫を飼っている","毎週水曜はバド","朝は弱い","甘党","読書が好き"],"fresh":"毎週水曜はバド、場所は区民体育館で、夜八時から","expect":null}
+{"id":"sm-095","lang":"en","cat":"more","existing":["Lives in Austin","Vegetarian","Runs before work","Has two cats","Hates cilantro","Works in finance","Watches F1"],"fresh":"Runs before work, usually around 6am along the river, about five miles","expect":null}
+{"id":"sm-096","lang":"cross","cat":"more","existing":["喜欢喝美式","周日去咖啡馆看书","不看恐怖片","手机用安卓","怕冷"],"fresh":"Doesn't watch horror movies, not even with friends","expect":null}
+{"id":"sm-097","lang":"en","cat":"more","existing":["Takes the train to work","Reads before bed","Prefers voice messages","Bakes sourdough on weekends","Hates being called before 9am","Uses a Mac","Does not own a TV","Has a sister in Denver"],"fresh":"Has a sister in Denver who is a nurse and visits every Thanksgiving","expect":null}
+{"id":"sm-098","lang":"zh","cat":"changed","existing":["住在杭州","做前端开发","不喝酒","每周日晚上跟爸妈视频","喜欢看科幻小说","养了一只橘猫","早餐喝豆浆"],"fresh":"最近开始喝点啤酒了，偶尔朋友聚会会喝","expect":null}
+{"id":"sm-099","lang":"ja","cat":"changed","existing":["東京に住んでいる","在宅は火曜と金曜","毎朝ジョギング","魚が好き","猫アレルギー"],"fresh":"先月から在宅は水曜だけになった","expect":null}
+{"id":"sm-100","lang":"en","cat":"changed","existing":["Lives in Austin","Runs before work","Hates cilantro","Has two cats","Works in finance","Watches F1","Drives a Honda","Allergic to shellfish"],"fresh":"Sold the Honda in September, now bikes everywhere","expect":null}
+{"id":"sm-101","lang":"cross","cat":"changed","existing":["在上海上班","对花生过敏","周三晚上打羽毛球","不喝咖啡","喜欢爬山","手机用安卓"],"fresh":"先月から名古屋で働いている","expect":null}
+{"id":"sm-102","lang":"zh","cat":"changed","existing":["喜欢吃面，不爱吃米饭","周五下班后固定去游泳","不看恐怖片","手机用的是安卓","喜欢听播客","每个月读两本书","怕冷","不喜欢视频会议","养了一盆绿萝"],"fresh":"手机换成 iPhone 了，用不惯安卓","expect":null}
+{"id":"sm-103","lang":"zh","cat":"different","existing":["不吃辣，也不吃香菜","周三晚上固定打羽毛球","喜欢喝美式","通勤骑车","周末睡到九点","在物流软件公司上班"],"fresh":"对芒果过敏","expect":null}
+{"id":"sm-104","lang":"ja","cat":"different","existing":["朝は紅茶派","電車では本を読む","週末は実家に帰ることが多い","妹が一人いる","納豆は食べられない","歯医者が苦手","甘党"],"fresh":"弟が一人いる","expect":null}
+{"id":"sm-105","lang":"en","cat":"different","existing":["Lives in Austin","Runs before work","Hates cilantro","Has two cats","Works in finance","Watches F1","Drives a Honda","Allergic to shellfish","Reads before bed"],"fresh":"Has a dog back home in Ohio","expect":null}
+{"id":"sm-106","lang":"cross","cat":"different","existing":["Prefers voice messages","Takes the train to work","Reads before bed","Has a sister in Denver","Bakes sourdough on weekends"],"fresh":"毎朝コーヒーを二杯飲む","expect":null}

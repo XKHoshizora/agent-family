@@ -1,0 +1,100 @@
+{"id":"ms-001","kind":"owner","lang":"zh","cat":"everyday","text":"不吃辣，也不吃香菜","expect":"open"}
+{"id":"ms-002","kind":"owner","lang":"zh","cat":"everyday","text":"对花生过敏","expect":"open"}
+{"id":"ms-003","kind":"owner","lang":"zh","cat":"everyday","text":"周三晚上固定打羽毛球","expect":"open"}
+{"id":"ms-004","kind":"owner","lang":"zh","cat":"everyday","text":"喜欢喝美式，不加糖","expect":"open"}
+{"id":"ms-005","kind":"owner","lang":"zh","cat":"everyday","text":"早上十点前别发消息给他，他不看","expect":"open"}
+{"id":"ms-006","kind":"owner","lang":"zh","cat":"everyday","text":"看电影只看原声字幕版，不爱看配音","expect":"open"}
+{"id":"ms-007","kind":"owner","lang":"zh","cat":"everyday","text":"平时骑共享单车通勤，下雨才打车","expect":"open"}
+{"id":"ms-008","kind":"owner","lang":"zh","cat":"everyday","text":"写东西的时候喜欢开着后摇，不要有歌词的","expect":"open"}
+{"id":"ms-009","kind":"owner","lang":"zh","cat":"everyday","text":"习惯发语音条，不爱打字","expect":"open"}
+{"id":"ms-010","kind":"owner","lang":"zh","cat":"everyday","text":"周日下午一般去楼下咖啡馆看书","expect":"open"}
+{"id":"ms-011","kind":"self","lang":"zh","cat":"everyday","text":"推荐餐馆时先给结论，再说理由","expect":"open"}
+{"id":"ms-012","kind":"self","lang":"zh","cat":"everyday","text":"回答尽量控制在五行以内","expect":"open"}
+{"id":"ms-013","kind":"self","lang":"zh","cat":"everyday","text":"主人说“随便”的时候，给两个具体选项让他挑","expect":"open"}
+{"id":"ms-014","kind":"self","lang":"zh","cat":"everyday","text":"提醒要写具体时间，别写“晚点”","expect":"open"}
+{"id":"ms-015","kind":"self","lang":"zh","cat":"everyday","text":"翻译的时候保留原文语气，别改得太正式","expect":"open"}
+{"id":"ms-016","kind":"self","lang":"zh","cat":"everyday","text":"推荐东西最多给三个，别列一大堆","expect":"open"}
+{"id":"ms-017","kind":"owner","lang":"zh","cat":"private","text":"最近在偷偷看新工作，还没跟公司说","expect":"vault"}
+{"id":"ms-018","kind":"owner","lang":"zh","cat":"private","text":"上个月体检查出血压偏高，在吃药","expect":"vault"}
+{"id":"ms-019","kind":"owner","lang":"zh","cat":"private","text":"在看心理医生","expect":"vault"}
+{"id":"ms-020","kind":"owner","lang":"zh","cat":"private","text":"欠朋友三万块，打算年底前还清","expect":"vault"}
+{"id":"ms-021","kind":"owner","lang":"zh","cat":"private","text":"跟妈妈吵得很凶，已经两周没说话了","expect":"vault"}
+{"id":"ms-022","kind":"owner","lang":"zh","cat":"private","text":"觉得组长老周特别爱甩锅，不想跟他一组","expect":"vault"}
+{"id":"ms-023","kind":"owner","lang":"zh","cat":"private","text":"住在朝阳路那个小区的十二号楼三单元","expect":"vault"}
+{"id":"ms-024","kind":"owner","lang":"zh","cat":"private","text":"打算年终奖发了就提离职，现在谁都没说","expect":"vault"}
+{"id":"ms-025","kind":"owner","lang":"zh","cat":"private","text":"税后月薪一万八，房贷占了一半","expect":"vault"}
+{"id":"ms-026","kind":"owner","lang":"zh","cat":"private","text":"家里 Wi-Fi 密码是 tetsu2024，路由器后台还是默认密码","expect":"vault"}
+{"id":"ms-027","kind":"self","lang":"zh","cat":"private","text":"主人在偷偷找工作，推荐职位时别在群里提","expect":"vault"}
+{"id":"ms-028","kind":"self","lang":"zh","cat":"private","text":"主人最近胃不舒服，推荐餐馆要避开油腻辛辣，别跟别人说是因为胃","expect":"vault"}
+{"id":"ms-029","kind":"self","lang":"zh","cat":"private","text":"主人跟女朋友在冷战，别主动提她","expect":"vault"}
+{"id":"ms-030","kind":"self","lang":"zh","cat":"private","text":"主人这个月手头紧，推荐东西尽量选便宜的，别让别人知道","expect":"vault"}
+{"id":"ms-031","kind":"self","lang":"zh","cat":"private","text":"主人晚上常失眠，别在群里聊熬夜的事","expect":"vault"}
+{"id":"ms-032","kind":"self","lang":"zh","cat":"private","text":"主人信用卡每月二十五号还款，提醒他，但群里别写金额","expect":"vault"}
+{"id":"ms-033","kind":"owner","lang":"zh","cat":"ambiguous","text":"有一个三岁的女儿","expect":"vault"}
+{"id":"ms-034","kind":"owner","lang":"zh","cat":"ambiguous","text":"下周要去上海出差三天","expect":"vault"}
+{"id":"ms-035","kind":"owner","lang":"zh","cat":"ambiguous","text":"最近在减肥，晚上不吃主食","expect":"vault"}
+{"id":"ms-036","kind":"owner","lang":"zh","cat":"ambiguous","text":"刚搬到新家，家具还没买齐","expect":"vault"}
+{"id":"ms-037","kind":"owner","lang":"zh","cat":"ambiguous","text":"今年准备考研，周末基本都在图书馆","expect":"vault"}
+{"id":"ms-038","kind":"self","lang":"zh","cat":"ambiguous","text":"主人最近在备考，晚上别推太多消息","expect":"vault"}
+{"id":"ms-039","kind":"self","lang":"zh","cat":"ambiguous","text":"主人下周不在本地，周一到周三的提醒顺延","expect":"vault"}
+{"id":"ms-040","kind":"self","lang":"zh","cat":"ambiguous","text":"主人最近在存钱买车，选东西多考虑性价比","expect":"vault"}
+{"id":"ms-041","kind":"owner","lang":"ja","cat":"everyday","text":"辛いものが苦手で、パクチーも食べない","expect":"open"}
+{"id":"ms-042","kind":"owner","lang":"ja","cat":"everyday","text":"毎週水曜の夜はバドミントンの練習","expect":"open"}
+{"id":"ms-043","kind":"owner","lang":"ja","cat":"everyday","text":"コーヒーはブラック派","expect":"open"}
+{"id":"ms-044","kind":"owner","lang":"ja","cat":"everyday","text":"返信は夜のほうが早い。朝はほとんど見ない","expect":"open"}
+{"id":"ms-045","kind":"owner","lang":"ja","cat":"everyday","text":"映画は吹き替えより字幕で観る","expect":"open"}
+{"id":"ms-046","kind":"self","lang":"ja","cat":"everyday","text":"お店を勧めるときは、先に結論、そのあとに理由","expect":"open"}
+{"id":"ms-047","kind":"self","lang":"ja","cat":"everyday","text":"返事は三行くらいの短めで","expect":"open"}
+{"id":"ms-048","kind":"self","lang":"ja","cat":"everyday","text":"「何でもいい」と言われたら、選択肢を二つ出す","expect":"open"}
+{"id":"ms-049","kind":"owner","lang":"ja","cat":"private","text":"最近こっそり転職活動をしていて、会社にはまだ言っていない","expect":"vault"}
+{"id":"ms-050","kind":"owner","lang":"ja","cat":"private","text":"先月の健康診断で血圧が高いと言われて、薬を飲み始めた","expect":"vault"}
+{"id":"ms-051","kind":"owner","lang":"ja","cat":"private","text":"心療内科に通っている","expect":"vault"}
+{"id":"ms-052","kind":"owner","lang":"ja","cat":"private","text":"友達に十万円借りていて、ボーナスで返す予定","expect":"vault"}
+{"id":"ms-053","kind":"owner","lang":"ja","cat":"private","text":"彼女とケンカして、もう一週間連絡を取っていない","expect":"vault"}
+{"id":"ms-054","kind":"self","lang":"ja","cat":"private","text":"主人が転職活動中なので、求人の話はグループでは出さない","expect":"vault"}
+{"id":"ms-055","kind":"self","lang":"ja","cat":"private","text":"主人は胃の調子が悪いので脂っこい店は避ける。理由は人に言わない","expect":"vault"}
+{"id":"ms-056","kind":"self","lang":"ja","cat":"private","text":"主人は今月ピンチなので、高いものは勧めない。人には言わない","expect":"vault"}
+{"id":"ms-057","kind":"owner","lang":"ja","cat":"ambiguous","text":"三歳の娘がいる","expect":"vault"}
+{"id":"ms-058","kind":"owner","lang":"ja","cat":"ambiguous","text":"来週、大阪に二泊三日で出張","expect":"vault"}
+{"id":"ms-059","kind":"self","lang":"ja","cat":"ambiguous","text":"主人は来週不在なので、リマインドは月曜以降にずらす","expect":"vault"}
+{"id":"ms-060","kind":"self","lang":"ja","cat":"ambiguous","text":"主人は最近ダイエット中。夜は軽めのお店を勧める","expect":"vault"}
+{"id":"ms-061","kind":"owner","lang":"en","cat":"everyday","text":"Doesn't eat spicy food or cilantro","expect":"open"}
+{"id":"ms-062","kind":"owner","lang":"en","cat":"everyday","text":"Plays badminton every Wednesday night","expect":"open"}
+{"id":"ms-063","kind":"owner","lang":"en","cat":"everyday","text":"Takes coffee black, no sugar","expect":"open"}
+{"id":"ms-064","kind":"owner","lang":"en","cat":"everyday","text":"Would rather send a voice message than type","expect":"open"}
+{"id":"ms-065","kind":"owner","lang":"en","cat":"everyday","text":"Watches everything with subtitles on, even in English","expect":"open"}
+{"id":"ms-066","kind":"self","lang":"en","cat":"everyday","text":"When recommending restaurants, give the pick first, then the reason","expect":"open"}
+{"id":"ms-067","kind":"self","lang":"en","cat":"everyday","text":"Keep answers under five lines unless he asks for more","expect":"open"}
+{"id":"ms-068","kind":"self","lang":"en","cat":"everyday","text":"When he says \"whatever\", offer two concrete options","expect":"open"}
+{"id":"ms-069","kind":"owner","lang":"en","cat":"private","text":"Secretly job hunting, hasn't told his company yet","expect":"vault"}
+{"id":"ms-070","kind":"owner","lang":"en","cat":"private","text":"Blood pressure came back high at last month's checkup, now on medication","expect":"vault"}
+{"id":"ms-071","kind":"owner","lang":"en","cat":"private","text":"Sees a therapist every other Thursday","expect":"vault"}
+{"id":"ms-072","kind":"owner","lang":"en","cat":"private","text":"Owes his brother $4,000 and is paying it back slowly","expect":"vault"}
+{"id":"ms-073","kind":"owner","lang":"en","cat":"private","text":"Thinks his manager Greg takes credit for other people's work","expect":"vault"}
+{"id":"ms-074","kind":"self","lang":"en","cat":"private","text":"Owner is quietly job hunting, don't mention job listings in group chats","expect":"vault"}
+{"id":"ms-075","kind":"self","lang":"en","cat":"private","text":"Owner has stomach trouble, avoid greasy places but don't say why in groups","expect":"vault"}
+{"id":"ms-076","kind":"self","lang":"en","cat":"private","text":"Owner and his partner are fighting, never bring her up unprompted","expect":"vault"}
+{"id":"ms-077","kind":"owner","lang":"en","cat":"ambiguous","text":"Has a three-year-old daughter","expect":"vault"}
+{"id":"ms-078","kind":"owner","lang":"en","cat":"ambiguous","text":"Flying to Berlin for work next week, three days","expect":"vault"}
+{"id":"ms-079","kind":"self","lang":"en","cat":"ambiguous","text":"Owner is on a diet, suggest lighter dinner options","expect":"vault"}
+{"id":"ms-080","kind":"self","lang":"en","cat":"ambiguous","text":"Owner is training for a half marathon, so skip late-night suggestions","expect":"vault"}
+{"id":"ms-081","kind":"owner","lang":"mix","cat":"everyday","text":"不吃辣，パクチーもNG","expect":"open"}
+{"id":"ms-082","kind":"owner","lang":"mix","cat":"everyday","text":"毎週水曜は badminton，晚上别约他","expect":"open"}
+{"id":"ms-083","kind":"owner","lang":"mix","cat":"everyday","text":"咖啡只喝 black，不加奶不加糖","expect":"open"}
+{"id":"ms-084","kind":"owner","lang":"mix","cat":"everyday","text":"在日本留学，课表相关的提醒用日语也行，中文更舒服","expect":"open"}
+{"id":"ms-085","kind":"owner","lang":"mix","cat":"everyday","text":"喜欢简短的回复，最好用 bullet points","expect":"open"}
+{"id":"ms-086","kind":"self","lang":"mix","cat":"everyday","text":"推荐店的时候先说结论，then reason","expect":"open"}
+{"id":"ms-087","kind":"self","lang":"mix","cat":"everyday","text":"日本語の固有名詞は漢字のまま，括号里加读音","expect":"open"}
+{"id":"ms-088","kind":"self","lang":"mix","cat":"everyday","text":"回答用中文，但 app 名字和专有名词保持 English","expect":"open"}
+{"id":"ms-089","kind":"owner","lang":"mix","cat":"private","text":"在日本找就職，まだ家里人不知道","expect":"vault"}
+{"id":"ms-090","kind":"owner","lang":"mix","cat":"private","text":"上周 bank 账户被盗刷了两万日元，还在跟银行 claim","expect":"vault"}
+{"id":"ms-091","kind":"owner","lang":"mix","cat":"private","text":"跟室友ケンジ因为房租吵架了，打算月底搬走","expect":"vault"}
+{"id":"ms-092","kind":"owner","lang":"mix","cat":"private","text":"觉得ゼミの先生太偏心，看不顺眼","expect":"vault"}
+{"id":"ms-093","kind":"owner","lang":"mix","cat":"private","text":"住在高田馬場那边的 apartment，二楼最里面那间","expect":"vault"}
+{"id":"ms-094","kind":"self","lang":"mix","cat":"private","text":"主人在偷偷准备 plan B，因为担心 ビザ 更新被拒，群里别提签证的事","expect":"vault"}
+{"id":"ms-095","kind":"self","lang":"mix","cat":"private","text":"主人最近 anxiety 很严重，推荐活动别在群里说原因","expect":"vault"}
+{"id":"ms-096","kind":"self","lang":"mix","cat":"private","text":"主人バイト的工资被拖欠了，别在群里催他","expect":"vault"}
+{"id":"ms-097","kind":"owner","lang":"mix","cat":"ambiguous","text":"有一个三歳的儿子","expect":"vault"}
+{"id":"ms-098","kind":"owner","lang":"mix","cat":"ambiguous","text":"下周去 Osaka 出差三天","expect":"vault"}
+{"id":"ms-099","kind":"self","lang":"mix","cat":"ambiguous","text":"主人最近 on a diet，晚饭推荐清淡点","expect":"vault"}
+{"id":"ms-100","kind":"self","lang":"mix","cat":"ambiguous","text":"主人下个月要回国，提醒顺延到回来之后","expect":"vault"}
