@@ -25,20 +25,35 @@ export async function decidedAlready(q: Queryable, conversationId: string, seq: 
 }
 
 /**
- * After a judgement, whatever came of it: each of `agentIds` stamped as judged in the group now (`judged_at`). The rows
- * not there yet are inserted first, on their own: a new row waits for the group's row (its foreign key) while holding no
- * other. Then every one is locked in id order and stamped.
+ * After a judgement, whatever came of it: each of `agentIds` stamped as judged in the group now (`judged_at`), and, when
+ * the judgement was answered, as judged up to the message at `answeredSeq` (`judged_seq`, never lowered; null: it was
+ * not answered, and what it was shown is new to the next one still). The rows not there yet are inserted first, on their
+ * own: a new row waits for the group's row (its foreign key) while holding no other. Then every one is locked in id order
+ * and stamped.
  */
-export async function stampJudged(db: Db, conversationId: string, agentIds: readonly string[]): Promise<void> {
+export async function stampJudged(db: Db, conversationId: string, agentIds: readonly string[], answeredSeq: number | null): Promise<void> {
   await db.query(
     "insert into agent_group_state (agent_id, conversation_id, judged_at) select unnest($1::uuid[]), $2, now() on conflict (agent_id, conversation_id) do nothing",
     [agentIds, conversationId],
   );
   await db.query(
     `with locked as (select agent_id from agent_group_state where conversation_id = $2 and agent_id = any($1::uuid[]) order by agent_id for update)
-     update agent_group_state s set judged_at = now() from locked where s.conversation_id = $2 and s.agent_id = locked.agent_id`,
-    [agentIds, conversationId],
+     update agent_group_state s set judged_at = now(), judged_seq = greatest(s.judged_seq, $3::bigint)
+       from locked where s.conversation_id = $2 and s.agent_id = locked.agent_id`,
+    [agentIds, conversationId, answeredSeq],
   );
+}
+
+/**
+ * The message the options were last judged up to in the group: the latest `judged_seq` among `agentIds`, null when none
+ * was ever judged there with an answer.
+ */
+export async function judgedUpTo(q: Queryable, conversationId: string, agentIds: readonly string[]): Promise<number | null> {
+  const { rows } = await q.query<{ seq: string | null }>(
+    "select max(judged_seq)::text as seq from agent_group_state where conversation_id = $1 and agent_id = any($2::uuid[])",
+    [conversationId, agentIds],
+  );
+  return rows[0]?.seq == null ? null : Number(rows[0].seq);
 }
 
 /**

@@ -26,7 +26,7 @@ import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./thr
  *    (`lockAgent`, id order) and read again, then its `agent_group_state` row (id order: state.ts), the quiet answers
  *    are applied (`afterQuiet`; a sure one tells the group once an hour, `agent_quieted`), and the winner — the Agent
  *    option with the highest pick probability, ties to the lowest id — replies when the message has led to no proactive
- *    reply yet, its probability reaches its threshold (`thresholdNow`), this message did not ask it to be quiet (the hush
+ *    reply yet, its probability reaches its threshold (`thresholdNow`), the new messages did not ask it to be quiet (the hush
  *    rule) and it can speak now; when it cannot, nobody does (there is no second choice). Its reply is queued in lane
  *    `proactive`, called for by nobody (a call folded into it while it is queued makes it that call's; a halt ends it
  *    while it is not, runs.ts), and its surcharge rises at once (`afterProactive`).
@@ -78,9 +78,9 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
     const reason = err instanceof JudgeError ? err.reason : deadline.aborted ? "timeout" : "network";
     log.info({ metric: "judge_failed", reason, conversationId }, "the judgement model gave no answer: no Agent replies unasked");
   }
-  // Whatever came of it: one more judgement today, and each option judged now.
+  // Whatever came of it: one more judgement today, and each option judged now — up to this message when it was answered.
   await countJudgement(db, day);
-  await stampJudged(db, conversationId, options.map((o) => o.agentId));
+  await stampJudged(db, conversationId, options.map((o) => o.agentId), answers === null ? null : seq);
   if (answers === null) return noneTriggered();
 
   const P = config.proactive;
@@ -235,7 +235,7 @@ async function lockOptions(t: Tx, conversationId: string, seq: number, ids: read
 }
 
 /**
- * Why the winner `agent` (pick probability `p`, quiet probability `quiet` for this message, its threshold's `state` with
+ * Why the winner `agent` (pick probability `p`, quiet probability `quiet` for the new messages, its threshold's `state` with
  * the others' messages since its surcharge) does not reply, or null when it does: the message at `seq` already led to a
  * proactive reply here — of any Agent: a surcharge was stamped after it (`already_decided`; at most one reply per
  * message, however often it is decided; the stamp stays when a call takes the reply over); this message asked it to be

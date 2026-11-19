@@ -916,7 +916,7 @@ describe("the hourly caps through the app: only messages actually judged count",
     await sayDecided(w.third, w.g, "有人会做饭吗");
     await sayDecided(w.owner, w.g, "我也想学");
     await sayDecided(w.member, w.g, "第三个问题");
-    expect(judge.calls.map((c) => c.state.split("\n").at(-1))).toEqual(["third：有人会做饭吗", "owner：我也想学"]);
+    expect(judge.calls.map((c) => c.state.split("\n").at(-1))).toEqual(["【新】third：有人会做饭吗", "【新】owner：我也想学"]);
   });
 
   it("a sender: across groups, the fourth of their messages judged in the hour is not; unjudged ones never counted", async () => {

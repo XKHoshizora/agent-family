@@ -4,6 +4,7 @@ import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
 import { mentionedHandles } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
+import { judgedUpTo } from "./state.ts";
 
 /**
  * What a proactive judgement is about (batch 2D, "Who is asked, and how"), read without writing: whether a message is
@@ -22,10 +23,16 @@ const DESCRIPTION_CHARS = 200;
 export const PICK = "pick";
 export const NOBODY = "nobody";
 
+/**
+ * What a line of the transcript opens with when it is new: sent after the options were last judged in the group with an
+ * answer (`judgedUpTo`). The latest message always is.
+ */
+export const NEW_MARK = "【新】";
+
 const PICK_INSTRUCTIONS = "群里有几个 AI 助手。记录里标着“（Agent）”的是它们说过的话。最新这条消息如果需要某个 AI 助手主动来回答，应该由谁回答？";
 const NOBODY_DESCRIPTION = "不需要任何 AI 助手回答：真人之间的闲聊、客套、道谢，已经有人回答了，或者不属于上面任何一位擅长的事";
 const quietInstructions = (name: string): string =>
-  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。最新这条消息是在让${name}别再说话、安静一点，或者表示它打扰到大家了。`;
+  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。开头标着${NEW_MARK}的是刚发的消息。在这些${NEW_MARK}消息里，有人在让${name}别再说话、安静一点，或者表示它打扰到大家了，而且在那之后没有人又让它继续说。没有标${NEW_MARK}的旧消息不算。`;
 
 /** An Agent the judgement may pick. */
 export interface Option {
@@ -131,9 +138,12 @@ export interface JudgeRequest {
 /**
  * The request for the message at `seq` (the group's latest that is not a notice): the transcript — the last
  * `transcriptMessages` messages that are not notices, after the latest join among `options` (so no option is shown what
- * came before it joined), oldest first, each `{name}：{text}` (an Agent's `{name}（Agent）：{text}`; a file `[文件] {caption
+ * came before it joined), oldest first, each `{name}：{text}`, opened with `NEW_MARK` when it came after the message the
+ * options were last judged up to (the latest always: a request to be quiet that a later message covered is still asked
+ * about, and one judged already is not asked about again) (an Agent's `{name}（Agent）：{text}`; a file `[文件] {caption
  * or name}`), the name a label's (`labelName`), the text on one line and cut at `transcriptChars` characters — then one
- * choice over the options and `nobody`, and a quiet question about each option that sent one of the messages shown.
+ * choice over the options and `nobody` about the latest message, and a quiet question about each option that sent one of
+ * the messages shown, asked of the new messages.
  * Null when there is no line to show (nothing is asked about descriptions alone).
  */
 export async function requestFor(
@@ -144,8 +154,8 @@ export async function requestFor(
   P: Pick<ProactiveConfig, "transcriptMessages" | "transcriptChars">,
 ): Promise<JudgeRequest | null> {
   const after = Math.max(...options.map((o) => o.joinedSeq));
-  const { rows } = await q.query<{ sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
-    `select m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
+  const { rows } = await q.query<{ seq: string; sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
+    `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
        from messages m join principals p on p.id = m.sender_id
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind in ('text', 'file')
@@ -154,9 +164,11 @@ export async function requestFor(
     [conversationId, after, seq, P.transcriptMessages],
   );
   if (rows.length === 0) return null;
+  // Null (never judged with an answer): only the latest message is new, as when each message is judged in turn.
+  const judged = Math.min((await judgedUpTo(q, conversationId, options.map((o) => o.agentId))) ?? seq - 1, seq - 1);
   const lines = rows.reverse().map((r) => {
     const text = r.kind === "file" ? `[文件] ${r.text || r.file || ""}` : (r.text ?? "");
-    return `${labelName(r.name, r.handle)}${r.sender_kind === "agent" ? "（Agent）" : ""}：${cut(text, P.transcriptChars)}`;
+    return `${Number(r.seq) > judged ? NEW_MARK : ""}${labelName(r.name, r.handle)}${r.sender_kind === "agent" ? "（Agent）" : ""}：${cut(text, P.transcriptChars)}`;
   });
   const spoke = new Set(rows.map((r) => r.sender_id));
   const pick: Question = {

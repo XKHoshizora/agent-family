@@ -40,7 +40,7 @@ const RANDOM = "6a0d4c2e-1b3f-4a5e-9c7d-8e9f0a1b2c3d";
 const PICK_TEXT = "群里有几个 AI 助手。记录里标着“（Agent）”的是它们说过的话。最新这条消息如果需要某个 AI 助手主动来回答，应该由谁回答？";
 const NOBODY_TEXT = "不需要任何 AI 助手回答：真人之间的闲聊、客套、道谢，已经有人回答了，或者不属于上面任何一位擅长的事";
 const quietText = (name: string) =>
-  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。最新这条消息是在让${name}别再说话、安静一点，或者表示它打扰到大家了。`;
+  `群里有一个 AI 助手「${name}」。记录里标着“${name}（Agent）”的是它说过的话。开头标着【新】的是刚发的消息。在这些【新】消息里，有人在让${name}别再说话、安静一点，或者表示它打扰到大家了，而且在那之后没有人又让它继续说。没有标【新】的旧消息不算。`;
 
 let lines: Array<Record<string, unknown>> = [];
 const log = {
@@ -356,7 +356,7 @@ describe("what the judgement model is asked", () => {
     expect(judge.calls).toHaveLength(1);
     const { state, questions } = judge.calls[0]!;
     expect(state).toBe(
-      ["群聊记录：", "member：大家好", "anna（Agent）：我来推荐几道菜： 番茄炒蛋", "dora（Agent）：我也在", "hal_bot（Agent）：我走了", "third：那周末去哪儿玩？"].join("\n"),
+      ["群聊记录：", "member：大家好", "anna（Agent）：我来推荐几道菜： 番茄炒蛋", "dora（Agent）：我也在", "hal_bot（Agent）：我走了", "【新】third：那周末去哪儿玩？"].join("\n"),
     );
     const inIdOrder = [anna, bob, carl].sort((a, b) => (a.id < b.id ? -1 : 1));
     const descriptions: Record<string, string> = {
@@ -390,7 +390,7 @@ describe("what the judgement model is asked", () => {
 
     const { state, questions } = judge.calls[0]!;
     expect(state).toBe(
-      ["群聊记录：", "小厨群成员 Agent（Agent）：你好", "member：[文件] 看看这个", "member：[文件] 照片 .jpg", "member：第一句 第二句", `member：${"字".repeat(300)}`].join("\n"),
+      ["群聊记录：", "小厨群成员 Agent（Agent）：你好", "member：[文件] 看看这个", "member：[文件] 照片 .jpg", "member：第一句 第二句", `【新】member：${"字".repeat(300)}`].join("\n"),
     );
     const described = Object.values(pickOf(questions).options);
     expect(described).toContain("小厨群成员 Agent：第一行 第二行 第三行；擅长：家常菜");
@@ -409,7 +409,7 @@ describe("what the judgement model is asked", () => {
     await agentOf(w.third, "dave_bot", w.g);
     await decide(w.g, asked);
     expect(offered()).toEqual(["anna", "nobody"]);
-    expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：早\nmember：今晚做什么菜好？");
+    expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：早\n【新】member：今晚做什么菜好？");
 
     // The late one alone: nobody to ask about.
     await db.query("update agents set proactive = false where principal_id = $1", [anna.id]);
@@ -435,14 +435,14 @@ describe("what the judgement model is asked", () => {
     await say(w.member, w.g, "dave 来了");
     const asked = await say(w.third, w.g, "问个问题");
     await decide(w.g, asked);
-    expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：dave 来了\nthird：问个问题");
+    expect(judge.calls[0]!.state).toBe("群聊记录：\nmember：dave 来了\n【新】third：问个问题");
     // anna's own message lies before dave joined: it is not shown, so anna is asked no quiet question.
     expect(judge.calls[0]!.questions.map((q) => q.key)).toEqual(["pick"]);
 
     await db.query("update agents set proactive = false where principal_id = $1", [dave.id]);
     const again = await say(w.third, w.g, "再问一个");
     await decide(w.g, again);
-    expect(judge.calls[1]!.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\nthird：再问一个");
+    expect(judge.calls[1]!.state).toBe("群聊记录：\nmember：早\nanna（Agent）：早上好\nmember：dave 来了\nthird：问个问题\n【新】third：再问一个");
     expect(judge.calls[1]!.questions.map((q) => q.key)).toEqual(["pick", "q_a1"]);
   });
 
@@ -454,7 +454,25 @@ describe("what the judgement model is asked", () => {
     const asked = await say(w.member, w.g, "第18条");
     await decide(w.g, asked);
     const shown = judge.calls[0]!.state.split("\n").slice(1);
-    expect(shown).toEqual(Array.from({ length: 15 }, (_, i) => `member：第${i + 4}条`));
+    expect(shown).toEqual(Array.from({ length: 15 }, (_, i) => `${i === 14 ? "【新】" : ""}member：第${i + 4}条`));
+  });
+
+  it("the messages since the options were last judged with an answer are marked new: a covered one too, one judged already not again", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    await agentSays(anna.id, w.g, "番茄蛋花汤");
+    await decide(w.g, await say(w.member, w.g, "听起来不错"));
+    expect(judge.calls[0]!.state).toBe("群聊记录：\nanna（Agent）：番茄蛋花汤\n【新】member：听起来不错");
+    // Two messages before the next judgement: both are new, the one judged before is not.
+    await say(w.third, w.g, "你先别插话了");
+    await decide(w.g, await say(w.member, w.g, "那我们去吃火锅吧"));
+    expect(judge.calls[1]!.state.split("\n").slice(2)).toEqual(["member：听起来不错", "【新】third：你先别插话了", "【新】member：那我们去吃火锅吧"]);
+    // A judgement that was not answered judged nothing: what it was shown is new to the next one still.
+    judge.answer(() => new JudgeError("auth"));
+    await decide(w.g, await say(w.member, w.g, "几点去"));
+    judge.answer(() => ({}));
+    await decide(w.g, await say(w.member, w.g, "七点吧"));
+    expect(judge.calls[3]!.state.split("\n").slice(-3)).toEqual(["member：那我们去吃火锅吧", "【新】member：几点去", "【新】member：七点吧"]);
   });
 
   it("a sender blocked by an owner, or who blocked one, is offered none of that owner's Agents; other owners' stay", async () => {
