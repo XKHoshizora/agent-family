@@ -147,7 +147,7 @@ async function freshDatabase() {
 }
 
 /** What a spec may set for the next start of the service (`restart(extra)`): small brakes, nothing else. */
-const ADJUSTABLE = new Set(["AGENT_CHAIN_LIMIT"]);
+const ADJUSTABLE = new Set(["AGENT_CHAIN_LIMIT", "MEMORY"]);
 
 /**
  * The service process. `start()` spawns it (same environment every time, plus what the last `restart(extra)` set) and
@@ -322,6 +322,10 @@ export async function startLocalSystem() {
       E2E_JUDGE: JSON.stringify(judge(judgeStub.url)),
       E2E_STUB_JUDGE_KEY: JUDGE_STUB_KEY,
       PROACTIVE: JSON.stringify({ debounceMs: 300 }),
+      // Memory: the review waits ten minutes of quiet (the default), so no other spec ever sees one (a review is a charged
+      // call: it would show up in the usage lines and use the small allowance); agents-memory.spec.mjs restarts the service
+      // with a one-second wait (`restart({MEMORY})`). The dream sweep is a day apart: no dream happens in a run.
+      MEMORY: JSON.stringify({ dreamSweepMs: 86_400_000 }),
       // Small, so a few replies use it up (agents.spec.mjs).
       FREE_DAILY_POINTS: "1",
       // tsx compiles the service's TypeScript with the service's own settings.

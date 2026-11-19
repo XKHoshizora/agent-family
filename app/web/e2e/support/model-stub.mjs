@@ -28,6 +28,26 @@ function chunks(text, size) {
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
+/** The words that tell a memory call from a reply: a distinctive phrase of the memory review's and the hearsay call's system text. */
+const MEMORY_MARKS = { review: "记忆整理员", hearsay: "听说整理员" };
+/** What a memory call answers when no rule matches it: nothing worth keeping. */
+const MEMORY_DEFAULTS = { review: '{"ops":[]}', hearsay: '{"entries":[],"drop":[]}' };
+
+/** The system text and the user messages of a call, as strings (either protocol). */
+function textsOf(body) {
+  const flat = (content) => (typeof content === "string" ? content : Array.isArray(content) ? content.map((c) => c?.text ?? "").join("") : "");
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  const system = [flat(body?.system), ...messages.filter((m) => m?.role === "system").map((m) => flat(m.content))].join("\n");
+  const user = messages.filter((m) => m?.role === "user").map((m) => flat(m.content)).join("\n");
+  return { system, user };
+}
+
+/** `"review"` or `"hearsay"` for a call of the memory feature (by its system text), else null. */
+const memoryKindOf = (body) => {
+  const { system } = textsOf(body);
+  return Object.keys(MEMORY_MARKS).find((kind) => system.includes(MEMORY_MARKS[kind])) ?? null;
+};
+
 /** One server-sent event: an `event:` line when named, then the JSON as `data:`. */
 const sse = (data, event) => `${event ? `event: ${event}\n` : ""}data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`;
 
@@ -95,6 +115,12 @@ export function startModelStub() {
   let queue = [];
   /** Calls holding (`hang`), oldest first: `release(text)` goes on with `text` and ends the answer. */
   let held = [];
+  /**
+   * What memory calls answer (control `memory`): `{kind, when, step}`; a call of that kind whose user message contains `when`
+   * takes the first such rule once. Memory calls never take a step of `queue` and are not among `calls()`: a review or a hearsay
+   * call comes some time after a reply, and must not eat what a spec scripted for the next reply.
+   */
+  let memoryRules = [];
 
   async function stream(req, res, record, step, protocol) {
     const usage = step.usage ?? DEFAULT_USAGE;
@@ -173,6 +199,15 @@ export function startModelStub() {
         res.end('{"error":{"message":"no such endpoint"}}');
         return;
       }
+      const memoryKind = req.method === "POST" ? memoryKindOf(body) : null;
+      if (memoryKind) {
+        record.memory = memoryKind;
+        const user = textsOf(body).user;
+        const at = memoryRules.findIndex((r) => r.kind === memoryKind && user.includes(r.when));
+        const rule = at >= 0 ? memoryRules.splice(at, 1)[0] : null;
+        stream(req, res, record, rule?.step ?? { text: MEMORY_DEFAULTS[memoryKind] }, protocol).catch(() => res.destroy());
+        return;
+      }
       const step = queue.shift() ?? { text: DEFAULT_REPLY };
       if (step.status) {
         res.writeHead(step.status, { "content-type": "application/json" });
@@ -191,11 +226,15 @@ export function startModelStub() {
         for (const hold of held) hold.release(null);
         held = [];
         queue = [];
+        memoryRules = [];
         requests = [];
         return { ok: true };
       case "script":
         queue.push(...(body?.steps ?? []));
         return { pending: queue.length };
+      case "memory":
+        memoryRules.push({ kind: body.kind, when: String(body.when ?? ""), step: { text: body.text, ...(body.options ?? {}) } });
+        return { rules: memoryRules.length };
       case "release": {
         const hold = held.shift();
         if (!hold) throw new Error("no call is holding");
@@ -247,10 +286,22 @@ export const modelStub = {
   release: (text = "") => call("release", { text }),
   /** `{requests, pending, holding}`. */
   state: () => call("state"),
-  /** The streaming calls received so far (model calls, not model lists), oldest first. */
+  /** The streaming calls received so far (model calls, not model lists, not the memory feature's), oldest first. */
   async calls() {
-    return (await call("state")).requests.filter((r) => r.method === "POST");
+    return (await call("state")).requests.filter((r) => r.method === "POST" && !r.memory);
   },
+  /**
+   * The calls of the memory feature so far, oldest first: `kind` "review" or "hearsay" (all when omitted). Each is a recorded
+   * request (`body`: the call as sent).
+   */
+  async memoryCalls(kind) {
+    return (await call("state")).requests.filter((r) => r.memory && (kind === undefined || r.memory === kind));
+  },
+  /**
+   * A call of kind "review" or "hearsay" whose user message contains `when` answers `text` (once). Anything else of that kind
+   * answers nothing worth keeping (`{"ops":[]}` / `{"entries":[],"drop":[]}`).
+   */
+  memoryAnswer: (kind, when, text, options = {}) => call("memory", { kind, when, text, options }),
   /** Waits until `n` calls are holding. */
   async holding(n = 1) {
     await expect.poll(async () => (await call("state")).holding, { message: `${n} model call(s) holding`, timeout: 20_000 }).toBe(n);

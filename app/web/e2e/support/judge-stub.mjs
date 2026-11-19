@@ -16,13 +16,47 @@ const NOT_QUIET = 0.02;
 /** The words its rules look for in the latest line: an on-topic request for the first Agent; a request for quiet. */
 export const ON_TOPIC = "川菜";
 export const HUSH = "别插话";
+/**
+ * The words the memory rules look for (agents-memory.spec.mjs): a note whose text contains `VAULT_MARK` is private (the
+ * sort question is answered 0.05, so the note goes into the vault; any other note is answered 0.95: outside); a new group
+ * message that contains `LISTEN_MARK` is something said about its owner (the hearsay listener question is answered 0.95).
+ */
+export const VAULT_MARK = "体检";
+export const LISTEN_MARK = "报告";
+
+/**
+ * The memory feature's questions (app/service/src/memory/sort.ts, hearsay.ts; agents/proactive/candidates.ts), each recognised
+ * by a distinctive phrase of its instructions and answered by its own fixed rule; null for any other question. Answers are
+ * a `noul` probability.
+ * - sort (a note about the owner, or an Agent's own): 0.05 when the note holds `VAULT_MARK`, else 0.95;
+ * - duplicate of an existing note: 0.05; the faithful check of a dream's change: 0.95;
+ * - listener "someone else said something about the owner": 0.95 when a new (【新】) line holds `LISTEN_MARK`, else 0.05;
+ * - listener "the owner said something about themselves": 0.05;
+ * - hearsay "something new in this batch": 0.95; hearsay "abuse": 0.05.
+ */
+function memoryAnswer(state, question) {
+  if (question?.type !== "noul") return null;
+  const text = String(question.instructions ?? "");
+  const has = (phrase) => text.includes(phrase);
+  if (has("这是一个人的 AI 助手记下的一条关于主人的笔记") || has("这是一个 AI 助手给自己记的一条笔记")) return String(state ?? "").includes(VAULT_MARK) ? 0.05 : SURE;
+  if (has("这是一个 AI 助手关于主人的两条笔记")) return 0.05;
+  if (has("新的这些说的全都是原来的笔记里已经有的事")) return SURE;
+  if (has("有人（不是") && has("本人的、以后还用得上的事")) {
+    const fresh = String(state ?? "").split("\n").filter((l) => l.startsWith("【新】"));
+    return fresh.some((l) => l.includes(LISTEN_MARK)) ? SURE : 0.05;
+  }
+  if (has("自己说了一件关于自己的、以后还用得上的事")) return 0.05;
+  if (has("至少有一条说了一件已经记下的内容里没有的、关于主人的新的事")) return SURE;
+  if (has("反复发内容相近的话")) return 0.05;
+  return null;
+}
 
 /**
  * The answers to `questions` about `state`, by the latest line of `state`: containing `ON_TOPIC`, every choice picks
  * its first option that is not `nobody` with 0.95 (the others share the rest) and every quiet question is 0.02;
  * containing `HUSH`, every choice picks `nobody` with 0.95 and every quiet question is 0.95; anything else, `nobody` with
  * 0.95 and quiet 0.02. The shape is the protocol's: `{answers: {key: {type: "choice", choice, confidence, probabilities}
- * | {noul}}}`.
+ * | {noul}}}`. The memory feature's questions are answered by `memoryAnswer`'s rules instead of the hush rule.
  */
 export function judgeAnswers(state, questions) {
   const lines = String(state ?? "").split("\n");
@@ -38,7 +72,8 @@ export function judgeAnswers(state, questions) {
       const rest = names.length > 1 ? (1 - SURE) / (names.length - 1) : 0;
       answers[key] = { type: "choice", choice, confidence: SURE, probabilities: Object.fromEntries(names.map((n) => [n, n === choice ? SURE : rest])) };
     } else if (question?.type === "noul") {
-      answers[key] = { noul: hush ? SURE : NOT_QUIET };
+      const memory = memoryAnswer(state, question);
+      answers[key] = { noul: memory ?? (hush ? SURE : NOT_QUIET) };
     }
   }
   return { answers };
