@@ -832,7 +832,7 @@ owner sends `"vault": false` here. Any `vault` the owner sends is their choice, 
 sorts that note again; without one a new note goes by the owner's setting (`newNotes`: `vault`, `open`, or `auto`: asked
 of the judgement model, in the vault when that cannot be asked or is not sure), and a text edit alone may move a note
 outside the vault into it (judged again; `unsure` then comes from that judgement) but never out, and never touches a note
-the owner chose for. A text edit that changes nothing (the same text, no `vault`) is not a write: `updatedAt` stays.
+the owner chose for. A text edit that changes nothing (the same text, no `vault`) is not a write: `updatedAt` stays. A text edit that changes the text clears the note's origin conversation (it began there no longer; `memory/origin.ts`), so a vault note that began in a group is no longer shown in it; a `vault`-only patch does not.
 
 #### `GET /api/memory/notes`
 
@@ -916,20 +916,24 @@ as a review does (`memoryCall`, purpose `memory`: one call per room; the judgeme
 
 - *When*: a sweep every `MEMORY.dreamSweepMs` finds the owners who dream — `accounts.dream` is on (`GET`/`PATCH /api/me`
   `dream`, on until chosen); they have sent no message (text or file) in any conversation for `dreamIdleMs`; something happened to
-  their notes since `accounts.dreamed_at` (a change applied or confirmed, a note written or mentioned again, a note's `seen_at`);
-  and `dreamed_at` is empty or older than `dreamEveryMs`. The sweep's timer is armed once when the service starts (`resume`) and
+  their notes since `accounts.dreamed_at` (a change a review made, applied or confirmed — `memory_changes.phase` `rest`; a dream's
+  own change, `dream`, is no reason for the next dream — or a note written or mentioned again, a note's `seen_at`); and `dreamed_at`
+  is empty or older than `dreamEveryMs`. A job that was queued asks all of this again when it starts. The sweep's timer is armed once when the service starts (`resume`) and
   again after each sweep; `close()` clears it. One job per owner consolidates, one room after another, the owner's shared room
   (carried out by the owner's Agent with memory and shared notes on that has the lowest id and is neither paused nor deleted: the
   notice goes to that Agent's own conversation; with no such Agent the shared room does not dream) and each Agent's own room that
   had something since `dreamed_at`, as that Agent. When every room is done `dreamed_at` is set, whether or not anything changed.
   A call that fails (none could be made, an error, a time-out) sets nothing, and the next sweep tries again: three calls in all
-  in a day per owner, counted in this process's memory; rooms already done are not paid for again.
+  in a day per owner, counted in this process's memory; rooms already done are not paid for again. What is remembered in
+  memory (the failures, the rooms done) expires after 24 hours: a room that failed three times yesterday is tried again today.
+  A room that napped, or was consolidated, within `dreamEveryMs` is not consolidated again by the sweep.
 - *A nap*: right after a change was applied or confirmed leaves a room at or above `napAt` of its limit, that room is
-  consolidated at once, without waiting for idleness, at most once per `dreamEveryMs` per room (in this process's memory). A nap
-  does not set `dreamed_at`.
+  consolidated at once, without waiting for idleness, at most once per `dreamEveryMs` per room (in this process's memory), and
+  never with the owner's 入梦 switch off. A nap does not set `dreamed_at`.
 - *What the model is shown*: one JSON object `{"notes": [{"ref": "n1", "text", "date", "last_mentioned", "strength", "vault",
   "new"}…], "room": {"used", "limit"}}` — the room's notes cleaned (`cleanText`), `date` the day it was written and `last_mentioned`
-  the day it was last mentioned (site time zone, `YYYY-MM-DD`), `new` for a note written or changed since `dreamed_at`. Its
+  the day it was last mentioned (site time zone, `YYYY-MM-DD`), `new` for a note written or changed since `dreamed_at` (before a first
+  dream: written in the last 24 hours). Its
   system text (Chinese) names the jobs: look at what is new, merge what says the same thing, let the later date win (the earlier
   becomes `现在…（以前…，YYYY 年 M 月改的）`), write a passing mood or one day's event as a dated event, shorten low-`strength`,
   long-ago entries when the room is over 80% full, split an entry only when it plainly holds unrelated facts, lock one that
@@ -944,17 +948,23 @@ as a review does (`memoryCall`, purpose `memory`: one call per room; the judgeme
   every source was); a merged note's `strength` is the sum, its `seen_at` the latest, its origin the `into` note's; a merged or
   rewritten text must fit the room by the net rule and, when it is outside the vault, is sorted again (towards the vault only; a
   text with no verdict goes in, unsure); every open note that is new and that no op touched, and that the owner did not open
-  themselves, is sorted again once and locked (`vault_by` `auto`) on a vault verdict; an op naming a note that changed since the
-  dream read it (its exact `updated_at`) is dropped. A split must add nothing: one judgement question
-  (`splitAddsNothing`, the site's, counted as the others, fail closed: dropped on any error) about the source and its parts, applied at
-  `splitAt` or more, and parts that together are longer than twice the source plus 40 code points are not even asked about. A
+  themselves, is sorted again (`resortNote`: always asked, whatever the owner's setting for new notes says; at most 20 per room per
+  dream, the newest first; no answer means the note stays) and locked (`vault_by` `auto`) on a vault verdict; an op naming a note
+  that changed since the dream read it (its exact `updated_at`) is dropped; a `lock` of a note the owner took out of the vault
+  (`vault = false`, `vault_by` the owner) is dropped. Nothing a dream makes is applied unless one judgement question (`addsNothing`,
+  the site's, counted as the others, fail closed: dropped on any error) finds it adds nothing and, for a merge or rewrite, loses
+  nothing: `{"sources": […], "result"}` at `faithfulAt` or more; for a split `{"source", "parts"}` at `splitAt` or more, and parts
+  that together are longer than twice the source plus 40 code points are not even asked about. A note keeps its origin conversation
+  only while all its content came from there (`memory/origin.ts`, the one place): a merge keeps `into`'s origin only when every
+  source has it, a rewrite that was checked and a split keep it, a review of another conversation that replaces the note and the
+  owner's own text edit clear it; an undo puts the recorded origin back. A
   part keeps the source's origin, `strength` and `seen_at`, lists in order from the source's `created_at`, and is in the vault with
   the source's `vault_by` when the source was, else sorted on its own (the vault when unsure).
 - *The audited path*: everything goes through `memory_changes` as one change per room (stored ops `merge` — with the notes it
   removed — `split` — with the parts it made —, `replace` for a rewrite and `lock`), a notice for the owner only, undo
-  (every note back exactly: ids, texts, vault state, `created_at`, `updated_at`, `strength`, `seen_at`; refused 409
-  `stale_change` when one changed since) and 先问我再记 (`memoryAsk` of the Agent carrying the dream out: the dream's changes are
-  one pending card; confirming applies all or nothing). The notice's lines: `合并了：{text}`, `改成了：{text}`,
+  (every note back exactly: ids, texts, vault state, origin, `created_at`, `updated_at`, `strength`, `seen_at`, except that what
+  the owner mentioned since stays — the strength gained and a later `seen_at`; refused 409 `stale_change` when one changed since) and 先问我再记 (`memoryAsk` of the Agent carrying the dream out: the dream's changes are
+  one pending card; confirming applies all or nothing). The notice's lines: `合并了 {k} 条：{text}` (k notes merged), `改成了：{text}`,
   `拆成了：{part 1}；{part 2}…`, `锁进了保险箱：{text}`.
 - *The notice*: the `memory_changed` event of a dream has `phase: "dream"`; every other (a review's, hearsay) `phase: "rest"`; `count`
   is the number of its lines.
@@ -1960,7 +1970,7 @@ client can render its own:
 | `blocked` | `actorId` (who blocked), `principalId` (who is blocked) | a new block, in the pair's direct chat if any |
 | `unblocked` | `actorId`, `principalId` | lifting a block, in the pair's direct chat if any |
 | `topic_reset` | `actorId` (the owner) | `POST /api/conversations/:id/topic`, in an Agent's conversation: what comes before it is no longer shown to the Agent's model |
-| `memory_changed` | `actorId` = the Agent, `changeId`, `lines` (`记住了：…`, `改成了：…`, `忘掉了：…`, `锁进了保险箱：…`; `听说：「{speaker}」在「{group}」里说：…` for hearsay; for a request to unlock, the note's text), `vaultLines` (booleans, one per line: the note is in the vault afterwards), `pending`, `unlock`, `full`, `status` (`applied`, `undone`, `pending`, `discarded`) | a review (小憩) or a dream (入梦) changed, or proposed to change, the Agent's notes, in the owner's own conversation with it, sent to the owner only; text “记忆已更新”; also `phase` (`"rest"`, or `"dream"` for a dream: `合并了：…`, `改成了：…`, `拆成了：…`, `锁进了保险箱：…`) and `count` (the number of lines) |
+| `memory_changed` | `actorId` = the Agent, `changeId`, `lines` (`记住了：…`, `改成了：…`, `忘掉了：…`, `锁进了保险箱：…`; `听说：「{speaker}」在「{group}」里说：…` for hearsay; for a request to unlock, the note's text), `vaultLines` (booleans, one per line: the note is in the vault afterwards), `pending`, `unlock`, `full`, `status` (`applied`, `undone`, `pending`, `discarded`) | a review (小憩) or a dream (入梦) changed, or proposed to change, the Agent's notes, in the owner's own conversation with it, sent to the owner only; text “记忆已更新”; also `phase` (`"rest"`, or `"dream"` for a dream: `合并了 {k} 条：…`, `改成了：…`, `拆成了：…`, `锁进了保险箱：…`) and `count` (the number of lines) |
 | `agents_halted` | `actorId` (who halted) | `POST /api/conversations/:id/agents/halt`, in a group that was not halted already: “{名字} 让 Agent 停止了接话” |
 | `agent_chain_paused` | `actorId` (the Agent whose message it was), `limit` (`AGENT_CHAIN_LIMIT`) | in a group, the first Agent's message that would call another Agent after the last `limit` messages that are not notices were all Agents'; once until a person writes: “Agent 已连续对话 {limit} 条，已暂停互相接话，有人发言后继续。” |
 | `agent_budget_reached` | `actorId` = `agentId` (the Agent whose `chainBudget` is reached) | in a group, the first Agent's message that would call it once its chain budget is reached — or the end of its reply that reached it, when only Agents' messages were noted on that reply for a follow-up (pushed after that reply's `run`); once per Agent until a person writes: “{Agent 名} 已达到本次接话的点数上限，有人发言后继续。” |
@@ -2671,7 +2681,7 @@ milliseconds.
 | `hearsayMuteMs` | 21 600 000 (1–31 536 000 000) | How long a speaker judged to flood or probe raises no hearsay flags for an owner |
 | `hearsayMute` | `"observe"` (`"off"`, `"observe"`, `"on"`) | `"on"`: flooding speakers are muted as above; `"observe"`: nobody is muted or dropped, and `memory_mute_would` is logged (counts only) each time a speaker would have been; `"off"`: the flooding question is not asked |
 | `dreamSweepMs`, `dreamIdleMs`, `dreamEveryMs` | 900 000 (1–86 400 000), 10 800 000 (1–604 800 000), 72 000 000 (1–2 592 000 000) | 入梦 (An Agent's memory): how often the sweep looks for owners to consolidate; how long an owner must have sent no message anywhere; the least time between two dreams of an owner, and between two naps of a room |
-| `napAt`, `splitAt` | 0.8, 0.6 (0–1) | A room a change leaves at or above this share of its limit is consolidated at once (a nap); a split of one entry into several is applied when the judgement model is at least this sure it adds nothing |
+| `napAt`, `splitAt`, `faithfulAt` | 0.8, 0.6, 0.6 (0–1) | A room a change leaves at or above this share of its limit is consolidated at once (a nap); a split of one entry into several is applied when the judgement model is at least `splitAt` sure it adds nothing; a merge or a rewrite when it is at least `faithfulAt` sure the result adds nothing and loses nothing |
 | `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |
 
 **When a message is judged** (`scheduler.ts`, `Deps.proactive`). Once a person's message in a group is stored

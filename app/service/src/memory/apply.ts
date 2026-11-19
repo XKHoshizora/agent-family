@@ -17,7 +17,7 @@ import {
   restoreHearsay,
   restoreNote,
   roomLimit,
-  updatedAtOf,
+  stampsOf,
   updateNote,
   type ExactNote,
   type HearsayExact,
@@ -225,6 +225,37 @@ const snapshot = (s: StoredOp, n: Note, state: State): StoredOp => ({
   unsureBefore: n.unsure,
 });
 
+/**
+ * The net rule of a room's limit, judged once for a whole change: every step that shrinks a room is counted first (it frees
+ * room), then every step that grows one, in the order the ops came, each dropped (and `full` set) when its room would pass its
+ * limit. `room` is what each holds now; a step is one op's net growth in code points.
+ */
+function netRule(room: { owner: number; self: number }, steps: ReadonlyArray<{ index: number; kind: NoteKind; growth: number }>, limits: Rooms): { rejected: Set<number>; full: boolean } {
+  const left = { ...room };
+  for (const s of steps) if (s.growth < 0) left[s.kind] += s.growth;
+  const rejected = new Set<number>();
+  let full = false;
+  for (const s of steps.filter((x) => x.growth > 0).sort((a, b) => a.index - b.index)) {
+    if (fits(left[s.kind], s.growth, roomLimit(limits, s.kind))) left[s.kind] += s.growth;
+    else {
+      rejected.add(s.index);
+      full = true;
+    }
+  }
+  return { rejected, full };
+}
+
+/**
+ * The vault state of a note after its text changed to a new one with `verdict` (null: no verdict, which is not "harmless"): the
+ * vault only fills here. A note inside stays (one the owner locked too, whatever the text). One outside, whoever put it there,
+ * is new text the owner never approved for groups: it goes in unless the verdict says it is fine.
+ */
+function intoVaultOnly(note: Note, verdict: { vault: boolean; unsure: boolean } | null | undefined): { vault: boolean; by: "auto" | "owner"; unsure: boolean } {
+  if (note.vault) return { vault: true, by: note.vaultBy, unsure: note.unsure };
+  const v = verdict ?? { vault: true, unsure: true };
+  return v.vault ? { vault: true, by: "auto", unsure: v.unsure } : { vault: false, by: note.vaultBy, unsure: note.unsure };
+}
+
 type Candidate = { index: number; op: "remove" | "lock" | "replace"; note: Note; text: string; growth: number };
 type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
 
@@ -237,7 +268,6 @@ type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
  */
 function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteKind; id: string }>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
-  const room = usedIn(state);
   const touched = new Set<string>();
   const candidates: Candidate[] = [];
   const adds: AddStep[] = [];
@@ -265,32 +295,23 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
       candidates.push({ index, op: "lock", note, text: note.text, growth: 0 });
     } else if (op.op === "remove") {
       touched.add(note.id);
-      room[note.kind] -= codePoints(note.text);
-      candidates.push({ index, op: "remove", note, text: note.text, growth: 0 });
+      candidates.push({ index, op: "remove", note, text: note.text, growth: -codePoints(note.text) });
     } else {
       const text = modelNote(op.text);
       if (text === null || text === note.text) return;
       touched.add(note.id);
-      const growth = codePoints(text) - codePoints(note.text);
-      if (growth < 0) room[note.kind] += growth;
-      candidates.push({ index, op: "replace", note, text, growth });
+      candidates.push({ index, op: "replace", note, text, growth: codePoints(text) - codePoints(note.text) });
     }
   });
 
-  // Growth, in op order across replaces and adds together.
-  const rejected = new Set<number>();
-  let full = false;
-  const growing = [
-    ...candidates.filter((c) => c.op === "replace" && c.growth > 0).map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
-    ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: codePoints(a.text) })),
-  ].sort((x, y) => x.index - y.index);
-  for (const g of growing) {
-    if (fits(room[g.kind], g.growth, roomLimit(opts.rooms, g.kind))) room[g.kind] += g.growth;
-    else {
-      rejected.add(g.index);
-      full = true;
-    }
-  }
+  const { rejected, full } = netRule(
+    usedIn(state),
+    [
+      ...candidates.map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
+      ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: codePoints(a.text) })),
+    ],
+    opts.rooms,
+  );
 
   const stored: StoredOp[] = [];
   for (const { index, op, note, text } of candidates) {
@@ -301,14 +322,7 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
     } else if (op === "lock") {
       stored.push({ ...s, after: note.text, vaultAfter: true, vaultByAfter: "owner", unsureAfter: note.unsure });
     } else {
-      // Into the vault only: a note inside stays (one the owner locked too, whatever the text). One outside, whoever put
-      // it there, is new text the owner never approved for groups: it goes in unless the sorting says it is fine (a
-      // text with no verdict is not known to be).
-      let vault = { vault: note.vault, by: note.vaultBy, unsure: note.unsure };
-      if (!note.vault) {
-        const verdict = opts.vaults.get(vaultKey(note.kind, text)) ?? { vault: true, unsure: true };
-        if (verdict.vault) vault = { vault: true, by: "auto", unsure: verdict.unsure };
-      }
+      const vault = intoVaultOnly(note, opts.vaults.get(vaultKey(note.kind, text)));
       const originAfter = keptOrigin(note.originConversationId, { from: "conversation", id: opts.originConversationId });
       stored.push({ ...s, after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, originBefore: note.originConversationId, originAfter });
     }
@@ -400,19 +414,27 @@ async function execute(t: Tx, w: Ids, stored: StoredOp[]): Promise<StoredOp[]> {
 async function stamp(t: Tx, w: Ids, ops: StoredOp[]): Promise<void> {
   for (const kind of ["owner", "self"] as const) {
     const touched = ops.filter((s) => s.kind === kind && s.noteId !== null && s.op !== "remove" && s.op !== "split");
-    const at = await updatedAtOf(t, roomFor(kind, w), touched.map((s) => s.noteId!));
-    for (const s of touched) s.updatedAtAfter = at.get(s.noteId!) ?? null;
+    const at = await stampsOf(t, roomFor(kind, w), touched.map((s) => s.noteId!));
+    for (const s of touched) {
+      const now = at.get(s.noteId!);
+      s.updatedAtAfter = now?.updatedAt ?? null;
+      // What the write left, for an undo that must not erase what the owner mentions after it.
+      if (now && s.op !== "lock" && s.op !== "unlock") {
+        s.seenAtAfter = now.seenAt;
+        s.strengthAfter = now.strength;
+      }
+    }
     // The parts a split made are stamped the same way.
     const parts = ops.filter((s) => s.kind === kind && s.op === "split").flatMap((s) => s.parts!.filter((p) => p.noteId !== null));
-    const partAt = await updatedAtOf(t, roomFor(kind, w), parts.map((p) => p.noteId!));
-    for (const p of parts) p.updatedAt = partAt.get(p.noteId!) ?? null;
+    const partAt = await stampsOf(t, roomFor(kind, w), parts.map((p) => p.noteId!));
+    for (const p of parts) p.updatedAt = partAt.get(p.noteId!)?.updatedAt ?? null;
   }
 }
 
-async function writeChange(t: Tx, w: Ids, conversationId: string, status: "applied" | "pending", stored: ReadonlyArray<StoredOp | StoredHearsayOp>, full: boolean): Promise<string> {
+async function writeChange(t: Tx, w: Ids, conversationId: string, status: "applied" | "pending", stored: ReadonlyArray<StoredOp | StoredHearsayOp>, full: boolean, phase: "rest" | "dream" = "rest"): Promise<string> {
   const { rows } = await t.query<{ id: string }>(
-    `insert into memory_changes (owner_id, agent_id, conversation_id, status, ops, "full") values ($1, $2, $3, $4, $5::jsonb, $6) returning id`,
-    [w.ownerId, w.agentId, conversationId, status, JSON.stringify(stored), full],
+    `insert into memory_changes (owner_id, agent_id, conversation_id, status, ops, "full", phase) values ($1, $2, $3, $4, $5::jsonb, $6, $7) returning id`,
+    [w.ownerId, w.agentId, conversationId, status, JSON.stringify(stored), full, phase],
   );
   return rows[0]!.id;
 }
@@ -451,12 +473,12 @@ export interface DreamApplyOpts {
   status: "applied" | "pending";
   /** The sorting verdict by `vaultKey(kind, text)` of a text a merge, rewrite or split makes, or of an open note that is new; a text with none goes into the vault, unsure. */
   vaults: Map<string, { vault: boolean; unsure: boolean }>;
-  /** The ids of the notes whose split the judgement accepted: a split of any other is dropped. */
-  splits: ReadonlySet<string>;
+  /** The indexes (in the `ops` given) of the merges, rewrites and splits the judgement found to add nothing and lose nothing (sort.ts `addsNothing`): any other is dropped. */
+  checked: ReadonlySet<number>;
   /** Every note the dream was shown: its id and exact `updated_at` as it was read. An op naming a note that has changed (or is gone) since is dropped. */
   read: ReadonlyMap<string, string>;
-  /** The ids of the notes that are new since the last dream: each such note that is open, not the owner's choice and untouched by an op is sorted again, and locked when the verdict says so. */
-  fresh: ReadonlySet<string>;
+  /** The sorting verdict (sort.ts `resortNote`) of each open note that is new since the last dream: one that no op touched, that is not the owner's choice and has not changed since it was read is locked when its verdict says so. A note with no entry has no verdict and stays. */
+  resorted: ReadonlyMap<string, { vault: boolean; unsure: boolean }>;
   rooms: Rooms;
 }
 
@@ -469,7 +491,6 @@ export interface DreamApplyOpts {
  */
 function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): { stored: StoredOp[]; full: boolean } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
-  const room = usedIn(state);
   const touched = new Set<string>();
   const noteOf = (ref: string): Note | null => {
     const target = refs.get(ref);
@@ -478,13 +499,8 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
     if (!note || touched.has(note.id) || state.exact.get(note.id)?.updatedAt !== opts.read.get(note.id)) return null;
     return note;
   };
-  const verdictOf = (kind: NoteKind, text: string) => opts.vaults.get(vaultKey(kind, text)) ?? { vault: true, unsure: true };
-  const keep = (n: Note, text: string): { vault: boolean; by: "auto" | "owner"; unsure: boolean } => {
-    // Into the vault only; a note inside stays whatever the text says. One outside is new text nobody approved for groups.
-    if (n.vault) return { vault: true, by: n.vaultBy, unsure: n.unsure };
-    const verdict = verdictOf(n.kind, text);
-    return verdict.vault ? { vault: true, by: "auto", unsure: verdict.unsure } : { vault: false, by: n.vaultBy, unsure: n.unsure };
-  };
+  const verdictOf = (kind: NoteKind, text: string) => opts.vaults.get(vaultKey(kind, text));
+  const keep = (n: Note, text: string) => intoVaultOnly(n, verdictOf(n.kind, text));
   const whole = (n: Note): StoredNote => {
     const at = state.exact.get(n.id)!;
     return { noteId: n.id, text: n.text, vault: n.vault, vaultBy: n.vaultBy, unsure: n.unsure, origin: n.origin, originConversationId: n.originConversationId, createdAt: at.createdAt, updatedAt: at.updatedAt, strength: n.strength, seenAt: at.seenAt };
@@ -493,6 +509,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
   const steps: Array<{ index: number; kind: NoteKind; growth: number; stored: StoredOp }> = [];
   ops.forEach((op, index) => {
     if (op.op === "merge") {
+      if (!opts.checked.has(index)) return;
       const into = noteOf(op.into);
       const from = op.from.map(noteOf);
       if (!into || from.some((n) => n === null)) return;
@@ -523,7 +540,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
         },
       });
     } else if (op.op === "rewrite") {
-      const note = noteOf(op.ref);
+      const note = opts.checked.has(index) ? noteOf(op.ref) : null;
       const text = note ? modelNote(op.text) : null;
       if (!note || text === null || text === note.text) return;
       touched.add(note.id);
@@ -532,12 +549,12 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
         index,
         kind: note.kind,
         growth: codePoints(text) - codePoints(note.text),
-        stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true, originBefore: note.originConversationId, originAfter: keptOrigin(note.originConversationId, { from: "conversation", id: null }) },
+        stored: { ...snapshot(base("replace", note.kind, note.id), note, state), after: text, vaultAfter: vault.vault, vaultByAfter: vault.by, unsureAfter: vault.unsure, keepSeen: true, originBefore: note.originConversationId, originAfter: keptOrigin(note.originConversationId, { from: "nothing-new" }) },
       });
     } else if (op.op === "split") {
-      const note = noteOf(op.ref);
+      const note = opts.checked.has(index) ? noteOf(op.ref) : null;
       const texts = op.texts.map(modelNote);
-      if (!note || !opts.splits.has(note.id) || texts.length < 2 || texts.length > 4 || texts.some((t) => t === null)) return;
+      if (!note || texts.length < 2 || texts.length > 4 || texts.some((t) => t === null)) return;
       touched.add(note.id);
       const at = state.exact.get(note.id)!;
       const parts = (texts as string[]).map((text): StoredNote => {
@@ -552,32 +569,23 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       });
     } else {
       const note = noteOf(op.ref);
-      if (!note || note.vault) return;
+      // One the owner took out of the vault (`vault_by` the owner) is not put back by the model.
+      if (!note || note.vault || note.vaultBy === "owner") return;
       touched.add(note.id);
       steps.push({ index, kind: note.kind, growth: 0, stored: { ...snapshot(base("lock", note.kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: false } });
     }
   });
 
-  // The net rule: shrinking ops free room first, then growing ones in op order, each dropped when its room would pass its limit.
-  const rejected = new Set<number>();
-  let full = false;
-  for (const s of steps.filter((s) => s.growth < 0)) room[s.kind] += s.growth;
-  for (const s of steps.filter((s) => s.growth > 0).sort((a, b) => a.index - b.index)) {
-    if (fits(room[s.kind], s.growth, roomLimit(opts.rooms, s.kind))) room[s.kind] += s.growth;
-    else {
-      rejected.add(s.index);
-      full = true;
-    }
-  }
+  const { rejected, full } = netRule(usedIn(state), steps, opts.rooms);
   const stored = steps.filter((s) => !rejected.has(s.index)).map((s) => s.stored);
 
-  // An open note that is new since the last dream and that no op touched is sorted once more; the owner's own choice is final.
+  // An open note that is new since the last dream and that no op touched is locked on a vault verdict; the owner's own choice is final.
   for (const kind of ["owner", "self"] as const) {
     if (!allowed(kind)) continue;
     for (const note of state[kind].values()) {
-      if (!opts.fresh.has(note.id) || touched.has(note.id) || note.vault || note.vaultBy === "owner" || state.exact.get(note.id)?.updatedAt !== opts.read.get(note.id)) continue;
-      const verdict = opts.vaults.get(vaultKey(kind, note.text));
-      if (verdict?.vault) stored.push({ ...snapshot(base("lock", kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: verdict.unsure });
+      const verdict = opts.resorted.get(note.id);
+      if (!verdict?.vault || touched.has(note.id) || note.vault || note.vaultBy === "owner" || state.exact.get(note.id)?.updatedAt !== opts.read.get(note.id)) continue;
+      stored.push({ ...snapshot(base("lock", kind, note.id), note, state), after: note.text, vaultAfter: true, vaultByAfter: "auto", unsureAfter: verdict.unsure });
     }
   }
   return { stored, full };
@@ -598,7 +606,7 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   if (opts.status === "applied") await stamp(t, who, stored);
   // A room too full to take a longer text is nothing a dream has to say.
   if (stored.length === 0) return null;
-  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full);
+  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, "dream");
   return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [] };
 }
 
@@ -806,8 +814,9 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         vaultBy: s.vaultByBefore!,
         unsure: s.unsureBefore!,
         updatedAt: s.updatedAtBefore!,
-        strength: s.strengthBefore!,
-        seenAt: s.seenAtBefore!,
+        // What the owner has mentioned since stays on top of what was recorded.
+        strengthBack: { before: s.strengthBefore!, after: s.strengthAfter! },
+        seenBack: { before: s.seenAtBefore!, after: s.seenAtAfter! },
         ...(s.originBefore !== undefined ? { originConversationId: s.originBefore } : {}),
       });
     } else if (s.op === "remove") {
@@ -831,7 +840,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
         vaultBy: s.vaultByBefore!,
         unsure: s.unsureBefore!,
         updatedAt: s.updatedAtBefore!,
-        ...(s.op === "replace" && s.seenAtBefore != null ? { seenAt: s.seenAtBefore } : {}),
+        ...(s.op === "replace" && s.seenAtBefore != null && s.seenAtAfter != null ? { seenBack: { before: s.seenAtBefore, after: s.seenAtAfter } } : {}),
         ...(s.op === "replace" && s.originBefore !== undefined ? { originConversationId: s.originBefore } : {}),
       });
     }

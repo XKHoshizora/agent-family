@@ -25,7 +25,11 @@ const DUPLICATE_INSTRUCTIONS =
 const SPLIT_INSTRUCTIONS =
   "下面是一条笔记和由它拆出来的几条。拆出来的这几条加在一起，说的全都是原来那条里已经有的事，没有多出任何原来没有的内容、推测或细节。都可能是任何语言。";
 
+const FAITHFUL_INSTRUCTIONS =
+  "下面是原来的一条或几条笔记，和由它们改写或合并成的一条新笔记。新的这一条说的全都是原来的笔记里已经有的事，没有多出任何原来没有的内容、推测或细节；原来的笔记里的事也都还在（只是删掉了括号里“以前……”那样的旧经过不算漏）。都可能是任何语言。";
+
 const SPLIT = "split";
+const FAITHFUL = "faithful";
 const SORT = "sort";
 const DUP = "dup";
 const NONE = "都不是";
@@ -78,22 +82,38 @@ export async function sortNote(
 ): Promise<{ vault: boolean; unsure: boolean }> {
   if (setting === "vault") return { vault: true, unsure: false };
   if (setting === "open") return { vault: false, unsure: false };
+  return (await resortNote(deps, text, kind)) ?? { vault: true, unsure: false };
+}
+
+/**
+ * The same judgement for a note that already exists and is outside the vault (a dream looking at what is new): always asked
+ * (the owner's setting for new notes is about new notes, never about these), and null when there is no answer (no judge, the
+ * day's limit, an error, nothing usable): the caller leaves the note where it is, where `sortNote` would lock it.
+ */
+export async function resortNote(deps: SortDeps, text: string, kind: NoteKind): Promise<{ vault: boolean; unsure: boolean } | null> {
   const instructions = kind === "owner" ? OWNER_INSTRUCTIONS : SELF_INSTRUCTIONS;
   const answer = await ask(deps, `笔记：${text}`, { key: SORT, type: "noul", instructions });
-  if (answer?.type !== "noul") return { vault: true, unsure: false };
+  if (answer?.type !== "noul") return null;
   const { shareAt } = deps.config.memory;
   if (answer.p >= shareAt) return { vault: false, unsure: false };
   return { vault: true, unsure: answer.p >= UNSURE_FROM };
 }
 
+/** What a dream made out of notes: a split of one note into parts, or a merge or a rewrite into one. */
+export type DreamChange = { kind: "split"; source: string; parts: ReadonlyArray<string> } | { kind: "merge" | "rewrite"; sources: ReadonlyArray<string>; result: string };
+
 /**
- * Whether the parts a note was split into hold nothing the note did not (checked by meaning, not by length: parts repeat
- * a subject or a date, and languages differ in length): one question to the site's judgement model, `splitAt` or more sure.
- * False whenever it cannot be asked or answers nothing usable: no split then.
+ * Whether what a dream made holds nothing the notes did not say (checked by meaning, not by length: parts repeat a subject or a
+ * date, and languages differ in length): one question to the site's judgement model, `splitAt` (a split) or `faithfulAt` (a merge
+ * or a rewrite, which must also keep what the notes said) or more sure. False whenever it cannot be asked or answers nothing
+ * usable: the change is dropped then.
  */
-export async function splitAddsNothing(deps: SortDeps, source: string, parts: ReadonlyArray<string>): Promise<boolean> {
-  const answer = await ask(deps, JSON.stringify({ source, parts }), { key: SPLIT, type: "noul", instructions: SPLIT_INSTRUCTIONS });
-  return answer?.type === "noul" && answer.p >= deps.config.memory.splitAt;
+export async function addsNothing(deps: SortDeps, change: DreamChange): Promise<boolean> {
+  const split = change.kind === "split";
+  const state = JSON.stringify(split ? { source: change.source, parts: change.parts } : { sources: change.sources, result: change.result });
+  const answer = await ask(deps, state, { key: split ? SPLIT : FAITHFUL, type: "noul", instructions: split ? SPLIT_INSTRUCTIONS : FAITHFUL_INSTRUCTIONS });
+  const { splitAt, faithfulAt } = deps.config.memory;
+  return answer?.type === "noul" && answer.p >= (split ? splitAt : faithfulAt);
 }
 
 /** The id of the existing note that `text` repeats, or null (also whenever it cannot be asked: the note is then added). */

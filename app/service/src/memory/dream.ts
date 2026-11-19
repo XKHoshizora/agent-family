@@ -1,13 +1,14 @@
-import { appendSystem } from "../conversations/system.ts";
+import { siteDay } from "../accounts/store.ts";
 import type { AgentRow } from "../agents/store.ts";
+import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { cleanText, MODEL_NOTE_MAX, modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
-import { announce, errInfo, inLockedAgent, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
-import { sortNote, splitAddsNothing, type SortDeps } from "./sort.ts";
+import { announce, errInfo, inLockedAgent, memoryNotice, reviewableAgent, type PipelineDeps, type ReviewContext } from "./pipeline.ts";
+import { addsNothing, resortNote, sortNote, type SortDeps } from "./sort.ts";
 import { codePoints, getNewNotes, roomOf, used, type NoteKind } from "./store.ts";
 import { listRoomExact, type ExactNote, type Room } from "./write.ts";
 
@@ -64,8 +65,11 @@ export interface DreamState {
   rooms: Map<string, number>;
   /** When each owner's dream calls failed, ms, for the day's three tries. */
   failures: Map<string, number[]>;
-  /** The rooms of an owner already consolidated in the dream that has not ended yet (a failure elsewhere does not make them be paid for again). */
-  done: Map<string, Set<string>>;
+  /**
+   * The rooms of an owner already consolidated in the dream that has not ended yet (a failure elsewhere does not make them be paid
+   * for again), and when that dream began (ms): after a day it is forgotten, as the failures are.
+   */
+  done: Map<string, { at: number; rooms: Set<string> }>;
 }
 
 export const newDreamState = (): DreamState => ({ rooms: new Map(), failures: new Map(), done: new Map() });
@@ -87,9 +91,6 @@ function todayIn(now: Date, timeZone: string): string {
   const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
   return `${get("year")} 年 ${get("month")} 月 ${get("day")} 日`;
 }
-
-/** A date as `YYYY-MM-DD` in the site's time zone. */
-const dayIn = (at: Date, timeZone: string): string => new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(at);
 
 /**
  * The system text. The user message is JSON (`dreamInput`), so a note is only ever an escaped string: it can never become
@@ -148,7 +149,7 @@ export function dreamInput(notes: ReadonlyArray<ExactNote>, kind: NoteKind, fres
     if (text === "") continue;
     const ref = `n${refs.size + 1}`;
     refs.set(ref, { kind, id: note.id, text: note.text, vault: note.vault, vaultBy: note.vaultBy });
-    shown.push({ ref, text, date: dayIn(note.createdAt, timeZone), last_mentioned: dayIn(note.seenAt, timeZone), strength: note.strength, vault: note.vault, new: fresh.has(note.id) });
+    shown.push({ ref, text, date: siteDay(note.createdAt, timeZone), last_mentioned: siteDay(note.seenAt, timeZone), strength: note.strength, vault: note.vault, new: fresh.has(note.id) });
   }
   const user = JSON.stringify({ notes: shown, room: { used: used(notes.map((n) => n.note)), limit } });
   return { system: dreamSystem(todayIn(now, timeZone)), user, refs };
@@ -219,13 +220,13 @@ export function parseDreamOps(answer: string, refs: ReadonlySet<string>): DreamO
   }
 }
 
-/** What a dream tells the owner, line by line: `合并了：…`, `改成了：…`, `拆成了：{part 1}；{part 2}…`, `锁进了保险箱：…`, and for each whether its note is in the vault afterwards (a split: whether any part is). */
+/** What a dream tells the owner, line by line: `合并了 {k} 条：…` (k notes merged), `改成了：…`, `拆成了：{part 1}；{part 2}…`, `锁进了保险箱：…`, and for each whether its note is in the vault afterwards (a split: whether any part is). */
 export function dreamLines(ops: ReadonlyArray<StoredOp>): { lines: string[]; vaultLines: boolean[] } {
   const lines: string[] = [];
   const vaultLines: boolean[] = [];
   for (const s of ops) {
     if (s.op === "merge") {
-      lines.push(`合并了：${s.after}`);
+      lines.push(`合并了 ${1 + s.removed!.length} 条：${s.after}`);
       vaultLines.push(s.vaultAfter === true);
     } else if (s.op === "replace") {
       lines.push(`改成了：${s.after}`);
@@ -243,19 +244,18 @@ export function dreamLines(ops: ReadonlyArray<StoredOp>): { lines: string[]; vau
 
 // --- jobs --------------------------------------------------------------------------------------------------------------
 
-/** What the scheduler hands over for the three job kinds of this file (pipeline.ts `runReview` passes them on). */
+/** What the scheduler hands over for the three job kinds of this file (the scheduler's runner passes it on). */
 export interface DreamContext extends ReviewContext {
   dream: DreamState;
   /** Asks the scheduler to run another job (a sweep asks for dreams, a nap for one). */
   enqueue(job: DreamJob): void;
 }
 
-export async function runDreamJob(deps: PipelineDeps, job: DreamJob | NapJob | SweepJob, ctx: ReviewContext): Promise<void> {
-  if (!ctx.dream || !ctx.enqueue) return;
-  const dctx = ctx as DreamContext;
-  if (job.kind === "sweep") return sweep(deps, dctx);
-  if (job.kind === "nap") return nap(deps, dctx, job);
-  return dream(deps, dctx, job);
+export async function runDreamJob(deps: PipelineDeps, job: DreamJob | NapJob | SweepJob, ctx: DreamContext): Promise<void> {
+  if (!ctx.dream || !ctx.enqueue) throw new Error("a dream job needs the scheduler's dream state and its queue");
+  if (job.kind === "sweep") return sweep(deps, ctx);
+  if (job.kind === "nap") return nap(deps, ctx, job);
+  return dream(deps, ctx, job);
 }
 
 /** The owner's live Agents that keep notes, lowest id first. */
@@ -278,14 +278,32 @@ const carrierOf = (agents: ReadonlyArray<AgentRow>): AgentRow | undefined => age
 const jobFor = (agent: AgentRow, scope: string): DreamJob => ({ kind: "dream", agentId: agent.id, conversationId: "dream", ownerId: agent.ownerId, scope });
 
 /**
- * The owners who dream now, one job each. Time is the scheduler's clock (`deps.now`), and compared with what the database
- * stamped: the owner's messages, `dreamed_at`.
+ * SQL (a boolean expression): something happened to notes since `since` — a note written or mentioned again, or a change applied
+ * or confirmed that a review made (a dream's own change is no reason for the next dream) — in every room of the owner (`any`),
+ * the owner's shared room, or one Agent's own. `owner`, `since` and the agent are SQL expressions.
  */
-async function sweep(deps: PipelineDeps, ctx: DreamContext): Promise<void> {
-  const { db, config } = deps;
-  const now = deps.now();
-  const idleSince = new Date(now - config.memory.dreamIdleMs);
-  const dueBefore = new Date(now - config.memory.dreamEveryMs);
+function activitySql(owner: string, since: string, scope: "any" | "owner" | { agent: string }): string {
+  const notes =
+    scope === "any"
+      ? `exists (select 1 from owner_notes n where n.owner_id = ${owner} and n.seen_at > ${since})
+         or exists (select 1 from agent_notes n join principals np on np.id = n.agent_id where np.owner_id = ${owner} and n.seen_at > ${since})`
+      : scope === "owner"
+        ? `exists (select 1 from owner_notes n where n.owner_id = ${owner} and n.seen_at > ${since})`
+        : `exists (select 1 from agent_notes n where n.agent_id = ${scope.agent} and n.seen_at > ${since})`;
+  const touchedRoom =
+    scope === "any"
+      ? ""
+      : `and exists (select 1 from jsonb_array_elements(c.ops) o where o ->> 'kind' = '${scope === "owner" ? "owner" : "self"}')${scope === "owner" ? "" : ` and c.agent_id = ${scope.agent}`}`;
+  return `(${notes}
+    or exists (select 1 from memory_changes c where c.owner_id = ${owner} and c.status = 'applied' and c.phase = 'rest' and coalesce(c.resolved_at, c.created_at) > ${since} ${touchedRoom}))`;
+}
+
+/**
+ * The owners who dream now (all of them, or just `only`), each with the Agent that starts the job. Time is the scheduler's clock
+ * (`now`), compared with what the database stamped: the owner's messages, `dreamed_at`. A sweep and a queued job that starts
+ * both ask this.
+ */
+async function dueOwners(db: Db, config: Pick<Config, "memory">, now: number, only: string | null): Promise<Array<{ owner_id: string; agent_id: string }>> {
   const { rows } = await db.query<{ owner_id: string; agent_id: string }>(
     `select distinct on (o.id) o.id as owner_id, a.principal_id as agent_id
        from principals o
@@ -293,29 +311,41 @@ async function sweep(deps: PipelineDeps, ctx: DreamContext): Promise<void> {
        join agents a on a.principal_id = p.id and a.memory and not a.paused and a.deleted_at is null
        left join accounts acc on acc.principal_id = o.id
       where coalesce(acc.dream, true)
+        and ($3::uuid is null or o.id = $3)
         and (acc.dreamed_at is null or acc.dreamed_at < $2)
         and not exists (select 1 from messages m where m.sender_id = o.id and m.kind in ('text', 'file') and m.created_at > $1)
-        and (
-          exists (select 1 from memory_changes c where c.owner_id = o.id and c.status = 'applied' and coalesce(c.resolved_at, c.created_at) > coalesce(acc.dreamed_at, '-infinity'))
-          or exists (select 1 from owner_notes n where n.owner_id = o.id and n.seen_at > coalesce(acc.dreamed_at, '-infinity'))
-          or exists (select 1 from agent_notes n join principals np on np.id = n.agent_id where np.owner_id = o.id and n.seen_at > coalesce(acc.dreamed_at, '-infinity'))
-        )
+        and ${activitySql("o.id", "coalesce(acc.dreamed_at, '-infinity')", "any")}
       order by o.id, a.principal_id`,
-    [idleSince, dueBefore],
+    [new Date(now - config.memory.dreamIdleMs), new Date(now - config.memory.dreamEveryMs), only],
   );
-  for (const r of rows) {
+  return rows;
+}
+
+/** One job per owner who dreams now, unless that owner's dream calls have failed three times in the day. */
+async function sweep(deps: PipelineDeps, ctx: DreamContext): Promise<void> {
+  const now = deps.now();
+  for (const r of await dueOwners(deps.db, deps.config, now, null)) {
     if (ctx.closing.aborted) return;
     const failed = (ctx.dream.failures.get(r.owner_id) ?? []).filter((t) => t > now - DAY);
+    // What expired is forgotten.
+    if (failed.length === 0) ctx.dream.failures.delete(r.owner_id);
+    else ctx.dream.failures.set(r.owner_id, failed);
     if (failed.length >= TRIES_A_DAY) continue;
     ctx.enqueue({ kind: "dream", agentId: r.agent_id, conversationId: "dream", ownerId: r.owner_id, scope: "all" });
   }
 }
 
-/** A change was made: if it left a room of its owner's at or above `napAt` and that room was not consolidated within `dreamEveryMs`, that room is consolidated now. */
+/** Whether the owner's switch for 入梦 is on (`accounts.dream`; on before they chose). */
+async function switchOn(db: Db, ownerId: string): Promise<boolean> {
+  const { rows } = await db.query<{ dream: boolean }>("select coalesce((select dream from accounts where principal_id = $1), true) as dream", [ownerId]);
+  return rows[0]?.dream === true;
+}
+
+/** A change was made: if it left a room of its owner's at or above `napAt` and that room was not consolidated within `dreamEveryMs`, that room is consolidated now (never with the switch off). */
 async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<void> {
   const { db, config } = deps;
   const agent = await reviewableAgent(db, job.agentId);
-  if (agent === null) return;
+  if (agent === null || !(await switchOn(db, agent.ownerId))) return;
   const limits = roomOf(config);
   const now = deps.now();
   const rooms = await db.query<{ owner: string | null; self: string | null }>(
@@ -340,45 +370,52 @@ async function nap(deps: PipelineDeps, ctx: DreamContext, job: NapJob): Promise<
   }
 }
 
-/** Whether something happened to the room since `since`: a note written or mentioned again, or a change applied or confirmed that touched it. */
+/** Whether something happened to the room since `since` (`activitySql`). */
 async function hadActivity(db: Db, ownerId: string, room: DreamRoom, since: Date): Promise<boolean> {
-  const owner = room.kind === "owner";
-  const { rows } = await db.query<{ yes: boolean }>(
-    `select exists (select 1 from ${owner ? "owner_notes where owner_id" : "agent_notes where agent_id"} = $1 and seen_at > $2)
-         or exists (select 1 from memory_changes c
-                     where c.owner_id = $3 ${owner ? "" : "and c.agent_id = $1"} and c.status = 'applied' and coalesce(c.resolved_at, c.created_at) > $2
-                       and exists (select 1 from jsonb_array_elements(c.ops) o where o ->> 'kind' = '${owner ? "owner" : "self"}')) as yes`,
-    [owner ? ownerId : room.agentId, since, ownerId],
-  );
+  const { rows } = await db.query<{ yes: boolean }>(`select ${activitySql("$1::uuid", "$2::timestamptz", room.kind === "owner" ? "owner" : { agent: "$3::uuid" })} as yes`, [
+    ownerId,
+    since,
+    ...(room.kind === "owner" ? [] : [room.agentId]),
+  ]);
   return rows[0]?.yes === true;
 }
 
-/** One owner's dream: the rooms the job names (all that had something to do, for `all`), one after another. */
+/**
+ * One owner's dream: the rooms the job names (all that had something to do, for `all`), one after another. A job that was queued
+ * asks again when it starts: the switch is on, and (for `all`) the owner is still away, the gap since the last dream has passed
+ * and there is still something new. A room consolidated within `dreamEveryMs` (a nap) is not consolidated again by `all`.
+ */
 async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Promise<void> {
-  const { db, log } = deps;
+  const { db, log, config } = deps;
   const { ownerId } = job;
+  const now = deps.now();
+  if (job.scope === "all" ? (await dueOwners(db, config, now, ownerId)).length === 0 : !(await switchOn(db, ownerId))) return;
   const agents = await liveAgents(db, ownerId);
-  const account = (await db.query<{ dream: boolean; dreamed_at: Date | null }>("select dream, dreamed_at from accounts where principal_id = $1", [ownerId])).rows[0];
-  const since = account?.dreamed_at ?? new Date(0);
-  if (agents.length === 0 || (job.scope === "all" && account?.dream === false)) return;
+  const since = (await db.query<{ dreamed_at: Date | null }>("select dreamed_at from accounts where principal_id = $1", [ownerId])).rows[0]?.dreamed_at ?? null;
+  if (agents.length === 0) return;
 
   const carrier = carrierOf(agents);
+  const sinceOrEver = since ?? new Date(0);
   const todo: Array<{ room: DreamRoom; carrier: AgentRow }> = [];
   if (job.scope === "all" || job.scope === "owner") {
-    if (carrier && (job.scope === "owner" || (await hadActivity(db, ownerId, { kind: "owner" }, since)))) todo.push({ room: { kind: "owner" }, carrier });
+    if (carrier && (job.scope === "owner" || (await hadActivity(db, ownerId, { kind: "owner" }, sinceOrEver)))) todo.push({ room: { kind: "owner" }, carrier });
   }
   for (const agent of agents) {
     const own = job.scope === `self:${agent.id}`;
-    if (own || (job.scope === "all" && (await hadActivity(db, ownerId, { kind: "self", agentId: agent.id }, since)))) todo.push({ room: { kind: "self", agentId: agent.id }, carrier: agent });
+    if (own || (job.scope === "all" && (await hadActivity(db, ownerId, { kind: "self", agentId: agent.id }, sinceOrEver)))) todo.push({ room: { kind: "self", agentId: agent.id }, carrier: agent });
   }
 
-  const done = ctx.dream.done.get(ownerId) ?? new Set<string>();
-  ctx.dream.done.set(ownerId, done);
+  let cycle = ctx.dream.done.get(ownerId);
+  if (!cycle || now - cycle.at > DAY) cycle = { at: now, rooms: new Set<string>() };
+  ctx.dream.done.set(ownerId, cycle);
   let failed = false;
   for (const { room, carrier: by } of todo) {
     if (ctx.closing.aborted) return;
     const key = roomKey(ownerId, room);
-    if (job.scope === "all" && done.has(key)) continue;
+    if (job.scope === "all") {
+      const last = ctx.dream.rooms.get(key);
+      if (cycle.rooms.has(key) || (last !== undefined && now - last < config.memory.dreamEveryMs)) continue;
+    }
     let outcome: "done" | "failed" | "aborted";
     try {
       outcome = await dreamRoom(deps, ctx, by, room, since);
@@ -391,7 +428,7 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
       failed = true;
       continue;
     }
-    done.add(key);
+    cycle.rooms.add(key);
     ctx.dream.rooms.set(key, deps.now());
   }
   if (job.scope !== "all") return;
@@ -400,22 +437,32 @@ async function dream(deps: PipelineDeps, ctx: DreamContext, job: DreamJob): Prom
     return;
   }
   // Dreamed, whether or not anything changed.
-  await db.query(
-    `insert into accounts (principal_id, dreamed_at) values ($1, now()) on conflict (principal_id) do update set dreamed_at = excluded.dreamed_at`,
-    [ownerId],
-  );
+  await db.query(`insert into accounts (principal_id, dreamed_at) values ($1, now()) on conflict (principal_id) do update set dreamed_at = excluded.dreamed_at`, [ownerId]);
   ctx.dream.done.delete(ownerId);
   ctx.dream.failures.delete(ownerId);
 }
 
+/** At most this many open new notes are sorted again per room per dream, the newest first. */
+const RESORT_AT_MOST = 20;
+/** Before a first dream, a note counts as new only when it was written within this long. */
+const NEW_WITHIN = DAY;
+
+/** Whether an answer is something a dream can use: an object with an `ops` list (an empty one is a fine answer too). */
+function usable(answer: string): boolean {
+  const parsed = parseAnswer(answer);
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) && Array.isArray((parsed as { ops?: unknown }).ops);
+}
+
 /** One room, one call: read, ask, parse, judge what needs judging (outside any transaction), apply in one. */
-async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date): Promise<"done" | "failed" | "aborted"> {
+async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, room: DreamRoom, since: Date | null): Promise<"done" | "failed" | "aborted"> {
   const { db, config, log } = deps;
   const ownerId = by.ownerId;
   const where: Room = room.kind === "owner" ? { kind: "owner", ownerId } : { kind: "self", agentId: room.agentId };
   const notes = await listRoomExact(db, where);
   if (notes.length === 0) return "done";
-  const fresh = new Set(notes.filter((n) => n.note.updatedAt > since).map((n) => n.note.id));
+  // New: written or changed since the last dream; before a first one, written in the last day.
+  const recent = new Date(deps.now() - NEW_WITHIN);
+  const fresh = new Set(notes.filter((n) => (since === null ? n.note.createdAt > recent : n.note.updatedAt > since)).map((n) => n.note.id));
   const read = new Map(notes.map((n) => [n.note.id, n.updatedAt]));
   const input = dreamInput(notes, room.kind, fresh, room.kind === "owner" ? config.memory.roomOwner : config.memory.roomSelf, new Date(deps.now()), config.siteTimezone);
   if (input.refs.size === 0) return "done";
@@ -429,11 +476,18 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     report,
   );
   if (ctx.closing.aborted) return "aborted";
-  // Charged for an answer that cannot be used: a dream all the same (nothing is asked again for the same notes).
   if (answer === null && !report.answered) return "failed";
+  // Charged for an answer that cannot be used: a dream all the same (nothing is asked again for the same notes), and no
+  // judgement is spent on it.
+  if (answer === null || !usable(answer)) return "done";
 
-  const ops = parseDreamOps(answer ?? "", new Set(input.refs.keys()));
-  const { vaults, splits } = await judge(deps, by, ops, input.refs, fresh, ctx.closing);
+  const ops = parseDreamOps(answer, new Set(input.refs.keys()));
+  // The open notes that are new, the newest first: what the re-sort may look at.
+  const candidates = notes
+    .filter((n) => fresh.has(n.note.id) && !n.note.vault && n.note.vaultBy === "auto")
+    .sort((a, b) => b.note.updatedAt.getTime() - a.note.updatedAt.getTime())
+    .map((n) => n.note.id);
+  const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing);
   if (ctx.closing.aborted) return "aborted";
 
   const refs = new Map([...input.refs].map(([ref, n]) => [ref, { kind: n.kind, id: n.id }]));
@@ -442,81 +496,79 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
       conversationId: locked.conversationId,
       status: locked.memoryAsk ? "pending" : "applied",
       vaults,
-      splits,
+      checked,
       read,
-      fresh,
+      resorted,
       rooms: roomOf(config),
     });
     if (applied?.changeId == null) return [];
-    const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [applied.changeId])).rows[0]!;
-    const { lines, vaultLines } = dreamLines(row.ops);
-    return [
-      await appendSystem(t, locked.conversationId, {
-        event: "memory_changed",
-        actorId: locked.id,
-        changeId: applied.changeId,
-        lines,
-        vaultLines,
-        pending: row.status === "pending",
-        unlock: false,
-        full: row.full,
-        status: row.status,
-        phase: "dream",
-        count: lines.length,
-      }),
-    ];
+    return [await memoryNotice(t, locked, applied.changeId, { unlock: false, phase: "dream", linesOf: dreamLines })];
   });
   announce(deps, notices, by.id);
   log.info({ metric: "memory_dream", agentId: by.id, room: room.kind, ops: ops.length, notices: notices?.length ?? 0 }, "a memory dream ended");
   return "done";
 }
 
-/** The sorting and splitting judgements a dream's ops need, outside any transaction (the site's judgement model; failing closed). */
+/**
+ * The judgements a dream's ops need, outside any transaction (the site's judgement model; failing closed): every merge, rewrite
+ * and split is checked to add nothing and lose nothing (`addsNothing`: an op that is not sure is not applied), the texts that
+ * stay open are sorted as new notes are (the owner's setting), and what is new and open that no op names is sorted again
+ * (`resortNote`, at most `RESORT_AT_MOST`, always asked, no answer meaning the note stays).
+ */
 async function judge(
   deps: PipelineDeps,
   by: AgentRow,
   ops: DreamOp[],
   refs: DreamInput["refs"],
-  fresh: ReadonlySet<string>,
+  candidates: ReadonlyArray<string>,
   closing: AbortSignal,
-): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; splits: Set<string> }> {
+): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; checked: Set<number>; resorted: Map<string, { vault: boolean; unsure: boolean }> }> {
   const { db, config, log } = deps;
   const vaults = new Map<string, { vault: boolean; unsure: boolean }>();
-  const splits = new Set<string>();
+  const checked = new Set<number>();
+  const resorted = new Map<string, { vault: boolean; unsure: boolean }>();
   const sortDeps: SortDeps = { db, judge: deps.judge, config, log };
   const setting = await getNewNotes(db, by.ownerId);
   const sort = async (kind: NoteKind, text: string): Promise<void> => {
     if (!closing.aborted && !vaults.has(vaultKey(kind, text))) vaults.set(vaultKey(kind, text), await sortNote(sortDeps, text, kind, setting));
   };
   const named = new Set<string>();
-  for (const op of ops) {
+  for (const [index, op] of ops.entries()) {
     if (closing.aborted) break;
     if (op.op === "merge") {
       const sources = [op.into, ...op.from].map((r) => refs.get(r)!);
-      named.add(op.into);
-      op.from.forEach((r) => named.add(r));
+      sources.forEach((n) => named.add(n.id));
+      if (!(await addsNothing(sortDeps, { kind: "merge", sources: sources.map((n) => n.text), result: op.text }))) continue;
+      checked.add(index);
       // A result with a note in the vault is in the vault: nothing to ask.
       if (sources.every((n) => !n.vault)) await sort(sources[0]!.kind, op.text);
     } else if (op.op === "rewrite") {
-      named.add(op.ref);
       const note = refs.get(op.ref)!;
+      named.add(note.id);
+      if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }))) continue;
+      checked.add(index);
       if (!note.vault) await sort(note.kind, op.text);
     } else if (op.op === "split") {
-      named.add(op.ref);
       const note = refs.get(op.ref)!;
+      named.add(note.id);
       // Parts that together are far longer than the note add something: not even asked about.
       if (op.texts.reduce((sum, t) => sum + codePoints(t), 0) > 2 * codePoints(note.text) + 40) continue;
-      if (!(await splitAddsNothing(sortDeps, note.text, op.texts))) continue;
-      splits.add(note.id);
+      if (!(await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }))) continue;
+      checked.add(index);
       if (!note.vault) for (const text of op.texts) await sort(note.kind, text);
     } else {
-      named.add(op.ref);
+      named.add(refs.get(op.ref)!.id);
     }
   }
-  // An open note that is new since the last dream and that no op names is sorted once more (never one the owner opened).
-  for (const [ref, note] of refs) {
-    if (closing.aborted) break;
-    if (fresh.has(note.id) && !named.has(ref) && !note.vault && note.vaultBy === "auto") await sort(note.kind, note.text);
+  const byId = new Map([...refs.values()].map((n) => [n.id, n]));
+  let asked = 0;
+  for (const id of candidates) {
+    if (closing.aborted || asked >= RESORT_AT_MOST) break;
+    const note = byId.get(id);
+    if (!note || named.has(id)) continue;
+    asked++;
+    const verdict = await resortNote(sortDeps, note.text, note.kind);
+    if (verdict !== null) resorted.set(id, verdict);
   }
-  return { vaults, splits };
+  return { vaults, checked, resorted };
 }

@@ -15,7 +15,7 @@ export const DREAM = [
   ({ name, n }) => `${name}在梦里收拾了 ${n} 条记忆`,
 ];
 
-/** A stable index below `size` for `id` (FNV-1a over its UTF-16 units). */
+/** A stable index below `size` for `id` (FNV-1a over its code points). */
 export function pickIndex(id, size) {
   let h = 0x811c9dc5;
   for (const ch of String(id)) {

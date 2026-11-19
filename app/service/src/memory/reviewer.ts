@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import { newDreamState, SWEEP_JOB, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
+import { newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
 import { errInfo, reviewableAgent, reviewedSeq, type ReviewJob } from "./pipeline.ts";
 import { EXPLICIT } from "./review.ts";
@@ -44,6 +44,9 @@ export const realTimer: SetTimer = (fn, ms) => {
 
 export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob;
 
+/** What a job is handed: the context of every kind (each job uses what its kind needs). */
+export type JobContext = FlagsContext & DreamContext;
+
 export interface ReviewerDeps {
   db: Db;
   config: Pick<Config, "memory">;
@@ -51,8 +54,8 @@ export interface ReviewerDeps {
   /** The service is stopping: a job under way is told (its `closing`). `close()` ends them too. */
   closing?: AbortSignal;
   setTimer: SetTimer;
-  /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`); may reject: it is logged. */
-  run(job: Job, ctx: FlagsContext): Promise<void>;
+  /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`, dream.ts `runDreamJob`, by `kind`); may reject: it is logged. */
+  run(job: Job, ctx: JobContext): Promise<void>;
 }
 
 export interface Reviewer {
@@ -129,7 +132,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       running.add(job.agentId);
       if (job.kind === "dream") dreaming.add(job.ownerId);
       const key = keyOf(job.agentId, job.conversationId);
-      const ctx: FlagsContext = {
+      const ctx: JobContext = {
         closing,
         attempted: (seq) => attempted.set(key, Math.max(seq, attempted.get(key) ?? 0)),
         again: (afterMs) => void (job.kind === "flags" && armFlags(job, afterMs)),

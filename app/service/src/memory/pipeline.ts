@@ -9,7 +9,6 @@ import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type StoredOp } from "./apply.ts";
-import type { DreamJob, DreamState, NapJob, SweepJob } from "./dream.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { MAX_OPS, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
@@ -55,9 +54,6 @@ export interface ReviewContext {
   attempted(seq: number): void;
   /** After commit: a change was applied to the notes of this Agent's owner; the scheduler may nap the rooms it left nearly full. */
   changed?(agentId: string): void;
-  /** What the scheduler keeps for the dreams (dream.ts), and how a dream job asks for another job: only given to the job kinds of dream.ts. */
-  dream?: DreamState;
-  enqueue?(job: DreamJob): void;
 }
 
 /** What may be logged of an error: never its message or detail, which can carry the text of a note. */
@@ -115,7 +111,7 @@ export function announce(deps: Pick<PipelineDeps, "conversations" | "log">, noti
   }
 }
 
-/** What this owner has waiting for their yes: texts of added or replaced entries, and the notes asked to be unlocked. */
+/** What this owner has waiting for their yes: texts of added, replaced, merged or split entries, and the notes asked to be unlocked. */
 async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind: NoteKind; text: string }>; unlocks: Set<string> }> {
   const { rows } = await db.query<{ agent_id: string; ops: StoredOp[] }>("select agent_id, ops from memory_changes where owner_id = $1 and status = 'pending'", [agent.ownerId]);
   const texts: Array<{ kind: NoteKind; text: string }> = [];
@@ -124,7 +120,8 @@ async function pendingOf(db: Db, agent: AgentRow): Promise<{ texts: Array<{ kind
     for (const s of row.ops) {
       // The owner's room is shared by all their Agents; an Agent's own room is its own.
       if (s.kind === "self" && row.agent_id !== agent.id) continue;
-      if ((s.op === "add" || s.op === "replace") && s.after) texts.push({ kind: s.kind, text: s.after });
+      if ((s.op === "add" || s.op === "replace" || s.op === "merge") && s.after) texts.push({ kind: s.kind, text: s.after });
+      if (s.op === "split") for (const part of s.parts ?? []) texts.push({ kind: s.kind, text: part.text });
       if (s.op === "unlock" && s.noteId) unlocks.add(s.noteId);
     }
   }
@@ -142,16 +139,39 @@ export async function kindsFor(db: Db, agent: AgentRow, conversationId: string, 
 }
 
 /**
- * One job of the scheduler other than a flag wake-up: a review (below), or one of the dream jobs (dream.ts: the sweep, a nap,
- * a dream), which are handed on. One entry for the scheduler's runner, whatever the kind.
+ * The notice of a change, in the Agent's own conversation with its owner (the Agent is locked, in the transaction): the lines
+ * `linesOf` makes of what the change recorded, its status and fullness as stored. A room too full to take anything is only told,
+ * never asked about: a pending change with no ops is applied, no card with no lines.
  */
-export async function runReview(deps: PipelineDeps, job: ReviewJob | DreamJob | NapJob | SweepJob, ctx: ReviewContext): Promise<void> {
-  // Loaded when needed: dream.ts uses this file's helpers.
-  if (job.kind !== "review") return (await import("./dream.ts")).runDreamJob(deps, job, ctx);
-  return review(deps, job, ctx);
+export async function memoryNotice(
+  t: Tx,
+  locked: AgentRow,
+  changeId: string,
+  how: { unlock: boolean; phase: "rest" | "dream"; linesOf: (ops: StoredOp[]) => { lines: string[]; vaultLines: boolean[] } },
+): Promise<StoredMessage> {
+  const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [changeId])).rows[0]!;
+  let status = row.status;
+  if (status === "pending" && row.ops.length === 0) {
+    await t.query("update memory_changes set status = 'applied', resolved_at = now() where id = $1", [changeId]);
+    status = "applied";
+  }
+  const { lines, vaultLines } = how.linesOf(row.ops);
+  return appendSystem(t, locked.conversationId, {
+    event: "memory_changed",
+    actorId: locked.id,
+    changeId,
+    lines,
+    vaultLines,
+    pending: status === "pending",
+    unlock: how.unlock,
+    full: row.full,
+    status,
+    phase: how.phase,
+    count: lines.length,
+  });
 }
 
-async function review(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<void> {
+export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<void> {
   const { db, config, log } = deps;
   const { agentId, conversationId } = job;
   const agent = await reviewableAgent(db, agentId);
@@ -217,29 +237,7 @@ async function review(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): P
     }
     await markReviewed(t, agentId, conversationId, input.upToSeq);
     const stored: StoredMessage[] = [];
-    for (const w of written) {
-      const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [w.changeId])).rows[0]!;
-      let status = row.status;
-      // A room too full to take anything is only told, never asked about: no card with no lines.
-      if (status === "pending" && row.ops.length === 0) {
-        await t.query("update memory_changes set status = 'applied', resolved_at = now() where id = $1", [w.changeId]);
-        status = "applied";
-      }
-      stored.push(
-        await appendSystem(t, locked.conversationId, {
-          event: "memory_changed",
-          actorId: agentId,
-          changeId: w.changeId,
-          ...linesOf(row.ops),
-          pending: status === "pending",
-          unlock: w.unlock,
-          full: row.full,
-          status,
-          phase: "rest",
-          count: linesOf(row.ops).lines.length,
-        }),
-      );
-    }
+    for (const w of written) stored.push(await memoryNotice(t, locked, w.changeId, { unlock: w.unlock, phase: "rest", linesOf }));
     return stored;
   });
   announce(deps, notices, agentId);

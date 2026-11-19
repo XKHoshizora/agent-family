@@ -415,6 +415,7 @@ describe("the memory configuration", () => {
     dreamEveryMs: 72_000_000,
     napAt: 0.8,
     splitAt: 0.6,
+    faithfulAt: 0.6,
   };
 
   test("unset or empty: every default", () => {

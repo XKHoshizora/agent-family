@@ -47,14 +47,14 @@ export async function listRoomExact(q: Queryable, room: Room): Promise<ExactNote
   return rows.map((r) => ({ note: toNote(room.kind, r), createdAt: r.created_x, updatedAt: r.updated_x, seenAt: r.seen_x }));
 }
 
-/** The exact `updated_at` of the notes `ids` of `room`, by id. */
-export async function updatedAtOf(q: Queryable, room: Room, ids: ReadonlyArray<string>): Promise<Map<string, string>> {
+/** What a write left of the notes `ids` of `room`, by id: the exact `updated_at` and `seen_at`, and the strength. */
+export async function stampsOf(q: Queryable, room: Room, ids: ReadonlyArray<string>): Promise<Map<string, { updatedAt: string; seenAt: string; strength: number }>> {
   if (ids.length === 0) return new Map();
-  const { rows } = await q.query<{ id: string; updated: string }>(
-    `select id, ${exactTs("updated_at")} as updated from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1 and id = any($2::uuid[])`,
+  const { rows } = await q.query<{ id: string; updated: string; seen: string; strength: number }>(
+    `select id, ${exactTs("updated_at")} as updated, ${exactTs("seen_at")} as seen, strength from ${TABLE[room.kind]} where ${COLUMN[room.kind]} = $1 and id = any($2::uuid[])`,
     [keyOf(room), ids],
   );
-  return new Map(rows.map((r) => [r.id, r.updated]));
+  return new Map(rows.map((r) => [r.id, { updatedAt: r.updated, seenAt: r.seen, strength: r.strength }]));
 }
 
 /** One note of `room`, or null when it has none such. */
@@ -116,6 +116,12 @@ export interface NotePatch {
   /** Writes this exact strength / last-mentioned time (an undo, a merge), or `"now"` for the seen time (a review that wrote the note). Neither touches `updated_at`. */
   strength?: number;
   seenAt?: string;
+  /**
+   * An undo puts strength and last-mentioned time back as they were (`before`) without erasing what the owner mentioned since:
+   * what the note gained over what the change left (`after`) stays on top of `before`, and a later seen time than the change left stays.
+   */
+  strengthBack?: { before: number; after: number };
+  seenBack?: { before: string; after: string };
   /** The conversation the note began in: `null` clears it, left out keeps it (what to write is origin.ts's rule; an undo writes what was recorded). */
   originConversationId?: string | null;
 }
@@ -126,8 +132,9 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
     `update ${TABLE[room.kind]}
         set text = coalesce($3, text), vault = coalesce($4, vault), vault_by = coalesce($5, vault_by),
             unsure = coalesce($6, unsure), updated_at = coalesce($7::timestamptz, clock_timestamp()),
-            strength = coalesce($8::int, strength),
-            seen_at = case when $9::text = 'now' then clock_timestamp() when $9::text is not null then $9::timestamptz else seen_at end,
+            strength = case when $8::int is not null then $8::int when $12::int is not null then greatest($12::int, $12::int + strength - $13::int) else strength end,
+            seen_at = case when $9::text = 'now' then clock_timestamp() when $9::text is not null then $9::timestamptz
+                           when $14::timestamptz is not null then (case when seen_at > $15::timestamptz then seen_at else $14::timestamptz end) else seen_at end,
             origin_conversation_id = case when $10::boolean then (select id from conversations where id = $11::uuid) else origin_conversation_id end
       where id = $1 and ${COLUMN[room.kind]} = $2`,
     [
@@ -142,6 +149,10 @@ export async function updateNote(t: Tx, room: Room, id: string, patch: NotePatch
       patch.seenAt ?? null,
       patch.originConversationId !== undefined,
       patch.originConversationId ?? null,
+      patch.strengthBack?.before ?? null,
+      patch.strengthBack?.after ?? null,
+      patch.seenBack?.before ?? null,
+      patch.seenBack?.after ?? null,
     ],
   );
   return rowCount === 1;

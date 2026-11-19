@@ -21,6 +21,7 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls } from "./memory/call.ts";
+import { runDreamJob } from "./memory/dream.ts";
 import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
@@ -352,7 +353,14 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
             setTimer: memoryAsked.setTimer ?? realTimer,
             run: (job, ctx) => {
               const pipeline = { db: deps.db, config, models: deps.models, judge: deps.judge, log: app.log, inFlight: memoryRuns, conversations: deps.conversations, now: memoryAsked.now ?? Date.now };
-              return job.kind === "flags" ? runFlags(pipeline, job, ctx) : runReview(pipeline, job, ctx);
+              switch (job.kind) {
+                case "review":
+                  return runReview(pipeline, job, ctx);
+                case "flags":
+                  return runFlags(pipeline, job, ctx);
+                default:
+                  return runDreamJob(pipeline, job, ctx);
+              }
             },
           });
   const memory = deps.memory;
