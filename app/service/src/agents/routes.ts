@@ -314,6 +314,8 @@ export function registerAgentRoutes(
         return { persona: await drafting };
       } finally {
         drafts.delete(closing);
+        // Its hold is released (or it never held): a reply held back behind it may be claimed now (port-impl.ts `claimNext`).
+        app.agentWorker.wake();
       }
     },
   );

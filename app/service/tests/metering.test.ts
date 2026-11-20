@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { freeUsedToday, nextSiteMidnight, siteDay } from "../src/accounts/store.ts";
 import type { Config, ReasoningLevel } from "../src/config.ts";
 import { AppError } from "../src/errors.ts";
-import { admit, admitRun } from "../src/metering/admit.ts";
+import { admit, admitRun, HeldBack } from "../src/metering/admit.ts";
 import { estimateTokens, IMAGE_TOKENS, maxCostMicro, PDF_TOKENS_PER_KB, pdfTokens } from "../src/metering/prices.ts";
 import { settle, type Outcome, type SettleLog } from "../src/metering/settle.ts";
 import { resolveModel, type Resolved } from "../src/models/resolve.ts";
@@ -561,33 +561,44 @@ describe("admitRun", () => {
 });
 
 describe("holds", () => {
-  it("count against admission by source until settled, and GET /api/usage's canStartFreeReply follows the same rule", async () => {
+  it("count against the source a call is picked by until settled: a reply waits behind them, a persona draft does not; GET /api/usage's canStartFreeReply says whether anything is left, holds aside", async () => {
     const owner = await signUp(app, "holds");
-    const fast = await meteredAgent(app, db, owner, FREE);
+    const [a, b] = [await meteredAgent(app, db, owner, FREE), await meteredAgent(app, db, owner, FREE)];
     const now = new Date();
     const canStart = async () => (await api(app, owner, "GET", "/api/usage")).json.canStartFreeReply;
     expect(await canStart()).toBe(true);
 
-    // 3 points of allowance: the first call holds 2, leaving 1; the second holds 2 more, leaving none.
-    const [r1, r2, r3] = [await runningRun(db, owner.id), await runningRun(db, owner.id), await runningRun(db, owner.id)];
-    expect(await admitAt(r1, owner, fast.resolved, now)).toMatchObject({ chargeTo: "free" });
+    // 3 points of allowance: a reply holds 2 of it; a second reply's 2 more would pass the 3, so it waits (held back,
+    // nothing written), and nothing is refused.
+    const r1 = await runningRun(db, owner.id, a);
+    expect(await admitAt(r1, owner, a.resolved, now)).toMatchObject({ chargeTo: "free" });
+    const r2 = await runningRun(db, owner.id, b);
+    const waited = await admitAt(r2, owner, b.resolved, now).catch((e: unknown) => e);
+    expect(waited).toBeInstanceOf(HeldBack);
+    expect((waited as HeldBack).behind).toEqual([r1]);
+    expect(await runRow(r2)).toEqual({ source: null, model: null, charge_to: null, hold: "0" });
     expect(await canStart()).toBe(true);
-    expect(await admitAt(r2, owner, fast.resolved, now)).toMatchObject({ chargeTo: "free" });
-    expect(await canStart()).toBe(false);
-    expect(await refusal(admitAt(r3, owner, fast.resolved, now))).toMatchObject({ reason: "free_and_balance" });
+    // A persona draft never waits: on the 1 point left after the hold, then — nothing left after the holds, 3 before them
+    // — on the allowance all the same.
+    const [d1, d2] = [await runningRun(db, owner.id), await runningRun(db, owner.id)];
+    expect(await admitAt(d1, owner, a.resolved, now)).toMatchObject({ chargeTo: "free" });
+    expect(await admitAt(d2, owner, a.resolved, now)).toMatchObject({ chargeTo: "free" });
+    expect(await canStart()).toBe(true);
 
-    // A balance of 1 point: one call may start on it (holding 2), then none.
+    // A balance of 1 point: the waiting reply goes on to it, as admission always has once the allowance is all held — the
+    // only call holding against the balance, it starts whatever its hold.
     await grant(db, owner.id, 1_000_000n);
-    expect(await canStart()).toBe(true);
-    expect(await admitAt(r3, owner, fast.resolved, now)).toMatchObject({ chargeTo: "balance" });
-    expect(await canStart()).toBe(false);
+    expect(await admitAt(r2, owner, b.resolved, now)).toMatchObject({ chargeTo: "balance" });
 
-    // Settling the first for half a point releases its hold: 3 - 0.5 used - 2 held leaves 0.5.
+    // Settled: 0.5 + 2 of the allowance, the last draft its 0.5 left (the rest forgiven), the reply on the balance 2.
     await settleAt(r1, { inputTokens: 0, outputTokens: 500 }, { now });
+    await settleAt(d1, FULL_USAGE, { now });
     expect(await canStart()).toBe(true);
-    const r4 = await runningRun(db, owner.id);
-    expect(await admitAt(r4, owner, fast.resolved, now)).toMatchObject({ chargeTo: "free" });
+    await settleAt(d2, FULL_USAGE, { now });
+    await settleAt(r2, FULL_USAGE, { now });
+    expect((await api(app, owner, "GET", "/api/usage")).json.free.used).toBe("3");
+    expect(await balanceOf(owner.id)).toBe(-1_000_000n);
     expect(await canStart()).toBe(false);
-    expect((await api(app, owner, "GET", "/api/usage")).json.free.used).toBe("0.5");
+    await expectLedgerMatchesBalance(owner.id);
   });
 });

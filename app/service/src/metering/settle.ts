@@ -1,6 +1,7 @@
 import { applyLedger, freeUsedToday, lockAccount, memoryUsedToday, siteDay } from "../accounts/store.ts";
 import type { Config } from "../config.ts";
 import type { Tx } from "../db.ts";
+import type { ChargeTo } from "./admit.ts";
 import { assertCount, costMicro, isCount } from "./prices.ts";
 import { learnRatio } from "./tokens.ts";
 
@@ -23,6 +24,12 @@ export interface Usage {
 }
 
 const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
+
+/** What a settlement charged: to which source (null: a run never admitted, or a provider model), and how much of it the balance. */
+export interface Settled {
+  chargeTo: ChargeTo | null;
+  balanceMicro: bigint;
+}
 
 /**
  * Settles the call of run `runId` with `outcome`, by what its admission recorded on the run (`source`, `model`,
@@ -49,7 +56,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
  *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
- * settled already (`usage_records_run_id_key` holds that in the database too).
+ * settled already (`usage_records_run_id_key` holds that in the database too). Returns what it charged (`Settled`: the
+ * reminders, reminders.ts, go by it).
  */
 export async function settle(
   t: Tx,
@@ -60,7 +68,7 @@ export async function settle(
   outcome: Outcome,
   now: Date,
   { forgiveAll = false, log }: { forgiveAll?: boolean; log: SettleLog },
-): Promise<void> {
+): Promise<Settled> {
   assertCount("settle: fallback.inputChars", fallback.inputChars);
   assertCount("settle: fallback.outputChars", fallback.outputChars);
   const { rows } = await t.query<{
@@ -144,4 +152,5 @@ export async function settle(
   if (reported && run.purpose === "reply" && run.input_estimate !== null && run.ratio_key !== null) {
     await learnRatio(t, run.ratio_key, run.input_estimate, usage.inputTokens, log);
   }
+  return { chargeTo: run.charge_to, balanceMicro };
 }

@@ -336,7 +336,7 @@ describe("the money of a reply that offers tools", () => {
     expect(await holdOf(run.id)).toBe(0n);
   });
 
-  it("a hold is never lowered: whatever extend answers — another round, the last call, or none — the run holds at least what it held before", async () => {
+  it("a hold is never lowered: whatever extend answers — another round or the last call — the run holds at least what it held before", async () => {
     const { port } = toolWorker(scriptedGateway());
     const { owner, conv } = await owned("neverlower", PAID);
     await grant(db, owner.id, 10n * POINT);
@@ -359,10 +359,11 @@ describe("the money of a reply that offers tools", () => {
       { spent: U(100, 10), next: 100, answer: "ok", hold: (before) => before },
       // Past what is left, while something is left after what was spent: the last call, held at its own most, above it.
       { spent: U(1000, 100), next: 95_000, answer: "final", hold: () => costOf(U(1000, 100)) + callMax(95_000) },
-      // Spent exactly what is left: nothing more; the hold kept.
-      { spent: U(0, 10_000), next: 100, answer: "stop", hold: (before) => before },
-      // Spent a hundred micro-points less: the last call, its hold raised to what was spent and its most.
-      { spent: U(9, 9_999), next: 100, answer: "final", hold: () => costOf(U(9, 9_999)) + callMax(100) },
+      // Spent exactly what is left: the last call all the same — a reply that has started is never refused for money —,
+      // held at what was spent and its most, past what is left.
+      { spent: U(0, 10_000), next: 100, answer: "final", hold: () => costOf(U(0, 10_000)) + callMax(100) },
+      // Spent a hundred micro-points less: the last call; what it asks is below the hold, which is kept.
+      { spent: U(9, 9_999), next: 100, answer: "final", hold: (before) => before },
       // And cheap again after it: kept.
       { spent: U(9, 9_999), next: 100, answer: "final", hold: (before) => before },
     ];
@@ -424,7 +425,7 @@ describe("the money of a reply that offers tools", () => {
     expect(await Promise.all(tickets.map((t) => holdOf(t.id)))).toEqual([wanted, wanted]);
   });
 
-  it("what is left between an ordinary call's most and the last call's own most: the last call, held at its own most; with nothing left after what was spent, no call — and the free allowance is never overdrawn, nor the balance touched", async () => {
+  it("what is left between an ordinary call's most and the last call's own most: the last call, held at its own most; with nothing left after what was spent, the last call all the same — and the free allowance is never overdrawn (what passes it is forgiven), nor the balance touched", async () => {
     const hits = "川".repeat(3000);
     const two = [
       { name: "search", input: { query: "a" } },
@@ -458,30 +459,36 @@ describe("the money of a reply that offers tools", () => {
     expect(await recordsOf(run.id)).toMatchObject([{ cost: cost.toString(), free: cost.toString(), balance: "0", forgiven: "0" }]);
     expect(await freeUsed(w.owner.id)).toBe((3n * POINT - leave + cost).toString());
 
-    // Nothing left: what the reply has spent is not covered — no call; what it wrote stands, cut. The balance it also
-    // has is never moved to.
+    // Nothing left: what the reply has spent is not covered — the last call all the same (a reply that has started is
+    // never refused for money), and it answers. On the allowance, what passes what is left of it is forgiven; the balance
+    // it also has is never moved to.
     const dear = await owned("headstop");
     await grant(db, dear.owner.id, 20n * POINT);
-    const stopGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 500), text: "我先查一下。" });
+    const stopGateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 500), text: "我先查一下。" })
+      .reply("就这样。", { usage: U(500, 100) });
     await say(dear.owner, dear.conv, "查一查");
     expect(await toolWorker(stopGateway, toolbox(leaving(dear.owner.id, 0n))).worker.runOnce()).toBe(true);
-    expect(stopGateway.calls).toHaveLength(1);
+    expect(stopGateway.calls).toHaveLength(2);
+    expect(isFinal(stopGateway.calls[1]!)).toBe(true);
     const dearRun = await runOf(dear.owner.id);
     expect(dearRun).toMatchObject({ status: "done", hold: "0" });
     const replies = (await api(app, dear.owner, "GET", `/api/conversations/${dear.conv}/messages`)).json.messages.filter((m: any) => m.senderId === dear.agent.id);
-    expect(replies).toMatchObject([{ text: "我先查一下。", truncated: true }]);
-    const dearCost = costOf(U(1000, 500)).toString();
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ text: "我先查一下。\n\n就这样。" });
+    expect(replies[0].truncated ?? false).toBe(false);
+    const dearCost = (costOf(U(1000, 500)) + costOf(U(500, 100))).toString();
     expect(await recordsOf(dearRun.id)).toMatchObject([{ cost: dearCost, free: "0", balance: "0", forgiven: dearCost }]);
     expect(await freeUsed(dear.owner.id)).toBe("3000000");
     expect(await balanceOf(dear.owner.id)).toBe(20n * POINT);
 
-    // A cheap first round, nothing written: no_quota all the same — nothing is left after what it spent.
+    // A cheap first round, nothing written: the last call answers all the same.
     const mute = await owned("headmute");
-    const muteGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(10, 1) });
+    const muteGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(10, 1) }).reply("好。", { usage: U(10, 1) });
     await say(mute.owner, mute.conv, "查一查");
     expect(await toolWorker(muteGateway, toolbox(leaving(mute.owner.id, 0n))).worker.runOnce()).toBe(true);
-    expect(muteGateway.calls).toHaveLength(1);
-    expect(await runOf(mute.owner.id)).toMatchObject({ status: "failed", error: "no_quota", hold: "0" });
+    expect(muteGateway.calls).toHaveLength(2);
+    expect(await runOf(mute.owner.id)).toMatchObject({ status: "done", error: null, hold: "0" });
     expect(await freeUsed(mute.owner.id)).toBe("3000000");
   });
 
