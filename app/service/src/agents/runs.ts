@@ -188,10 +188,13 @@ export interface Announced {
   run: WireRun;
 }
 
-/** Whether `text` calls the Agent: `@` and its handle, its name part or its current name, case ignored (spec 6.5 "触发"). */
+/**
+ * Whether `text` calls the Agent: its handle or its name part as a whole mention (`mentionedHandles`: `@jarvis_2` is not
+ * `@jarvis`), or `@` and its current name anywhere, case ignored (spec 6.5 "触发").
+ */
 export function mentions(text: string, agent: Pick<AgentRow, "handle" | "namePart" | "name">): boolean {
-  const lower = text.toLowerCase();
-  return [agent.handle, agent.namePart, agent.name].some((called) => lower.includes(`@${called.toLowerCase()}`));
+  const named = mentionedHandles(text);
+  return named.includes(agent.handle.toLowerCase()) || named.includes(agent.namePart.toLowerCase()) || text.toLowerCase().includes(`@${agent.name.toLowerCase()}`);
 }
 
 /** The Agent of `conversationId` when it is an Agent conversation of `ownerId`'s, else null. */
@@ -1110,7 +1113,8 @@ export function followUpOf(run: Announced | null, told: Told = noneTold()): Foll
 /**
  * The follow-up of a run of `agent` in `conversationId` that ended having noted messages up to `pending` beyond what it
  * covered (`covers`), under that conversation's row and the Agent's (`finish`, recovery): a queued reply answering up
- * to `pending`. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
+ * to `pending`. A message there "calls" it only when the run noted it as a call when it was sent (`callSeqs`, the run's
+ * `call_seqs`; none when null), whatever its text would name now. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
  * replies a minute (it answers what its owner wrote meanwhile; README "Replies started"). In a group it is a person's
  * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it, from a person with no block between them and its owner, in either direction); otherwise only
  * Agents' messages called for it: it is an Agent's, and is not queued at all when the latest of them (`pending`) came
@@ -1150,6 +1154,7 @@ export async function followUp(
   conversationId: string,
   covers: number,
   pending: number,
+  callSeqs: readonly (number | string)[] | null,
   config: RunLimits,
 ): Promise<FollowUp> {
   const owners = callerOf(agent.ownerId, agent.ownerId);
@@ -1159,8 +1164,8 @@ export async function followUp(
   // when it was refused for this Agent when it was posted (`refused_agent_calls`), nor when there is a block, either way,
   // between the Agent's owner and the sender or the sending Agent's owner, or the person behind it (nobody behind it
   // matches no block).
-  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null; askers: string[] | null }>(
-    `select m.seq::text as seq, p.kind, m.sender_id, m.body ->> 'text' as text, bh.caller_id, r.asker_ids as askers
+  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; askers: string[] | null }>(
+    `select m.seq::text as seq, p.kind, m.sender_id, bh.caller_id, r.asker_ids as askers
        from messages m
        join principals p on p.id = m.sender_id
        left join agent_runs r on p.kind = 'agent' and ${postingRun("m", "r")}
@@ -1171,12 +1176,12 @@ export async function followUp(
       order by m.seq`,
     [conversationId, covers, pending, agent.ownerId, agent.id],
   );
-  // Whom each handle calls in the group now (`resolveMentions`).
-  const called = await resolveMentions(t, conversationId, rows.flatMap((r) => mentionedHandles(r.text ?? "")));
+  // The calls the run noted (`callSeqs`, its `call_seqs`: each recorded as it was accepted when it was sent), never read
+  // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1).
+  const noted = new Set((callSeqs ?? []).map(Number));
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
   const calls = rows.filter(
-    (r) =>
-      (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && mentionedHandles(r.text ?? "").some((h) => called.get(h) === agent.id),
+    (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && noted.has(Number(r.seq)),
   );
   const asked = calls.some((r) => r.kind === "human");
   // None of them (or none that names someone): others', with no caller.

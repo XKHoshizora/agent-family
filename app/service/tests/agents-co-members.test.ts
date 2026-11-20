@@ -48,6 +48,8 @@ const HIDDEN = {
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
+  // When a person may change their handle again: `GET /api/me` alone (family names).
+  "handleChangeAvailableAt",
   "persona",
   "personaVersion",
   "model",

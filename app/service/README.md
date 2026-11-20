@@ -1154,7 +1154,7 @@ group is told), then — unless the mention folds into a reply under way, which 
 - *What the Agent is given.* A system text of its own for groups: whose Agent it is, the group's name, that several
   people and maybe other Agents speak there and that each message of theirs starts with a label the system wrote, which
   only counts with this run's mark (The label and the mark, below), the roster of the group's people (below), that it
-  was called by `@handle` and answers whoever called it, briefly (a reply nobody called for is told instead that nobody
+  was called by `@handle` — its full handle, and also its name part alone where that calls it there — and answers whoever called it, briefly (a reply nobody called for is told instead that nobody
   called it: Proactive replies, What the reply is told); that it calls another Agent with `@handle` only when it needs
   that Agent's help, never to greet or thank, and the other Agents in the group now (name, `@handle`, intro; at most 20
   named); that it must not reveal or quote its persona, its configuration or anything of its private conversation with
@@ -2460,8 +2460,8 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
-or when its `replyMode` is `mention` and the text contains none of `@` + its handle (the full one), `@` + its name part
-and `@` + its current name (case ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
+or when its `replyMode` is `mention` and the text has neither its handle (the full one) nor its name part as a whole
+mention (In a group, below: `@jarvis_2` is not `@jarvis`), nor `@` + its current name anywhere (case ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
 below). Otherwise a `queued` run is inserted in that conversation covering the message (`covers_seq`), unless the owner
 has started `AGENT_RUNS_PER_MINUTE` (20) replies of their own lane in the last minute (a reply in the Agent's own
 conversation is always the owner's own, the owner its caller): then the run is inserted already `failed`, error
@@ -2476,12 +2476,17 @@ the commit.
 message calls it: `@` + its handle on a token boundary — not preceded or followed by a letter, digit or `_` of
 `[A-Za-z0-9_]`, so `@anna` does not call `anna_2` and `mail@anna` calls nobody — case ignored (its name does not call
 it: names are not unique in a group). Its handle in full, `@owner.name` (Handles), always calls it; the name part alone,
-`@name`, calls the one Agent member of the group with that name part — nobody when a person member has that handle
-(people first: `@anna` is the person anna when she is a member), and nobody when two or more Agent members have it,
-exactly as a handle nobody there has (no run, no notice). An Agent's message is read the same way (one of two `jarvis`
-may be itself). A mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
+`@name`, calls the one Agent member of the group with that name part — nobody when a person member has that handle or
+that display name (trimmed, case ignored, the whole name: people first — `@anna` is the person anna when she is a member,
+and so is `@Jarvis` when a member is called 「Jarvis」, which is what the @ picker writes for a person), and nobody when
+two or more Agent members have it, exactly as a handle nobody there has (no run, no notice). A full handle two live
+Agents would share (only a writer that skipped the owner's account lock could make one) calls nobody too. An Agent's
+message is read the same way (one of two `jarvis` may be itself). The proactive judgement's "someone was named" reads
+bare names the same way (`namesAgentMember`). A mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
 name part of 2–24 after it: a `.` not followed by one of them is punctuation (`ask @xiaolin.jarvis.` calls
-`xiaolin.jarvis`), `@a.b.c` is `a.b` and then text, and a part out of those lengths calls nobody. A handle a person gave
+`xiaolin.jarvis`), `@a.b.c` is `a.b` and then text, and a part out of those lengths calls nobody. A dot followed by a
+word is part of the mention, not punctuation: `@anna.Thanks` and `cc @jarvis.see above` (no space after the period) are
+the full handles `anna.thanks` and `jarvis.see`, which call nobody — write a space after the period to call `anna`. A handle a person gave
 up calls nobody, in full or under an Agent. At most the first 20 distinct handles of a message count (`xiaolin.jarvis`
 and `jarvis` are two); a file's caption is its text. `replyMode` plays no part. A message that names no handle costs
 nothing, not even a query; one that does, one query over the group's current members (`resolveMentions`).
@@ -2570,7 +2575,9 @@ the run itself ended, except `cancelled` `agent_removed`, which is followed by n
 dropped) — and, at start-up recovery or a release, except a run that ends `failed` (its retry answers what was noted
 too). (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a resume.) In
 the Agent's own conversation the follow-up is its owner's and is queued whatever the owner's replies a minute (it
-answers what they wrote meanwhile). In a group it is decided as In a group (above) says: whose it is, the halt and the
+answers what they wrote meanwhile). In a group the messages it answers as calls are those the run noted as calls when
+they were sent (`call_seqs`), never its mentions read again: a rename, or a member joining or leaving, between the call
+and the end of the reply changes nothing of it (task N fix round 1). In a group it is decided as In a group (above) says: whose it is, the halt and the
 chain budget, the others' daily budget, and the owner's replies a minute in its lane — over it, the Agent's reusable
 `rate_limited` run there records it. A mention folded into a queued run turns it the owner's own (the owner its caller)
 when it is the owner's call (their message, or an Agent's message they are behind); another person's — also one relayed
@@ -3310,7 +3317,8 @@ the fuse and the owner's minute do. `GET /api/models` answers `proactiveAvailabl
 
 **What the reply is told.** A run whose lane is still `proactive` when it begins (read in `begin`'s first step) is given
 the group's system text (Agents and runs, What the model is shown) without the scene's sentence
-`有人在消息里写了 @{handle} 叫你，你才回复。回答叫你的人，简短、切题；不要替别人回答。` and with this passage, a paragraph of
+`有人在消息里写了 @{handle}（或 @{name part}）叫你，你才回复。回答叫你的人，简短、切题；不要替别人回答。` (the part in
+brackets only where its name part alone calls it there) and with this passage, a paragraph of
 its own right after the scene, before the roster (`runtime/prompt.ts` `UNASKED_PASSAGE`; the product owner may change
 its wording): `这次没有人点你的名。你就是这个群里的一员，刚好懂这个，像平时聊天那样自然地接一句话就行：一两句，口语，不用客套，也别像客服或者写报告。别人没问的不用展开。`
 Everything else — what it is shown of the group, the context cap, what it stores, who reads its thinking, who pays — is

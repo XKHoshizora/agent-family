@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mentionedHandles } from "../src/agents/mentions.ts";
+import { namesAnAgent } from "../src/agents/proactive/candidates.ts";
+import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
 import { insertMessage } from "../src/messages/model.ts";
@@ -51,24 +53,37 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     ["@xiaolin.jarvis @jarvis @XIAOLIN.JARVIS @Jarvis", ["xiaolin.jarvis", "jarvis"]],
     ["(@xiaolin.jarvis)，@bobby.jarvis！@carl_x.helper_2", ["xiaolin.jarvis", "bobby.jarvis", "carl_x.helper_2"]],
     ["@安娜.jarvis @xiaolin.安娜", ["xiaolin"]],
+    // A dot followed by a word is a full handle, not punctuation: `@anna.Thanks` names `anna.thanks` (nobody), not anna.
+    ["@anna.Thanks", ["anna.thanks"]],
+    ["cc @jarvis.see above", ["jarvis.see"]],
   ])("%j → %j", (text, expected) => {
     expect(mentionedHandles(text)).toEqual(expected);
   });
 
-  it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like", () => {
-    const cases: Array<[string, string[]]> = [
-      ["@a.".repeat(2700), []],
-      [`@${"a.".repeat(4000)}`, []],
-      ["@aaa.bb".repeat(1200), ["aaa.bb"]],
-      [`@${"a".repeat(3999)}.${"b".repeat(4000)}`, []],
-      [".@xyz.".repeat(1400), ["xyz"]],
+  it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like take about four times what 2 000 take", () => {
+    // The best of a few runs of each size: a pause of the collector or a busy machine does not decide it.
+    const fastest = (text: string): number => {
+      let best = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < 5; i++) {
+        const started = performance.now();
+        for (let j = 0; j < 10; j++) mentionedHandles(text);
+        best = Math.min(best, performance.now() - started);
+      }
+      return best;
+    };
+    const cases: Array<[(n: number) => string, string[]]> = [
+      [(n) => "@a.".repeat(n * 0.34), []],
+      [(n) => `@${"a.".repeat(n / 2)}`, []],
+      [(n) => "@aaa.bb".repeat(n / 7), ["aaa.bb"]],
+      [(n) => `@${"a".repeat(n / 2 - 1)}.${"b".repeat(n / 2)}`, []],
+      [(n) => ".@xyz.".repeat(n / 6), ["xyz"]],
     ];
-    for (const [text, expected] of cases) {
-      expect(text.length).toBeGreaterThanOrEqual(8000);
-      expect(mentionedHandles(text)).toEqual(expected);
-      const started = performance.now();
-      for (let i = 0; i < 20; i++) mentionedHandles(text);
-      expect((performance.now() - started) / 20).toBeLessThan(5);
+    for (const [make, expected] of cases) {
+      const [small, large] = [make(2000), make(8000)];
+      expect(large.length).toBeGreaterThanOrEqual(7900);
+      expect(mentionedHandles(large)).toEqual(expected);
+      // Linear: four times the text, about four times the time (a quadratic parse would take sixteen); a few ms of grace.
+      expect(fastest(large)).toBeLessThan(8 * fastest(small) + 5);
     }
   });
 });
@@ -236,5 +251,119 @@ describe("who a mention calls in a group", () => {
       expect([text, (await covered(agent.id, conv)).at(-1)]).toEqual([text, seq]);
       await settleAll();
     }
+    // Its handle and name part as whole mentions only (fix round 1, M5): not inside a longer one.
+    const runs = await allRuns();
+    for (const text of ["@jarvis_2 在吗", "@xiaolin.jarvis2 在吗", "@jarvisx"]) await say(owner, conv, text);
+    expect(await allRuns()).toBe(runs);
+  });
+
+  it("a full handle two live Agents would have (only a write that skipped the owner's lock could make one) calls nobody (fix round 1, M1)", async () => {
+    const w = await world();
+    await agentOf(w.xiaolin, "jarvis", w.g);
+    const twin = (
+      await db.query<{ id: string }>("insert into principals (kind, handle, display_name, owner_id) values ('agent', 'jarvis', 'Twin', $1) returning id", [w.xiaolin.id])
+    ).rows[0]!.id;
+    await db.query("insert into agents (principal_id, model_source, site_model_id) values ($1, 'site', 'fast')", [twin]);
+    await join(w.g, twin);
+    const runs = await allRuns();
+    await say(w.anna, w.g, "@xiaolin.jarvis 你好");
+    expect(await allRuns()).toBe(runs);
   });
 });
+
+describe("a person member's display name is a person first (fix round 1, I2)", () => {
+  it("the person 「Jarvis」 (handle tony) and the Agent xiaolin.jarvis in one group: @Jarvis calls nobody and costs nothing, @xiaolin.jarvis calls it; without that person @jarvis calls it", async () => {
+    const w = await world();
+    const tony = await signUp(app, "tony");
+    expect((await api(app, tony, "PATCH", "/api/me", { displayName: "Jarvis" })).status).toBe(200);
+    await join(w.g, tony.id);
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    const runs = await allRuns();
+    await say(w.anna, w.g, "@Jarvis 你好");
+    expect(await allRuns()).toBe(runs);
+    expect(Number((await db.query("select count(*) n from usage_records")).rows[0].n)).toBe(0);
+    // Nor does it name an Agent for the proactive judgement: it named the person.
+    expect(await namesAnAgent(db, w.g, "@Jarvis 你好")).toBe(false);
+    // The full form is never a person's.
+    const one = await say(w.anna, w.g, "@xiaolin.jarvis 你好");
+    expect(await covered(jarvis.id, w.g)).toEqual([one]);
+    expect(await namesAnAgent(db, w.g, "@xiaolin.jarvis")).toBe(true);
+    await settleAll();
+    const elsewhere = await group(app, w.xiaolin, "elsewhere", [w.bobby, w.anna]);
+    await join(elsewhere, jarvis.id);
+    const two = await say(w.anna, elsewhere, "@jarvis 你好");
+    expect(await covered(jarvis.id, elsewhere)).toEqual([two]);
+    expect(await namesAnAgent(db, elsewhere, "@jarvis 你好")).toBe(true);
+  });
+});
+
+/** The Agent's queued run in `conv`, made running as the worker's claim makes it. */
+const claim = async (agentId: string, conv: string): Promise<RunTicket> => {
+  const { rows } = await db.query<{ id: string; owner_id: string }>(
+    "update agent_runs set status = 'running', started_at = now() where agent_id = $1 and conversation_id = $2 and status = 'queued' returning id, owner_id",
+    [agentId, conv],
+  );
+  return { id: rows[0]!.id, agentId, ownerId: rows[0]!.owner_id, conversationId: conv };
+};
+
+/** Ends a running run as the worker ends one that answered: `finish`, which follows it up. */
+const finish = (ticket: RunTicket) => app.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
+
+/** The Agent's latest run in `conv`: who and what it answers. */
+const latestRun = async (agentId: string, conv: string) =>
+  (
+    await db.query<{ status: string; by: string; lane: string; caller: string | null; askers: string[] | null; calls: number[] | null }>(
+      `select status, triggered_by as by, lane, caller_id as caller, asker_ids as askers, call_seqs::int[] as calls
+         from agent_runs where agent_id = $1 and conversation_id = $2 order by created_at desc, id desc limit 1`,
+      [agentId, conv],
+    )
+  ).rows[0];
+
+describe("a follow-up answers the calls its run recorded, as they were read when sent (fix round 1, I1)", () => {
+  it("a member's call by full handle noted while the reply runs is still theirs after the owner renames and the group is halted", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    await say(w.anna, w.g, "@xiaolin.jarvis 一");
+    const ticket = await claim(jarvis.id, w.g);
+    const noted = await say(w.bobby, w.g, "@xiaolin.jarvis 帮我查一下");
+    expect((await api(app, w.xiaolin, "PATCH", "/api/me", { handle: "lin" })).status).toBe(200);
+    expect((await api(app, w.anna, "POST", `/api/conversations/${w.g}/agents/halt`)).status).toBe(200);
+    await finish(ticket);
+    const next = await latestRun(jarvis.id, w.g);
+    expect(next).toMatchObject({ status: "queued", by: "human", lane: "others", caller: w.bobby.id });
+    expect(next!.askers).toContain(w.bobby.id);
+    expect(next!.calls).toContain(noted);
+  });
+
+  it("a bare call noted while it named one Agent stays that member's call after a second Agent of that name part joins", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    await say(w.anna, w.g, "@jarvis 一");
+    const ticket = await claim(jarvis.id, w.g);
+    const noted = await say(w.bobby, w.g, "@jarvis 二");
+    await agentOf(w.bobby, "jarvis", w.g);
+    await finish(ticket);
+    const next = await latestRun(jarvis.id, w.g);
+    expect(next).toMatchObject({ status: "queued", by: "human", lane: "others", caller: w.bobby.id });
+    expect(next!.calls).toContain(noted);
+  });
+
+  it("a message that only now reads as a call of it, but called nobody when sent, is not one", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    const other = await agentOf(w.bobby, "jarvis", w.g);
+    await say(w.anna, w.g, "@xiaolin.jarvis 一");
+    const ticket = await claim(jarvis.id, w.g);
+    // Two jarvises: the bare form calls nobody, so nothing is noted for it.
+    const ambiguous = await say(w.bobby, w.g, "@jarvis 二");
+    await db.query("update memberships set left_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2", [w.g, other.id]);
+    const noted = await say(w.anna, w.g, "@xiaolin.jarvis 三");
+    await finish(ticket);
+    const next = await latestRun(jarvis.id, w.g);
+    // anna's call alone: hers, not bobby's (whose message would be the earlier caller if it were read as a call now).
+    expect(next).toMatchObject({ status: "queued", by: "human", lane: "others", caller: w.anna.id });
+    expect(next!.calls).toContain(noted);
+    expect(next!.calls).not.toContain(ambiguous);
+  });
+});
+

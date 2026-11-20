@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInvite } from "../src/auth/invites.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -153,6 +153,21 @@ describe("PATCH /api/me {handle}", () => {
     expect(await runs()).toBe(had);
     expect((await say(bobby, g, "@lin.jarvis 还在吗")).status).toBe(201);
     expect(await runs()).toBe(had + 1);
+  });
+
+  it("once committed it stands: a push failing afterwards does not answer an error; deleted Agents get no principal push (fix round 1, M2)", async () => {
+    const xiaolin = await signUp(app, "xiaolin");
+    const live = await mustCreateAgent(app, xiaolin, { namePart: "jarvis" });
+    const gone = await mustCreateAgent(app, xiaolin, { namePart: "gone" });
+    expect((await api(app, xiaolin, "DELETE", `/api/agents/${gone.id}`)).status).toBe(200);
+    const pushed = vi.spyOn(app.realtime, "pushPrincipalChanged").mockRejectedValue(new Error("the hub is down"));
+    try {
+      expect(await rename(xiaolin, "lin")).toEqual({ status: 200, json: { id: xiaolin.id, handle: "lin", displayName: "xiaolin", avatarVersion: 0 } });
+      expect(pushed.mock.calls.map(([id]) => id)).toEqual([xiaolin.id, live.id]);
+    } finally {
+      pushed.mockRestore();
+    }
+    expect((await api(app, xiaolin, "GET", "/api/me")).json.handle).toBe("lin");
   });
 
   it("is a person's own: an Agent's handle cannot be changed this way, nor anyone else's", async () => {

@@ -9,7 +9,9 @@
 -- 2–24 of them and shares no pool with people's handles nor with other owners' Agents. It is unique among its owner's
 -- Agents that are not deleted, checked where an Agent is created, under its owner's account lock (src/agents/
 -- conversation.ts `createAgent`, the one writer): an index here cannot see `agents.deleted_at`. A deleted Agent's name
--- part is free at once.
+-- part is free at once. Any new writer of Agent principals (an import, a restore, a seed) must take the owner's account
+-- lock (`lockAccount`) and make the same check, or two live Agents could share one full handle (a mention of it then
+-- calls nobody: mentions.ts).
 alter table principals drop constraint principals_handle_key;
 alter table principals drop constraint principals_handle_check;
 alter table principals add constraint principals_handle_check

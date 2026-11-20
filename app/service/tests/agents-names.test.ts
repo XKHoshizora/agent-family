@@ -71,10 +71,27 @@ describe("creating an Agent with a name part", () => {
     expect(carla.handle).toBe("carla");
   });
 
-  it("the Agent limit is unchanged: a deleted Agent's name part is free, but it still does not count", async () => {
+  it("the Agent limit is unchanged: a deleted Agent's name part is free at once, and a deleted Agent does not count", async () => {
     const owner = await signUp(app, "xiaolin");
-    for (let i = 0; i < 20; i++) expect((await create(owner, { namePart: `bot_${i}` })).status).toBe(201);
+    const made: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const res = await create(owner, { namePart: `bot_${i}` });
+      expect(res.status).toBe(201);
+      made.push(res.json.id);
+    }
     expect(await create(owner, { namePart: "one_more" })).toEqual({ status: 403, json: { error: "agent_limit" } });
+    expect((await api(app, owner, "DELETE", `/api/agents/${made[0]}`)).status).toBe(200);
+    // Its place and its name part are free: the same name part again is the 20th live Agent.
+    expect((await create(owner, { namePart: "bot_0" })).json.handle).toBe("xiaolin.bot_0");
+    expect(await create(owner, { namePart: "one_more" })).toEqual({ status: 403, json: { error: "agent_limit" } });
+  });
+
+  it("two creates of one name part at once by one owner: exactly one is made, the others are 409 handle_taken (fix round 1, M1)", async () => {
+    const owner = await signUp(app, "xiaolin");
+    const answers = await Promise.all([create(owner, { namePart: "jarvis" }), create(owner, { namePart: "jarvis" }), create(owner, { namePart: "jarvis" })]);
+    expect(answers.map((a) => a.status).sort()).toEqual([201, 409, 409]);
+    const live = await db.query("select 1 from principals p join agents a on a.principal_id = p.id where p.owner_id = $1 and p.handle = 'jarvis' and a.deleted_at is null", [owner.id]);
+    expect(live.rowCount).toBe(1);
   });
 });
 
@@ -109,9 +126,21 @@ describe("where an Agent's handle is shown, the full one", () => {
     expect(await app.agentWorker.runOnce()).toBe(true);
     const system = gateway.calls.at(-1)!.system;
     expect(system).toContain("你是「贾维斯」（@xiaolin.jarvis），xiaolin 在 Agent Family 里的个人 Agent。");
+    // Two jarvises here: only the full handle calls it, and that is all it is told.
     expect(system).toContain("有人在消息里写了 @xiaolin.jarvis 叫你，你才回复。");
     expect(system).toContain("- 阿杰（@bobby.jarvis）：擅长查资料");
     expect(system).not.toMatch(/@jarvis\b/);
+  });
+
+  it("to a model: where its name part alone calls it, it is told both ways it is called (fix round 1, M6)", async () => {
+    const [xiaolin, bobby, carla] = [await signUp(app, "xiaolin"), await signUp(app, "bobby"), await signUp(app, "carla")];
+    const g = await group(app, xiaolin, "family", [bobby, carla]);
+    const agent = (await create(xiaolin, { namePart: "jarvis", name: "贾维斯", model: FAST, persona: "简短。" })).json;
+    expect((await api(app, xiaolin, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    expect((await api(app, bobby, "POST", `/api/conversations/${g}/messages`, { text: "@jarvis 你好", clientTxn: "m6" })).status).toBe(201);
+    gateway.reply("你好。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.at(-1)!.system).toContain("有人在消息里写了 @xiaolin.jarvis（或 @jarvis）叫你，你才回复。");
   });
 
   it("a label whose name shows as nothing falls back to the full handle", async () => {

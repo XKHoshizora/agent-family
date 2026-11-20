@@ -36,6 +36,7 @@ import {
 import { contextBudget, holdsNewest } from "./runtime/context.ts";
 import { FINAL_LINE } from "./runtime/loop.ts";
 import { postAsAgent } from "./conversation.ts";
+import { resolveMentions } from "./mentions.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import {
@@ -167,8 +168,10 @@ interface RunState {
   pending_seq: string | null;
   interrupted: Interruption | null;
   lane: Lane;
+  /** The calls it answers, as each was accepted when it was sent (`call_seqs`): what its follow-up answers of them. */
+  call_seqs: string[] | null;
 }
-const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane";
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, call_seqs::text[] as call_seqs";
 
 /**
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
@@ -428,6 +431,8 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
+      // Whether its name part alone calls it there (mentions.ts): then the system text names both ways it is called.
+      const bare = group && (await resolveMentions(t, run.conversationId, [agent.namePart])).get(agent.namePart) === agent.id ? agent.namePart : null;
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
@@ -476,7 +481,7 @@ export class DbAgentPort implements AgentPort {
         (tools: boolean) =>
         (mark: string, speakers: readonly Speaker[]): SystemText =>
           scene
-            ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
+            ? groupSystemText({ ...agent, bare }, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown, and
       // nothing at or before its asker's line (`askerLine`, Task 10b) but the calls it answers (`callsSeen`), read once,
@@ -844,7 +849,10 @@ export class DbAgentPort implements AgentPort {
       const next = followUpSeq(state.rows[0], agent, final);
       return {
         ended,
-        followed: next === null ? followUpOf(null) : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, config),
+        followed:
+          next === null
+            ? followUpOf(null)
+            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
         interrupted: state.rows[0].interrupted !== null,
         reply: posted.rows[0] ? Number(posted.rows[0].seq) : null,
       };
@@ -987,7 +995,8 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
-  const { run: followed, ...told } = next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, config);
+  const { run: followed, ...told } =
+    next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config);
   return {
     runs: followed ? [ended, followed] : [ended],
     told,

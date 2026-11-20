@@ -37,38 +37,58 @@ export function mentionedHandles(text: string): string[] {
 }
 
 /**
- * Whom in conversation `conversationId` each of `handles` (`mentionedHandles`) calls, by handle: the current Agent
- * members (not deleted) it names. `owner.name` names the Agent with name part `name` of the person whose handle is
- * `owner` now (a handle they gave up names nobody). A bare `name` names nobody when a current member is the person with
- * that handle (people first), else the one current Agent member with that name part — nobody when two or more are, as
- * for a handle nobody here has. An Agent's own message is read the same way: one of two `jarvis` is itself. One query
- * over the conversation's current members, none when there is nothing to look up. Handles that call nobody are absent.
+ * Per handle (`mentionedHandles`), the Agents it names among the current members (not deleted) of conversation
+ * `conversationId` — the one place a mention is read against a conversation (both triggers, the proactive judgement's
+ * "someone was named", the system text's way the Agent is called). `owner.name`: the Agent with name part `name` of the
+ * person whose handle is `owner` now (a handle they gave up names nobody). A bare `name`: none when a current member is a
+ * person whose handle is `name`, or whose display name is it — trimmed, case ignored, the whole name (people first: the @
+ * picker writes a person as `@` and their name) — else every Agent member with that name part. One query over the
+ * conversation's current members, none when there is nothing to look up.
  */
-export async function resolveMentions(q: Queryable, conversationId: string, handles: readonly string[]): Promise<Map<string, string>> {
-  const called = new Map<string, string>();
+async function namedAgents(q: Queryable, conversationId: string, handles: readonly string[]): Promise<Map<string, string[]>> {
+  const named = new Map<string, string[]>();
   const wanted = [...new Set(handles)];
-  if (wanted.length === 0) return called;
-  // What a principal's own handle may be: a bare handle, or the name part of a full one.
+  if (wanted.length === 0) return named;
+  // What a principal's own handle may be: a bare handle, or the name part of a full one; what a person's name may be: a bare one.
   const parts = [...new Set(wanted.map((h) => h.slice(h.indexOf(".") + 1)))];
-  const { rows } = await q.query<{ id: string; kind: "human" | "agent"; handle: string; owner: string | null }>(
-    `select p.id, p.kind, lower(p.handle::text) as handle, lower(o.handle::text) as owner
+  const bare = wanted.filter((h) => !h.includes("."));
+  const { rows } = await q.query<{ id: string; kind: "human" | "agent"; handle: string; owner: string | null; name: string }>(
+    `select p.id, p.kind, lower(p.handle::text) as handle, lower(o.handle::text) as owner, lower(btrim(p.display_name)) as name
        from memberships m
        join principals p on p.id = m.principal_id
        left join principals o on o.id = p.owner_id
-      where m.conversation_id = $1 and m.left_seq is null and p.handle = any($2::citext[])
+      where m.conversation_id = $1 and m.left_seq is null
+        and (p.handle = any($2::citext[]) or (p.kind = 'human' and lower(btrim(p.display_name)) = any($3::text[])))
         and not exists (select 1 from agents a where a.principal_id = p.id and a.deleted_at is not null)`,
-    [conversationId, parts],
+    [conversationId, parts, bare],
   );
   for (const handle of wanted) {
-    const dot = handle.indexOf(".");
-    if (dot >= 0) {
-      const agent = rows.find((r) => r.kind === "agent" && `${r.owner}.${r.handle}` === handle);
-      if (agent) called.set(handle, agent.id);
-      continue;
-    }
-    if (rows.some((r) => r.kind === "human" && r.handle === handle)) continue;
-    const agents = rows.filter((r) => r.kind === "agent" && r.handle === handle);
-    if (agents.length === 1) called.set(handle, agents[0]!.id);
+    const agents = handle.includes(".")
+      ? rows.filter((r) => r.kind === "agent" && `${r.owner}.${r.handle}` === handle)
+      : rows.some((r) => r.kind === "human" && (r.handle === handle || r.name === handle))
+        ? []
+        : rows.filter((r) => r.kind === "agent" && r.handle === handle);
+    named.set(handle, agents.map((r) => r.id));
   }
+  return named;
+}
+
+/**
+ * Whom in conversation `conversationId` each of `handles` calls (`namedAgents`): the one Agent a handle names — nobody
+ * when it names two or more, as for a handle nobody here has (two of one name part for a bare one; for a full one only a
+ * write that skipped the owner's account lock could make two). An Agent's own message is read the same way: one of two
+ * `jarvis` is itself. Handles that call nobody are absent.
+ */
+export async function resolveMentions(q: Queryable, conversationId: string, handles: readonly string[]): Promise<Map<string, string>> {
+  const called = new Map<string, string>();
+  for (const [handle, agents] of await namedAgents(q, conversationId, handles)) if (agents.length === 1) called.set(handle, agents[0]!);
   return called;
+}
+
+/**
+ * Whether any of `handles` names an Agent member of conversation `conversationId` (`namedAgents`), two of one name part
+ * included: a message asking an Agent, whether or not one was called (proactive `namesAnAgent`).
+ */
+export async function namesAgentMember(q: Queryable, conversationId: string, handles: readonly string[]): Promise<boolean> {
+  return [...(await namedAgents(q, conversationId, handles)).values()].some((agents) => agents.length > 0);
 }

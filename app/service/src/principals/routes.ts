@@ -86,7 +86,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       await renameLimit(req, me.id);
       const { displayName: name, handle, newNotes, memoryModel, dream, memoryLanguage } = req.body;
       // All or nothing: a model or a handle that is refused changes nothing, the name and the setting included.
-      const renamed = await db.tx(async (t) => {
+      const renamed = await db.tx(async (t): Promise<{ agents: Array<{ id: string; deleted: boolean }> } | null> => {
         // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider. Memory the site
         // pays for runs only on free-tier site models: a paid one is refused as an unknown one is.
         if (memoryModel !== undefined && memoryModel !== null) {
@@ -98,16 +98,30 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);
         if (dream !== undefined) await setDream(t, me.id, dream);
         if (memoryLanguage !== undefined) await setMemoryLanguage(t, me.id, memoryLanguage);
-        // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`).
-        return handle !== undefined && (await changeHandle(t, me.id, handle));
+        // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`). Their ids are read here,
+        // in the change's own transaction: nothing after it commits may turn it into an error.
+        if (handle === undefined || !(await changeHandle(t, me.id, handle))) return null;
+        const agents = await t.query<{ id: string; deleted: boolean }>(
+          "select p.id, a.deleted_at is not null as deleted from principals p join agents a on a.principal_id = p.id where p.owner_id = $1 order by p.id",
+          [me.id],
+        );
+        return { agents: agents.rows };
       });
       if (renamed) {
-        // Whoever sees them, or one of their Agents, is told the new handle, as an avatar change is told (`pushPrincipalChanged`).
-        const agents = await db.query<{ id: string }>("select id from principals where owner_id = $1 order by id", [me.id]);
-        await app.realtime.pushPrincipalChanged(me.id);
-        for (const { id } of agents.rows) {
-          await app.realtime.pushPrincipalChanged(id);
-          app.realtime.pushAgentChanged(me.id, id);
+        // Whoever sees them, or one of their Agents that is not deleted (a deleted one is in no group), is told the new
+        // handle, as an avatar change is told (`pushPrincipalChanged`); their own clients refetch each Agent. Best effort:
+        // the change has committed, and a client that missed a push reads the handle at its next sync.
+        const announce = async (push: () => unknown): Promise<void> => {
+          try {
+            await push();
+          } catch (err) {
+            req.log.error({ err }, "handle change announcement failed");
+          }
+        };
+        await announce(() => app.realtime.pushPrincipalChanged(me.id));
+        for (const { id, deleted } of renamed.agents) {
+          if (!deleted) await announce(() => app.realtime.pushPrincipalChanged(id));
+          await announce(() => app.realtime.pushAgentChanged(me.id, id));
         }
       }
       return { id: me.id, handle: renamed ? handle! : me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
@@ -124,7 +138,7 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
             .string()
             .max(100)
             .transform((s) => s.toLowerCase())
-            .pipe(z.string().regex(/^[a-z0-9_]{3,24}$/)),
+            .pipe(z.string().regex(HANDLE_PATTERN)),
         }),
         response: { 200: publicPrincipal },
       },

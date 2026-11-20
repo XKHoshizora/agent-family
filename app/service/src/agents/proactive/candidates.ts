@@ -3,7 +3,7 @@ import type { Queryable } from "../../db.ts";
 import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
 import { handleOf } from "../../principals/store.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
-import { mentionedHandles } from "../mentions.ts";
+import { mentionedHandles, namesAgentMember } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
 import type { Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
@@ -93,26 +93,24 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
 /**
  * Whether `text` names an Agent by `@handle` — by its full handle `owner.name` any Agent, in the group or not; by a bare
  * name part an Agent member of group `conversationId` (one or more: two of one name part call nobody, but the message
- * asked an Agent all the same), unless a person member has that handle (people first, as `resolveMentions`): such a
- * message is no one to judge (`judgeable`, the decision's first read). One query, only when the text has a handle.
+ * asked an Agent all the same), read as a mention is read there (mentions.ts `namesAgentMember`: a person member's handle
+ * or display name is a person first): such a message is no one to judge (`judgeable`, the decision's first read). At most
+ * two queries, none when the text has no handle.
  */
 export async function namesAnAgent(q: Queryable, conversationId: string, text: string): Promise<boolean> {
   const handles = mentionedHandles(text);
   if (handles.length === 0) return false;
   const full = handles.filter((h) => h.includes("."));
-  const bare = handles.filter((h) => !h.includes("."));
-  const named = await q.query(
-    `select 1 from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
-      where o.kind = 'human' and o.handle = any($1::citext[]) and (o.handle::text || '.' || p.handle::text) = any($2::text[])
-     union all
-     select 1 from memberships m join principals p on p.id = m.principal_id and p.kind = 'agent' join agents a on a.principal_id = p.id
-      where m.conversation_id = $3 and m.left_seq is null and a.deleted_at is null and p.handle = any($4::citext[])
-        and not exists (select 1 from memberships hm join principals hp on hp.id = hm.principal_id
-                         where hm.conversation_id = $3 and hm.left_seq is null and hp.kind = 'human' and hp.handle = p.handle)
-     limit 1`,
-    [full.map((h) => h.slice(0, h.indexOf("."))), full, conversationId, bare],
-  );
-  return Boolean(named.rowCount);
+  if (full.length > 0) {
+    const named = await q.query(
+      `select 1 from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
+        where o.kind = 'human' and o.handle = any($1::citext[]) and (o.handle::text || '.' || p.handle::text) = any($2::text[])
+        limit 1`,
+      [full.map((h) => h.slice(0, h.indexOf("."))), full],
+    );
+    if (named.rowCount) return true;
+  }
+  return namesAgentMember(q, conversationId, handles.filter((h) => !h.includes(".")));
 }
 
 /**
