@@ -45,8 +45,17 @@ export interface ToolSpec {
 }
 
 /**
- * A tool call the model made: the protocol's id for it (the SDK makes one up where the protocol gives none: Gemini),
- * the tool's name and its input, parsed — null when it was not valid JSON or named no tool the call offered.
+ * A tool call the model made. What the gateway guarantees, and nothing more:
+ * - `name` is one of the tools the call offered when `input` is not null; otherwise it is arbitrary — a tool not
+ *   offered, possibly empty.
+ * - `input` is the call's arguments parsed as JSON and never checked against the tool's schema: `{}` for empty
+ *   arguments; null when they were not JSON, when the name is not an offered tool, or when they were JSON `null`.
+ * - `id` is the protocol's (Gemini's own when it sends one, else made up by the SDK); on Responses and Anthropic it is
+ *   as the upstream sent it, so it may be empty or repeat within a round; on no protocol is it unique across rounds.
+ * - Only `finish.truncated` says a round was cut: a call cut short may have `input` null, or `{}` when it was cut before
+ *   its first argument.
+ * - The gateway bounds no sizes: not a call's name, id or input, nor how many calls a round makes (only the 8 MiB a
+ *   stream may have), nor what a call sends (`tools`, `steps`, results).
  */
 export interface ToolCall {
   id: string;
@@ -86,8 +95,9 @@ export interface ModelCall {
   upstreamId?: string;
   /**
    * The tools the model may call in this round (none is run here: the caller runs them and sends their results in the
-   * next call's `steps`). Absent or empty: the request is exactly a call's without tools. An upstream that refuses them
-   * is asked once more without them, and its later calls leave them out (`OptionalField` `tools`).
+   * next call's `steps`). Absent or empty: the request is exactly a call's without tools. On a call without `steps`, an
+   * upstream that refuses them is asked once more without them, and its later calls without `steps` leave them out for
+   * `TOOLS_REFUSAL_TTL_MS` (`OptionalField` `tools`); a call with `steps` always sends them.
    */
   tools?: ToolSpec[];
   /**
@@ -248,58 +258,82 @@ const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
  * Responses call asks for at any level but `none` (`reasoning.summary: "auto"`); `tools`, the tool definitions of a
  * call with `tools` (and the protocol's choice field the SDK sends with them). An upstream that refuses one — a 400 or
  * 422 whose body names it — is asked once more without it, and once that is answered its later calls leave it out
- * (`Refusals`).
+ * (`Refusals`). Tools are never taken for refused on a call with `steps` (an earlier round of the same answer was sent
+ * them: such a call always sends them, and a 400 to it is the call's failure), nor by a body that speaks of the
+ * request's length (leaving the tools out may only have made it fit); a remembered refusal of them is forgotten after
+ * `TOOLS_REFUSAL_TTL_MS`.
  */
 export type OptionalField = "thinking" | "summary" | "tools";
 /**
  * How a refusal names each field: what a 400's or 422's body is looked through for (its first `REFUSAL_CHARS`). Tools
- * are named "tools" by most, "function calling" by some (Gemini).
+ * are named as such ("tools", "tool_choice", "tool_use", "tool_calls") by most, "function calling" by some (Gemini).
  */
-const NAMES: Readonly<Record<OptionalField, RegExp>> = { thinking: /thinking/i, summary: /summary/i, tools: /tool|function/i };
+const NAMES: Readonly<Record<OptionalField, RegExp>> = {
+  thinking: /thinking/i,
+  summary: /summary/i,
+  tools: /\btools?\b|tool_(?:use|choice|calls?)|function.?call/i,
+};
+/** A body that speaks of the request's length: never a refusal of tools, whatever else it names. */
+const TOO_LONG = /context|too long|maximum.*tokens|token limit/i;
 const REFUSAL_CHARS = 4096;
 /** Upstreams whose refusals are remembered at most; the one used longest ago is forgotten first. */
 export const MAX_REMEMBERED_UPSTREAMS = 1000;
+/** How long a refusal of tools is remembered: then the upstream is offered them again (6 hours). */
+export const TOOLS_REFUSAL_TTL_MS = 6 * 60 * 60 * 1000;
 
 /** The optional fields the call sends, given what its upstream refused (`left`: left out). */
 function optionalFields(call: ModelCall, left: ReadonlySet<OptionalField>): OptionalField[] {
   const fields: OptionalField[] = [];
   if (call.protocol === "openai_chat" && call.thinkingSwitch === true && !left.has("thinking")) fields.push("thinking");
   if (call.protocol === "openai_responses" && call.reasoning !== "none" && !left.has("summary")) fields.push("summary");
-  if (offersTools(call) && !left.has("tools")) fields.push("tools");
+  if (offersTools(call) && (laterRound(call) || !left.has("tools"))) fields.push("tools");
   return fields;
 }
 
 const offersTools = (call: ModelCall): boolean => (call.tools?.length ?? 0) > 0;
+/** A call with `steps`: a later round of an answer whose earlier rounds this upstream was sent the tools for. */
+const laterRound = (call: ModelCall): boolean => (call.steps?.length ?? 0) > 0;
 
-/** What upstreams refused, by `ModelCall.upstreamId`, in this process: at most `MAX_REMEMBERED_UPSTREAMS` of them. */
+/**
+ * What upstreams refused, by `ModelCall.upstreamId`, in this process: at most `MAX_REMEMBERED_UPSTREAMS` of them, each
+ * field with when it was refused; a refusal of tools is forgotten `TOOLS_REFUSAL_TTL_MS` after it (`now`: the clock).
+ */
 export class Refusals {
-  private readonly byUpstream = new Map<string, Set<OptionalField>>();
+  private readonly byUpstream = new Map<string, Map<OptionalField, number>>();
+
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   of(upstreamId: string | undefined): Set<OptionalField> {
     const refused = upstreamId === undefined ? undefined : this.byUpstream.get(upstreamId);
     if (upstreamId === undefined || refused === undefined) return new Set();
+    const tools = refused.get("tools");
+    if (tools !== undefined && this.now() - tools >= TOOLS_REFUSAL_TTL_MS) refused.delete("tools");
     this.byUpstream.delete(upstreamId);
-    this.byUpstream.set(upstreamId, refused); // used now: forgotten last
-    return new Set(refused);
+    if (refused.size > 0) this.byUpstream.set(upstreamId, refused); // used now: forgotten last
+    return new Set(refused.keys());
   }
 
   add(upstreamId: string | undefined, field: OptionalField): void {
     if (upstreamId === undefined) return;
-    const refused = this.byUpstream.get(upstreamId) ?? new Set();
-    refused.add(field);
+    const refused = this.byUpstream.get(upstreamId) ?? new Map<OptionalField, number>();
+    refused.set(field, this.now());
     this.byUpstream.delete(upstreamId);
     this.byUpstream.set(upstreamId, refused);
     if (this.byUpstream.size > MAX_REMEMBERED_UPSTREAMS) this.byUpstream.delete(this.byUpstream.keys().next().value!);
   }
 }
 
-/** Whether `err` is the upstream refusing `field`: a 400 or 422 whose body names it. Only read here; never kept. */
+/**
+ * Whether `err` is the upstream refusing `field`: a 400 or 422 whose body names it — for tools, and does not speak of
+ * the request's length (`TOO_LONG`). Only read here; never kept.
+ */
 function refuses(err: unknown, field: OptionalField): boolean {
   const seen = new Set<unknown>();
   for (let e: unknown = err; e != null && !seen.has(e); e = (e as { cause?: unknown }).cause) {
     seen.add(e);
     if (APICallError.isInstance(e)) {
-      return (e.statusCode === 400 || e.statusCode === 422) && NAMES[field].test((e.responseBody ?? "").slice(0, REFUSAL_CHARS));
+      const body = (e.responseBody ?? "").slice(0, REFUSAL_CHARS);
+      return (e.statusCode === 400 || e.statusCode === 422) && NAMES[field].test(body) && (field !== "tools" || !TOO_LONG.test(body));
     }
   }
   return false;
@@ -453,19 +487,27 @@ function assistantTurn(messages: readonly ModelMessage[] | undefined, chatReason
   return [{ ...first, content: [{ type: "reasoning", text: chatReasoning }, ...content] }, ...rest];
 }
 
+/** Chat Completions: an earlier round's assistant message that called tools — its first call's id and the reasoning it read. */
+interface ChatRound {
+  firstCall: string;
+  reasoning: string;
+}
+
 /**
- * Chat Completions: the reasoning each earlier round read off the stream (`assistantTurn`), by the id of the first tool
- * call of its turn — what upstreams that think while calling tools (DeepSeek, Kimi and others) need back with it.
+ * Chat Completions: the reasoning each earlier round read off the stream (`assistantTurn`), round by round — one entry
+ * for each assistant message of the steps that calls tools, in order, as the request's own assistant messages with
+ * `tool_calls` come (the conversation's are text only). What upstreams that think while calling tools (DeepSeek, Kimi
+ * and others) need back with it.
  */
-function chatReasoningByCall(steps: ModelCall["steps"]): Map<string, string> {
-  const byCall = new Map<string, string>();
+function chatRounds(steps: ModelCall["steps"]): ChatRound[] {
+  const rounds: ChatRound[] = [];
   for (const message of (steps ?? []).flatMap(turnOf)) {
     if (message.role !== "assistant" || typeof message.content === "string") continue;
-    const reasoning = message.content.flatMap((p) => (p.type === "reasoning" ? [p.text] : [])).join("");
     const call = message.content.find((p) => p.type === "tool-call");
-    if (reasoning !== "" && call !== undefined) byCall.set(call.toolCallId, reasoning);
+    if (call === undefined) continue;
+    rounds.push({ firstCall: call.toolCallId, reasoning: message.content.flatMap((p) => (p.type === "reasoning" ? [p.text] : [])).join("") });
   }
-  return byCall;
+  return rounds;
 }
 
 /** The reported usage, or null unless the upstream reported both counts. */
@@ -495,7 +537,7 @@ function toModelError(err: unknown): ModelError {
 
 /**
  * The `fetch` of a Chat Completions call: the request's JSON body gets the thinking switch when it is sent
- * (`thinking`) and, on an assistant message whose first tool call is in `reasoning`, that reasoning as
+ * (`thinking`) and, on the assistant message of each earlier round that read reasoning (`rounds`), that reasoning as
  * `reasoning_content`; and every successful response's body is read by `tap` on its way to the SDK, `tool_calls` and
  * all, unchanged. A body that gets neither is sent as the SDK wrote it. The key stays in the headers the SDK set;
  * nothing here reads them.
@@ -504,29 +546,35 @@ function chatFetch(
   fetch: typeof globalThis.fetch,
   tap: ChatReasoningTap,
   thinking: { type: "enabled" | "disabled" } | null,
-  reasoning: ReadonlyMap<string, string>,
+  rounds: readonly ChatRound[],
 ): typeof globalThis.fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
-    const res = await fetch(input, withChatFields(init, thinking, reasoning));
+    const res = await fetch(input, withChatFields(init, thinking, rounds));
     if (!res.ok || res.body === null) return res;
     return new Response(res.body.pipeThrough(tap.transform()), { status: res.status, statusText: res.statusText, headers: res.headers });
   }) as typeof globalThis.fetch;
 }
 
-/** `chatFetch`'s request: the thinking switch and the earlier rounds' reasoning added to its body, or as it was. */
+/**
+ * `chatFetch`'s request: the thinking switch and the earlier rounds' reasoning added to its body, or as it was. The
+ * body's assistant messages with `tool_calls` are the rounds, in order: the n-th gets the n-th round's reasoning when
+ * there is some and its first call's id is that round's (ids alone may repeat from round to round).
+ */
 function withChatFields(
   init: RequestInit | undefined,
   thinking: { type: "enabled" | "disabled" } | null,
-  reasoning: ReadonlyMap<string, string>,
+  rounds: readonly ChatRound[],
 ): RequestInit | undefined {
-  if ((thinking === null && reasoning.size === 0) || typeof init?.body !== "string") return init;
+  if ((thinking === null && !rounds.some((r) => r.reasoning !== "")) || typeof init?.body !== "string") return init;
   const body = JSON.parse(init.body) as { messages?: unknown; thinking?: unknown };
   let changed = false;
+  let n = 0;
   for (const message of Array.isArray(body.messages) ? (body.messages as Array<Record<string, unknown>>) : []) {
     const calls = message?.role === "assistant" && Array.isArray(message.tool_calls) ? (message.tool_calls as Array<{ id?: unknown }>) : [];
-    const thought = typeof calls[0]?.id === "string" ? reasoning.get(calls[0].id) : undefined;
-    if (thought === undefined) continue;
-    message.reasoning_content = thought;
+    if (calls.length === 0) continue;
+    const round = rounds[n++];
+    if (round === undefined || round.reasoning === "" || calls[0]?.id !== round.firstCall) continue;
+    message.reasoning_content = round.reasoning;
     changed = true;
   }
   if (thinking !== null) {
@@ -545,19 +593,22 @@ type AttemptEvent =
  * The call as events: one attempt (`attempt`), and when the upstream refused an optional field it sent
  * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream
  * once that one shows leaving it out helped (its first event came), so a refusal for some other reason, which fails
- * the retry too, is not. A call whose tools were left out so finishes `toolsRefused`. A model that stopped for length
- * with no answer (no text that shows anything, no tool call), having reasoned — reasoning came, or the upstream
- * reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported, instead of finishing.
+ * the retry too, is not. Tools are never left out of a call with `steps`. A call that offered tools and did not send
+ * them finishes `toolsRefused`. A model that stopped for length with no answer (no text that shows anything, no tool
+ * call with an input), having reasoned — reasoning came, or the upstream reported reasoning tokens — ends
+ * `thinking_exhausted`, with the usage it reported, instead of finishing.
  */
 async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refusals: Refusals): AsyncGenerator<ModelEvent> {
   try {
     call.signal.throwIfAborted();
     const left = refusals.of(call.upstreamId);
+    /** The fields that may be left out on a refusal: all but the tools of a later round. */
+    const droppable = (field: OptionalField) => field !== "tools" || !laterRound(call);
     /** The field the first attempt was refused, left out of the retry. */
     let refused: OptionalField | undefined;
     for (let retry = false; ; retry = true) {
       const sent = optionalFields(call, left);
-      const toolsRefused = offersTools(call) && left.has("tools");
+      const toolsRefused = offersTools(call) && !sent.includes("tools");
       let started = false;
       let answered = false;
       let thought = false;
@@ -572,13 +623,13 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
             return;
           }
           if (event.type === "text") answered ||= hasVisibleText(event.delta);
-          else if (event.type === "tool_call") answered = true;
+          else if (event.type === "tool_call") answered ||= event.call.input !== null; // a call cut short is no answer
           else thought = true;
           yield event;
         }
         return;
       } catch (err) {
-        refused = started || retry || call.signal.aborted ? undefined : sent.find((field) => refuses(err, field));
+        refused = started || retry || call.signal.aborted ? undefined : sent.find((field) => droppable(field) && refuses(err, field));
         if (refused === undefined) throw err;
         left.add(refused);
       }
@@ -624,7 +675,7 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
   let parts: AsyncIterator<StreamPart> | undefined;
   try {
     const result = streamText({
-      model: languageModel(call, tap ? chatFetch(fetch, tap, thinking, chatReasoningByCall(call.steps)) : fetch),
+      model: languageModel(call, tap ? chatFetch(fetch, tap, thinking, chatRounds(call.steps)) : fetch),
       ...(call.system === "" ? {} : { instructions: call.system }),
       messages: [...toModelMessages(call.messages), ...stepMessages(call.steps ?? [])],
       ...(tools === undefined ? {} : { tools }),

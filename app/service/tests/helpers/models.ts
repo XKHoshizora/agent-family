@@ -1,7 +1,8 @@
 import http from "node:http";
 import type net from "node:net";
+import { isDeepStrictEqual } from "node:util";
 import type { Protocol } from "../../src/config.ts";
-import { ModelError, type ModelCall, type ModelErrorCode, type ModelEvent, type ModelGateway, type ToolCall } from "../../src/models/gateway.ts";
+import { ModelError, type ModelCall, type ModelErrorCode, type ModelEvent, type ModelGateway, type ToolCall, type ToolResult } from "../../src/models/gateway.ts";
 
 // --- a scripted gateway: what rule tests inject as `Deps.models` -----------------------------------------------------
 
@@ -28,9 +29,21 @@ export interface Hold {
 
 /** How a call that streams ends up answering (`toolsRefused`: its finish says the tools were refused). */
 type Answer = { kind: "reply"; text: string; options: ReplyOptions; toolsRefused?: true } | { kind: "empty" };
+/** What `callTools` takes besides the calls. */
+export interface CallToolsOptions {
+  /** Streamed as `text` deltas before the calls. */
+  text?: string;
+  /** Streamed as `reasoning` deltas before the text. */
+  reasoning?: string;
+  /** The `finish` usage; default null (the upstream reported none). */
+  usage?: { inputTokens: number; outputTokens: number } | null;
+  /** The `finish` says the round was cut at its output limit. */
+  truncated?: boolean;
+}
+
 type Step =
   | Answer
-  | { kind: "tools"; calls: Array<{ name: string; input: unknown }>; text: string; usage: { inputTokens: number; outputTokens: number } | null }
+  | { kind: "tools"; calls: Array<{ name: string; input: unknown }>; options: CallToolsOptions }
   | { kind: "fail"; code: ModelErrorCode; afterText: string; status?: number; usage?: { inputTokens: number; outputTokens: number } }
   | { kind: "cut"; text: string }
   | { kind: "hang"; before: string; gate: Promise<Answer>; reached: (call: ModelCall) => void };
@@ -47,14 +60,16 @@ export interface ScriptedGateway extends ModelGateway {
   /** The next call streams `text` (and `options.reasoning` first), then `finish`. */
   reply(text: string, options?: ReplyOptions): ScriptedGateway;
   /**
-   * The next call is a round that ends in tool calls: it streams `options.text` (if any), then one `tool_call` per call
-   * (each with an id no other call of this gateway has), then a finish naming them, with `options.usage` (default null)
-   * and an opaque assistant turn that survives a JSON round trip, as the real gateway's does.
+   * The next call is a round that ends in tool calls: it streams `options.reasoning`, then `options.text` (if any), then
+   * one `tool_call` per call (each with an id no other call of this gateway has; `input: null` for a name the call did
+   * not offer), then a finish naming them, with `options.usage` (default null), `options.truncated`, and an opaque
+   * assistant turn that survives a JSON round trip, as the real gateway's does. The call must offer tools (it throws
+   * otherwise), and the call after it must answer this round (see the header).
    */
-  callTools(calls: Array<{ name: string; input: unknown }>, options?: { text?: string; usage?: { inputTokens: number; outputTokens: number } | null }): ScriptedGateway;
+  callTools(calls: Array<{ name: string; input: unknown }>, options?: CallToolsOptions): ScriptedGateway;
   /**
-   * The next call is one whose upstream refused the tools: it answers as `reply(text, options)` does and its finish
-   * reports `toolsRefused`.
+   * The next call is one whose upstream refused the tools: it answers as `reply(text, options)` does and, when the call
+   * offered tools, its finish reports `toolsRefused`.
    */
   refuseTools(text?: string, options?: ReplyOptions): ScriptedGateway;
   /**
@@ -119,20 +134,82 @@ function finished(
   return { type: "finish", usage, truncated, toolCalls, assistant: scriptedTurn(text, toolCalls) };
 }
 
+/** `value` as it comes back from a JSON round trip (how a caller may hold an opaque turn). */
+const throughJson = (value: unknown): unknown => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+
+/** Why `results` do not answer exactly `calls` (one result each, same id and name), or null when they do. */
+function unanswered(calls: readonly ToolCall[], results: readonly ToolResult[]): string | null {
+  if (results.length !== calls.length) return `${results.length} result(s) for ${calls.length} call(s)`;
+  for (const c of calls) {
+    const answers = results.filter((r) => r.id === c.id);
+    if (answers.length !== 1) return `call ${c.id} answered ${answers.length} time(s)`;
+    if (answers[0]!.name !== c.name) return `call ${c.id} (${c.name}) answered as ${answers[0]!.name}`;
+  }
+  return null;
+}
+
 /**
  * A `ModelGateway` that answers from a script, in the order the steps were queued, and records every call. It behaves
  * like the real one where rule tests can tell: events come as `text` / `reasoning` deltas and `tool_call`s then one
  * `finish`; a failure is a thrown `ModelError`; when the call's signal aborts the iterator stops at once by throwing the
  * signal's reason. A call with nothing scripted throws a plain Error naming it.
+ *
+ * Tool rounds are checked as every real upstream checks them: a call's `steps` must each pass back (deep-equal after a
+ * JSON round trip) a turn this gateway gave in a `callTools` round, each turn at most once, its results answering
+ * exactly that round's calls (one result each, same id and name); and the call right after a `callTools` round must
+ * have that round as its last step. A call that breaks this throws a plain Error naming it, as an unscripted call
+ * does, and leaves its scripted answer queued. So after a `callTools` round the gateway's next call must be that
+ * answer's next round: a test whose answer stops between rounds and then makes another call uses another gateway.
+ *
+ * Where it still differs from the real gateway (tests must not rely on these):
+ * - Ids are `scripted-call-N`, unique for the gateway's whole life; real ids are unique only within a round, and only
+ *   on Chat Completions and Gemini (Responses and Anthropic pass on what the upstream sent: possibly empty, possibly
+ *   repeated).
+ * - `usage` defaults to null; real rounds usually report usage, so a sum over rounds is null unless every scripted
+ *   round passes one.
+ * - `refuseTools` is one round only; the real gateway, once an upstream refused tools, leaves them out of that
+ *   upstream's calls without `steps` for `TOOLS_REFUSAL_TTL_MS`, reporting `toolsRefused` each time. Nothing here
+ *   remembers it: a later `callTools` is honoured.
+ * - Events come in a fixed order — reasoning, text, then the calls; real streams interleave as the upstream sends them
+ *   (Chat Completions gives its calls at the end, Anthropic block by block).
+ * - The assistant turn holds the text and the calls only: no reasoning, no provider metadata.
+ * - A `callTools` round never fails after its calls (`fail` can only follow text), `hang` releases only into a reply,
+ *   and a truncated `callTools` round whose inputs are all null finishes truncated where the real one is
+ *   `thinking_exhausted` after reasoning.
+ * - `calls[n].steps` is a copy of the array, but the step objects in it are the caller's.
  */
 export function scriptedGateway(): ScriptedGateway {
   const queue: Step[] = [];
   const calls: ModelCall[] = [];
   /** Tool calls made so far: each gets the next id. */
   let toolCallsMade = 0;
+  /** Every `callTools` round's turn and calls, as given; and the last one, until the next call answers it. */
+  const turns: Array<{ assistant: unknown; calls: ToolCall[] }> = [];
+  let awaiting: { assistant: unknown; calls: ToolCall[] } | null = null;
 
-  async function* run(call: ModelCall, scripted: Step | undefined, n: number): AsyncGenerator<ModelEvent> {
+  /** Why the call's steps are not ones a real upstream would take after this gateway's rounds, or null. */
+  function stepsProblem(call: ModelCall): string | null {
+    const expected = awaiting;
+    awaiting = null;
+    const steps = call.steps ?? [];
+    const used = new Set<number>();
+    for (const [i, step] of steps.entries()) {
+      const k = turns.findIndex((t) => isDeepStrictEqual(throughJson(step.assistant), t.assistant));
+      if (k < 0) return `step ${i + 1} passes back a turn this gateway never gave`;
+      if (used.has(k)) return `step ${i + 1} passes back a turn an earlier step already did`;
+      used.add(k);
+      const problem = unanswered(turns[k]!.calls, step.results);
+      if (problem !== null) return `step ${i + 1}: ${problem}`;
+    }
+    if (expected !== null && (steps.length === 0 || !isDeepStrictEqual(throughJson(steps.at(-1)!.assistant), expected.assistant))) {
+      return "does not answer the tool calls of the round before it in its last step";
+    }
+    return null;
+  }
+
+  async function* run(call: ModelCall, scripted: Step | undefined, n: number, problem: string | null): AsyncGenerator<ModelEvent> {
     const { signal } = call;
+    if (problem !== null) throw new Error(`scriptedGateway: call #${n} ${problem}`);
     if (!scripted) throw new Error(`scriptedGateway: call #${n} was not scripted`);
     signal.throwIfAborted();
     let delay = 0;
@@ -166,24 +243,31 @@ export function scriptedGateway(): ScriptedGateway {
       yield* emit("text", step.afterText);
       throw new ModelError(step.code, step.status, step.usage);
     }
+    const offered = new Set((call.tools ?? []).map((t) => t.name));
     if (step.kind === "tools") {
-      yield* emit("text", step.text);
+      if (offered.size === 0) throw new Error(`scriptedGateway: call #${n} is scripted to call tools but offered no tools`);
+      const text = step.options.text ?? "";
+      yield* emit("reasoning", step.options.reasoning ?? "");
+      yield* emit("text", text);
       const made: ToolCall[] = [];
       for (const { name, input } of step.calls) {
         signal.throwIfAborted();
-        const toolCall = { id: `scripted-call-${++toolCallsMade}`, name, input };
+        const toolCall = { id: `scripted-call-${++toolCallsMade}`, name, input: offered.has(name) ? input : null };
         made.push(toolCall);
         yield { type: "tool_call", call: toolCall };
       }
       signal.throwIfAborted();
-      yield finished(step.usage, false, step.text, made);
+      const finish = finished(step.options.usage ?? null, step.options.truncated ?? false, text, made);
+      awaiting = { assistant: finish.assistant, calls: made };
+      turns.push(awaiting);
+      yield finish;
       return;
     }
     yield* emit("reasoning", step.options.reasoning ?? "");
     yield* emit("text", step.text);
     signal.throwIfAborted();
     const finish = finished(step.options.usage ?? null, step.options.truncated ?? false, step.text);
-    yield step.toolsRefused ? { ...finish, toolsRefused: true } : finish;
+    yield step.toolsRefused && offered.size > 0 ? { ...finish, toolsRefused: true } : finish;
   }
 
   const gateway: ScriptedGateway = {
@@ -192,7 +276,8 @@ export function scriptedGateway(): ScriptedGateway {
     stream(call) {
       const recorded = call.tools || call.steps ? { ...call, ...(call.tools ? { tools: [...call.tools] } : {}), ...(call.steps ? { steps: [...call.steps] } : {}) } : call;
       calls.push(recorded);
-      return run(recorded, queue.shift(), calls.length);
+      const problem = stepsProblem(recorded);
+      return run(recorded, problem === null ? queue.shift() : undefined, calls.length, problem);
     },
     async listModels() {
       return [...gateway.models];
@@ -202,7 +287,7 @@ export function scriptedGateway(): ScriptedGateway {
       return gateway;
     },
     callTools(toolCalls, options = {}) {
-      queue.push({ kind: "tools", calls: toolCalls, text: options.text ?? "", usage: options.usage ?? null });
+      queue.push({ kind: "tools", calls: toolCalls, options });
       return gateway;
     },
     refuseTools(text = "Answered without tools.", options = {}) {
@@ -258,27 +343,45 @@ export const CANNED_REASONING_USAGE = { inputTokens: 11, outputTokens: 19 } as c
 
 /**
  * What a canned stream is: a plain answer, one that reasons first, one that stops for length; or a round that ends in
- * one tool call (`CANNED_TOOL`, no text), plainly or after reasoning (signed or encrypted where the protocol does that).
+ * tool calls — one (`CANNED_TOOL`, no text), plainly or after reasoning (signed or encrypted where the protocol does
+ * that); the canned text, then that call; or two calls (`CANNED_TOOL`, then `CANNED_SECOND_TOOL`), no text.
  */
-export type CannedKind = "text" | "reasoning" | "length" | "tool" | "reasoning_tool";
+export type CannedKind = "text" | "reasoning" | "length" | "tool" | "reasoning_tool" | "text_tool" | "two_tools";
 
 /** The tool call every canned tool stream makes, and its input's JSON as the protocols that stream it send it. */
 export const CANNED_TOOL = { name: "search_messages", input: { query: "川菜", limit: 3 } } as const;
 export const CANNED_TOOL_ARGS = ['{"query":"川菜",', '"limit":3}'] as const;
 /** The call's id, where the protocol gives one (Gemini gives none: the SDK makes one up). */
 export const CANNED_TOOL_CALL_ID = "call_stub_1";
+/** The second call of a `two_tools` round. */
+export const CANNED_SECOND_TOOL = { name: "read_file", input: { id: "f1" } } as const;
+export const CANNED_SECOND_TOOL_ARGS = ['{"id":', '"f1"}'] as const;
+export const CANNED_SECOND_TOOL_CALL_ID = "call_stub_2";
 /** What a canned round's reasoning comes with that the next round must send back: Anthropic's signature, OpenAI's encrypted reasoning, Gemini's thought signature. */
 export const CANNED_SIGNATURE = "c2lnbmF0dXJl";
 export const CANNED_ENCRYPTED_REASONING = "enc-stub-reasoning";
 export const CANNED_THOUGHT_SIGNATURE = "dGhvdWdodA==";
 
 export interface CannedOptions {
-  /** A tool stream's input JSON, in the pieces it streams (default `CANNED_TOOL_ARGS`); Gemini sends it whole, parsed. */
+  /** The first tool call's input JSON, in the pieces it streams (default `CANNED_TOOL_ARGS`); Gemini sends it whole, parsed. */
   toolArgs?: readonly string[];
 }
 
-const isTool = (kind: CannedKind) => kind === "tool" || kind === "reasoning_tool";
-const reasons = (kind: CannedKind) => kind === "reasoning" || kind === "reasoning_tool";
+/** A tool call of a canned round: its id, its Responses item id, its name, and its input JSON as streamed. */
+interface CannedCall {
+  id: string;
+  itemId: string;
+  name: string;
+  args: readonly string[];
+}
+
+/** What a canned round says: whether it reasons, whether it has the canned text, and its tool calls. */
+function cannedRound(kind: CannedKind, toolArgs: readonly string[]): { reasoning: boolean; text: boolean; calls: CannedCall[] } {
+  const first: CannedCall = { id: CANNED_TOOL_CALL_ID, itemId: "fc_stub", name: CANNED_TOOL.name, args: toolArgs };
+  const second: CannedCall = { id: CANNED_SECOND_TOOL_CALL_ID, itemId: "fc_stub_2", name: CANNED_SECOND_TOOL.name, args: CANNED_SECOND_TOOL_ARGS };
+  const calls = kind === "two_tools" ? [first, second] : kind === "tool" || kind === "reasoning_tool" || kind === "text_tool" ? [first] : [];
+  return { reasoning: kind === "reasoning" || kind === "reasoning_tool", text: calls.length === 0 || kind === "text_tool", calls };
+}
 
 /** One server-sent event per entry: an `event:` line when named, then the JSON (or a literal) as `data:`. */
 function sse(events: Array<{ event?: string; data: unknown }>): string {
@@ -289,20 +392,18 @@ function openaiChatStream(kind: CannedKind, toolArgs: readonly string[]): string
   const chunk = (delta: object, finish: string | null = null) => ({
     data: { id: "chatcmpl-stub", object: "chat.completion.chunk", created: 1_700_000_000, model: STUB_MODEL, choices: [{ index: 0, delta, finish_reason: finish }] },
   });
-  const reasoning = reasons(kind);
-  const tool = isTool(kind);
+  const { reasoning, text, calls } = cannedRound(kind, toolArgs);
   return sse([
-    chunk({ role: "assistant", content: tool ? null : "" }),
+    chunk({ role: "assistant", content: text ? "" : null }),
     // The OpenAI-compatible way some servers stream reasoning: the SDK's Chat Completions model does not read it, the
     // gateway does (src/models/chat-reasoning.ts).
     ...(reasoning ? CANNED_REASONING_DELTAS.map((d) => chunk({ reasoning_content: d })) : []),
-    ...(tool
-      ? [
-          chunk({ tool_calls: [{ index: 0, id: CANNED_TOOL_CALL_ID, type: "function", function: { name: CANNED_TOOL.name, arguments: "" } }] }),
-          ...toolArgs.map((piece) => chunk({ tool_calls: [{ index: 0, function: { arguments: piece } }] })),
-        ]
-      : CANNED_TEXT_DELTAS.map((d) => chunk({ content: d }))),
-    chunk({}, kind === "length" ? "length" : tool ? "tool_calls" : "stop"),
+    ...(text ? CANNED_TEXT_DELTAS.map((d) => chunk({ content: d })) : []),
+    ...calls.flatMap((c, index) => [
+      chunk({ tool_calls: [{ index, id: c.id, type: "function", function: { name: c.name, arguments: "" } }] }),
+      ...c.args.map((piece) => chunk({ tool_calls: [{ index, function: { arguments: piece } }] })),
+    ]),
+    chunk({}, kind === "length" ? "length" : calls.length > 0 ? "tool_calls" : "stop"),
     {
       data: {
         id: "chatcmpl-stub",
@@ -322,9 +423,10 @@ function openaiChatStream(kind: CannedKind, toolArgs: readonly string[]): string
 function openaiResponsesStream(kind: CannedKind, toolArgs: readonly string[]): string {
   let seq = 0;
   const ev = (type: string, fields: object) => ({ event: type, data: { type, sequence_number: seq++, ...fields } });
-  const reasoning = reasons(kind);
-  const tool = isTool(kind);
+  const { reasoning, text, calls } = cannedRound(kind, toolArgs);
+  const tool = calls.length > 0;
   const msgIndex = reasoning ? 1 : 0;
+  const callIndex = msgIndex + (text ? 1 : 0);
   const message = (status: string, text: string | null) => ({
     type: "message",
     id: "msg_stub",
@@ -339,11 +441,11 @@ function openaiResponsesStream(kind: CannedKind, toolArgs: readonly string[]): s
     summary: summary === null ? [] : [{ type: "summary_text", text: summary }],
     ...(tool ? { encrypted_content: CANNED_ENCRYPTED_REASONING } : {}),
   });
-  const functionCall = (status: string, args: string) => ({
+  const functionCall = (c: CannedCall, status: string, args: string) => ({
     type: "function_call",
-    id: "fc_stub",
-    call_id: CANNED_TOOL_CALL_ID,
-    name: CANNED_TOOL.name,
+    id: c.itemId,
+    call_id: c.id,
+    name: c.name,
     arguments: args,
     status,
   });
@@ -371,14 +473,8 @@ function openaiResponsesStream(kind: CannedKind, toolArgs: readonly string[]): s
           ev("response.output_item.done", { output_index: 0, item: reasoningItem(CANNED_REASONING) }),
         ]
       : []),
-    ...(tool
+    ...(text
       ? [
-          ev("response.output_item.added", { output_index: msgIndex, item: functionCall("in_progress", "") }),
-          ...toolArgs.map((delta) => ev("response.function_call_arguments.delta", { item_id: "fc_stub", output_index: msgIndex, delta })),
-          ev("response.function_call_arguments.done", { item_id: "fc_stub", output_index: msgIndex, arguments: toolArgs.join("") }),
-          ev("response.output_item.done", { output_index: msgIndex, item: functionCall("completed", toolArgs.join("")) }),
-        ]
-      : [
           ev("response.output_item.added", { output_index: msgIndex, item: message("in_progress", null) }),
           ev("response.content_part.added", { item_id: "msg_stub", output_index: msgIndex, content_index: 0, part: { type: "output_text", text: "", annotations: [] } }),
           ...CANNED_TEXT_DELTAS.map((delta) =>
@@ -386,7 +482,14 @@ function openaiResponsesStream(kind: CannedKind, toolArgs: readonly string[]): s
           ),
           ev("response.output_text.done", { item_id: "msg_stub", output_index: msgIndex, content_index: 0, text: CANNED_TEXT }),
           ev("response.output_item.done", { output_index: msgIndex, item: message("completed", CANNED_TEXT) }),
-        ]),
+        ]
+      : []),
+    ...calls.flatMap((c, i) => [
+      ev("response.output_item.added", { output_index: callIndex + i, item: functionCall(c, "in_progress", "") }),
+      ...c.args.map((delta) => ev("response.function_call_arguments.delta", { item_id: c.itemId, output_index: callIndex + i, delta })),
+      ev("response.function_call_arguments.done", { item_id: c.itemId, output_index: callIndex + i, arguments: c.args.join("") }),
+      ev("response.output_item.done", { output_index: callIndex + i, item: functionCall(c, "completed", c.args.join("")) }),
+    ]),
     kind === "length"
       ? ev("response.incomplete", { response: { ...head, status: "incomplete", incomplete_details: { reason: "max_output_tokens" }, usage } })
       : ev("response.completed", { response: { ...head, status: "completed", usage } }),
@@ -394,9 +497,16 @@ function openaiResponsesStream(kind: CannedKind, toolArgs: readonly string[]): s
 }
 
 function anthropicStream(kind: CannedKind, toolArgs: readonly string[]): string {
-  const reasoning = reasons(kind);
-  const tool = isTool(kind);
+  const { reasoning, text, calls } = cannedRound(kind, toolArgs);
   const textIndex = reasoning ? 1 : 0;
+  /** The answer's blocks after any thinking: the text's deltas or a call's input pieces (a ping after the first block's start). */
+  const blocks: Array<{ start: object; deltas: object[] }> = [
+    ...(text ? [{ start: { type: "text", text: "" }, deltas: CANNED_TEXT_DELTAS.map((t) => ({ type: "text_delta", text: t })) }] : []),
+    ...calls.map((c) => ({
+      start: { type: "tool_use", id: c.id, name: c.name, input: {} },
+      deltas: c.args.map((partial_json) => ({ type: "input_json_delta", partial_json })),
+    })),
+  ];
   const ev = (type: string, fields: object = {}) => ({ event: type, data: { type, ...fields } });
   return sse([
     ev("message_start", {
@@ -419,20 +529,14 @@ function anthropicStream(kind: CannedKind, toolArgs: readonly string[]): string 
           ev("content_block_stop", { index: 0 }),
         ]
       : []),
-    ...(tool
-      ? [
-          ev("content_block_start", { index: textIndex, content_block: { type: "tool_use", id: CANNED_TOOL_CALL_ID, name: CANNED_TOOL.name, input: {} } }),
-          ev("ping"),
-          ...toolArgs.map((partial_json) => ev("content_block_delta", { index: textIndex, delta: { type: "input_json_delta", partial_json } })),
-        ]
-      : [
-          ev("content_block_start", { index: textIndex, content_block: { type: "text", text: "" } }),
-          ev("ping"),
-          ...CANNED_TEXT_DELTAS.map((text) => ev("content_block_delta", { index: textIndex, delta: { type: "text_delta", text } })),
-        ]),
-    ev("content_block_stop", { index: textIndex }),
+    ...blocks.flatMap((b, i) => [
+      ev("content_block_start", { index: textIndex + i, content_block: b.start }),
+      ...(i === 0 ? [ev("ping")] : []),
+      ...b.deltas.map((delta) => ev("content_block_delta", { index: textIndex + i, delta })),
+      ev("content_block_stop", { index: textIndex + i }),
+    ]),
     ev("message_delta", {
-      delta: { stop_reason: kind === "length" ? "max_tokens" : tool ? "tool_use" : "end_turn", stop_sequence: null },
+      delta: { stop_reason: kind === "length" ? "max_tokens" : calls.length > 0 ? "tool_use" : "end_turn", stop_sequence: null },
       usage: { output_tokens: reasoning ? 19 : 7 },
     }),
     ev("message_stop"),
@@ -440,24 +544,29 @@ function anthropicStream(kind: CannedKind, toolArgs: readonly string[]): string 
 }
 
 function geminiStream(kind: CannedKind, toolArgs: readonly string[]): string {
-  const reasoning = reasons(kind);
+  const { reasoning, text, calls } = cannedRound(kind, toolArgs);
   const chunk = (parts: object[], extra: object = {}) => ({
     data: { candidates: [{ content: { parts, role: "model" }, index: 0, ...extra }], modelVersion: STUB_MODEL },
   });
   const usageMetadata = reasoning
     ? { promptTokenCount: 11, candidatesTokenCount: 7, thoughtsTokenCount: 12, totalTokenCount: 30 }
     : { promptTokenCount: 11, candidatesTokenCount: 7, totalTokenCount: 18 };
-  const thoughts = reasoning ? CANNED_REASONING_DELTAS.map((text) => chunk([{ text, thought: true }])) : [];
-  if (isTool(kind)) {
-    // A function call comes whole, its arguments parsed; after reasoning it carries the thought signature.
-    const functionCall = { functionCall: { name: CANNED_TOOL.name, args: JSON.parse(toolArgs.join("")) }, ...(reasoning ? { thoughtSignature: CANNED_THOUGHT_SIGNATURE } : {}) };
-    return sse([...thoughts, { data: { ...chunk([functionCall], { finishReason: "STOP" }).data, usageMetadata } }]);
+  const thoughts = reasoning ? CANNED_REASONING_DELTAS.map((t) => chunk([{ text: t, thought: true }])) : [];
+  if (calls.length > 0) {
+    // Function calls come whole, in the last chunk, their arguments parsed; after reasoning the first carries the
+    // thought signature.
+    const functionCalls = calls.map((c, i) => ({
+      functionCall: { name: c.name, args: JSON.parse(c.args.join("")) },
+      ...(reasoning && i === 0 ? { thoughtSignature: CANNED_THOUGHT_SIGNATURE } : {}),
+    }));
+    const texts = text ? CANNED_TEXT_DELTAS.map((t) => chunk([{ text: t }])) : [];
+    return sse([...thoughts, ...texts, { data: { ...chunk(functionCalls, { finishReason: "STOP" }).data, usageMetadata } }]);
   }
   const last = CANNED_TEXT_DELTAS.length - 1;
   return sse([
     ...thoughts,
-    ...CANNED_TEXT_DELTAS.map((text, i) =>
-      i < last ? chunk([{ text }]) : { data: { ...chunk([{ text }], { finishReason: kind === "length" ? "MAX_TOKENS" : "STOP" }).data, usageMetadata } },
+    ...CANNED_TEXT_DELTAS.map((t, i) =>
+      i < last ? chunk([{ text: t }]) : { data: { ...chunk([{ text: t }], { finishReason: kind === "length" ? "MAX_TOKENS" : "STOP" }).data, usageMetadata } },
     ),
   ]);
 }

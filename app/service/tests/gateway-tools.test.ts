@@ -1,7 +1,17 @@
 import type http from "node:http";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PROTOCOLS, type Protocol } from "../src/config.ts";
-import { createModelGateway, ModelError, type ModelCall, type ModelEvent, type ToolCall, type ToolResult, type ToolSpec } from "../src/models/gateway.ts";
+import {
+  createModelGateway,
+  ModelError,
+  Refusals,
+  TOOLS_REFUSAL_TTL_MS,
+  type ModelCall,
+  type ModelEvent,
+  type ToolCall,
+  type ToolResult,
+  type ToolSpec,
+} from "../src/models/gateway.ts";
 import { createSlots } from "../src/slots.ts";
 import { PNG } from "./helpers/agents.ts";
 import {
@@ -10,6 +20,9 @@ import {
   CANNED_REASONING,
   CANNED_REASONING_DELTAS,
   CANNED_REASONING_USAGE,
+  CANNED_SECOND_TOOL,
+  CANNED_SECOND_TOOL_ARGS,
+  CANNED_SECOND_TOOL_CALL_ID,
   CANNED_SIGNATURE,
   CANNED_TEXT,
   CANNED_THOUGHT_SIGNATURE,
@@ -203,6 +216,44 @@ function turns(protocol: Protocol, body: any): any[] {
 }
 
 const SEARCH_ARGS = CANNED_TOOL_ARGS.join("");
+const READ_ARGS = CANNED_SECOND_TOOL_ARGS.join("");
+
+/** Answers every request with `body` as an event stream. */
+const sending = (body: string) => (_req: StubRequest, res: http.ServerResponse) => {
+  res.writeHead(200, { "content-type": "text/event-stream" });
+  res.end(body);
+};
+
+/** How each protocol's upstream says it takes no tools. */
+const REFUSAL: Record<Protocol, string> = {
+  openai_chat: JSON.stringify({ error: { message: "This model does not support tools.", type: "invalid_request_error", param: "tools", code: null } }),
+  openai_responses: JSON.stringify({ error: { message: "Tools are not supported with this model.", type: "invalid_request_error", param: "tools", code: null } }),
+  anthropic: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "tools: Extra inputs are not permitted" } }),
+  gemini: JSON.stringify({ error: { code: 400, message: "Function calling is not enabled for models/stub-model", status: "INVALID_ARGUMENT" } }),
+};
+/** `status` with `body` to a request that carries tools (all of them, with `always`), else the canned answer. */
+const refusing = (status: number, body: string, always = false) => (req: StubRequest, res: http.ServerResponse) => {
+  if (!always && !("tools" in req.body)) return answerCanned(req, res);
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(body);
+};
+/** The error the call failed with, or null. */
+const failure = (events: AsyncIterable<ModelEvent>) =>
+  collect(events).then(
+    () => null,
+    (e: unknown) => e,
+  );
+const toolsSent = () => stub.requests.map((r) => "tools" in r.body);
+/** A step as the caller makes it: a round's turn, each of its calls answered. */
+const answered = (finish: Finish, output: unknown = RESULT_OUTPUT) => ({
+  assistant: finish.assistant,
+  results: finish.toolCalls.map((c): ToolResult => ({ id: c.id, name: c.name, output })),
+});
+/** A real step: one tool round against the stub, answered. */
+async function aStep(protocol: Protocol) {
+  stub.answer(answering("tool"));
+  return answered(finishOf(await collect(gateway.stream(call(protocol, { tools: TOOLS })))));
+}
 
 describe.each(PROTOCOLS)("%s", (protocol) => {
   it("a request with tools carries them in the protocol's wire shape, the model left to choose", async () => {
@@ -364,28 +415,174 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     expect(finishOf(events).toolCalls).toEqual(toolCallsIn(events));
   });
 
+  it("two calls in one round: two tool_call events in order, the finish names both, and the next request answers both", async () => {
+    stub.answer(answering("two_tools"));
+    const first = await collect(gateway.stream(call(protocol, { tools: TOOLS })));
+    expect(deltas(first, "text")).toBe("");
+    const calls = toolCallsIn(first);
+    expect(calls.map((c) => [c.name, c.input])).toEqual([
+      [CANNED_TOOL.name, CANNED_TOOL.input],
+      [CANNED_SECOND_TOOL.name, CANNED_SECOND_TOOL.input],
+    ]);
+    if (protocol !== "gemini") expect(calls.map((c) => c.id)).toEqual([CANNED_TOOL_CALL_ID, CANNED_SECOND_TOOL_CALL_ID]);
+    const finish = finishOf(first);
+    expect(finish.toolCalls).toEqual(calls);
+    const [one, two] = calls as [ToolCall, ToolCall];
+    const results: ToolResult[] = [
+      { id: one.id, name: one.name, output: RESULT_OUTPUT },
+      { id: two.id, name: two.name, output: "第一页" },
+    ];
+    stub.answer(answering("text"));
+    await collect(gateway.stream(call(protocol, { tools: TOOLS, steps: [{ assistant: JSON.parse(JSON.stringify(finish.assistant)), results }] })));
+    const output = JSON.stringify(RESULT_OUTPUT);
+    const sent = turns(protocol, stub.requests[1]!.body).slice(1);
+    switch (protocol) {
+      case "openai_chat":
+        expect(sent).toEqual([
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: one.id, type: "function", function: { name: one.name, arguments: SEARCH_ARGS } },
+              { id: two.id, type: "function", function: { name: two.name, arguments: READ_ARGS } },
+            ],
+          },
+          { role: "tool", tool_call_id: one.id, content: output },
+          { role: "tool", tool_call_id: two.id, content: "第一页" },
+        ]);
+        break;
+      case "openai_responses":
+        expect(sent).toEqual([
+          { type: "function_call", call_id: one.id, name: one.name, arguments: SEARCH_ARGS },
+          { type: "function_call", call_id: two.id, name: two.name, arguments: READ_ARGS },
+          { type: "function_call_output", call_id: one.id, output },
+          { type: "function_call_output", call_id: two.id, output: "第一页" },
+        ]);
+        break;
+      case "anthropic":
+        expect(sent).toEqual([
+          {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: one.id, name: one.name, input: CANNED_TOOL.input },
+              { type: "tool_use", id: two.id, name: two.name, input: CANNED_SECOND_TOOL.input },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: one.id, content: output },
+              { type: "tool_result", tool_use_id: two.id, content: "第一页" },
+            ],
+          },
+        ]);
+        break;
+      case "gemini":
+        expect(sent).toEqual([
+          {
+            role: "model",
+            parts: [{ functionCall: { id: one.id, name: one.name, args: CANNED_TOOL.input } }, { functionCall: { id: two.id, name: two.name, args: CANNED_SECOND_TOOL.input } }],
+          },
+          {
+            role: "user",
+            parts: [
+              { functionResponse: { id: one.id, name: one.name, response: { name: one.name, content: RESULT_OUTPUT } } },
+              { functionResponse: { id: two.id, name: two.name, response: { name: two.name, content: "第一页" } } },
+            ],
+          },
+        ]);
+        break;
+    }
+  });
+
+  it("text and a call in one round: the text streams before the call, and the next request carries both", async () => {
+    stub.answer(answering("text_tool"));
+    const first = await collect(gateway.stream(call(protocol, { tools: TOOLS })));
+    expect(deltas(first, "text")).toBe(CANNED_TEXT);
+    expect(first.findLastIndex((e) => e.type === "text")).toBeLessThan(first.findIndex((e) => e.type === "tool_call"));
+    const finish = finishOf(first);
+    expect(finish.toolCalls.map((c) => [c.name, c.input])).toEqual([[CANNED_TOOL.name, CANNED_TOOL.input]]);
+    const id = finish.toolCalls[0]!.id;
+    stub.answer(answering("text"));
+    await collect(gateway.stream(call(protocol, { tools: TOOLS, steps: [JSON.parse(JSON.stringify(answered(finish)))] })));
+    const output = JSON.stringify(RESULT_OUTPUT);
+    const sent = turns(protocol, stub.requests[1]!.body).slice(1);
+    switch (protocol) {
+      case "openai_chat":
+        expect(sent).toEqual([
+          { role: "assistant", content: CANNED_TEXT, tool_calls: [{ id, type: "function", function: { name: CANNED_TOOL.name, arguments: SEARCH_ARGS } }] },
+          { role: "tool", tool_call_id: id, content: output },
+        ]);
+        break;
+      case "openai_responses":
+        expect(sent).toEqual([
+          { role: "assistant", content: CANNED_TEXT },
+          { type: "function_call", call_id: id, name: CANNED_TOOL.name, arguments: SEARCH_ARGS },
+          { type: "function_call_output", call_id: id, output },
+        ]);
+        break;
+      case "anthropic":
+        expect(sent).toEqual([
+          { role: "assistant", content: [{ type: "text", text: CANNED_TEXT }, { type: "tool_use", id, name: CANNED_TOOL.name, input: CANNED_TOOL.input }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: output }] },
+        ]);
+        break;
+      case "gemini":
+        expect(sent).toEqual([
+          { role: "model", parts: [{ text: CANNED_TEXT }, { functionCall: { id, name: CANNED_TOOL.name, args: CANNED_TOOL.input } }] },
+          { role: "user", parts: [{ functionResponse: { id, name: CANNED_TOOL.name, response: { name: CANNED_TOOL.name, content: RESULT_OUTPUT } } }] },
+        ]);
+        break;
+    }
+  });
+
+  it("an abort during a tool-call stream ends it at once with the signal's reason, closes the upstream, and leaves no unhandled rejection", async () => {
+    const body = cannedStream(protocol, "reasoning_tool");
+    // Held just after the call's first piece of input (Gemini sends a call whole: just before it).
+    const at =
+      protocol === "gemini"
+        ? body.lastIndexOf("data: ", body.indexOf("functionCall"))
+        : body.indexOf("\n\n", body.indexOf(JSON.stringify(CANNED_TOOL_ARGS[0]).slice(1, -1))) + 2;
+    const upstream = { closed: false };
+    stub.answer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(body.slice(0, at));
+      res.on("close", () => (upstream.closed = true));
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => void unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const controller = new AbortController();
+      const seen: ModelEvent[] = [];
+      const error = await (async () => {
+        try {
+          for await (const e of gateway.stream(call(protocol, { tools: TOOLS, reasoning: "high", signal: controller.signal }))) {
+            seen.push(e);
+            if (seen.length === 1) setTimeout(() => controller.abort(), 30);
+          }
+          return null;
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(error).toBe(controller.signal.reason);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((e) => e.type === "reasoning")).toBe(true);
+      for (let i = 0; i < 100 && !upstream.closed; i++) await new Promise((r) => setTimeout(r, 10));
+      expect(upstream.closed).toBe(true);
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   describe("an upstream that refuses tools", () => {
-    const REFUSAL: Record<Protocol, string> = {
-      openai_chat: JSON.stringify({ error: { message: "This model does not support tools.", type: "invalid_request_error", param: "tools", code: null } }),
-      openai_responses: JSON.stringify({ error: { message: "Tools are not supported with this model.", type: "invalid_request_error", param: "tools", code: null } }),
-      anthropic: JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "tools: Extra inputs are not permitted" } }),
-      gemini: JSON.stringify({ error: { code: 400, message: "Function calling is not enabled for models/stub-model", status: "INVALID_ARGUMENT" } }),
-    };
-    /** `status` with `body` to a request that carries tools (all of them, with `always`), else the canned answer. */
-    const refusing = (status: number, body: string, always = false) => (req: StubRequest, res: http.ServerResponse) => {
-      if (!always && !("tools" in req.body)) return answerCanned(req, res);
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(body);
-    };
     const withoutTools = (body: any) => {
       const { tools: _tools, tool_choice: _choice, toolConfig: _config, ...rest } = body;
       return rest;
     };
-    const failure = (events: AsyncIterable<ModelEvent>) =>
-      collect(events).then(
-        () => null,
-        (e: unknown) => e,
-      );
 
     it("a 400 naming them: asked once more without them, toolsRefused; that upstream's next call goes without them at once", async () => {
       stub.answer(refusing(400, REFUSAL[protocol]));
@@ -435,6 +632,100 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
       await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId })));
       expect(stub.requests.map((r) => "tools" in r.body)).toEqual([true]);
     });
+
+    it("a context-length 400, even one naming the tools: the call's failure as it came, not retried, nothing remembered", async () => {
+      const tooLong = [
+        // OpenAI's wording counts the tool definitions as "functions": leaving them out may only have made it fit.
+        JSON.stringify({
+          error: {
+            message:
+              "This model's maximum context length is 8192 tokens. However, your messages resulted in 9001 tokens (8780 in the messages, 221 in the functions). Please reduce the length of the messages or functions.",
+            type: "invalid_request_error",
+            param: "messages",
+            code: "context_length_exceeded",
+          },
+        }),
+        JSON.stringify({ error: { message: "Prompt is too long: the messages and tools exceed the model's context window." } }),
+      ];
+      for (const [i, body] of tooLong.entries()) {
+        stub.reset();
+        stub.answer(refusing(400, body));
+        const upstreamId = `provider:too-long-${protocol}-${i}`;
+        expect(await failure(gateway.stream(call(protocol, { tools: TOOLS, upstreamId })))).toMatchObject({ code: "provider_unavailable", upstreamStatus: 400 });
+        expect(toolsSent()).toEqual([true]);
+        stub.reset();
+        await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId })));
+        expect(toolsSent()).toEqual([true]);
+      }
+    });
+
+    it("on a call with steps a 400 naming them is the call's failure: not retried, nothing remembered, tools sent on the next call", async () => {
+      const step = await aStep(protocol);
+      stub.reset();
+      stub.answer(refusing(400, REFUSAL[protocol]));
+      const upstreamId = `provider:mid-loop-${protocol}`;
+      expect(await failure(gateway.stream(call(protocol, { tools: TOOLS, upstreamId, steps: [step] })))).toMatchObject({
+        code: "provider_unavailable",
+        upstreamStatus: 400,
+      });
+      expect(toolsSent()).toEqual([true]);
+      stub.reset();
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId })));
+      expect(toolsSent()).toEqual([true]);
+    });
+
+    it("an upstream remembered as refusing them is still sent them on a call with steps, and that round is not toolsRefused", async () => {
+      const step = await aStep(protocol);
+      const upstreamId = `provider:remembered-${protocol}`;
+      stub.reset();
+      stub.answer(refusing(400, REFUSAL[protocol]));
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId })));
+      expect(toolsSent()).toEqual([true, false]); // remembered from now on
+      stub.reset();
+      const events = await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId, steps: [step] })));
+      expect(toolsSent()).toEqual([true]);
+      expect(finishOf(events)).not.toHaveProperty("toolsRefused");
+    });
+  });
+});
+
+describe("a remembered refusal of tools", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is forgotten after TOOLS_REFUSAL_TTL_MS: that upstream is offered them again", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-20T00:00:00Z"));
+    stub.answer(refusing(400, REFUSAL.openai_chat));
+    const ask = () => collect(gateway.stream(call("openai_chat", { tools: TOOLS, upstreamId: "provider:ttl" })));
+    expect(finishOf(await ask())).toMatchObject({ toolsRefused: true });
+    expect(toolsSent()).toEqual([true, false]);
+    stub.requests.length = 0;
+    vi.setSystemTime(Date.now() + TOOLS_REFUSAL_TTL_MS - 1);
+    expect(finishOf(await ask())).toMatchObject({ toolsRefused: true });
+    expect(toolsSent()).toEqual([false]);
+    stub.requests.length = 0;
+    vi.setSystemTime(Date.now() + 1);
+    expect(finishOf(await ask())).toMatchObject({ toolsRefused: true });
+    expect(toolsSent()).toEqual([true, false]); // asked with them again: refused again, so remembered again
+    stub.requests.length = 0;
+    await ask();
+    expect(toolsSent()).toEqual([false]);
+  });
+
+  it("Refusals forgets tools after the TTL, and nothing else", () => {
+    let now = 0;
+    const refusals = new Refusals(() => now);
+    refusals.add("provider:a", "tools");
+    refusals.add("provider:a", "thinking");
+    now = TOOLS_REFUSAL_TTL_MS - 1;
+    expect([...refusals.of("provider:a")].sort()).toEqual(["thinking", "tools"]);
+    now = TOOLS_REFUSAL_TTL_MS;
+    expect([...refusals.of("provider:a")]).toEqual(["thinking"]);
+    now = 10 * TOOLS_REFUSAL_TTL_MS;
+    expect([...refusals.of("provider:a")]).toEqual(["thinking"]);
+    expect(TOOLS_REFUSAL_TTL_MS).toBe(6 * 60 * 60 * 1000);
   });
 });
 
@@ -467,9 +758,46 @@ describe("Chat Completions", () => {
     const tool = stub.requests[1]!.body.messages.filter((m: any) => m.role === "tool").map((m: any) => m.content);
     expect(tool).toEqual(["资料：\n去吃川菜", "[1,null]"]);
   });
+
+  it("each round's reasoning goes back on that round's assistant message, even when the upstream reuses call ids", async () => {
+    // Both rounds call `call_stub_1`, as upstreams that number calls per response do.
+    const later = CANNED_REASONING.replace("Let me think", "Then again");
+    stub.answer(answering("reasoning_tool"));
+    const one = finishOf(await collect(gateway.stream(call("openai_chat", { tools: TOOLS, reasoning: "high" }))));
+    stub.answer(sending(cannedStream("openai_chat", "reasoning_tool").replaceAll("Let me think", "Then again")));
+    const two = finishOf(await collect(gateway.stream(call("openai_chat", { tools: TOOLS, reasoning: "high", steps: [answered(one)] }))));
+    expect(two.toolCalls[0]!.id).toBe(one.toolCalls[0]!.id);
+    stub.answer(answering("text"));
+    await collect(gateway.stream(call("openai_chat", { tools: TOOLS, reasoning: "high", steps: [answered(one), answered(two)] })));
+    const assistants = stub.requests[2]!.body.messages.filter((m: any) => m.role === "assistant");
+    expect(assistants.map((m: any) => m.reasoning_content)).toEqual([CANNED_REASONING, later]);
+  });
+
+  it("a tool-call stream cut in two at any byte gives the same single tool_call", async () => {
+    const bytes = Buffer.from(cannedStream("openai_chat", "reasoning_tool"));
+    for (let cut = 1; cut < bytes.length; cut++) {
+      stub.reset();
+      stub.answer(async (_req, res) => {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(bytes.subarray(0, cut));
+        await new Promise((r) => setImmediate(r));
+        res.end(bytes.subarray(cut));
+      });
+      const events = await collect(gateway.stream(call("openai_chat", { tools: TOOLS, reasoning: "high" })));
+      expect(toolCallsIn(events), `cut at byte ${cut}`).toEqual([{ id: CANNED_TOOL_CALL_ID, name: CANNED_TOOL.name, input: CANNED_TOOL.input }]);
+      expect(deltas(events, "reasoning"), `cut at byte ${cut}`).toBe(CANNED_REASONING);
+    }
+  }, 120_000);
 });
 
 describe("thinking_exhausted", () => {
+  it("a round cut off at its limit after thinking whose only call has input null is thinking_exhausted, as before tools", async () => {
+    stub.answer(sending(cannedStream("anthropic", "reasoning_tool", { toolArgs: ['{"query":', '"川'] }).replace('"stop_reason":"tool_use"', '"stop_reason":"max_tokens"')));
+    const error = await failure(gateway.stream(call("anthropic", { tools: TOOLS, reasoning: "high" })));
+    expect(error).toBeInstanceOf(ModelError);
+    expect(error).toMatchObject({ code: "thinking_exhausted", usage: CANNED_REASONING_USAGE });
+  });
+
   it("a round cut off at its limit after thinking that made a tool call is a truncated finish naming the call, not thinking_exhausted", async () => {
     stub.answer((_req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });

@@ -1402,11 +1402,16 @@ existed. The rounds of the answer so far (`steps`) follow the conversation: each
 gave it, then one tool message with its calls' results (a string as it is, anything else as its JSON) — so the next
 request carries what the protocol needs back: Anthropic's signed thinking before its `tool_use`, the Responses
 reasoning item with its encrypted content (nothing is kept at OpenAI, so nothing is referred to by id), Gemini's thought
-signature on its `functionCall`, and on `openai_chat` the round's `reasoning_content` on the assistant message whose
-tool calls it came before (DeepSeek, Kimi and other upstreams that think while calling tools need it back; the SDK
-neither reads nor sends it, the gateway does both). An upstream that answers 400 or 422 naming tools ("tool", or
-"function" as Gemini says it) before anything streamed is asked once more without them, as above; that round, and
-every later call to that upstream while it is remembered, finishes `toolsRefused`.
+signature on its `functionCall`, and on `openai_chat` each round's `reasoning_content` on that round's assistant
+message (DeepSeek, Kimi and other upstreams that think while calling tools need it back; the SDK neither reads nor
+sends it, the gateway does both; matched by the round's place in `steps`, since call ids may repeat from round to
+round). A call without `steps` that an upstream answers 400 or 422 before anything streamed, the body naming tools
+("tool", "tools", `tool_use`, `tool_choice`, `tool_call(s)`, or "function call…" as Gemini says it) and not speaking of
+the request's length ("context", "too long", "maximum … tokens", "token limit"), is asked once more without them; only
+if that request is answered are tools remembered as refused by that upstream, for 6 hours (`TOOLS_REFUSAL_TTL_MS`;
+until then its calls without `steps` go without them, and after it they are offered again). A call with `steps` always
+sends its tools, is never asked again without them, and marks nothing: a 400 to it is the call's failure. Every call
+that offered tools and did not send them finishes `toolsRefused`.
 
 What follows for a person choosing a model and a level:
 
@@ -1427,22 +1432,28 @@ thought summaries; Chat Completions' `reasoning_content` / `reasoning`, which th
 the stream, or a leading `<think>` block; reasoning comes out in its place among the text as it arrives, and never
 becomes text. The gateway reads the stream in time proportional to its bytes however they are cut, and stops reading
 it — the SDK still reads all of it, so the answer is whole — at a line, or an event's data, over 1 048 576
-characters), and each tool call the model makes, with its id (made up by the SDK on Gemini, which gives none), the
-tool's name and its input parsed (null when it is not JSON or names a tool the call did not offer: the caller decides);
-then one finish: the usage the upstream reported for this round alone (reasoning tokens count as output; none reported:
-no usage), whether the model stopped for length, the round's tool calls (none: the model answered), and the round's
-assistant turn — opaque, plain JSON, to be passed back untouched in the next call's `steps` — and `toolsRefused` when
-the tools offered were not sent. An answer may be up to 8 MiB on the wire and is given up after 60 s without a byte
-(before or after the headers); how long it may take in all is the caller's to bound. Nothing a model calls a tool with,
-nor any tool's result, is logged.
+characters), and each tool call the model makes (its id, the tool's name, its input); then one finish: the usage the
+upstream reported for this round alone (reasoning tokens count as output; none reported: no usage), whether the model
+stopped for length, the round's tool calls (none: the model answered), and the round's assistant turn — opaque, plain
+JSON, to be passed back untouched in the next call's `steps` — and `toolsRefused` when the tools offered were not sent.
+A tool call is guaranteed this, and nothing more (the caller decides the rest): its name is one of the tools the call
+offered when its input is not null, otherwise arbitrary and possibly empty; its input is the arguments parsed as JSON
+and never checked against the tool's schema — `{}` for empty arguments, null when they were not JSON, named no offered
+tool, or were JSON `null`; its id is the protocol's (Gemini's own when it sends one, else made up by the SDK), and on
+Responses and Anthropic is as the upstream sent it, so it may be empty or repeat within a round (on no protocol is it
+unique across rounds); only the finish's `truncated` says a round was cut (a call cut short may have input null, or
+`{}` when cut before its first argument); and the gateway bounds no sizes — not a call's name, id or input, nor how
+many calls a round makes, nor what a call sends (`tools`, `steps`, results). An answer may be up to 8 MiB on the wire
+and is given up after 60 s without a byte (before or after the headers); how long it may take in all is the caller's
+to bound. Nothing a model calls a tool with, nor any tool's result, is logged.
 
 **Failures** are a `ModelError` with one of four codes and a fixed sentence: 401 or 403 is `provider_rejected`; any
 other error status, a network failure, silence, a redirect, an oversized answer, and a stream that is malformed or ends
 without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`; an answer
-cut off at its output limit with no visible text and no tool call, having reasoned (reasoning came, or the upstream
-reported reasoning tokens), is `thinking_exhausted` and carries the usage the upstream reported, which the call is
-charged. Besides the
-code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent is kept, printed or logged.
+cut off at its output limit with no visible text and no tool call with an input, having reasoned (reasoning came, or
+the upstream reported reasoning tokens), is `thinking_exhausted` and carries the usage the upstream reported, which
+the call is charged. Besides the code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent
+is kept, printed or logged.
 Stopping a call (its abort signal) ends it at once and closes the upstream connection.
 
 #### `GET /api/models`
