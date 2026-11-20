@@ -83,9 +83,10 @@ export interface ContextRun {
    * The run's conversation is a group, not the Agent's own conversation with its owner (null): the most of the group's
    * history its model is shown — `maxTokens` tokens, counted as the plan counts them (text in weight, attachments at their
    * estimate; the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
-   * messages only. The Agent's own conversation is limited by the model's context alone.
+   * messages only — and nothing at or before seq `after`, the run's asker's line (`askerLine`): no message, no quote of
+   * one, no attachment of one. The Agent's own conversation is limited by the model's context alone.
    */
-  group: { maxTokens: number; maxMessages: number } | null;
+  group: { maxTokens: number; maxMessages: number; after: number } | null;
   /**
    * The ratio the context is planned at (metering/tokens.ts `planRatio` of the model's learned ratio, read once by the
    * run): every text of the plan — the system text, the messages, the cut of the newest — counts its weight times this.
@@ -204,6 +205,37 @@ export async function readPrefix(
   }
 }
 
+/**
+ * The asker's line of reply run `runId` in a group (Task 10b, the product rule of 2026-11-20): the seq at and before which
+ * nothing of the group is shown to its model — the latest joining among the people whose questions it answers
+ * (`agent_runs.asker_ids`, runs.ts `Askers`), each at the start of their latest stay there (the current one; for one
+ * who has left since, the stay they asked in). Where an asker cannot be told — the run's askers are not known (a run
+ * recorded before they were, a chain whose first person cannot be told), or one was never in the group — the latest
+ * joining among the group's people now counts as well (the safe side). 0 when nothing bounds it (no such run; no person
+ * in the group now). The Agent's own joining needs no line here: the visibility rule with the Agent as reader
+ * (`VISIBLE_JOIN`) bounds everything it is shown already, so a reply is shown nothing before the later of the two.
+ * Everything that shows a reply's model what was said in its group — this context (`loadContext`), and any tool that
+ * reads the group's history or a summary of it for the reply — keeps to the same line.
+ */
+export async function askerLine(q: Queryable, runId: string): Promise<number> {
+  const { rows } = await q.query<{ line: string }>(
+    `select greatest(
+              coalesce(max(j.joined), 0),
+              case when bool_or(j.joined is null) is not false
+                   then (select coalesce(max(ms.joined_seq), 0) from memberships ms join principals p on p.id = ms.principal_id
+                          where ms.conversation_id = r.conversation_id and ms.left_seq is null and p.kind = 'human')
+                   else 0 end)::text as line
+       from agent_runs r
+       left join lateral (select (select max(ms.joined_seq) from memberships ms
+                                   where ms.conversation_id = r.conversation_id and ms.principal_id = a.id) as joined
+                            from unnest(r.asker_ids) as a (id)) j on true
+      where r.id = $1
+      group by r.id, r.conversation_id`,
+    [runId],
+  );
+  return Number(rows[0]?.line ?? 0);
+}
+
 /** The seq of the latest `topic_reset` notice the Agent can see in its conversation; 0 when there is none. */
 async function topicStart(q: Queryable, agentId: string, conversationId: string): Promise<number> {
   const { rows } = await q.query<{ seq: string | null }>(
@@ -291,7 +323,9 @@ const inGroupNow = (ms: string): string =>
  * who they are by account, `speakerRole`, and whether they are in the group now, `inGroupNow`). A reply of the Agent's
  * that proposed a persona is its text followed by the proposal as the block it was written in (`renderProposalBlock`):
  * the Agent's own output, so it can revise what it proposed; it counts toward the budget like any text and is never
- * read for a block again. (A reply in a group never proposes: nothing is looked up there.)
+ * read for a block again. (A reply in a group never proposes: nothing is looked up there.) In a group a quote of a
+ * message at or before the asker's line (`ContextRun.group.after`) is left out as one the Agent cannot see is: the
+ * quoting message's own text only.
  * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -327,8 +361,8 @@ async function loadPage(
     const quoted = await q.query<{ seq: string; text: string | null; attachment: AttachmentRef | null }>(
       `select m.seq::text as seq, m.body ->> 'text' as text, m.body -> 'attachment' as attachment
          from messages m ${VISIBLE_JOIN}
-        where m.conversation_id = $2 and m.seq = any($3::bigint[])`,
-      [run.agentId, run.conversationId, quotedSeqs],
+        where m.conversation_id = $2 and m.seq = any($3::bigint[]) and m.seq > $4`,
+      [run.agentId, run.conversationId, quotedSeqs, run.group?.after ?? 0],
     );
     for (const r of quoted.rows) {
       const shown = r.text ? r.text : r.attachment ? attachmentLabel(toAttachment(r.attachment)) : "";
@@ -398,7 +432,8 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
 
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
- * the messages after the latest new topic in the order they were answered, read newest first until they are more than
+ * the messages after the latest new topic — in a group, and after the asker's line (`ContextRun.group.after`), the later
+ * of the two — in the order they were answered, read newest first until they are more than
  * the budget (the model's context less its output limit, `system` and `run.reserved`; in a group at most `run.group.maxTokens`) can
  * hold — in a group, its latest `run.group.maxMessages` messages at most, as if what is older were left unread — and the
  * records of the attachments the plan could show — looked up only through `findDownloadable` with the Agent as reader
@@ -429,7 +464,9 @@ export async function loadContext(
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
   const reading = budgetWith(system("", []));
-  const from = await topicStart(q, run.agentId, run.conversationId);
+  const start = await topicStart(q, run.agentId, run.conversationId);
+  // In a group, nothing at or before the asker's line either (`askerLine`): what is read starts after the later of the two.
+  const from = Math.max(start, run.group?.after ?? 0);
   const loaded: Loaded[] = [];
   // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
   // only that is used while more is left unread (a reply may belong before messages not read yet).
@@ -463,7 +500,7 @@ export async function loadContext(
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: from };
+  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start };
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */

@@ -229,8 +229,8 @@ export async function postAsAgent(
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
   // nor is one its Agent's pause or delete interrupted, even once the Agent is resumed (runs.ts); nor a run of another
   // conversation's, here.
-  const run = await t.query<{ status: string; interrupted: string | null; lane: Lane; caller_id: string | null }>(
-    "select status, interrupted, lane, caller_id from agent_runs where id = $1 and agent_id = $2 and conversation_id = $3",
+  const run = await t.query<{ status: string; interrupted: string | null; lane: Lane; caller_id: string | null; asker_ids: string[] | null }>(
+    "select status, interrupted, lane, caller_id, asker_ids from agent_runs where id = $1 and agent_id = $2 and conversation_id = $3",
     [runId, agentId, conversationId],
   );
   if (run.rows[0]?.status !== "running") throw new RunNotRunning(runId, run.rows[0]?.status ?? null);
@@ -284,9 +284,10 @@ export async function postAsAgent(
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who
-  // is behind its message there is decided by this run's caller and lane (read above; a running run's never change).
+  // is behind its message there is decided by this run's caller and lane (read above; a running run's never change); the
+  // runs it calls answer this run's askers (Task 10b: the person whose message started the chain).
   const postedBy = { id: run.rows[0].caller_id, lane: run.rows[0].lane };
-  const triggered = own ? noneTriggered() : await triggerFromAgent(t, conversationId, message, agent, postedBy, config);
+  const triggered = own ? noneTriggered() : await triggerFromAgent(t, conversationId, message, agent, postedBy, config, run.rows[0].asker_ids);
   return { message, duplicate: false, triggered };
 }
 

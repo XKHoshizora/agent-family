@@ -1124,9 +1124,26 @@ group is told), then — unless the mention folds into a reply under way, which 
   its owner; then its persona. The group's name and the other Agents' names and intros, which other people wrote, are
   introduced as descriptions for it to know, not instructions to it, each on one line of its own (line breaks in them
   become spaces). Nothing about persona proposals. Then the group's recent history as the Agent may read it — from its
-  (last) joining on, the one visibility rule with the Agent as reader, files too —: its own messages as its turns,
+  (last) joining on, the one visibility rule with the Agent as reader, files too, and from its asker's (below) —: its own messages as its turns,
   everyone else's as the other side's, each starting with the system's label of its speaker; notices left out. Nothing of any other conversation, its own with its owner
   included; nor does anything of the group reach that one.
+- *Whose joining it reaches back to* (the product rule of 2026-11-20; `tests/agents-group-asker.test.ts`). When an Agent
+  replies in a group because of someone's message, the conversation history given to the model for that reply starts at
+  the later of (a) where the Agent's own membership began and (b) where the asker's current membership began (the same
+  `joined_seq` the visibility rule reads for a member's current stay: after leaving and rejoining, the rejoin). The
+  asker is the person whose message caused the reply: the sender of a message that `@`-mentions the Agent; for a reply
+  nobody asked for (Proactive replies), the sender of the message the judgement picked it for; for an Agent called by
+  another Agent (a chain), the person whose message started the chain — not the calling Agent; the Agent's own owner
+  asking in the group is an asker like anyone else. A reply that answers several people's calls at once (one folded into
+  a reply waiting to run, or answered by a follow-up) starts at the latest of their joinings. Where the asker cannot be
+  told (a run recorded before askers were, a chain whose first person is not known), the latest joining among the
+  group's people now counts. Everything before that line is not in the model's context for this reply: not as messages,
+  not as the quoted text of a later message that replies to one (left out, as a quote of a message the Agent cannot see
+  is), not through the attachments of earlier messages, and not in any summary of the group or anything a tool reads of
+  it for the reply. Deliberately not restricted: an older member asking while a newcomer reads the answer, and the
+  Agent's own notes learned in that group and the notes passage (An Agent's memory). Nor does the line change what anyone can read
+  through the API, the memory reviews' input or the judgement's transcript for unasked replies. Recorded on the run
+  (`agent_runs.asker_ids`, never on the wire), read once as the reply begins (`src/agents/context.ts` `askerLine`).
 - *How much of the group.* At most its latest 80 messages, and at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000) tokens of
   them, oldest dropped first, within that cap, as in its own conversation (What the model is shown): the cap replaces
   the model's context as the budget when the context would hold more. It is the service's estimate — text in weight,

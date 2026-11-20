@@ -259,7 +259,8 @@ async function settle(t: Tx, j: Judged): Promise<Triggered> {
     logSkipped(log, skipped, agent.id, conversationId);
     return told;
   }
-  const run = await queueRun(t, agent, conversationId, seq, "human", { id: null, lane: "proactive" });
+  // Nobody called it, but it answers the message's sender (Task 10b): what it is shown starts no earlier than their joining.
+  const run = await queueRun(t, agent, conversationId, seq, "human", { id: null, lane: "proactive" }, [still.senderId]);
   await saveState(t, agent.id, conversationId, { state: afterProactive(stored.state, now, P), surchargeSeq: seq });
   return { ...told, runs: [run] };
 }

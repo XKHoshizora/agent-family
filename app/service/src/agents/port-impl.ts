@@ -20,6 +20,7 @@ import type { Hub } from "../sync/hub.ts";
 import { createWhisper, type WhisperBody } from "../whispers/store.ts";
 import { toWireWhisper } from "../whispers/wire.ts";
 import {
+  askerLine,
   BlobStoreDown,
   buildContext,
   GROUP_CONTEXT_MESSAGES,
@@ -354,7 +355,8 @@ export class DbAgentPort implements AgentPort {
    *    system text — its own conversation's (`systemPrompt`, with what the Agent calls its owner), or the group's
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
    *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
-   *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, each of someone else's
+   *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, nothing at or before the
+   *    run's asker's line (context.ts `askerLine`: the latest joining of those whose questions it answers), each of someone else's
    *    labelled with the run's mark, which `loadContext` draws with `deps.drawMark` and the roster carries too; the
    *    port keeps it for `post` once the call is handed over, `RunFlags.mark`). With no owner's message in it (in a group: nobody else's) the run ends without a call:
    *    `cancelled` with no error when everything it was to answer is before a new topic (its owner started over), else
@@ -466,8 +468,9 @@ export class DbAgentPort implements AgentPort {
           scene
             ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
-      // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
-      const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
+      // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown, and
+      // nothing at or before its asker's line (`askerLine`, Task 10b), read once, here, for the whole run.
+      const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: await askerLine(t, run.id) } : null;
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
       // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it
