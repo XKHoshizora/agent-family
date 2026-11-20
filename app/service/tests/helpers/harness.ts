@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach } from "vitest";
 import { buildApp, type BuildOptions, type Deps } from "../../src/app.ts";
 import { loadConfig, type Config } from "../../src/config.ts";
 import { createDb, type Db } from "../../src/db.ts";
+import { settled as memoryCountsSettled } from "../../src/memory/stats.ts";
 import { testDatabaseUrl } from "./env.ts";
 
 const MIGRATIONS_TABLE = "pgmigrations";
@@ -70,6 +71,51 @@ async function truncateAll(db: Db): Promise<void> {
   });
 }
 
+/** How long `untilIdle` waits for the app's own work to end before it gives up and lets the truncate go on. */
+const IDLE_WAIT_MS = 10_000;
+
+/** Whether `idle()` (a promise that resolves when a component has nothing under way) has resolved already. */
+const idleNow = async (idle: (() => Promise<void>) | undefined): Promise<boolean> =>
+  idle === undefined ? true : Promise.race([idle().then(() => true), new Promise<boolean>((r) => setImmediate(() => r(false)))]);
+
+/**
+ * Waits until the app has nothing of its own under way — what a test leaves behind when it ends: a reply the worker's
+ * loop claimed or is about to claim, the memory reviewer's and proactive scheduler's jobs, the memory counters written
+ * without anyone waiting (`memory/stats.ts`), the realtime hub's deliveries, and (what none of those names) any
+ * statement of this database still running for another connection. A truncate that starts while any of those is still
+ * writing takes its table locks one by one against theirs, and Postgres ends the cycle with `deadlock detected`.
+ * Nothing here retries: it only does not start the truncate until the work is over. It looks until two looks in a row
+ * find everything quiet (work can start work: a reply's follow-up, a delivery's next step), and gives up after
+ * `IDLE_WAIT_MS` (something a test leaves running on purpose then costs that, once, as it always did the truncate).
+ */
+async function untilIdle(app: FastifyInstance, db: Db, backgroundWorker: boolean): Promise<void> {
+  const hub = app.hasDecorator("realtime") ? (app.realtime as unknown as { queues?: Map<string, unknown> }) : null;
+  const deadline = Date.now() + IDLE_WAIT_MS;
+  let quiet = 0;
+  while (quiet < 2 && Date.now() < deadline) {
+    await memoryCountsSettled();
+    let busy = !(await idleNow(app.deps.memory?.idle.bind(app.deps.memory))) || !(await idleNow(app.deps.proactive?.idle.bind(app.deps.proactive)));
+    busy ||= (hub?.queues?.size ?? 0) > 0;
+    if (backgroundWorker) {
+      // What the loop has not yet claimed is run now (by this hook, in the loop's place); what it has claimed is waited for.
+      if ((await app.agentWorker.drain()) > 0) busy = true;
+      const running = await db.query<{ id: string }>("select id from agent_runs where status = 'running'");
+      if (running.rows.some((r) => app.agentWorker.isWorking(r.id))) busy = true;
+    }
+    const active = await db.query<{ n: number }>(
+      "select count(*)::int as n from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and state = 'active'",
+    );
+    if (active.rows[0]!.n > 0) busy = true;
+    if (busy) {
+      quiet = 0;
+      await new Promise((r) => setTimeout(r, 5));
+    } else {
+      quiet++;
+      await new Promise((r) => setImmediate(r));
+    }
+  }
+}
+
 /**
  * No answer floor (`BuildOptions.answerFloor`): registrations and reset requests answer as soon as they are done.
  * What `useApp()` uses unless a test asks for a floor; pass it to an app a test builds itself.
@@ -91,7 +137,8 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * `config` replaces fields of the loaded configuration, past `loadConfig`'s rules (a file that needs a value they
  * refuse, such as a connection timeout of under a second, for what it tests; nothing else is affected).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
- * The truncate before each test runs outside the app's statement timeout.
+ * Before each truncate the harness waits for the app's own background work to be over (`untilIdle`), and the truncate
+ * runs outside the app's statement timeout.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory"> & { memory?: boolean } = {},
@@ -152,6 +199,8 @@ export function useApp(
   });
 
   beforeEach(async () => {
+    // Before the truncate, what the previous test left running is over (see `untilIdle`).
+    await untilIdle(current(instance), current(database), agentWorker !== false);
     await truncateAll(current(database));
   });
 

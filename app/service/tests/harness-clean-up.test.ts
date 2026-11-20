@@ -54,3 +54,20 @@ describe("the truncate between tests", () => {
     expect((await db.query("select count(*)::int n from principals")).rows[0].n).toBe(0);
   });
 });
+
+describe("the truncate waits for the app's background work", () => {
+  it("(setup) a test ends while the reply worker is still answering", async () => {
+    replyEnded = false;
+    const owner = await signUp(app, "asker");
+    const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: "fast" }, persona: "简短地回答。" });
+    expect((await api(app, owner, "POST", `/api/conversations/${agent.conversationId}/messages`, { text: "你好", clientTxn: "idle1" })).status).toBe(201);
+    // The worker's loop claims the reply on its own: it is queued or in the model's call (300 ms) when this test ends.
+  });
+
+  it("starts with the reply over, not truncated from under it", async () => {
+    // The hook before this test waited for the reply to end (posted: its run `done`), then cleared the tables.
+    expect(replyEnded).toBe(true);
+    expect((await db.query("select count(*)::int n from agent_runs")).rows[0].n).toBe(0);
+    expect((await db.query("select count(*)::int n from messages")).rows[0].n).toBe(0);
+  });
+});
