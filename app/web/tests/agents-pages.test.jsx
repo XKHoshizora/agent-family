@@ -542,7 +542,8 @@ describe("family names: an Agent's account name hangs under mine (Task N)", () =
     await click(within(dialog()).getByRole("button", { name: "取消" }));
     await click(inMain().getByRole("button", { name: /编辑/ }));
     expect(inMain().queryByLabelText("账号名")).toBeNull();
-    expect(mainText()).toContain("me_one.jarvis（创建后不可修改）");
+    // The name part never changes; the part before it is my account name, and follows it.
+    expect(mainText()).toContain("me_one.jarvis（名字部分创建后不可修改，前面跟随你的账号名）");
   });
 });
 

@@ -788,9 +788,27 @@ describe("family names: what a mention calls, as the service reads it (Task N)",
     expect(calledAgentIds("@xiaolin.anna @nobody", all, of)).toEqual(["xa"]);
   });
 
+  it("a person member's display name is a person first too: a bare `@Jarvis` naming the person 「Jarvis」 calls no Agent; the full form still does", () => {
+    const people = {
+      tony: { kind: "human", handle: "tony", displayName: "Jarvis" },
+      x: { kind: "human", handle: "xiaolin", displayName: "小林" },
+      xj: { kind: "agent", handle: "xiaolin.jarvis", displayName: "贾维斯" },
+    };
+    const of = (id) => people[id];
+    expect(calledAgentIds("@Jarvis 你好", ["tony", "x", "xj"], of)).toEqual([]);
+    expect(calledAgentIds("@xiaolin.jarvis 你好", ["tony", "x", "xj"], of)).toEqual(["xj"]);
+    expect(calledAgentIds("@jarvis 你好", ["x", "xj"], of)).toEqual(["xj"]);
+    // Whole token only: 「Jarvis Lee」 is no `@jarvis`.
+    expect(calledAgentIds("@jarvis", ["x", "xj", "lee"], (id) => (id === "lee" ? { kind: "human", handle: "lee", displayName: "Jarvis Lee" } : of(id)))).toEqual(["xj"]);
+  });
+
   it("an Agent that answers only when called, in its own conversation, answers to its full handle, its name part and its name", () => {
     const agent = { handle: "@xiaolin.jarvis", name: "贾维斯" };
     for (const text of ["@xiaolin.jarvis 在吗", "@jarvis 在吗", "@贾维斯 在吗"]) expect([text, namesAgent(text, agent)]).toEqual([text, true]);
     expect(namesAgent("随便聊聊 @xiaolin", agent)).toBe(false);
+    // The handle and the name part as whole mentions, not inside a longer one.
+    for (const text of ["@jarvis_2 在吗", "@xiaolin.jarvis2", "@ai"]) expect([text, namesAgent(text, agent)]).toEqual([text, false]);
+    expect(namesAgent("@aiden 你好", { handle: "xiaolin.ai", name: "小爱" })).toBe(false);
+    expect(namesAgent("@ai 你好", { handle: "xiaolin.ai", name: "小爱" })).toBe(true);
   });
 });

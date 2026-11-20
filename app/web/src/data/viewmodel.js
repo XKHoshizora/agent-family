@@ -218,10 +218,14 @@ export function mentionedHandles(text) {
 const bareHandle = (handle) => String(handle ?? "").replace(/^@/, "").toLowerCase();
 const namePartOf = (handle) => bareHandle(handle).slice(bareHandle(handle).indexOf(".") + 1);
 
+/** A person's display name as a bare mention is compared with it: trimmed, lower-cased (the service's `personNamed`). */
+const nameAsHandle = (name) => String(name ?? "").trim().toLowerCase();
+
 /**
  * The Agents among `memberIds` that `text` calls, as the service decides (`mentions.ts` `resolveMentions`):
- * `@owner.name` the Agent with that full handle; a bare `@name` nobody when a person member has that handle, else the one
- * Agent member with that name part — nobody when there are two or more. `principalOf(id)` → `{kind, handle}`.
+ * `@owner.name` the Agent with that full handle (nobody when two live ones would have it); a bare `@name` nobody when a
+ * person member has that handle or that display name (people first), else the one Agent member with that name part —
+ * nobody when there are two or more. `principalOf(id)` → `{kind, handle, displayName}`.
  */
 export function calledAgentIds(text, memberIds, principalOf) {
   const members = memberIds.map((id) => ({ id, ...principalOf(id) })).filter((m) => m.kind === "human" || m.kind === "agent");
@@ -229,7 +233,7 @@ export function calledAgentIds(text, memberIds, principalOf) {
   for (const handle of mentionedHandles(text)) {
     const agents = handle.includes(".")
       ? members.filter((m) => m.kind === "agent" && bareHandle(m.handle) === handle)
-      : members.some((m) => m.kind === "human" && bareHandle(m.handle) === handle)
+      : members.some((m) => m.kind === "human" && (bareHandle(m.handle) === handle || nameAsHandle(m.displayName) === handle))
         ? []
         : members.filter((m) => m.kind === "agent" && namePartOf(m.handle) === handle);
     if (agents.length === 1 && !called.includes(agents[0].id)) called.push(agents[0].id);
@@ -238,15 +242,15 @@ export function calledAgentIds(text, memberIds, principalOf) {
 }
 
 /**
- * Whether `text` names the Agent by `@handle` (its full one), `@name part` or `@name` (case ignored, anywhere in the
- * text): the service's rule for a message in the Agent's own conversation when its reply mode is 仅在我点名时回复
- * (`runs.ts` `mentions`).
+ * Whether `text` names the Agent by `@handle` (its full one) or `@name part`, each a whole mention (`mentionedHandles`),
+ * or by `@name` anywhere in the text (case ignored): the service's rule for a message in the Agent's own conversation
+ * when its reply mode is 仅在我点名时回复 (`runs.ts` `mentions`).
  */
 export function namesAgent(text, agent) {
-  const lower = String(text ?? "").toLowerCase();
   const handle = bareHandle(agent?.handle);
   const name = String(agent?.name ?? "").toLowerCase();
-  return [handle, namePartOf(handle), name].some((called) => called !== "" && lower.includes(`@${called}`));
+  const mentioned = mentionedHandles(text);
+  return (handle !== "" && (mentioned.includes(handle) || mentioned.includes(namePartOf(handle)))) || (name !== "" && String(text ?? "").toLowerCase().includes(`@${name}`));
 }
 
 /**
@@ -471,7 +475,11 @@ function agentsTalking(model, conv, held, rows) {
   const last = held[held.length - 1];
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
   if (rows.some((r) => r.kind === "replying")) return true;
-  const principalOf = (id) => ({ kind: model.principals[id]?.kind, handle: model.agents[id]?.handle ?? model.principals[id]?.handle });
+  const principalOf = (id) => ({
+    kind: model.principals[id]?.kind,
+    handle: model.agents[id]?.handle ?? model.principals[id]?.handle,
+    displayName: model.principals[id]?.displayName,
+  });
   return calledAgentIds(last.text, conv.members.map((m) => m.id), principalOf).some((id) => id !== last.senderId);
 }
 

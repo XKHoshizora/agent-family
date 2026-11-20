@@ -534,7 +534,7 @@ export function AgentForm({ agent = null }) {
         {agent ? (
           <div className="field">
             <span className="field-label">账号名</span>
-            <p className="readonly"><Lock size={14} aria-hidden="true" /> {agent.handle}（创建后不可修改）</p>
+            <p className="readonly"><Lock size={14} aria-hidden="true" /> {agent.handle}（名字部分创建后不可修改，前面跟随你的账号名）</p>
           </div>
         ) : (
           <Field label="账号名" hint="2 到 24 位小写字母、数字或下划线，接在你的账号名后面，创建后不可修改" error={handleError}>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentErrorText, friendErrorText, groupErrorText, noQuotaText, profileErrorText, providerErrorText, replyErrorText, runFailureText } from "../src/data/errorTexts.js";
+import { agentErrorText, dayText, friendErrorText, groupErrorText, noQuotaText, profileErrorText, providerErrorText, replyErrorText, runFailureText } from "../src/data/errorTexts.js";
 
 const GENERIC = "操作没有成功，请稍后再试。";
 const err = (code, status = 400) => ({ code, status, reason: null });
@@ -125,8 +125,15 @@ for (const [label, textOf, routes] of [
 describe("changing my account name (Task N)", () => {
   it("says the name is taken, or when the year is up (a local date)", () => {
     expect(profileErrorText("handle", err("handle_taken", 409))).toBe("这个名字已经有人用了");
+    // The day it really is possible: an instant later than midnight rounds up to the next local day.
     const availableAt = new Date(2027, 10, 21, 9, 30).toISOString();
-    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt })).toBe("离上次改名还不到一年，2027年11月21日 之后可以再改");
+    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt })).toBe("离上次改名还不到一年，2027年11月22日 之后可以再改");
+    const atMidnight = new Date(2027, 10, 21).toISOString();
+    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt: atMidnight })).toBe("离上次改名还不到一年，2027年11月21日 之后可以再改");
+    expect(dayText(new Date(2027, 11, 31, 23, 59).toISOString())).toBe("2028年1月1日");
+    expect(dayText("not a time")).toBeNull();
+    // The create form's refusal states the name part's real range.
+    expect(agentErrorText("create", err("invalid_request"))).toContain("账号名需 2–24 位");
     expect(profileErrorText("handle", err("handle_change_too_soon", 429))).toBe("离上次改名还不到一年，暂时不能再改");
     expect(profileErrorText("handle", err("invalid_request"))).toBe("账号名为 3 到 24 位小写字母、数字或下划线");
   });

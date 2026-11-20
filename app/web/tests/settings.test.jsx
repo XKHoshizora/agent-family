@@ -134,8 +134,8 @@ describe("account name (账号名, Task N)", () => {
   const handleBox = () => screen.getByLabelText("账号名");
   const changeButton = () => inMain().getByRole("button", { name: /^修改账号名$|^保存中…$/ });
   const handleField = () => handleBox().closest(".field");
-  /** A local date at 10:00, as the service would send it. */
-  const dayAt = (y, m, d) => new Date(y, m - 1, d, 10, 0).toISOString();
+  /** A local day's midnight, as the service would send an instant; `hour` later that day shows as the next day (M7). */
+  const dayAt = (y, m, d, hour = 0) => new Date(y, m - 1, d, hour, 0).toISOString();
 
   it("says it can change once a year; while it may change now there is no date", async () => {
     const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: null }));
@@ -148,7 +148,7 @@ describe("account name (账号名, Task N)", () => {
   });
 
   it("within the year shows the next date it may change, and the box stays as it is", async () => {
-    const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: dayAt(2027, 11, 21) }));
+    const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: dayAt(2027, 11, 20, 15) }));
     const updateHandle = vi.fn();
     await openApp({ sync: baseSync, api: { getMe, updateHandle } });
     await goSettings();
