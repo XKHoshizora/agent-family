@@ -51,7 +51,7 @@ const F = {
   dream: 'src/memory/dream.ts',
   prompt: 'src/agents/runtime/prompt.ts',
   store: 'src/memory/store.ts',
-  weight: 'src/memory/weight.ts',
+  weight: 'src/metering/tokens.ts',
   config: 'src/config.ts',
 }
 const FILE_MODES = {
@@ -384,7 +384,7 @@ function cleanText(text) {
   const spaced = oneLine(text.replace(FORMAT_CHARACTERS, '')).replace(WHITESPACE_RUN, ' ')
   return spaced.replace(CONTROL_OR_LONE_SURROGATE, '').replace(WHITESPACE_RUN, ' ').trim()
 }
-// src/memory/weight.ts: the one measure of memory, ceil(utf-8 bytes / 3).
+// src/metering/tokens.ts (memory's names re-exported by src/memory/weight.ts): the one measure, ceil(utf-8 bytes / 3).
 SN(F.weight, 'weight', 'export const weight = (text: string): number => Math.ceil(encoder.encode(text).length / 3);')
 SN(F.weight, 'weightOf', 'export const weightOf = (notes: ReadonlyArray<{ text: string }>): number => notes.reduce((sum, n) => sum + weight(n.text), 0);')
 SN(F.weight, 'cutToWeight 1', 'if (weight(text) <= max) return text;')

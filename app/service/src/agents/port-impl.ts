@@ -7,6 +7,7 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
+import { correctedEstimate, ratioKey, readRatio } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
@@ -308,9 +309,10 @@ export class DbAgentPort implements AgentPort {
    *    owner's calls are never refused by these), someone else's meets the others' budget again and is not queued once
    *    it is spent.
    *    Otherwise
-   *    the call is admitted on its input estimate (402 `no_quota` ends the run failed) and the Agent's read marker moves
-   *    to what the run covers (announced after commit). The reasoning level is the Agent's when the model allows it,
-   *    else `none`.
+   *    the call is admitted on its input estimate, its text corrected by its model's learned ratio (metering/tokens.ts;
+   *    402 `no_quota` ends the run failed), the estimate itself (a call of text only) and the ratio's key are recorded on
+   *    the run for settlement to learn from, and the Agent's read marker moves to what the run covers (announced after
+   *    commit). The reasoning level is the Agent's when the model allows it, else `none`.
    */
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
@@ -413,17 +415,28 @@ export class DbAgentPort implements AgentPort {
         return { end: ENDED_QUIETLY, told };
       }
       const { resolved, loaded, covers } = first;
+      // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned),
+      // images and PDFs at their constants. What admission holds for, and what settlement falls back on.
+      const key = ratioKey(resolved);
+      const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, await readRatio(t, key));
       try {
-        await admitRun(t, config, run.id, run.ownerId, resolved, context.inputTokensEstimate, now);
+        await admitRun(t, config, run.id, run.ownerId, resolved, input, now);
       } catch (err) {
         if (!(err instanceof AppError) || err.code !== "no_quota") throw err;
         const resetsAt = err.details.resetsAt;
         return { end: { status: "failed", error: "no_quota", ...(typeof resetsAt === "string" ? { resetsAt } : {}) } };
       }
+      // What settlement learns the ratio from: the estimate at ratio 1 of a call that showed text only (an image's or a
+      // PDF's real tokens are not text's), and the ratio's key.
+      await t.query("update agent_runs set input_estimate = $2, ratio_key = $3 where id = $1", [
+        run.id,
+        context.fixedTokens === 0 ? context.inputTokensEstimate : null,
+        key,
+      ]);
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       return {
-        prepared: { call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning }, inputChars: context.inputChars },
+        prepared: { call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning }, inputChars: input },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
       };
     });

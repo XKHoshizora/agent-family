@@ -9,8 +9,8 @@ import { ModelError, type ModelErrorCode, type ModelGateway } from "../models/ga
 import type { Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { admitRun } from "./admit.ts";
-import { estimateTokens } from "./prices.ts";
 import { settle, type Usage } from "./settle.ts";
+import { correctedEstimate, estimateTokens, ratioKey, readRatio } from "./tokens.ts";
 
 /**
  * A metered owner call: a model call that is not a chat reply, metered to an owner in the owner's own lane (a persona draft, charged to
@@ -19,10 +19,13 @@ import { settle, type Usage } from "./settle.ts";
  * 1. One transaction: the run is inserted `running`; under the owner's account lock the model is chosen and resolved
  *    (`spec.choose`; none to call: 502 `provider_unavailable`; a saved key that cannot be opened: 502
  *    `provider_rejected`), the owner's calls running at once must be fewer than `agentMaxConcurrentRuns` (429
- *    `rate_limited`), the context must hold the input (400 `context_too_small`), then admission (402 `no_quota`). Any
- *    refusal rolls all of it back: nothing recorded, nothing called.
+ *    `rate_limited`), the context must hold the input (400 `context_too_small`), then admission (402 `no_quota`) on the
+ *    input's estimate in weight, corrected by the model's learned ratio (tokens.ts). Any refusal rolls all of it back:
+ *    nothing recorded, nothing called.
  * 2. The call, outside any transaction, reasoning `none`, ended after `spec.deadlineMs`.
- * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported) and the run ended.
+ * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported; with no usage
+ *    reported, on the input as admission held it and the output in weight) and the run ended. An owner call teaches no
+ *    ratio: only replies do.
  *
  * What the callers differ in is parameters of `ownerCall`; what to do with the outcome is theirs. Nothing here throws
  * for what goes wrong in the three steps: each is a kind of `OwnerCallOutcome`.
@@ -58,8 +61,6 @@ export interface OwnerCallSpec {
    * `provider_unavailable`).
    */
   answer(text: string): string | null;
-  /** The size of a piece of output text for the estimate used when the upstream reported no usage. */
-  measure(text: string): number;
   /**
    * What happens when `closing` aborts (the service is stopping). Given: the call is handed to it (it ends the run as it
    * sees fit) and the outcome is `closed`; the run is not settled here. Absent: the call is abandoned and settled
@@ -94,9 +95,9 @@ export type OwnerCallOutcome =
 export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closing: AbortSignal): Promise<OwnerCallOutcome> {
   const { db, config, models, log, inFlight } = deps;
   const { ownerId, system, user, label } = spec;
-  const inputChars = estimateTokens(system) + estimateTokens(user);
 
-  let started: { runId: string; call: Resolved["call"] };
+  /** `input`: the input estimate as admission held it (and settlement falls back on). */
+  let started: { runId: string; call: Resolved["call"]; input: number };
   try {
     started = await db.tx(async (t) => {
       const inserted = await t.query<{ id: string }>(
@@ -129,8 +130,9 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
       if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, { rest: system, passage: "" }) < estimateTokens(user)) {
         throw new AppError(400, "context_too_small");
       }
-      await admitRun(t, config, runId, ownerId, sized, inputChars, new Date());
-      return { runId, call: sized.call };
+      const input = correctedEstimate(estimateTokens(system) + estimateTokens(user), 0, await readRatio(t, ratioKey(sized)));
+      await admitRun(t, config, runId, ownerId, sized, input, new Date());
+      return { runId, call: sized.call, input };
     });
   } catch (error) {
     return { kind: "not_started", error };
@@ -182,7 +184,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
         : abandoned || (finished === null && !(spec.keepAnswerOnTimeout && deadline.aborted)) || answer === null
           ? UNAVAILABLE
           : ({ status: "done" } as const);
-    const outputChars = end.status === "done" ? spec.measure(text) + spec.measure(reasoning) : 0;
+    const outputChars = end.status === "done" ? estimateTokens(text) + estimateTokens(reasoning) : 0;
     let endedElsewhere: string | null = null;
     try {
       await db.tx(async (t) => {
@@ -193,7 +195,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
           endedElsewhere = now.rows[0]?.status ?? "gone";
           return;
         }
-        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars, outputChars }, end.status, new Date(), { forgiveAll: abandoned, log });
+        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars: started.input, outputChars }, end.status, new Date(), { forgiveAll: abandoned, log });
         await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
           started.runId,
           end.status,

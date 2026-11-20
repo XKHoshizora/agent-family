@@ -1,3 +1,4 @@
+import { estimateTokens } from "../../metering/prices.ts";
 import { stripUnsafeText } from "../../schemas.ts";
 import type { Delta } from "./port.ts";
 
@@ -10,13 +11,6 @@ export const DELTA_INTERVAL_MS = 50;
  * message, which has the block taken out.
  */
 const BLOCK_START = "<af-";
-
-/** Code points of `s`: what an estimate counts as tokens (metering/prices.ts `estimateTokens`). */
-export function codePoints(s: string): number {
-  let n = 0;
-  for (const _ of s) n++;
-  return n;
-}
 
 /** How many characters at the end of `s` could be the start of `BLOCK_START` (`<`, `<a`, `<af`): held until the next piece says. */
 function pendingStart(s: string): number {
@@ -114,8 +108,11 @@ export class ReplyStream {
     this.pending = { text: "", reasoning: "" };
   }
 
-  /** Characters produced so far, reasoning included: what settlement counts as output when the upstream reports no usage. */
+  /**
+   * What was produced so far, reasoning included, in weight (`estimateTokens`, metering/tokens.ts): what settlement counts as
+   * output when the upstream reports no usage.
+   */
   outputChars(): number {
-    return codePoints(this.text) + codePoints(this.reasoning);
+    return estimateTokens(this.text) + estimateTokens(this.reasoning);
   }
 }

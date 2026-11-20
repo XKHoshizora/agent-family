@@ -802,11 +802,11 @@ ends `cancelled` with no error. Limit: 30 per minute with the Agent writes.
 ### An Agent's memory
 
 **How memory is measured.** Every size in memory — a room's limit, a model's entry, a review's per-message cut, `used` / `limit` / `left` in every route answer,
-what the notes passage may take of a model's context, the output limit of a language conversion — is one measure, *weight*: `ceil(utf-8 bytes / 3)` (`src/memory/weight.ts`;
-the web mirrors it in `app/web/src/data/memoryWeight.js`, and both are tested against one shared list of strings). Both of what a limit bounds, what a reply costs and how much of the context the notes take, are
+what the notes passage may take of a model's context, the output limit of a language conversion — is one measure, *weight*: `ceil(utf-8 bytes / 3)` (`src/memory/weight.ts`,
+which re-exports it from `src/metering/tokens.ts`: it is the service's one measure of tokens, Metering, Token estimates; the web mirrors it in `app/web/src/data/memoryWeight.js`, and both are tested against one shared list of strings). Both of what a limit bounds, what a reply costs and how much of the context the notes take, are
 token quantities, and code points are not: one fact is about 10 code points in Chinese and 30 to 40 in English at about the same tokens. A Chinese or Japanese or Korean
 character weighs 1 and a Latin letter a third, so a room of 2000 holds about 2000 Chinese characters or about 6000 English letters, and one weight is taken as one token
-(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `weight.ts` is the single place to change — and the web's mirror (`weight` and `storedWeight`, the weight of a typed text once its whitespace is collapsed and trimmed as `cleanText` does, in `memoryWeight.js`) must change with it, with the shared test rows. The reply's context budget counts the notes passage in weight too (`systemTokens`: the system text without the passage a token a code point, plus the passage in weight, the one function both the budget and `loadContext` use; it takes the parts the system text was composed of, `systemText` / `groupSystemText`, so where the passage is is never guessed from the text, and a persona holding the notes heading is measured as persona), so a passage held to `MEMORY.passageShare` is counted as that share, in Latin script as in Chinese.
+(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `metering/tokens.ts` is the single place to change — and the web's mirror (`weight` and `storedWeight`, the weight of a typed text once its whitespace is collapsed and trimmed as `cleanText` does, in `memoryWeight.js`) must change with it, with the shared test rows. The reply's context budget counts the notes passage in weight too, as it counts everything (`systemTokens`: the system text without the passage, plus the passage, each in weight, the one function both the budget and `loadContext` use; it takes the parts the system text was composed of, `systemText` / `groupSystemText`, so where the passage is is never guessed from the text, and a persona holding the notes heading is measured as persona), so a passage held to `MEMORY.passageShare` is counted as that share, in Latin script as in Chinese.
 
 An Agent can keep notes (`memory`, an owner's setting per Agent). There are three rooms, each with a limit in weight
 (below; `MEMORY.roomOwner` 2000, `roomSelf` 3000, `roomHearsay` 2000): notes about the owner (shared by all their Agents unless
@@ -1111,9 +1111,9 @@ group is told), then — unless the mention folds into a reply under way, which 
   included; nor does anything of the group reach that one.
 - *How much of the group.* At most its latest 80 messages, and at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000) tokens of
   them, oldest dropped first, within that cap, as in its own conversation (What the model is shown): the cap replaces
-  the model's context as the budget when the context would hold more. It is the service's estimate — a token per
-  character, labels and quotes included, 1 500 an image, 300 per KB of PDF — so a provider may bill an image or a PDF at
-  more. The system text, the roster included, comes on top of it. Its own conversation has no such cap.
+  the model's context as the budget when the context would hold more. It is the service's estimate — text in weight
+  (Metering, Token estimates), labels and quotes included, 1 500 an image, 300 per KB of PDF — so a provider may bill an
+  image or a PDF at more. The system text, the roster included, comes on top of it. Its own conversation has no such cap.
 - *What it stores.* An ordinary `text` message from the Agent, which every member reads: its text (message-text rules,
   everything from its first `<af-` on dropped, cut at 8 000 characters, then without the run's mark, below), `stopped` and `truncated` as in its own
   conversation, and the model's `reasoning` exactly as there (message-text rules, at most 32 000 characters, only when
@@ -2406,8 +2406,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       run's end follows it up as any (Coalescing): the owner's own mention is answered — the owner's calls are never
       refused by these — and someone else's meets the others' budget again and is not queued once it is spent (no second
       notice that day); nothing loops. Otherwise the call is admitted on its input
-      estimate (Metering; `no_quota` ends it `failed` before any call) and the Agent's read marker moves to what the run
-      covers (`read` push, `peerReadSeq`).
+      estimate, corrected by its model's learned ratio (Metering, Token estimates; `no_quota` ends it `failed` before any
+      call), the estimate and the ratio's key are recorded on the run for settlement to learn from, and the Agent's read
+      marker moves to what the run covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)
    — except for a reply in a group, of which no delta goes to anyone, its owner included (plan ruling 2; decided at
    `begin` and kept on the run's in-process flags, so nothing is read per delta): it arrives whole, as its message.
@@ -2544,10 +2545,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
   later failure is shown by its name (`tests/runs-faults.test.ts`).
 - The budget: the model's context, less the call's output limit (at a reasoning level, its thinking allowance included)
-  and the system text, counted as admission counts (a token per
-  character, 1 500 an image, 300 per KB of PDF). What fits, in this order: the current turn (the owner's messages after
+  and the system text, counted in the service's one measure (text in weight, `ceil(utf-8 bytes / 3)`; 1 500 an image,
+  300 per KB of PDF; Metering, Token estimates). What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
-  then its end) when it alone is over the budget (which then holds at least 200 tokens: with less the run fails
+  then as much of its end as the budget holds, in weight) when it alone is over the budget (which then holds at least 200 tokens: with less the run fails
   `context_too_small`, see `begin`); then the current turn's attachment contents, newest first, each if it
   fits; then older messages by name only, newest first, while they fit (nothing older than one that does not); then
   their attachment contents, newest first, each if it fits. So an older message's attachment goes (leaving its name)
@@ -2560,8 +2561,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   listing keeps answering with that level (the run is not failed) until the Agent is edited, when the level is checked
   again.
 
-A reply's input estimate (what admission holds) and what settlement falls back on when no usage is reported both count
-all of the above, attachments at their estimate.
+A reply's input estimate counts all of the above, attachments at their estimate. What admission holds for — and what
+settlement falls back on when no usage is reported — is that estimate with its text corrected by the model's learned
+ratio (Metering, Token estimates); a reply that showed text only also records the estimate itself, for settlement to
+learn the ratio from.
 
 **Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
 (Metering):
@@ -2995,7 +2998,7 @@ at `info`, so the two `debug` lines show only when the level is lowered.
 ## Metering (`src/metering/`)
 
 Spec 6.3 and 6.4. A model call is a reply of an Agent, a persona draft (`POST /api/agents/draft-persona`) or a memory
-call (below): all are runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices and estimates in `prices.ts`). A call on a
+call (below): all are runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices in `prices.ts`, estimates in `tokens.ts`). A call on a
 provider model costs nothing and needs no points (it is still recorded). A call on a site model is admitted before it
 starts and settled when it ends, each in one transaction under the owner's `accounts` row lock (after the run's row), and
 never with a transaction open across the call.
@@ -3005,9 +3008,28 @@ Prices are micro-points per token (`inputMicroPerToken`, `outputMicroPerToken` o
 `FREE_DAILY_POINTS` whole points, a day the calendar day of `SITE_TIMEZONE`. On the wire every amount is a decimal string
 of points (Usage and points).
 
+**Token estimates** (`src/metering/tokens.ts`; migration `042_token_ratios.sql`; `tests/tokens.test.ts`). Every estimate
+of what a text costs in tokens — what a reply's context holds, what a call is held for, what it is settled on when its
+upstream reports no usage, memory's sizes — is one measure, *weight*: `ceil(utf-8 bytes / 3)` (How memory is measured). A
+Chinese, Japanese or Korean character weighs 1 and a Latin letter a third, so 3 000 English letters are 1 000 tokens, as
+1 000 Chinese characters are (until this, a token was a character, three times too many for Latin text). Images (1 500)
+and PDFs (300 per KB) keep their constants. What one model really counts for a weight is its own, so a call's input
+estimate is corrected by its model's *ratio*, learned from replies: admission records on a reply's run its estimate at
+ratio 1 (`agent_runs.input_estimate`, only when the call showed text alone: an image's or a PDF's real tokens are not
+text's) and the key of its model's ratio (`ratio_key`: `site:<id>`, or `provider:<protocol>:<model name>` — what the
+model is, never whose: no owner, provider id, key or address in it); settlement, when the upstream reported the input
+tokens, moves that ratio (`token_ratios (key, ratio, samples, updated_at)`) by a tenth of the sample `reported /
+estimated`, from 1 for a first sample, each sample held to [0.5, 3] and so the ratio too. Nothing is learned from an
+estimate under 200, a reported count that is not a whole number above 0, a draft or a memory call, or a settlement on an
+estimate. A ratio is used once it has 5 samples (1 until then), held to [0.5, 3]: a call is held for its text's estimate
+times the ratio, rounded up, plus its images and PDFs at their constants (drafts and memory calls too). Learning never
+fails or delays a settlement: it is done in a savepoint, waits at most 100 ms for the ratio's row (another settlement of
+the same model may hold it), and when anything fails the sample is skipped with a warning that carries the database's
+error code only. Reading a ratio never fails either: a failed read is 1.
+
 **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
-cost until it is settled: its input estimate (one token per character, high on purpose for Latin text; 1 500 per image;
-300 per KB of PDF) plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
+cost until it is settled: its input estimate (Token estimates: text in weight times its model's learned ratio; 1 500 per
+image; 300 per KB of PDF) plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
 model), at the model's prices. A free-tier model is charged to today's
 free allowance while what is left of it, less what your running calls hold against it, is above zero; otherwise to the
 balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
@@ -3016,7 +3038,8 @@ so). A memory call (purpose `memory`) on a site model is the exception: see "The
 Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
-reported none, one token per character (images and PDFs at their estimate, as at admission), and the record says
+reported none, the estimate — its input as admission held it (ratio included; images and PDFs at their estimate), its
+output in weight — and the record says
 `estimated`, at the model's price — unless the operator has removed that site model from `SITE_MODELS` while the call
 ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
 (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer

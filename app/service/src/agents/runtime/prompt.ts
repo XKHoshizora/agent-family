@@ -357,11 +357,11 @@ export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, o
 
 /**
  * What a system text counts in the context budget, from the parts it was composed of (`SystemText`; a text with no passage is all `rest`):
- * the rest a token a code point (`estimateTokens`), and the passage as `fitNotes` measures it, in weight (`TOKENS_PER_WEIGHT`). One
- * function for every place that counts the system text, so the passage is never counted by two rules.
+ * each in weight (`estimateTokens`, metering/tokens.ts) — the passage as `fitNotes` measures it. One function for every place that
+ * counts the system text, so the passage is never counted by two rules.
  */
 export function systemTokens(system: Pick<SystemText, "rest" | "passage">): number {
-  return estimateTokens(system.rest) + weight(system.passage) * TOKENS_PER_WEIGHT;
+  return estimateTokens(system.rest) + estimateTokens(system.passage);
 }
 
 /** What the notes passage may take of a model's context (`MEMORY.passageShare` of the input the model has room for: its context less its output limit). */

@@ -2,6 +2,7 @@ import { applyLedger, freeUsedToday, lockAccount, memoryUsedToday, siteDay } fro
 import type { Config } from "../config.ts";
 import type { Tx } from "../db.ts";
 import { assertCount, costMicro, isCount } from "./prices.ts";
+import { learnRatio } from "./tokens.ts";
 
 /**
  * Settlement (spec 6.4): after a call, in one transaction, charge what it cost — at most what it held — to the source
@@ -26,9 +27,9 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
 /**
  * Settles the call of run `runId` with `outcome`, by what its admission recorded on the run (`source`, `model`,
  * `charge_to`, `hold_micro`), whatever the Agent's model is by now:
- * - Tokens: `usage` as reported; when none was reported (or it is not two whole non-negative numbers), one token per
- *   character of `fallback` (estimateTokens' rule; its input side counts what the call showed besides text, such as
- *   images, at their token estimate) and the record says `estimated`. `fallback` is ours, so its counts must be
+ * - Tokens: `usage` as reported; when none was reported (or it is not two whole non-negative numbers), `fallback` (the
+ *   caller's estimate: text in weight, its input as admission held it — corrected by the model's learned ratio, images
+ *   and PDFs at their constants; tokens.ts) and the record says `estimated`. `fallback` is ours, so its counts must be
  *   whole numbers of 0 or more: anything else throws before anything is read or written.
  * - Cost (`cost_micro`, the true cost): the tokens at the site model's configured price; 0 for a provider model, for a
  *   `failed` call that produced no output, for no tokens at all (a run recovered at start-up settles so), and for a
@@ -42,7 +43,10 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  *   (`memory_usage`, `usage_records.memory_micro`) and never touches the other two; `balance` debits the whole charge to the ledger (`usage`), which may
  *   take the balance below zero. `forgiven_micro` is everything of the cost not charged.
  * - Appends the `usage_records` row and zeroes the run's `hold_micro`.
- * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
+ * - Learns: a reply (purpose `reply`) whose input estimate admission recorded (`input_estimate`, `ratio_key`) and whose
+ *   usage was reported teaches its model's ratio once (`learnRatio`, which never throws and never holds this up). Nothing
+ *   else does: no draft, no memory call, no settlement on an estimate.
+ * - `forgiveAll`:the call's result was lost on the service's side (its reply could not be stored): nothing is charged
  *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
  * settled already (`usage_records_run_id_key` holds that in the database too).
@@ -67,7 +71,9 @@ export async function settle(
     model: string | null;
     charge_to: "free" | "balance" | "memory" | null;
     hold_micro: string;
-  }>("select owner_id, agent_id, purpose, source, model, charge_to, hold_micro::text from agent_runs where id = $1 for update", [runId]);
+    input_estimate: number | null;
+    ratio_key: string | null;
+  }>("select owner_id, agent_id, purpose, source, model, charge_to, hold_micro::text, input_estimate, ratio_key from agent_runs where id = $1 for update", [runId]);
   const run = rows[0];
   if (!run) throw new Error(`settle: no run ${runId}`);
   if ((await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0) {
@@ -135,4 +141,7 @@ export async function settle(
   );
   if (balanceMicro > 0n) await applyLedger(t, run.owner_id, -balanceMicro, "usage", null, inserted.rows[0]!.id);
   await t.query("update agent_runs set hold_micro = 0 where id = $1", [runId]);
+  if (reported && run.purpose === "reply" && run.input_estimate !== null && run.ratio_key !== null) {
+    await learnRatio(t, run.ratio_key, run.input_estimate, usage.inputTokens, log);
+  }
 }

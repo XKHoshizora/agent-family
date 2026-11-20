@@ -101,11 +101,11 @@ async function expectLedgerMatchesBalance(ownerId: string): Promise<void> {
 }
 
 describe("prices", () => {
-  it("estimates a token per Unicode code point, conservatively", () => {
+  it("estimates a token per weight: ceil(utf-8 bytes / 3)", () => {
     expect(estimateTokens("")).toBe(0);
-    expect(estimateTokens("hello world")).toBe(11);
-    expect(estimateTokens("你好，世界")).toBe(5);
-    expect(estimateTokens("😀👍🏽")).toBe(3); // three code points, five UTF-16 units
+    expect(estimateTokens("hello world")).toBe(4); // 11 bytes
+    expect(estimateTokens("你好，世界")).toBe(5); // 15 bytes
+    expect(estimateTokens("😀👍🏽")).toBe(4); // three code points of 4 bytes each, five UTF-16 units
     expect(IMAGE_TOKENS).toBe(1500);
     expect(PDF_TOKENS_PER_KB).toBe(300);
   });

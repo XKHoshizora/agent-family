@@ -81,8 +81,8 @@ export interface ContextRun {
   coversSeq: number;
   /**
    * The run's conversation is a group, not the Agent's own conversation with its owner (null): the most of the group's
-   * history its model is shown — `maxTokens` tokens, counted as admission counts them (attachments at their estimate;
-   * the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
+   * history its model is shown — `maxTokens` tokens, counted as the plan counts them (text in weight, attachments at their
+   * estimate; the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
    * messages only. The Agent's own conversation is limited by the model's context alone.
    */
   group: { maxTokens: number; maxMessages: number } | null;
@@ -110,13 +110,14 @@ export interface LoadedContext {
 export interface BuiltContext {
   /** Never empty when `loadContext` found an owner's message (`hasOwnerTurn`). */
   messages: ModelCall["messages"];
-  /** Tokens of the system text and the turns, images and PDFs at their estimate: what admission holds for. */
-  inputTokensEstimate: number;
   /**
-   * What settlement falls back on when the upstream reports no usage: characters, attachments at their token
-   * estimate. Settlement counts a token per character (`estimateTokens`' rule), so it is the estimate itself.
+   * Tokens of the system text and the turns — text in weight, images and PDFs at their constants — at ratio 1: what the
+   * budget was planned in. Admission holds for it corrected by the model's learned ratio (`correctedEstimate`), and a reply
+   * of text only teaches the ratio from it (metering/tokens.ts).
    */
-  inputChars: number;
+  inputTokensEstimate: number;
+  /** Of `inputTokensEstimate`, what images and PDFs are counted as: their constants, never corrected by a ratio. */
+  fixedTokens: number;
 }
 
 /**
@@ -616,7 +617,6 @@ export async function buildContext(
   for (const [slot, attachment] of plan.attachments(false)) await show(slot, attachment);
   plan.keepOlder();
   for (const [slot, attachment] of plan.attachments(true)) await show(slot, attachment);
-  const { messages, tokens } = plan.build();
-  const inputTokensEstimate = systemTokens(loaded.system) + tokens;
-  return { messages, inputTokensEstimate, inputChars: inputTokensEstimate };
+  const { messages, tokens, fixed } = plan.build();
+  return { messages, inputTokensEstimate: systemTokens(loaded.system) + tokens, fixedTokens: fixed };
 }

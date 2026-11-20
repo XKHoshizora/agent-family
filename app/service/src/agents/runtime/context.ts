@@ -1,6 +1,7 @@
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../../metering/prices.ts";
+import { lastToWeight } from "../../metering/tokens.ts";
 import type { ModelCall, Part } from "../../models/gateway.ts";
-import { stripUnsafeText } from "../../schemas.ts";
+import { characters as countCharacters, stripUnsafeText } from "../../schemas.ts";
 import { systemTokens, type SystemText } from "./prompt.ts";
 
 /**
@@ -87,7 +88,10 @@ export function entryText(own: string, quoted: string | null): string {
   return own === "" ? quoteLines(quoted) : `${quoteLines(quoted)}\n${own}`;
 }
 
-/** Tokens a part is counted as (metering/prices.ts): its characters, `IMAGE_TOKENS` for an image, `pdfTokens` for a PDF. */
+/**
+ * Tokens a part is counted as (metering/tokens.ts, prices.ts): a text its weight, an image `IMAGE_TOKENS`, a PDF
+ * `pdfTokens` — at ratio 1, as a context is planned; admission corrects the text by the model's ratio.
+ */
 export function partTokens(p: Part): number {
   return p.type === "text" ? estimateTokens(p.text) : p.type === "image" ? IMAGE_TOKENS : pdfTokens(p.data.length);
 }
@@ -168,7 +172,7 @@ export function fileText(bytes: Uint8Array, complete: boolean, maxChars: number)
   }
   if (decoded === "" || decoded.includes("\u0000")) return null;
   const stray = decoded.match(STRAY_CONTROLS)?.length ?? 0;
-  if (stray * 100 > estimateTokens(decoded)) return null;
+  if (stray * 100 > countCharacters(decoded)) return null;
   const characters = Array.from(stripUnsafeText(decoded));
   const cut = !complete || characters.length > maxChars;
   const shown = characters.slice(0, maxChars);
@@ -234,12 +238,11 @@ export class ContextPlan {
     this.older = fits ? shown.slice(turn.length) : [];
   }
 
-  /** The owner's newest message: as it is when it fits, else cut from the front to what the budget holds. */
+  /** The owner's newest message: as it is when it fits, else cut from the front to what the budget holds (its end, in weight). */
   private keepNewest(e: ContextEntry): void {
     if (this.keep(e)) return;
     const whole = [e.text, e.attachment ? attachmentLabel(e.attachment) : ""].filter((s) => s !== "").join("\n");
-    const tail = Math.max(0, this.left - estimateTokens(CUT_FRONT));
-    const text = CUT_FRONT + (tail === 0 ? "" : Array.from(whole).slice(-tail).join(""));
+    const text = CUT_FRONT + lastToWeight(whole, this.left - estimateTokens(CUT_FRONT));
     this.kept.push({ entry: { ...e, text, attachment: null }, content: null });
     this.left -= estimateTokens(text);
   }
@@ -299,22 +302,28 @@ export class ContextPlan {
 
   /**
    * The call's turns, oldest first: a turn of the Agent's first is left out (a call starts with the owner's), and
-   * consecutive messages of one side are one turn, their parts in order. `tokens`: what they are counted as.
+   * consecutive messages of one side are one turn, their parts in order. `tokens`: what they are counted as (`partTokens`);
+   * `fixed`: the part of it that is images and PDFs at their constants.
    */
-  build(): { messages: ModelCall["messages"]; tokens: number } {
+  build(): { messages: ModelCall["messages"]; tokens: number; fixed: number } {
     const oldestFirst = [...this.kept].reverse();
     while (oldestFirst[0]?.entry.role === "assistant") oldestFirst.shift();
     const messages: ModelCall["messages"] = [];
     let tokens = 0;
+    let fixed = 0;
     for (const { entry, content } of oldestFirst) {
       const parts: Part[] = [];
       if (entry.text !== "") parts.push({ type: "text", text: entry.text });
       if (entry.attachment) parts.push(attachmentPart(entry.attachment, content));
-      for (const p of parts) tokens += partTokens(p);
+      for (const p of parts) {
+        const n = partTokens(p);
+        tokens += n;
+        if (p.type !== "text") fixed += n;
+      }
       const last = messages[messages.length - 1];
       if (last?.role === entry.role) last.parts.push(...parts);
       else messages.push({ role: entry.role, parts });
     }
-    return { messages, tokens };
+    return { messages, tokens, fixed };
   }
 }

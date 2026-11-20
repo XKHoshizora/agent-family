@@ -334,7 +334,6 @@ export async function draftPersona(deps: DraftDeps, ownerId: string, input: Draf
         const persona = draftText(text);
         return hasVisibleText(persona) ? persona : null;
       },
-      measure: characters,
       onClosing: async (runId) => {
         try {
           await release(runId);

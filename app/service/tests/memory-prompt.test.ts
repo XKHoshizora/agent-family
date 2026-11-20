@@ -229,7 +229,12 @@ describe("the system text", () => {
     expect(told.text).toContain(MEMORY_ON);
     expect(told.passage).toBe("");
     expect(told.text).toBe(plain.text.replace("\n\n以下是主人为你写的人格设定", `\n\n${MEMORY_ON}\n\n以下是主人为你写的人格设定`));
-    expect(systemTokens(told) - systemTokens(plain)).toBe(estimateTokens(`${MEMORY_ON}\n\n`));
+    // Counted as text, in weight: the whole text (no passage). Weight rounds per text, so what the sentence adds is its own
+    // weight or one less.
+    const added = estimateTokens(`${MEMORY_ON}\n\n`);
+    expect(systemTokens(told)).toBe(estimateTokens(told.text));
+    expect(systemTokens(told) - systemTokens(plain)).toBeGreaterThanOrEqual(added - 1);
+    expect(systemTokens(told) - systemTokens(plain)).toBeLessThanOrEqual(added);
     const withNotes = systemText(on, { displayName: "甲" }, NOW, "normal", ZONE, notes);
     expect(withNotes.passage).not.toBe("");
     expect(withNotes.text.indexOf(MEMORY_ON)).toBeLessThan(withNotes.text.indexOf(withNotes.passage));
@@ -244,7 +249,9 @@ describe("the system text", () => {
     expect(onboarding.text).toBe(interview.replace("\n\n你还没有人格设定", `\n\n${MEMORY_ON}\n\n你还没有人格设定`));
     expect(onboarding.text).not.toBe(interview);
     expect(onboarding.passage).toBe("");
-    expect(systemTokens(onboarding) - estimateTokens(interview)).toBe(estimateTokens(`${MEMORY_ON}\n\n`));
+    expect(systemTokens(onboarding)).toBe(estimateTokens(onboarding.text));
+    expect(systemTokens(onboarding) - estimateTokens(interview)).toBeGreaterThanOrEqual(added - 1);
+    expect(systemTokens(onboarding) - estimateTokens(interview)).toBeLessThanOrEqual(added);
     expect(systemPrompt({ ...off, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE)).toBe(interview);
     const gOn = { ...gAgent, memory: true };
     expect(groupSystemPrompt(gOn, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes)).toBe(groupSystemPrompt(gAgent, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes));
@@ -524,7 +531,7 @@ describe("fitNotes", () => {
     expect(fitNotes(zh, false, ZONE, "主人", budget)).toEqual({ notes: zh, fits: true });
     expect(fitNotes(en, false, ZONE, "主人", budget + 10).fits).toBe(true);
     // The weight of the passage, not its code points, is what is compared (by code points the English one would be far over).
-    expect(estimateTokens(notesPassage(en, false, ZONE, "主人"))).toBeGreaterThan(budget + 10);
+    expect(Array.from(notesPassage(en, false, ZONE, "主人")).length).toBeGreaterThan(budget + 10);
   });
 
   it("a group's passage is measured as a group's (its own sentence, no group name on what was heard)", () => {

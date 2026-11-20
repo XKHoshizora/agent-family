@@ -1,8 +1,9 @@
 import type { Resolved } from "../models/resolve.ts";
 
 /**
- * Cost maths of site models. Money is `bigint` micro-points; a price is micro-points per token. Estimates are
- * deliberately high: the most a call can cost is held against the owner's quota while it runs (admit.ts).
+ * Cost maths of site models. Money is `bigint` micro-points; a price is micro-points per token. The most a call can cost
+ * is held against the owner's quota while it runs (admit.ts): its input estimate (tokens.ts, corrected by its model's
+ * learned ratio) and its whole output limit.
  */
 
 /** Tokens counted for one image shown to a model. */
@@ -11,14 +12,10 @@ export const IMAGE_TOKENS = 1500;
 export const PDF_TOKENS_PER_KB = 300;
 
 /**
- * Tokens of `text` when nobody counted them: one per Unicode code point. High for Latin text (a token is usually
- * several letters), about right for Chinese: conservative on purpose.
+ * Tokens of `text` when nobody counted them: its weight (ceil(utf-8 bytes / 3)), times its model's learned ratio when
+ * given. The one measure lives in tokens.ts; this is it.
  */
-export function estimateTokens(text: string): number {
-  let n = 0;
-  for (const _ of text) n++;
-  return n;
-}
+export { estimateTokens } from "./tokens.ts";
 
 /** Tokens counted for a PDF of `bytes` bytes shown to a model: `PDF_TOKENS_PER_KB` per 1 000 bytes, rounded up. */
 export function pdfTokens(bytes: number): number {

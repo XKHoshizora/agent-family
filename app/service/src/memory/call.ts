@@ -204,7 +204,6 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
       deadlineMs: config.agentRunTimeoutMs,
       keepAnswerOnTimeout: false,
       answer: (text) => text.trim() || null,
-      measure: (text) => text.length,
     },
     closing,
   );

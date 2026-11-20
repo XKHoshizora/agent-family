@@ -21,8 +21,9 @@ export interface Prepared {
   /** Holds a provider's key in plaintext: hand it to the gateway and nowhere else. */
   readonly call: Omit<ModelCall, "signal">;
   /**
-   * Characters of the system text and the turns, images and PDFs at their token estimate: what settlement counts when
-   * the upstream reports no usage. A whole number of 0 or more.
+   * The call's input estimate as admission held it: the system text and the turns in weight, corrected by the model's
+   * learned ratio, images and PDFs at their constants (metering/tokens.ts) — what settlement counts when the upstream
+   * reports no usage. A whole number of 0 or more.
    */
   readonly inputChars: number;
 }
