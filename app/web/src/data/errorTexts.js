@@ -148,7 +148,7 @@ const PROFILE = {
 export function profileErrorText(action, error) {
   if (action === "handle" && error?.code === "handle_change_too_soon") {
     const day = dayText(error.availableAt);
-    return day ? `离上次改名还不到一年，${day} 之后可以再改` : "离上次改名还不到一年，暂时不能再改";
+    return day ? `离上次改名还不到一年，${day}起可以再改` : "离上次改名还不到一年，暂时不能再改";
   }
   return pick(PROFILE, action, error);
 }

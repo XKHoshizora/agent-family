@@ -127,9 +127,9 @@ describe("changing my account name (Task N)", () => {
     expect(profileErrorText("handle", err("handle_taken", 409))).toBe("这个名字已经有人用了");
     // The day it really is possible: an instant later than midnight rounds up to the next local day.
     const availableAt = new Date(2027, 10, 21, 9, 30).toISOString();
-    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt })).toBe("离上次改名还不到一年，2027年11月22日 之后可以再改");
+    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt })).toBe("离上次改名还不到一年，2027年11月22日起可以再改");
     const atMidnight = new Date(2027, 10, 21).toISOString();
-    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt: atMidnight })).toBe("离上次改名还不到一年，2027年11月21日 之后可以再改");
+    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt: atMidnight })).toBe("离上次改名还不到一年，2027年11月21日起可以再改");
     expect(dayText(new Date(2027, 11, 31, 23, 59).toISOString())).toBe("2028年1月1日");
     expect(dayText("not a time")).toBeNull();
     // The create form's refusal states the name part's real range.

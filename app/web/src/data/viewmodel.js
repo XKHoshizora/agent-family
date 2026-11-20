@@ -218,7 +218,7 @@ export function mentionedHandles(text) {
 const bareHandle = (handle) => String(handle ?? "").replace(/^@/, "").toLowerCase();
 const namePartOf = (handle) => bareHandle(handle).slice(bareHandle(handle).indexOf(".") + 1);
 
-/** A person's display name as a bare mention is compared with it: trimmed, lower-cased (the service's `personNamed`). */
+/** A person's display name as a bare mention is compared with it: trimmed, lower-cased (the service's `namedAgents`, mentions.ts). */
 const nameAsHandle = (name) => String(name ?? "").trim().toLowerCase();
 
 /**

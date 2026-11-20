@@ -156,7 +156,7 @@ function HandleForm({ account }) {
 
   return (
     <form onSubmit={submit}>
-      <Field label="账号名" error={error} hint={waiting ? `一年可以改一次，${day} 之后可以再改` : "3 到 24 位小写字母、数字或下划线。一年可以改一次。"}>
+      <Field label="账号名" error={error} hint={waiting ? `一年可以改一次，${day}起可以再改` : "3 到 24 位小写字母、数字或下划线。一年可以改一次。"}>
         <input
           value={handle}
           disabled={waiting}

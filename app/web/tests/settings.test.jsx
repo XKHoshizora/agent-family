@@ -143,7 +143,7 @@ describe("account name (账号名, Task N)", () => {
     await goSettings();
     expect(handleBox().value).toBe("me_one");
     expect(handleField().textContent).toContain("一年可以改一次");
-    expect(handleField().textContent).not.toContain("之后可以再改");
+    expect(handleField().textContent).not.toContain("起可以再改");
     expect(changeButton().disabled).toBe(true);
   });
 
@@ -152,7 +152,7 @@ describe("account name (账号名, Task N)", () => {
     const updateHandle = vi.fn();
     await openApp({ sync: baseSync, api: { getMe, updateHandle } });
     await goSettings();
-    expect(handleField().textContent).toContain("一年可以改一次，2027年11月21日 之后可以再改");
+    expect(handleField().textContent).toContain("一年可以改一次，2027年11月21日起可以再改");
     expect(handleBox().disabled).toBe(true);
     expect(changeButton().disabled).toBe(true);
     expect(updateHandle).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe("account name (账号名, Task N)", () => {
     expect(toastText()).toBe("账号名已更新");
     expect(document.querySelector(".profile-head").textContent).toContain("@mei_2");
     expect(document.querySelector(".settings-me").textContent).toContain("mei_2");
-    expect(handleField().textContent).toContain("2027年11月21日 之后可以再改");
+    expect(handleField().textContent).toContain("2027年11月21日起可以再改");
   });
 
   it("says why a change was refused: the name is taken, or the year has not passed", async () => {
@@ -197,7 +197,7 @@ describe("account name (账号名, Task N)", () => {
     });
     fireEvent.change(handleBox(), { target: { value: "mei_3" } });
     await click(changeButton());
-    expect(handleField().textContent).toContain("离上次改名还不到一年，2027年3月5日 之后可以再改");
+    expect(handleField().textContent).toContain("离上次改名还不到一年，2027年3月5日起可以再改");
     expect(handleBox().disabled).toBe(true);
     expect(document.querySelector(".profile-head").textContent).toContain("@me_one");
   });
