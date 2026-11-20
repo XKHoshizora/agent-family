@@ -24,6 +24,7 @@ import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls } from "./memory/call.ts";
 import { runDreamJob } from "./memory/dream.ts";
+import { runCatchUp } from "./memory/catchup.ts";
 import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
 import { setModelEntryMax } from "./memory/clean.ts";
@@ -389,6 +390,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
                   return runReview(pipeline, job, ctx);
                 case "flags":
                   return runFlags(pipeline, job, ctx);
+                case "catchup":
+                  return runCatchUp(pipeline, job, ctx);
                 default:
                   return runDreamJob(pipeline, job, ctx);
               }

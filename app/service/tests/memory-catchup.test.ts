@@ -1,0 +1,239 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { decideProactive } from "../src/agents/proactive/decide.ts";
+import type { Judge, Question } from "../src/judge/client.ts";
+import { settled } from "../src/memory/stats.ts";
+import { api, group, signUp, type Actor } from "./helpers/actors.ts";
+import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
+import { useApp } from "./helpers/harness.ts";
+import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
+import { FAST, flagHelpers, JUDGE, PERSONA } from "./helpers/memory-flags.ts";
+import { scriptedGateway } from "./helpers/models.ts";
+import { closeAllSockets } from "./helpers/ws.ts";
+
+/**
+ * 也回顾一下 in a group (memory/catchup.ts; README "An Agent's memory"): switching memory on with catchUp catches up, once per group,
+ * what members said there while it was off — the group's own judgement asked this Agent's questions alone, over those lines.
+ */
+
+const gateway = scriptedGateway();
+const scripted = scriptedJudge();
+/** Run before the judgement answers a request (the state it was shown): a test's way into the middle of a catch-up. */
+let beforeAnswer: ((state: string) => Promise<void>) | null = null;
+const judge: Judge = {
+  async ask(state, questions, signal) {
+    if (beforeAnswer) await beforeAnswer(state);
+    return scripted.ask(state, questions, signal);
+  },
+};
+const { app, db, clock } = useApp({ env: SITE_ENV, models: gateway, judge, agentWorker: false, memory: true, config: { judge: JUDGE } });
+const { memory, say, world, flagRows } = flagHelpers({ app, db, clock, gateway });
+const quiet = { info: () => {}, debug: () => {} };
+
+/** Every listener question answered 0.9 (no Agent is proactive here): each line asked about is flagged. */
+const everything = (_state: string, questions: readonly Question[]): ScriptedAnswers => Object.fromEntries(questions.map((q) => [q.key, 0.9]));
+/** The settings a test may change, as they were before it. */
+let defaults = { lines: 0, days: 0, window: 0 };
+
+beforeEach(() => {
+  defaults = { lines: app.deps.config.memory.catchUpLines, days: app.deps.config.memory.catchUpDays, window: app.deps.config.proactive.transcriptMessages };
+  clock.reset();
+  scripted.calls.splice(0);
+  scripted.answer(everything);
+  beforeAnswer = null;
+});
+afterEach(async () => {
+  beforeAnswer = null;
+  app.deps.config.memory.catchUpLines = defaults.lines;
+  app.deps.config.memory.catchUpDays = defaults.days;
+  app.deps.config.proactive.transcriptMessages = defaults.window;
+  await closeAllSockets();
+  await memory().idle();
+});
+
+type World = Awaited<ReturnType<typeof world>>;
+const patch = (w: World, body: Record<string, unknown>) => api(app, w.owner, "PATCH", `/api/agents/${w.agent.id}`, body);
+const switched = async (w: World, body: Record<string, unknown>) => {
+  expect([body, (await patch(w, body)).status]).toEqual([body, 200]);
+  await memory().idle();
+};
+/** The group's judgement of message `seq`, as the scheduler asks it. */
+const decide = async (w: World, seq: number) => {
+  const decided = await decideProactive({ db, judge, config: app.deps.config, log: quiet }, w.g, seq);
+  for (const f of decided.flags ?? []) memory().flagged(f.agentId, f.conversationId, f.kind);
+};
+/** Another owner's Agent in the group, memory on: it listens there too. */
+async function another(w: World, tag: string) {
+  const bot = await mustCreateAgent(app, w.third, { handle: `cu_b${tag}`, name: `cu_b${tag}`, model: FAST, persona: PERSONA, proactive: false, memory: true });
+  expect((await api(app, w.third, "POST", `/api/conversations/${w.g}/members`, { principalId: bot.id })).status).toBe(201);
+  return bot as { id: string };
+}
+/** An Agent's state row in the group, every column, as text. */
+const stateOf = async (agentId: string, g: string) =>
+  (await db.query<{ row: string }>("select row_to_json(s)::text as row from agent_group_state s where agent_id = $1 and conversation_id = $2", [agentId, g])).rows[0]?.row;
+const catchUps = async (agentId: string) =>
+  (await db.query<{ from_seq: number; to_seq: number; next_seq: number }>("select from_seq::int, to_seq::int, next_seq::int from memory_catchups where agent_id = $1 order by conversation_id", [agentId])).rows;
+const counted = async (name: string): Promise<number> => {
+  await settled();
+  return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
+};
+/** The listener questions a catch-up asked (its requests carry no pick). */
+const catchUpCalls = () => scripted.calls.filter((c) => !c.questions.some((q) => q.key === "pick"));
+const spend = (ownerId: string) =>
+  db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 900000000000) on conflict (owner_id, day) do update set used_micro = excluded.used_micro", [ownerId]);
+
+describe("也回顾一下 in a group: what members said while memory was off", () => {
+  it("off, members speak (judged meanwhile for another owner's Agent), on with catchUp: this Agent hears from those lines; the other Agent's state and the group's judged position are as they were, to the byte", async () => {
+    const w = await world("cu1");
+    const bob = await another(w, "1");
+    await decide(w, await say(w.mia, w.g, "大家早"));
+    await switched(w, { memory: false });
+    const off: number[] = [];
+    for (const text of ["小李下周去北京出差", "小李在学吉他", "小李搬家了"]) {
+      off.push(await say(w.mia, w.g, text));
+      await decide(w, off.at(-1)!);
+    }
+    const bobBefore = await stateOf(bob.id, w.g);
+    const judgedBefore = (await db.query("select max(judged_seq)::int as j from agent_group_state where conversation_id = $1", [w.g])).rows[0].j;
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    scripted.calls.splice(0);
+    await switched(w, { memory: true, catchUp: true });
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off);
+    expect(await stateOf(bob.id, w.g)).toBe(bobBefore);
+    expect((await db.query("select max(judged_seq)::int as j from agent_group_state where conversation_id = $1", [w.g])).rows[0].j).toBe(judgedBefore);
+    // One request: this owner's question alone, over the off period only.
+    expect(scripted.calls).toHaveLength(1);
+    expect(scripted.calls[0]!.questions.map((q) => q.key)).toEqual(["h1"]);
+    expect(scripted.calls[0]!.state).toBe(`群聊记录：\n【新】miacu1：小李下周去北京出差\n【新】miacu1：小李在学吉他\n【新】miacu1：小李搬家了`);
+    expect([await counted("catchup_group_jobs"), await counted("catchup_lines_judged"), await counted("catchup_flags")]).toEqual([1, 3, 3]);
+    // Done: running it again (a restart) judges and flags nothing twice.
+    expect(await catchUps(w.agent.id)).toEqual([{ from_seq: off[0]! - 1, to_seq: off[2]!, next_seq: off[2]! + 1 }]);
+    await memory().resume();
+    await memory().idle();
+    expect(scripted.calls).toHaveLength(1);
+  });
+
+  it("on without catchUp: nothing is queued, nothing heard", async () => {
+    const w = await world("cu2");
+    await another(w, "2");
+    await switched(w, { memory: false });
+    await decide(w, await say(w.mia, w.g, "小李下周去北京出差"));
+    scripted.calls.splice(0);
+    await switched(w, { memory: true });
+    expect(await catchUps(w.agent.id)).toEqual([]);
+    expect(catchUpCalls()).toEqual([]);
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+  });
+
+  it("bounds: the most recent MEMORY.catchUpLines lines of the off period, none older than MEMORY.catchUpDays days; older lines are not caught up", async () => {
+    app.deps.config.memory.catchUpLines = 3;
+    const w = await world("cu3");
+    await switched(w, { memory: false });
+    const off: number[] = [];
+    for (let i = 0; i < 5; i++) off.push(await say(w.mia, w.g, `小李的第${i}件事`));
+    await switched(w, { memory: true, catchUp: true });
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off.slice(2));
+
+    app.deps.config.memory.catchUpLines = 200;
+    const v = await world("cu3b");
+    await switched(v, { memory: false });
+    const old: number[] = [];
+    for (let i = 0; i < 3; i++) old.push(await say(v.mia, v.g, `小李的第${i}件旧事`));
+    // The first two were said 31 days ago (MEMORY.catchUpDays: 30).
+    await db.query("update messages set created_at = now() - interval '31 days' where conversation_id = $1 and seq = any($2::bigint[])", [v.g, old.slice(0, 2)]);
+    await switched(v, { memory: true, catchUp: true });
+    expect(await flagRows(v.agent.id, "hearsay")).toEqual(old.slice(2));
+  });
+
+  it("no line from before the switch-off, nor from before the Agent joined, is ever shown to the judgement", async () => {
+    const w = await world("cu4");
+    await say(w.mia, w.g, "关机前的话");
+    await switched(w, { memory: false });
+    // A second group, which the Agent joins while its memory is off.
+    const g2 = await group(app, w.mia, "爬山群", [w.owner, w.third]);
+    await say(w.mia, g2, "加入之前的话");
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g2}/members`, { principalId: w.agent.id })).status).toBe(201);
+    const after2 = await say(w.mia, g2, "加入之后的话");
+    const off = await say(w.mia, w.g, "关机期间的话");
+    await switched(w, { memory: true, catchUp: true });
+    const shown = scripted.calls.map((c) => c.state).join("\n");
+    expect(shown).toContain("关机期间的话");
+    expect(shown).toContain("加入之后的话");
+    expect(shown).not.toContain("关机前的话");
+    expect(shown).not.toContain("加入之前的话");
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([after2, off].sort((a, b) => a - b));
+  });
+
+  it("the owner's memory allowance used up mid-way: it stops there, quietly; the rest of the off period is not caught up", async () => {
+    app.deps.config.proactive.transcriptMessages = 2;
+    const w = await world("cu5");
+    await switched(w, { memory: false });
+    const off: number[] = [];
+    for (let i = 0; i < 6; i++) off.push(await say(w.mia, w.g, `小李的第${i}件事`));
+    // Spent while the second window is asked.
+    beforeAnswer = async (state) => {
+      if (state.includes("小李的第2件事")) await spend(w.owner.id);
+    };
+    await switched(w, { memory: true, catchUp: true });
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off.slice(0, 4));
+    expect(scripted.calls).toHaveLength(2);
+    expect(await catchUps(w.agent.id)).toEqual([{ from_seq: off[0]! - 1, to_seq: off[5]!, next_seq: off[5]! + 1 }]);
+  });
+
+  it("memory switched off again mid-way: what the catch-up is told after it is dropped, and it asks nothing more", async () => {
+    app.deps.config.proactive.transcriptMessages = 2;
+    const w = await world("cu6");
+    await switched(w, { memory: false });
+    for (let i = 0; i < 6; i++) await say(w.mia, w.g, `小李的第${i}件事`);
+    beforeAnswer = async (state) => {
+      if (state.includes("小李的第2件事")) expect((await patch(w, { memory: false })).status).toBe(200);
+    };
+    expect((await patch(w, { memory: true, catchUp: true })).status).toBe(200);
+    await memory().idle();
+    expect(scripted.calls).toHaveLength(2);
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    expect(await catchUps(w.agent.id)).toEqual([]);
+  });
+
+  it("a catch-up queued by a switch whose process could not run it is run after a restart (resume)", async () => {
+    const w = await world("cu7");
+    await switched(w, { memory: false });
+    const off = await say(w.mia, w.g, "小李下周去北京出差");
+    // No judgement to ask when it is queued: it waits, stored.
+    const judgeConfig = app.deps.config.judge;
+    app.deps.config.judge = null;
+    try {
+      await switched(w, { memory: true, catchUp: true });
+    } finally {
+      app.deps.config.judge = judgeConfig;
+    }
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    expect(await catchUps(w.agent.id)).toEqual([{ from_seq: off - 1, to_seq: off, next_seq: off }]);
+    await memory().resume();
+    await memory().idle();
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([off]);
+  });
+
+  it("a normal judgement while a catch-up waits flags nothing at or below the catch-up's end for this Agent: each line is flagged once, by one of them", async () => {
+    const w = await world("cu8");
+    // Judged once while listening: what came after is new to the next judgement.
+    await decide(w, await say(w.mia, w.g, "大家早"));
+    await switched(w, { memory: false });
+    // Nobody listens while it is off: these are never judged, so a judgement after the switch finds them new.
+    const off = [await say(w.mia, w.g, "小李下周去北京出差"), await say(w.mia, w.g, "小李在学吉他")];
+    const judgeConfig = app.deps.config.judge;
+    app.deps.config.judge = null;
+    try {
+      await switched(w, { memory: true, catchUp: true });
+    } finally {
+      app.deps.config.judge = judgeConfig;
+    }
+    const later = await say(w.mia, w.g, "小李明天生日");
+    await decide(w, later);
+    // The judgement finds the off period new (nobody judged it), and asks this Agent's question about the line after it alone.
+    expect(scripted.calls.at(-1)!.state).toContain("【新】miacu8：小李下周去北京出差");
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([later]);
+    await memory().resume();
+    await memory().idle();
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([...off, later]);
+  });
+});

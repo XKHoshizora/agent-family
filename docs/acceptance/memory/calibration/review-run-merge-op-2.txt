@@ -1,0 +1,101 @@
+复核校准报告（review）  模型 deepseek-chat  样本 62  布局 apart
+  按生产的原样发：系统文本 + JSON 用户消息 {conversation, notes, room_left}，主人自己的对话（可以新增/替换/删除/锁/解锁），max_tokens 800，temperature 0；答案按 ops.ts 解析并过 modelNote 的拒绝规则。
+  通过 = 操作种类对（merge 要有 replace）、mustMention 都在结果笔记里、mustNot 都不在；none 的样本要求一个操作都没有。（样本文件没有写房间大小：默认房间；near-full 的样本被告知主人房间还剩 20 个字。）
+
+========== 布局 apart（笔记单独放在 notes 里并编号，生产的做法）  成功 62，失败 0
+一、通过 / 总（按类别）
+  agent-asks-owner-confirms    4 / 4
+  agent-restates               4 / 4
+  change                       3 / 4
+  chitchat                     4 / 4
+  correction                   10 / 10
+  cross-language               5 / 6
+  explicit                     4 / 4
+  forget                       4 / 4
+  instruction-injection        4 / 4
+  merge                        0 / 2
+  near-full                    3 / 4
+  one-time                     1 / 4
+  preference                   4 / 4
+  secret                       4 / 4
+  （按语言）
+  zh                           21 / 22
+  ja                           11 / 13
+  en                           12 / 15
+  mix                          5 / 6
+  cross                        5 / 6
+  （按语言 / 类别）
+  cross / cross-language       5 / 6
+  en / agent-asks-owner-confirms 1 / 1
+  en / agent-restates          1 / 1
+  en / change                  0 / 1
+  en / chitchat                1 / 1
+  en / correction              3 / 3
+  en / explicit                1 / 1
+  en / forget                  1 / 1
+  en / instruction-injection   1 / 1
+  en / merge                   0 / 1
+  en / near-full               1 / 1
+  en / one-time                0 / 1
+  en / preference              1 / 1
+  en / secret                  1 / 1
+  ja / agent-asks-owner-confirms 1 / 1
+  ja / agent-restates          1 / 1
+  ja / change                  1 / 1
+  ja / chitchat                1 / 1
+  ja / correction              2 / 2
+  ja / explicit                1 / 1
+  ja / forget                  1 / 1
+  ja / instruction-injection   1 / 1
+  ja / near-full               0 / 1
+  ja / one-time                0 / 1
+  ja / preference              1 / 1
+  ja / secret                  1 / 1
+  mix / chitchat               1 / 1
+  mix / correction             2 / 2
+  mix / instruction-injection  1 / 1
+  mix / one-time               0 / 1
+  mix / preference             1 / 1
+  zh / agent-asks-owner-confirms 2 / 2
+  zh / agent-restates          2 / 2
+  zh / change                  2 / 2
+  zh / chitchat                1 / 1
+  zh / correction              3 / 3
+  zh / explicit                2 / 2
+  zh / forget                  2 / 2
+  zh / instruction-injection   1 / 1
+  zh / merge                   0 / 1
+  zh / near-full               2 / 2
+  zh / one-time                1 / 1
+  zh / preference              1 / 1
+  zh / secret                  2 / 2
+  合计                           54 / 62    答案不是 JSON 对象的：0
+
+二、没通过的样本和它们返回的操作（样本是编出来的，这里可以打印笔记原文）
+  mr-016（en / change）期望 replace 提到 fish、egetarian  → 结果里没有「egetarian」
+    操作 [{"op":"replace","ref":"n1","text":"Pescatarian: eats fish, no other meat (started eating fish again 2026 年 10 月)"}]
+  mr-044（ja / near-full）期望 replace 提到 ヨガ  → 没有 replace 操作
+    操作 [{"op":"add","kind":"owner","text":"最近ヨガを始めた（寝る前のストレッチと一緒に、20分くらい）"}]
+  mr-046（ja / one-time）期望 none 不能有 買い物  → 该什么都不做，却有操作；结果里不该有「買い物」
+    操作 [{"op":"add","kind":"owner","text":"夕飯の買い物リストにネギを追加してほしい"}]
+  mr-047（en / one-time）期望 none 不能有 dentist  → 该什么都不做，却有操作
+    操作 [{"op":"add","kind":"owner","text":"主人让我提醒他下午 3 点给牙医打电话。"}]
+  mr-048（mix / one-time）期望 none 不能有 Shibuya  → 该什么都不做，却有操作
+    操作 [{"op":"add","kind":"owner","text":"订餐厅时偏好有 private room（包间）。"}]
+  mr-059（cross / cross-language）期望 replace 提到 Berlin  → 结果里没有「Berlin」
+    操作 [{"op":"replace","ref":"n1","text":"在柏林工作，办公室在 Mitte（2026 年 11 月从上海搬来）"}]
+  mr-061（zh / merge）期望 merge 提到 羽毛球、体育馆  → 没有 merge 操作
+    操作 []
+  mr-062（en / merge）期望 merge 提到 Biscuit、beagle  → 没有 merge 操作
+    操作 []
+
+三、用量
+  62 次有 usage：提示 65436 tokens，输出 1533 tokens，合计 66969；平均每次 提示 1055 / 输出 25
+  延迟：中位数 638ms，最大 1249ms
+
+重复新增（模型把已有的笔记又 add 了一遍；按 ops.ts 去重之前的原始答案算，一字不差的会被生产丢掉，换了说法的不会）
+  apart：带已有笔记的样本 38 条，其中重复新增 0 条（共 0 次）
+
+需要决定的数字
+  - 没有门槛；看通过率：apart 合计 54 / 62。要看哪类掉得多，第一节按类别。
+  - 重复新增：apart 里 0 / 38 条带笔记的样本出现。加 --mixed-notes 可以和“笔记混在对话里”对比。

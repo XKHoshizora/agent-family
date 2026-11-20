@@ -463,7 +463,7 @@ describe("one heard position per Agent in a group (agent_group_state.heard_from_
     for (const [n, heard] of heardByB.entries()) expect([n, heard]).toEqual([n, heardByB[0]]);
   });
 
-  it("A's Agent hears nothing from the off period without catchUp, and exactly the off period — what the judgement's window shows of it — with it; never what was said before it was switched off", async () => {
+  it("A's Agent hears nothing from the off period without catchUp; with it the off period is its catch-up's (memory/catchup.ts, tested there) — exactly the lines after the switch-off up to the switch-on — and the group's judgement hears for it only what came after; never what was said before it was switched off", async () => {
     for (const catchUp of [false, true]) {
       const tag = catchUp ? "1" : "0";
       const w = await world(`hq${tag}`);
@@ -486,12 +486,17 @@ describe("one heard position per Agent in a group (agent_group_state.heard_from_
       const [third, member] = [`thirdhq${tag}`, `memberhq${tag}`];
       expect(judge.calls[0]!.state).toBe(`群聊记录：\n【新】${third}：owner 换了新工作\n【新】${member}：owner 养了一只猫\n【新】${third}：owner 周末去爬山`);
       const heard = (await flagsOf(w.g)).map((f) => f.seq);
-      expect([catchUp, heard]).toEqual([catchUp, catchUp ? [off[1], off[2], after] : [after]]);
+      expect([catchUp, heard]).toEqual([catchUp, [after]]);
       expect(heard).not.toContain(before);
+      // With catchUp the switch stored the catch-up of the off period (this app runs no reviewer: it is not run here).
+      expect([catchUp, (await db.query("select from_seq::int, to_seq::int from memory_catchups where agent_id = $1", [a.id])).rows]).toEqual([
+        catchUp,
+        catchUp ? [{ from_seq: before, to_seq: off[2] }] : [],
+      ]);
     }
   });
 
-  it("switched off and on again repeatedly, the last switch decides: with catchUp A hears from its last switch-off, without it from its last switch-on; a line no Agent of A's may hear asks A nothing", async () => {
+  it("switched off and on again repeatedly, the last switch decides: with catchUp its catch-up is the last off period and the group's judgement hears for it after the switch-on, without it from its last switch-on; a line no Agent of A's may hear asks A nothing", async () => {
     const w = await world();
     const a = await agentOf(w.owner, "memo", w.g);
     judge.answer(everything);
@@ -503,9 +508,11 @@ describe("one heard position per Agent in a group (agent_group_state.heard_from_
     await switched(w.owner, a.id, { memory: false });
     const lastOff = await say(w.member, w.g, "owner 第二次关掉时说的");
     await switched(w.owner, a.id, { memory: true, catchUp: true });
+    // One catch-up: the last off period alone (the first one's was dropped by the switch-off after it).
+    expect((await db.query("select from_seq::int, to_seq::int from memory_catchups where agent_id = $1", [a.id])).rows).toEqual([{ from_seq: lastOff - 1, to_seq: lastOff }]);
     const after = await say(w.third, w.g, "owner 周末去爬山");
     await decide(w.g, after);
-    expect(await flagsOf(w.g)).toEqual([lastOff, after].map((seq) => ({ agent_id: a.id, seq, kind: "hearsay" })));
+    expect(await flagsOf(w.g)).toEqual([{ agent_id: a.id, seq: after, kind: "hearsay" }]);
 
     // Off and on without catchUp: what came before the switch-on is new to the judgement but not heard for A — its question is
     // not even asked when only such lines are by others (the owner's own line asks the owner's question alone).

@@ -449,6 +449,8 @@ describe("the memory configuration", () => {
     flaggedMax: 20,
     flaggedContext: 3,
     hearsayPerHour: 4,
+    catchUpLines: 200,
+    catchUpDays: 30,
     hearsayNewAt: 0.7,
     hearsayAbuseAt: 0.6,
     hearsayMuteMs: 21_600_000,
@@ -508,6 +510,8 @@ describe("the memory configuration", () => {
 
   test("the hearsay limits can be set", () => {
     expect(loadConfig({ ...base, MEMORY: '{"hearsayPerHour":2,"hearsayNewAt":0.3,"hearsayAbuseAt":0.9,"hearsayMuteMs":1000,"hearsayMute":"on"}' }).memory).toMatchObject({ hearsayPerHour: 2, hearsayNewAt: 0.3, hearsayAbuseAt: 0.9, hearsayMuteMs: 1000, hearsayMute: "on" });
+    expect(loadConfig({ ...base, MEMORY: '{"catchUpLines":50,"catchUpDays":7}' }).memory).toMatchObject({ catchUpLines: 50, catchUpDays: 7 });
+    for (const bad of ['{"catchUpLines":0}', '{"catchUpDays":366}', '{"catchUpLines":1.5}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
   });
 
   test("a threshold outside [0, 1], a non-whole or non-positive count, an unknown key and bad JSON refuse", () => {

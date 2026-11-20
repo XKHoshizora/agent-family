@@ -199,6 +199,8 @@ export interface JudgeRequest {
  * something lasting about the owner (`{key}`: asked only when a person with no block with the owner either way sent
  * one) and whether a new message by the owner says something lasting about themselves (`{key}o`: asked only when the
  * owner sent one and an Agent of theirs reviews it, `reviewerId`).
+ * `window` (a catch-up, memory/catchup.ts): nothing at or before `after` is shown, and what is new is what came after `newAfter`, not
+ * what the group's judgement has judged — the group's position is neither read nor moved.
  * Null when there is no line to show (nothing is asked about descriptions alone) or nothing to ask.
  */
 export async function requestFor(
@@ -208,9 +210,10 @@ export async function requestFor(
   options: readonly Option[],
   P: Pick<ProactiveConfig, "transcriptMessages" | "transcriptChars">,
   listeners: readonly Listener[] = [],
+  window?: { after: number; newAfter: number },
 ): Promise<JudgeRequest | null> {
   if (options.length === 0 && listeners.length === 0) return null;
-  const after = Math.max(...(options.length > 0 ? options : listeners).map((o) => o.joinedSeq));
+  const after = Math.max(...(options.length > 0 ? options : listeners).map((o) => o.joinedSeq), window?.after ?? 0);
   const { rows } = await q.query<{ seq: string; sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
     `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, ${handleOf("p")} as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
@@ -222,7 +225,7 @@ export async function requestFor(
   );
   if (rows.length === 0) return null;
   // Null (never judged with an answer): only the latest message is new, as when each message is judged in turn.
-  const judged = Math.min((await judgedUpTo(q, conversationId, judgedAgentIds(options, listeners))) ?? seq - 1, seq - 1);
+  const judged = window !== undefined ? window.newAfter : Math.min((await judgedUpTo(q, conversationId, judgedAgentIds(options, listeners))) ?? seq - 1, seq - 1);
   rows.reverse();
   const lines = rows.map((r) => {
     const text = r.kind === "file" ? `[文件] ${r.text || r.file || ""}` : (r.text ?? "");
