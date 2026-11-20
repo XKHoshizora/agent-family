@@ -1,0 +1,141 @@
+复习时的合并校验校准报告（merge；MEMORY.mergeAuto 为 on 时分数 >= reviewMergeAt 的合并不问主人就生效）  模型 jev-latest  样本 97（成功 97，失败 0）  默认 reviewMergeAt = 0.7（入梦的 faithfulAt = 0.6），mergeAuto 默认 observe
+  faithful / resolved 应当过；dropped / changed / modality / added / fused / correction / unrelated 一条都不该过（必须是 0：过了就是没问主人就删掉或改掉了笔记里的一件事，30 天内可撤销）。
+
+一、分数分布（最小 / 中位 / 最大）
+  按类别
+    added                  8    0.05 / 0.10 / 0.25
+    changed                11   0.02 / 0.04 / 0.12
+    correction             4    0.09 / 0.14 / 0.29
+    dropped                17   0.05 / 0.32 / 0.96
+    faithful               31   0.54 / 0.92 / 0.96
+    fused                  6    0.02 / 0.04 / 0.10
+    modality               11   0.07 / 0.21 / 0.93
+    resolved               5    0.58 / 0.62 / 0.70
+    unrelated              4    0.18 / 0.21 / 0.33
+  按语言
+    en                     24   0.03 / 0.28 / 0.96
+    ja                     22   0.02 / 0.39 / 0.95
+    mix                    22   0.02 / 0.27 / 0.94
+    zh                     29   0.03 / 0.32 / 0.95
+  按类别 / 语言
+    added / en             2    0.07 / 0.10 / 0.13
+    added / ja             2    0.05 / 0.06 / 0.06
+    added / mix            2    0.09 / 0.10 / 0.11
+    added / zh             2    0.10 / 0.17 / 0.25
+    changed / en           3    0.03 / 0.06 / 0.07
+    changed / ja           3    0.02 / 0.03 / 0.03
+    changed / mix          2    0.02 / 0.03 / 0.04
+    changed / zh           3    0.04 / 0.04 / 0.12
+    correction / en        1    0.09 / 0.09 / 0.09
+    correction / ja        1    0.29 / 0.29 / 0.29
+    correction / mix       1    0.17 / 0.17 / 0.17
+    correction / zh        1    0.11 / 0.11 / 0.11
+    dropped / en           4    0.05 / 0.26 / 0.96
+    dropped / ja           4    0.38 / 0.48 / 0.65
+    dropped / mix          4    0.08 / 0.21 / 0.86
+    dropped / zh           5    0.10 / 0.30 / 0.88
+    faithful / en          8    0.54 / 0.93 / 0.96
+    faithful / ja          7    0.90 / 0.92 / 0.95
+    faithful / mix         7    0.84 / 0.93 / 0.94
+    faithful / zh          9    0.59 / 0.91 / 0.95
+    fused / en             1    0.03 / 0.03 / 0.03
+    fused / ja             1    0.05 / 0.05 / 0.05
+    fused / mix            2    0.02 / 0.06 / 0.10
+    fused / zh             2    0.03 / 0.04 / 0.04
+    modality / en          3    0.08 / 0.19 / 0.93
+    modality / ja          2    0.07 / 0.11 / 0.15
+    modality / mix         2    0.21 / 0.29 / 0.38
+    modality / zh          4    0.07 / 0.54 / 0.90
+    resolved / en          1    0.70 / 0.70 / 0.70
+    resolved / ja          1    0.65 / 0.65 / 0.65
+    resolved / mix         1    0.62 / 0.62 / 0.62
+    resolved / zh          2    0.58 / 0.58 / 0.59
+    unrelated / en         1    0.18 / 0.18 / 0.18
+    unrelated / ja         1    0.24 / 0.24 / 0.24
+    unrelated / mix        1    0.33 / 0.33 / 0.33
+    unrelated / zh         1    0.18 / 0.18 / 0.18
+  changed / modality 按改了什么
+    changed date           3    0.02 / 0.03 / 0.04
+    changed name           2    0.03 / 0.05 / 0.07
+    changed negation       3    0.03 / 0.04 / 0.06
+    changed number         3    0.02 / 0.04 / 0.12
+    modality always        3    0.08 / 0.15 / 0.90
+    modality decision      2    0.19 / 0.53 / 0.87
+    modality plan          3    0.07 / 0.38 / 0.93
+    modality will          3    0.07 / 0.21 / 0.21
+  按类别 / 来源条数
+    added / 2 条            8    0.05 / 0.10 / 0.25
+    changed / 2 条          11   0.02 / 0.04 / 0.12
+    correction / 2 条       4    0.09 / 0.14 / 0.29
+    dropped / 2 条          10   0.10 / 0.38 / 0.96
+    dropped / 3 条          5    0.08 / 0.32 / 0.65
+    dropped / 4 条          2    0.05 / 0.17 / 0.30
+    faithful / 2 条         19   0.54 / 0.93 / 0.96
+    faithful / 2 条（换了说法）   4    0.88 / 0.92 / 0.93
+    faithful / 3 条         6    0.85 / 0.91 / 0.94
+    faithful / 4 条         2    0.95 / 0.95 / 0.96
+    fused / 2 条            6    0.02 / 0.04 / 0.10
+    modality / 2 条         10   0.07 / 0.20 / 0.93
+    modality / 3 条         1    0.90 / 0.90 / 0.90
+    resolved / 2 条         4    0.58 / 0.64 / 0.70
+    resolved / 3 条         1    0.59 / 0.59 / 0.59
+    unrelated / 2 条        4    0.18 / 0.21 / 0.33
+  长笔记（long）按类别
+    dropped                5    0.10 / 0.86 / 0.96
+    faithful               4    0.94 / 0.95 / 0.96
+
+二、各类别里达到 T（会马上合并）的条数
+                      0.40    0.45    0.50    0.55    0.60    0.65    0.70    0.75    0.80    0.85    0.90    0.95    
+  added               0/8     0/8     0/8     0/8     0/8     0/8     0/8     0/8     0/8     0/8     0/8     0/8     
+  changed             0/11    0/11    0/11    0/11    0/11    0/11    0/11    0/11    0/11    0/11    0/11    0/11    
+  correction          0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     
+  dropped             6/17    5/17    5/17    5/17    4/17    4/17    3/17    3/17    3/17    3/17    1/17    1/17    
+  faithful            31/31   31/31   31/31   30/31   29/31   29/31   29/31   29/31   29/31   27/31   25/31   5/31    
+  fused               0/6     0/6     0/6     0/6     0/6     0/6     0/6     0/6     0/6     0/6     0/6     0/6     
+  modality            3/11    3/11    3/11    3/11    3/11    3/11    3/11    3/11    3/11    3/11    2/11    0/11    
+  resolved            5/5     5/5     5/5     5/5     3/5     2/5     1/5     0/5     0/5     0/5     0/5     0/5     
+  unrelated           0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     0/4     
+  按语言（faithful 过 / 总；其余过 / 总）
+                      0.40    0.45    0.50    0.55    0.60    0.65    0.70    0.75    0.80    0.85    0.90    0.95    
+  faithful zh         11/11   11/11   11/11   11/11   8/11    8/11    8/11    8/11    8/11    8/11    8/11    2/11    
+  faithful ja         8/8     8/8     8/8     8/8     8/8     8/8     7/8     7/8     7/8     7/8     7/8     1/8     
+  faithful en         9/9     9/9     9/9     8/9     8/9     8/9     8/9     7/9     7/9     6/9     6/9     2/9     
+  faithful mix        8/8     8/8     8/8     8/8     8/8     7/8     7/8     7/8     7/8     6/8     4/8     0/8     
+                          0.40    0.45    0.50    0.55    0.60    0.65    0.70    0.75    0.80    0.85    0.90    0.95    
+  not faithful zh         3/18    3/18    3/18    3/18    3/18    3/18    3/18    3/18    3/18    3/18    1/18    0/18    
+  not faithful ja         3/14    2/14    2/14    2/14    1/14    1/14    0/14    0/14    0/14    0/14    0/14    0/14    
+  not faithful en         2/15    2/15    2/15    2/15    2/15    2/15    2/15    2/15    2/15    2/15    2/15    1/15    
+  not faithful mix        1/14    1/14    1/14    1/14    1/14    1/14    1/14    1/14    1/14    1/14    0/14    0/14    
+
+  T     faithful 过    不该过却过了(必须0)
+  0.40  36/36          9/61    
+  0.45  36/36          8/61    
+  0.50  36/36          8/61    
+  0.55  35/36          8/61    
+  0.60  32/36          7/61      ← faithfulAt（入梦）
+  0.65  31/36          7/61    
+  0.70  30/36          6/61      ← reviewMergeAt
+  0.75  29/36          6/61    
+  0.80  29/36          6/61    
+  0.85  27/36          6/61    
+  0.90  25/36          3/61    
+  0.95  5/36           1/61    
+  在 reviewMergeAt = 0.7：faithful 过 30 / 36，不该过却过了 6 / 61；不该过的最高分 0.96。
+
+三、站在错误一侧的样本（按默认 reviewMergeAt = 0.7）
+  en-dropped-03      dropped    0.96  漏了/改了/多了内容的合并被放行：Works from home on Mondays and Fridays. Goes to the office in Leeds the other days, by train. ＋ Leaves the office early on Wednesdays to pick up the kids. → Works from home on Mondays and Fridays and goes to the Leeds office by train the other days, leaving early on Wednesdays.
+  en-modality-01     modality   0.93  漏了/改了/多了内容的合并被放行：Moving to Berlin on 2026-09-01 ＋ Will rent a flat in Kreuzberg for 1,200 euros a month → From 1 September 2026: living in Berlin, in a Kreuzberg flat rented at €1,200 per month
+  zh-modality-01     modality   0.90  漏了/改了/多了内容的合并被放行：每周二晚上打羽毛球 ＋ 打球的地方在体育中心 ＋ 一般和同事一起打 → 每周二晚上和同事在体育中心打羽毛球
+  zh-dropped-03      dropped    0.88  漏了/改了/多了内容的合并被放行：每周三晚上去游泳，在小区旁边的体育馆，一次游一千米。 ＋ 游完会在楼下的面馆吃一碗牛肉面。 → 每周三晚上去小区旁边的体育馆游泳，游完在楼下的面馆吃一碗牛肉面。
+  zh-modality-04     modality   0.87  漏了/改了/多了内容的合并被放行：想换一份离家近的工作 ＋ 最近在看杭州的机会 → 决定换一份离家近的工作，最近在看杭州的机会
+  mix-dropped-03     dropped    0.86  漏了/改了/多了内容的合并被放行：每天早上 7 点起床，先 stretching 十分钟。然后喝一杯 black coffee，不加糖。 ＋ 周末会睡到 9 点。 → 每天早上 7 点起床，先 stretching 十分钟，再喝一杯 black coffee；周末会睡到 9 点。
+  ja-resolved-01     resolved   0.65  忠实的合并被拒（照旧变成卡片）：娘の誕生日は3月8日 ＋ さっきのは間違いで、娘の誕生日は3月18日 → 娘の誕生日は3月18日
+  mix-resolved-01    resolved   0.62  忠实的合并被拒（照旧变成卡片）：Lives on the 5th floor ＋ 更正：其实住 6 楼 → Lives on the 6th floor
+  zh-faithful-05     faithful   0.59  忠实的合并被拒（照旧变成卡片）：对花生过敏 ＋ 花生过敏会起疹子 → 对花生过敏，吃了会起疹子
+  zh-resolved-02     resolved   0.59  忠实的合并被拒（照旧变成卡片）：女儿叫小雨 ＋ 女儿今年 6 岁 ＋ 记错了，女儿今年 7 岁 → 女儿小雨今年 7 岁
+  zh-resolved-01     resolved   0.58  忠实的合并被拒（照旧变成卡片）：生日是 5 月 3 日 ＋ 之前记错了，生日其实是 5 月 13 日 → 生日是 5 月 13 日
+  en-faithful-01     faithful   0.54  忠实的合并被拒（照旧变成卡片）：Drinks tea ＋ Takes tea without sugar → Drinks tea without sugar
+
+需要决定的数字
+  - reviewMergeAt：当前 0.7，误放 6 / 61，faithful 过 30 / 36。零误放的最低门槛：格子里没有。（不能低于入梦的 faithfulAt = 0.6：配置会拒绝。）
+  - MEMORY.mergeAuto：只有在用的 reviewMergeAt 下误放为 0（不该过的最高分也明显低于它），才考虑从 observe 改成 on；线上看 merge_would_auto / merge_would_card（observe）和 merge_undone（on）（memory:stats）。
