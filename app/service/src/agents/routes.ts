@@ -405,6 +405,8 @@ export function registerAgentRoutes(
           // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
           // After the run rows (it takes the owner's account lock): the lock order is agent → run rows → account (runs.ts).
           if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
+          // Its appellations go with it: what it called anyone is not kept (rows naming it, another Agent's, stay).
+          if ("deleted" in change) await t.query("delete from agent_appellations where agent_id = $1", [current.id]);
           // So are its open whispers, everywhere (src/whispers/): none is left with buttons that lead nowhere.
           const whispers = "deleted" in change ? await expireOfAgent(t, current.id) : [];
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted, whispers };

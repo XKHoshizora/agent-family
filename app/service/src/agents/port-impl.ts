@@ -16,6 +16,7 @@ import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
+import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
 import { createWhisper, type WhisperBody } from "../whispers/store.ts";
 import { toWireWhisper } from "../whispers/wire.ts";
@@ -142,6 +143,12 @@ const STARTED_OVER: RunEnd = { status: "cancelled" };
  * left to answer — nothing failed, nothing to retry.
  */
 const NOTHING_LEFT: RunEnd = { status: "cancelled" };
+/**
+ * A block made since the call, either way, between the Agent's owner and the person who called for the reply (its
+ * `caller_id`; none for a reply nobody called for): that call would be refused now (runs.ts `triggerInGroup`,
+ * `triggerFromAgent`), so the reply ends before any call — nothing held or charged, no message, nothing to retry.
+ */
+const BLOCKED_SINCE: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 /** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
@@ -428,6 +435,9 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
+      // A block made since the call, either way, between the Agent's owner and its caller: the call is refused now.
+      const blocked = await t.query(`select 1 from agent_runs r where r.id = $1 and ${blockedEitherWay("$2::uuid", "r.caller_id")}`, [run.id, agent.ownerId]);
+      if (blocked.rowCount !== 0) return { end: BLOCKED_SINCE };
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };

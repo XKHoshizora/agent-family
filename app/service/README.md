@@ -501,7 +501,7 @@ with the name and handle they have now (Appellations, below). Like everything he
 **Appellations.** What an Agent calls people is the owner's setting alone, and only a way of calling: it never changes
 who the Agent takes for its owner (that is decided by account, What the model is shown). Two layers. `ownerAppellation`
 is a column of the Agent (set on `POST /api/agents`, `PATCH /api/agents/:id`; `null` clears it). The rest are rows of
-`agent_appellations` (agent, principal, text; at most 100 per Agent, a deleted Agent's or principal's go with it),
+`agent_appellations` (agent, principal, text; at most 100 per Agent; a deleted Agent's are deleted with it, in the delete),
 which the two routes below edit. Appellations are 1–20 characters once trimmed, on one line, with no control character
 or lone surrogate; they are stored as written and cleaned only where the model is shown them (What the model is shown).
 A row stays stored when its target leaves the group or the friendship ends, and stays in `appellations`; it simply is
@@ -632,7 +632,8 @@ a queued reply is `cancelled` `agent_paused` (`run` pushed), a running one is ne
 *Session: required.* Body: none or `{}`. Deletes the Agent: irreversible and idempotent (a deleted Agent no longer counts toward the limit; its
 conversation and history stay readable, sending there is 403 `cannot_send` `{"reason": "agent_deleted"}`; its reply in
 progress ends as on a pause, with `agent_deleted`; its memory changes still waiting for your decision — pending cards — are
-discarded in the same transaction, so no card of it is left with actions). → 200 Agent; 404 `not_found` unless yours.
+discarded in the same transaction, so no card of it is left with actions, and its appellations are deleted there too: the
+Agent then answers with `appellations` empty). → 200 Agent; 404 `not_found` unless yours.
 
 It also leaves every group it is in, before the answer: once the delete itself has committed, one transaction per group
 appends a `member_left` notice there (`actorId` you, `principalId` the Agent; pushed as any leaving) whose seq ends its
@@ -740,7 +741,8 @@ took it out, or it left with you when you left or were removed), `halted` (in a 
 or nobody had — it was to speak unasked — and a member halted Agents, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
 answer is before a new topic you started; in a group, none of the messages that called for it is one the Agent can see,
 A reply there, Whose joining it reaches back to; or — a reply someone else called for in a group — the Agent's others' daily
-budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group).
+budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group;
+or a block between you and the person who called for it, either way, was made before it began: nothing was called or charged).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail; true
 after `rate_limited`, which a retry within the same minute meets again as 429). `resetsAt` (ISO instant): for
@@ -2566,7 +2568,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    in any of them ends the run `failed`, `busy`):
    1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
       `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
-      `cancelled`, `agent_removed`, a model that no longer resolves `failed`
+      `cancelled`, `agent_removed`, a reply whose caller and the Agent's owner now have a block between them (either
+      way; made since the call) `cancelled` with no error (the call would be refused now: no call, nothing held or
+      charged, no message, nothing to retry), a model that no longer resolves `failed`
       (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
       run takes on what was noted meanwhile — but a reply nobody had asked for (lane `proactive`) with a mention noted on
       it since its claim ends here instead, `cancelled` with no error, no call and nothing held or charged, and its
