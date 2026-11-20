@@ -79,6 +79,29 @@ export function foundOf(value: unknown): MessageRef[] {
   return out;
 }
 
+/** A citation's number as a reply writes it (agents/tools/refs.ts): `m` and a whole number from 1, at most six digits. */
+const CITE_KEY = /^m[1-9][0-9]{0,5}$/;
+/** The most citations a reply keeps: the first ones. */
+export const CITES_MAX = 20;
+
+/**
+ * The citations `value` holds (a reply's `cites`, a stored body's): each number (`m3`) with the message it points to,
+ * only those whose number and message are well formed, at most `CITES_MAX`, in their order; `keep` (default all) says
+ * which messages may be pointed to.
+ */
+export function citesOf(value: unknown, keep: (r: MessageRef) => boolean = () => true): Record<string, MessageRef> {
+  const out: Record<string, MessageRef> = {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
+  let n = 0;
+  for (const [key, r] of Object.entries(value)) {
+    if (n >= CITES_MAX) break;
+    if (!CITE_KEY.test(key) || !isMessageRef(r) || !keep(r)) continue;
+    out[key] = { conversationId: r.conversationId, seq: r.seq };
+    n++;
+  }
+  return out;
+}
+
 /** A search word as it is kept: what message text would keep of it (`cleanModelText`), cut to `QUERY_MAX_WEIGHT`; null when it shows nothing. */
 export function queryOf(value: unknown): string | null {
   if (typeof value !== "string") return null;

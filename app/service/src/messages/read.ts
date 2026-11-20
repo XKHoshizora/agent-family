@@ -5,7 +5,7 @@ import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversatio
 import type { Queryable } from "../db.ts";
 import type { StoredOp } from "../memory/apply.ts";
 import { dreamLines, linesOf } from "../memory/lines.ts";
-import { foundOf, lookupsOf, queriesOf, type MessageRef } from "./lookups.ts";
+import { citesOf, foundOf, lookupsOf, queriesOf, type MessageRef } from "./lookups.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
 
@@ -148,12 +148,16 @@ async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<{ c
 /** Whether `op` is a note's own operation (a change holds only one kind: a hearsay change has none of these). */
 const isNoteOp = (op: ChangeRow["ops"][number]): op is StoredOp => op.op !== "hearsay_add" && op.op !== "hearsay_drop";
 
-/** What this reader is sent of what a reply's tools looked up besides its counts: the messages found they can see, and the words when they are for them. */
+/**
+ * What this reader is sent of what a reply's tools looked up besides its counts: the messages found they can see, the
+ * words when they are for them, and of what its text cites the messages they can see.
+ */
 interface Looked {
   found: MessageRef[];
   queries: string[];
+  cites: Record<string, MessageRef>;
 }
-const NOTHING_LOOKED: Looked = { found: [], queries: [] };
+const NOTHING_LOOKED: Looked = { found: [], queries: [], cites: {} };
 
 /**
  * Module-private on purpose: it renders whatever quote, proposal, `via` and `looked` it is handed, and the reasoning when
@@ -215,6 +219,7 @@ function toWire(
     if (lookups) wire.lookups = lookups;
     if (looked.found.length > 0) wire.found = looked.found;
     if (looked.queries.length > 0) wire.queries = looked.queries;
+    if (Object.keys(looked.cites).length > 0) wire.cites = looked.cites;
   }
   return wire;
 }
@@ -296,12 +301,15 @@ export async function toWireForReaders(
     for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, toStored(r));
   }
 
-  // What a reply's tools found: each message by the same rule as the reply itself (VISIBLE_JOIN, the reader's own), so a
-  // reader is pointed only at what they can open — not at a message from before they joined, of a conversation they are
-  // not in, or that is not there. One query for every reader and reply.
-  const foundIn = new Map(msgs.filter((m) => m.kind === "text" && shownToAnyone.has(m.id)).map((m) => [m.id, foundOf(m.body.found)]));
+  // What a reply's tools found, and what its text cites: each message by the same rule as the reply itself (VISIBLE_JOIN,
+  // the reader's own), so a reader is pointed only at what they can open — not at a message from before they joined, of
+  // a conversation they are not in, or that is not there. One query for every reader and reply, both together.
+  const replies = msgs.filter((m) => m.kind === "text" && shownToAnyone.has(m.id));
+  const foundIn = new Map(replies.map((m) => [m.id, foundOf(m.body.found)]));
+  const citesIn = new Map(replies.map((m) => [m.id, citesOf(m.body.cites)]));
   const refs = new Map<string, MessageRef>();
   for (const list of foundIn.values()) for (const r of list) refs.set(`${r.conversationId}|${r.seq}`, r);
+  for (const cited of citesIn.values()) for (const r of Object.values(cited)) refs.set(`${r.conversationId}|${r.seq}`, r);
   /** reader|conversation|seq of the messages found that this reader can see. */
   const foundSeen = new Set<string>();
   if (refs.size > 0) {
@@ -318,9 +326,11 @@ export async function toWireForReaders(
     for (const r of rows) foundSeen.add(`${r.reader_id}|${r.conversation_id}|${r.seq}`);
   }
   /** What `reader` is sent of what `m`'s tools looked up besides the counts (`key`: reader|message). */
+  const seen = (reader: string) => (r: MessageRef): boolean => foundSeen.has(`${reader}|${r.conversationId}|${r.seq}`);
   const lookedFor = (reader: string, m: StoredMessage, key: string): Looked => ({
-    found: (foundIn.get(m.id) ?? []).filter((r) => foundSeen.has(`${reader}|${r.conversationId}|${r.seq}`)),
+    found: (foundIn.get(m.id) ?? []).filter(seen(reader)),
     queries: queriesFor.has(key) ? queriesOf(m.body.queries) : [],
+    cites: citesOf(citesIn.get(m.id) ?? {}, seen(reader)),
   });
 
   const proposals = await proposalsOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));

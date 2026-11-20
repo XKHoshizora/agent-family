@@ -14,6 +14,8 @@ import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
+import { citesIn, RunRefs } from "./tools/refs.ts";
+import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -98,13 +100,15 @@ export interface AgentPortDeps {
  * Where a reply's tools come from (`AgentPortDeps.toolbox`): what a run is offered, with at most how many calls of each
  * tool one reply may run (`ToolRun.perTool`) and what each tool's work is (`ToolRun.kinds`: the status while it runs,
  * what it is counted under), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot answer, its
- * signal honoured; what it found and searched for in its outcome, `ToolOutcome`). Nothing is offered while
- * `TOOLS.enabled` is false. `offer` is asked once per run, in `begin`'s first step (inside its transaction, under the
- * run's locks), before the context is planned.
+ * signal honoured; what it found and searched for in its outcome, `ToolOutcome`) — for the run's scope as `begin` set it
+ * (`RunScope`: whether it is in a group, the numbers it gave the model, how far its conversation had come, its mark).
+ * Nothing is offered while `TOOLS.enabled` is false. `offer` is asked once per run, in `begin`'s first step (inside its
+ * transaction, under the run's locks), before the context is planned; `where.group`: the run is not in its Agent's own
+ * conversation. The service's toolbox is agents/tools/index.ts `createToolbox`.
  */
 export interface Toolbox {
-  offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number>; kinds: Record<string, Activity> };
-  run(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
+  offer(run: RunTicket, where: { group: boolean }): { tools: ToolSpec[]; perTool: Record<string, number>; kinds: Record<string, Activity> };
+  run(scope: RunScope, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
 }
 
 /** What a toolbox offers a run. */
@@ -219,6 +223,12 @@ interface RunFlags {
   money: RunMoney | null;
   /** The model the reply calls, from `begin` once the call is admitted (with `money`); null until then. */
   model: RunModel | null;
+  /**
+   * A reply offered tools, from `begin` once the call is admitted: the numbers it gave the model (refs.ts — its context's
+   * file labels, then what its tools hand over) and how far its conversation had come when it began (`RunScope.heardTo`).
+   * Null for one offered none. Forgotten with the run's flags: no number outlives its reply.
+   */
+  tools: { refs: RunRefs; heardTo: number } | null;
 }
 
 /**
@@ -259,7 +269,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null };
+      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null, tools: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -428,6 +438,7 @@ export class DbAgentPort implements AgentPort {
           offer: Offer | null;
           reserved: number;
           withoutTools: string | null;
+          tools: { refs: RunRefs; heardTo: number } | null;
         }
     > => {
       const { agent, state } = await this.lockRun(t, run);
@@ -505,16 +516,20 @@ export class DbAgentPort implements AgentPort {
       // offers none; then what they take of the context — their definitions at the plan's ratio, as tools' text is planned
       // (`TOOL_TEXT_FACTOR`), and what providers add around them, reserved as the system text is — and room for what they
       // bring back (below).
-      let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run, { group }) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
+      // A reply offered tools numbers the files its context labels (`[文件 f1：name]`), so that its file tool can name
+      // them (tools/refs.ts); one offered none is shown them as always.
+      const refs = offer === null ? null : new RunRefs();
+      const numbered = refs === null ? plan : { ...plan, fileRef: (id: string) => refs.file(id) };
       const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned * TOOL_TEXT_FACTOR) + TOOL_PREAMBLE_TOKENS;
       let reserved = definitions;
-      let loaded = await loadContext(t, { ...plan, reserved }, resolved, system(offer !== null), this.deps.drawMark);
+      let loaded = await loadContext(t, { ...numbered, reserved }, resolved, system(offer !== null), this.deps.drawMark);
       if (offer !== null && holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // And room for what the tools bring back, from what that plan gives the conversation (`resultReserve`), with
         // the last call's line: reserved as the definitions are.
         reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`, planned) + resultReserve(config.tools.resultMaxWeight, planned, loaded.budget);
-        loaded = await loadContext(t, { ...plan, reserved }, resolved, system(true), this.deps.drawMark);
+        loaded = await loadContext(t, { ...numbered, reserved }, resolved, system(true), this.deps.drawMark);
       }
       if (offer !== null && !holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // With the tools reserved the conversation would not get the room a call needs at least: none are offered, and
@@ -529,7 +544,11 @@ export class DbAgentPort implements AgentPort {
       // its tools are not sent: an upstream that refuses them, or the ordinary call after a later round it refused
       // (`ModelCall.systemWithoutTools`). Its plan holds it: the tools' definitions it leaves out are larger.
       const withoutTools = offer === null ? null : system(false)(loaded.mark ?? "", loaded.speakers).text;
-      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools };
+      // How far its conversation has come, read under its row's lock: everyone who wrote up to here is heard (`hearFrom`
+      // above), and its tools show it nothing later (`RunScope.heardTo`).
+      const heard = offer === null ? null : await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [run.conversationId]);
+      const tools = heard === null || refs === null ? null : { refs, heardTo: Number(heard.rows[0]?.seq ?? 0) };
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools, tools };
     });
     if ("end" in first) return first.end;
 
@@ -649,6 +668,7 @@ export class DbAgentPort implements AgentPort {
     flags.money = result.money;
     const { resolved } = first;
     flags.model = resolved.source === "site" ? { source: "site", id: resolved.name } : { source: "provider", providerId: resolved.providerId!, name: resolved.name };
+    flags.tools = result.prepared.tools.length > 0 ? first.tools : null;
     return result.prepared;
   }
 
@@ -661,11 +681,16 @@ export class DbAgentPort implements AgentPort {
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
 
-  /** `AgentPort.tool`: through the toolbox that offered the tool (`begin`); with none nothing was offered, and nothing runs. */
+  /**
+   * `AgentPort.tool`: through the toolbox that offered the tool (`begin`), for the run's scope as `begin` set it; with no
+   * toolbox, or for a run this process did not begin with tools, nothing was offered and nothing runs.
+   */
   tool(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome> {
     const box = this.deps.toolbox;
-    if (!box) return Promise.reject(new Error("no tool is offered: there is no toolbox"));
-    return box.run(run, call, signal);
+    const flags = this.flags.get(run.id);
+    if (!box || !flags?.tools) return Promise.reject(new Error("no tool is offered to this run"));
+    const scope: RunScope = { ...run, group: flags.group, refs: flags.tools.refs, heardTo: flags.tools.heardTo, mark: flags.mark };
+    return box.run(scope, call, signal);
   }
 
   /**
@@ -761,9 +786,13 @@ export class DbAgentPort implements AgentPort {
    * recovery recorded it.
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
-    const mark = this.flags.get(run.id)?.mark ?? null;
+    const flags = this.flags.get(run.id);
+    const mark = flags?.mark ?? null;
+    // A reply offered tools: its citations checked against the numbers it was given (tools/refs.ts `citesIn`); one
+    // offered none is posted as written.
+    const reply = flags?.tools ? (({ text, cites }) => ({ ...out, text, cites }))(citesIn(out.text, flags.tools.refs)) : out;
     try {
-      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, mark, this.deps.config));
+      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, reply, mark, this.deps.config));
       if (!posted) return "empty";
       const { message, duplicate, triggered } = posted;
       // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners, the

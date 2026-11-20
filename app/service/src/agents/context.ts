@@ -100,6 +100,11 @@ export interface ContextRun {
    * `begin`). None when absent.
    */
   reserved?: number;
+  /**
+   * A reply offered tools: the number of each attachment it is shown (agents/tools/refs.ts `RunRefs.file`), which its
+   * label carries — the message's own and a quoted one's alike. Absent: labels carry none.
+   */
+  fileRef?: (attachmentId: string) => string;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
@@ -323,7 +328,13 @@ interface MessageRow {
   proposal_field: string | null;
 }
 
-const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
+/** An attachment as the context shows it; with `fileRef` (a reply offered tools), with its number. */
+const toAttachment = (a: AttachmentRef, fileRef?: (attachmentId: string) => string): ContextAttachment => ({
+  id: a.id,
+  name: a.name,
+  image: a.inline === true,
+  ...(fileRef ? { ref: fileRef(a.id) } : {}),
+});
 
 /**
  * Who the sender of a message is to the Agent (design rule 3), by account and never by name: its owner (whatever either
@@ -394,7 +405,7 @@ async function loadPage(
       [run.agentId, run.conversationId, quotedSeqs, run.group?.after ?? 0],
     );
     for (const r of quoted.rows) {
-      const shown = r.text ? r.text : r.attachment ? attachmentLabel(toAttachment(r.attachment)) : "";
+      const shown = r.text ? r.text : r.attachment ? attachmentLabel(toAttachment(r.attachment, run.fileRef)) : "";
       if (shown !== "") quotes.set(Number(r.seq), shown);
     }
   }
@@ -408,7 +419,7 @@ async function loadPage(
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
     }
-    const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
+    const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment, run.fileRef) : null };
     const speaker =
       group && role === "user"
         ? {

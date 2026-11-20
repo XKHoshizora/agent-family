@@ -6,7 +6,7 @@ import { currentMembership } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import { foundOf, lookupsOf, queriesOf, type LookupFields } from "../messages/lookups.ts";
+import { citesOf, foundOf, lookupsOf, queriesOf, type LookupFields, type MessageRef } from "../messages/lookups.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
@@ -163,6 +163,8 @@ export interface AgentReply extends LookupFields {
   reasoning: string;
   stopped: boolean;
   truncated: boolean;
+  /** The messages its text cites by number (agents/tools/refs.ts `citesIn`): only a reply offered tools has any. */
+  cites?: Record<string, MessageRef>;
 }
 
 /**
@@ -278,8 +280,13 @@ export async function postAsAgent(
   // its own conversation, its owner's to read — in a group they are not kept.
   const lookups = lookupsOf(reply.lookups);
   if (lookups) body.lookups = lookups;
-  const found = foundOf(reply.found).filter((r) => own || r.conversationId === conversationId);
+  const here = (r: MessageRef): boolean => own || r.conversationId === conversationId;
+  const found = foundOf(reply.found).filter(here);
   if (found.length > 0) body.found = found;
+  // What its text cites, by number, as `found` is kept (each reader is sent only those they can see); a number whose
+  // message is not kept stays in the text as it is.
+  const cites = citesOf(reply.cites, here);
+  if (Object.keys(cites).length > 0) body.cites = cites;
   const queries = own ? queriesOf(reply.queries) : [];
   if (queries.length > 0) body.queries = queries;
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);

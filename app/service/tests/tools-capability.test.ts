@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentPort, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
 import { isRunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
-import { groupSystemText, NO_NOTES, NO_TOOLS, systemText } from "../src/agents/runtime/prompt.ts";
+import { groupSystemText, NO_NOTES, NO_TOOLS, systemText, toolsPassage } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
 import type { ModelCall, ToolSpec } from "../src/models/gateway.ts";
@@ -438,26 +438,25 @@ describe("the system text says the reply has no tools only when it is offered no
   const owner = { displayName: "Ada" };
   const now = new Date("2026-11-20T08:00:00Z");
   const scene = { title: "饭搭子", agents: [], more: false, people: [], morePeople: false };
-  /** `text` without the line holding the sentence. */
-  const withoutSentence = (text: string) => {
-    const line = text.split("\n").find((l) => l.startsWith(NO_TOOLS));
-    expect(line).toBeDefined();
-    return text.replace(`\n${line}`, "");
+  /** `text` with the tools' passage (`toolsPassage`) in place of the line holding the sentence. */
+  const withPassage = (text: string, group: boolean) => {
+    expect(text.split("\n")).toContain(NO_TOOLS);
+    return text.replace(NO_TOOLS, toolsPassage(group));
   };
 
-  it("in the Agent's own conversation, onboarding too, and in a group: as it always was without tools; with tools, the same less that sentence", () => {
+  it("in the Agent's own conversation, onboarding too, and in a group: as it always was without tools; with tools, the same with the tools' passage in place of that sentence", () => {
     for (const mode of ["normal", "onboarding"] as const) {
       const was = systemText(agent, owner, now, mode, "Asia/Shanghai", NO_NOTES);
       expect(systemText(agent, owner, now, mode, "Asia/Shanghai", NO_NOTES, false)).toEqual(was);
       expect(was.text).toContain(NO_TOOLS);
       const offered = systemText(agent, owner, now, mode, "Asia/Shanghai", NO_NOTES, true);
-      expect(offered.text).toBe(withoutSentence(was.text));
+      expect(offered.text).toBe(withPassage(was.text, false));
       expect(offered.text).not.toContain(NO_TOOLS);
     }
     const g = { ...agent, handle: "helper" };
     const was = groupSystemText(g, owner, scene, now, "Asia/Shanghai", "Q7", false, NO_NOTES);
     expect(groupSystemText(g, owner, scene, now, "Asia/Shanghai", "Q7", false, NO_NOTES, false)).toEqual(was);
-    expect(groupSystemText(g, owner, scene, now, "Asia/Shanghai", "Q7", false, NO_NOTES, true).text).toBe(withoutSentence(was.text));
+    expect(groupSystemText(g, owner, scene, now, "Asia/Shanghai", "Q7", false, NO_NOTES, true).text).toBe(withPassage(was.text, true));
   });
 
   it("a reply in a group offered tools is not told it has none; one whose model is not offered them is", async () => {

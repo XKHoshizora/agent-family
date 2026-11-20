@@ -240,6 +240,11 @@ export const wireMessageSchema = z.object({
   found: z.array(z.object({ conversationId: z.string(), seq: z.number() })).optional(),
   /** The words its searches were for: to the Agent's owner, in the Agent's own conversation only. */
   queries: z.array(z.string()).optional(),
+  /**
+   * What its text cites by number (`〔m3〕`, agents/tools/refs.ts): of those, the messages this reader can see now
+   * (VISIBLE_JOIN), by number; absent when none is. A number in the text with no entry here is plain text to this reader.
+   */
+  cites: z.record(z.string(), z.object({ conversationId: z.string(), seq: z.number() })).optional(),
   createdAt: z.string(),
 });
 

@@ -43,11 +43,15 @@ export const CUT_MARK = "…（已截断）";
 /** Starts the newest message's text when it alone was over the budget and lost its beginning. */
 export const CUT_FRONT = "…";
 
-/** A file message's attachment, as the message names it. `image`: one the site shows as a picture (PNG, JPEG, WebP, GIF). */
+/**
+ * A file message's attachment, as the message names it. `image`: one the site shows as a picture (PNG, JPEG, WebP, GIF).
+ * `ref`: its number in a reply offered tools (agents/tools/refs.ts), which its label then carries; none otherwise.
+ */
 export interface ContextAttachment {
   id: string;
   name: string;
   image: boolean;
+  ref?: string;
 }
 
 /** One message as it may be shown: the owner's as `user`, the Agent's as `assistant`. */
@@ -64,8 +68,12 @@ export type AttachmentContent =
   | { type: "pdf"; data: Uint8Array }
   | { type: "text"; text: string; chars: number };
 
-/** `[图片：name]` or `[文件：name]`: an attachment shown by its name. */
-export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): string => (a.image ? `[图片：${a.name}]` : `[文件：${a.name}]`);
+/**
+ * `[图片：name]` or `[文件：name]`: an attachment shown by its name; with its number in a reply offered tools,
+ * `[图片 f2：name]` or `[文件 f1：name]` (what the file tool is called with).
+ */
+export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image" | "ref">): string =>
+  `[${a.image ? "图片" : "文件"}${a.ref === undefined ? "" : ` ${a.ref}`}：${a.name}]`;
 
 /**
  * Tokens the conversation may take: of what the model's context leaves beside its output limit, the system text (as

@@ -190,9 +190,13 @@ export interface ToolsConfig {
    * admission alone bounds), and its one last call.
    */
   maxPoints: number;
-  /** Calls of the search tool, and of the file tool, one reply may run; further ones are answered with a fixed note. */
+  /**
+   * Calls of the search tool, of the file tool and of the clock, one reply may run (src/agents/tools/index.ts, each tool's
+   * own count in the loop); further ones are answered with a fixed note.
+   */
   searchPerReply: number;
   filePerReply: number;
+  timePerReply: number;
   /**
    * The most one tool result weighs (metering/tokens.ts `weight`) when it goes back to the model; more is cut, and marked
    * so. A reply offered tools keeps room for two in its context plan, at most a third of the conversation's
@@ -212,6 +216,7 @@ const toolsSchema = z.strictObject({
   maxPoints: positive(20, 100_000),
   searchPerReply: positive(6, 1000),
   filePerReply: positive(4, 1000),
+  timePerReply: positive(1, 1000),
   resultMaxWeight: positive(3000, 100_000),
   runTimeoutMs: z.number().int().min(1000).max(3_600_000).default(300_000),
 });

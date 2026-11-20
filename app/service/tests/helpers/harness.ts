@@ -77,15 +77,20 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * reply worker's background loop off: the test then runs replies itself with `app.agentWorker.runOnce()`. The stale-run
  * sweep's timer is off unless `staleRunSweep` asks for it (`app.staleRunSweep.run()` sweeps by hand). So is the
  * proactive scheduler unless `proactive` asks for it (`{}`, or `{ delayMs }` for a shorter wait; built only when the
- * judgement model is configured, `config.judge`): `app.deps.proactive` is null otherwise.
+ * judgement model is configured, `config.judge`): `app.deps.proactive` is null otherwise. So are the tools replies may be
+ * offered unless `tools` asks for them (the app's own port then has the real toolbox; without it every reply is one call,
+ * as before tools).
  * `config` replaces fields of the loaded configuration, past `loadConfig`'s rules (a file that needs a value they
  * refuse, such as a connection timeout of under a second, for what it tests; nothing else is affected).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
  */
 export function useApp(
-  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory"> & { memory?: boolean } = {},
+  extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory" | "tools"> & {
+      memory?: boolean;
+      tools?: boolean;
+    } = {},
 ): { app: FastifyInstance; db: Db; clock: TestClock } {
-  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, memory = false, ...overrides } =
+  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, memory = false, tools = false, ...overrides } =
     extra;
   const clock = testClock();
   const options: BuildOptions = {
@@ -93,6 +98,7 @@ export function useApp(
     staleRunSweep,
     proactive,
     memory: memory ? { now: clock.now, setTimer: clock.setTimer } : false,
+    ...(tools ? {} : { tools: false as const }),
     ...(logStream ? { logStream } : {}),
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
     ...(allowInsecureLocal ? { allowInsecureLocal } : {}),

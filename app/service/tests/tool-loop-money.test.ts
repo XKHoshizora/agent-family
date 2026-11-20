@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentPort, staleAfterMs, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
 import { contextBudget } from "../src/agents/runtime/context.ts";
 import { isRunEnd, type Prepared, type ToolOutcome } from "../src/agents/runtime/port.ts";
-import { NO_TOOLS } from "../src/agents/runtime/prompt.ts";
+import { NO_TOOLS, toolsPassage } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
 import { CONTEXT_HEADROOM, estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR } from "../src/metering/tokens.ts";
@@ -710,14 +710,15 @@ describe("the money of a reply that offers tools", () => {
 
 describe("the tools' definitions, and room for what they bring back, in the context plan", () => {
   /**
-   * The system text's line saying the reply has no tools, with the line break before it: a reply offered tools is not
-   * told it (agents/runtime/prompt.ts), so its plan is made with a system text shorter by this.
+   * The system text's line saying the reply has no tools, with the line break before it: a reply offered tools is told
+   * the tools' passage in its place (agents/runtime/prompt.ts `toolsPassage`), so its plan is made with that text.
    */
   const NO_TOOLS_LINE = `\n${NO_TOOLS}`;
+  const PASSAGE_LINES = `\n${toolsPassage(false)}`;
   /** `system` as a reply offered tools would have it. */
   const offered = (system: string) => {
     expect(system).toContain(NO_TOOLS_LINE);
-    return system.replace(NO_TOOLS_LINE, "");
+    return system.replace(NO_TOOLS_LINE, PASSAGE_LINES);
   };
   /** A toolbox offering `BIG`. */
   const big: Toolbox = { offer: () => ({ tools: [BIG], perTool: { search: 6 }, kinds: { search: "search" } }), run: async () => ({ output: { hits: [] }, activity: "search" }) };
@@ -745,7 +746,7 @@ describe("the tools' definitions, and room for what they bring back, in the cont
     const room = contextBudget(8192, call.maxOutputTokens, { rest: call.system, passage: "" });
     expect(room).toBeGreaterThan(400);
     expect(room).toBeLessThan(530);
-    // With the tools offered the system text would be without its line saying there are none.
+    // With the tools offered the system text would have the tools' passage in place of its line saying there are none.
     expect(contextBudget(8192, call.maxOutputTokens, { rest: offered(call.system), passage: "" }, 1, definitions + TOOL_PREAMBLE_TOKENS)).toBeLessThan(
       estimateTokens("附近有什么好吃的？"),
     );
@@ -780,11 +781,11 @@ describe("the tools' definitions, and room for what they bring back, in the cont
     // The newest message, then older ones, newest first, while they fit what the plan leaves them. Reserved: the
     // definitions and what providers add around them; the last call's line; and room for what the tools bring back —
     // two results of `resultMaxWeight`, but at most a third of what the plan would give the conversation beside the
-    // definitions (about 3 980 tokens here, its system text without the line saying there are no tools: 1 326 are kept).
+    // definitions (about 3 785 tokens here, its system text with the tools' passage: 1 261 are kept).
     const definitions = estimateTokens(JSON.stringify([BIG]), TOOL_TEXT_FACTOR) + TOOL_PREAMBLE_TOKENS;
     const conversation = contextBudget(8192, a.maxOutputTokens, { rest: a.system, passage: "" }, 1, definitions);
     const results = Math.min(Math.ceil(2 * app.deps.config.tools.resultMaxWeight * TOOL_TEXT_FACTOR), Math.floor(conversation / 3));
-    expect(results).toBe(1326);
+    expect(results).toBe(1261);
     const reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`) + results;
     const shown = (budget: number) => 1 + Math.min(older.length, Math.floor((budget - estimateTokens("附近有什么好吃的？")) / 310));
     const plans = [contextBudget(8192, b.maxOutputTokens, { rest: b.system, passage: "" }), contextBudget(8192, a.maxOutputTokens, { rest: a.system, passage: "" }, 1, reserved)];
@@ -896,8 +897,8 @@ describe("the tools' definitions, and room for what they bring back, in the cont
     const model = await smallModel(owner);
     // A persona that leaves the conversation about 260 tokens beside the search tool's definitions: enough for the
     // newest message's 200 alone, not once the line and a third of it for results are kept too. (Planned with the
-    // system text a reply offered tools has: without its line saying there are none.)
-    const agent = await mustCreateAgent(app, owner, { name: "小", model, persona: "简".repeat(4892 + estimateTokens(NO_TOOLS_LINE)) });
+    // system text a reply offered tools has: the tools' passage in place of its line saying there are none.)
+    const agent = await mustCreateAgent(app, owner, { name: "小", model, persona: "简".repeat(4892 + estimateTokens(NO_TOOLS_LINE) - estimateTokens(PASSAGE_LINES)) });
     const question = `附近有什么好吃的？${"我想吃辣的。".repeat(40)}`;
     const gateway = scriptedGateway().reply("去吃川菜。", { usage: U(6000, 10) });
     await say(owner, agent.conversationId, question);
