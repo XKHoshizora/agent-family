@@ -109,6 +109,15 @@ export interface Mention {
   length: number;
 }
 
+/**
+ * What the reading at send decides of a message (agents/mentions.ts `mentionsAtSend`): its mentions, and whether a typed
+ * `@…` asked an Agent it could not name (`messages.asks_agent`, fix round 1).
+ */
+export interface MentionsRead {
+  mentions: Mention[] | null;
+  asksAgent: boolean;
+}
+
 export interface StoredMessage {
   /** `messages.id`, a bigint, as a string. Never exposed on the wire. */
   id: string;
@@ -122,10 +131,15 @@ export interface StoredMessage {
   createdAt: Date;
   /** Who its mentions mean, in order of their ranges (`Mention`); null when it names nobody, and for every message from before. */
   mentions: Mention[] | null;
+  /**
+   * Whether, when it was sent, it asked an Agent it could not name (`messages.asks_agent`): for the proactive judgement
+   * alone, never on the wire (messages/read.ts `toWire` does not read it).
+   */
+  asksAgent: boolean;
 }
 
 /** Columns of `messages m` in the shape `toStored` reads. */
-export const MESSAGE_COLUMNS = "m.id, m.conversation_id, m.seq, m.sender_id, m.kind, m.body, m.client_txn, m.created_at, m.mentions";
+export const MESSAGE_COLUMNS = "m.id, m.conversation_id, m.seq, m.sender_id, m.kind, m.body, m.client_txn, m.created_at, m.mentions, m.asks_agent";
 
 export interface MessageRow {
   id: string;
@@ -137,6 +151,7 @@ export interface MessageRow {
   client_txn: string | null;
   created_at: Date;
   mentions?: Mention[] | null;
+  asks_agent?: boolean;
 }
 
 export function toStored(r: MessageRow): StoredMessage {
@@ -150,13 +165,15 @@ export function toStored(r: MessageRow): StoredMessage {
     clientTxn: r.client_txn,
     createdAt: r.created_at,
     mentions: r.mentions ?? null,
+    asksAgent: r.asks_agent ?? false,
   };
 }
 
 /**
  * Appends a message with the next sequence number (`conversations.seq + 1`, gapless and unique). The
- * caller must already hold the conversation row lock and have checked permission in the same transaction. `mentions`:
- * who its mentions mean, decided by the caller now (agents/mentions.ts `mentionsAtSend`; null: nobody, as for a notice).
+ * caller must already hold the conversation row lock and have checked permission in the same transaction. `read`: who
+ * its mentions mean and whether it asked an Agent it could not name, decided by the caller now (agents/mentions.ts
+ * `mentionsAtSend`; null: nobody, as for a notice).
  */
 export async function insertMessage(
   t: Tx,
@@ -165,14 +182,15 @@ export async function insertMessage(
   kind: MessageKind,
   body: MessageBody,
   clientTxn: string | null,
-  mentions: readonly Mention[] | null = null,
+  read: MentionsRead | null = null,
 ): Promise<StoredMessage> {
+  const mentions = read?.mentions ?? null;
   const { rows } = await t.query<MessageRow>(
     `with next as (update conversations set seq = seq + 1 where id = $1 returning seq)
-     insert into messages as m (conversation_id, seq, sender_id, kind, body, client_txn, mentions)
-     select $1, next.seq, $2, $3, $4::jsonb, $5, $6::jsonb from next
+     insert into messages as m (conversation_id, seq, sender_id, kind, body, client_txn, mentions, asks_agent)
+     select $1, next.seq, $2, $3, $4::jsonb, $5, $6::jsonb, $7 from next
      returning ${MESSAGE_COLUMNS}`,
-    [conversationId, senderId, kind, JSON.stringify(body), clientTxn, mentions === null || mentions.length === 0 ? null : JSON.stringify(mentions)],
+    [conversationId, senderId, kind, JSON.stringify(body), clientTxn, mentions === null || mentions.length === 0 ? null : JSON.stringify(mentions), read?.asksAgent ?? false],
   );
   if (!rows[0]) throw new Error(`insertMessage: conversation ${conversationId} does not exist`);
   return toStored(rows[0]);

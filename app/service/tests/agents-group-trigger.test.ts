@@ -1,6 +1,7 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mentionedHandles, mentionsAtSend } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend, mentionTokens } from "../src/agents/mentions.ts";
+
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { maybeTrigger, noneTriggered, triggerFromAgent, type RunLimits } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
@@ -15,6 +16,9 @@ import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
+
+/** The handles a text names, as the reading at send looks them up (its tokens, then their distinct handles). */
+const handlesIn = (text: string): string[] => mentionedHandles(mentionTokens(text));
 
 /**
  * What makes an Agent reply in a group, and the brakes on Agents answering each other (README "Agents and runs",
@@ -122,26 +126,26 @@ const seqOf = async (conv: string) => Number((await db.query("select seq from co
 
 describe("mentionedHandles", () => {
   it("finds @handle on a token boundary, case ignored, lower-cased, distinct, in order", () => {
-    expect(mentionedHandles("@anna hi @Bob_1, and @ANNA again; @carl.")).toEqual(["anna", "bob_1", "carl"]);
-    expect(mentionedHandles("(@anna) [@bob_1] 你好@carl你好 @dave! @erin's @fred-x")).toEqual(["anna", "bob_1", "carl", "dave", "erin", "fred"]);
-    expect(mentionedHandles("@@anna")).toEqual(["anna"]);
+    expect(handlesIn("@anna hi @Bob_1, and @ANNA again; @carl.")).toEqual(["anna", "bob_1", "carl"]);
+    expect(handlesIn("(@anna) [@bob_1] 你好@carl你好 @dave! @erin's @fred-x")).toEqual(["anna", "bob_1", "carl", "dave", "erin", "fred"]);
+    expect(handlesIn("@@anna")).toEqual(["anna"]);
     // Preceded by a word character: an address, not a mention.
-    expect(mentionedHandles("mail@anna x_@bob 9@carl Z@dave")).toEqual([]);
+    expect(handlesIn("mail@anna x_@bob 9@carl Z@dave")).toEqual([]);
     // The whole run of word characters is the handle: `@anna_2` is not `@anna`.
-    expect(mentionedHandles("@anna_2 @anna2")).toEqual(["anna_2", "anna2"]);
+    expect(handlesIn("@anna_2 @anna2")).toEqual(["anna_2", "anna2"]);
     // 2 to 24 characters (an Agent's name part may be 2: family names), or nothing.
-    expect(mentionedHandles(`@a @an @ab_ @${"a".repeat(24)} @${"b".repeat(25)}`)).toEqual(["an", "ab_", "a".repeat(24)]);
-    expect(mentionedHandles("")).toEqual([]);
-    expect(mentionedHandles("@")).toEqual([]);
-    expect(mentionedHandles("@ anna")).toEqual([]);
-    expect(mentionedHandles("@安娜")).toEqual([]);
+    expect(handlesIn(`@a @an @ab_ @${"a".repeat(24)} @${"b".repeat(25)}`)).toEqual(["an", "ab_", "a".repeat(24)]);
+    expect(handlesIn("")).toEqual([]);
+    expect(handlesIn("@")).toEqual([]);
+    expect(handlesIn("@ anna")).toEqual([]);
+    expect(handlesIn("@安娜")).toEqual([]);
   });
 
   it("returns at most the first 20 distinct handles; repeats do not count toward them", () => {
     const handle = (i: number) => `h_${String(i).padStart(2, "0")}`;
     const many = Array.from({ length: 25 }, (_, i) => `@${handle(i)}`).join(" ");
-    expect(mentionedHandles(many)).toEqual(Array.from({ length: 20 }, (_, i) => handle(i)));
-    expect(mentionedHandles(`${"@aaa ".repeat(30)}@bbb`)).toEqual(["aaa", "bbb"]);
+    expect(handlesIn(many)).toEqual(Array.from({ length: 20 }, (_, i) => handle(i)));
+    expect(handlesIn(`${"@aaa ".repeat(30)}@bbb`)).toEqual(["aaa", "bbb"]);
   });
 
   it("is linear: 8 000 characters of @a@a…, @aaaa… and the like take well under a few milliseconds", () => {
@@ -155,9 +159,9 @@ describe("mentionedHandles", () => {
     ];
     for (const [text, expected] of cases) {
       expect(text.length).toBeGreaterThanOrEqual(8000);
-      expect(mentionedHandles(text)).toEqual(expected);
+      expect(handlesIn(text)).toEqual(expected);
       const started = performance.now();
-      for (let i = 0; i < 20; i++) mentionedHandles(text);
+      for (let i = 0; i < 20; i++) handlesIn(text);
       expect((performance.now() - started) / 20).toBeLessThan(5);
     }
   });
@@ -187,6 +191,7 @@ describe("a person's message in a group", () => {
       clientTxn: "x",
       createdAt: new Date(),
       mentions: null,
+      asksAgent: false,
     });
     const nothing = noneTriggered();
     for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@a @ 安娜 @x.y" }, { text: "@anna 你好" }, {}]) {

@@ -70,14 +70,16 @@ const cut = (text: string, chars: number): string => Array.from(oneLine(text)).s
 /**
  * The sender of the message at `seq` when it is one to judge (design rule 3): the conversation is an open group, the
  * message is its latest that is not a notice, a person sent it, Agents were not halted at or after it (a halt keeps them
- * out until a person writes again, rule 13), and its stored mentions mean no Agent (`namesAnAgent`): whoever names an
- * Agent asked that one, and none other answers in its place. Null otherwise.
+ * out until a person writes again, rule 13), its stored mentions mean no Agent (`namesAnAgent`) and it asked no Agent it
+ * could not name (`messages.asks_agent`, decided at send by the same reading: a full handle of an Agent elsewhere, a bare
+ * name two Agents here share): whoever asks an Agent asked that one, and none other answers in its place. Null otherwise.
  */
 export async function judgeable(q: Queryable, conversationId: string, seq: number): Promise<{ senderId: string } | null> {
-  const { rows } = await q.query<{ type: string; closed: boolean; halted: string | null; seq: string | null; sender_id: string | null; kind: string | null; mentions: Mention[] | null }>(
-    `select c.type, c.closed_at is not null as closed, c.agents_halted_seq::text as halted, m.seq::text as seq, m.sender_id, p.kind, m.mentions
+  const { rows } = await q.query<{ type: string; closed: boolean; halted: string | null; seq: string | null; sender_id: string | null; kind: string | null; mentions: Mention[] | null; asks: boolean | null }>(
+    `select c.type, c.closed_at is not null as closed, c.agents_halted_seq::text as halted, m.seq::text as seq, m.sender_id, p.kind, m.mentions,
+            m.asks_agent as asks
        from conversations c
-       left join lateral (select x.seq, x.sender_id, x.mentions from messages x
+       left join lateral (select x.seq, x.sender_id, x.mentions, x.asks_agent from messages x
                            where x.conversation_id = c.id and x.kind <> 'system' order by x.seq desc limit 1) m on true
        left join principals p on p.id = m.sender_id
       where c.id = $1`,
@@ -86,7 +88,7 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
   const r = rows[0];
   if (!r || r.type !== "group" || r.closed || r.seq === null || Number(r.seq) !== seq || r.kind !== "human" || r.sender_id === null) return null;
   if (r.halted !== null && Number(r.halted) >= seq) return null;
-  if (await namesAnAgent(q, r.mentions)) return null;
+  if (r.asks === true || (await namesAnAgent(q, r.mentions))) return null;
   return { senderId: r.sender_id };
 }
 

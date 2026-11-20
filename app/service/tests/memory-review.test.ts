@@ -1012,7 +1012,7 @@ describe("only the owner", () => {
     const [chip] = await chips(owner, w.conv);
     const stored = await db.query("select id, conversation_id, seq, sender_id, kind, body, client_txn, created_at from messages where conversation_id = $1 and seq = $2", [w.conv, chip.seq]);
     const row = stored.rows[0]!;
-    const asRow = { id: row.id, conversationId: row.conversation_id, seq: Number(row.seq), senderId: row.sender_id, kind: row.kind, body: row.body, clientTxn: row.client_txn, createdAt: row.created_at, mentions: null };
+    const asRow = { id: row.id, conversationId: row.conversation_id, seq: Number(row.seq), senderId: row.sender_id, kind: row.kind, body: row.body, clientTxn: row.client_txn, createdAt: row.created_at, mentions: null, asksAgent: false };
     const readers = await toWireForReaders(db, [owner.id, w.agent.id, mia.id], [asRow], app.deps.config);
     expect(readers.get(owner.id)).toHaveLength(1);
     expect(readers.get(w.agent.id)).toEqual([]);

@@ -9,7 +9,13 @@
 alter table messages add column mentions jsonb;
 alter table messages add constraint messages_mentions_shape
   check (mentions is null or (jsonb_typeof(mentions) = 'array' and jsonb_array_length(mentions) between 1 and 20));
+-- Whether, when it was sent, the message asked an Agent it could not name (Task M fix round 1): an `@owner.name` of an
+-- Agent that is not one of the conversation's Agents, or a bare `@name` two or more of its Agents share (and no person).
+-- Decided by the same reading, at the same moment, as `mentions`. Read by the proactive judgement only (whoever asked an
+-- Agent asked that one, and none other answers in its place); never sent to anyone. False for every message from before.
+alter table messages add column asks_agent boolean not null default false;
 
 -- Down Migration
-alter table messages drop constraint messages_mentions_shape;
-alter table messages drop column mentions;
+alter table messages drop column if exists asks_agent;
+alter table messages drop constraint if exists messages_mentions_shape;
+alter table messages drop column if exists mentions;

@@ -289,8 +289,8 @@ export async function postAsAgent(
   if (queries.length > 0) body.queries = queries;
   // Who its mentions mean, read once, now, from the text it stores (Task M: a model's text is typed text), and stored with
   // it: what it calls below, and everything after, reads that.
-  const mentions = await mentionsAtSend(t, { id: conversationId, type: own ? "agent" : "group" }, text);
-  const message = await insertMessage(t, conversationId, agentId, "text", body, runId, mentions);
+  const read = await mentionsAtSend(t, { id: conversationId, type: own ? "agent" : "group" }, text);
+  const message = await insertMessage(t, conversationId, agentId, "text", body, runId, read);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who
   // is behind its message there is decided by this run's caller and lane (read above; a running run's never change); the

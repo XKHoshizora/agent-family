@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mentionedHandles, mentionsAtSend } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend, mentionTokens } from "../src/agents/mentions.ts";
+
 import { namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
@@ -9,6 +10,9 @@ import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
+
+/** The handles a text names, as the reading at send looks them up (its tokens, then their distinct handles). */
+const handlesIn = (text: string): string[] => mentionedHandles(mentionTokens(text));
 
 /**
  * Family names in mentions (Task N): `@owner.name` always names that Agent; a bare `@name` names the one Agent member of
@@ -57,7 +61,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     ["@anna.Thanks", ["anna.thanks"]],
     ["cc @jarvis.see above", ["jarvis.see"]],
   ])("%j → %j", (text, expected) => {
-    expect(mentionedHandles(text)).toEqual(expected);
+    expect(handlesIn(text)).toEqual(expected);
   });
 
   it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like take about four times what 2 000 take", () => {
@@ -66,7 +70,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
       let best = Number.POSITIVE_INFINITY;
       for (let i = 0; i < 5; i++) {
         const started = performance.now();
-        for (let j = 0; j < 10; j++) mentionedHandles(text);
+        for (let j = 0; j < 10; j++) handlesIn(text);
         best = Math.min(best, performance.now() - started);
       }
       return best;
@@ -81,7 +85,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     for (const [make, expected] of cases) {
       const [small, large] = [make(2000), make(8000)];
       expect(large.length).toBeGreaterThanOrEqual(7900);
-      expect(mentionedHandles(large)).toEqual(expected);
+      expect(handlesIn(large)).toEqual(expected);
       // Linear: four times the text, about four times the time (a quadratic parse would take sixteen); a few ms of grace.
       expect(fastest(large)).toBeLessThan(8 * fastest(small) + 5);
     }

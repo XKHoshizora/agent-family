@@ -1,7 +1,7 @@
 import type { ConversationType } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { AppError } from "../errors.ts";
-import type { Mention } from "../messages/model.ts";
+import type { Mention, MentionsRead } from "../messages/model.ts";
 import { handleOf } from "../principals/store.ts";
 
 /**
@@ -35,53 +35,117 @@ export interface Token {
 /** `[start, end)` in code units of a text. */
 export type Range = readonly [number, number];
 
-/** A fence line: after any quote markers and indentation, ``` or ~~~ (three or more), then the rest of the line. */
-const FENCE = /^[ \t>]*(`{3,}|~{3,})(.*)$/;
+/**
+ * A fence line: after any quote markers, indentation and list markers (`- `, `* `, `+ `, `1. `, `1) `: a fence may open
+ * a list item), ``` or ~~~ (three or more), then the rest of the line.
+ */
+const FENCE = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*(`{3,}|~{3,})(.*)$/;
+/** A list item's first line: after any quote markers and indentation, a list marker and a space (or nothing more). */
+const LIST_ITEM = /^[ \t>]*(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
+
+/** How far a line is indented, in columns (a tab to the next multiple of 4). */
+function indentOf(line: string): number {
+  let columns = 0;
+  for (const ch of line) {
+    if (ch === " ") columns += 1;
+    else if (ch === "\t") columns += 4 - (columns % 4);
+    else break;
+  }
+  return columns;
+}
 
 /**
- * The parts of `text` Markdown shows as code, in which a typed `@…` names nobody: fenced blocks, from the opening fence
- * line to the closing one (the same character, at least as many, nothing but spaces after them) or to the end of the
- * text when none closes it (a backtick fence's info string holds no backtick); and outside them backtick spans — a run of
- * backticks up to the next run of exactly as many in the same paragraph (a blank line ends one); a backtick after an odd
- * number of backslashes is text, and so is a run nothing closes. Indented code blocks are not told apart: they are text
- * here. In order, not overlapping; linear in the text.
+ * The parts of `text` Markdown shows as code, in which a typed `@…` names nobody (README "Mentions", the exact rule):
+ * - a fenced block, from its opening fence line to the closing one (the same character, at least as many, nothing but
+ *   spaces after them) or to the end of the text when none closes it; a fence may follow quote markers, indentation and
+ *   list markers (`- ```js`); a backtick fence's info string holds no backtick;
+ * - an indented code block: lines indented 4 columns or more (a tab to the next multiple of 4), the first of them at the
+ *   start of the text or after a blank line, unless the text before that blank line is a list item (its own line or a
+ *   line indented under it): there, indented lines are the item's text, as Markdown has it for an item's continuation;
+ *   blank lines inside the block belong to it, those after its last line do not;
+ * - outside those, a backtick span: a run of backticks up to the next run of exactly as many in the same paragraph (a
+ *   blank line ends one); a backtick after an odd number of backslashes is text, and so is a run nothing closes.
+ * In order, not overlapping; linear in the text. (The web renders with CommonMark; this follows it for these cases. A
+ * block indented deeper than its list item's own text — code inside an item — is read as the item's text here.)
  */
 export function codeRanges(text: string): Range[] {
   const out: Array<[number, number]> = [];
   const prose: Array<[number, number]> = [];
   let fence: { char: string; size: number; start: number } | null = null;
+  let block: { start: number; end: number } | null = null;
   let proseStart = 0;
+  let blankBefore = true;
+  let inList = false;
+  const endProse = (at: number) => {
+    if (proseStart >= 0 && at > proseStart) prose.push([proseStart, at]);
+    proseStart = -1;
+  };
   for (let at = 0; ; ) {
     const newline = text.indexOf("\n", at);
     const end = newline === -1 ? text.length : newline;
-    const line = FENCE.exec(text.slice(at, end));
-    if (fence === null) {
-      if (line && !(line[1]![0] === "`" && line[2]!.includes("`"))) {
-        if (at > proseStart) prose.push([proseStart, at]);
-        fence = { char: line[1]![0]!, size: line[1]!.length, start: at };
+    const line = text.slice(at, end);
+    const blank = line.trim() === "";
+    if (fence !== null) {
+      const close = FENCE.exec(line);
+      if (close && close[1]![0] === fence.char && close[1]!.length >= fence.size && close[2]!.trim() === "") {
+        out.push([fence.start, end]);
+        fence = null;
+        proseStart = end;
       }
-    } else if (line && line[1]![0] === fence.char && line[1]!.length >= fence.size && line[2]!.trim() === "") {
-      out.push([fence.start, end]);
-      fence = null;
-      proseStart = end;
+    } else if (block !== null && (blank || indentOf(line) >= 4)) {
+      if (!blank) block.end = end;
+    } else {
+      if (block !== null) {
+        out.push([block.start, block.end]);
+        proseStart = block.end;
+        block = null;
+      }
+      const open = FENCE.exec(line);
+      if (open && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
+        endProse(at);
+        fence = { char: open[1]![0]!, size: open[1]!.length, start: at };
+      } else if (!blank && indentOf(line) >= 4 && blankBefore && !inList) {
+        endProse(at);
+        block = { start: at, end };
+      } else {
+        if (proseStart < 0) proseStart = at;
+        if (!blank) inList = LIST_ITEM.test(line) || (inList && indentOf(line) > 0);
+      }
     }
+    blankBefore = blank;
     if (newline === -1) break;
     at = newline + 1;
   }
   if (fence !== null) out.push([fence.start, text.length]);
-  else if (proseStart < text.length) prose.push([proseStart, text.length]);
+  else if (block !== null) {
+    out.push([block.start, block.end]);
+    if (block.end < text.length) prose.push([block.end, text.length]);
+  } else if (proseStart >= 0 && proseStart < text.length) prose.push([proseStart, text.length]);
 
-  const blank = /\n[ \t]*\n/g;
+  const gaps = /\n[ \t]*\n/g;
   for (const [from, to] of prose) {
     let start = from;
-    blank.lastIndex = from;
-    for (let gap = blank.exec(text); gap !== null && gap.index < to; gap = blank.exec(text)) {
+    gaps.lastIndex = from;
+    for (let gap = gaps.exec(text); gap !== null && gap.index < to; gap = gaps.exec(text)) {
       out.push(...backtickSpans(text, start, gap.index));
       start = gap.index + gap[0].length;
     }
     if (start < to) out.push(...backtickSpans(text, start, to));
   }
   return out.sort((a, b) => a[0] - b[0]);
+}
+
+/**
+ * The addresses of `text`, in which an `@name` is part of the address and names nobody (fix round 1, I-3: a name inside
+ * an address is not someone being addressed): a URL — a scheme and `://`, or `www.`, then everything up to white space
+ * or `<` `>` — and a Markdown link's target, `](` up to its `)` or white space. (An `@` right after `/` is an address
+ * too, wherever it is: `mentionTokens`, `checkPicked`.)
+ */
+const ADDRESS = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
+
+/** The addresses of `text` (`ADDRESS`), in order. */
+export function addressRanges(text: string): Range[] {
+  return [...text.matchAll(ADDRESS)].map((m) => [m.index!, m.index! + m[0].length] as const);
 }
 
 /** The backtick spans of `text` in `[from, to)` (`codeRanges`): an opening run's next run of the same length closes it. */
@@ -150,7 +214,8 @@ function outside(ranges: readonly Range[]): (start: number, length: number) => b
 }
 
 /**
- * The `@…` of `text` the reading looks up, outside `skip` (code, and the picked ranges): `@owner.name` — an owner's
+ * The `@…` of `text` the reading looks up, outside `skip` (code, addresses and the picked ranges) and not right after a
+ * `/` (an address: `example.org/@anna`, fix round 1): `@owner.name` — an owner's
  * handle of 3 to 24 word characters, a dot, a name part of 2 to 24 — or a bare `@name` of 2 to 24 (a person's handle or
  * display name, or an Agent's name part: `namedIn` says whose). A `.` not followed by a word character is punctuation
  * (`ask @xiaolin.jarvis.` names `xiaolin.jarvis`), only one dot counts (`@abc.def.ghi` names `abc.def`), and a run
@@ -163,18 +228,18 @@ export function mentionTokens(text: string, skip: readonly Range[] = []): Token[
   for (const match of text.matchAll(MENTION)) {
     const [whole, first, name] = match as unknown as [string, string, string | undefined];
     const fits = name === undefined ? first.length >= 2 && first.length <= 24 : first.length >= 3 && first.length <= 24 && name.length >= 2 && name.length <= 24;
-    if (!fits || !free(match.index!, whole.length)) continue;
+    if (!fits || text[match.index! - 1] === "/" || !free(match.index!, whole.length)) continue;
     found.push({ handle: (name === undefined ? first : `${first}.${name}`).toLowerCase(), start: match.index!, length: whole.length });
   }
   return found;
 }
 
 /**
- * The handles `text` names outside `skip` (`mentionTokens`): distinct, in the order they first appear, at most the first
- * MENTION_LIMIT — what one message may look up. Pure: no lookup, so a text that names nobody costs no query.
+ * The handles `tokens` name (`mentionTokens`): distinct, in the order they first appear, at most the first MENTION_LIMIT
+ * — what one message may look up. Pure: no lookup, so a text that names nobody costs no query.
  */
-export function mentionedHandles(text: string, skip: readonly Range[] = []): string[] {
-  return [...new Set(mentionTokens(text, skip).map((t) => t.handle))].slice(0, MENTION_LIMIT);
+export function mentionedHandles(tokens: readonly Token[]): string[] {
+  return [...new Set(tokens.map((t) => t.handle))].slice(0, MENTION_LIMIT);
 }
 
 /**
@@ -183,13 +248,15 @@ export function mentionedHandles(text: string, skip: readonly Range[] = []): str
  * (a handle they gave up names nobody); a bare `name` the person member with that handle, else the one person member
  * whose display name it is (trimmed, case ignored, the whole name: people first — two such people name nobody), else the
  * one Agent member with that name part. Two or more of one name part, or for a full handle two live Agents (only a write
- * that skipped the owner's account lock could make them), name nobody. Handles that name nobody are absent. One query,
- * none when there is nothing to look up.
+ * that skipped the owner's account lock could make them), name nobody — and those are `shared`: a handle that asks an
+ * Agent here without naming one (fix round 1, I-1). Handles that name nobody are absent from `named`. One query, none
+ * when there is nothing to look up.
  */
-async function namedIn(q: Queryable, conversationId: string, handles: readonly string[]): Promise<Map<string, string>> {
+async function namedIn(q: Queryable, conversationId: string, handles: readonly string[]): Promise<{ named: Map<string, string>; shared: Set<string> }> {
   const named = new Map<string, string>();
+  const shared = new Set<string>();
   const wanted = [...new Set(handles)];
-  if (wanted.length === 0) return named;
+  if (wanted.length === 0) return { named, shared };
   const parts = [...new Set(wanted.map((h) => h.slice(h.indexOf(".") + 1)))];
   const bare = wanted.filter((h) => !h.includes("."));
   const { rows } = await q.query<{ id: string; kind: "human" | "agent"; handle: string; owner: string | null; name: string }>(
@@ -204,17 +271,37 @@ async function namedIn(q: Queryable, conversationId: string, handles: readonly s
   );
   const one = (ids: readonly string[]): string | null => (ids.length === 1 ? ids[0]! : null);
   for (const handle of wanted) {
+    let agents: string[] = [];
     let id: string | null;
     if (handle.includes(".")) {
-      id = one(rows.filter((r) => r.kind === "agent" && `${r.owner}.${r.handle}` === handle).map((r) => r.id));
+      agents = rows.filter((r) => r.kind === "agent" && `${r.owner}.${r.handle}` === handle).map((r) => r.id);
+      id = one(agents);
     } else {
       const byHandle = rows.find((r) => r.kind === "human" && r.handle === handle);
       const byName = rows.filter((r) => r.kind === "human" && r.name === handle);
-      id = byHandle ? byHandle.id : byName.length > 0 ? one(byName.map((r) => r.id)) : one(rows.filter((r) => r.kind === "agent" && r.handle === handle).map((r) => r.id));
+      if (!byHandle && byName.length === 0) agents = rows.filter((r) => r.kind === "agent" && r.handle === handle).map((r) => r.id);
+      id = byHandle ? byHandle.id : byName.length > 0 ? one(byName.map((r) => r.id)) : one(agents);
     }
     if (id !== null) named.set(handle, id);
+    else if (agents.length > 1) shared.add(handle);
   }
-  return named;
+  return { named, shared };
+}
+
+/**
+ * Whether any of `handles` (full ones, `owner.name`) is the full handle of an Agent anywhere, in this conversation or not,
+ * deleted or not: one such typed `@` asks an Agent (fix round 1, I-1; the reading the proactive judgement had before Task
+ * M). One query.
+ */
+async function anyAgentHandle(q: Queryable, handles: readonly string[]): Promise<boolean> {
+  if (handles.length === 0) return false;
+  const { rowCount } = await q.query(
+    `select 1 from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
+      where o.kind = 'human' and o.handle = any($1::citext[]) and lower(o.handle::text || '.' || p.handle::text) = any($2::text[])
+      limit 1`,
+    [handles.map((h) => h.slice(0, h.indexOf("."))), handles],
+  );
+  return rowCount !== 0;
 }
 
 /**
@@ -222,7 +309,7 @@ async function namedIn(q: Queryable, conversationId: string, handles: readonly s
  * both ways it is called (port-impl.ts `begin`). It reads no message: it says how a typed `@name` would be read at send.
  */
 export async function namePartCalls(q: Queryable, conversationId: string, namePart: string, agentId: string): Promise<boolean> {
-  return (await namedIn(q, conversationId, [namePart.toLowerCase()])).get(namePart.toLowerCase()) === agentId;
+  return (await namedIn(q, conversationId, [namePart.toLowerCase()])).named.get(namePart.toLowerCase()) === agentId;
 }
 
 const bad = (): AppError => new AppError(400, "bad_mentions");
@@ -231,10 +318,23 @@ const bad = (): AppError => new AppError(400, "bad_mentions");
 const splitsPair = (text: string, at: number): boolean =>
   at > 0 && at < text.length && /[\uD800-\uDBFF]/.test(text[at - 1]!) && /[\uDC00-\uDFFF]/.test(text[at]!);
 
+/** The longest name a mention can show, in characters: a full handle (24 + 1 + 24); a display name is at most 40. */
+const NAME_MAX = 49;
+
+/**
+ * Whether `@name`, a picked range's text, is one mention (fix round 1, M-2): `@` and a name — not `@` alone, nothing but
+ * spaces, a space at either end or a line break inside — of at most NAME_MAX characters.
+ */
+const oneMention = (range: string): boolean => {
+  const name = range.slice(1);
+  return name !== "" && !/^\s|\s$/.test(name) && !/[\n\r\u2028\u2029]/.test(name) && Array.from(name).length <= NAME_MAX;
+};
+
 /**
  * The mentions picked from the @ list, as sent with a message (`POST …/messages` `mentions`), checked against its text as
  * it is stored (`text`) and its conversation: at most MENTION_LIMIT; each range inside the text, not cutting a surrogate
- * pair, beginning with `@`, in ascending order and not overlapping the one before; each id a current member of the
+ * pair, one `@name` (`oneMention`), not part of an address (right after `/`, or inside a URL or a link's target:
+ * `addressRanges`), in ascending order and not overlapping the one before; each id a current member of the
  * conversation (a person, or an Agent that is not deleted — who can be called there is decided by the triggers, as for
  * any mention). The text in a range is otherwise free: it is the name as the sender saw it. Anything else: 400
  * `bad_mentions`, and nothing is stored. One query, none when nothing was picked.
@@ -243,9 +343,11 @@ export async function checkPicked(q: Queryable, conversationId: string, text: st
   if (picked.length === 0) return;
   if (picked.length > MENTION_LIMIT) throw bad();
   let end = 0;
+  const free = outside(addressRanges(text));
   for (const { start, length } of picked) {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < end || length < 1 || start + length > text.length) throw bad();
-    if (text[start] !== "@" || splitsPair(text, start + length)) throw bad();
+    if (text[start] !== "@" || splitsPair(text, start + length) || !oneMention(text.slice(start, start + length))) throw bad();
+    if (text[start - 1] === "/" || !free(start, length)) throw bad();
     end = start + length;
   }
   const ids = [...new Set(picked.map((m) => m.id))];
@@ -266,28 +368,37 @@ export async function checkPicked(q: Queryable, conversationId: string, text: st
  * matched; what names nobody stores nothing. In an Agent's own conversation (`type` `agent`) the Agent is also named as
  * it always was there (spec 6.5): by its full handle or its name part as a whole mention, and by `@` and its name
  * anywhere (case ignored), outside code. At most MENTION_LIMIT in all, the picked ones first; in order of their ranges.
+ * Nothing in an address is read (`addressRanges`, and an `@` right after `/`).
+ * With them, read by the same reading at the same moment (fix round 1, I-1): `asksAgent`, whether a typed `@…` asked an
+ * Agent it could not name — a bare name two or more Agent members share (and no person), or the full handle of an Agent
+ * that is not one of the conversation's (or of two live ones): stored as `messages.asks_agent`, for the proactive
+ * judgement alone (never on the wire).
  */
 export async function mentionsAtSend(
   q: Queryable,
   conversation: { id: string; type: ConversationType },
   text: string,
   picked: readonly Mention[] = [],
-): Promise<Mention[] | null> {
+): Promise<MentionsRead> {
+  const kept = picked.map(({ id, start, length }) => ({ id, start, length }));
   // No `@` typed anywhere: only what was picked (and no query at all).
-  if (!text.includes("@")) return picked.length === 0 ? null : picked.map(({ id, start, length }) => ({ id, start, length }));
+  if (!text.includes("@")) return { mentions: kept.length === 0 ? null : kept, asksAgent: false };
   const code = codeRanges(text);
   const taken: Range[] = picked.map((m) => [m.start, m.start + m.length] as const);
-  const skip = [...code, ...taken];
+  const skip = [...code, ...addressRanges(text), ...taken];
   const tokens = mentionTokens(text, skip);
   const typed: Mention[] = [];
+  let asksAgent = false;
   const own = conversation.type === "agent" ? await ownAgent(q, conversation.id) : null;
   if (tokens.length > 0) {
-    const handles = mentionedHandles(text, skip);
-    const named = await namedIn(q, conversation.id, handles.filter((h) => own === null || (h !== own.handle && h !== own.namePart)));
+    const handles = mentionedHandles(tokens);
+    const ownHandle = (h: string) => own !== null && (h === own.handle || h === own.namePart);
+    const { named, shared } = await namedIn(q, conversation.id, handles.filter((h) => !ownHandle(h)));
     for (const token of tokens) {
-      const id = own !== null && (token.handle === own.handle || token.handle === own.namePart) && handles.includes(token.handle) ? own.id : named.get(token.handle);
+      const id = ownHandle(token.handle) && handles.includes(token.handle) ? own!.id : named.get(token.handle);
       if (id !== undefined) typed.push({ id, start: token.start, length: token.length });
     }
+    asksAgent = shared.size > 0 || (await anyAgentHandle(q, handles.filter((h) => h.includes(".") && !ownHandle(h) && !named.has(h))));
   }
   if (own !== null && own.name !== "") {
     const byName = new RegExp(`@${own.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "giu");
@@ -296,9 +407,9 @@ export async function mentionsAtSend(
       if (free(match.index!, match[0].length)) typed.push({ id: own.id, start: match.index!, length: match[0].length });
     }
   }
-  const room = Math.max(0, MENTION_LIMIT - picked.length);
-  const all = [...picked.map(({ id, start, length }) => ({ id, start, length })), ...typed.sort((a, b) => a.start - b.start).slice(0, room)];
-  return all.length === 0 ? null : all.sort((a, b) => a.start - b.start);
+  const room = Math.max(0, MENTION_LIMIT - kept.length);
+  const all = [...kept, ...typed.sort((a, b) => a.start - b.start).slice(0, room)];
+  return { mentions: all.length === 0 ? null : all.sort((a, b) => a.start - b.start), asksAgent };
 }
 
 /** The Agent of its own conversation `conversationId`: its id, full handle and name part (lower-cased), and its name. */

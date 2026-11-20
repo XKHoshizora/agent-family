@@ -37,8 +37,8 @@ const invalid = () => new AppError(400, "invalid_request");
  *
  * Who its mentions mean is decided here, once, under the conversation's lock (Task M): the picked ones are checked
  * against the text and the current members (`checkPicked`, 400 `bad_mentions`, nothing stored), and what is typed and
- * not picked is read (`mentionsAtSend`); both are stored with the message (`messages.mentions`). Nothing reads its text
- * again to decide who was meant.
+ * not picked is read (`mentionsAtSend`); both are stored with the message (`messages.mentions`), with whether it asked
+ * an Agent it could not name (`messages.asks_agent`). Nothing reads its text again to decide who was meant.
  */
 export async function sendMessage(
   t: Tx,
@@ -83,8 +83,8 @@ export async function sendMessage(
   const text = input.text ?? "";
   const picked = input.mentions ?? [];
   await checkPicked(t, conversationId, text, picked);
-  const mentions = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked);
-  const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn, mentions);
+  const read = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked);
+  const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn, read);
   if (body.attachment && !(await linkAttachment(t, body.attachment.id, message.id))) throw invalid();
   return { message, duplicate: false, lock };
 }

@@ -181,8 +181,20 @@ describe("what was decided at send stays decided", () => {
 });
 
 describe("picked mentions are checked: anything wrong is 400 bad_mentions and nothing is stored", () => {
-  it.each<[string, (w: World & { jarvis: string; stranger: string; outside: string }) => [string, unknown]]>([
+  it.each<[string, (w: World & { jarvis: string; stranger: string; outside: string; gone: string }) => [string, unknown]]>([
     ["an id that is not a member", (w) => ["@路人 你好", [{ id: w.stranger, start: 0, length: 3 }]]],
+    // Fix round 1 (M-7): a deleted Agent, still a member of the group, cannot be picked.
+    ["a deleted Agent", (w) => ["@已删 你好", [{ id: w.gone, start: 0, length: 3 }]]],
+    // Fix round 1 (M-2): a range is exactly one `@name`: not `@` alone, not `@` and spaces, no line break inside, no
+    // space at either end, at most 1 + 49 characters.
+    ["a range of just @", (w) => ["@ 你好", [{ id: w.tony.id, start: 0, length: 1 }]]],
+    ["a range of @ and a space", (w) => ["@ Jarvis", [{ id: w.tony.id, start: 0, length: 8 }]]],
+    ["a range with a space at its end", (w) => ["@Jarvis 你好", [{ id: w.tony.id, start: 0, length: 8 }]]],
+    ["a range across a line break", (w) => ["@Jar\nvis", [{ id: w.tony.id, start: 0, length: 8 }]]],
+    ["a range longer than any name", (w) => [`@${"长".repeat(50)}`, [{ id: w.tony.id, start: 0, length: 51 }]]],
+    // Fix round 1 (I-3): a name inside an address is nobody being addressed.
+    ["a range right after a / (an address)", (w) => ["看 https://example.com/@Jarvis", [{ id: w.tony.id, start: 22, length: 7 }]]],
+    ["a range inside a link target", (w) => ["[主页](x.example/u?@Jarvis)", [{ id: w.tony.id, start: 17, length: 7 }]]],
     ["an Agent that is not in the group", (w) => ["@外人 你好", [{ id: w.outside, start: 0, length: 3 }]]],
     ["an unknown id", () => ["@谁 你好", [{ id: "3f1c2a4e-9b7d-4c1e-8a2f-5d6e7f809a1b", start: 0, length: 2 }]]],
     ["a range past the end", (w) => ["@Jarvis", [{ id: w.tony.id, start: 0, length: 8 }]]],
@@ -215,7 +227,9 @@ describe("picked mentions are checked: anything wrong is 400 bad_mentions and no
     const jarvis = await agentOf(w.xiaolin, "jarvis", w.g, "贾维斯");
     const stranger = await signUp(app, "stranger");
     const outside = await agentOf(w.bobby, "outside", null);
-    const [text, mentions] = make({ ...w, jarvis: jarvis.id, stranger: stranger.id, outside: outside.id });
+    const gone = await agentOf(w.bobby, "gone", w.g, "已删");
+    expect((await api(app, w.bobby, "DELETE", `/api/agents/${gone.id}`)).status).toBe(200);
+    const [text, mentions] = make({ ...w, jarvis: jarvis.id, stranger: stranger.id, outside: outside.id, gone: gone.id });
     const seq = Number((await db.query("select seq from conversations where id = $1", [w.g])).rows[0].seq);
     const runs = await allRuns();
     expect(await send(w.anna, w.g, text, mentions)).toMatchObject({ status: 400, json: { error: "bad_mentions" } });
@@ -346,7 +360,7 @@ describe("an Agent's reply is read once, at its post", () => {
     const posted = (text: string, mentions: Mention[] | null) =>
       db.tx(async (t) => {
         const poster = await lockAgent(t, jarvis.id, w.g);
-        const message = await insertMessage(t, w.g, jarvis.id, "text", { text }, null, mentions);
+        const message = await insertMessage(t, w.g, jarvis.id, "text", { text }, null, { mentions, asksAgent: false });
         return triggerFromAgent(t, w.g, message, poster, null, app.deps.config, null);
       });
     expect((await posted("@bobby.helper 你来", null)).runs).toEqual([]);
@@ -375,8 +389,11 @@ describe("a message stored before mentions were (mentions null) names nobody", (
   it("mentionsAtSend is the one reading: it is what an Agent's post and a person's send store", async () => {
     const w = await world();
     const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
-    expect(await db.tx((t) => mentionsAtSend(t, { id: w.g, type: "group" }, "hi @xiaolin.jarvis"))).toEqual([{ id: jarvis.id, start: 3, length: 15 }]);
-    expect(await db.tx((t) => mentionsAtSend(t, { id: w.g, type: "group" }, "hi"))).toBeNull();
+    expect(await db.tx((t) => mentionsAtSend(t, { id: w.g, type: "group" }, "hi @xiaolin.jarvis"))).toEqual({
+      mentions: [{ id: jarvis.id, start: 3, length: 15 }],
+      asksAgent: false,
+    });
+    expect(await db.tx((t) => mentionsAtSend(t, { id: w.g, type: "group" }, "hi"))).toEqual({ mentions: null, asksAgent: false });
   });
 });
 
@@ -403,6 +420,146 @@ describe("what goes out", () => {
     expect(pushed.message.mentions).toEqual(entries);
     const sent = await send(w.anna, w.g, "@anna 自己", [{ id: w.anna.id, start: 0, length: 5 }]);
     expect(sent.json.message.mentions).toEqual([{ id: w.anna.id, start: 0, length: 5 }]);
+  });
+});
+
+/** Whether the message at `seq` was found, at send, to ask an Agent it could not name (`messages.asks_agent`). */
+const asks = async (conv: string, seq: number): Promise<boolean> =>
+  (await db.query<{ asks: boolean }>("select asks_agent as asks from messages where conversation_id = $1 and seq = $2", [conv, seq])).rows[0]!.asks;
+
+describe("fix round 1: an Agent asked but not named is decided at send too (I-1)", () => {
+  it("a full handle of an Agent outside the group, and a bare name two Agent members share: nothing stored, asks_agent, not judged", async () => {
+    const w = await world();
+    await agentOf(w.bobby, "loner", null);
+    await agentOf(w.xiaolin, "helper", w.g);
+    await agentOf(w.bobby, "helper", w.g);
+    const outside = await say(w.anna, w.g, "@bobby.loner 你在哪");
+    expect([await stored(w.g, outside), await asks(w.g, outside)]).toEqual([null, true]);
+    expect(await judgeable(db, w.g, outside)).toBeNull();
+    const shared = await say(w.anna, w.g, "@helper 你们谁来");
+    expect([await stored(w.g, shared), await asks(w.g, shared)]).toEqual([null, true]);
+    expect(await judgeable(db, w.g, shared)).toBeNull();
+  });
+
+  it("a plain message, one naming a person, and one whose @ meant nobody at all are judged as before", async () => {
+    const w = await world();
+    await agentOf(w.xiaolin, "jarvis", w.g);
+    for (const text of ["今晚吃什么？", "@anna 你说呢", "@nobody_here 在吗", "`@xiaolin.jarvis` 是它的名字"]) {
+      const seq = await say(w.bobby, w.g, text);
+      expect([text, await asks(w.g, seq), await judgeable(db, w.g, seq)]).toEqual([text, false, { senderId: w.bobby.id }]);
+    }
+  });
+
+  it("an Agent's own reply sets it by the same reading", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    await agentOf(w.bobby, "loner", null);
+    await say(w.anna, w.g, "@xiaolin.jarvis 帮忙");
+    const ticket = await claim(jarvis.id, w.g);
+    const posted = await db.tx((t) =>
+      postAsAgent(t, jarvis.id, w.g, ticket.id, { text: "问问 @bobby.loner 吧", reasoning: "", stopped: false, truncated: false }, "k7f2ab", app.deps.config),
+    );
+    expect(posted!.message.mentions).toBeNull();
+    expect(await asks(w.g, posted!.message.seq)).toBe(true);
+  });
+
+  it("asks_agent never reaches anyone: not in history, a single read, a push or the send's answer", async () => {
+    const w = await world();
+    await agentOf(w.bobby, "loner", null);
+    const socket = await connect(app, w.bobby);
+    const sent = await send(w.anna, w.g, "@bobby.loner 你在哪");
+    const seq = sent.json.message.seq as number;
+    expect(await asks(w.g, seq)).toBe(true);
+    const pushed = await socket.next((e) => e.type === "message" && e.message.seq === seq);
+    const history = await api(app, w.bobby, "GET", `/api/conversations/${w.g}/messages`);
+    const one = await api(app, w.tony, "GET", `/api/conversations/${w.g}/messages/${seq}`);
+    for (const shown of [sent.json, pushed, history.json, one.json]) expect(JSON.stringify(shown)).not.toMatch(/asks_?agent/i);
+  });
+});
+
+describe("fix round 1: a name inside an address is no mention (I-3)", () => {
+  it("an @ right after a / or inside a URL or a link target is not read, and calls nobody", async () => {
+    const w = await world();
+    await agentOf(w.xiaolin, "jarvis", w.g);
+    const runs = await allRuns();
+    for (const text of [
+      "我的主页 https://www.youtube.com/@anna",
+      "见 example.org/@anna 吧",
+      "[主页](https://x.example/@xiaolin.jarvis)",
+      "<https://mastodon.social/@xiaolin.jarvis>",
+      "链接 https://x.example/u?who=@anna 打开",
+    ]) {
+      const seq = await say(w.bobby, w.g, text);
+      expect([text, await stored(w.g, seq), await asks(w.g, seq)]).toEqual([text, null, false]);
+    }
+    expect(await allRuns()).toBe(runs);
+    // Outside the address, the same name is read.
+    const seq = await say(w.bobby, w.g, "https://x.example/ @anna");
+    expect(await stored(w.g, seq)).toEqual([{ id: w.anna.id, start: 19, length: 5 }]);
+  });
+});
+
+describe("fix round 1: code as the web shows it (M-4)", () => {
+  it("a fence opened on a list item's line, and an indented code block, are code: nothing in them is read", async () => {
+    const w = await world();
+    await agentOf(w.xiaolin, "jarvis", w.g);
+    const runs = await allRuns();
+    for (const text of ["- ```js\n  @xiaolin.jarvis\n  ```", "1. ```\n   @xiaolin.jarvis\n   ```", "示例：\n\n    @xiaolin.jarvis 帮忙\n\n就这样"]) {
+      expect([text, await stored(w.g, await say(w.anna, w.g, text))]).toEqual([text, null]);
+    }
+    expect(await allRuns()).toBe(runs);
+    // A list item's own text, indented under it, is no code.
+    const seq = await say(w.anna, w.g, "1. 第一项\n\n    @xiaolin.jarvis 帮忙看看");
+    expect((await stored(w.g, seq))?.length).toBe(1);
+  });
+
+  it("codeRanges: list fences and indented blocks", () => {
+    expect(codeRanges("- ```\nx\n```")).toEqual([[0, 11]]);
+    expect(codeRanges("a\n\n    code\n    more\n\nb")).toEqual([[3, 20]]);
+    expect(codeRanges("    first")).toEqual([[0, 9]]);
+    expect(codeRanges("a\n    not code (no blank line)")).toEqual([]);
+    expect(codeRanges("- item\n\n    in the item")).toEqual([]);
+  });
+});
+
+describe("fix round 1: the remaining cases (M-7)", () => {
+  it("a picked person who left: the entry stays, and the message calls nobody", async () => {
+    const w = await world();
+    const seq = await say(w.anna, w.g, "@Jarvis 你好", [{ id: w.tony.id, start: 0, length: 7 }]);
+    expect((await api(app, w.tony, "DELETE", `/api/conversations/${w.g}/members/${w.tony.id}`)).status).toBe(200);
+    expect(await stored(w.g, seq)).toEqual([{ id: w.tony.id, start: 0, length: 7 }]);
+    expect((await read(w.anna, w.g, seq)).mentions).toEqual([{ id: w.tony.id, start: 0, length: 7 }]);
+    expect(await allRuns()).toBe(0);
+  });
+
+  it("one Agent picked twice is stored twice and called once", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g, "贾维斯");
+    const twice = [
+      { id: jarvis.id, start: 0, length: 4 },
+      { id: jarvis.id, start: 7, length: 4 },
+    ];
+    const seq = await say(w.anna, w.g, "@贾维斯 和 @贾维斯", twice);
+    expect(await stored(w.g, seq)).toEqual(twice);
+    expect(await covered(jarvis.id, w.g)).toEqual([seq]);
+  });
+
+  it("an Agent picked by someone its owner blocked: stored, and no run", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g, "贾维斯");
+    expect((await api(app, w.xiaolin, "PUT", `/api/blocks/${w.anna.id}`)).status).toBe(200);
+    const seq = await say(w.anna, w.g, "@贾维斯 在吗", [{ id: jarvis.id, start: 0, length: 4 }]);
+    expect(await stored(w.g, seq)).toEqual([{ id: jarvis.id, start: 0, length: 4 }]);
+    expect(await covered(jarvis.id, w.g)).toEqual([]);
+  });
+
+  it("a picked range over a handle that would be read anyway: one entry, one run", async () => {
+    const w = await world();
+    const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
+    const seq = await say(w.anna, w.g, "@xiaolin.jarvis 帮忙", [{ id: jarvis.id, start: 0, length: 15 }]);
+    expect(await stored(w.g, seq)).toEqual([{ id: jarvis.id, start: 0, length: 15 }]);
+    expect(await covered(jarvis.id, w.g)).toEqual([seq]);
+    expect(await allRuns()).toBe(1);
   });
 });
 
