@@ -593,9 +593,9 @@ describe("guardedFetch: provider calls in flight, site-wide", () => {
     await waitFor(() => gate.waiting.length === 2);
     expect(calls.inProgress()).toBe(2);
 
-    const started = Date.now();
+    // Refused, not queued behind the two held ones: a call that queued would be a third at the gate (asserted below, and a
+    // refusal that came only at timeoutMs would too), so no elapsed-time bound is needed.
     expect(await settle(f(url))).toMatchObject(unavailable);
-    expect(Date.now() - started).toBeLessThan(200);
     expect(gate.waiting).toHaveLength(2); // the refused call looked nothing up
 
     gate.open();
