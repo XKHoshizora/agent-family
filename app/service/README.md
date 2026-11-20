@@ -483,7 +483,7 @@ principals, as for people; a changed avatar is pushed to them (`principal`).
 "deleted", "conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `modelUsable` is
 false when its model is not there to call any more — taken off its provider's list, or a site model the site no longer
 offers — and with no model chosen: its replies then fail `model_gone`, and none of its failed replies can be retried
-(`retryable`, Run), until you choose another (the web says 这个模型现在用不了，换一个). It is not offered for a reply
+(`retryable`, Run), until you choose another (the web: the tag 模型不可用, the action 换一个模型, and 这个模型不可用，换一个模型。 where a sentence is needed). It is not offered for a reply
 nobody asked for meanwhile (Proactive replies). `groupMentions` says
 who may call the Agent with `@` in a group it is in: `members` (any member, and other Agents there) or `owner` (you
 only; never another Agent). `chainBudget` is the most you pay, in points (a decimal string as money is on the wire, `"1"`

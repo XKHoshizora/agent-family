@@ -6,7 +6,7 @@
 // again from the model.
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { runFailureText } from "../data/errorTexts.js";
+import { MODEL_GONE, runFailureText } from "../data/errorTexts.js";
 import { nameOf, ownerOf, publishBlock } from "../state/selectors.js";
 import { GrowingText, StreamingAgentText } from "../ui/AgentText.jsx";
 import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
@@ -452,7 +452,7 @@ export function RunStatusLine({ conv, run, agentId = null }) {
             )}
             {run.error === "model_gone" && (
               <Btn small onClick={() => openModelChoice(dispatch, agent)}>
-                换一个模型
+                {MODEL_GONE.action}
               </Btn>
             )}
             <IconBtn label="关闭提示" disabled={busy !== null} onClick={dismiss}>

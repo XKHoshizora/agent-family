@@ -342,10 +342,11 @@ export function providerErrorText(action, error) {
 }
 
 /**
- * What my Agent whose model is not there to call any more says (the service's `modelUsable: false`; a reply then fails
- * `model_gone`): on its page, on the model picker's button, and as that reply's status line.
+ * The one wording of my Agent whose model is not there to call any more (the service's `modelUsable: false`; a reply then
+ * fails `model_gone`): `tag` on its status tag and its model picker's button, `action` on what opens where its model is
+ * chosen, `sentence` where a sentence is needed (its page's 模型 row, that reply's status line).
  */
-export const MODEL_GONE_TEXT = "这个模型现在用不了，换一个";
+export const MODEL_GONE = Object.freeze({ tag: "模型不可用", action: "换一个模型", sentence: "这个模型不可用，换一个模型。" });
 
 const RUN_FAILED = {
   provider_rejected: "供应商拒绝了密钥，这次没有回复。请到设置里检查密钥。",
@@ -358,7 +359,7 @@ const RUN_FAILED = {
   agent_paused: "它已暂停，这次没有回复。",
   agent_deleted: "它已删除，这次没有回复。",
   // Its model is not there to call any more (off its provider's list, no longer on the site): only another one helps.
-  model_gone: `${MODEL_GONE_TEXT}。`,
+  model_gone: MODEL_GONE.sentence,
 };
 /** How a reply in a group ends that is not a failure of the owner's to fix: neither is retried (batch 2C). */
 const RUN_ENDED_IN_GROUP = {

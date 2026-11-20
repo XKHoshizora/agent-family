@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { MODEL_GONE_TEXT } from "../data/errorTexts.js";
+import { MODEL_GONE } from "../data/errorTexts.js";
 import { formatPoints, pointsReached, proactiveLevelLabel } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
@@ -60,10 +60,10 @@ function appellationRows(agent) {
 export function ModelGoneTag({ agent, plain = false }) {
   const { dispatch } = useStore();
   if (!agent.mine) return null;
-  if (plain) return <Tag tone="warn">模型不可用</Tag>;
+  if (plain) return <Tag tone="warn">{MODEL_GONE.tag}</Tag>;
   return (
-    <button type="button" className="tag tag-warn" aria-label="模型不可用，换一个模型" onClick={() => openModelChoice(dispatch, agent.id)}>
-      模型不可用
+    <button type="button" className="tag tag-warn" aria-label={`${MODEL_GONE.tag}，${MODEL_GONE.action}`} onClick={() => openModelChoice(dispatch, agent.id)}>
+      {MODEL_GONE.tag}
     </button>
   );
 }
@@ -312,7 +312,7 @@ function AgentDetail({ agent }) {
                   rows={[
                     ["主人", "你（不可修改）"],
                     ["擅长领域", agent.field || "未填写"],
-                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}{agent.model && !agent.modelUsable && <Reason>{MODEL_GONE_TEXT}</Reason>}</>],
+                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}{agent.model && !agent.modelUsable && <Reason>{MODEL_GONE.sentence}</Reason>}</>],
                     ["思考程度", levelLabel(agent.reasoning)],
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],

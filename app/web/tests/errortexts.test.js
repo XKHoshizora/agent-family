@@ -221,7 +221,7 @@ describe("the sentences batch 2A names", () => {
     for (const [i, text] of texts.entries()) expect(text, codes[i]).not.toBe("这次没有回复成功。");
     expect(new Set(texts).size).toBe(codes.length);
     expect(runFailureText(failed("rate_limited"), NOW)).toBe("发得太快了，请稍后重试。");
-    expect(runFailureText(failed("model_gone"), NOW)).toBe("这个模型现在用不了，换一个。");
+    expect(runFailureText(failed("model_gone"), NOW)).toBe("这个模型不可用，换一个模型。");
     expect(runFailureText(failed("agent_paused"), NOW)).toBe("它已暂停，这次没有回复。");
     expect(runFailureText(failed("agent_deleted"), NOW)).toBe("它已删除，这次没有回复。");
   });

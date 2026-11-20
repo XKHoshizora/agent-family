@@ -148,11 +148,11 @@ describe("the header and the list row", () => {
     expect(within(subtitle()).getByRole("button", { name: "模型：未选模型，点击更改" }).querySelector(".model-brand")).toBeNull();
   });
 
-  it("an Agent whose model is gone (modelUsable false): the header's model button says 这个模型现在用不了，换一个, and still opens the picker", async () => {
+  it("an Agent whose model is gone (modelUsable false): the header's model button says 模型不可用, and still opens the picker", async () => {
     const subtitle = () => document.querySelector(".chat-head .chat-title p");
     await openAgentChat({ agent: { model: PROVIDER_MODEL, modelUsable: false }, providers: [providerOf()] });
-    const model = within(subtitle()).getByRole("button", { name: "模型：gpt-x（这个模型现在用不了，换一个），点击更改" });
-    expect(model.textContent).toBe("这个模型现在用不了，换一个");
+    const model = within(subtitle()).getByRole("button", { name: "模型：gpt-x（模型不可用），点击更改" });
+    expect(model.textContent).toBe("模型不可用");
     await click(model);
     expect(screen.getByRole("listbox")).toBeTruthy();
     cleanup();
@@ -1004,7 +1004,7 @@ describe("the status line of a failed reply", () => {
     ["no_quota", true, {}, "余额不足：这个模型需要余额才能使用。"],
     ["agent_paused", false, {}, "它已暂停，这次没有回复。"],
     ["agent_deleted", false, {}, "它已删除，这次没有回复。"],
-    ["model_gone", false, {}, "这个模型现在用不了，换一个。"],
+    ["model_gone", false, {}, "这个模型不可用，换一个模型。"],
   ];
   for (const [code, retryable, extra, sentence] of CASES) {
     it(`${code}${extra.resetsAt ? " (free model)" : ""}: its sentence, 重试 ${retryable ? "shown" : "hidden"}, a dismiss control`, async () => {
@@ -1053,6 +1053,31 @@ describe("the status line of a failed reply", () => {
     await runPush(transport, runOf(R1, "failed", { error: "context_too_small", retryable: false }));
     await click(within(statusLine()).getByRole("button", { name: "修改 Agent" }));
     expect(screen.getByLabelText("人格文档")).toBeTruthy();
+  });
+
+  it("model_gone, then the model is back: the Agent's push brings 重试 to the line already shown, with no reload", async () => {
+    const now = { usable: false, run: runOf(R1, "failed", { error: "model_gone", retryable: false }) };
+    const getRun = vi.fn(() => ({ run: now.run }));
+    const { transport } = await openAgentChat({
+      agent: { model: PROVIDER_MODEL, modelUsable: false },
+      providers: [providerOf()],
+      handlers: { agent: () => agentOf(AG1, { model: PROVIDER_MODEL, modelUsable: now.usable }), run: getRun },
+    });
+    await runPush(transport, now.run);
+    expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
+    const asked = getRun.mock.calls.length;
+
+    // The owner put the model back on the provider's list: the service pushes the Agent, not the run.
+    now.usable = true;
+    now.run = runOf(R1, "failed", { error: "model_gone", retryable: true });
+    await push(transport, { type: "agent", id: AG1 });
+    await flush();
+    expect(getRun.mock.calls.length).toBe(asked + 1);
+    expect(within(statusLine()).getByRole("button", { name: "重试" })).toBeTruthy();
+    // A push that changes nothing of it asks for nothing more.
+    await push(transport, { type: "agent", id: AG1 });
+    await flush();
+    expect(getRun.mock.calls.length).toBe(asked + 1);
   });
 
   it("model_gone offers 换一个模型 and no 重试: it opens the header's model switch, right here", async () => {
