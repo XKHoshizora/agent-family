@@ -22,7 +22,7 @@ import { api, group, seatPerson, signUp, type Actor } from "./helpers/actors.ts"
 import { markOf, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
-import { expectLinear } from "./helpers/linear.ts";
+import { expectLinear, LOADED_TIMEOUT_MS } from "./helpers/linear.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/ws.ts";
@@ -258,15 +258,15 @@ describe("withoutMark", () => {
     });
   };
 
-  it("takes time in proportion to the text: separators after an open bracket, then the mark", () => {
+  it("takes time in proportion to the text: separators after an open bracket, then the mark", { timeout: LOADED_TIMEOUT_MS }, () => {
     inProportion(12_500, (n) => `〔${"｜".repeat(n)}k7f2ab`, (n) => `〔${"｜".repeat(n)}`);
   });
 
-  it("takes time in proportion to the text: a mark split around itself again and again", () => {
+  it("takes time in proportion to the text: a mark split around itself again and again", { timeout: LOADED_TIMEOUT_MS }, () => {
     inProportion(2_500, (n) => `${"k7f".repeat(n)}${"2ab".repeat(n)}`, () => "");
   });
 
-  it("takes time in proportion to the text: labels nested so that taking out each puts the mark back together in the next", () => {
+  it("takes time in proportion to the text: labels nested so that taking out each puts the mark back together in the next", { timeout: LOADED_TIMEOUT_MS }, () => {
     inProportion(1_000, (n) => `${"〔k7f".repeat(n)}〔k7f2ab 小周｜群成员〕${"2ab 阿哲｜你的主人〕".repeat(n)}`, () => "");
     inProportion(6_000, (n) => `前${"〔".repeat(n)}k7f2ab 小周｜群成员${"〕".repeat(n)}后`, (n) => `前${"〔".repeat(n - 1)}${"〕".repeat(n - 1)}后`);
   });

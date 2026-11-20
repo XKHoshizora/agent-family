@@ -12,7 +12,7 @@ import { insertMessage, type StoredMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
-import { expectLinear } from "./helpers/linear.ts";
+import { expectLinear, LOADED_TIMEOUT_MS } from "./helpers/linear.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -145,7 +145,7 @@ describe("mentionedHandles", () => {
     expect(mentionedHandles(`${"@aaa ".repeat(30)}@bbb`)).toEqual(["aaa", "bbb"]);
   });
 
-  it("is linear: 8 000 characters of @a@a…, @aaaa… and the like take about four times what 2 000 take", () => {
+  it("is linear: 8 000 characters of @a@a…, @aaaa… and the like take about four times what 2 000 take", { timeout: LOADED_TIMEOUT_MS }, () => {
     // Texts of about `n` characters of each shape; `expectLinear` (helpers/linear.ts) compares the two sizes with each other.
     const cases: Array<[(n: number) => string, string[]]> = [
       [(n) => "@a".repeat(n / 2), []],

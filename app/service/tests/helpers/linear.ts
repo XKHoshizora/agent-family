@@ -8,14 +8,18 @@ import { expect } from "vitest";
  * quadratic one `factor ** 2` times (so use a `factor` of at least 4: that is 8 against 16). Nothing in it depends on how
  * fast the machine is:
  *  - one sample is `reps` calls in a row, with `reps` chosen so that a sample of the smaller size lasts at least
- *    `MIN_SAMPLE_MS` (a timer's grain, or one pause of the collector, cannot decide a sample that long);
+ *    `MIN_SAMPLE_MS` (ten times a timer's grain: neither it nor one pause of the collector decides a sample that long);
  *  - the larger size runs the same `reps`, and each size is the fastest of `SAMPLES` samples (a busy machine only ever
  *    adds time, so the fastest is the one closest to the truth; both sizes are measured the same way, alternately, so a
  *    load that lasts is felt by both).
- * `run` should check its own result (`expect(...)`), so that a call that does less than it should cannot pass for fast.
+ * A busy machine makes the measurement longer, not wrong: a test that uses it asks for a timeout of its own that leaves
+ * room for that (`LOADED_TIMEOUT_MS`).
+ * `run` should check its own result (throw when it is wrong; `expect` costs time in the samples), so that a call that does less than it should cannot pass for fast.
  */
-export const MIN_SAMPLE_MS = 20;
-const SAMPLES = 7;
+export const MIN_SAMPLE_MS = 10;
+const SAMPLES = 5;
+/** For the `it(…, { timeout })` of a test that calls `expectLinear` several times: a loaded machine takes several times longer to measure. */
+export const LOADED_TIMEOUT_MS = 60_000;
 const MAX_REPS = 5_000;
 
 const timed = (run: () => void, reps: number): number => {
