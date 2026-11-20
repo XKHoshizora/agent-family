@@ -389,6 +389,20 @@ describe("parseOps: a merge (ids only)", () => {
     // A note of neither: both stand.
     expect(parseOps(answer([merge, { op: "remove", ref: "s1" }]), REFS)).toEqual([merge, { op: "remove", ref: "s1" }]);
   });
+
+  it("drops a merge naming a note that an entry parseOps itself drops also names — a replace whose text the cleaning refuses, one with a key too many, one past the cap: the model wrote about that note all the same", () => {
+    const merge = { op: "merge", refs: ["o1", "o2"] };
+    const add = (i: number) => ({ op: "add", kind: "owner", text: `第${i}件事` });
+    for (const other of [
+      { op: "replace", ref: "o1", text: "说明书在 https://example.com/manual" },
+      { op: "replace", ref: "o1", text: "改喝拿铁了", why: "合并" },
+    ]) {
+      expect([other, parseOps(answer([other, merge]), REFS)]).toEqual([other, []]);
+    }
+    // Eight adds and the merge are looked at; the replace of o2 comes after the cap and is never applied, but it names o2.
+    const ops = parseOps(answer([...Array.from({ length: 7 }, (_, i) => add(i)), merge, { op: "replace", ref: "o2", text: "改喝拿铁了" }]), REFS);
+    expect(ops.map((o) => o.op)).toEqual(Array.from({ length: 7 }, () => "add"));
+  });
 });
 
 describe("modelEntryMax", () => {

@@ -121,6 +121,19 @@ describe("the owner's own remark, flagged", () => {
     expect((await chips(w.owner, w.agent.conversationId)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, ["记住了：养了一只猫"]]]);
   });
 
+  it("a merge op alone in a group (a group review only adds) is dropped: the notes stay as they were, nothing is joined; the add applies", async () => {
+    const w = await world("bj");
+    await api(app, w.owner, "POST", "/api/memory/notes", { text: "路由器在客厅", vault: false });
+    await api(app, w.owner, "POST", "/api/memory/notes", { text: "路由器是华硕的", vault: false });
+    const seq = await say(w.owner, w.g, "路由器那两条合成一条吧，我还养了只猫");
+    judge.answer(() => ({ sort: 0.95 }));
+    gateway.reply(ops({ op: "merge", refs: ["n1", "n2"] }, add("养了一只猫")));
+    await flag(w.agent.id, w.g, seq, "own");
+    await wake();
+    expect((await notesOf(w.owner)).map((n) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "养了一只猫"]);
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and ops::text like '%\"merge\"%'", [w.owner.id])).rows[0].n).toBe(0);
+  });
+
   it("a seen is allowed in a group: the note it names is one stronger, with no change row, no chip, no judge call; the group prompt offers add and seen only", async () => {
     const w = await world("bs");
     const seeded = (await api(app, w.owner, "POST", "/api/memory/notes", { text: "喜欢喝茶", vault: false })).json;

@@ -127,9 +127,9 @@ export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boole
  * `ref` (one not in `refs`), the wrong shape, or a text `modelNote` refuses is dropped. An `add` whose text equals one of
  * `existing`, or the text of an earlier `add` or `replace` of this answer, once case, whitespace and punctuation are
  * ignored, is dropped as well. A `seen` of a note already `seen` in this answer is dropped. A `merge` names two or more distinct notes it
- * was shown and nothing else (no text); one naming fewer, an unknown ref, or a note another op of the answer names too (a replace, remove,
- * lock, unlock, seen or another merge of it: what the note becomes would depend on which goes first) is dropped, and the rest of the
- * answer stands. Whether its notes are of one room, and whether a merge may be applied at all, is the caller's (pipeline.ts `allowed`).
+ * was shown and nothing else (no text); one naming fewer, an unknown ref, or a note another entry of the answer names too (a replace,
+ * remove, lock, unlock, seen or another merge of it — also one dropped for its shape or text, or past the cap: what the note becomes
+ * would depend on which goes first) is dropped, and the rest of the answer stands. Whether its notes are of one room, and whether a merge may be applied at all, is the caller's (pipeline.ts `allowed`).
  */
 export function parseOps(answer: string, refs: ReadonlySet<string>, existing: ReadonlyArray<string> = []): Op[] {
   try {
@@ -155,18 +155,30 @@ export function parseOps(answer: string, refs: ReadonlySet<string>, existing: Re
       }
       ops.push(op);
     }
-    return withoutSharedMerges(ops);
+    return withoutSharedMerges(ops, namedIn(list, refs));
   } catch {
     return [];
   }
 }
 
-/** The notes `op` names. */
-const refsOf = (op: Op): string[] => (op.op === "add" ? [] : op.op === "merge" ? op.refs : [op.ref]);
-
-/** `ops` without every `merge` that names a note some other op of them names too. */
-function withoutSharedMerges(ops: Op[]): Op[] {
+/**
+ * How many entries of the answer's whole list name each note it was shown (by `ref`, or among `refs`; once per entry) — kept, dropped
+ * (an unusable shape or text) or past the cap alike: an entry the model wrote about a note is a claim on it whether or not it is applied.
+ */
+function namedIn(list: readonly unknown[], refs: ReadonlySet<string>): Map<string, number> {
   const named = new Map<string, number>();
-  for (const op of ops) for (const ref of refsOf(op)) named.set(ref, (named.get(ref) ?? 0) + 1);
+  for (const raw of list) {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) continue;
+    const o = raw as Record<string, unknown>;
+    const mine = new Set<string>();
+    if (typeof o.ref === "string" && refs.has(o.ref)) mine.add(o.ref);
+    if (Array.isArray(o.refs)) for (const r of o.refs) if (typeof r === "string" && refs.has(r)) mine.add(r);
+    for (const r of mine) named.set(r, (named.get(r) ?? 0) + 1);
+  }
+  return named;
+}
+
+/** `ops` without every `merge` that names a note some other entry of the answer names too (`named`, `namedIn`). */
+function withoutSharedMerges(ops: Op[], named: ReadonlyMap<string, number>): Op[] {
   return ops.filter((op) => op.op !== "merge" || op.refs.every((ref) => named.get(ref) === 1));
 }

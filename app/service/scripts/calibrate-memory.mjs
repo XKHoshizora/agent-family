@@ -534,6 +534,7 @@ SN(F.ops, 'op remove', 'return hasExactly(o, ["op", "ref"]) && ref !== null ? { 
 SN(F.ops, 'op merge', 'if (!hasExactly(o, ["op", "refs"]) || !Array.isArray(o.refs) || !o.refs.every((r) => typeof r === "string" && refs.has(r))) return null;')
 SN(F.ops, 'op merge distinct', 'return named.length < 2 ? null : { op: "merge", refs: named };')
 SN(F.ops, 'merge shares no note', 'return ops.filter((op) => op.op !== "merge" || op.refs.every((ref) => named.get(ref) === 1));')
+SN(F.ops, 'merge shares no note of the whole list', 'return withoutSharedMerges(ops, namedIn(list, refs));')
 function oneOp(raw, refs) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
   const o = raw
@@ -562,10 +563,16 @@ function oneOp(raw, refs) {
       return null
   }
 }
-/** ops.ts: a merge naming a note another op of the answer names too is dropped. */
-function withoutSharedMerges(ops) {
+/** ops.ts: a merge naming a note another entry of the answer's whole list names too (kept, dropped or past the cap) is dropped. */
+function withoutSharedMerges(ops, list, refs) {
   const named = new Map()
-  for (const op of ops) for (const ref of op.op === 'add' ? [] : op.op === 'merge' ? op.refs : [op.ref]) named.set(ref, (named.get(ref) ?? 0) + 1)
+  for (const raw of list) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue
+    const mine = new Set()
+    if (typeof raw.ref === 'string' && refs.has(raw.ref)) mine.add(raw.ref)
+    if (Array.isArray(raw.refs)) for (const r of raw.refs) if (typeof r === 'string' && refs.has(r)) mine.add(r)
+    for (const r of mine) named.set(r, (named.get(r) ?? 0) + 1)
+  }
   return ops.filter((op) => op.op !== 'merge' || op.refs.every((ref) => named.get(ref) === 1))
 }
 SN(F.ops, 'parseOps seen', 'if (op.op === "add" && (key === "" || seen.has(key))) continue;')
@@ -588,7 +595,7 @@ function parseOps(answer, refs, existing = []) {
       }
       ops.push(op)
     }
-    return withoutSharedMerges(ops)
+    return withoutSharedMerges(ops, list, refs)
   } catch {
     return []
   }

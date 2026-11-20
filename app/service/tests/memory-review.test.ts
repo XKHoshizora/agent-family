@@ -1815,6 +1815,14 @@ describe("a merge in a review: the answer's merge op (the ids of notes that are 
     }
   });
 
+  it("a merge op sharing a note with an op the cleaning refused is dropped too: nothing is joined, and the in-place ops of the answer are dropped as before", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    const w = await routers("mx0");
+    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: "路由器在客厅，说明书在 https://example.com/manual" }, { op: "merge", refs: ["n1", "n2"] }, add("喜欢茶")));
+    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false], ["喜欢茶", false]]);
+    expect(await counted("merge_joined")).toBe(0);
+  });
+
   it("a merge op naming a note another op of the answer names too — a remove, a seen, another merge — is dropped, and that op goes on by its own rule; so is one naming a note a waiting card already asks about", async () => {
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
     // With a remove of n2: the remove is the forget question's (yes here), the merge is gone.
@@ -1886,7 +1894,7 @@ describe("a merge in a review: the answer's merge op (the ids of notes that are 
     expect((await chips(w.owner, w.conv))[0].system.sourceLines).toEqual([false, true, true, false, true, true]);
   });
 
-  it("the replaced note in the vault and the removed one open: the joined note is in the vault, vault_by auto (not every note was the owner's)", async () => {
+  it("the older note in the vault and the other open: the joined note is in the vault, vault_by auto (not every note was the owner's)", async () => {
     const w = await routers("mgx");
     await db.query("update owner_notes set vault = true, vault_by = 'owner' where id = $1", [w.a.id]);
     await sayAndReview(w, ASK, MERGE);
@@ -1903,6 +1911,94 @@ describe("a merge in a review: the answer's merge op (the ids of notes that are 
     await quietThen(MERGE);
     expect(await texts(w)).toEqual([[JOINED, false]]);
     expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines[0]])).toEqual([[false, `合并了 2 条：${JOINED}`]]);
+  });
+});
+
+describe("the vault only fills inwards, across notes: a replace or an add beside the remove of a note in the vault", () => {
+  const ownerRows = async (ownerId: string) => (await db.query("select text, vault, vault_by from owner_notes where owner_id = $1 order by created_at, id", [ownerId])).rows;
+
+  it("a replace and the remove of a note in the vault, in one room: the new text goes into the vault (vault_by auto) whatever the owner's sorting (全部不进保险箱) — applied at once on the owner's forget; held on a card without it (the remove waits, so the replace waits with it), the card shows it in the vault and confirming puts it there", async () => {
+    for (const [name, forget] of [["mv1", 0.95], ["mv4", 0.1]] as const) {
+      judge.answer(() => ({ sort: 0.95, explicit_forget: forget }));
+      const w = await owned(name);
+      await setNewNotes(db, w.owner.id, "open");
+      await openAuto(w.owner, w.agent.id, "周末去爬山");
+      // The owner locked it: the group must not know.
+      await seeded(w.owner, w.agent.id, "和小林一起去", true);
+      await sayAndReview(w, "这两条合成一条，重复的那条删掉", ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
+      const [notice] = await chips(w.owner, w.conv);
+      if (forget < 0.5) {
+        expect([notice.system.pending, notice.system.lines, notice.system.vaultLines]).toEqual([true, ["要改成：周末和小林去爬山，七点出发", "要忘掉：和小林一起去"], [true, true]]);
+        expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${notice.system.changeId}/confirm`)).status).toBe(200);
+      } else {
+        expect([notice.system.pending, notice.system.lines, notice.system.vaultLines]).toEqual([false, ["改成了：周末和小林去爬山，七点出发", "忘掉了：和小林一起去"], [true, true]]);
+      }
+      expect([name, await ownerRows(w.owner.id)]).toEqual([name, [{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]]);
+    }
+  });
+
+  it("the reviewer's scenario: an open 周末去爬山 and an owner-locked 和小林一起去, the owner says to combine them; the sorting finds the new text shareable — it goes into the vault all the same, and no group is shown it", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    const w = await owned("mvr");
+    await setNewNotes(db, w.owner.id, "auto");
+    await openAuto(w.owner, w.agent.id, "周末去爬山");
+    await seeded(w.owner, w.agent.id, "和小林一起去", true);
+    const g = await group(app, w.owner, "爬山群", [await signUp(app, "mvr_mia"), await signUp(app, "mvr_ned")]);
+    await sayAndReview(w, "这两条合成一条，七点出发，重复的删掉", ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
+    expect(await ownerRows(w.owner.id)).toEqual([{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]);
+    const inGroup = (await notesFor(db, { id: w.agent.id, ownerId: w.owner.id, memory: true, sharedNotes: true }, { conversationId: g, group: true })).owner.map((n) => n.text);
+    expect(inGroup).toEqual([]);
+  });
+
+  it("the other way round: the replace is what waits (its note changed after the owner's last line) while the forget is asked yes — both wait on ONE card, which shows the new text in the vault; confirmed, it is there", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    const w = await owned("mv5");
+    await setNewNotes(db, w.owner.id, "open");
+    // No word that runs a review at once: it comes after the quiet time.
+    await exchange(w, "周末的安排你整理一下");
+    // Written after the owner's only line of the window: a replace of it needs the owner's word.
+    await openAuto(w.owner, w.agent.id, "周末去爬山");
+    await seeded(w.owner, w.agent.id, "和小林一起去", true);
+    await quietThen(ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
+    const notices = await chips(w.owner, w.conv);
+    expect(notices.map((n) => [n.system.pending, n.system.lines, n.system.vaultLines])).toEqual([[true, ["要改成：周末和小林去爬山，七点出发", "要忘掉：和小林一起去"], [true, true]]]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${notices[0].system.changeId}/confirm`)).status).toBe(200);
+    expect(await ownerRows(w.owner.id)).toEqual([{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]);
+  });
+
+  it("an add beside the remove of a note in the vault is in the vault too; an add of the other room is not; with 先问我再记 the card shows them so and confirming keeps them so", async () => {
+    for (const [name, ask] of [["mva", false], ["mvb", true]] as const) {
+      judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+      const w = await owned(name, ask ? { memoryAsk: true } : {});
+      await setNewNotes(db, w.owner.id, "open");
+      await seeded(w.owner, w.agent.id, "和小林一起去", true);
+      await sayAndReview(w, "那条删掉，记成周末和小林去爬山；回答简短些", ops({ op: "remove", ref: "n1" }, add("周末和小林去爬山"), add("回答要简短", "self")));
+      if (ask) {
+        const [card] = await chips(w.owner, w.conv);
+        expect(card.system.pending).toBe(true);
+        expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+      }
+      expect([name, await ownerRows(w.owner.id)]).toEqual([name, [{ text: "周末和小林去爬山", vault: true, vault_by: "auto" }]]);
+      const own = (await db.query("select text, vault from agent_notes where agent_id = $1", [w.agent.id])).rows;
+      expect([name, own]).toEqual([name, [{ text: "回答要简短", vault: false }]]);
+    }
+  });
+
+  it("a correction next to the forget of a note in the vault fails closed: the corrected note goes into the vault (which text took what cannot be told)", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    const w = await owned("mvc");
+    await setNewNotes(db, w.owner.id, "open");
+    await openAuto(w.owner, w.agent.id, "住在上海");
+    await seeded(w.owner, w.agent.id, "喜欢喝茶", true);
+    await sayAndReview(w, "我现在住北京了，喝茶那条删掉", ops({ op: "replace", ref: "n1", text: "住在北京" }, { op: "remove", ref: "n2" }));
+    expect(await ownerRows(w.owner.id)).toEqual([{ text: "住在北京", vault: true, vault_by: "auto" }]);
+    // The same answer with the removed note open: the sorting decides, as for any replace.
+    const v = await owned("mvd");
+    await setNewNotes(db, v.owner.id, "open");
+    await openAuto(v.owner, v.agent.id, "住在上海");
+    await openAuto(v.owner, v.agent.id, "喜欢喝茶");
+    await sayAndReview(v, "我现在住北京了，喝茶那条删掉", ops({ op: "replace", ref: "n1", text: "住在北京" }, { op: "remove", ref: "n2" }));
+    expect(await ownerRows(v.owner.id)).toEqual([{ text: "住在北京", vault: false, vault_by: "auto" }]);
   });
 });
 
