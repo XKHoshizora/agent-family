@@ -56,7 +56,7 @@ describe("profile change rate limits", () => {
 
   it("an Agent's avatar counts against the same 10 a minute as your own (besides the Agent writes' 30)", async () => {
     const [a, b] = [await signUp(app, "gina"), await signUp(app, "hank")];
-    const agent = (await api(app, a, "POST", "/api/agents", { handle: "rl_avatar_bot", name: "Bot" })).json;
+    const agent = (await api(app, a, "POST", "/api/agents", { namePart: "rl_avatar_bot", name: "Bot" })).json;
     const putAgentAvatar = (who: { cookie: string }, id: string) =>
       app
         .inject({ method: "PUT", url: `/api/agents/${id}/avatar`, headers: { cookie: who.cookie, "content-type": "image/png" }, payload: PNG })

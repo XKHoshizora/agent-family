@@ -224,6 +224,32 @@ describe("schema guarantees enforced by the database", () => {
     );
   });
 
+  test("an Agent's handle is its name part: 2 to 24 of a-z0-9_, in no pool with people's or other owners' Agents' (family names)", async () => {
+    const [one, two] = [await human("owner_fn1"), await human("owner_fn2")];
+    const agent = (owner: string, handle: string) =>
+      db.query(`insert into principals (kind, handle, display_name, owner_id) values ('agent', $1, 'A', $2)`, [handle, owner]);
+    await agent(one, "ai");
+    await agent(one, "x".repeat(24));
+    await agent(two, "ai"); // another owner's
+    await agent(one, "owner_fn2"); // a person's handle
+    for (const bad of ["a", "x".repeat(25), "Upper", "dot.ted", "dash-ed"]) await expect(agent(one, bad)).rejects.toMatchObject({ code: CHECK_VIOLATION });
+    // A person's handle is still 3 to 24 and still unique among people.
+    await rejectedWith(CHECK_VIOLATION, `insert into principals (kind, handle, display_name, auth_user_id) values ('human', 'ab', 'X', 'auth-ab')`);
+    await authUser("auth-fn3");
+    expect((await db.query(`insert into principals (kind, handle, display_name, auth_user_id) values ('human', 'ai_x', 'X', 'auth-fn3')`)).rowCount).toBe(1);
+    expect((await db.query(`select handle_changed_at from principals where id = $1`, [one])).rows).toEqual([{ handle_changed_at: null }]);
+  });
+
+  test("reserved_handles: one row per handle, of a person's handle's shape, for a principal that exists", async () => {
+    const a = await human("reserve_a");
+    const b = await human("reserve_b");
+    await db.query(`insert into reserved_handles (handle, principal_id) values ('old_a', $1)`, [a]);
+    await rejectedWith(UNIQUE_VIOLATION, `insert into reserved_handles (handle, principal_id) values ('old_a', $1)`, [b]);
+    for (const bad of ["ab", "OLD_B", "old.b"]) await rejectedWith(CHECK_VIOLATION, `insert into reserved_handles (handle, principal_id) values ($1, $2)`, [bad, b]);
+    await rejectedWith(FOREIGN_KEY_VIOLATION, `insert into reserved_handles (handle, principal_id) values ('old_c', gen_random_uuid())`);
+    await rejectedWith(FOREIGN_KEY_VIOLATION, `delete from principals where id = $1`, [a]);
+  });
+
   test("friendships must be stored with the smaller id first", async () => {
     const a = await human("order_a");
     const b = await human("order_b");

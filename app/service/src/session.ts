@@ -8,6 +8,7 @@ import { AppError } from "./errors.ts";
 import { memoryChoice, memoryModelUsable } from "./memory/call.ts";
 import { MEMORY_LANGUAGE_CODES } from "./memory/language.ts";
 import { getDream, getMemoryLanguage, getMemoryModel, getNewNotes } from "./memory/store.ts";
+import { handleChangeAvailableAt } from "./principals/store.ts";
 
 export interface Principal {
   id: string;
@@ -80,6 +81,7 @@ export function registerSessionRoutes(app: FastifyInstance): void {
             memoryModelUsable: z.boolean(),
             dream: z.boolean(),
             memoryLanguage: z.enum(MEMORY_LANGUAGE_CODES).nullable(),
+            handleChangeAvailableAt: z.string().nullable(),
           }),
         },
       },
@@ -93,7 +95,21 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       const usable = await memoryModelUsable(db, config, p.id, memoryModel);
       const dream = await getDream(db, p.id);
       const memoryLanguage = await getMemoryLanguage(db, p.id);
-      return { id: p.id, handle: p.handle, displayName: p.displayName, avatarVersion: p.avatarVersion, email: p.email, newNotes, memoryModel, memoryModelUsable: usable, dream, memoryLanguage };
+      // When the handle may be changed again (once a year); null: now.
+      const handleChangeAt = await handleChangeAvailableAt(db, p.id);
+      return {
+        id: p.id,
+        handle: p.handle,
+        displayName: p.displayName,
+        avatarVersion: p.avatarVersion,
+        email: p.email,
+        newNotes,
+        memoryModel,
+        memoryModelUsable: usable,
+        dream,
+        memoryLanguage,
+        handleChangeAvailableAt: handleChangeAt === null ? null : handleChangeAt.toISOString(),
+      };
     },
   );
 }

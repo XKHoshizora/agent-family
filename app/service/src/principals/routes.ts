@@ -15,7 +15,7 @@ import { setDream, setMemoryLanguage, setMemoryModel, setNewNotes } from "../mem
 import { requirePrincipal } from "../session.ts";
 import { defaultAvatarSvg } from "./avatar.ts";
 import { avatarBudget, registerAvatarPut, SNIFF_BYTES, storeAvatar } from "./avatar-upload.ts";
-import { findAvatarSubject, findByHandle, swapAvatarKey, updateDisplayName } from "./store.ts";
+import { changeHandle, findAvatarSubject, findByHandle, HANDLE_PATTERN, swapAvatarKey, updateDisplayName } from "./store.ts";
 
 const publicPrincipal = z.object({ id: z.string(), handle: z.string(), displayName: z.string(), avatarVersion: z.number() });
 
@@ -67,14 +67,16 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         body: z
           .object({
             displayName: displayName.optional(),
+            handle: z.string().regex(HANDLE_PATTERN).optional(),
             newNotes: z.enum(["auto", "vault", "open"]).optional(),
             memoryModel: chosenModel(uuidParam).nullable().optional(),
             dream: z.boolean().optional(),
             memoryLanguage: z.enum(MEMORY_LANGUAGE_CODES).nullable().optional(),
           })
           .refine(
-            (b) => b.displayName !== undefined || b.newNotes !== undefined || b.memoryModel !== undefined || b.dream !== undefined || b.memoryLanguage !== undefined,
-            "displayName, newNotes, memoryModel, dream or memoryLanguage",
+            (b) =>
+              b.displayName !== undefined || b.handle !== undefined || b.newNotes !== undefined || b.memoryModel !== undefined || b.dream !== undefined || b.memoryLanguage !== undefined,
+            "displayName, handle, newNotes, memoryModel, dream or memoryLanguage",
           ),
         response: { 200: publicPrincipal },
       },
@@ -82,9 +84,9 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
     async (req) => {
       const me = await requirePrincipal(req);
       await renameLimit(req, me.id);
-      const { displayName: name, newNotes, memoryModel, dream, memoryLanguage } = req.body;
-      // All or nothing: a model that is refused changes nothing, the name and the setting included.
-      await db.tx(async (t) => {
+      const { displayName: name, handle, newNotes, memoryModel, dream, memoryLanguage } = req.body;
+      // All or nothing: a model or a handle that is refused changes nothing, the name and the setting included.
+      const renamed = await db.tx(async (t) => {
         // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider. Memory the site
         // pays for runs only on free-tier site models: a paid one is refused as an unknown one is.
         if (memoryModel !== undefined && memoryModel !== null) {
@@ -96,8 +98,19 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
         if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);
         if (dream !== undefined) await setDream(t, me.id, dream);
         if (memoryLanguage !== undefined) await setMemoryLanguage(t, me.id, memoryLanguage);
+        // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`).
+        return handle !== undefined && (await changeHandle(t, me.id, handle));
       });
-      return { id: me.id, handle: me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
+      if (renamed) {
+        // Whoever sees them, or one of their Agents, is told the new handle, as an avatar change is told (`pushPrincipalChanged`).
+        const agents = await db.query<{ id: string }>("select id from principals where owner_id = $1 order by id", [me.id]);
+        await app.realtime.pushPrincipalChanged(me.id);
+        for (const { id } of agents.rows) {
+          await app.realtime.pushPrincipalChanged(id);
+          app.realtime.pushAgentChanged(me.id, id);
+        }
+      }
+      return { id: me.id, handle: renamed ? handle! : me.handle, displayName: name ?? me.displayName, avatarVersion: me.avatarVersion };
     },
   );
 

@@ -1,4 +1,72 @@
 import type { Queryable } from "../db.ts";
+import { AppError } from "../errors.ts";
+
+/**
+ * SQL: the handle of principal `p` (a `principals` alias) as everyone is shown it: a person's own; an Agent's its owner's
+ * handle, a dot and its name part (`principals.handle` of an Agent, migration 048), e.g. `xiaolin.jarvis` — read now, so it
+ * follows the owner's rename. The one place an Agent's full handle is put together in SQL; every read of a handle that
+ * may be an Agent's goes through it, and so does every handle a model is told.
+ */
+export const handleOf = (p: string): string =>
+  `(case when ${p}.kind = 'agent' then (select ho.handle::text from principals ho where ho.id = ${p}.owner_id) || '.' || ${p}.handle::text else ${p}.handle::text end)`;
+
+/** The shape of a person's handle (registration, a change, a lookup): 3 to 24 of `a-z0-9_`. */
+export const HANDLE_PATTERN = /^[a-z0-9_]{3,24}$/;
+/** The shape of an Agent's name part: 2 to 24 of `a-z0-9_`. Its handle is `<owner's handle>.<name part>`. */
+export const NAME_PART_PATTERN = /^[a-z0-9_]{2,24}$/;
+
+/**
+ * Whether `handle` is free for `principalId` (null: a registration) to take: no person holds it now and no person gave it
+ * up (`reserved_handles`) — unless it is theirs. One statement, so it reads both in one snapshot: a handle given up while
+ * this runs is seen held or seen reserved, never neither. A concurrent taker of the same free handle meets the unique index.
+ */
+export async function handleFree(q: Queryable, handle: string, principalId: string | null): Promise<boolean> {
+  const { rows } = await q.query<{ principal_id: string }>(
+    `select id as principal_id from principals where kind = 'human' and handle = $1
+     union all select principal_id from reserved_handles where handle = $1`,
+    [handle],
+  );
+  return rows.every((r) => r.principal_id === principalId);
+}
+
+/** How long a person waits between two changes of their handle. */
+export const HANDLE_CHANGE_DAYS = 365;
+
+/** When `principalId` may next change their handle; null when they may now (never changed, or the year has passed). */
+export async function handleChangeAvailableAt(q: Queryable, principalId: string): Promise<Date | null> {
+  const { rows } = await q.query<{ at: Date | null }>(
+    `select case when handle_changed_at > now() - make_interval(days => $2) then handle_changed_at + make_interval(days => $2) end as at
+       from principals where id = $1`,
+    [principalId, HANDLE_CHANGE_DAYS],
+  );
+  return rows[0]?.at ?? null;
+}
+
+const UNIQUE_VIOLATION = "23505";
+
+/**
+ * Changes person `principalId`'s handle to `handle`, in the caller's transaction: their row locked first, so two changes
+ * of theirs take turns. Their current handle: nothing changes (no year starts). Otherwise 429 `handle_change_too_soon`
+ * (with `availableAt`) within `HANDLE_CHANGE_DAYS` of their last change — said before whether the handle is free — then
+ * 409 `handle_taken` when it is not free (`handleFree`; a person who takes it meanwhile meets the unique index: the same
+ * 409). The handle they leave is theirs for good (`reserved_handles`). False when nothing changed.
+ */
+export async function changeHandle(q: Queryable, principalId: string, handle: string): Promise<boolean> {
+  const { rows } = await q.query<{ handle: string }>("select handle::text as handle from principals where id = $1 and kind = 'human' for update", [principalId]);
+  const current = rows[0]?.handle;
+  if (current === undefined || current === handle) return false;
+  const available = await handleChangeAvailableAt(q, principalId);
+  if (available !== null) throw new AppError(429, "handle_change_too_soon", { availableAt: available.toISOString() });
+  if (!(await handleFree(q, handle, principalId))) throw new AppError(409, "handle_taken");
+  await q.query("insert into reserved_handles (handle, principal_id) values ($1, $2) on conflict (handle) do nothing", [current, principalId]);
+  try {
+    await q.query("update principals set handle = $2, handle_changed_at = now() where id = $1", [principalId, handle]);
+  } catch (err) {
+    if ((err as { code?: string }).code === UNIQUE_VIOLATION) throw new AppError(409, "handle_taken");
+    throw err;
+  }
+  return true;
+}
 
 export interface PublicPrincipal {
   id: string;

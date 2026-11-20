@@ -11,7 +11,7 @@ import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
 import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
-import { swapAvatarKey } from "../principals/store.ts";
+import { NAME_PART_PATTERN, swapAvatarKey } from "../principals/store.ts";
 import { agentName, userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { pushWhispers } from "../whispers/routes.ts";
@@ -242,7 +242,7 @@ export function registerAgentRoutes(
       schema: {
         params: empty,
         querystring: empty,
-        body: z.strictObject({ handle: z.string().regex(/^[a-z0-9_]{3,24}$/), name: agentName, ...agentSettings }),
+        body: z.strictObject({ namePart: z.string().regex(NAME_PART_PATTERN), name: agentName, ...agentSettings }),
         response: { 201: agentView },
       },
     },
@@ -252,7 +252,7 @@ export function registerAgentRoutes(
       const b = req.body;
       assertProactiveAvailable(config, b.proactive);
       const input = {
-        handle: b.handle,
+        namePart: b.namePart,
         name: b.name,
         intro: b.intro ?? "",
         field: b.field ?? "",
@@ -342,7 +342,7 @@ export function registerAgentRoutes(
       schema: {
         params: idParams,
         querystring: empty,
-        // Strict: the handle and the owner are not keys, so naming them is a 400.
+        // Strict: the name part (so the handle) and the owner are not keys, so naming them is a 400.
         body: z.strictObject({ name: agentName.optional(), ...agentSettings }),
         response: { 200: agentView },
       },

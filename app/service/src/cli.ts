@@ -30,11 +30,18 @@ function flag(args: string[], name: string): string | undefined {
   return value;
 }
 
-/** The person (never an Agent: accounts belong to humans) whose handle is given. */
+/**
+ * The person (never an Agent: accounts belong to humans) whose handle is given. An Agent's handle is its owner's, a dot
+ * and its name part (`owner.name`): found as an Agent, and refused.
+ */
 async function humanByHandle(db: Db, handle: string): Promise<{ id: string; handle: string }> {
+  const [person, namePart] = handle.split(".", 2) as [string, string | undefined];
   const { rows } = await db.query<{ id: string; handle: string; kind: string }>(
-    "select id, handle::text as handle, kind from principals where handle = $1",
-    [handle],
+    namePart === undefined
+      ? "select id, handle::text as handle, kind from principals where kind = 'human' and handle = $1"
+      : `select p.id, o.handle::text || '.' || p.handle::text as handle, p.kind from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
+          where o.kind = 'human' and o.handle = $1 and p.handle = $2`,
+    namePart === undefined ? [person] : [person, namePart],
   );
   const row = rows[0];
   if (!row) throw new Error(`no such handle: ${handle}`);

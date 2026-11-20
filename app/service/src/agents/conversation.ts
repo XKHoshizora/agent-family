@@ -30,13 +30,12 @@ import type { ProactiveLevel, ReasoningLevel } from "../config.ts";
 /** The most of a reply's reasoning that is stored; the rest is cut (it is never shown to a model again). */
 export const REASONING_MAX = 32_000;
 
-const UNIQUE_VIOLATION = "23505";
-
 export const greetingText = (name: string): string =>
   `你好，我是「${name}」，你刚刚创建的 Agent。我现在还没有设定。你希望我是谁、主要帮你做什么、用什么语气说话？直接告诉我就行，说完我会整理成一份设定给你确认。`;
 
 export interface NewAgent {
-  handle: string;
+  /** Its name part: its handle is `<owner's handle>.<name part>` (family names). */
+  namePart: string;
   name: string;
   intro: string;
   field: string;
@@ -61,8 +60,9 @@ export interface NewAgent {
  * dedicated conversation (type `agent`, `agent_conversations`, owner and Agent as speakers from seq 0) and, when
  * there is no persona yet, the fixed greeting from the Agent. The owner's account lock (taken first: it also
  * serialises the count) decides the limit: 403 `agent_limit` at the tier's number of Agents that are not deleted
- * (a tier `config` no longer names gets the `free` number). 409 `handle_taken`; 400 for a model or reasoning level
- * that does not fit.
+ * (a tier `config` no longer names gets the `free` number). 409 `handle_taken` when one of the owner's Agents that is
+ * not deleted has the name part — decided under that same lock, the only place an Agent is made, so two creations take
+ * turns (migration 048: no index sees `agents.deleted_at`); 400 for a model or reasoning level that does not fit.
  */
 export async function createAgent(
   t: Tx,
@@ -74,17 +74,19 @@ export async function createAgent(
   if ((await countLiveAgents(t, ownerId)) >= agentLimit(config, account.tier)) throw new AppError(403, "agent_limit");
   await assertModelChoice(t, ownerId, input.model, input.reasoning, config);
 
-  let id: string;
-  try {
-    const { rows } = await t.query<{ id: string }>(
-      "insert into principals (kind, handle, display_name, owner_id) values ('agent', $1, $2, $3) returning id",
-      [input.handle, input.name, ownerId],
-    );
-    id = rows[0]!.id;
-  } catch (err) {
-    if ((err as { code?: string }).code === UNIQUE_VIOLATION) throw new AppError(409, "handle_taken");
-    throw err;
-  }
+  const named = await t.query<{ owner_handle: string; taken: boolean }>(
+    `select o.handle::text as owner_handle,
+            exists (select 1 from principals p join agents a on a.principal_id = p.id
+                     where p.owner_id = o.id and p.kind = 'agent' and p.handle = $2 and a.deleted_at is null) as taken
+       from principals o where o.id = $1`,
+    [ownerId, input.namePart],
+  );
+  if (named.rows[0]!.taken) throw new AppError(409, "handle_taken");
+  const { rows } = await t.query<{ id: string }>(
+    "insert into principals (kind, handle, display_name, owner_id) values ('agent', $1, $2, $3) returning id",
+    [input.namePart, input.name, ownerId],
+  );
+  const id = rows[0]!.id;
   const personaVersion = input.persona === "" ? 0 : 1;
   const created = await t.query<{ created_at: Date }>(
     `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
@@ -129,7 +131,8 @@ export async function createAgent(
   const agent: AgentRow = {
     id,
     ownerId,
-    handle: input.handle,
+    handle: `${named.rows[0]!.owner_handle}.${input.namePart}`,
+    namePart: input.namePart,
     name: input.name,
     avatarVersion: 0,
     intro: input.intro,

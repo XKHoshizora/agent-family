@@ -10,7 +10,7 @@ import type { StoredMessage, SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
-import { mentionedHandles } from "./mentions.ts";
+import { mentionedHandles, resolveMentions } from "./mentions.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
@@ -188,10 +188,10 @@ export interface Announced {
   run: WireRun;
 }
 
-/** Whether `text` calls the Agent: `@` and its handle or its current name, case ignored (spec 6.5 "触发"). */
-export function mentions(text: string, agent: Pick<AgentRow, "handle" | "name">): boolean {
+/** Whether `text` calls the Agent: `@` and its handle, its name part or its current name, case ignored (spec 6.5 "触发"). */
+export function mentions(text: string, agent: Pick<AgentRow, "handle" | "namePart" | "name">): boolean {
   const lower = text.toLowerCase();
-  return lower.includes(`@${agent.handle.toLowerCase()}`) || lower.includes(`@${agent.name.toLowerCase()}`);
+  return [agent.handle, agent.namePart, agent.name].some((called) => lower.includes(`@${called.toLowerCase()}`));
 }
 
 /** The Agent of `conversationId` when it is an Agent conversation of `ownerId`'s, else null. */
@@ -824,7 +824,7 @@ export async function budgetReachedWith(
 
 /**
  * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
- * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles
+ * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members those handles call (`resolveMentions`)
  * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
  * as a direct chat reads it: neither of the two calls the other's Agents, nor spends the other's points); each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
  * deleted, paused or has no model, or only its owner may call it (`groupMentions` `owner`) and this is someone else's
@@ -838,14 +838,15 @@ export async function budgetReachedWith(
 async function triggerInGroup(t: Tx, conversationId: string, message: StoredMessage, config: RunLimits): Promise<Triggered> {
   const handles = mentionedHandles(textOf(message));
   if (handles.length === 0) return noneTriggered();
+  const called = [...(await resolveMentions(t, conversationId, handles)).values()];
   const { rows } = await t.query<{ id: string }>(
     `select p.id from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
-      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[])
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id = any($2::uuid[])
         and not ${blockedEitherWay("p.owner_id", "$3::uuid")}
       order by p.id`,
-    [conversationId, handles, message.senderId],
+    [conversationId, called, message.senderId],
   );
   const dayStart = siteToday(config);
   const told = noneTold();
@@ -946,7 +947,7 @@ async function chainBudgetSpent(
 /**
  * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
  * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
- * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
+ * One query finds the group's current Agent members those handles call (`resolveMentions`) that an Agent may call: not deleted, not
  * paused, with a model, `groupMentions` `members`, and of an owner with no block, in either direction, between them and
  * the poster's owner, nor between them and the person behind the message (`behindAgentMessage`; none when nobody is) —
  * neither of two people calls the other's Agents, through their own Agent or someone else's no more than themselves: a
@@ -996,9 +997,10 @@ export async function triggerFromAgent(
   config: RunLimits & Pick<Config, "agentChainLimit">,
   askers: Askers,
 ): Promise<Triggered> {
-  const own = poster.handle.toLowerCase();
-  const handles = mentionedHandles(textOf(message)).filter((h) => h !== own);
+  const handles = mentionedHandles(textOf(message));
   if (handles.length === 0) return noneTriggered();
+  const called = [...(await resolveMentions(t, conversationId, handles)).values()].filter((id) => id !== poster.id);
+  if (called.length === 0) return noneTriggered();
   const behind = behindAgentMessage(poster.ownerId, postedBy);
   // A block, either way, between a target's owner and the poster's owner or the person behind the message (none to
   // match when nobody is: `$5` null) refuses the target.
@@ -1008,10 +1010,10 @@ export async function triggerFromAgent(
        from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
-      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id = any($2::uuid[]) and p.id <> $3
         and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
       order by p.id`,
-    [conversationId, handles, poster.id, poster.ownerId, behind],
+    [conversationId, called, poster.id, poster.ownerId, behind],
   );
   // The targets refused below (a block, the halt, the chain limit, a chain budget, an others' daily budget), recorded with
   // the message as this returns, so that none of them counts it as a call later (`followUp`).
@@ -1148,10 +1150,12 @@ export async function followUp(
       order by m.seq`,
     [conversationId, covers, pending, agent.ownerId, agent.id],
   );
-  const handle = agent.handle.toLowerCase();
+  // Whom each handle calls in the group now (`resolveMentions`).
+  const called = await resolveMentions(t, conversationId, rows.flatMap((r) => mentionedHandles(r.text ?? "")));
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
   const calls = rows.filter(
-    (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && mentionedHandles(r.text ?? "").includes(handle),
+    (r) =>
+      (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && mentionedHandles(r.text ?? "").some((h) => called.get(h) === agent.id),
   );
   const asked = calls.some((r) => r.kind === "human");
   // None of them (or none that names someone): others', with no caller.

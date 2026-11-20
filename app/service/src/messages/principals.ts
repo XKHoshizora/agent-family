@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { Queryable } from "../db.ts";
+import { handleOf } from "../principals/store.ts";
 import type { WireMessage } from "./model.ts";
 
 /**
@@ -82,9 +83,9 @@ export function mentionedIn(m: WireMessage): string[] {
  */
 export async function readPrincipals(q: Queryable, ids: Iterable<string>): Promise<SyncPrincipal[]> {
   const { rows } = await q.query<{ id: string; handle: string; display_name: string; avatar_version: number } & AgentProfileRow>(
-    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version, p.kind, ${AGENT_PROFILE_COLUMNS}
+    `select p.id, ${handleOf("p")} as handle, p.display_name, p.avatar_version, p.kind, ${AGENT_PROFILE_COLUMNS}
        from principals p ${AGENT_PROFILE_JOIN}
-      where p.id = any($1::uuid[]) order by p.handle::text`,
+      where p.id = any($1::uuid[]) order by handle`,
     [[...ids]],
   );
   return rows.map((p) => ({
