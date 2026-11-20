@@ -53,12 +53,14 @@ function appellationRows(agent) {
 }
 
 /**
- * 模型不可用: the Agent's model is not there to call. For its owner, unless `plain` (inside a row that is a button already),
- * a button that opens where its model is chosen (`openModelChoice`); for anyone else plain text with no action.
+ * 模型不可用: the Agent's model is not there to call — its owner's to know alone. For the owner a button that opens where its
+ * model is chosen (`openModelChoice`), plain text only inside a row that is a button already (`plain`); for anyone else
+ * nothing at all.
  */
 export function ModelGoneTag({ agent, plain = false }) {
   const { dispatch } = useStore();
-  if (!agent.mine || plain) return <Tag tone="warn">模型不可用</Tag>;
+  if (!agent.mine) return null;
+  if (plain) return <Tag tone="warn">模型不可用</Tag>;
   return (
     <button type="button" className="tag tag-warn" aria-label="模型不可用，换一个模型" onClick={() => openModelChoice(dispatch, agent.id)}>
       模型不可用

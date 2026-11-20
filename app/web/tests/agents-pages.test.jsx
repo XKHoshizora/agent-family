@@ -189,19 +189,21 @@ describe("the Agent list", () => {
     expect(inMain().queryByRole("button", { name: /模型不可用/ })).toBeNull();
   });
 
-  it("the 模型不可用 tag is a button for the Agent's owner only: for anyone else it is plain text with no action", () => {
+  it("the 模型不可用 tag is the Agent's owner's only: for anyone else nothing of it is rendered — no text, no element", () => {
     const agent = agentOf(AG1, { model: SITE_MODEL, modelUsable: false });
     render(
       <StoreProvider initialState={emptyState()}>
-        <ModelGoneTag agent={{ ...agent, mine: true }} />
+        <span data-testid="mine">
+          <ModelGoneTag agent={{ ...agent, mine: true }} />
+        </span>
         <span data-testid="theirs">
           <ModelGoneTag agent={{ ...agent, mine: false }} />
         </span>
       </StoreProvider>,
     );
-    expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual(["模型不可用，换一个模型"]);
-    expect(screen.getByTestId("theirs").textContent).toBe("模型不可用");
-    expect(within(screen.getByTestId("theirs")).queryByRole("button")).toBeNull();
+    expect(within(screen.getByTestId("mine")).getByRole("button", { name: "模型不可用，换一个模型" }).textContent).toBe("模型不可用");
+    expect(screen.getByTestId("theirs").childNodes).toHaveLength(0);
+    expect(screen.getByTestId("theirs").textContent).toBe("");
   });
 });
 
