@@ -1101,6 +1101,7 @@ describe("undoing hearsay", () => {
     expect(await hearsayRows(w.agent.id)).toEqual([]);
   });
 
+  // A state no product path reaches (see below): kept for the day conversations can be removed.
   it("does not count a dropped entry whose group is gone toward the room: the rest still fits", async () => {
     const w = await world("tb");
     const other = await group(app, w.mia, "会散的群", [w.owner, w.third]);
@@ -1119,7 +1120,9 @@ describe("undoing hearsay", () => {
     const [chip] = await chips(w.owner, w.agent.conversationId);
     // The room trimmed the oldest entry, the other group's; then that group is gone and the owner fills the room by hand.
     expect((await hearsayRows(w.agent.id)).map((r) => r.id)).not.toContain(ids[0]);
-    // No route deletes a conversation (the references restrict it): the change is made to say its dropped entry was of one that is gone.
+    // No product path does this: no route deletes a conversation (the references restrict it), so a group cannot vanish
+    // today. The test writes the stored change by hand to say its dropped entry was of one that is gone, and pins only
+    // what the undo would do then.
     const row = (await db.query<{ ops: Array<{ op: string; conversationId: string }> }>("select ops from memory_changes where id = $1", [chip.system.changeId])).rows[0]!;
     const gone = row.ops.map((o) => (o.op === "hearsay_drop" && o.conversationId === other ? { ...o, conversationId: "00000000-0000-4000-8000-000000000000" } : o));
     expect(gone).not.toEqual(row.ops);
@@ -1134,6 +1137,29 @@ describe("undoing hearsay", () => {
     await heard(w);
     const [chip] = await chips(w.owner, w.agent.conversationId);
     expect((await api(app, w.mia, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(404);
+  });
+});
+
+describe("a group the owner has left (Task R fix round 1, I3: the controller's ruling)", () => {
+  it("a change line written while the owner was a member keeps the title it was written with, in the notice and the stored change, after they leave and the group is renamed", async () => {
+    const w = await world("gl", "OLD-TITLE-gl");
+    await heard(w);
+    const before = await chips(w.owner, w.agent.conversationId);
+    expect(before.map((c) => c.system.lines)).toEqual([[`听说：「miagl」在「OLD-TITLE-gl」里说：${SAID}`]]);
+    // The notice as stored (its lines are written into its body once).
+    const stored = async () =>
+      (await db.query<{ lines: unknown }>("select body -> 'lines' as lines from messages where conversation_id = $1 and body ->> 'event' = 'memory_changed' order by seq", [w.agent.conversationId]))
+        .rows;
+    const linesBefore = await stored();
+    expect(linesBefore).toEqual([{ lines: [`听说：「miagl」在「OLD-TITLE-gl」里说：${SAID}`] }]);
+
+    expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.g}/members/${w.owner.id}`)).status).toBe(200);
+    expect((await api(app, w.mia, "PATCH", `/api/conversations/${w.g}`, { title: "NEW-TITLE-gl" })).status).toBe(200);
+    // The title is not read again after the leaving: the line keeps the one it was written with, and never the new one.
+    const after = await chips(w.owner, w.agent.conversationId);
+    expect(after.map((c) => c.system.lines)).toEqual(before.map((c) => c.system.lines));
+    expect(await stored()).toEqual(linesBefore);
+    expect(JSON.stringify(after)).not.toContain("NEW-TITLE-gl");
   });
 });
 

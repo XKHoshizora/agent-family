@@ -11,7 +11,8 @@ import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
 import { mentionedHandles } from "./mentions.ts";
-import { lockAgent, type AgentRow } from "./store.ts";
+import { modelsUsable, modelUsable } from "../models/resolve.ts";
+import { agentModelOf, lockAgent, type AgentRow } from "./store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
@@ -30,9 +31,20 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /**
  * Errors after which trying again unchanged does not help (the key, the address, the Agent itself, a context too small
- * for the persona: the owner must change something first).
+ * for the persona: the owner must change something first). A model that is gone (`model_gone`) is `retryable`'s own
+ * case: it follows the Agent's model as it is now.
  */
 const NOT_RETRYABLE: ReadonlySet<string> = new Set(["provider_rejected", "address_not_allowed", "agent_deleted", "context_too_small"]);
+
+/**
+ * The one rule of `retryable` (README "Run"): the run failed, trying it again as it is may work (not after an error of
+ * `NOT_RETRYABLE`), and the Agent's model is there to call (`modelUsable`, models/resolve.ts `modelsUsable`) — while it is
+ * not, a retry is refused (409 `model_gone`, `retryRun`), and a run that failed `model_gone` is retryable again once it
+ * is. `modelUsable` as the reader knows it now (`GET …/run`, `GET …/runs`); else as it was when the run ended — usable,
+ * unless it ended `model_gone`.
+ */
+export const retryable = (r: Pick<RunRow, "status" | "error">, modelUsable = r.error !== "model_gone"): boolean =>
+  r.status === "failed" && modelUsable && !NOT_RETRYABLE.has(r.error ?? "");
 
 /** A run on the wire (README "Wire shapes"). */
 export const wireRunSchema = z.object({
@@ -56,15 +68,15 @@ export interface RunRow {
 export const RUN_COLUMNS = "r.id, r.status, r.error, r.resets_at, r.dismissed_at";
 
 /**
- * `retryable`: the run failed and trying again as it is may work — not after the provider refused the key or the
- * address, and never for a run that did not fail. `resetsAt` only for `no_quota` on a free-tier model.
+ * `retryable`: by its one rule (`retryable`, with the Agent's model as `modelUsable` says, where known), never for a run
+ * that did not fail. `resetsAt` only for `no_quota` on a free-tier model.
  */
-export function toWireRun(r: RunRow): WireRun {
+export function toWireRun(r: RunRow, modelUsable?: boolean): WireRun {
   return {
     id: r.id,
     status: r.status,
     ...(r.error === null ? {} : { error: r.error }),
-    retryable: r.status === "failed" && !NOT_RETRYABLE.has(r.error ?? ""),
+    retryable: retryable(r, modelUsable),
     ...(r.error === "no_quota" && r.resets_at ? { resetsAt: r.resets_at.toISOString() } : {}),
   };
 }
@@ -113,24 +125,28 @@ export interface GroupRunEntry {
  * `GET /api/conversations/:id/runs` for `readerId` (wire contract "Run state"): 404, as for a conversation that does not
  * exist, unless it is a group the reader is a current member of. One entry per current Agent member whose latest run
  * there in its current stay (`latestInStay`) has a state for the reader (`groupRunState`), in `agentId` order; the run
- * itself on the reader's own Agents' entries only.
+ * itself on the reader's own Agents' entries only, `retryable` by the Agent's model as it is now (`retryable`).
  */
-export async function groupRuns(q: Queryable, readerId: string, conversationId: string): Promise<GroupRunEntry[]> {
+export async function groupRuns(q: Queryable, readerId: string, conversationId: string, config: Pick<Config, "siteModels">): Promise<GroupRunEntry[]> {
   if ((await peekConversation(q, conversationId))?.type !== "group" || !(await currentMembership(q, conversationId, readerId))) throw notFound();
-  const { rows } = await q.query<RunRow & { agent_id: string; owner_id: string; lane: Lane }>(
-    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}, r.lane
+  const { rows } = await q.query<RunRow & Parameters<typeof agentModelOf>[0] & { agent_id: string; owner_id: string; lane: Lane }>(
+    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}, r.lane, a.model_source, a.site_model_id, a.provider_id, a.provider_model
        from memberships m
        join principals p on p.id = m.principal_id and p.kind = 'agent'
+       join agents a on a.principal_id = p.id
        join ${latestInStay("m")} r on true
       where m.conversation_id = $1 and m.left_seq is null
       order by m.principal_id`,
     [conversationId],
   );
+  const mine = rows.filter((row) => row.owner_id === readerId);
+  const usable = new Map(mine.map((row, i) => [row.agent_id, i]));
+  const now = await modelsUsable(q, config, readerId, mine.map(agentModelOf));
   const entries: GroupRunEntry[] = [];
   for (const row of rows) {
     const owns = row.owner_id === readerId;
     const state = groupRunState(row, owns ? "owner" : "member");
-    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(owns ? { run: toWireRun(row) } : {}) });
+    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(owns ? { run: toWireRun(row, now[usable.get(row.agent_id)!]) } : {}) });
   }
   return entries;
 }
@@ -214,15 +230,23 @@ export async function latestRun(q: Queryable, conversationId: string): Promise<R
 
 /**
  * The limits on replies started a minute — an owner's own lane, the others' (every other lane together), one caller's —
- * and the site's time zone, whose day the others' daily budget is counted in (`othersBudgetSpent`).
+ * and the site's time zone, whose day the others' daily budget is counted in (`othersBudgetSpent`); and the site's models,
+ * by which someone else's call on an Agent whose model is gone is refused as it is made (`reachAgents`).
  */
-export type RunLimits = Pick<Config, "agentRunsPerMinute" | "agentOthersRunsPerMinute" | "agentCallerRunsPerMinute" | "siteTimezone">;
+export type RunLimits = Pick<Config, "agentRunsPerMinute" | "agentOthersRunsPerMinute" | "agentCallerRunsPerMinute" | "siteTimezone" | "siteModels">;
 
 /**
  * Of `agent_runs`: a reply started in the last minute — not one a limit refused (`rate_limited`), which started nothing
  * (`startedLastMinute`, `calledLastMinute`).
  */
 const STARTED_LAST_MINUTE = "purpose = 'reply' and created_at > now() - interval '1 minute' and error is distinct from 'rate_limited'";
+
+/**
+ * `STARTED_LAST_MINUTE` as an owner's minute counts it (`startedLastMinute`): not a reply whose model was not there to
+ * call either (`model_gone`) — it called nothing and spent nothing of the owner's, so calls on an Agent whose model is gone
+ * cannot crowd out calls on the owner's other Agents. A caller's own minute counts it (`calledLastMinute`).
+ */
+const OWNER_STARTED_LAST_MINUTE = `${STARTED_LAST_MINUTE} and error is distinct from 'model_gone'`;
 
 /**
  * Replies `ownerId` has started in the last minute in one lane: their own (`own`, `agentRunsPerMinute`), or else
@@ -234,7 +258,7 @@ const STARTED_LAST_MINUTE = "purpose = 'reply' and created_at > now() - interval
  */
 async function startedLastMinute(t: Tx, ownerId: string, own: boolean): Promise<number> {
   await lockAccount(t, ownerId);
-  const { rows } = await t.query<{ n: number }>(`select count(*)::int as n from agent_runs where owner_id = $1 and (lane = 'own') = $2 and ${STARTED_LAST_MINUTE}`, [
+  const { rows } = await t.query<{ n: number }>(`select count(*)::int as n from agent_runs where owner_id = $1 and (lane = 'own') = $2 and ${OWNER_STARTED_LAST_MINUTE}`, [
     ownerId,
     own,
   ]);
@@ -444,6 +468,70 @@ export async function hearFrom(t: Tx, runId: string, from: number, to: number | 
   return rows[0]?.askers ?? null;
 }
 
+/**
+ * The block rule a call meets when it is made, met again by every call reply run `runId` of an Agent of `ownerId`
+ * answers as it begins (reverse-paths audit A12; Task R fix round 1), whatever the run's lane: a call (`call_seqs`; its
+ * `covers_seq` when not known) whose person has a block with the owner, either way — the sender of a person's message;
+ * for an Agent's message that Agent's owner and the person behind it (`behindMessageSql`), as `followUp` reads them — would
+ * be refused were it made now (`triggerInGroup`, `triggerFromAgent`), and is dropped: it is no longer among the calls the
+ * run answers and nobody the owner has a block with is among its askers; what the run covers ends at the latest call
+ * left (`covers_seq`, or `pending_seq` when that call was noted after its claim), so what came after that call is heard
+ * by the usual rule as the run begins (`hearFrom`: someone blocked who wrote there is heard, as anyone is, and counts
+ * toward its line, never as a call). A run whose caller is dropped becomes the remaining calls' by `followUp`'s rule —
+ * its owner's own when the owner is behind one of them, else the earliest one's — and a person's while a person's call
+ * is left (a reply nobody asked for keeps its lane, caller and trigger). The owner's own call is never dropped (nobody has
+ * a block with themselves): `begin` asks this of every group run (none in the Agent's own conversation). Returns what the run now covers and has noted (empty when nothing was dropped: one query),
+ * or null when no call is left — then only its `pending_seq` is cleared, so no follow-up answers a dropped call.
+ */
+export async function dropBlockedCalls(t: Tx, runId: string, ownerId: string): Promise<{ covers_seq?: string | null; pending_seq?: string | null } | null> {
+  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; behind: string | null; blocked: boolean; lane: Lane; caller_blocked: boolean }>(
+    `select m.seq::text as seq, p.kind, bh.caller_id as behind, ${blockedEitherWay("$2::uuid", "coalesce(p.owner_id, p.id), bh.caller_id")} as blocked,
+            r.lane, ${blockedEitherWay("$2::uuid", "r.caller_id")} as caller_blocked
+       from agent_runs r
+       join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, array[r.covers_seq]))
+       join principals p on p.id = m.sender_id
+       left join agent_runs pr on p.kind = 'agent' and ${postingRun("m", "pr")}
+       cross join lateral (select ${behindMessageSql("p", "pr")} as caller_id) bh
+      where r.id = $1
+      order by m.seq`,
+    [runId, ownerId],
+  );
+  if (!rows.some((r) => r.blocked)) return {};
+  const left = rows.filter((r) => !r.blocked);
+  if (left.length === 0) {
+    await t.query("update agent_runs set pending_seq = null where id = $1", [runId]);
+    return null;
+  }
+  const { lane } = rows[0]!;
+  const caller: Caller | null =
+    lane === "proactive" || !rows[0]!.caller_blocked
+      ? null
+      : left.some((r) => r.behind === ownerId)
+        ? callerOf(ownerId, ownerId)
+        : callerOf(ownerId, left.find((r) => r.behind !== null)?.behind ?? null);
+  const by: TriggeredBy | null = lane === "proactive" ? null : left.some((r) => r.kind === "human") ? "human" : "agent";
+  const updated = await t.query<{ covers_seq: string | null; pending_seq: string | null }>(
+    `update agent_runs set call_seqs = $2::bigint[], covers_seq = least(covers_seq, $3::bigint),
+            pending_seq = case when $3::bigint > covers_seq then $3::bigint end,
+            asker_ids = case when asker_ids is null then null
+                             else array(select x.a from unnest(asker_ids) as x (a) where not ${blockedEitherWay("$4::uuid", "x.a")} order by x.a) end,
+            caller_id = case when $5::boolean then $6::uuid else caller_id end, lane = case when $5::boolean then $7::text else lane end,
+            triggered_by = coalesce($8::text, triggered_by)
+      where id = $1 returning covers_seq::text as covers_seq, pending_seq::text as pending_seq`,
+    [runId, left.map((r) => Number(r.seq)), Number(left.at(-1)!.seq), ownerId, caller !== null, caller?.id ?? null, caller?.lane ?? null, by],
+  );
+  return updated.rows[0]!;
+}
+
+/** The model of Agent `agentId` as its `agents` row says now (`agentModelOf`); null for none, or no such Agent. */
+async function modelOfAgent(q: Queryable, agentId: string): Promise<AgentRow["model"]> {
+  const { rows } = await q.query<Parameters<typeof agentModelOf>[0]>(
+    "select model_source, site_model_id, provider_id, provider_model from agents where principal_id = $1",
+    [agentId],
+  );
+  return rows[0] ? agentModelOf(rows[0]) : null;
+}
+
 /** That run `runId` answers the calls at `seqs` too (`call_seqs`, migration 046), besides those it has. */
 async function answersCalls(t: Tx, runId: string, seqs: readonly number[]): Promise<void> {
   if (seqs.length === 0) return;
@@ -482,7 +570,9 @@ export async function queueRun(
  * A reply in `conversationId` the owner's replies a minute in its lane refused (`overLaneLimit`): recorded `failed`,
  * `rate_limited` (retryable), covering `coversSeq`, with whose message and which `caller` called for it and whose
  * questions it answers (`askers`), so the owner sees it and can retry. It never reached a model: no hold, no usage
- * record, and it is not active (it takes no concurrency slot, and the Agent's one active run there stays free).
+ * record, and it is not active (it takes no concurrency slot, and the Agent's one active run there stays free). With
+ * `error` `model_gone`: someone else's call on an Agent whose model is not there to call, refused as it is made
+ * (`reachAgents`), recorded the same way so the group shows its one line and the caller's own limit counts it.
  */
 async function recordRateLimited(
   t: Tx,
@@ -492,11 +582,12 @@ async function recordRateLimited(
   triggeredBy: TriggeredBy,
   caller: Caller,
   askers: Askers,
+  error: "rate_limited" | "model_gone" = "rate_limited",
 ): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
     `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at, triggered_by, caller_id, lane, asker_ids, call_seqs)
-     values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now(), $5, $6, $7, $8, array[$4::bigint]) returning ${RUN_COLUMNS}`,
-    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy, caller.id, caller.lane, askersParam(askers)],
+     values ('reply', $1, $2, $3, 'failed', $9, $4, now(), $5, $6, $7, $8, array[$4::bigint]) returning ${RUN_COLUMNS}`,
+    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy, caller.id, caller.lane, askersParam(askers), error],
   );
   return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
@@ -682,6 +773,13 @@ async function reachAgents(
   for (const { agent, by, askers, othersCaller } of unfolded) {
     if (othersCaller !== null && (await calledLastMinute(t, othersCaller)) >= config.agentCallerRunsPerMinute) {
       reached.callerLimited.push({ callerId: othersCaller, agentId: agent.id, conversationId });
+      continue;
+    }
+    // Someone else's call on an Agent whose model is not there to call (models/resolve.ts `modelUsable`) queues no reply
+    // and is not held to its owner's minute (it would spend nothing of theirs): recorded failed `model_gone` at once.
+    // Its owner's own call is queued as any (it ends `model_gone` as it begins, with 换一个模型 for them).
+    if (by.lane !== "own" && !(await modelUsable(t, config, { ownerId: agent.ownerId, model: await modelOfAgent(t, agent.id) }))) {
+      reached.runs.push(await recordRateLimited(t, agent, conversationId, seq, triggeredBy, by, askers, "model_gone"));
       continue;
     }
     const over = await overLaneLimit(t, agent.ownerId, by.lane, config);
@@ -1338,11 +1436,18 @@ const isGroup = async (q: Queryable, conversationId: string): Promise<boolean> =
  * `POST …/runs/retry`: a new queued reply answering up to the owner's last message, only when the conversation's
  * latest run failed. 404 unless it is the caller's Agent conversation; 409 `agent_deleted` / `agent_paused`; 409
  * `busy_run` while a reply is queued or running; 400 when the latest run did not fail (or there is none) or the Agent
- * has no model; 429 over the owner's own `agentRunsPerMinute`. In a group, for the Agent `agentId` names
+ * has no model; 409 `model_gone` while its model is not there to call (`retryable`'s rule); 429 over the owner's own
+ * `agentRunsPerMinute`. In a group, for the Agent `agentId` names
  * (`retryInGroup`); elsewhere `agentId` plays no part. A retry is its owner's call: the owner's own (`lane` `own`),
  * wherever it is, held to their own lane's limit.
  */
-export async function retryRun(t: Tx, ownerId: string, conversationId: string, agentId: string | undefined, config: RunLimits): Promise<Announced> {
+export async function retryRun(
+  t: Tx,
+  ownerId: string,
+  conversationId: string,
+  agentId: string | undefined,
+  config: RunLimits & Pick<Config, "siteModels">,
+): Promise<Announced> {
   if (await isGroup(t, conversationId)) return retryInGroup(t, ownerId, conversationId, agentId, config);
   const ownAgentId = await ownedAgentOf(t, ownerId, conversationId);
   if (!ownAgentId) throw notFound();
@@ -1352,6 +1457,7 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, a
   const latest = await latestRun(t, conversationId);
   if (latest?.status === "queued" || latest?.status === "running") throw new AppError(409, "busy_run");
   if (latest?.status !== "failed" || agent.model === null) throw new AppError(400, "invalid_request");
+  if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const last = await t.query<{ seq: string | null }>(
     "select max(seq)::text as seq from messages where conversation_id = $1 and sender_id = $2 and kind <> 'system'",
@@ -1370,10 +1476,16 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, a
  * questions as the failed one, so whose they were is kept too (`asker_ids`: the retry asks nothing new), and so are the
  * calls (`call_seqs`). Not for an Agent that
  * is not in the group now, nor for a run from before it last joined; a run a halt or the Agent's leaving cancelled
- * (`halted`, `agent_removed`) did not fail: 400 like any other; 429 over the owner's own `agentRunsPerMinute`. Lock
- * order: the group's row → the Agent's → run rows → the owner's `accounts` row.
+ * (`halted`, `agent_removed`) did not fail: 400 like any other; 409 `model_gone` as `retryRun`; 429 over the owner's own
+ * `agentRunsPerMinute`. Lock order: the group's row → the Agent's → run rows → the owner's `accounts` row.
  */
-async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agentId: string | undefined, config: RunLimits): Promise<Announced> {
+async function retryInGroup(
+  t: Tx,
+  ownerId: string,
+  conversationId: string,
+  agentId: string | undefined,
+  config: RunLimits & Pick<Config, "siteModels">,
+): Promise<Announced> {
   const own = await ownAgentInGroup(t, ownerId, conversationId, agentId);
   const joinedSeq = own.joinedSeq;
   const agent = await lockAgent(t, own.agentId, conversationId);
@@ -1385,6 +1497,7 @@ async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agen
   if (latest?.status !== "failed" || agent.model === null || joinedSeq === null || covers === null || covers <= joinedSeq) {
     throw new AppError(400, "invalid_request");
   }
+  if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
   await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));

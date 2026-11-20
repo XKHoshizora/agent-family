@@ -243,8 +243,9 @@ export async function askerLine(q: Queryable, runId: string): Promise<number> {
 
 /**
  * The calls reply run `runId` of Agent `agentId` answers that the Agent can see and show, by seq, oldest first: of the
- * messages that called for it (`agent_runs.call_seqs`, and the latest it covers, `covers_seq`; its `covers_seq` alone when
- * not known), those that are text or file messages the Agent can see (`VISIBLE_JOIN`) — one at or before the run's line
+ * messages that called for it (`agent_runs.call_seqs`, which holds the latest it covers too as it is written; its
+ * `covers_seq` alone when not known — a call `runs.ts dropBlockedCalls` dropped is in neither), those that are text or
+ * file messages the Agent can see (`VISIBLE_JOIN`) — one at or before the run's line
  * `line` (`askerLine`) only when it has text: it is shown even there, but as its text only (fix round 3: not its file).
  * What it was asked is answered, whoever spoke since. None: nothing is left to answer.
  */
@@ -252,7 +253,7 @@ export async function callsSeen(q: Queryable, agentId: string, runId: string, li
   const { rows } = await q.query<{ seq: string }>(
     `select m.seq::text as seq
        from agent_runs r
-       join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, '{}'::bigint[]) || r.covers_seq)
+       join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, array[r.covers_seq]))
        ${VISIBLE_JOIN}
       where r.id = $2 and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
         and (m.seq > $3 or coalesce(m.body ->> 'text', '') <> '')

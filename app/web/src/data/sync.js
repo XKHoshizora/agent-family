@@ -444,7 +444,16 @@ export function start(
       return;
     }
     if (my !== conn) return;
+    const before = getModel().agents[id];
     setModel(applyAgent(getModel(), agent));
+    // Its model became usable or unusable (a provider edit, say): whether its failed replies can be tried again changed
+    // with it, so the runs held for it — its own conversation's and its lines in groups — are asked for again.
+    if (before && agent && before.modelUsable !== agent.modelUsable) {
+      const model = getModel();
+      if (typeof agent.conversationId === "string") agentNeed.runs.add(agent.conversationId);
+      for (const [groupId, slots] of Object.entries(model.groupRuns)) if (slots && id in slots) agentNeed.groupRuns.add(groupId);
+      pumpAgents();
+    }
   }
 
   /**

@@ -19,7 +19,7 @@ function HeardRow({ agentId, line, memory, leaving }) {
     <li className="memory-row" data-memory-id={line.id}>
       <div className="memory-body">
         <p className="memory-text" id={textId}>{`${line.speakerName}${line.speakerHandle ? `（@${line.speakerHandle}）` : ""}说：${line.text}`}</p>
-        <p className="memory-source muted">{`${formatAt(Date.parse(line.saidAt), Date.now())} · ${line.group?.title ?? "已离开的群"}`}</p>
+        <p className="memory-source muted">{`${formatAt(Date.parse(line.saidAt), Date.now())} · ${line.group?.title ?? "一个已离开的群"}`}</p>
         {error && <p className="field-msg" role="alert">{error}</p>}
       </div>
       <div className="memory-actions">

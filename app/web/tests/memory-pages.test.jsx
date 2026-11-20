@@ -967,7 +967,7 @@ describe("an Agent's page: its own notes and what it heard", () => {
     expect(rowWith(room("小助手自己的笔记"), "它学到的事").querySelector(".memory-source").textContent).toBe("11月10日 · 和小助手的对话");
   });
 
-  it("a heard line is {speakerName}说：{text} with {date} · {group title or 已离开的群} and 属实 / 删除", async () => {
+  it("a heard line is {speakerName}说：{text} with {date} · {group title or 一个已离开的群} and 属实 / 删除", async () => {
     await openAgentPalace(service({ hearsay: [HEARD, GONE] }));
     const scope = room("小助手听说的");
     const a = rowWith(scope, "周五发布会推迟了");
@@ -975,7 +975,7 @@ describe("an Agent's page: its own notes and what it heard", () => {
     expect(a.querySelector(".memory-source").textContent).toBe("11月12日 · 项目群");
     expect(within(a).getByRole("button", { name: "属实" })).toBeTruthy();
     expect(within(a).getByRole("button", { name: "删除" })).toBeTruthy();
-    expect(rowWith(scope, "他想换工作").querySelector(".memory-source").textContent).toBe("11月11日 · 已离开的群");
+    expect(rowWith(scope, "他想换工作").querySelector(".memory-source").textContent).toBe("11月11日 · 一个已离开的群");
   });
 
   it("a heard line names the speaker's account name when the service gives it: {speakerName}（@{speakerHandle}）说：{text}", async () => {
@@ -1066,7 +1066,7 @@ describe("fix round 1", () => {
     expect(rowWith(room("关于我"), "整理出来的事").querySelector(".memory-source").textContent).toBe("11月10日 · 多处整理而成");
   });
 
-  it("a manual source of an entry that did not come from the owner is a deleted origin; a group without a title is a left group", async () => {
+  it("a manual source of an entry that did not come from the owner is a deleted origin; a group without a title is one the owner has left (一个已离开的群)", async () => {
     await openPalace(
       service({
         notes: [
@@ -1076,7 +1076,7 @@ describe("fix round 1", () => {
       }),
     );
     expect(rowWith(room("关于我"), "旧的事").querySelector(".memory-source").textContent).toBe("11月10日 · 来源已删除");
-    expect(rowWith(room("关于我"), "群里的事").querySelector(".memory-source").textContent).toBe("11月10日 · 已离开的群");
+    expect(rowWith(room("关于我"), "群里的事").querySelector(".memory-source").textContent).toBe("11月10日 · 一个已离开的群");
   });
 
   it("the add row is locked through the reload: a second Enter or 添加 sends nothing", async () => {

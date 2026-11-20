@@ -22,7 +22,7 @@ function sourceLine(note, agentName) {
   const { kind, title } = note.source;
   let source;
   if (kind === "agent") source = `和${title ?? agentName ?? "Agent"}的对话`;
-  else if (kind === "group") source = title ?? "已离开的群";
+  else if (kind === "group") source = title ?? "一个已离开的群";
   else if (kind === "mixed") source = "多处整理而成";
   else source = note.origin === "owner" ? "手动添加" : "来源已删除";
   return `${formatAt(Date.parse(note.createdAt), Date.now())} · ${source}`;

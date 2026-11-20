@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { MODEL_GONE } from "../data/errorTexts.js";
 import { Btn, Notice, Reason } from "../ui/primitives.jsx";
 import { ModelBrand } from "../ui/ModelBrand.jsx";
 import { brandOf } from "../ui/modelBrands.js";
@@ -211,13 +212,21 @@ export const PROVIDERS_PAGE = { section: "settings", settingsPage: "providers", 
  * The model field of the Agent form: the picker (`ModelSelect`) with its two groups, 站点提供 (each model 免费 or 需余额)
  * and 我的供应商 (provider → its models); a notice leading to Settings › 模型供应商 when nothing at all can be chosen; the
  * privacy notice beside it. `options`: `choiceList(sources, …)`; `value`: the chosen key; `onChange(key)`. (No
- * 管理供应商 under its list: leaving for it would drop what the form holds.)
+ * 管理供应商 under its list: leaving for it would drop what the form holds.) `focus`: the picker takes the focus once it
+ * is shown (`openModelChoice` sent me here), then `onFocused()` — called too when what can be chosen is read and no picker
+ * is shown (nothing to choose), so the asked focus never waits for a later form.
  */
-export function ModelPicker({ sources, options, value, onChange }) {
+export function ModelPicker({ sources, options, value, onChange, focus = false, onFocused }) {
   const { dispatch } = useStore();
   const id = useId();
   const chosen = options.find((o) => o.key === value) ?? null;
   const showSelect = sources.status === "ready" && !sources.nothing;
+  useEffect(() => {
+    if (!focus || sources.status !== "ready") return;
+    // Once what can be chosen is read: the picker takes the focus — or, with none shown, the asked focus is dropped.
+    if (showSelect) document.getElementById(id)?.focus();
+    onFocused?.();
+  }, [focus, showSelect, sources.status]);
   const addProvider = () => dispatch({ type: "nav", patch: PROVIDERS_PAGE });
 
   let control;
@@ -263,6 +272,25 @@ export function ModelPicker({ sources, options, value, onChange }) {
   );
 }
 
+/**
+ * The quick model switches on screen (`AgentModelSwitch`), by Agent: each one's opener, and whether it says a reply's
+ * model (`shown`) rather than the Agent's.
+ */
+const quickSwitches = new Map();
+
+/**
+ * Opens where my Agent `agentId`'s model is chosen: a quick model switch for it on this screen (`AgentModelSwitch`: the
+ * conversation's header or details panel first, else a reply's line), else its edit form, focused on its model field. The
+ * one way the 模型不可用 tag (Agents.jsx `ModelGoneTag`) and a `model_gone` status line (AgentChatBits.jsx) send its owner to
+ * choose another model.
+ */
+export function openModelChoice(dispatch, agentId) {
+  const here = [...(quickSwitches.get(agentId) ?? [])];
+  const quick = here.find((s) => !s.shown) ?? here[0];
+  if (quick) return quick.open();
+  dispatch({ type: "nav", patch: { section: "agents", agentId, agentView: "edit", agentFocus: "model", pane: "main" } });
+}
+
 /** Under the picker's search where it is opened from a group: the model is the Agent's, wherever it talks. */
 export const EVERYWHERE_NOTE = "换了以后，它在所有会话里都用这个模型";
 
@@ -284,11 +312,30 @@ export function AgentModelSwitch({ agentId, shown = null, note = null }) {
   const sources = useModelSources({ load: opened });
   const { busy, run } = useAction();
   const [saving, setSaving] = useState(null);
+  const switchId = useId();
+  // While it is shown it is where `openModelChoice` opens this Agent's model choice.
+  const live = Boolean(agent?.mine && agent.loaded && !agent.deleted);
+  useEffect(() => {
+    if (!live) return;
+    const open = () => {
+      const button = document.getElementById(switchId);
+      if (button?.getAttribute("aria-expanded") !== "true") button?.click();
+    };
+    const entry = { shown: shown !== null, open };
+    const set = quickSwitches.get(agentId) ?? new Set();
+    quickSwitches.set(agentId, set.add(entry));
+    return () => {
+      set.delete(entry);
+      if (set.size === 0) quickSwitches.delete(agentId);
+    };
+  }, [live, agentId, switchId, shown !== null]);
   if (!agent?.mine || !agent.loaded) return null;
 
   const model = saving ?? agent.model;
   const name = shown ? shown.name : modelName(state, model);
-  const current = shown ?? (model ? { name, brand: modelLab(state, model) } : null);
+  // Its model is not there to call any more (the service's `modelUsable`): the button says so, not the model's name.
+  const gone = !shown && saving === null && model !== null && agent.modelUsable === false;
+  const current = shown ?? (model ? { name: gone ? MODEL_GONE.tag : name, brand: modelLab(state, model) } : null);
   if (agent.deleted) {
     return (
       <span className="head-model">
@@ -314,7 +361,8 @@ export function AgentModelSwitch({ agentId, shown = null, note = null }) {
   return (
     <ModelSelect
       compact
-      label={`模型：${name ?? "未选模型"}，点击更改`}
+      id={switchId}
+      label={`模型：${name ?? "未选模型"}${gone ? `（${MODEL_GONE.tag}）` : ""}，点击更改`}
       value={modelKey(agent.model)}
       current={current}
       placeholder="未选模型"

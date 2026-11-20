@@ -5,7 +5,7 @@ import "./markdown-ready.js";
 import { readFileSync } from "node:fs";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import {
   A1,
   A2,
@@ -37,6 +37,8 @@ import {
 import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, push, rowNames, toastText } from "./harness.jsx";
 import { optionsOf, pickOption } from "./select-helpers.js";
 import { othersBudgetSent } from "../src/pages/AgentForm.jsx";
+import { ModelGoneTag } from "../src/pages/Agents.jsx";
+import { StoreProvider, emptyState } from "../src/data/store.jsx";
 
 beforeEach(() => {
   installBrowser();
@@ -158,6 +160,69 @@ describe("the Agent list", () => {
     await openAgents({ agents: [agentOf(AG1, { model: null })] });
     expect(rowOf("小助手").querySelector(".tag").textContent).toBe("未选模型");
     expect(rowOf("小助手").querySelector(".row-preview").textContent).toBe("未填写擅长领域 · 未选择模型");
+  });
+
+  it("an Agent whose model is gone (modelUsable false) says 这个模型不可用，换一个模型。 by its model on its page; one whose model is there does not", async () => {
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: false })] });
+    await openRow("小助手");
+    const modelRow = () => [...document.querySelectorAll(".main-col dt")].find((dt) => dt.textContent === "模型").nextElementSibling;
+    expect(modelRow().textContent).toContain("小模型");
+    expect(modelRow().textContent).toContain("这个模型不可用，换一个模型。");
+    // Nor does it claim 可回复: its tag reads 模型不可用 — in the list as text (the row is a button already), on its page
+    // a button that opens where its model is chosen.
+    expect(mainText()).not.toContain("可回复");
+    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("模型不可用");
+    expect(within(rowOf("小助手")).queryByRole("button")).toBeNull();
+    const fix = inMain().getByRole("button", { name: "模型不可用，换一个模型" });
+    expect(fix.textContent).toBe("模型不可用");
+    await click(fix);
+    // No quick model switch on this page: the edit form opens, focused on its model field.
+    expect(personaBox()).toBeTruthy();
+    expect(document.activeElement).toBe(modelBox());
+    cleanup();
+
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: true })] });
+    await openRow("小助手");
+    expect(modelRow().textContent).toContain("小模型");
+    expect(mainText()).not.toContain("这个模型不可用");
+    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("可回复");
+    expect(inMain().queryByRole("button", { name: /模型不可用/ })).toBeNull();
+  });
+
+  it("a focus on the model field asked for by the tag does not outlive the form it was asked for: no model to choose there, leave, edit again — nothing is focused", async () => {
+    const now = { models: { siteModels: [], providerDefaults: MODELS.providerDefaults }, providers: [] };
+    await openAgents({
+      agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: false })],
+      api: { getModels: vi.fn(async () => now.models), listProviders: vi.fn(async () => ({ providers: now.providers })) },
+    });
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: "模型不可用，换一个模型" }));
+    // Nothing can be chosen here: the form says so, and no picker is shown to focus.
+    expect(mainText()).toContain("还没有可用的模型");
+    await click(inMain().getByRole("button", { name: "取消" }));
+
+    now.models = MODELS;
+    now.providers = [PROVIDER];
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(modelBox()).toBeTruthy();
+    expect(document.activeElement).not.toBe(modelBox());
+  });
+
+  it("the 模型不可用 tag is the Agent's owner's only: for anyone else nothing of it is rendered — no text, no element", () => {
+    const agent = agentOf(AG1, { model: SITE_MODEL, modelUsable: false });
+    render(
+      <StoreProvider initialState={emptyState()}>
+        <span data-testid="mine">
+          <ModelGoneTag agent={{ ...agent, mine: true }} />
+        </span>
+        <span data-testid="theirs">
+          <ModelGoneTag agent={{ ...agent, mine: false }} />
+        </span>
+      </StoreProvider>,
+    );
+    expect(within(screen.getByTestId("mine")).getByRole("button", { name: "模型不可用，换一个模型" }).textContent).toBe("模型不可用");
+    expect(screen.getByTestId("theirs").childNodes).toHaveLength(0);
+    expect(screen.getByTestId("theirs").textContent).toBe("");
   });
 });
 

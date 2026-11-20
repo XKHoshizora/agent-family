@@ -216,11 +216,12 @@ describe("the sentences batch 2A names", () => {
 
   it("every error a failed run can carry has its own sentence (none falls back to the generic one)", () => {
     const failed = (error) => ({ id: "r", status: "failed", error, retryable: true });
-    const codes = ["no_quota", "provider_rejected", "provider_unavailable", "address_not_allowed", "context_too_small", "thinking_exhausted", "busy", "rate_limited", "agent_paused", "agent_deleted"];
+    const codes = ["no_quota", "provider_rejected", "provider_unavailable", "address_not_allowed", "context_too_small", "thinking_exhausted", "busy", "rate_limited", "agent_paused", "agent_deleted", "model_gone"];
     const texts = codes.map((code) => runFailureText(failed(code), NOW));
     for (const [i, text] of texts.entries()) expect(text, codes[i]).not.toBe("这次没有回复成功。");
     expect(new Set(texts).size).toBe(codes.length);
     expect(runFailureText(failed("rate_limited"), NOW)).toBe("发得太快了，请稍后重试。");
+    expect(runFailureText(failed("model_gone"), NOW)).toBe("这个模型不可用，换一个模型。");
     expect(runFailureText(failed("agent_paused"), NOW)).toBe("它已暂停，这次没有回复。");
     expect(runFailureText(failed("agent_deleted"), NOW)).toBe("它已删除，这次没有回复。");
   });
@@ -242,7 +243,7 @@ describe("the sentences batch 2A names", () => {
     }
     expect(runFailureText(failed("provider_rejected"), NOW, "provider")).toBe("供应商拒绝了密钥，这次没有回复。请到设置里检查密钥。");
     // The other codes read the same whatever the model.
-    for (const code of ["context_too_small", "busy", "rate_limited", "no_quota"]) {
+    for (const code of ["context_too_small", "busy", "rate_limited", "no_quota", "model_gone"]) {
       expect(runFailureText(failed(code), NOW, "site"), code).toBe(runFailureText(failed(code), NOW, "provider"));
     }
   });

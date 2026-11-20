@@ -296,6 +296,25 @@ describe("PUT and DELETE /api/agents/:id/appellations/:principalId", () => {
     expect(await remove(w.owner, w.agent.id, w.mia.id)).toEqual({ status: 409, json: { error: "agent_deleted" } });
   });
 
+  it("go with a deleted Agent: its rows are deleted with it, its view names nobody, and both routes still answer 409 agent_deleted", async () => {
+    const w = await world();
+    const other = await mustCreateAgent(app, w.owner);
+    await seat(w.g, other.id);
+    expect((await put(w.owner, w.agent.id, w.mia.id, "米亚")).status).toBe(200);
+    expect((await put(w.owner, w.agent.id, w.gus.id, "阿古")).status).toBe(200);
+    // Another Agent's row naming it stays (it is listed with no name or handle, and can be removed).
+    expect((await put(w.owner, other.id, w.agent.id, "旧助手")).status).toBe(200);
+    expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200);
+    expect(await stored(w.agent.id)).toEqual({});
+    expect(await stored(other.id)).toEqual({ [w.agent.id]: "旧助手" });
+    expect((await view(w.owner, w.agent.id)).appellations).toEqual([]);
+    expect(await put(w.owner, w.agent.id, w.mia.id, "米")).toEqual({ status: 409, json: { error: "agent_deleted" } });
+    expect(await remove(w.owner, w.agent.id, w.mia.id)).toEqual({ status: 409, json: { error: "agent_deleted" } });
+    // A repeated delete changes nothing.
+    expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200);
+    expect(await stored(w.agent.id)).toEqual({});
+  });
+
   it("is removed with its target principal", async () => {
     const w = await world();
     const { rows } = await db.query<{ id: string }>(

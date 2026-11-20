@@ -24,6 +24,7 @@ import {
   loadProviderForCall,
   mergeListedModels,
   modelName,
+  parseModels,
   updateProvider,
   type ProviderModel,
   type ProviderRow,
@@ -278,8 +279,11 @@ export function registerProviderRoutes(
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
       const b = req.body;
-      const updated = await db.tx((t) =>
-        updateProvider(
+      const { updated, affected } = await db.tx(async (t) => {
+        // The names on its list before the edit (none for a provider that is not theirs: the edit is 404 then).
+        const before = await t.query<{ models: unknown }>("select models from providers where id = $1 and owner_id = $2", [req.params.id, me.id]);
+        const was = new Set(parseModels(before.rows[0]?.models).map((m) => m.name));
+        const updated = await updateProvider(
           t,
           me.id,
           req.params.id,
@@ -290,8 +294,28 @@ export function registerProviderRoutes(
             ...(b.models === undefined ? {} : { models: withDefaults(b.models) }),
           },
           secret,
-        ),
-      );
+        );
+        // The names the edit took off the list or put on it: the live Agents on one of them can or cannot be called now.
+        const is = new Set(updated.models.map((m) => m.name));
+        const changed = [...was].filter((n) => !is.has(n)).concat([...is].filter((n) => !was.has(n)));
+        const affected =
+          changed.length === 0
+            ? []
+            : (
+                await t.query<{ id: string }>(
+                  "select principal_id as id from agents where provider_id = $1 and deleted_at is null and provider_model = any($2::text[]) order by principal_id",
+                  [req.params.id, changed],
+                )
+              ).rows.map((r) => r.id);
+        return { updated, affected };
+      });
+      // Those Agents go to their owner's sockets again (`agent`), so their pages read `modelUsable` anew. After commit:
+      // nothing here may fail the edit.
+      try {
+        for (const id of affected) app.realtime.pushAgentChanged(me.id, id);
+      } catch (err) {
+        req.log.error({ err, providerId: req.params.id }, "provider edit: pushing the Agents whose model changed failed");
+      }
       return toView(updated);
     },
   );

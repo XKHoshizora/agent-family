@@ -188,7 +188,7 @@ describe("an Agent with memory on in the request", () => {
     await say(w.member, w.g, "加入之前");
     const memo = await agentOf(w.third, "memo", w.g, { memory: true, proactive: false });
     const asked = await say(w.member, w.g, "third 周末要去爬山");
-    const options = await optionsFor(db, w.g, asked, w.member.id);
+    const options = await optionsFor(db, w.g, asked, w.member.id, app.deps.config);
     const listeners = await listenersFor(db, w.g, asked);
     expect(listeners).toMatchObject([{ key: "h1", ownerId: w.third.id, ownerName: "third", agentIds: [memo.id], reviewerId: memo.id }]);
     const request = (await requestFor(db, w.g, asked, options, app.deps.config.proactive, listeners))!;
@@ -507,7 +507,7 @@ describe.each([false, true])("what the judgement model is asked (memory %s)", (m
     const w = await world();
     const anna = await agentOf(w.owner, "anna", w.g);
     const asked = await say(w.member, w.g, "今晚做什么菜好？");
-    const [option] = await optionsFor(db, w.g, asked, w.member.id);
+    const [option] = await optionsFor(db, w.g, asked, w.member.id, app.deps.config);
     expect(option?.agentId).toBe(anna.id);
     expect(await requestFor(db, w.g, asked, [{ ...option!, joinedSeq: asked }], app.deps.config.proactive)).toBeNull();
   });
@@ -1146,7 +1146,7 @@ describe("what reaches anyone", () => {
       }
     return into;
   };
-  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools", "askerIds", "asker_ids", "askers", "callSeqs", "call_seqs", "sourceLines"];
+  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "modelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools", "askerIds", "asker_ids", "askers", "callSeqs", "call_seqs", "sourceLines"];
 
   it("no frame and no view of another member names proactive replies, lanes, callers, thresholds or probabilities; the log only ids and reasons", async () => {
     const w = await world();
@@ -1191,5 +1191,22 @@ describe("what reaches anyone", () => {
       expect(Object.keys(line).every((k) => ["level", "metric", "reason", "agentId", "conversationId"].includes(k))).toBe(true);
     }
     expect(JSON.stringify(lines)).not.toContain("anna");
+  });
+});
+
+describe("an Agent whose model is gone (Task R fix round 1)", () => {
+  it("is not offered: no judgement is spent on an Agent that cannot reply, and with no other option nothing is asked", async () => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    // Its site model taken out of what the site offers (as removing it from SITE_MODELS and restarting does).
+    await db.query("update agents set site_model_id = 'retired_q7' where principal_id = $1", [anna.id]);
+    const asked = await say(w.member, w.g, "周末去哪儿玩？");
+    expect(await optionsFor(db, w.g, asked, w.member.id, app.deps.config)).toEqual([]);
+    await decide(w.g, asked);
+    expect(judge.calls).toHaveLength(0);
+    // With another that can reply, only that one is offered.
+    const bob = await agentOf(w.third, "bob_bot", w.g);
+    const again = await say(w.member, w.g, "那吃什么？");
+    expect((await optionsFor(db, w.g, again, w.member.id, app.deps.config)).map((o) => o.agentId)).toEqual([bob.id]);
   });
 });

@@ -6,12 +6,13 @@
 // again from the model.
 import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
-import { runFailureText } from "../data/errorTexts.js";
+import { MODEL_GONE, runFailureText } from "../data/errorTexts.js";
 import { nameOf, ownerOf, publishBlock } from "../state/selectors.js";
 import { GrowingText, StreamingAgentText } from "../ui/AgentText.jsx";
 import { REVEAL_END_MS, REVEAL_FINISH_MS } from "../ui/reveal.js";
 import { Avatar, Btn, Field, IconBtn, Modal, Notice, Reason, Tag, focusInvalid } from "../ui/primitives.jsx";
 import { refusalText, settled, useAction, useNow } from "./useAction.js";
+import { openModelChoice } from "./ModelPicker.jsx";
 import { RotateCw, Sparkles, Square, X } from "../icons.js";
 
 /** The pause notice of a paused Agent (as on its detail page). */
@@ -447,6 +448,11 @@ export function RunStatusLine({ conv, run, agentId = null }) {
             {run.error === "context_too_small" && (
               <Btn small onClick={() => go({ section: "agents", agentId: agent, agentView: "edit" })}>
                 修改 Agent
+              </Btn>
+            )}
+            {run.error === "model_gone" && (
+              <Btn small onClick={() => openModelChoice(dispatch, agent)}>
+                {MODEL_GONE.action}
               </Btn>
             )}
             <IconBtn label="关闭提示" disabled={busy !== null} onClick={dismiss}>

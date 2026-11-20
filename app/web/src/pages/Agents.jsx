@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { MODEL_GONE } from "../data/errorTexts.js";
 import { formatPoints, pointsReached, proactiveLevelLabel } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
 import { AgentForm, CHAIN_BUDGET_DEFAULT, GROUP_MENTIONS, openAgentChat } from "./AgentForm.jsx";
-import { levelLabel, modelLab, modelLabel } from "./ModelPicker.jsx";
+import { levelLabel, modelLab, modelLabel, openModelChoice } from "./ModelPicker.jsx";
 import { LabLogo } from "../ui/LabLogo.jsx";
 import { convSubtitle, convTitle, isMyAgent, myAgents } from "../state/selectors.js";
 import { refusalText, settled, useAction } from "./useAction.js";
@@ -51,12 +52,30 @@ function appellationRows(agent) {
   ];
 }
 
-/** The status tag of an Agent; none while its record is not loaded (its model is not known yet). */
-function StatusTag({ agent, long = false }) {
+/**
+ * 模型不可用: the Agent's model is not there to call — its owner's to know alone. For the owner a button that opens where its
+ * model is chosen (`openModelChoice`), plain text only inside a row that is a button already (`plain`); for anyone else
+ * nothing at all.
+ */
+export function ModelGoneTag({ agent, plain = false }) {
+  const { dispatch } = useStore();
+  if (!agent.mine) return null;
+  if (plain) return <Tag tone="warn">{MODEL_GONE.tag}</Tag>;
+  return (
+    <button type="button" className="tag tag-warn" aria-label={`${MODEL_GONE.tag}，${MODEL_GONE.action}`} onClick={() => openModelChoice(dispatch, agent.id)}>
+      {MODEL_GONE.tag}
+    </button>
+  );
+}
+
+/** The status tag of an Agent; none while its record is not loaded (its model is not known yet). `action`: a tag that can act may. */
+function StatusTag({ agent, long = false, action = false }) {
   if (agent.deleted) return <Tag tone="muted">已删除</Tag>;
   if (agent.paused) return <Tag tone="pending">{long ? "已暂停全部会话" : "已暂停"}</Tag>;
   if (!agent.loaded) return null;
   if (!agent.model) return <Tag tone="warn">未选模型</Tag>;
+  // (Its model is not there to call any more: it cannot reply, and its page says why.)
+  if (!agent.modelUsable) return <ModelGoneTag agent={agent} plain={!action} />;
   return <Tag tone="ok">可回复</Tag>;
 }
 
@@ -235,7 +254,7 @@ function AgentDetail({ agent }) {
         <div className="grow">
           <p className="eyebrow">我的 Agent</p>
           <h2>
-            {agent.name} <Tag>Agent</Tag> <StatusTag agent={agent} long />
+            {agent.name} <Tag>Agent</Tag> <StatusTag agent={agent} long action />
           </h2>
           <p className="muted">{agent.handle} · 主人：你</p>
         </div>
@@ -293,7 +312,7 @@ function AgentDetail({ agent }) {
                   rows={[
                     ["主人", "你（不可修改）"],
                     ["擅长领域", agent.field || "未填写"],
-                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}</>],
+                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}{agent.model && !agent.modelUsable && <Reason>{MODEL_GONE.sentence}</Reason>}</>],
                     ["思考程度", levelLabel(agent.reasoning)],
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],

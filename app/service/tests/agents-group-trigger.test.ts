@@ -340,6 +340,30 @@ describe("a person's message in a group", () => {
     ]);
   });
 
+  it.each([
+    ["its owner blocks the person who called it", "owner", "member"],
+    ["the person who called it blocks its owner", "member", "owner"],
+  ] as const)("a reply already queued ends quietly when, before it begins, %s: no call, nothing charged, no message, nothing to retry", async (_what, blocker, blocked) => {
+    const w = await world();
+    const anna = await agentOf(w.owner, "anna", w.g);
+    const asked = await say(w.member, w.g, "@anna 帮我看看");
+    expect((await runsOf(anna.id, w.g)).map((r) => r.status)).toEqual(["queued"]);
+    expect((await api(app, w[blocker], "PUT", `/api/blocks/${w[blocked].id}`)).status).toBe(200);
+
+    const calls = gateway.calls.length;
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(calls);
+    expect(await runsOf(anna.id, w.g)).toEqual([{ status: "cancelled", error: null, covers: asked, pending: null, by: "human", interrupted: null }]);
+    const charged = await db.query<{ charged: string }>(
+      "select coalesce(sum(u.free_micro + u.balance_micro), 0)::text as charged from usage_records u join agent_runs r on r.id = u.run_id where r.agent_id = $1",
+      [anna.id],
+    );
+    expect(charged.rows[0]!.charged).toBe("0");
+    expect((await db.query("select 1 from messages where conversation_id = $1 and sender_id = $2", [w.g, anna.id])).rowCount).toBe(0);
+    // Nothing shows in the group: not 暂时无法回复 to the caller, nor anything to its owner.
+    for (const who of [w.owner, w.member]) expect((await api(app, who, "GET", `/api/conversations/${w.g}/runs`)).json.runs).toEqual([]);
+  });
+
   it("a paused, deleted or model-less Agent is not called", async () => {
     const w = await world();
     const paused = await agentOf(w.owner, "paused_bot", w.g);

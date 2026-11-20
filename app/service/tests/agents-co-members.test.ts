@@ -68,6 +68,7 @@ const HIDDEN_KEYS = [
   "newNotes",
   "memoryModel",
   "memoryModelUsable",
+  "modelUsable",
   "memoryLanguage",
   "fits",
   "noRoom",

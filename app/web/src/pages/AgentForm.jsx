@@ -546,7 +546,14 @@ export function AgentForm({ agent = null }) {
         <Field label="擅长领域" error={shown("field")}>
           <input value={f.field} onChange={set("field")} autoComplete="off" placeholder="例如：旅行规划" />
         </Field>
-        <ModelPicker sources={sources} options={options} value={f.model} onChange={setModel} />
+        <ModelPicker
+          sources={sources}
+          options={options}
+          value={f.model}
+          onChange={setModel}
+          focus={state.nav.agentFocus === "model"}
+          onFocused={() => dispatch({ type: "nav", patch: { agentFocus: null } })}
+        />
         {choice && levels.length > 1 && (
           <Field label="思考程度" hint="思考越多，回复越慢，用量也越多。">
             <Select

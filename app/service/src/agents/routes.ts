@@ -11,6 +11,7 @@ import { lockSwitchGroups, memorySwitched, SwitchAgain } from "../memory/pipelin
 import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
+import { modelsUsable } from "../models/resolve.ts";
 import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avatar-upload.ts";
 import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, userText, uuidParam } from "../schemas.ts";
@@ -170,6 +171,7 @@ const agentView = z.object({
   proactiveSpentToday: z.string(),
   reasoning,
   model: modelChoice(z.string()),
+  modelUsable: z.boolean(),
   paused: z.boolean(),
   deleted: z.boolean(),
   conversationId: z.string(),
@@ -180,9 +182,10 @@ const agentView = z.object({
  * An Agent as its owner sees it, with its configuration (persona, model, `groupMentions`, …), which nobody else is shown,
  * what other people's calls on it and its proactive replies have spent today of the owner's points (`spent`, runs.ts
  * `spentTodayOf`), and
- * what it calls its owner and the people and Agents the owner named (`ownerAppellation`, `appellations`).
+ * what it calls its owner and the people and Agents the owner named (`ownerAppellation`, `appellations`), and whether its
+ * model is there to call (`modelUsable`, models/resolve.ts `modelsUsable`).
  */
-const toView = (a: AgentRow, spent: { others: bigint; proactive: bigint }, appellations: AppellationEntry[]): z.infer<typeof agentView> => ({
+const toView = (a: AgentRow, spent: { others: bigint; proactive: bigint }, appellations: AppellationEntry[], modelUsable: boolean): z.infer<typeof agentView> => ({
   id: a.id,
   handle: a.handle,
   name: a.name,
@@ -207,6 +210,7 @@ const toView = (a: AgentRow, spent: { others: bigint; proactive: bigint }, appel
   proactiveSpentToday: formatPoints(spent.proactive),
   reasoning: a.reasoning,
   model: a.model,
+  modelUsable,
   paused: a.paused,
   deleted: a.deleted,
   conversationId: a.conversationId,
@@ -230,7 +234,12 @@ export function registerAgentRoutes(
   const api = app.withTypeProvider<ZodTypeProvider>();
   /** The owner's view of `agent`, with what other people's calls and its proactive replies have spent today, read now (runs.ts `spentTodayOf`). */
   const viewOf = async (agent: AgentRow) =>
-    toView(agent, (await spentTodayOf(db, [agent.id], siteToday(config))).get(agent.id) ?? NO_SPEND, (await appellationEntriesOf(db, [agent.id])).get(agent.id)!);
+    toView(
+      agent,
+      (await spentTodayOf(db, [agent.id], siteToday(config))).get(agent.id) ?? NO_SPEND,
+      (await appellationEntriesOf(db, [agent.id])).get(agent.id)!,
+      (await modelsUsable(db, config, agent.ownerId, [agent.model]))[0]!,
+    );
 
   // Create, edit, pause, resume, delete, avatar, new topics and confirming or discarding a proposal share one budget.
   const writeLimit = perPrincipalLimit(app, 30);
@@ -283,7 +292,7 @@ export function registerAgentRoutes(
       const { agent, change } = await db.tx((t) => createAgent(t, me.id, input, config));
       conversations.publish(change, req.log);
       // A new Agent has had no reply yet (nothing spent) and its owner has named nobody.
-      return reply.code(201).send(toView(agent, NO_SPEND, []));
+      return reply.code(201).send(toView(agent, NO_SPEND, [], (await modelsUsable(db, config, me.id, [agent.model]))[0]!));
     },
   );
 
@@ -328,7 +337,8 @@ export function registerAgentRoutes(
       const ids = agents.map((a) => a.id);
       const spent = await spentTodayOf(db, ids, siteToday(config));
       const named = await appellationEntriesOf(db, ids);
-      return { agents: agents.map((a) => toView(a, spent.get(a.id) ?? NO_SPEND, named.get(a.id)!)) };
+      const usable = await modelsUsable(db, config, me.id, agents.map((a) => a.model));
+      return { agents: agents.map((a, i) => toView(a, spent.get(a.id) ?? NO_SPEND, named.get(a.id)!, usable[i]!)) };
     },
   );
 
@@ -441,6 +451,8 @@ export function registerAgentRoutes(
           // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
           // After the run rows (it takes the owner's account lock): the lock order is agent → run rows → account (runs.ts).
           if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
+          // Its appellations go with it: what it called anyone is not kept (rows naming it, another Agent's, stay).
+          if ("deleted" in change) await t.query("delete from agent_appellations where agent_id = $1", [current.id]);
           // So are its open whispers, everywhere (src/whispers/): none is left with buttons that lead nowhere.
           const whispers = "deleted" in change ? await expireOfAgent(t, current.id) : [];
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted, whispers };
