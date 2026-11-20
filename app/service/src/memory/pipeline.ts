@@ -8,7 +8,7 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
-import { applyDream, applyOps, proposeUnlocks, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
+import { applyDream, applyOps, discardPendingOf, proposeUnlocks, recordRoomFull, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { lookedAt, parseAnswer, parseOps, refusedInPlace, sameKey, type Op } from "./ops.ts";
@@ -28,7 +28,8 @@ import { bumpNotes, stampsOf } from "./write.ts";
  * that cannot be used (garbage, cut, empty) changes nothing but is reviewed (`reviewed_seq` moves, as it does when there
  * was no owner message to look at). In a group only additions are applied: forgetting and locking by speech are the
  * owner's, in their own conversation. What this owner has pending already counts as known. In the owner's own conversation memory asks
- * as little as it can (`runReview`): a lock and a faithful merge apply at once, a remove only when the owner asked for it.
+ * as little as it can (`runReview`): a lock and (with `MEMORY.mergeAuto` "on") a faithful merge apply at once, a remove only when the
+ * owner asked for it.
  */
 
 export interface PipelineDeps {
@@ -93,6 +94,32 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
     `delete from memory_flags where agent_id = $1 and conversation_id = $2 and kind = 'own'
         and seq <= (select reviewed_seq from memory_review_state where agent_id = $1 and conversation_id = $2)`,
     [agentId, conversationId],
+  );
+}
+
+/**
+ * In the transaction that turns an Agent's `memory` off or on (agents/routes.ts, `PATCH /api/agents/:id`; the Agent's row locked). Off:
+ * its waiting cards are discarded (as when it is deleted) and its flags not yet acted on (hearsay, the owner's own remarks) dropped;
+ * its notes stay. On: every review position of the Agent — its own conversation, every conversation it is a member of, any it was
+ * reviewed in — becomes the conversation's current seq, and any flag is dropped, so nothing said while memory was off is ever
+ * reviewed; unless the owner asked it to look back (`catchUp`): then the positions stay where they were, and the next review reads
+ * what was said meanwhile within its usual window (`reviewMessages`, the topic, in a group what came after it joined).
+ */
+export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">, on: boolean, catchUp: boolean): Promise<void> {
+  if (on && catchUp) return;
+  await t.query("delete from memory_flags where agent_id = $1", [agent.id]);
+  if (!on) {
+    await discardPendingOf(t, agent.ownerId, agent.id);
+    return;
+  }
+  await t.query(
+    `insert into memory_review_state (agent_id, conversation_id, reviewed_seq)
+       select $1, c.id, c.seq from conversations c
+        where c.id = $2
+           or c.id in (select conversation_id from memberships where principal_id = $1 and left_seq is null)
+           or c.id in (select conversation_id from memory_review_state where agent_id = $1)
+     on conflict (agent_id, conversation_id) do update set reviewed_seq = greatest(memory_review_state.reviewed_seq, excluded.reviewed_seq)`,
+    [agent.id, agent.conversationId],
   );
 }
 
@@ -195,11 +222,14 @@ export async function memoryNotice(
  * A review; "refused" when its call was not made because the owner's memory allowance is spent (no failure: it waits for the next site day).
  *
  * What of an answer applies at once, in the owner's own conversation without 先问我再记: its adds; its locks (a lock only makes a note more
- * private, and is undone in one tap: never asked about); a merge — a room's one replace and its removes (`mergesOf`) — that the judgement
- * finds faithful, the dream's way (`faithfulOf`), applied as a dream's merge, ONE change of its own; and the replaces and removes left only
- * when none of them needs the owner's word (`needsWords`: a remove needs the owner to have asked, `askedFor`), else they wait together in
- * ONE card. The ops that change a note in place stand or fall together — save the faithful merge, the one deliberate exception: it is
- * judged and applied apart from the answer's other replaces and removes. With 先问我再记 everything waits as one card; a group only adds.
+ * private, and is undone in one tap: never asked about; never of a note the owner took out of the vault, apply.ts `plan`); with
+ * `MEMORY.mergeAuto` "on", a merge — a room's one replace and its removes (`mergesOf`) — that the judgement finds faithful, the dream's
+ * way (`faithfulOf`), applied as a dream's merge, ONE change of its own ("observe", the default, asks and counts but applies none: such a
+ * merge is replaces and removes like any other); and the replaces and removes left only when none of them needs the owner's word
+ * (`needsWords`: a remove needs the owner to have asked, `askedFor`), else they wait together in ONE card. The ops that change a note in
+ * place stand or fall together — save the faithful merge, the one deliberate exception: it is judged and applied apart from the answer's
+ * other replaces and removes. A merge's shape that is not merged so, with a note in the vault among its notes, puts its new text in the
+ * vault whatever the sorting (it carries that note's content). With 先问我再记 everything waits as one card; a group only adds.
  */
 export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<"refused" | undefined> {
   const { db, config, log } = deps;
@@ -263,9 +293,13 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   // Judged outside any transaction: which of the answer's merges are faithful (one request each), then, for the replaces and removes
   // left, whether the owner asked to forget (one request for the answer, when it can matter). A lock needs neither.
   const merges = mergesOf(changing.filter(inPlace), input.refs);
-  const faithful = await faithfulOf(deps, agent, merges, input.refs, group, ctx.closing);
+  const { judged, faithful } = await faithfulOf(deps, agent, merges, input.refs, group, ctx.closing);
   if (ctx.closing.aborted) return;
-  const asked = await askedFor(deps, agent, inPlaceLeft(changing, faithful, true), input, group, ctx.closing);
+  // Applied at once only with MEMORY.mergeAuto "on"; observed ("observe"), a faithful merge is replaces and removes like any other.
+  const applying = deps.config.memory.mergeAuto === "on" ? faithful : [];
+  const observed = deps.config.memory.mergeAuto === "observe";
+  const unfaithful = judged.filter((m) => !faithful.includes(m));
+  const asked = await askedFor(deps, agent, inPlaceLeft(changing, applying, true), input, group, ctx.closing);
   if (ctx.closing.aborted) return;
 
   // What took effect, counted once the transaction has committed (`stats.ts`).
@@ -285,18 +319,24 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
     strengthened = bumped.size;
-    // In the owner's own conversation, without 先问我再记 (`auto`), memory asks as little as it can. A lock is applied at once. So is a
-    // merge the judgement found faithful (`faithful`), as a dream's merge, one change of its own, judged and applied apart from the other
+    // In the owner's own conversation, without 先问我再记 (`auto`), memory asks as little as it can. A lock is applied at once. So is, with
+    // MEMORY.mergeAuto "on", a merge the judgement found faithful (`applying`), as a dream's merge, one change of its own, judged and applied apart from the other
     // ops in place: the one exception to their standing or falling together. The replaces and removes left need the owner's words
     // (`needsWords`, `asked`), and they depend on one another (the room check of the one counts on the space the other frees): when ANY of
     // them is held ALL of them are, together in one pending change, the card 先问我再记 produces. Adds apply at once. With 先问我再记 on
     // everything waits as one change anyway; a group review has nothing but adds.
     const auto = !group && !locked.memoryAsk;
-    const merged = auto ? faithful : [];
+    const merged = auto ? applying : [];
     const inMerge = opsOf(merged);
     const left = inPlaceLeft(changing, merged, auto);
     const held: Op[] = auto && left.some((op) => needsWords(op, input, asked)) ? left : [];
     const direct = changing.filter((op) => !held.includes(op) && !inMerge.has(op));
+    // A merge's shape not merged here (not faithful, not answered, observed, not asked) is a replace and removes like any other — but its
+    // new text is meant to carry what its other notes said: with one of them in the vault, it goes into the vault, whatever the sorting.
+    for (const m of merges) {
+      const notes = [m.replace, ...m.removes].map((op) => input.refs.get(op.ref)!);
+      if (!merged.includes(m) && notes.some((n) => n.vault)) sorted.vaults.set(vaultKey(notes[0]!.kind, m.replace.text), { vault: true, unsure: false });
+    }
     if (merged.length > 0) {
       // First: what it frees in a room is there for the adds below.
       const notes = merged.flatMap((m) => [m.replace, ...m.removes]).map((op) => input.refs.get(op.ref)!);
@@ -309,10 +349,15 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
         read: await asReviewed(t, ids, notes),
         resorted: new Map(),
         rooms: roomOf(config),
+        // What the review read: the merged text keeps an origin only when that conversation is its notes' origin too.
+        heardIn: conversationId,
       });
       if (result?.changeId) {
         mergedNow = result.applied.filter((o) => o.op === "merge").length;
         written.push({ changeId: result.changeId, unlock: false, reason: null });
+      } else if (result?.full) {
+        // Its room could not hold it: the notes stay as they are, and the owner is told the room is full, as for any review.
+        written.push({ changeId: await recordRoomFull(t, ids, locked.conversationId), unlock: false, reason: null });
       }
     }
     const apply = (list: Op[], status: "applied" | "pending") =>
@@ -339,7 +384,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     }
     if (held.length > 0) {
       const result = await apply(held, "pending");
-      if (result?.changeId) written.push({ changeId: result.changeId, unlock: false, reason: heldFor(held, merges) });
+      if (result?.changeId) written.push({ changeId: result.changeId, unlock: false, reason: heldFor(held, unfaithful) });
     }
     await markReviewed(t, agentId, conversationId, input.upToSeq);
     const stored: StoredMessage[] = [];
@@ -357,6 +402,11 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     // Every lock a review applies is one nobody was asked about.
     count(db, "lock_auto", made.filter((o) => o.op === "lock").length);
     count(db, "merge_auto", mergedNow);
+    // Observed: what "on" would have done with each merge judged — applied it at once, or left it to the rules of before.
+    if (observed) {
+      count(db, "merge_would_auto", faithful.length);
+      count(db, "merge_would_card", unfaithful.length);
+    }
     for (const reason of shown) count(db, `card_shown_${reason}`);
   }
   // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
@@ -396,9 +446,12 @@ async function askedFor(deps: PipelineDeps, agent: AgentRow, left: Op[], input: 
 /** Why a card waits for the owner (`card_shown_<reason>`): a remove not asked for, a merge not found faithful, 先问我再记, or anything else (a replace before the owner's word, a request to unlock). */
 type CardReason = "remove" | "unfaithful_merge" | "ask_first" | "other";
 
-/** Why the replaces and removes `held` wait: one of them is of a merge the judgement did not find faithful, else one is a remove the owner did not ask for, else a replace waits for the owner's word. */
-const heldFor = (held: readonly Op[], merges: readonly Merge[]): CardReason =>
-  merges.some((m) => held.includes(m.replace)) ? "unfaithful_merge" : held.some((op) => op.op === "remove") ? "remove" : "other";
+/**
+ * Why the replaces and removes `held` wait: one of them is of a merge the judgement did not find faithful (or did not answer about,
+ * `unfaithful`), else one is a remove the owner did not ask for (an observed faithful merge's too), else a replace waits for the owner's word.
+ */
+const heldFor = (held: readonly Op[], unfaithful: readonly Merge[]): CardReason =>
+  unfaithful.some((m) => held.includes(m.replace)) ? "unfaithful_merge" : held.some((op) => op.op === "remove") ? "remove" : "other";
 
 /** A merge in a review's answer: the replace of a note, whose new text is meant to carry what the notes the removes name said. */
 interface Merge {
@@ -434,21 +487,31 @@ function mergesOf(inPlaceOps: ReadonlyArray<Op>, refs: ReadonlyMap<string, RefNo
 }
 
 /**
- * The merges of `merges` the judgement finds faithful, asked exactly as a dream's merge is (sort.ts `addsNothing`: the old texts of the
- * replaced note and of the removed ones as the sources, the new text as the result, `faithfulAt`), one request each, outside any
- * transaction; only where a merge may apply at once — in the owner's own conversation (a group review only adds), without 先问我再记
- * (everything waits then) — and not once the service is closing. No answer is not faithful: such a merge follows the rule of before.
+ * Which of `merges` were asked about (`judged`) and which the judgement finds faithful, asked exactly as a dream's merge is (sort.ts
+ * `addsNothing`: the old texts of the replaced note and of the removed ones as the sources, the new text as the result, `faithfulAt`), one
+ * request each, outside any transaction; only where a merge may apply at once — in the owner's own conversation (a group review only
+ * adds), without 先问我再记 (everything waits then), with `MEMORY.mergeAuto` not "off" ("observe" asks, to count what it would do) — and
+ * not once the service is closing (a request under way ends with it). No answer is not faithful: such a merge follows the rule of before.
  */
-async function faithfulOf(deps: PipelineDeps, agent: AgentRow, merges: readonly Merge[], refs: ReadonlyMap<string, RefNote>, group: boolean, closing: AbortSignal): Promise<Merge[]> {
-  if (group || agent.memoryAsk) return [];
+async function faithfulOf(
+  deps: PipelineDeps,
+  agent: AgentRow,
+  merges: readonly Merge[],
+  refs: ReadonlyMap<string, RefNote>,
+  group: boolean,
+  closing: AbortSignal,
+): Promise<{ judged: Merge[]; faithful: Merge[] }> {
+  const judged: Merge[] = [];
+  const faithful: Merge[] = [];
+  if (group || agent.memoryAsk || deps.config.memory.mergeAuto === "off") return { judged, faithful };
   const sortDeps: SortDeps = { db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log };
-  const found: Merge[] = [];
   for (const m of merges) {
     if (closing.aborted) break;
     const sources = [m.replace, ...m.removes].map((op) => refs.get(op.ref)!.text);
-    if (await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text })) found.push(m);
+    judged.push(m);
+    if (await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, closing)) faithful.push(m);
   }
-  return found;
+  return { judged, faithful };
 }
 
 /** The ops of `merged`. */

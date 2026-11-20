@@ -361,6 +361,24 @@ describe("addsNothing", () => {
     expect(await addsNothing(deps(), change)).toBe(false);
     expect(await addsNothing(deps({ judge: null }), change)).toBe(false);
   });
+
+  it("the closing signal: nothing is asked once the service is closing, and a request under way ends with it (not faithful)", async () => {
+    const change = { kind: "merge" as const, sources: ["a", "b"], result: "a, b" };
+    judge.answer(() => ({ faithful: 0.9 }));
+    const closed = new AbortController();
+    closed.abort();
+    expect(await addsNothing(deps(), change, closed.signal)).toBe(false);
+    expect(judge.calls).toHaveLength(0);
+    expect(await used()).toBe(0);
+    // A request that would wait a minute for its answer ends as soon as the service closes.
+    judge.answer(() => "hang");
+    const closing = new AbortController();
+    setTimeout(() => closing.abort(), 20);
+    const started = Date.now();
+    expect(await addsNothing(deps({}, { judge: { ...JUDGE, timeoutMs: 60_000 } }), change, closing.signal)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(judge.calls).toHaveLength(1);
+  });
 });
 
 describe("ownerAsked", () => {
@@ -382,14 +400,14 @@ describe("ownerAsked", () => {
     expect(judge.calls[1]!.questions.map((q) => q.key)).toEqual(["explicit_forget"]);
   });
 
-  it("yes from explicitAt (0.5, as calibrated) up; below it, a missing answer, an error, a hang, no judge, the owner's allowance or memory's share of the day: no", async () => {
-    expect(app.deps.config.memory.explicitAt).toBe(0.5);
+  it("yes from explicitAt (0.7, as calibrated) up; below it, a missing answer, an error, a hang, no judge, the owner's allowance or memory's share of the day: no", async () => {
+    expect(app.deps.config.memory.explicitAt).toBe(0.7);
     const at = async (p: number) => {
       judge.answer(() => ({ explicit_forget: p }));
       return ownerAsked(deps(), ["x"]);
     };
-    expect(await at(0.5)).toBe(true);
-    expect(await at(0.49)).toBe(false);
+    expect(await at(0.7)).toBe(true);
+    expect(await at(0.69)).toBe(false);
     expect(await ownerAsked(deps({}, withMemory({ explicitAt: 0.4 })), ["x"])).toBe(true);
     judge.answer(() => ({ explicit_lock: 0.9 }));
     expect(await ownerAsked(deps(), ["x"])).toBe(false);

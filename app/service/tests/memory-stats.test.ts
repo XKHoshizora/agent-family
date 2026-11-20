@@ -38,6 +38,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   app.deps.config.memory.hearsayMute = "observe";
+  app.deps.config.memory.mergeAuto = "observe";
   app.deps.config.memory.flaggedMax = 20;
   await closeAllSockets();
   await memory().idle();
@@ -80,6 +81,12 @@ async function sayAndReview(w: Owned, text: string, answer: string): Promise<voi
   await memory().idle();
 }
 const seeded = async (who: Actor, text: string, vault: boolean) => (await api(app, who, "POST", "/api/memory/notes", { text, vault })).json;
+/** A note outside the vault nobody chose for (`vault_by` auto): an automatic lock may lock it, never one its owner took out. */
+const openAuto = async (who: Actor, text: string) => {
+  const note = await seeded(who, text, false);
+  await db.query("update owner_notes set vault_by = 'auto' where id = $1", [note.id]);
+  return note;
+};
 const ownerNotes = async (who: Actor) => (await api(app, who, "GET", "/api/memory/notes")).json.notes as Array<{ id: string; text: string; vault: boolean }>;
 /** Judge: a duplicate question says no, a sorting question `sort`. */
 const judging = (sort: number, faithful = 0.9) =>
@@ -146,8 +153,8 @@ describe("a review", () => {
     const w = await owned("st3");
     await seeded(w.owner, "喜欢鱼香肉丝", false);
     await seeded(w.owner, "住在东门", false);
-    await seeded(w.owner, "不吃辣", false);
-    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9, explicit_lock: 0.9 }));
+    await openAuto(w.owner, "不吃辣");
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9 }));
     await sayAndReview(w, "我现在喜欢麻婆豆腐了，住址忘掉吧，不吃辣那条锁起来", ops({ op: "replace", ref: "n1", text: "喜欢麻婆豆腐" }, { op: "remove", ref: "n2" }, { op: "lock", ref: "n3" }));
     // The replace and the remove have a merge's shape: the faithful question came first (no answer here: not faithful).
     expect(await stats()).toMatchObject({ review_run: 1, note_replaced: 1, note_removed: 1, note_locked: 1, lock_auto: 1, explicit_asked: 1, explicit_yes: 1, judge_memory_call_explicit: 1, judge_memory_call_faithful: 1 });
@@ -158,7 +165,7 @@ describe("a review", () => {
   it("the judgement's no and no answer at all are counted apart, and it is asked whatever the words", async () => {
     const w = await owned("st3b");
     await seeded(w.owner, "住在东门", false);
-    await seeded(w.owner, "不吃辣", false);
+    await openAuto(w.owner, "不吃辣");
     // A no for the forget statement; the lock is applied without a question.
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.2 }));
     await sayAndReview(w, "住址忘掉吧，不吃辣那条锁起来", ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
@@ -171,13 +178,37 @@ describe("a review", () => {
     expect(await stats()).toEqual({ review_run: 2, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 2, note_locked: 1, lock_auto: 1, card_shown_remove: 2 });
   });
 
-  it("a faithful merge applied at once counts merge_auto (no note_replaced, no note_removed) and the faithful question it needed", async () => {
+  it("a faithful merge applied at once (MEMORY.mergeAuto on) counts merge_auto (no note_replaced, no note_removed) and the faithful question it needed", async () => {
+    app.deps.config.memory.mergeAuto = "on";
     const w = await owned("st3d");
     await seeded(w.owner, "路由器在客厅", false);
     await seeded(w.owner, "路由器是华硕的", false);
     judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
     await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
     expect(await stats()).toEqual({ review_run: 1, merge_auto: 1, judge_memory_call_faithful: 1, judge_memory_call_sort: 1 });
+  });
+
+  it("observed (MEMORY.mergeAuto observe, the default): a merge the judgement finds faithful counts merge_would_auto, one it does not (or with no answer) merge_would_card; neither is applied at once; off asks and counts nothing", async () => {
+    const merge = ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" });
+    const routers = async (name: string) => {
+      const w = await owned(name);
+      await seeded(w.owner, "路由器在客厅", false);
+      await seeded(w.owner, "路由器是华硕的", false);
+      return w;
+    };
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9, explicit_forget: 0.1 }));
+    await sayAndReview(await routers("so1"), "把路由器那两条合成一条，多的删掉", merge);
+    expect(await stats()).toMatchObject({ merge_would_auto: 1, card_shown_remove: 1, judge_memory_call_faithful: 1 });
+    judge.answer(() => ({ sort: 0.95, faithful: 0.3, explicit_forget: 0.1 }));
+    await sayAndReview(await routers("so2"), "把路由器那两条合成一条，多的删掉", merge);
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
+    await sayAndReview(await routers("so3"), "把路由器那两条合成一条，多的删掉", merge);
+    const found = await stats();
+    expect(found).toMatchObject({ merge_would_auto: 1, merge_would_card: 2, card_shown_remove: 1, card_shown_unfaithful_merge: 2, judge_memory_call_faithful: 3 });
+    expect(found).not.toHaveProperty("merge_auto");
+    app.deps.config.memory.mergeAuto = "off";
+    await sayAndReview(await routers("so4"), "把路由器那两条合成一条，多的删掉", merge);
+    expect(await stats()).toMatchObject({ merge_would_auto: 1, merge_would_card: 2, judge_memory_call_faithful: 3, card_shown_remove: 2 });
   });
 
   it("whose call fails counts the run and the failure; one that answers garbage is no failure", async () => {
@@ -516,6 +547,10 @@ describe("a dream", () => {
   });
 
   it("a dream the memory allowance refuses is counted as refused, not as failed, and uses none of the day's three tries", async () => {
+    const { nextSiteMidnight } = await import("../src/accounts/store.ts");
+    // Start early in a site day by the test clock (the dream waits on it; the allowance is read on the wall clock): the hour of sweeps
+    // below can then never cross a site midnight, whenever the test runs.
+    clock.advance(nextSiteMidnight(new Date(clock.now()), app.deps.config.siteTimezone).getTime() - clock.now() + HOUR);
     const w = await owned("d5");
     const before = gateway.calls.length;
     await seeded(w.owner, "喜欢喝茶", false);
@@ -526,7 +561,6 @@ describe("a dream", () => {
     expect(await stats()).toEqual({ memory_refused_allowance: 1 });
     expect(gateway.calls.slice(before)).toHaveLength(0);
     // A new site day: the allowance is there again and the dream is made (three refusals counted as tries would have barred it for a day).
-    const { nextSiteMidnight } = await import("../src/accounts/store.ts");
     await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);
     gateway.reply(JSON.stringify({ ops: [] }));
     await night(nextSiteMidnight(new Date(clock.now()), app.deps.config.siteTimezone).getTime() - clock.now() + MIN);

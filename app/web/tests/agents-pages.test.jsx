@@ -1972,14 +1972,92 @@ describe("the 记忆 section of the form", () => {
     expect(patchAgent.mock.calls[0][1]).toEqual({ memory: false });
   });
 
-  it("a record with 记忆 off opens with the other two disabled, and turning it on sends memory: true", async () => {
-    const { patchAgent } = await openEditOf({ memory: false });
-    expect(sw(MEMORY).checked).toBe(false);
-    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([true, true]);
-    fireEvent.click(sw(MEMORY));
-    expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([false, false]);
-    await save();
-    expect(patchAgent.mock.calls[0][1]).toEqual({ memory: true });
+  describe("turning 记忆 back on for an Agent that had it off", () => {
+    const QUESTION = "关掉期间聊过的内容，要不要也让它回顾一下？";
+    const ONLY_LATER = "只记以后的";
+    const LOOK_BACK = "也回顾一下";
+    const question = () => inMain().queryByText(QUESTION);
+
+    it("opens with the other two disabled; turning it on does not turn it on yet: it asks, inline, whether to look back at what was said while it was off", async () => {
+      const { patchAgent } = await openEditOf({ memory: false });
+      expect(sw(MEMORY).checked).toBe(false);
+      expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([true, true]);
+      expect(question()).toBeNull();
+      fireEvent.click(sw(MEMORY));
+      expect(sw(MEMORY).checked).toBe(false);
+      expect(question()).toBeTruthy();
+      const buttons = within(question().closest(".memory-catch-up")).getAllByRole("button");
+      expect(buttons.map((b) => b.textContent)).toEqual([ONLY_LATER, LOOK_BACK]);
+      expect(buttons[0].className).toMatch(/primary/);
+      expect(patchAgent).not.toHaveBeenCalled();
+    });
+
+    it("只记以后的 turns it on at once with catchUp false; 也回顾一下 with catchUp true; the switch is then on and the question gone", async () => {
+      for (const [label, catchUp] of [[ONLY_LATER, false], [LOOK_BACK, true]]) {
+        const { patchAgent } = await openEditOf({ memory: false });
+        fireEvent.click(sw(MEMORY));
+        await click(inMain().getByRole("button", { name: label }));
+        expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ memory: true, catchUp }]);
+        expect(sw(MEMORY).checked).toBe(true);
+        expect(question()).toBeNull();
+        expect([sw(ASK).matches(":disabled"), sw(SHARED).matches(":disabled")]).toEqual([false, false]);
+        // Saving afterwards does not send it again.
+        await save();
+        expect(patchAgent).toHaveBeenCalledTimes(1);
+        cleanup();
+      }
+    });
+
+    it("one decision at a time: while the request is under way both buttons wait; a refusal is said under the question and the switch stays off", async () => {
+      const gate = deferred();
+      const record = agentOf(AG1, { model: SITE_MODEL, memory: false });
+      const patchAgent = vi.fn(() => gate.promise);
+      const app = await openAgents({ agents: [record], api: { patchAgent } });
+      app.transport.handlers.agent = () => record;
+      await openRow("小助手");
+      await click(inMain().getByRole("button", { name: /编辑/ }));
+      fireEvent.click(sw(MEMORY));
+      fireEvent.click(inMain().getByRole("button", { name: ONLY_LATER }));
+      await flush();
+      const buttons = within(question().closest(".memory-catch-up")).getAllByRole("button");
+      expect(buttons.map((b) => b.disabled)).toEqual([true, true]);
+      fireEvent.click(buttons[1]);
+      expect(patchAgent).toHaveBeenCalledTimes(1);
+      gate.reject(apiError(409, "agent_deleted"));
+      await flush();
+      expect(within(question().closest(".memory-catch-up")).getByRole("alert").textContent).not.toBe("");
+      expect(sw(MEMORY).checked).toBe(false);
+    });
+
+    it("Esc, or a press anywhere else, leaves it off and sends nothing", async () => {
+      const { patchAgent } = await openEditOf({ memory: false });
+      fireEvent.click(sw(MEMORY));
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(question()).toBeNull();
+      expect(sw(MEMORY).checked).toBe(false);
+      fireEvent.click(sw(MEMORY));
+      expect(question()).toBeTruthy();
+      fireEvent.pointerDown(inMain().getByText(HELPER));
+      expect(question()).toBeNull();
+      expect(sw(MEMORY).checked).toBe(false);
+      await save();
+      expect(patchAgent).not.toHaveBeenCalled();
+    });
+
+    it("turning it off stays one click, and creating an Agent never asks", async () => {
+      const { patchAgent } = await openEditOf({ memory: true });
+      fireEvent.click(sw(MEMORY));
+      expect(question()).toBeNull();
+      await save();
+      expect(patchAgent.mock.calls[0][1]).toEqual({ memory: false });
+      cleanup();
+      await openAgents({ api: { createAgent: vi.fn(async () => agentOf(AG1)) } });
+      await openCreate();
+      fireEvent.click(sw(MEMORY));
+      fireEvent.click(sw(MEMORY));
+      expect(question()).toBeNull();
+      expect(sw(MEMORY).checked).toBe(true);
+    });
   });
 
   it("creating: the defaults send none of them; a changed one is sent", async () => {

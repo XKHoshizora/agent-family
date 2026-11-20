@@ -302,6 +302,13 @@ export interface MemoryConfig {
    * or with no answer, it waits for the owner's yes. (A `lock` is applied at once without asking.) Above 0, at most 1.
    */
   explicitAt: number;
+  /**
+   * What a review does with a merge (a room's one replace and its removes) in the owner's own conversation: "on" applies it at once when
+   * the judgement model finds it faithful (`faithfulAt`), as a dream's merge; "observe" (default) asks the question and counts what it
+   * would have done (`merge_would_auto` / `merge_would_card`) but applies nothing at once — the merge's replace and removes follow the
+   * rules of any other (a card, unless the owner asked to forget); "off" does not ask.
+   */
+  mergeAuto: "off" | "observe" | "on";
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
   roomNotes: number;
   /**
@@ -363,8 +370,10 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   faithfulAt: probability(0.6),
   judgePerOwnerDay: positive(300, 1_000_000),
   judgeShare: probability(0.5),
-  // Above 0: at 0 every answer would be a yes. 0.5 as calibrated on the real judgement model (memory/sort.ts `ownerAsked`).
-  explicitAt: probability(0.5).refine((p) => p > 0),
+  // Above 0: at 0 every answer would be a yes. 0.7 as calibrated on the real judgement model (memory/sort.ts `ownerAsked`).
+  explicitAt: probability(0.7).refine((p) => p > 0),
+  // Observed until the faithful question has been measured on review merges (calibration/memory-merge.jsonl).
+  mergeAuto: z.enum(["off", "observe", "on"]).default("observe"),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),

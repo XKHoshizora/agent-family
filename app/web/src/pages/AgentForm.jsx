@@ -8,6 +8,7 @@ import { Select } from "../ui/Select.jsx";
 import { ChevronLeft, Lock } from "../icons.js";
 import { AgentAppellations } from "./AgentAppellations.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
+import { useDecision } from "./AgentChatBits.jsx";
 import { LEVELS, ModelPicker, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
 import { refusalText, settled, useAction } from "./useAction.js";
 
@@ -36,6 +37,8 @@ const MEMORY_SWITCHES = [
   ["memoryAsk", "先问我再记", "记之前先在会话里问你，你同意了才记。"],
   ["sharedNotes", "使用共用的“关于我”", "和你名下其他开着这一项的 Agent 共用同一份。"],
 ];
+/** Asked, under 记忆, when it is turned back on for an Agent that has had it off: the answer is sent at once (`catchUp`). */
+const CATCH_UP_QUESTION = "关掉期间聊过的内容，要不要也让它回顾一下？";
 /** What the service takes when a switch is not said (the form's defaults, `recordFields`). */
 const MEMORY_DEFAULTS = { memory: true, memoryAsk: false, sharedNotes: true };
 const MEMORY_KEYS = Object.keys(MEMORY_DEFAULTS);
@@ -183,6 +186,27 @@ export function AgentForm({ agent = null }) {
   current.current = f;
   const [changedElsewhere, setChangedElsewhere] = useState(false);
   const editing = agent !== null;
+  /** 记忆 turned back on for an Agent that has had it off: the question whether to look back is open (nothing is on until it is answered). */
+  const [askCatchUp, setAskCatchUp] = useState(false);
+  const catchUpRef = useRef(null);
+  const catchUp = useDecision();
+
+  // Esc, or a press anywhere else, closes the question and leaves 记忆 off (not while its answer is being sent).
+  useEffect(() => {
+    if (!askCatchUp || catchUp.busy !== null) return undefined;
+    const outside = (event) => {
+      if (!catchUpRef.current?.contains(event.target)) setAskCatchUp(false);
+    };
+    const escape = (event) => {
+      if (event.key === "Escape") setAskCatchUp(false);
+    };
+    document.addEventListener("pointerdown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [askCatchUp, catchUp.busy]);
 
   // Keyed by the record's values (the view model makes a new Agent object whenever anything changes).
   useEffect(() => {
@@ -264,6 +288,23 @@ export function AgentForm({ agent = null }) {
     const value = event.target.checked;
     edited.current.add(key);
     setF((cur) => ({ ...cur, [key]: value }));
+  };
+  /**
+   * 记忆: turned back on for an Agent that has had it off (not the create form), it is not just flipped — the question under it asks
+   * whether what was said while it was off is to be looked back at, and its answer turns it on at once (`answerCatchUp`). Off is one click.
+   */
+  const setMemory = (event) => {
+    if (editing && event.target.checked && !record.memory && !f.memory) {
+      setAskCatchUp(true);
+      return;
+    }
+    setAskCatchUp(false);
+    setSwitch("memory")(event);
+  };
+  const answerCatchUp = async (lookBack) => {
+    const res = await catchUp.decide(lookBack ? "back" : "later", actions.patchAgent(agent.id, { memory: true, catchUp: lookBack }));
+    // On: the record says so, and the switch shows it (a setting this form did not change follows the record).
+    if (res.ok && catchUp.mounted.current) setAskCatchUp(false);
   };
   const setName = (event) => {
     const value = event.target.value;
@@ -602,8 +643,26 @@ export function AgentForm({ agent = null }) {
         <fieldset className="form-section">
           <legend>记忆</legend>
           <div className="field">
-            <Switch checked={f.memory} onChange={setSwitch("memory")} label="记忆" hint={MEMORY_HELPER} hintClass="field-hint" />
+            <Switch checked={f.memory} onChange={setMemory} label="记忆" hint={MEMORY_HELPER} hintClass="field-hint" />
           </div>
+          {askCatchUp && (
+            <div className="memory-catch-up" ref={catchUpRef}>
+              <p>{CATCH_UP_QUESTION}</p>
+              <div className="card-actions">
+                <Btn variant="primary" disabled={catchUp.busy !== null} onClick={() => answerCatchUp(false)}>
+                  {catchUp.busy === "later" ? "处理中…" : "只记以后的"}
+                </Btn>
+                <Btn disabled={catchUp.busy !== null} onClick={() => answerCatchUp(true)}>
+                  {catchUp.busy === "back" ? "处理中…" : "也回顾一下"}
+                </Btn>
+              </div>
+              {catchUp.refusal && (
+                <p className="field-msg" role="alert">
+                  {catchUp.refusal}
+                </p>
+              )}
+            </div>
+          )}
           {/* A disabled fieldset turns off every switch inside it: with 记忆 off the other two do nothing. */}
           <fieldset className="memory-switches" disabled={!f.memory}>
             {MEMORY_SWITCHES.map(([key, label, hint]) => (

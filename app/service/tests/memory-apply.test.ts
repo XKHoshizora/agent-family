@@ -134,7 +134,20 @@ describe("applyOps", () => {
       ["lock", "to lock", "to lock", false, true],
     ]);
     expect((await ownerNotes(w)).map((n) => [n.text, n.vault])).toEqual([["new owner", false]]);
-    expect((await selfNotes(w)).map((n) => [n.text, n.vault, n.vaultBy])).toEqual([["new self", false, "auto"], ["to lock", true, "owner"]]);
+    // A lock applied at once is nobody's choice: the model's (`auto`), never the owner's.
+    expect((await selfNotes(w)).map((n) => [n.text, n.vault, n.vaultBy])).toEqual([["new self", false, "auto"], ["to lock", true, "auto"]]);
+  });
+
+  it("a lock applied at once never locks a note the owner took out of the vault (nothing recorded); a pending one still carries it, and the owner's yes is theirs", async () => {
+    const w = await world();
+    const opened = await seed(w, "owner", "opened by the owner", { vault: false, vaultBy: "owner" });
+    const refs = new Map([["a", ref("owner", opened)]]);
+    expect(await run(w, [{ op: "lock", ref: "a" }], refs)).toBeNull();
+    expect((await ownerNotes(w)).map((n) => [n.vault, n.vaultBy])).toEqual([[false, "owner"]]);
+    const pending = await run(w, [{ op: "lock", ref: "a" }], refs, { status: "pending" });
+    expect(pending!.applied.map((a) => [a.op, a.vaultAfter])).toEqual([["lock", true]]);
+    expect(await confirm(w, pending!.changeId!)).toMatchObject([{ op: "lock" }]);
+    expect((await ownerNotes(w)).map((n) => [n.vault, n.vaultBy])).toEqual([[true, "owner"]]);
   });
 
   it("does removes and replaces before adds: a merge frees room for its add", async () => {
@@ -746,7 +759,8 @@ describe("fix round 2", () => {
     const w = await world();
     const a = await seed(w, "owner", "lock me", { vault: false, unsure: true });
     const r = await run(w, [{ op: "lock", ref: "a" }], new Map([["a", ref("owner", a)]]));
-    expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner", unsure: true });
+    // The model's lock, applied at once: nobody chose it (`auto`).
+    expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "auto", unsure: true });
     await patchNote(w, a, { vault: true });
     expect(await undo(w, r!.changeId!)).toBe("stale");
     expect((await ownerNotes(w))[0]).toMatchObject({ vault: true, vaultBy: "owner", unsure: false });

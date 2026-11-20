@@ -10,6 +10,7 @@
 //     split          memory-split.jsonl          does a split of a note add nothing and lose nothing: the question a merge and a rewrite share too (sort.ts addsNothing)
 //     hearsay-check  memory-hearsay-check.jsonl  the two pre-check questions before a hearsay call (hearsay.ts worthACall)
 //     explicit       memory-explicit.jsonl       did the owner ask to forget or delete: the question that lets a review's remove apply at once (sort.ts ownerAsked), asked of every window whatever its words
+//     merge          memory-merge.jsonl          does a review's merge (a replace and the removes of its room) keep everything and add nothing: the faithful question a review asks before a merge may apply at once (pipeline.ts faithfulOf; MEMORY.mergeAuto)
 //   modes through a chat model (MEMORY_CHAT_URL, MEMORY_CHAT_KEY, MEMORY_CHAT_MODEL; POST <url>/chat/completions):
 //     review         memory-review.jsonl         the review call over an owner's own conversation (review.ts)  [--mixed-notes] [--today YYYY-MM-DD] [--language <code>]
 //     rooms          (built in)                  a notes room filled to its limit in weight, per language, in the reply prompt (prompt.ts notesPassage), one note first / middle / last, with the provider's real prompt tokens next to its weight (does 1 weight = 1 token hold?); and the dream call over it  [--repeat <n>] [--no-dream] [--language <code>]
@@ -28,7 +29,7 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const SERVICE = resolve(HERE, '..')
 const CAL = resolve(SERVICE, 'calibration')
 
-const MODES = ['shareable', 'same', 'flags', 'split', 'hearsay-check', 'explicit', 'review', 'rooms']
+const MODES = ['shareable', 'same', 'flags', 'split', 'hearsay-check', 'explicit', 'merge', 'review', 'rooms']
 const SAMPLE_FILE = {
   shareable: 'memory-shareable.jsonl',
   same: 'memory-same.jsonl',
@@ -36,6 +37,7 @@ const SAMPLE_FILE = {
   split: 'memory-split.jsonl',
   'hearsay-check': 'memory-hearsay-check.jsonl',
   explicit: 'memory-explicit.jsonl',
+  merge: 'memory-merge.jsonl',
   review: 'memory-review.jsonl',
 }
 const LANGS = ['zh', 'ja', 'en', 'mix']
@@ -55,21 +57,23 @@ const F = {
   store: 'src/memory/store.ts',
   weight: 'src/metering/tokens.ts',
   config: 'src/config.ts',
+  pipeline: 'src/memory/pipeline.ts',
 }
 const FILE_MODES = {
-  [F.sort]: ['shareable', 'same', 'split', 'explicit'],
+  [F.sort]: ['shareable', 'same', 'split', 'explicit', 'merge'],
   [F.cand]: ['flags'],
   [F.listeners]: ['flags'],
   [F.hear]: ['hearsay-check'],
   [F.review]: ['review', 'explicit'],
   [F.language]: ['review', 'rooms'],
   [F.ops]: ['review'],
-  [F.clean]: ['review'],
+  [F.clean]: ['review', 'merge'],
   [F.dream]: ['rooms'],
   [F.prompt]: ['review', 'flags', 'rooms', 'explicit'],
   [F.store]: ['review', 'rooms'],
-  [F.weight]: ['review', 'rooms', 'explicit'],
+  [F.weight]: ['review', 'rooms', 'explicit', 'merge'],
   [F.config]: MODES,
+  [F.pipeline]: ['merge'],
 }
 
 // ---------- drift self-test: every copied prompt and rule is registered with the source it was copied from
@@ -165,6 +169,13 @@ SN(F.sort, 'explicit forget question', 'const questions: Question[] = [{ key: FO
 SN(F.sort, 'explicit probability', 'if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) {')
 SN(F.sort, 'explicit rule', 'const asked = p >= deps.config.memory.explicitAt;')
 const EXPLICIT_KEY = 'explicit_forget'
+
+// src/memory/pipeline.ts: a review's merge is asked the faithful question exactly as a dream's (sort.ts addsNothing, kind merge): the
+// stored texts of the replaced note and of the removed ones as the sources, the replace's new text (cleaned, modelNote) as the result.
+SN(F.pipeline, 'merge sources', 'const sources = [m.replace, ...m.removes].map((op) => refs.get(op.ref)!.text);')
+SN(F.pipeline, 'merge question', 'await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, closing)')
+SN(F.pipeline, 'merge applied only on', 'const applying = deps.config.memory.mergeAuto === "on" ? faithful : [];')
+SN(F.config, 'mergeAuto default', 'mergeAuto: z.enum(["off", "observe", "on"]).default("observe"),')
 
 // src/agents/proactive/candidates.ts and listeners.ts
 const NEW_MARK = '【新】'
@@ -541,7 +552,7 @@ const DEFAULTS = {
   hearsayAt: 0.65,
   ownAt: 0.6,
   faithfulAt: 0.6,
-  explicitAt: 0.5,
+  explicitAt: 0.7,
   hearsayNewAt: 0.7,
   hearsayAbuseAt: 0.6,
   roomOwner: 2000,
@@ -916,7 +927,39 @@ function checkExplicit(samples) {
   return { errors, counts: countBy(samples, (s) => s.cat) }
 }
 
-const CHECKERS = { shareable: checkShareable, same: checkSame, flags: checkFlags, split: checkSplit, 'hearsay-check': checkHearsay, explicit: checkExplicit, review: checkReview }
+// A review's merge: 'faithful' keeps every fact of every source and adds none (2 and 3 sources; `reworded`: said quite differently, dates
+// and numbers included). The near misses must not pass: 'dropped' (a source's fact left out), 'changed' (`what`: a number, a date, a name
+// or a negation changed), 'added' (a detail no source has), 'fused' (two people or two events made one), 'correction' (a later note
+// corrects an earlier one and the result keeps the wrong value), 'unrelated' (a remove of something else pulled into the merge: its fact
+// is gone).
+const MERGE_CATS = ['faithful', 'dropped', 'changed', 'added', 'fused', 'correction', 'unrelated']
+const MERGE_CHANGES = ['number', 'date', 'name', 'negation']
+function checkMerge(samples) {
+  const errors = []
+  baseChecks(samples, errors, LANGS)
+  for (const [n, s] of samples.entries()) {
+    const at = `#${n + 1} ${s.id}`
+    if (!MERGE_CATS.includes(s.cat)) errors.push(`${at}: 未知的 cat ${s.cat}`)
+    if (!isStrArr(s.sources) || s.sources.length < 2 || s.sources.length > 4) errors.push(`${at}: sources 要是 2 到 4 条字符串（被替换的那条在前，再是被删掉的）`)
+    if (!isStr(s.result)) errors.push(`${at}: result 缺失`)
+    else if (modelNote(s.result) !== s.result) errors.push(`${at}: result 不是生产会留下的样子（modelNote 会改它或拒绝它）`)
+    if (typeof s.expect?.faithful !== 'boolean' || Object.keys(s.expect ?? {}).length !== 1) errors.push(`${at}: expect 只要一个布尔的 faithful`)
+    else if (s.expect.faithful !== (s.cat === 'faithful')) errors.push(`${at}: ${s.cat} 的 expect.faithful 应为 ${s.cat === 'faithful'}`)
+    if (s.cat === 'changed' && !MERGE_CHANGES.includes(s.what)) errors.push(`${at}: changed 要写 what（${MERGE_CHANGES.join(' / ')}）`)
+    if (s.cat !== 'changed' && s.what !== undefined) errors.push(`${at}: 只有 changed 写 what`)
+    if (s.reworded !== undefined && (s.reworded !== true || s.cat !== 'faithful')) errors.push(`${at}: reworded 只用在 faithful 上，写 true`)
+  }
+  if (samples.length < 60) errors.push(`一共 ${samples.length} 条，至少要 60`)
+  for (const c of MERGE_CATS) if (!samples.some((s) => s.cat === c)) errors.push(`缺 ${c} 的样本`)
+  for (const l of LANGS) if (!samples.some((s) => s.lang === l)) errors.push(`缺 ${l} 的样本`)
+  const faithful = samples.filter((s) => s.cat === 'faithful')
+  for (const k of [2, 3]) if (!faithful.some((s) => s.sources?.length === k)) errors.push(`faithful 缺 ${k} 条合成一条的样本`)
+  if (!faithful.some((s) => s.reworded === true)) errors.push('faithful 缺换了说法（reworded）的样本')
+  for (const w of MERGE_CHANGES) if (!samples.some((s) => s.cat === 'changed' && s.what === w)) errors.push(`changed 缺 what = ${w} 的样本`)
+  return { errors, counts: countBy(samples, (s) => s.cat) }
+}
+
+const CHECKERS = { shareable: checkShareable, same: checkSame, flags: checkFlags, split: checkSplit, 'hearsay-check': checkHearsay, explicit: checkExplicit, merge: checkMerge, review: checkReview }
 
 // ---------- small helpers
 
@@ -1505,6 +1548,65 @@ function explicitReport(results, model, samples) {
   return lines.join('\n')
 }
 
+// ---------- mode: merge
+
+function mergeTasks(samples, model) {
+  // As pipeline.ts faithfulOf asks it (sort.ts addsNothing, kind merge): the sources (the replaced note first, then the removed ones),
+  // the one result.
+  return samples.map((s) => ({ key: s.id, sample: s, body: { model, state: JSON.stringify({ sources: s.sources, results: [s.result] }), questions: { faithful: { type: 'noul', instructions: FAITHFUL_INSTRUCTIONS } } } }))
+}
+function mergeReport(results, model) {
+  const rec = results.map((r) => ({ ...r.sample, score: noulOf(r, 'faithful'), error: r.ok ? '没有 faithful.noul' : r.error }))
+  const ok = rec.filter((r) => r.score !== undefined)
+  const failed = rec.filter((r) => r.score === undefined)
+  const lines = []
+  const out = (s = '') => lines.push(s)
+  const ths = grid(0.4, 0.95, 0.05)
+  const at = DEFAULTS.faithfulAt
+  out(`复习时的合并校验校准报告（merge；MEMORY.mergeAuto 为 on 时分数 >= faithfulAt 的合并不问主人就生效）  模型 ${model}  样本 ${rec.length}（成功 ${ok.length}，失败 ${failed.length}）  默认 faithfulAt = ${at}，mergeAuto 默认 observe`)
+  out('  faithful 应当过；dropped / changed / added / fused / correction / unrelated 一条都不该过（必须是 0：过了就是没问主人就删掉了笔记里的一件事，30 天内可撤销）。')
+  out()
+  out('一、分数分布（最小 / 中位 / 最大）')
+  const groupings = [
+    ['按类别', (r) => r.cat],
+    ['按语言', (r) => r.lang],
+    ['按类别 / 语言', (r) => `${r.cat} / ${r.lang}`],
+    ['changed 按改了什么', (r) => (r.cat === 'changed' ? r.what : null)],
+    ['faithful 按来源条数', (r) => (r.cat === 'faithful' ? `${r.sources.length} 条${r.reworded ? '（换了说法）' : ''}` : null)],
+  ]
+  for (const [title, f] of groupings) {
+    out(`  ${title}`)
+    const g = groupBy(ok.filter((r) => f(r) !== null), f)
+    for (const k of [...g.keys()].sort()) out(`    ${pad(k, 22)} ${pad(g.get(k).length, 4)} ${dist(g.get(k).map((r) => r.score))}`)
+  }
+  out()
+  out('二、各类别里达到 T（会马上合并）的条数')
+  tableOf(out, [...groupBy(ok, (r) => r.cat)].sort(), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`)
+  out('  按语言（faithful 过 / 总；其余过 / 总）')
+  tableOf(out, [...groupBy(ok.filter((r) => r.cat === 'faithful'), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`)
+  tableOf(out, [...groupBy(ok.filter((r) => r.cat !== 'faithful'), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`not faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`, 24)
+  out()
+  const pass = (items, T) => items.filter((r) => r.score >= T).length
+  const good = ok.filter((r) => r.cat === 'faithful')
+  const bad = ok.filter((r) => r.cat !== 'faithful')
+  out('  T     faithful 过    不该过却过了(必须0)')
+  for (const T of ths) out(`  ${T.toFixed(2)}  ${pad(`${pass(good, T)}/${good.length}`, 13)}  ${pass(bad, T)}/${bad.length}`)
+  out()
+  out(`三、站在错误一侧的样本（按默认 faithfulAt = ${at}）`)
+  const wrong = ok.filter((r) => (r.cat === 'faithful' ? r.score < at : r.score >= at))
+  if (wrong.length === 0) out('  没有')
+  for (const r of wrong.sort((a, b) => Number(a.cat === 'faithful') - Number(b.cat === 'faithful') || b.score - a.score)) {
+    out(`  ${pad(r.id, 18)} ${pad(r.cat, 10)} ${f2(r.score)}  ${r.cat === 'faithful' ? '忠实的合并被拒（照旧变成卡片）' : '漏了/改了/多了内容的合并被放行'}：${r.sources.join(' ＋ ')} → ${r.result}`)
+  }
+  if (failed.length) out(`\n请求失败的样本（不计入）：${failed.map((r) => `${r.id}（${r.error}）`).join('、')}`)
+  out()
+  out('需要决定的数字')
+  const T0 = lowest(ths, (T) => pass(bad, T) === 0)
+  out(`  - faithfulAt：当前 ${at}，误放 ${pass(bad, at)} / ${bad.length}，faithful 过 ${pass(good, at)} / ${good.length}。零误放的最低门槛：${T0?.toFixed(2) ?? '格子里没有'}${T0 === undefined ? '' : `；这时 faithful 能过 ${pass(good, T0)} / ${good.length}`}。`)
+  out('  - MEMORY.mergeAuto：只有在用的 faithfulAt 下误放为 0，才考虑从 observe 改成 on；线上 observe 期间看 merge_would_auto / merge_would_card（memory:stats）。')
+  return lines.join('\n')
+}
+
 // ---------- mode: review
 
 function todayText(args) {
@@ -1901,6 +2003,7 @@ async function main() {
     else if (mode === 'split') tasks = splitTasks(samples, judgeModel)
     else if (mode === 'hearsay-check') tasks = hearsayTasks(samples, judgeModel)
     else if (mode === 'explicit') tasks = explicitTasks(samples, judgeModel)
+    else if (mode === 'merge') tasks = mergeTasks(samples, judgeModel)
     else tasks = reviewTasks(samples, args, chatModel)
   }
 
@@ -1938,6 +2041,7 @@ async function main() {
   else if (mode === 'split') report = splitReport(results, model)
   else if (mode === 'hearsay-check') report = hearsayReport(results, model)
   else if (mode === 'explicit') report = explicitReport(results, model, samples)
+  else if (mode === 'merge') report = mergeReport(results, model)
   else if (mode === 'review') report = reviewReport(results, model, args)
   else report = roomsReport(results, model, args)
   console.log(report)

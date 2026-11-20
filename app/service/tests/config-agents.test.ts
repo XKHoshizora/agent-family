@@ -461,7 +461,8 @@ describe("the memory configuration", () => {
     faithfulAt: 0.6,
     judgePerOwnerDay: 300,
     judgeShare: 0.5,
-    explicitAt: 0.5,
+    explicitAt: 0.7,
+    mergeAuto: "observe",
     roomNotes: 150,
     passageShare: 0.25,
     freeDailyPoints: 20,
@@ -496,6 +497,11 @@ describe("the memory configuration", () => {
     // Not borrowed from the attachment sweep's setting.
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "0" }).memory.changesSweepMs).toBe(3_600_000);
     for (const bad of ['{"changesSweepMs":-1}', '{"changesSweepMs":1.5}', '{"changesSweepMs":86400001}', '{"changesSweepMs":"3600000"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+  });
+
+  test("what a review does with a merge the judgement finds faithful, mergeAuto: observe by default (asked and counted, not applied at once), on, or off", () => {
+    for (const mode of ["off", "observe", "on"]) expect(loadConfig({ ...base, MEMORY: JSON.stringify({ mergeAuto: mode }) }).memory.mergeAuto).toBe(mode);
+    for (const bad of ['{"mergeAuto":"yes"}', '{"mergeAuto":true}', '{"mergeAuto":null}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
   });
 
   test("the hearsay limits can be set", () => {

@@ -7,6 +7,7 @@ import { EXPLICIT, REMEMBER, reviewInput } from "../src/memory/review.ts";
 import { siteDay } from "../src/accounts/store.ts";
 import { JudgeError } from "../src/judge/client.ts";
 import { weight } from "../src/memory/weight.ts";
+import { notesFor, setNewNotes } from "../src/memory/store.ts";
 import { readOwnedAgent } from "../src/agents/store.ts";
 import { toWireForReaders } from "../src/messages/read.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -60,6 +61,7 @@ beforeEach(() => {
   judge.answer(() => ({ sort: 0.05, ...ASKED }));
 });
 afterEach(async () => {
+  app.deps.config.memory.mergeAuto = "observe";
   await closeAllSockets();
   await memory().idle();
   expect(gateway.pending()).toBe(0);
@@ -106,6 +108,12 @@ const chips = async (who: Actor, conv: string) => (await messagesOf(who, conv)).
 const roomOf = async (who: Actor) => (await api(app, who, "GET", "/api/memory/notes")).json;
 const seeded = async (who: Actor, agentId: string, text: string, vault: boolean, kind: "owner" | "self" = "owner") =>
   (await api(app, who, "POST", kind === "owner" ? "/api/memory/notes" : `/api/agents/${agentId}/memory/notes`, { text, vault })).json;
+/** A note outside the vault that nobody chose for (`vault_by` auto, as the sorter leaves one): not one its owner took out. */
+const openAuto = async (who: Actor, agentId: string, text: string, kind: "owner" | "self" = "owner") => {
+  const note = await seeded(who, agentId, text, false, kind);
+  await db.query(`update ${kind === "owner" ? "owner_notes" : "agent_notes"} set vault_by = 'auto' where id = $1`, [note.id]);
+  return note;
+};
 const reviewedSeq = async (agentId: string, conv: string): Promise<number | null> => {
   const r = await db.query<{ s: string }>("select reviewed_seq::text as s from memory_review_state where agent_id = $1 and conversation_id = $2", [agentId, conv]);
   return r.rows[0] ? Number(r.rows[0].s) : null;
@@ -438,6 +446,76 @@ describe("when a review runs", () => {
   });
 });
 
+describe("switching memory off and on again", () => {
+  const patch = (w: World, body: Record<string, unknown>) => api(app, w.owner, "PATCH", `/api/agents/${w.agent.id}`, body);
+  const SECRET = "我前阵子去看了心理医生，确诊了焦虑症";
+  const seqOf = async (conv: string) => Number((await db.query<{ seq: string }>("select seq::text from conversations where id = $1", [conv])).rows[0]!.seq);
+  /** What the review call was shown (its user message). */
+  const shown = (call: { messages: Array<{ parts: unknown[] }> }) => JSON.stringify(call.messages);
+
+  it("on again with catchUp false (or not said): nothing said while it was off is ever reviewed — the next review reads only what came after", async () => {
+    for (const [name, body] of [["sw1", { memory: true, catchUp: false }], ["sw1b", { memory: true }]] as const) {
+      first = gateway.calls.length;
+      const w = await owned(name);
+      expect((await patch(w, { memory: false })).status).toBe(200);
+      await exchange(w, SECRET);
+      expect(reviewCalls()).toHaveLength(0);
+      expect((await patch(w, body)).status).toBe(200);
+      expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
+      await exchange(w, "今天天气不错");
+      await quietThen(ops(add("今天天气不错")));
+      const calls = reviewCalls();
+      expect([name, calls.length]).toEqual([name, 1]);
+      expect([name, shown(calls[0]!).includes("心理医生")]).toEqual([name, false]);
+      expect([name, shown(calls[0]!).includes("今天天气不错")]).toEqual([name, true]);
+      expect([name, (await roomOf(w.owner)).notes.some((n: { text: string }) => n.text.includes("心理医生"))]).toEqual([name, false]);
+    }
+  });
+
+  it("on again with catchUp true: the review positions stay where they were, and one review of the own conversation runs at once over what was said meanwhile", async () => {
+    const w = await owned("sw2");
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    await exchange(w, SECRET);
+    expect(reviewCalls()).toHaveLength(0);
+    gateway.reply(ops());
+    expect((await patch(w, { memory: true, catchUp: true })).status).toBe(200);
+    await memory().idle();
+    const calls = reviewCalls();
+    expect(calls).toHaveLength(1);
+    expect(shown(calls[0]!)).toContain("心理医生");
+  });
+
+  it("catchUp is only for switching memory back on: with memory already on, when switching it off, or alone, it is 400 and nothing changes", async () => {
+    const w = await owned("sw3");
+    for (const body of [{ memory: true, catchUp: false }, { memory: true, catchUp: true }, { catchUp: true }, { memory: false, catchUp: false }, { memory: true, catchUp: "yes" }]) {
+      expect([body, (await patch(w, body)).status]).toEqual([body, 400]);
+    }
+    expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(true);
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    expect((await patch(w, { memory: false, catchUp: true })).status).toBe(400);
+    expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(false);
+  });
+
+  it("switching off discards its waiting cards and drops its flags not yet acted on, in the same request; the notes stay. On again: every review position of the Agent, its groups' too, is the conversation's current seq", async () => {
+    const w = await owned("sw4", { memoryAsk: true });
+    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    await exchange(w, "我喜欢咖啡");
+    await quietThen(ops(add("喜欢咖啡")));
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ pending: true });
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "sw4_mia"), await signUp(app, "sw4_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await db.query("insert into memory_flags (agent_id, conversation_id, seq, kind) values ($1, $2, 1, 'hearsay'), ($1, $2, 1, 'own')", [w.agent.id, g]);
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ pending: false, status: "discarded" });
+    expect((await db.query("select count(*)::int as n from memory_flags where agent_id = $1", [w.agent.id])).rows[0].n).toBe(0);
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["喜欢喝茶"]);
+    await say(w.owner, g, "我准备辞职了，先别说出去");
+    expect((await patch(w, { memory: true })).status).toBe(200);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
+  });
+});
+
 describe("what a review does with an answer", () => {
   it("a garbage answer: nothing changes, reviewed_seq moves, no chip", async () => {
     const w = await owned("sol");
@@ -638,7 +716,7 @@ describe("what a review does with an answer", () => {
 
   it("replace, remove and lock are told in the owner's words, and undo puts everything back", async () => {
     const w = await owned("yan");
-    const [a, b, c] = [await seeded(w.owner, w.agent.id, "喜欢鱼香肉丝", false), await seeded(w.owner, w.agent.id, "住在北京", false), await seeded(w.owner, w.agent.id, "不吃辣", false)];
+    const [a, b, c] = [await seeded(w.owner, w.agent.id, "喜欢鱼香肉丝", false), await seeded(w.owner, w.agent.id, "住在北京", false), await openAuto(w.owner, w.agent.id, "不吃辣")];
     const before = await roomOf(w.owner);
     await sayAndReview(w, "我现在喜欢麻婆豆腐了，住址忘掉吧，不吃辣那条锁起来", ops({ op: "replace", ref: "n1", text: "现在喜欢麻婆豆腐（以前喜欢鱼香肉丝）" }, { op: "remove", ref: "n2" }, { op: "lock", ref: "n3" }));
     const [chip] = await chips(w.owner, w.conv);
@@ -909,13 +987,32 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text).sort()).toEqual(["下周去北京", "喜欢茶"].sort());
   });
 
+  // Notes the sorter left open (`vault_by` auto): an automatic lock may put them in the vault. One the owner took out it never does (below).
   const heldWorld = async (name: string) => {
     const w = await owned(name);
-    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
-    await seeded(w.owner, w.agent.id, "住在上海", false);
+    await openAuto(w.owner, w.agent.id, "喜欢喝茶");
+    await openAuto(w.owner, w.agent.id, "住在上海");
     return w;
   };
   const texts = async (w: World) => (await roomOf(w.owner)).notes.map((n: { text: string; vault: boolean }) => [n.text, n.vault]);
+
+  it("an automatic lock never puts back into the vault a note its owner took out of it (the lock is dropped: no card, no line), and a lock it applies is the model's doing, vault_by auto; undo gives the note back as it was", async () => {
+    const w = await owned("opn");
+    // Taken out by the owner (their 不进保险箱): vault false, vault_by the owner's.
+    const theirs = await seeded(w.owner, w.agent.id, "周末去爬山", false);
+    const sorted = await openAuto(w.owner, w.agent.id, "住在上海");
+    judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
+    await sayAndReview(w, "记住我养了只猫", ops({ op: "lock", ref: "n1" }, { op: "lock", ref: "n2" }, add("养了一只猫")));
+    const row = async (id: string) => (await db.query("select vault, vault_by from owner_notes where id = $1", [id])).rows[0];
+    expect(await row(theirs.id)).toEqual({ vault: false, vault_by: "owner" });
+    expect(await row(sorted.id)).toEqual({ vault: true, vault_by: "auto" });
+    const notices = await chips(w.owner, w.conv);
+    expect(notices.map((n) => [n.system.pending, n.system.lines])).toEqual([[false, ["锁进了保险箱：住在上海", "记住了：养了一只猫"]]]);
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${notices[0].system.changeId}/undo`)).json).toEqual({ status: "undone" });
+    expect(await row(sorted.id)).toEqual({ vault: false, vault_by: "auto" });
+    expect(await row(theirs.id)).toEqual({ vault: false, vault_by: "owner" });
+  });
 
   it("a lock applies at once, with no question, in the notice of what was applied with it; a remove the owner did not ask for (the judgement's no) is ONE pending card of its own", async () => {
     const w = await heldWorld("hal");
@@ -1115,6 +1212,8 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
 });
 
 describe("a merge in a review: a room's one replace and its removes, applied at once when it is faithful", () => {
+  // Applied at once only with MEMORY.mergeAuto "on" (the default "observe" only asks and counts: below).
+  beforeEach(() => void (app.deps.config.memory.mergeAuto = "on"));
   const routers = async (name: string, over: Record<string, unknown> = {}) => {
     const w = await owned(name, over);
     const a = await seeded(w.owner, w.agent.id, "路由器在客厅", false);
@@ -1148,7 +1247,15 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
     expect(after).toMatchObject([{ id: w.a.id, text: "路由器在客厅，是华硕的", vault: false, strength: 5 }]);
     const notices = await chips(w.owner, w.conv);
     expect(notices).toHaveLength(1);
-    expect(notices[0].system).toMatchObject({ pending: false, status: "applied", phase: "rest", count: 1, lines: ["合并了 2 条：路由器在客厅，是华硕的"], vaultLines: [false] });
+    // What was merged is listed under the merge (原来：…, every source): a merge that lost something shows it, and its undo is informed.
+    expect(notices[0].system).toMatchObject({
+      pending: false,
+      status: "applied",
+      phase: "rest",
+      count: 3,
+      lines: ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"],
+      vaultLines: [false, false, false],
+    });
     const [change] = (await db.query("select status, phase, ops from memory_changes where owner_id = $1", [w.owner.id])).rows;
     expect(change).toMatchObject({ status: "applied", phase: "rest" });
     expect(change.ops).toHaveLength(1);
@@ -1173,7 +1280,7 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
     judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
     await sayAndReview(w, ASK, MERGE);
     expect(await exactRows(w.owner.id)).toMatchObject([{ id: w.a.id, text: "路由器在客厅，是华硕的", vault: true, vault_by: "auto", unsure: false, origin_conversation_id: w.conv }]);
-    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ lines: ["合并了 2 条：路由器在客厅，是华硕的"], vaultLines: [true] });
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ lines: ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"], vaultLines: [true, false, true] });
     const [chip] = await chips(w.owner, w.conv);
     expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
     expect(await exactRows(w.owner.id)).toEqual(before);
@@ -1226,7 +1333,7 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
       expect(await texts(w)).toEqual([["路由器在客厅，是华硕的", false]]);
       const own = (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json.notes.map((n: { text: string }) => n.text);
       const notices = await chips(w.owner, w.conv);
-      expect(notices[0].system).toMatchObject({ pending: false, status: "applied", lines: ["合并了 2 条：路由器在客厅，是华硕的"] });
+      expect(notices[0].system).toMatchObject({ pending: false, status: "applied", lines: ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"] });
       if (forget > 0.5) {
         expect(own).toEqual([]);
         expect(notices.slice(1).map((n) => [n.system.pending, n.system.lines])).toEqual([[false, ["忘掉了：回答要简短"]]]);
@@ -1281,13 +1388,197 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
     expect(await chips(w.owner, w.conv)).toEqual([]);
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1", [w.owner.id])).rows[0].n).toBe(0);
   });
+
+  it("MEMORY.mergeAuto observe (the default) asks the faithful question but applies no merge at once: the rule of before — a card unless the owner asked to forget, then a replace and a remove; off does not even ask", async () => {
+    app.deps.config.memory.mergeAuto = "observe";
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.1 }));
+    const w = await routers("mo1");
+    await sayAndReview(w, ASK, MERGE);
+    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+    expect([faithfulCalls().length, explicitCalls().length]).toEqual([1, 1]);
+    judge.calls.splice(0);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.95 }));
+    const v = await routers("mo2");
+    await sayAndReview(v, ASK, MERGE);
+    expect(await texts(v)).toEqual([["路由器在客厅，是华硕的", false]]);
+    expect((await chips(v.owner, v.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, ["改成了：路由器在客厅，是华硕的", "忘掉了：路由器是华硕的"]]]);
+    expect(faithfulCalls()).toHaveLength(1);
+    // off: the question is not asked at all.
+    app.deps.config.memory.mergeAuto = "off";
+    judge.calls.splice(0);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.1 }));
+    const x = await routers("mo3");
+    await sayAndReview(x, ASK, MERGE);
+    expect(faithfulCalls()).toEqual([]);
+    expect((await chips(x.owner, x.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+  });
+
+  it("keeps no group's origin: two vault notes learned in one group, merged by a review of the owner's own conversation, begin nowhere afterwards — so the merged note is not shown in that group; undo gives each its group back", async () => {
+    const w = await routers("mgo");
+    const g = await group(app, w.owner, "爬山群", [await signUp(app, "mgo_mia"), await signUp(app, "mgo_ned")]);
+    await db.query("update owner_notes set vault = true, vault_by = 'owner', origin = 'review', origin_conversation_id = $2 where id = any($1::uuid[])", [[w.a.id, w.b.id], g]);
+    const before = await exactRows(w.owner.id);
+    const shownInGroup = async () => (await notesFor(db, { id: w.agent.id, ownerId: w.owner.id, memory: true, sharedNotes: true }, { conversationId: g, group: true })).owner.map((n) => n.text);
+    expect(await shownInGroup()).toEqual(["路由器在客厅", "路由器是华硕的"]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
+    await sayAndReview(w, ASK, MERGE);
+    expect(await exactRows(w.owner.id)).toMatchObject([{ id: w.a.id, text: "路由器在客厅，是华硕的", vault: true, vault_by: "owner", origin_conversation_id: null }]);
+    expect(await shownInGroup()).toEqual([]);
+    const [chip] = await chips(w.owner, w.conv);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
+    expect(await exactRows(w.owner.id)).toEqual(before);
+  });
+
+  it("a merge-shaped answer that is not merged (not faithful; only observed; not asked) but applied at once on the owner's forget: with a source in the vault the new text goes into the vault (vault_by auto), whatever the owner's sorting (全部不进保险箱)", async () => {
+    for (const [name, mode, faithful] of [["mv1", "on", 0.3], ["mv2", "observe", 0.95], ["mv3", "off", 0.95]] as const) {
+      app.deps.config.memory.mergeAuto = mode;
+      judge.answer(() => ({ sort: 0.95, faithful, explicit_forget: 0.95 }));
+      const w = await owned(name);
+      await setNewNotes(db, w.owner.id, "open");
+      await openAuto(w.owner, w.agent.id, "周末去爬山");
+      // The owner locked it: the group must not know.
+      await seeded(w.owner, w.agent.id, "和小林一起去", true);
+      await sayAndReview(w, "这两条合成一条，重复的那条删掉", ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
+      const rows = (await db.query("select text, vault, vault_by from owner_notes where owner_id = $1", [w.owner.id])).rows;
+      expect([name, rows]).toEqual([name, [{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]]);
+      const notices = (await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines, c.system.vaultLines]);
+      expect([name, notices]).toEqual([name, [[false, ["改成了：周末和小林去爬山，七点出发", "忘掉了：和小林一起去"], [true, true]]]]);
+    }
+  });
+
+  it("a merge in the Agent's own room is the same: applied at once as ONE change", async () => {
+    const w = await owned("mgs");
+    await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
+    await seeded(w.owner, w.agent.id, "先说结论", false, "self");
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
+    await sayAndReview(w, "把说话方式那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "回答要简短，先说结论" }, { op: "remove", ref: "n2" }));
+    const own = (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json.notes.map((n: { text: string }) => n.text);
+    expect(own).toEqual(["回答要简短，先说结论"]);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, ["合并了 2 条：回答要简短，先说结论", "原来：回答要简短", "原来：先说结论"]]]);
+    expect(faithfulCalls()).toHaveLength(1);
+    expect(explicitCalls()).toEqual([]);
+  });
+
+  it("two merges in one answer (one in each room): two faithful questions, ONE change holding both merges", async () => {
+    const w = await routers("mg2r");
+    await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
+    await seeded(w.owner, w.agent.id, "先说结论", false, "self");
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
+    await sayAndReview(
+      w,
+      ASK,
+      ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, { op: "replace", ref: "n3", text: "回答要简短，先说结论" }, { op: "remove", ref: "n4" }),
+    );
+    expect(await texts(w)).toEqual([["路由器在客厅，是华硕的", false]]);
+    const rows = (await db.query("select status, ops from memory_changes where owner_id = $1", [w.owner.id])).rows;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].ops.map((o: { op: string; kind: string }) => [o.op, o.kind])).toEqual([["merge", "owner"], ["merge", "self"]]);
+    expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的", "合并了 2 条：回答要简短，先说结论", "原来：回答要简短", "原来：先说结论"]);
+    expect(faithfulCalls()).toHaveLength(2);
+  });
+
+  it("the replaced note in the vault and the removed one open: the result is in the vault, vault_by auto (not every source was the owner's)", async () => {
+    const w = await routers("mgx");
+    await db.query("update owner_notes set vault = true, vault_by = 'owner' where id = $1", [w.a.id]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
+    await sayAndReview(w, ASK, MERGE);
+    expect(await exactRows(w.owner.id)).toMatchObject([{ id: w.a.id, text: "路由器在客厅，是华硕的", vault: true, vault_by: "auto" }]);
+    expect((await chips(w.owner, w.conv))[0].system.vaultLines).toEqual([true, true, false]);
+  });
+
+  it("a faithful merge its room cannot hold is dropped (the notes stay as they are), and the owner is told the room is full", async () => {
+    const w = await owned("mgf");
+    await seeded(w.owner, w.agent.id, "茶", false);
+    await seeded(w.owner, w.agent.id, "咖啡", false);
+    // 1 + 2 + 1990 of 2000: the merged text is 13 heavier than its two sources, 7 are left.
+    await seeded(w.owner, w.agent.id, "字".repeat(1990), true);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95 }));
+    await sayAndReview(w, "把茶和咖啡那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "喜欢喝茶，也喜欢喝咖啡，每天都喝" }, { op: "remove", ref: "n2" }));
+    expect((await texts(w)).map(([t]: [string]) => t)).toEqual(["茶", "咖啡", "字".repeat(1990)]);
+    const notices = await chips(w.owner, w.conv);
+    expect(notices.map((n) => n.system)).toMatchObject([{ lines: [], full: true, pending: false, status: "applied" }]);
+    expect((await db.query(`select status, "full", jsonb_array_length(ops) as n from memory_changes where owner_id = $1`, [w.owner.id])).rows).toEqual([{ status: "applied", full: true, n: 0 }]);
+  });
+
+  it("no faithful answer because the owner's judgement allowance of the day is spent, or memory's share of the site's day is reached: not faithful — the rule of before, a card; nothing is asked", async () => {
+    const today = () => siteDay(new Date(), app.deps.config.siteTimezone);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.95 }));
+    const a = await routers("mga");
+    await db.query("insert into memory_judge_usage (owner_id, day, calls) values ($1, $2::date, $3)", [a.owner.id, today(), app.deps.config.memory.judgePerOwnerDay]);
+    await sayAndReview(a, ASK, MERGE);
+    expect(await texts(a)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await chips(a.owner, a.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+    expect(judge.calls).toEqual([]);
+    const b = await routers("mgb");
+    const was = (await db.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [today()])).rows[0]?.calls;
+    await db.query("insert into judge_usage (day, calls) values ($1::date, $2) on conflict (day) do update set calls = $2", [today(), app.deps.config.memory.judgeShare * JUDGE.dailyLimit]);
+    try {
+      await sayAndReview(b, ASK, MERGE);
+    } finally {
+      if (was === undefined) await db.query("delete from judge_usage where day = $1::date", [today()]);
+      else await db.query("update judge_usage set calls = $2 where day = $1::date", [today(), was]);
+    }
+    expect(await texts(b)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await chips(b.owner, b.conv)).map((c) => c.system.pending)).toEqual([true]);
+    expect(judge.calls).toEqual([]);
+  });
+
+  it("the service closing while a merge's faithful question hangs ends the question with it: nothing applied, nothing held, reviewed_seq unmoved", async () => {
+    const w = await routers("mgc");
+    await say(w.owner, w.conv, ASK);
+    judge.answer((_s, qs) => (qs.some((q) => q.key === "faithful") ? "hang" : { sort: 0.95 }));
+    gateway.reply(MERGE);
+    const deps: PipelineDeps = { db, config: app.deps.config, models: gateway, judge, log: app.log, inFlight: new Set<string>(), conversations: app.deps.conversations, now: clock.now };
+    const judging = app.deps.config.judge!;
+    const timeoutMs = judging.timeoutMs;
+    // A request that would wait a minute for its answer (the test's own limit is far shorter).
+    judging.timeoutMs = 60_000;
+    const stop = new AbortController();
+    try {
+      const running = runReview(deps, { kind: "review", agentId: w.agent.id, conversationId: w.conv }, { closing: stop.signal, attempted: () => {} });
+      await vi.waitFor(() => expect(faithfulCalls()).toHaveLength(1));
+      stop.abort();
+      await running;
+    } finally {
+      judging.timeoutMs = timeoutMs;
+    }
+    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect(await chips(w.owner, w.conv)).toEqual([]);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBeNull();
+  });
+
+  it("a faithful merge needs no owner line after its notes last changed (it keeps what they said): applied at once where a replace would wait", async () => {
+    const w = await owned("mgt");
+    await exchange(w, "路由器的事你整理一下");
+    // Written after the owner's only line of the window.
+    await seeded(w.owner, w.agent.id, "路由器在客厅", false);
+    await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.1 }));
+    await quietThen(MERGE);
+    expect(await texts(w)).toEqual([["路由器在客厅，是华硕的", false]]);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines[0]])).toEqual([[false, "合并了 2 条：路由器在客厅，是华硕的"]]);
+  });
+
+  it("is no merge either when the replaced note is also locked, or a removed note is named twice: no faithful question, the rules of before", async () => {
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.1 }));
+    const w = await routers("mg7d");
+    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "lock", ref: "n1" }, { op: "remove", ref: "n2" }));
+    expect(faithfulCalls()).toEqual([]);
+    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+    const v = await routers("mg7e");
+    await sayAndReview(v, ASK, ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, { op: "remove", ref: "n2" }));
+    expect(faithfulCalls()).toEqual([]);
+    expect((await chips(v.owner, v.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+  });
 });
 
 describe("whether the owner asked to forget: the judgement decides, whatever the words", () => {
   const heldWorld = async (name: string) => {
     const w = await owned(name);
-    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
-    await seeded(w.owner, w.agent.id, "住在上海", false);
+    await openAuto(w.owner, w.agent.id, "喜欢喝茶");
+    await openAuto(w.owner, w.agent.id, "住在上海");
     return w;
   };
   const texts = async (w: World) => (await roomOf(w.owner)).notes.map((n: { text: string; vault: boolean }) => [n.text, n.vault]);
