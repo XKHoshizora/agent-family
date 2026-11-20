@@ -273,6 +273,37 @@ describe("the chat list", () => {
     await openGroup({ whispers: [whisper("w1", G1, 2, { status: "accepted" })], open: null });
     expect(within(listRow("周末小组")).queryByLabelText(DOT)).toBeNull();
   });
+
+  it("an open whisper that offers no button only tells: it marks nothing", async () => {
+    const { transport } = await openGroup({ whispers: [whisper("w1", G1, 2, { kind: "tools_off", actions: [] })], open: null });
+    expect(within(listRow("周末小组")).queryByLabelText(DOT)).toBeNull();
+    await push(transport, { type: "whisper", whisper: whisper("w2", A1, 0, { kind: "tools_off", actions: [] }) });
+    expect(within(listRow("小助手")).queryByLabelText(DOT)).toBeNull();
+    // Beside one that waits for me, the mark is that one's.
+    await push(transport, { type: "whisper", whisper: whisper("w3", A1, 0, { actions: ["dismiss"] }) });
+    expect(within(listRow("小助手")).getByLabelText(DOT)).toBeTruthy();
+  });
+});
+
+describe("a whisper that offers no button (a model turned to plain chat: tools_off)", () => {
+  const TOLD = "这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。";
+
+  it("is a plain line only I see — the lock, 只有你能看到, its text — with no button, after the message it follows", async () => {
+    await openGroup({ whispers: [whisper("w1", G1, 2, { kind: "tools_off", text: TOLD, actions: [] })] });
+    expect(rows()).toEqual(["m1", "m2", "w:w1", "m3"]);
+    expect(whisperLi("w1").textContent).toBe(`只有你能看到${TOLD}`);
+    expect(whisperLi("w1").querySelector("svg")).toBeTruthy();
+    expect(inWhisper("w1").queryAllByRole("button")).toEqual([]);
+    expect(whisperLi("w1").querySelector(".msg-action, .msg-meta, time")).toBeNull();
+  });
+
+  it("expired (after 7 days, or its Agent gone) it still says what it told, not 已过期", async () => {
+    const { transport } = await openGroup({ whispers: [whisper("w1", G1, 2, { kind: "tools_off", text: TOLD, actions: [] })] });
+    await push(transport, { type: "whisper", whisper: whisper("w1", G1, 2, { kind: "tools_off", text: TOLD, actions: [], status: "expired" }) });
+    expect(whisperLi("w1").textContent).toBe(`只有你能看到${TOLD}`);
+    expect(whisperLi("w1").textContent).not.toContain("已过期");
+    expect(inWhisper("w1").queryAllByRole("button")).toEqual([]);
+  });
 });
 
 describe("the held whispers (model.js)", () => {

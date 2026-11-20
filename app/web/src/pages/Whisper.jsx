@@ -1,7 +1,9 @@
 // A whisper (悄悄话): a small note in a conversation that only I see, about my Agent there (app/service/README.md
 // "Whispers"). Not a message — no sender, no time, nothing to quote —, it sits after the message it follows (ChatView,
 // `placeWhispers`). Open: a small bubble with a lock, 只有你能看到, its text and the buttons it offers (告诉他们, 不用), one
-// decision at a time (`useDecision`), a refusal said on it. Answered or expired: a quiet line. Following MemoryNotice.
+// decision at a time (`useDecision`), a refusal said on it. Answered or expired: a quiet line. One that offers no button
+// (it only tells, such as a model turned to plain chat, `tools_off`) has nothing to answer: it stays that note, with its
+// text, whatever its status. Following MemoryNotice.
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Lock } from "../icons.js";
@@ -20,7 +22,8 @@ export function Whisper({ whisper, conv }) {
   // Refused as stale (answered or expired meanwhile): nothing more is offered until it is read again.
   const [stale, setStale] = useState(false);
 
-  if (whisper.status !== "open") {
+  // One that offers no button was never waiting for an answer: expired, it still says what it told.
+  if (whisper.status !== "open" && whisper.actions.length > 0) {
     return (
       <li className="msg-whisper whisper-done" data-whisper={whisper.id}>
         <span className="muted">

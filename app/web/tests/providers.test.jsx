@@ -699,6 +699,57 @@ describe("the models of a provider", () => {
     expect(toastText()).toBe("供应商已保存");
   });
 
+  it("会用工具（查聊天记录、看文件） is ticked unless the model's entry says tools: false; unticking saves tools: false and ticking tools: true, in the one PATCH of its list", async () => {
+    const marked = providerOf(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000, tools: false },
+      ],
+    });
+    const app = await openProviders({ providers: [marked] });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    const box = (name) => within(modelRow(name)).getByLabelText("会用工具（查聊天记录、看文件）");
+    for (const name of ["gpt-x", "plain"]) await click(within(modelRow(name)).getByRole("button", { name: `高级设置：${name}` }));
+    expect([box("gpt-x").checked, box("plain").checked]).toEqual([true, false]);
+    fireEvent.click(box("gpt-x"));
+    fireEvent.click(box("plain"));
+    await flush();
+    expect([box("gpt-x").checked, box("plain").checked]).toEqual([false, true]);
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledTimes(1);
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000, tools: false },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000, tools: true },
+      ],
+    });
+    // As saved: the form, opened again, holds what the service answered.
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    for (const name of ["gpt-x", "plain"]) await click(within(modelRow(name)).getByRole("button", { name: `高级设置：${name}` }));
+    expect([box("gpt-x").checked, box("plain").checked]).toEqual([false, true]);
+  });
+
+  it("a model marked tools: false keeps it when the list is saved for another change; one whose entry says nothing sends nothing of it", async () => {
+    const marked = providerOf(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000, tools: false },
+      ],
+    });
+    const app = await openProviders({ providers: [marked] });
+    await click(inRow("我的 OpenAI").getByRole("button", { name: "编辑" }));
+    await click(within(modelRow("plain")).getByRole("button", { name: /高级/ }));
+    fireEvent.click(within(modelRow("plain")).getByLabelText(/能看图片/));
+    await flush();
+    await click(inMain().getByRole("button", { name: "保存" }));
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: true, pdf: false, reasoning: false, contextTokens: 16000, tools: false },
+      ],
+    });
+  });
+
   it("a model's listed thinking levels show beside 支持思考; 改为全部档位 clears them, and so does unticking 支持思考", async () => {
     const levels = providerOf(P1, {
       models: [
@@ -820,6 +871,29 @@ describe("同步模型", () => {
     expect(modelRow("claude-long").textContent).toContain("支持思考（低、高）");
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(app.api.patchProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it("never changes whether a model may use tools: a model marked tools: false keeps it through 完成, a model added says nothing of it", async () => {
+    const marked = providerOf(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000, tools: false },
+      ],
+    });
+    const app = await openSync({ providers: [marked] });
+    await click(within(rowOf("house-blend")).getByRole("button", { name: "添加：house-blend" }));
+    await done();
+    expect(app.api.patchProvider).toHaveBeenCalledTimes(1);
+    expect(app.api.patchProvider).toHaveBeenCalledWith(P1, {
+      models: [
+        { name: "gpt-x", vision: false, pdf: false, reasoning: true, contextTokens: 64000 },
+        { name: "plain", vision: false, pdf: false, reasoning: false, contextTokens: 16000, tools: false },
+        { name: "house-blend", vision: false, pdf: false, reasoning: false },
+      ],
+    });
+    // The form now holds what was saved: plain still unticked.
+    await click(within(modelRow("plain")).getByRole("button", { name: /高级/ }));
+    expect(within(modelRow("plain")).getByLabelText("会用工具（查聊天记录、看文件）").checked).toBe(false);
   });
 
   it("移除 takes a model off the form's list, a saved one too; with nothing changed 完成 only closes", async () => {

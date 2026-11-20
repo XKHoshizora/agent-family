@@ -153,8 +153,9 @@ const contextProblem = (text) => {
 };
 
 /**
- * A model of the provider as the form holds it: the context as text ("" means the service's default), and `levels` the
- * thinking levels it lists (null: every level).
+ * A model of the provider as the form holds it: the context as text ("" means the service's default), `levels` the
+ * thinking levels it lists (null: every level), and `tools` whether its replies may be offered tools as its entry says it
+ * (undefined: it says nothing — not known yet, so they are; the service may set it false when the model turns out unable).
  */
 const formModel = (m) => ({
   name: m.name,
@@ -163,8 +164,12 @@ const formModel = (m) => ({
   reasoning: Boolean(m.reasoning),
   context: Number.isFinite(m.contextTokens) ? String(m.contextTokens) : "",
   levels: m.reasoning ? modelLevels(m.reasoningLevels) : null,
+  ...(typeof m.tools === "boolean" ? { tools: m.tools } : {}),
 });
-/** As it is sent: the flags always, the context only when one is given, the levels only on a model that reasons. */
+/**
+ * As it is sent: the flags always, the context only when one is given, the levels only on a model that reasons, `tools`
+ * only when the entry says it or its owner ticked or unticked it (left out, the service keeps what it has).
+ */
 const wireModel = (m) => {
   const n = contextNumber(m.context);
   return {
@@ -174,9 +179,11 @@ const wireModel = (m) => {
     reasoning: m.reasoning,
     ...(n === null ? {} : { contextTokens: n }),
     ...(m.reasoning && m.levels ? { reasoningLevels: m.levels } : {}),
+    ...(typeof m.tools === "boolean" ? { tools: m.tools } : {}),
   };
 };
-const modelsKey = (list) => JSON.stringify(list.map((m) => [m.name, m.vision, m.pdf, m.reasoning, m.contextTokens ?? null, m.reasoningLevels ?? null]));
+const modelsKey = (list) =>
+  JSON.stringify(list.map((m) => [m.name, m.vision, m.pdf, m.reasoning, m.contextTokens ?? null, m.reasoningLevels ?? null, m.tools ?? null]));
 /** A model from the provider's own list (同步模型) as the form adds it: its hints as flags, a known model's context and levels. */
 const syncedModel = (m) => ({
   name: m.name,
@@ -390,6 +397,11 @@ function ModelRow({ model, open, error, defaults, onToggle, onChange, onRemove }
               <label>
                 <input type="checkbox" checked={model.reasoning} onChange={flag("reasoning")} />
                 <span>支持思考 <small>用它的 Agent 可以选择思考程度</small></span>
+              </label>
+              <label>
+                {/* Ticked unless its entry says false (the service sets that when the model turns out unable to use them). */}
+                <input type="checkbox" checked={model.tools !== false} onChange={flag("tools")} />
+                <span>会用工具（查聊天记录、看文件）</span>
               </label>
             </fieldset>
             <Field label="上下文容量" hint={contextHint} error={error}>

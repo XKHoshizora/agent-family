@@ -1398,6 +1398,8 @@ export function publicProvider(answer) {
         reasoning: Boolean(m.reasoning),
         contextTokens: m.contextTokens,
         ...(levels ? { reasoningLevels: levels } : {}),
+        // Whether its replies may be offered tools, only when its entry says it (absent: not known yet, so they are).
+        ...(typeof m.tools === "boolean" ? { tools: m.tools } : {}),
       };
     }),
   };

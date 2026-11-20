@@ -746,8 +746,8 @@ export function toView(model, { now = Date.now() } = {}) {
       agentsTalking: conv.type === "group" && agentsTalking(model, conv, held, agentRuns),
       /** My whispers here (悄悄话), ascending by where they sit: [{id, afterSeq, kind, text, actions, status, createdAt, agentId}]. */
       whispers,
-      /** How many of them are open (the chat list's mark). */
-      openWhispers: whispers.filter((w) => w.status === "open").length,
+      /** How many of them wait for my answer: open, offering a button (the chat list's mark; one offering none only tells). */
+      openWhispers: whispers.filter((w) => w.status === "open" && w.actions.length > 0).length,
       title: direct ? null : conv.title,
       members,
       memberRoles: conv.members.map((m) => ({ id: alias(m.id), role: m.role, isCreator: Boolean(m.isCreator) })),
