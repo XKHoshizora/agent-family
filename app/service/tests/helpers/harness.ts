@@ -52,10 +52,13 @@ export function testClock(): TestClock {
 
 /**
  * The harness's own statements do not run under the app's `statement_timeout`: a file that sets it to a second to test
- * it (db-timeout, search-limits) must not have the clean-up between its tests cut off by it when the machine is busy.
- * They have a generous limit of their own, so that a lock nobody releases still fails the hook rather than hangs it.
+ * it (db-timeout, search-limits) must not have the clean-up between its tests cut off by it. And a truncate of the
+ * ~60 tables is not quick on a busy machine: each table's file is synced to disk (`DataFileImmediateSync`), and with
+ * other test runs writing too one truncate was seen to take 5 to 8 seconds, and over 25 on a machine at its limit. They
+ * have a limit of their own that leaves room for that (below `hookTimeout`, vitest.config.ts), so that a lock nobody
+ * releases still fails the hook rather than hangs it.
  */
-const HARNESS_STATEMENT_TIMEOUT = "25s";
+const HARNESS_STATEMENT_TIMEOUT = "110s";
 
 async function truncateAll(db: Db): Promise<void> {
   await db.tx(async (c) => {
