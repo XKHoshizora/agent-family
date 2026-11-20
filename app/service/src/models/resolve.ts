@@ -1,5 +1,5 @@
 import type { AgentRow } from "../agents/store.ts";
-import { REASONING_LEVELS, type Config, type ReasoningAllowance, type ReasoningLevel } from "../config.ts";
+import { REASONING_LEVELS, type Config, type ReasoningAllowance, type ReasoningLevel, type SiteModel } from "../config.ts";
 import type { Queryable } from "../db.ts";
 import { listProviders, loadProviderForCall } from "../providers/store.ts";
 import type { ModelCall } from "./gateway.ts";
@@ -35,20 +35,40 @@ export interface Resolved {
 }
 
 /**
+ * The site model `id` as it can be called: configured, with the variable its `apiKeyEnv` names set (read now), and that
+ * key; null when it cannot be. The one statement of a site model's being there (`resolveModel`, `modelsUsable`).
+ */
+function siteCallable(config: Pick<Config, "siteModels">, id: string): { site: SiteModel; apiKey: string } | null {
+  const site = config.siteModels.find((m) => m.id === id);
+  const apiKey = site ? process.env[site.apiKeyEnv] : undefined;
+  return site && apiKey !== undefined && apiKey !== "" ? { site, apiKey } : null;
+}
+
+/** The model `name` on a provider's list, or undefined: the one statement of a provider model's being there (as above). */
+const listedOn = <M extends { name: string }>(models: readonly M[], name: string): M | undefined => models.find((m) => m.name === name);
+
+/**
  * Whether each of `models` (models of `ownerId`'s Agents) is there to call, by what `resolveModel` needs besides opening
- * the key: a site model still configured with its key variable set, a model still on the list of a provider of the
- * owner's. True for no model chosen: nothing is gone. The owner's view of an Agent (`modelUsable`); a reply on a model
- * that is not fails `model_gone`. One read of the owner's providers when any model is a provider's; no key is opened.
+ * the key (`siteCallable`, `listedOn`): a site model still configured with its key variable set, a model still on the
+ * list of a provider of the owner's. False with no model chosen: nothing can be called, as `resolveModel` finds too. The
+ * owner's view of an Agent (`modelUsable`), whether its failed replies may be tried again (runs.ts `retryable`) and
+ * whether it is offered for a reply nobody asked for (proactive/candidates.ts); a reply on a model that is not fails
+ * `model_gone`. A provider's saved key that cannot be opened is not looked at (no key is opened here): such an Agent says
+ * usable, and its replies fail `provider_rejected` until the key is saved again. One read of the owner's providers when
+ * any model is a provider's.
  */
 export async function modelsUsable(q: Queryable, config: Pick<Config, "siteModels">, ownerId: string, models: ReadonlyArray<AgentRow["model"]>): Promise<boolean[]> {
   const providers = models.some((m) => m?.source === "provider") ? await listProviders(q, ownerId) : [];
   return models.map((m) => {
-    if (m === null) return true;
-    if (m.source === "provider") return providers.some((p) => p.id === m.providerId && p.models.some((listed) => listed.name === m.model));
-    const site = config.siteModels.find((s) => s.id === m.id);
-    const apiKey = site ? process.env[site.apiKeyEnv] : undefined;
-    return apiKey !== undefined && apiKey !== "";
+    if (m === null) return false;
+    if (m.source === "site") return siteCallable(config, m.id) !== null;
+    return providers.some((p) => p.id === m.providerId && listedOn(p.models, m.model) !== undefined);
   });
+}
+
+/** `modelsUsable` of one Agent's model. */
+export async function modelUsable(q: Queryable, config: Pick<Config, "siteModels">, agent: Pick<AgentRow, "model" | "ownerId">): Promise<boolean> {
+  return (await modelsUsable(q, config, agent.ownerId, [agent.model]))[0]!;
 }
 
 /** The level a call is made at: `wanted` when the model takes it, else `none`. */
@@ -94,9 +114,9 @@ export async function resolveModel(
   const wanted = agent.reasoning ?? "none";
 
   if (choice.source === "site") {
-    const site = config.siteModels.find((m) => m.id === choice.id);
-    const apiKey = site ? process.env[site.apiKeyEnv] : undefined;
-    if (!site || apiKey === undefined || apiKey === "") return null;
+    const callable = siteCallable(config, choice.id);
+    if (!callable) return null;
+    const { site, apiKey } = callable;
     const reasoningAllowed = REASONING_LEVELS.filter((level) => level === "none" || site.reasoning.includes(level));
     const reasoning = callLevel(reasoningAllowed, wanted);
     return {
@@ -123,7 +143,7 @@ export async function resolveModel(
   }
 
   const provider = await loadProviderForCall(q, agent.ownerId, choice.providerId, config.providerKeySecret);
-  const listed = provider?.models.find((m) => m.name === choice.model);
+  const listed = provider ? listedOn(provider.models, choice.model) : undefined;
   if (!provider || !listed) return null;
   const reasoningAllowed: readonly ReasoningLevel[] = listed.reasoning ? [...REASONING_LEVELS] : ["none"];
   const reasoning = callLevel(reasoningAllowed, wanted);

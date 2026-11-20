@@ -48,7 +48,7 @@ import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./thr
 export interface DecideDeps {
   db: Db;
   judge: Judge | null;
-  config: RunLimits & Pick<Config, "judge" | "proactive" | "memory">;
+  config: RunLimits & Pick<Config, "judge" | "proactive" | "memory" | "siteModels">;
   log: Pick<FastifyBaseLogger, "info" | "debug">;
   /** Called as the judgement model is asked, once (the scheduler counts its hourly caps by it); not when it is not. */
   onAsk?: () => void;
@@ -75,7 +75,7 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
 
   const message = await judgeable(db, conversationId, seq);
   if (message === null || (await decidedAlready(db, conversationId, seq))) return noneTriggered();
-  const options = await optionsFor(db, conversationId, seq, message.senderId);
+  const options = await optionsFor(db, conversationId, seq, message.senderId, config);
   const listeners = await listenersFor(db, conversationId, seq);
   if (options.length === 0 && listeners.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);

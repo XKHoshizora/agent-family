@@ -324,6 +324,7 @@ Every error body is `{"error": "<snake_case_code>"}`, sometimes with details nex
 | 409 | `agent_deleted` | Editing, pausing, resuming or changing the avatar of a deleted Agent, retrying its reply, or confirming or discarding its persona proposals |
 | 409 | `agent_paused` | Retrying the reply of a paused Agent |
 | 409 | `busy_run` | Retrying while a reply of that Agent is already queued or running |
+| 409 | `model_gone` | Retrying while the Agent's model is not there to call (its `modelUsable` is false); also a run's error (Run): its model was not there to call, so no call was made |
 | 409 | `stale_proposal` | Confirming or discarding a persona proposal that can no longer be acted on: confirmed already, discarded (confirming), superseded by a newer one, or made against a persona that has changed since (see Persona proposals) |
 | 409 | `provider_in_use` | Deleting a provider that Agents still use; `agents: [{"id", "name"}]` names them |
 | 409 | `proactive_unavailable` | Turning an Agent's `proactive` on (`"proactive": true` on `POST /api/agents` or `PATCH /api/agents/:id`) while the site has no judgement model (`JUDGE` unset; `GET /api/models` says `proactiveAvailable: false`). Nothing is changed. Turning it off, and every other field, are never refused for this |
@@ -481,8 +482,9 @@ principals, as for people; a changed avatar is pushed to them (`principal`).
 "xhigh" | "max", "model": {"source": "site", "id"} | {"source": "provider", "providerId", "model"} | null, "modelUsable", "paused",
 "deleted", "conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `modelUsable` is
 false when its model is not there to call any more — taken off its provider's list, or a site model the site no longer
-offers — (true with no model): its replies then fail `model_gone` until you choose another (the web says
-这个模型现在用不了，换一个). `groupMentions` says
+offers — and with no model chosen: its replies then fail `model_gone`, and none of its failed replies can be retried
+(`retryable`, Run), until you choose another (the web says 这个模型现在用不了，换一个). It is not offered for a reply
+nobody asked for meanwhile (Proactive replies). `groupMentions` says
 who may call the Agent with `@` in a group it is in: `members` (any member, and other Agents there) or `owner` (you
 only; never another Agent). `chainBudget` is the most you pay, in points (a decimal string as money is on the wire, `"1"`
 to `"100000"`, default `"50"`), for its replies in a group that other Agents' messages called for between two messages
@@ -751,7 +753,9 @@ budget was spent by the time it was to start: nothing was called or charged, and
 or everyone whose call it answered has had a block with you, either way, since the call and before it began — a call from
 such a person is dropped and the others are still answered; with none left nothing was called or charged).
 `retryable`: it failed and trying again as it is may work (false
-after `provider_rejected`, `address_not_allowed`, `context_too_small` and `model_gone`, and for every run that did not fail; true
+after `provider_rejected`, `address_not_allowed` and `context_too_small`, while the Agent's model is not there to call —
+`modelUsable` false (Agent): a `model_gone` failure is retryable again once it is, as read now by `GET …/run` and
+`GET …/runs` —, and for every run that did not fail; true
 after `rate_limited`, which a retry within the same minute meets again as 429). `resetsAt` (ISO instant): for
 `no_quota` on a free-tier model, the next midnight in `SITE_TIMEZONE`, when the free allowance starts again.
 
@@ -802,7 +806,8 @@ without it). When the latest run failed, queues a new reply answering up to your
 again exactly what the failed run was to answer (its messages and what was noted on it while it ran, not your last
 one), called for by whoever called the failed run: one that another Agent's message called for (`triggered_by`
 `agent`) stays an Agent's, so a member's halt still ends it (Agents in a group). → 201 `{"run": Run}` (queued; also pushed). 409 `busy_run` while a reply is queued or
-running; 409 `agent_paused` / `agent_deleted`; 400 `invalid_request` when the latest run did not fail (or there is
+running; 409 `agent_paused` / `agent_deleted`; 409 `model_gone` while the Agent's model is not there to call
+(`modelUsable` false); 400 `invalid_request` when the latest run did not fail (or there is
 none) or the Agent has no model — in a group also when the Agent is not in the group now or its latest run there is
 from an earlier stay; so a reply cancelled by a halt (`halted`) or by the Agent's leaving (`agent_removed`) is not
 retried; 429 `rate_limited` over the replies one may start a minute (a retry is your own lane: 20). In a group, an `agentId` that is not one of
@@ -1374,8 +1379,8 @@ stored for the provider's own protocol). → 200 Provider;
 without `apiKey` in the same request: the stored key is never sent to an address it was not saved for (another path on
 the same origin keeps it). 404 comes first: someone else's provider is 404 whatever the body. A `models` that leaves out
 a model your Agents use is accepted: those Agents keep it as their model, say `modelUsable: false` (Agent), and their
-replies fail `model_gone` until you choose another; every Agent on the provider is pushed to your sockets (`agent`)
-after an edit of `models`.
+replies fail `model_gone` until you choose another (or put the model back); each live Agent whose model the edit took
+off the list or put back on it is pushed to your sockets (`agent`) — none when the list of names did not change.
 
 #### `DELETE /api/providers/:id`
 
@@ -3131,7 +3136,8 @@ nothing more is judged, and what a decision still in flight decides is dropped (
    it (`agents_halted_seq`), and its text (a file's caption) names no Agent by `@handle` — any Agent, in the group or not.
    And it has led to no proactive reply yet (no `agent_group_state` row of the group has `surcharge_seq` at or after it).
    The options (`optionsFor`, `mayAnswerUnasked`): the group's current Agent members that joined before the message (an
-   Agent answers nothing from before its stay began), with `proactive` on, not paused or deleted, with a model, whose
+   Agent answers nothing from before its stay began), with `proactive` on, not paused or deleted, with a model that is
+   there to call (`modelUsable`: no judgement is spent on one that could not reply), whose
    owner and the sender have no block between them in either direction (the owner's own message counts). None: nothing
    more happens, nothing is asked or counted. At most 253 (a choice is sent with at most 254 options, one of
    them `nobody`); beyond that, those judged least recently in this group (`judged_at`, never judged first) take the

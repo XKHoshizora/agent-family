@@ -55,11 +55,10 @@ async function providerAgent(name: string, over: Record<string, unknown> = {}) {
 const retireSiteModel = (agentId: string) => db.query("update agents set site_model_id = 'retired_q7' where principal_id = $1", [agentId]);
 
 describe("modelUsable, the owner's view of whether the Agent's model is there to call", () => {
-  it("is true on a model that is there and with none chosen; false once its provider model is off the list (that edit is still allowed), in every view; true again once another is chosen", async () => {
+  it("is true on a model that is there; false once its provider model is off the list (that edit is still allowed), in every view; true again once another is chosen", async () => {
     const w = await providerAgent("mg_owner");
     expect((await view(w.owner, w.agent.id)).modelUsable).toBe(true);
     expect(w.agent.modelUsable).toBe(true);
-    expect((await mustCreateAgent(app, w.owner)).modelUsable).toBe(true);
     await w.trim();
     expect((await view(w.owner, w.agent.id)).modelUsable).toBe(false);
     expect((await listed(w.owner, w.agent.id)).modelUsable).toBe(false);
@@ -78,17 +77,67 @@ describe("modelUsable, the owner's view of whether the Agent's model is there to
     expect((await listed(owner, agent.id)).modelUsable).toBe(false);
   });
 
-  it("a provider edit of its models (one that takes an Agent's model off the list, say) pushes the Agents on it to their owner, so their pages read it again", async () => {
+  it("with no model it is false, and a reply queued before the model was cleared fails model_gone: the two agree", async () => {
+    const owner = await signUp(app, "mg_none");
+    expect((await mustCreateAgent(app, owner)).modelUsable).toBe(false);
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: "简短地回答。" });
+    await say(owner, agent.conversationId, "在吗？");
+    expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { model: null })).json.modelUsable).toBe(false);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(gateway.calls.length).toBe(first);
+    expect((await api(app, owner, "GET", `/api/conversations/${agent.conversationId}/run`)).json.run).toMatchObject({ status: "failed", error: "model_gone", retryable: false });
+  });
+
+  it("a provider edit pushes the Agents whose model it took off the list or put back on it, to their owner — none when the list did not change", async () => {
     const w = await providerAgent("mg_push");
-    // Another of the owner's Agents, on a site model: not pushed.
-    await mustCreateAgent(app, w.owner, { model: FAST });
+    // Another of the owner's Agents, on the model that stays: never pushed.
+    await mustCreateAgent(app, w.owner, { model: { source: "provider", providerId: w.provider, model: "keep-1" } });
     const pushed = vi.spyOn(app.realtime, "pushAgentChanged");
     await w.trim();
     expect(pushed.mock.calls).toEqual([[w.owner.id, w.agent.id]]);
-    // An edit that leaves its model on the list pushes nothing.
+    // An edit that changes no model (its name; the same list sent again, as the web's editor does) pushes nothing.
     pushed.mockClear();
     expect((await api(app, w.owner, "PATCH", `/api/providers/${w.provider}`, { name: "改个名字" })).status).toBe(200);
+    expect((await api(app, w.owner, "PATCH", `/api/providers/${w.provider}`, { models: [{ name: "keep-1" }] })).status).toBe(200);
     expect(pushed).not.toHaveBeenCalled();
+    // Putting it back pushes it again.
+    expect((await api(app, w.owner, "PATCH", `/api/providers/${w.provider}`, { models: [{ name: "keep-1" }, { name: "gone-1" }] })).status).toBe(200);
+    expect(pushed.mock.calls).toEqual([[w.owner.id, w.agent.id]]);
+  });
+});
+
+describe("a model that comes back", () => {
+  it("while it is gone a retry is refused (409 model_gone); once it is back the failed reply says retryable, the retry is taken and the reply is answered", async () => {
+    const w = await providerAgent("mg_back");
+    await w.trim();
+    await say(w.owner, w.agent.conversationId, "在吗？");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const latestRun = async () => (await api(app, w.owner, "GET", `/api/conversations/${w.agent.conversationId}/run`)).json.run;
+    expect(await latestRun()).toMatchObject({ status: "failed", error: "model_gone", retryable: false });
+    expect(await api(app, w.owner, "POST", `/api/conversations/${w.agent.conversationId}/runs/retry`)).toEqual({ status: 409, json: { error: "model_gone" } });
+
+    expect((await api(app, w.owner, "PATCH", `/api/providers/${w.provider}`, { models: [{ name: "keep-1" }, { name: "gone-1" }] })).status).toBe(200);
+    expect((await view(w.owner, w.agent.id)).modelUsable).toBe(true);
+    expect(await latestRun()).toMatchObject({ status: "failed", error: "model_gone", retryable: true });
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.agent.conversationId}/runs/retry`)).status).toBe(201);
+    gateway.reply("我在。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await latestRun()).toMatchObject({ status: "done" });
+  });
+
+  it("in a group the owner's line says retryable only while the model is there, and the retry there is refused while it is not", async () => {
+    const w = await providerAgent("mg_gback", { handle: "back_bot", name: "小回" });
+    const [member, third] = [await signUp(app, "mg_gmember"), await signUp(app, "mg_gthird")];
+    const g = await group(app, w.owner, "team", [member, third]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await w.trim();
+    await say(member, g, "@back_bot 在吗");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const mine = async () => (await api(app, w.owner, "GET", `/api/conversations/${g}/runs`)).json.runs[0].run;
+    expect(await mine()).toMatchObject({ error: "model_gone", retryable: false });
+    expect(await api(app, w.owner, "POST", `/api/conversations/${g}/runs/retry`, { agentId: w.agent.id })).toEqual({ status: 409, json: { error: "model_gone" } });
+    expect((await api(app, w.owner, "PATCH", `/api/providers/${w.provider}`, { models: [{ name: "keep-1" }, { name: "gone-1" }] })).status).toBe(200);
+    expect(await mine()).toMatchObject({ error: "model_gone", retryable: true });
   });
 });
 

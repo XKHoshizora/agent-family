@@ -101,13 +101,21 @@ const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_nam
   join principals p on p.id = a.principal_id
   join agent_conversations ac on ac.agent_id = a.principal_id`;
 
+/** An Agent's model from its `agents` columns (any query that reads them: `model_source`, `site_model_id`, `provider_id`, `provider_model`). */
+export const agentModelOf = (r: {
+  model_source: "site" | "provider" | null;
+  site_model_id: string | null;
+  provider_id: string | null;
+  provider_model: string | null;
+}): AgentModel =>
+  r.model_source === "site"
+    ? { source: "site", id: r.site_model_id! }
+    : r.model_source === "provider"
+      ? { source: "provider", providerId: r.provider_id!, model: r.provider_model! }
+      : null;
+
 function toAgent(r: AgentDbRow): AgentRow {
-  const model: AgentModel =
-    r.model_source === "site"
-      ? { source: "site", id: r.site_model_id! }
-      : r.model_source === "provider"
-        ? { source: "provider", providerId: r.provider_id!, model: r.provider_model! }
-        : null;
+  const model = agentModelOf(r);
   return {
     id: r.id,
     ownerId: r.owner_id,

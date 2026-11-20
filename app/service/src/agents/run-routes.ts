@@ -5,6 +5,8 @@ import { notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
+import { modelUsable } from "../models/resolve.ts";
+import { readOwnedAgent } from "./store.ts";
 import { dismissRun, groupRuns, haltAgents, latestRun, ownedAgentOf, retryRun, stopRun, toWireRun, wireRunSchema } from "./runs.ts";
 
 const empty = z.object({});
@@ -34,10 +36,13 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
     async (req) => {
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
-      if (!(await ownedAgentOf(db, me.id, req.params.id))) throw notFound();
+      const agentId = await ownedAgentOf(db, me.id, req.params.id);
+      if (!agentId) throw notFound();
       const run = await latestRun(db, req.params.id);
-      // A failure the owner dismissed is no longer shown.
-      return { run: run && !(run.status === "failed" && run.dismissed_at !== null) ? toWireRun(run) : null };
+      // A failure the owner dismissed is no longer shown. One shown is retryable by the Agent's model as it is now.
+      if (!run || (run.status === "failed" && run.dismissed_at !== null)) return { run: null };
+      const agent = run.status === "failed" ? await readOwnedAgent(db, me.id, agentId) : null;
+      return { run: toWireRun(run, agent ? await modelUsable(db, config, agent) : undefined) };
     },
   );
 
@@ -49,7 +54,7 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
     async (req) => {
       const me = await requirePrincipal(req);
       await readLimit(req, me.id);
-      return { runs: await groupRuns(db, me.id, req.params.id) };
+      return { runs: await groupRuns(db, me.id, req.params.id, config) };
     },
   );
 

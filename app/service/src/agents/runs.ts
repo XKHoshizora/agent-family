@@ -11,7 +11,8 @@ import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
 import { mentionedHandles } from "./mentions.ts";
-import { lockAgent, type AgentRow } from "./store.ts";
+import { modelsUsable, modelUsable } from "../models/resolve.ts";
+import { agentModelOf, lockAgent, type AgentRow } from "./store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
@@ -30,9 +31,20 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /**
  * Errors after which trying again unchanged does not help (the key, the address, the Agent itself, a context too small
- * for the persona, a model that is gone: the owner must change something first).
+ * for the persona: the owner must change something first). A model that is gone (`model_gone`) is `retryable`'s own
+ * case: it follows the Agent's model as it is now.
  */
-const NOT_RETRYABLE: ReadonlySet<string> = new Set(["provider_rejected", "address_not_allowed", "agent_deleted", "context_too_small", "model_gone"]);
+const NOT_RETRYABLE: ReadonlySet<string> = new Set(["provider_rejected", "address_not_allowed", "agent_deleted", "context_too_small"]);
+
+/**
+ * The one rule of `retryable` (README "Run"): the run failed, trying it again as it is may work (not after an error of
+ * `NOT_RETRYABLE`), and the Agent's model is there to call (`modelUsable`, models/resolve.ts `modelsUsable`) — while it is
+ * not, a retry is refused (409 `model_gone`, `retryRun`), and a run that failed `model_gone` is retryable again once it
+ * is. `modelUsable` as the reader knows it now (`GET …/run`, `GET …/runs`); else as it was when the run ended — usable,
+ * unless it ended `model_gone`.
+ */
+export const retryable = (r: Pick<RunRow, "status" | "error">, modelUsable = r.error !== "model_gone"): boolean =>
+  r.status === "failed" && modelUsable && !NOT_RETRYABLE.has(r.error ?? "");
 
 /** A run on the wire (README "Wire shapes"). */
 export const wireRunSchema = z.object({
@@ -56,15 +68,15 @@ export interface RunRow {
 export const RUN_COLUMNS = "r.id, r.status, r.error, r.resets_at, r.dismissed_at";
 
 /**
- * `retryable`: the run failed and trying again as it is may work — not after the provider refused the key or the
- * address, and never for a run that did not fail. `resetsAt` only for `no_quota` on a free-tier model.
+ * `retryable`: by its one rule (`retryable`, with the Agent's model as `modelUsable` says, where known), never for a run
+ * that did not fail. `resetsAt` only for `no_quota` on a free-tier model.
  */
-export function toWireRun(r: RunRow): WireRun {
+export function toWireRun(r: RunRow, modelUsable?: boolean): WireRun {
   return {
     id: r.id,
     status: r.status,
     ...(r.error === null ? {} : { error: r.error }),
-    retryable: r.status === "failed" && !NOT_RETRYABLE.has(r.error ?? ""),
+    retryable: retryable(r, modelUsable),
     ...(r.error === "no_quota" && r.resets_at ? { resetsAt: r.resets_at.toISOString() } : {}),
   };
 }
@@ -113,24 +125,28 @@ export interface GroupRunEntry {
  * `GET /api/conversations/:id/runs` for `readerId` (wire contract "Run state"): 404, as for a conversation that does not
  * exist, unless it is a group the reader is a current member of. One entry per current Agent member whose latest run
  * there in its current stay (`latestInStay`) has a state for the reader (`groupRunState`), in `agentId` order; the run
- * itself on the reader's own Agents' entries only.
+ * itself on the reader's own Agents' entries only, `retryable` by the Agent's model as it is now (`retryable`).
  */
-export async function groupRuns(q: Queryable, readerId: string, conversationId: string): Promise<GroupRunEntry[]> {
+export async function groupRuns(q: Queryable, readerId: string, conversationId: string, config: Pick<Config, "siteModels">): Promise<GroupRunEntry[]> {
   if ((await peekConversation(q, conversationId))?.type !== "group" || !(await currentMembership(q, conversationId, readerId))) throw notFound();
-  const { rows } = await q.query<RunRow & { agent_id: string; owner_id: string; lane: Lane }>(
-    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}, r.lane
+  const { rows } = await q.query<RunRow & Parameters<typeof agentModelOf>[0] & { agent_id: string; owner_id: string; lane: Lane }>(
+    `select m.principal_id as agent_id, p.owner_id, ${RUN_COLUMNS}, r.lane, a.model_source, a.site_model_id, a.provider_id, a.provider_model
        from memberships m
        join principals p on p.id = m.principal_id and p.kind = 'agent'
+       join agents a on a.principal_id = p.id
        join ${latestInStay("m")} r on true
       where m.conversation_id = $1 and m.left_seq is null
       order by m.principal_id`,
     [conversationId],
   );
+  const mine = rows.filter((row) => row.owner_id === readerId);
+  const usable = new Map(mine.map((row, i) => [row.agent_id, i]));
+  const now = await modelsUsable(q, config, readerId, mine.map(agentModelOf));
   const entries: GroupRunEntry[] = [];
   for (const row of rows) {
     const owns = row.owner_id === readerId;
     const state = groupRunState(row, owns ? "owner" : "member");
-    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(owns ? { run: toWireRun(row) } : {}) });
+    if (state !== null) entries.push({ agentId: row.agent_id, state, ...(owns ? { run: toWireRun(row, now[usable.get(row.agent_id)!]) } : {}) });
   }
   return entries;
 }
@@ -1393,11 +1409,18 @@ const isGroup = async (q: Queryable, conversationId: string): Promise<boolean> =
  * `POST …/runs/retry`: a new queued reply answering up to the owner's last message, only when the conversation's
  * latest run failed. 404 unless it is the caller's Agent conversation; 409 `agent_deleted` / `agent_paused`; 409
  * `busy_run` while a reply is queued or running; 400 when the latest run did not fail (or there is none) or the Agent
- * has no model; 429 over the owner's own `agentRunsPerMinute`. In a group, for the Agent `agentId` names
+ * has no model; 409 `model_gone` while its model is not there to call (`retryable`'s rule); 429 over the owner's own
+ * `agentRunsPerMinute`. In a group, for the Agent `agentId` names
  * (`retryInGroup`); elsewhere `agentId` plays no part. A retry is its owner's call: the owner's own (`lane` `own`),
  * wherever it is, held to their own lane's limit.
  */
-export async function retryRun(t: Tx, ownerId: string, conversationId: string, agentId: string | undefined, config: RunLimits): Promise<Announced> {
+export async function retryRun(
+  t: Tx,
+  ownerId: string,
+  conversationId: string,
+  agentId: string | undefined,
+  config: RunLimits & Pick<Config, "siteModels">,
+): Promise<Announced> {
   if (await isGroup(t, conversationId)) return retryInGroup(t, ownerId, conversationId, agentId, config);
   const ownAgentId = await ownedAgentOf(t, ownerId, conversationId);
   if (!ownAgentId) throw notFound();
@@ -1407,6 +1430,7 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, a
   const latest = await latestRun(t, conversationId);
   if (latest?.status === "queued" || latest?.status === "running") throw new AppError(409, "busy_run");
   if (latest?.status !== "failed" || agent.model === null) throw new AppError(400, "invalid_request");
+  if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const last = await t.query<{ seq: string | null }>(
     "select max(seq)::text as seq from messages where conversation_id = $1 and sender_id = $2 and kind <> 'system'",
@@ -1425,10 +1449,16 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, a
  * questions as the failed one, so whose they were is kept too (`asker_ids`: the retry asks nothing new), and so are the
  * calls (`call_seqs`). Not for an Agent that
  * is not in the group now, nor for a run from before it last joined; a run a halt or the Agent's leaving cancelled
- * (`halted`, `agent_removed`) did not fail: 400 like any other; 429 over the owner's own `agentRunsPerMinute`. Lock
- * order: the group's row → the Agent's → run rows → the owner's `accounts` row.
+ * (`halted`, `agent_removed`) did not fail: 400 like any other; 409 `model_gone` as `retryRun`; 429 over the owner's own
+ * `agentRunsPerMinute`. Lock order: the group's row → the Agent's → run rows → the owner's `accounts` row.
  */
-async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agentId: string | undefined, config: RunLimits): Promise<Announced> {
+async function retryInGroup(
+  t: Tx,
+  ownerId: string,
+  conversationId: string,
+  agentId: string | undefined,
+  config: RunLimits & Pick<Config, "siteModels">,
+): Promise<Announced> {
   const own = await ownAgentInGroup(t, ownerId, conversationId, agentId);
   const joinedSeq = own.joinedSeq;
   const agent = await lockAgent(t, own.agentId, conversationId);
@@ -1440,6 +1470,7 @@ async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agen
   if (latest?.status !== "failed" || agent.model === null || joinedSeq === null || covers === null || covers <= joinedSeq) {
     throw new AppError(400, "invalid_request");
   }
+  if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
   await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));

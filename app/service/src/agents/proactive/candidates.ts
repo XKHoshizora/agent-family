@@ -1,8 +1,10 @@
-import type { ProactiveConfig } from "../../config.ts";
+import type { Config, ProactiveConfig } from "../../config.ts";
 import type { Queryable } from "../../db.ts";
 import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
+import { modelsUsable } from "../../models/resolve.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
 import { mentionedHandles } from "../mentions.ts";
+import { agentModelOf } from "../store.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
 import type { Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
@@ -113,24 +115,34 @@ export const mayAnswerUnasked = (seq: string, sender: string): string =>
    and not ${blockedEitherWay("p.owner_id", sender)}`;
 
 /**
- * The Agents that may answer unasked `senderId`'s message at `seq` in the group (`mayAnswerUnasked`). At most
+ * The Agents that may answer unasked `senderId`'s message at `seq` in the group (`mayAnswerUnasked`) and whose model is
+ * there to call (models/resolve.ts `modelsUsable`: no judgement is spent on one that could not reply). At most
  * `MAX_AGENT_OPTIONS`: beyond that, those judged here least recently (`agent_group_state.judged_at`, never first) take
  * the places. Keyed and returned in id order.
  */
-export async function optionsFor(q: Queryable, conversationId: string, seq: number, senderId: string): Promise<Option[]> {
-  const { rows } = await q.query<{ id: string; handle: string; name: string; intro: string; field: string; joined_seq: string }>(
-    `select x.* from (
-       select p.id, p.handle::text as handle, p.display_name as name, a.intro, a.field, m.joined_seq::text as joined_seq
-         from memberships m
-         join principals p on p.id = m.principal_id
-         join agents a on a.principal_id = p.id
-         left join agent_group_state s on s.agent_id = p.id and s.conversation_id = m.conversation_id
-        where m.conversation_id = $1 and ${mayAnswerUnasked("$3", "$2::uuid")}
-        order by s.judged_at nulls first, p.id
-        limit $4) x
-      order by x.id`,
-    [conversationId, senderId, seq, MAX_AGENT_OPTIONS],
+export async function optionsFor(q: Queryable, conversationId: string, seq: number, senderId: string, config: Pick<Config, "siteModels">): Promise<Option[]> {
+  const found = await q.query<
+    { id: string; owner_id: string; handle: string; name: string; intro: string; field: string; joined_seq: string } & Parameters<typeof agentModelOf>[0]
+  >(
+    `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, a.intro, a.field, m.joined_seq::text as joined_seq,
+            a.model_source, a.site_model_id, a.provider_id, a.provider_model
+       from memberships m
+       join principals p on p.id = m.principal_id
+       join agents a on a.principal_id = p.id
+       left join agent_group_state s on s.agent_id = p.id and s.conversation_id = m.conversation_id
+      where m.conversation_id = $1 and ${mayAnswerUnasked("$3", "$2::uuid")}
+      order by s.judged_at nulls first, p.id`,
+    [conversationId, senderId, seq],
   );
+  const usable = new Set<string>();
+  for (const ownerId of new Set(found.rows.map((r) => r.owner_id))) {
+    const theirs = found.rows.filter((r) => r.owner_id === ownerId);
+    (await modelsUsable(q, config, ownerId, theirs.map(agentModelOf))).forEach((ok, i) => ok && usable.add(theirs[i]!.id));
+  }
+  const rows = found.rows
+    .filter((r) => usable.has(r.id))
+    .slice(0, MAX_AGENT_OPTIONS)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return rows.map((r, i) => {
     const name = labelName(r.name, r.handle);
     return {

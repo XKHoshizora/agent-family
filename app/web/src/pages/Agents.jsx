@@ -59,7 +59,7 @@ function StatusTag({ agent, long = false }) {
   if (!agent.loaded) return null;
   if (!agent.model) return <Tag tone="warn">未选模型</Tag>;
   // (Its model is not there to call any more: it cannot reply, and its page says why.)
-  if (!agent.modelUsable) return null;
+  if (!agent.modelUsable) return <Tag tone="warn">模型用不了</Tag>;
   return <Tag tone="ok">可回复</Tag>;
 }
 

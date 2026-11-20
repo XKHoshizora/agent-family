@@ -166,9 +166,10 @@ describe("the Agent list", () => {
     const modelRow = () => [...document.querySelectorAll(".main-col dt")].find((dt) => dt.textContent === "模型").nextElementSibling;
     expect(modelRow().textContent).toContain("小模型");
     expect(modelRow().textContent).toContain("这个模型现在用不了，换一个");
-    // Nor does it claim 可回复, on its page or in the list.
+    // Nor does it claim 可回复: its tag, on its page and in the list, is a warning, 模型用不了.
     expect(mainText()).not.toContain("可回复");
-    expect(rowOf("小助手").querySelector(".tag")).toBeNull();
+    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("模型用不了");
+    expect(document.querySelector(".profile-head .tag:not(:first-of-type)").textContent).toBe("模型用不了");
     cleanup();
 
     await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: true })] });
