@@ -691,12 +691,12 @@ export function positionsOf(state, ids) {
 // ───────── optimistic sends, keyed by clientTxn
 
 /** A new unsent message, or a retry of one (it keeps its clientTxn, time and place). */
-export function markSending(state, { clientTxn, conversationId, text = "", replyToSeq = null, attachment = null, at }) {
+export function markSending(state, { clientTxn, conversationId, text = "", replyToSeq = null, attachment = null, mentions = [], at }) {
   const conv = state.conversations[conversationId];
   const old = state.pending[clientTxn];
   const entry = old
     ? { ...old, status: "sending", error: null }
-    : { clientTxn, conversationId, text, replyToSeq, attachment, at, afterSeq: conv ? conv.position : 0, status: "sending", error: null };
+    : { clientTxn, conversationId, text, replyToSeq, attachment, mentions, at, afterSeq: conv ? conv.position : 0, status: "sending", error: null };
   return { ...state, pending: { ...state.pending, [clientTxn]: entry } };
 }
 
@@ -822,9 +822,14 @@ export function setPeerRead(state, conversationId, seq) {
   return putConversation(state, { ...conv, peerReadSeq: seq });
 }
 
-export function setDraft(state, conversationId, text) {
-  if ((state.drafts[conversationId] ?? "") === text) return state;
-  return { ...state, drafts: text ? { ...state.drafts, [conversationId]: text } : without(state.drafts, conversationId) };
+/**
+ * A conversation's draft: its text, or — while it holds mentions picked from the @ list — `{text, mentions}` (the
+ * mentions' ranges in that text, data/mentions.js), so a draft keeps its tags. Nothing for an empty draft.
+ */
+export function setDraft(state, conversationId, text, mentions = []) {
+  const draft = Array.isArray(mentions) && mentions.length > 0 && text ? { text, mentions: mentions.map(({ id, start, length }) => ({ id, start, length })) } : text;
+  if (JSON.stringify(state.drafts[conversationId] ?? "") === JSON.stringify(draft)) return state;
+  return { ...state, drafts: draft ? { ...state.drafts, [conversationId]: draft } : without(state.drafts, conversationId) };
 }
 
 /**

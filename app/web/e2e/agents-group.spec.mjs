@@ -169,14 +169,14 @@ test("a member calls the Agent with @ (its account name goes in); both see 正�
   };
   const boBefore = await boUsage();
 
-  // Bo types @ and picks the Agent from the members: its account name is what goes in.
+  // Bo types @ and picks the Agent from the members: a tag of its name goes in, meaning that Agent (Task M).
   await composer(boChat).click();
   await bo.page.keyboard.type("@");
   const option = bo.page.getByRole("listbox", { name: "选择要提及的成员" }).getByRole("option").filter({ hasText: agent.name });
   await expect(option).toContainText(`@${agent.handle} · Agent · 主人：${ann.displayName}`);
   await shot(bo.page, "group-mention-picker");
   await option.click();
-  await expect(composer(boChat)).toHaveValue(`@${agent.handle} `);
+  await expect(composer(boChat)).toHaveValue(`@${agent.name} `);
   const tag = uniq(4);
   const question = `帮我查一下明天的天气 ${tag}`;
   const first = `先说一半 ${tag}，`;
@@ -184,7 +184,7 @@ test("a member calls the Agent with @ (its account name goes in); both see 正�
   await modelStub.hangAfter(first);
   await bo.page.keyboard.type(question);
   await composer(boChat).press("Enter");
-  await expectStored(boChat, `@${agent.handle} ${question}`);
+  await expectStored(boChat, `@${agent.name} ${question}`);
 
   // While it writes: 正在回复… for both, none of its text (nothing streams in a group); only its owner can stop it.
   await modelStub.holding(1);

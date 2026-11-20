@@ -3,6 +3,7 @@
 // Every avatar URL carries its principal's version (`avatarUrl(id, version)`), so a changed avatar shows at once.
 import { attachmentUrl, avatarUrl } from "../api/routes.js";
 import { ME } from "./identities.js";
+import { mentionsIn } from "./mentions.js";
 import { ownsAgent } from "./model.js";
 
 const pad = (n) => String(n).padStart(2, "0");
@@ -197,63 +198,13 @@ export function noticeText(system, fallback, nameOf, where = {}) {
   return missing ? fallback : text;
 }
 
-/** `@`, a run of handle characters and at most one `.` with another run: the service's `mentions.ts` `MENTION`. */
-const MENTION = /(?<![A-Za-z0-9_])@([A-Za-z0-9_]+)(?:\.([A-Za-z0-9_]+))?/g;
-
 /**
- * The handles `text` calls, as the service reads them (`mentions.ts` `mentionedHandles`): an Agent's full handle
- * `owner.name` (3–24 characters, a dot, 2–24) or a bare one (2–24), lower-cased, distinct, at most 20; a `.` not followed
- * by a handle character is punctuation, and only one dot counts.
+ * Whether a message names the Agent `agentId` (its stored mentions, `msg.mentions`, decided by the service when it was
+ * sent: a mention picked from the @ list, or one typed and read there once): the service's rule for a message in the
+ * Agent's own conversation when its reply mode is 仅在我点名时回复. The text is never read for it.
  */
-export function mentionedHandles(text) {
-  const found = [];
-  for (const [, first, name] of String(text ?? "").matchAll(MENTION)) {
-    const fits = name === undefined ? first.length >= 2 && first.length <= 24 : first.length >= 3 && first.length <= 24 && name.length >= 2 && name.length <= 24;
-    if (!fits) continue;
-    const lower = (name === undefined ? first : `${first}.${name}`).toLowerCase();
-    if (!found.includes(lower)) found.push(lower);
-    if (found.length === 20) break;
-  }
-  return found;
-}
-
-/** An account name without "@", lower-cased; an Agent's name part is what follows its owner's handle and the dot. */
-const bareHandle = (handle) => String(handle ?? "").replace(/^@/, "").toLowerCase();
-const namePartOf = (handle) => bareHandle(handle).slice(bareHandle(handle).indexOf(".") + 1);
-
-/** A person's display name as a bare mention is compared with it: trimmed, lower-cased (the service's `namedAgents`, mentions.ts). */
-const nameAsHandle = (name) => String(name ?? "").trim().toLowerCase();
-
-/**
- * The Agents among `memberIds` that `text` calls, as the service decides (`mentions.ts` `resolveMentions`):
- * `@owner.name` the Agent with that full handle (nobody when two live ones would have it); a bare `@name` nobody when a
- * person member has that handle or that display name (people first), else the one Agent member with that name part —
- * nobody when there are two or more. `principalOf(id)` → `{kind, handle, displayName}`.
- */
-export function calledAgentIds(text, memberIds, principalOf) {
-  const members = memberIds.map((id) => ({ id, ...principalOf(id) })).filter((m) => m.kind === "human" || m.kind === "agent");
-  const called = [];
-  for (const handle of mentionedHandles(text)) {
-    const agents = handle.includes(".")
-      ? members.filter((m) => m.kind === "agent" && bareHandle(m.handle) === handle)
-      : members.some((m) => m.kind === "human" && (bareHandle(m.handle) === handle || nameAsHandle(m.displayName) === handle))
-        ? []
-        : members.filter((m) => m.kind === "agent" && namePartOf(m.handle) === handle);
-    if (agents.length === 1 && !called.includes(agents[0].id)) called.push(agents[0].id);
-  }
-  return called;
-}
-
-/**
- * Whether `text` names the Agent by `@handle` (its full one) or `@name part`, each a whole mention (`mentionedHandles`),
- * or by `@name` anywhere in the text (case ignored): the service's rule for a message in the Agent's own conversation
- * when its reply mode is 仅在我点名时回复 (`runs.ts` `mentions`).
- */
-export function namesAgent(text, agent) {
-  const handle = bareHandle(agent?.handle);
-  const name = String(agent?.name ?? "").toLowerCase();
-  const mentioned = mentionedHandles(text);
-  return (handle !== "" && (mentioned.includes(handle) || mentioned.includes(namePartOf(handle)))) || (name !== "" && String(text ?? "").toLowerCase().includes(`@${name}`));
+export function namesAgent(msg, agentId) {
+  return Array.isArray(msg?.mentions) && msg.mentions.some((m) => m.id === agentId);
 }
 
 /**
@@ -421,6 +372,9 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     // more), and the words searched for — only in my Agent's own conversation, whatever a message carries elsewhere.
     lookups: m.kind === "text" ? lookupsView(m.lookups) : null,
     found: m.kind === "text" ? foundView(m.found) : [],
+    // Who its mentions mean, as stored when it was sent (data/mentions.js `mentionsIn`: only those that fit its text —
+    // a file's caption): shown as tags over their ranges. Never read from the text.
+    mentions: kind === "system" ? [] : mentionsIn(m.text ?? "", m.mentions).map((x) => ({ ...x, id: alias(x.id) })),
     queries:
       m.kind === "text" && typeof agentId === "string" && m.senderId === agentId && Array.isArray(m.queries)
         ? m.queries.filter((q) => typeof q === "string" && q.trim() !== "")
@@ -471,19 +425,16 @@ function groupRunRows(conv, slots) {
 
 /**
  * Whether Agents of the group are answering each other (not a reply a person asked for): the newest message is an
- * Agent's (not a notice) and either @-mentions another Agent member (by its account name) or an Agent's reply is being
- * written. It shows 让 Agent 停下.
+ * Agent's (not a notice) and either its stored mentions (decided by the service when it was posted) mean another Agent
+ * that is a member of the group now, or an Agent's reply is being written. It shows 让 Agent 停下. Its text is never read
+ * for it.
  */
 function agentsTalking(model, conv, held, rows) {
   const last = held[held.length - 1];
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
   if (rows.some((r) => r.kind === "replying")) return true;
-  const principalOf = (id) => ({
-    kind: model.principals[id]?.kind,
-    handle: model.agents[id]?.handle ?? model.principals[id]?.handle,
-    displayName: model.principals[id]?.displayName,
-  });
-  return calledAgentIds(last.text, conv.members.map((m) => m.id), principalOf).some((id) => id !== last.senderId);
+  const members = new Set(conv.members.map((m) => m.id));
+  return mentionsIn(last.text ?? "", last.mentions).some((m) => m.id !== last.senderId && members.has(m.id) && model.principals[m.id]?.kind === "agent");
 }
 
 function pendingView(p, { held, alias, now }) {
@@ -519,6 +470,8 @@ function pendingView(p, { held, alias, now }) {
       : null,
     attachment,
     system: null,
+    // The mentions picked when it was written (ranges of its text as sent), shown while it is sent.
+    mentions: mentionsIn(p.text ?? "", p.mentions).map((x) => ({ ...x, id: alias(x.id) })),
   };
 }
 

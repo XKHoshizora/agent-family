@@ -8,6 +8,7 @@
 import * as routes from "../api/routes.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
 import { ME } from "./identities.js";
+import { cleanWithMentions } from "./mentions.js";
 import { agentErrorText, commonErrorText, profileErrorText, providerErrorText, replyErrorText, whisperErrorText } from "./errorTexts.js";
 import {
   applyAgent,
@@ -123,6 +124,8 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (p.attachment) body.attachmentId = p.attachment.id;
     if (p.text) body.text = p.text;
     if (p.replyToSeq !== null && p.replyToSeq !== undefined) body.replyToSeq = p.replyToSeq;
+    // The mentions picked from the @ list: who each means, and its range of the text sent (Task M).
+    if (Array.isArray(p.mentions) && p.mentions.length > 0) body.mentions = p.mentions;
     try {
       const res = await api.sendMessage(p.conversationId, body);
       const why = staleness(token);
@@ -149,23 +152,25 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   /** What I send goes to the end of the conversation: a detached window is left first. */
   const toNewest = (conversationId) => setModel(closeWindow(getModel(), conversationId));
 
-  function send(conversationId, { text = "", replyToSeq = null, attachment = null }) {
+  function send(conversationId, { text = "", replyToSeq = null, attachment = null, mentions = [] }) {
     if (!getModel().conversations[conversationId]) return refused("not_found");
     toNewest(conversationId);
     const clientTxn = uuid();
-    setModel(markSending(getModel(), { clientTxn, conversationId, text, replyToSeq, attachment, at: now() }));
+    setModel(markSending(getModel(), { clientTxn, conversationId, text, replyToSeq, attachment, mentions, at: now() }));
     return deliver(clientTxn);
   }
 
   /**
    * Sends text as the service stores it (bidi overrides and isolates removed, trimmed; NUL dropped and lone
    * surrogates replaced, which the service refuses); text with nothing visible is refused without a request.
-   * Resolves {ok, clientTxn, duplicate?, error?}.
+   * `mentions`: those picked from the @ list (`{id, start, length}` in `text` as given), sent as ranges of the text as
+   * it is sent (data/mentions.js `cleanWithMentions`, the same rules). Resolves {ok, clientTxn, duplicate?, error?}.
    */
-  function sendText(conversationId, text, { replyToSeq = null } = {}) {
-    const body = typeof text === "string" ? messageText(wellFormed(text.replaceAll("\u0000", ""))) : "";
+  function sendText(conversationId, text, { replyToSeq = null, mentions = [] } = {}) {
+    const cleaned = typeof text === "string" ? cleanWithMentions(text, mentions) : { text: "", mentions: [] };
+    const body = messageText(wellFormed(cleaned.text));
     if (!hasVisibleText(body)) return refused("invalid_request");
-    return send(conversationId, { text: body, replyToSeq });
+    return send(conversationId, { text: body, replyToSeq, mentions: body === cleaned.text ? cleaned.mentions : [] });
   }
 
   // ───────── file messages: upload (at most MAX_UPLOADS at once, the rest wait in order), then send
@@ -560,10 +565,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
    * Composer text kept in the store (survives stop() for the same account). Not kept for a conversation I am
    * no longer in (a composer saving on its way out after I was removed); while stopped every draft is kept.
    */
-  function saveDraft(conversationId, text) {
+  function saveDraft(conversationId, text, mentions = []) {
     const model = getModel();
     if (model.synced && !model.conversations[conversationId]) return;
-    setModel(setDraft(model, conversationId, typeof text === "string" ? text : ""));
+    setModel(setDraft(model, conversationId, typeof text === "string" ? text : "", mentions));
   }
 
   /**

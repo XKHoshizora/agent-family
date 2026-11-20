@@ -317,6 +317,56 @@ describe("what an Agent's Markdown renders to", () => {
   });
 });
 
+describe("an Agent's stored mentions in its Markdown (Task M)", () => {
+  /** The text with its stored `mentions`, as the conversation shows it, once the worker's answer has come. */
+  async function showWith(text, mentions) {
+    const { container } = render(
+      <div className="bubble">
+        <AgentText text={text} mentions={mentions} />
+      </div>,
+    );
+    return container;
+  }
+  const tags = (root) => [...root.querySelectorAll(".mention")].map((t) => [t.querySelector(".sr-only").textContent, t.querySelector('[aria-hidden="true"]').textContent]);
+
+  it("a mention is a tag over its range, plain at first and in the rendered text; one inside code is plain text there", async () => {
+    const text = "**请** @xiaolin.jarvis 看看，`@bobby.helper` 不叫";
+    const mentions = [
+      { id: AG1, start: 6, length: 15 },
+      { id: ANN, start: 26, length: 13 },
+    ];
+    const root = await showWith(text, mentions);
+    expect(tags(root)).toEqual([
+      ["提到 xiaolin.jarvis", "@xiaolin.jarvis"],
+      ["提到 bobby.helper", "@bobby.helper"],
+    ]);
+    await settle();
+    expect(root.querySelector(".md strong").textContent).toBe("请");
+    expect(tags(root.querySelector(".md"))).toEqual([["提到 xiaolin.jarvis", "@xiaolin.jarvis"]]);
+    expect(root.querySelector(".md code").textContent).toBe("@bobby.helper");
+    expect([...root.textContent].filter((ch) => ch === String.fromCharCode(0xfdd0) || ch === String.fromCharCode(0xfdd1))).toEqual([]);
+    expectSafe(root);
+  });
+
+  it("in a list, a quote and a link's text: tags where text is, plain inside the link; without mentions nothing is marked", async () => {
+    const text = "- @阿波 一\n> @小安 二\n\n[@阿波](https://x.example/)";
+    const mentions = [
+      { id: ANN, start: 2, length: 3 },
+      { id: ANN, start: 10, length: 3 },
+      { id: ANN, start: 18, length: 3 },
+    ];
+    const root = await showWith(text, mentions);
+    await settle();
+    expect(tags(root.querySelector(".md li"))).toEqual([["提到 阿波", "@阿波"]]);
+    expect(tags(root.querySelector(".md blockquote"))).toEqual([["提到 小安", "@小安"]]);
+    expect(root.querySelector(".md a").textContent).toBe("@阿波");
+    const plain = await showWith("**@阿波** 你好", null);
+    await settle();
+    expect(plain.querySelector(".mention")).toBeNull();
+    expect(plain.querySelector(".md strong").textContent).toBe("@阿波");
+  });
+});
+
 describe("every link shows where it goes", () => {
   it("an ordinary link is its text followed by its real host, in a muted note that is not a link", async () => {
     const bubble = await show("看 [文档](https://www.docs.example/a/b?c=1) 和 [登录](https://evil.example:8443/x)");

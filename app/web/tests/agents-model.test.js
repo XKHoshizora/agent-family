@@ -796,7 +796,9 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     expect(rows(s).map((r) => r.agentId)).toEqual([OAG, AG1]);
   });
 
-  it("Agents talking: the newest message an Agent's that @-mentions another Agent of the group, or an Agent's with a reply under way; never a person's", () => {
+  it("Agents talking: the newest message an Agent's whose stored mentions mean another Agent of the group, or an Agent's with a reply under way; never a person's", () => {
+    /** Who a message means, as the service stored it when it was posted (Task M). */
+    const means = (id, start, length) => ({ mentions: [{ id, start, length }] });
     const talking = (messages) => view(inGroup({ messages: [...BASE, ...messages] })).convs[G1].agentsTalking;
     expect(view(inGroup()).convs[G1].agentsTalking).toBe(false);
     // A reply under way after a person's message (an @-mention of an Agent, say) is the person's ask: no.
@@ -806,22 +808,22 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     // An Agent's newest message and a reply under way (whatever it says): Agents answering each other.
     expect(view(put(inGroup({ messages: [...BASE, wire(G1, 3, OAG, "好的")] }), memberPush("replying"))).convs[G1].agentsTalking).toBe(true);
     expect(view(put(inGroup({ messages: [...BASE, wire(G1, 3, OAG, "好的")] }), memberPush("unavailable"))).convs[G1].agentsTalking).toBe(false);
-    expect(talking([wire(G1, 3, OAG, "问问 @helper 吧")])).toBe(true);
-    expect(talking([wire(G1, 3, OAG, "@HELPER，你来")])).toBe(true);
-    expect(talking([wire(G1, 3, AG1, "@annbot")])).toBe(true);
-    // Itself, a person, a longer handle, an address, a person's message, a notice after it: no.
-    expect(talking([wire(G1, 3, OAG, "我是 @annbot")])).toBe(false);
-    expect(talking([wire(G1, 3, OAG, "@ann 你好")])).toBe(false);
-    expect(talking([wire(G1, 3, OAG, "@helper_2 你好")])).toBe(false);
-    expect(talking([wire(G1, 3, OAG, "写信到 me@helper")])).toBe(false);
-    expect(talking([wire(G1, 3, ANN, "@helper 你好")])).toBe(false);
-    expect(talking([wire(G1, 3, OAG, "@helper"), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "问问 @helper 吧", means(AG1, 3, 7))])).toBe(true);
+    expect(talking([wire(G1, 3, OAG, "@小助手，你来", means(AG1, 0, 4))])).toBe(true);
+    expect(talking([wire(G1, 3, AG1, "@annbot", means(OAG, 0, 7))])).toBe(true);
+    // The text alone is not read: an @ the service stored nothing for (a longer handle, an address, two of one name) is no call.
+    expect(talking([wire(G1, 3, OAG, "问问 @helper 吧")])).toBe(false);
+    // Itself, a person, a person's message, a notice after it: no.
+    expect(talking([wire(G1, 3, OAG, "我是 @annbot", means(OAG, 3, 7))])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "@ann 你好", means(ANN, 0, 4))])).toBe(false);
+    expect(talking([wire(G1, 3, ANN, "@helper 你好", means(AG1, 0, 7))])).toBe(false);
+    expect(talking([wire(G1, 3, OAG, "@helper", means(AG1, 0, 7)), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })])).toBe(false);
     // A system notice as the newest message hides the button even while a row is replying.
-    const noticeLast = inGroup({ messages: [...BASE, wire(G1, 3, OAG, "@helper"), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })] });
+    const noticeLast = inGroup({ messages: [...BASE, wire(G1, 3, OAG, "@helper", means(AG1, 0, 7)), notice(G1, 4, "x", { event: "agent_chain_paused", limit: 30 })] });
     expect(view(put(noticeLast, memberPush("replying"))).convs[G1].agentsTalking).toBe(false);
     expect(view(put(put(noticeLast, memberPush("replying")), ownerPush(runOf(R1, "running")))).convs[G1].agentsTalking).toBe(false);
     // An Agent that is not (or no longer) in the group is nobody to call.
-    expect(view(inGroup({ ids: [ME_ID, ANN, OAG], messages: [...BASE, wire(G1, 3, OAG, "@helper")] })).convs[G1].agentsTalking).toBe(false);
+    expect(view(inGroup({ ids: [ME_ID, ANN, OAG], messages: [...BASE, wire(G1, 3, OAG, "@helper", means(AG1, 0, 7))] })).convs[G1].agentsTalking).toBe(false);
     // Only a group has it.
     expect(view(inGroup()).convs[A1].agentsTalking).toBe(false);
     expect(view(inGroup()).convs[A1].agentRuns).toEqual([]);

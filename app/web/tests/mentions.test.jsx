@@ -1,0 +1,314 @@
+// @vitest-environment jsdom
+// A mention carries who it means (Task M). The composer keeps each mention picked from the @ list as a tag — its range
+// of the box's text and the id picked — through every edit, and sends it with the message (`mentions`); a stored
+// message shows its mentions as tags over their ranges. The web never reads mention text to decide who is meant.
+import React from "react";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { App } from "../src/App.jsx";
+import { createDataLayer } from "../src/data/store.jsx";
+import { cleanWithMentions, editOf, mentionSegments, mentionsIn, retag, widenDeletion } from "../src/data/mentions.js";
+import { MentionText } from "../src/ui/MentionText.jsx";
+import { ANN, BO, D1, G1, ME, ME_ID, PRINCIPALS, direct, emptySocial, fakeTimers, fakeTransport, group, principal, syncOf, wire } from "./fixtures.js";
+
+const NOW = new Date(2026, 10, 16, 12, 0).getTime();
+
+beforeAll(() => {
+  Element.prototype.scrollIntoView = () => {};
+});
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.spyOn(Element.prototype, "getClientRects").mockImplementation(() => [{ top: 0 }]);
+  history.replaceState(null, "", "/");
+});
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+const flush = () =>
+  act(async () => {
+    for (let i = 0; i < 6; i += 1) await vi.advanceTimersByTimeAsync(0);
+  });
+
+/** D1 with 小安; G1 with 小安 and 阿波 (or the `principals` given), each with `messages`. */
+async function openApp({ principals = PRINCIPALS, messages = [] } = {}) {
+  const lastSeq = (conv) => messages.filter((m) => m.conversationId === conv).reduce((max, m) => Math.max(max, m.seq), 0);
+  const sync = () => syncOf([direct(D1, ANN, { lastSeq: lastSeq(D1), readSeq: lastSeq(D1) }), group(G1, { lastSeq: lastSeq(G1), readSeq: lastSeq(G1) })], messages, principals);
+  const transport = fakeTransport({ sync, social: emptySocial });
+  const api = {
+    sendMessage: vi.fn(() => new Promise(() => {})),
+    markRead: vi.fn(async (_id, seq) => ({ readSeq: seq })),
+    listMessages: vi.fn(async () => ({ messages: [], nextBefore: null })),
+  };
+  let n = 0;
+  const layer = createDataLayer({ transport, api, timers: fakeTimers(), now: () => NOW, random: () => 0.5, uuid: () => `tx-${++n}` });
+  render(<App api={{ getMe: async () => ME }} createLayer={() => layer} />);
+  await flush();
+  return { layer, api };
+}
+const openChat = async (name) => {
+  fireEvent.click(screen.getByText(name, { selector: ".list-col .row-name" }));
+  await flush();
+};
+const input = () => screen.getByLabelText("消息内容");
+/** The box's text becomes `value`, the caret at `caret` (its end by default) — as the browser leaves it after an edit. */
+const edit = (value, caret = value.length, init = {}) => fireEvent.change(input(), { target: { value, selectionStart: caret, selectionEnd: caret }, ...init });
+/** Puts the caret (or a selection) in the box without changing its text. */
+const caretAt = (start, end = start) => {
+  input().setSelectionRange(start, end);
+  fireEvent.select(input());
+};
+const press = (key, init = {}) => fireEvent.keyDown(input(), { key, ...init });
+/** Types "@" at the caret's end of `before` and picks the member named `name` (the `nth` of that name). */
+function pick(before, name, nth = 0) {
+  edit(`${before}@`);
+  fireEvent.click(screen.getAllByRole("option").filter((o) => o.querySelector("strong").textContent === name)[nth]);
+}
+/** The tags the composer shows (its mirror), as their text. */
+const chips = () => [...document.querySelectorAll(".composer-mirror .mention-chip")].map((c) => c.textContent);
+/** What the composer tells a screen reader it mentions. */
+const spoken = () => {
+  const id = input().getAttribute("aria-describedby");
+  return id ? [...document.getElementById(id).querySelectorAll("li")].map((li) => li.textContent) : [];
+};
+const sentBody = (api) => api.sendMessage.mock.calls.at(-1)?.[1];
+
+describe("the composer: a mention picked from the @ list is a tag meaning the one picked", () => {
+  it("picking a member inserts a tag of their name; it is sent with their id and its range", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("你好 ", "阿波");
+    expect(input().value).toBe("你好 @阿波 ");
+    expect(chips()).toEqual(["@阿波"]);
+    expect(spoken()).toEqual(["提到 阿波"]);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "你好 @阿波", mentions: [{ id: BO, start: 3, length: 3 }] });
+  });
+
+  it("deletes as a unit: Backspace at its end or Delete at its start selects all of it for the deletion; a deletion that takes part of it takes it all", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    edit("@阿波", 3);
+    caretAt(3);
+    press("Backspace");
+    expect([input().selectionStart, input().selectionEnd]).toEqual([0, 3]);
+    edit("", 0);
+    expect(chips()).toEqual([]);
+    pick("", "阿波");
+    caretAt(0);
+    press("Delete");
+    expect([input().selectionStart, input().selectionEnd]).toEqual([0, 3]);
+    // A keyboard that sends no key (a phone's): its one-character deletion at the tag's end takes the whole tag.
+    edit("@阿 ", 2);
+    expect(input().value).toBe(" ");
+    expect(chips()).toEqual([]);
+    edit("好 ", 1);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "好" });
+  });
+
+  it("typing inside it turns it back into plain text: the text stays, the mention goes", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    caretAt(2);
+    edit("@阿x波 ", 3);
+    expect(chips()).toEqual([]);
+    expect(spoken()).toEqual([]);
+    // (The caret after "@阿x" opens the @ list, as any typed @ does: closed first.)
+    press("Escape");
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "@阿x波" });
+  });
+
+  it("its range stays right through typing before and after it, a paste, a cut, line breaks and an emoji before it", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    edit("@阿波 你好", 6);
+    caretAt(0);
+    edit("嗨@阿波 你好", 1);
+    edit("😀嗨@阿波 你好", 2);
+    edit("😀嗨\n@阿波 你好", 4);
+    caretAt(0);
+    edit("粘贴进来的😀嗨\n@阿波 你好", 5);
+    caretAt(0, 2);
+    edit("进来的😀嗨\n@阿波 你好", 0);
+    edit("进来的😀嗨\n@阿波 你好\n第二行", 15);
+    expect(chips()).toEqual(["@阿波"]);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "进来的😀嗨\n@阿波 你好\n第二行", mentions: [{ id: BO, start: 7, length: 3 }] });
+  });
+
+  it("undo brings a deleted tag back as the tag it was; redo takes it again", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    caretAt(3);
+    press("Backspace");
+    edit(" ", 0, { inputType: "deleteContentBackward" });
+    expect(chips()).toEqual([]);
+    edit("@阿波 ", 3, { inputType: "historyUndo" });
+    expect(chips()).toEqual(["@阿波"]);
+    edit(" ", 0, { inputType: "historyRedo" });
+    expect(chips()).toEqual([]);
+    edit("@阿波 ", 3, { inputType: "historyUndo" });
+    edit("@阿波 好", 5);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "@阿波 好", mentions: [{ id: BO, start: 0, length: 3 }] });
+  });
+
+  it("IME composition before, right after and right next to a tag keeps its range and duplicates nothing", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    edit("@阿波", 3);
+    // Composing right after it (its end, no space between).
+    fireEvent.compositionStart(input());
+    edit("@阿波h", 4);
+    edit("@阿波hao", 6);
+    // The IME's own Backspace while composing touches no tag.
+    caretAt(6);
+    fireEvent.keyDown(input(), { key: "Backspace", isComposing: true, keyCode: 229 });
+    expect([input().selectionStart, input().selectionEnd]).toEqual([6, 6]);
+    edit("@阿波好", 4);
+    fireEvent.compositionEnd(input());
+    // Composing before it, at the very start.
+    caretAt(0);
+    fireEvent.compositionStart(input());
+    edit("n@阿波好", 1);
+    edit("ni@阿波好", 2);
+    edit("你@阿波好", 1);
+    fireEvent.compositionEnd(input());
+    // And right before it, between 你 and the tag.
+    fireEvent.compositionStart(input());
+    edit("你m@阿波好", 2);
+    edit("你们@阿波好", 2);
+    fireEvent.compositionEnd(input());
+    expect(input().value).toBe("你们@阿波好");
+    expect(chips()).toEqual(["@阿波"]);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "你们@阿波好", mentions: [{ id: BO, start: 2, length: 3 }] });
+  });
+
+  it("two people of the same name: each tag means its own person", async () => {
+    const { api } = await openApp({ principals: [principal(ME_ID, "me_one", "Mei"), principal(ANN, "ann", "阿波"), principal(BO, "bo", "阿波")] });
+    await openChat("周末小组");
+    pick("", "阿波", 0);
+    pick("@阿波 ", "阿波", 1);
+    expect(chips()).toEqual(["@阿波", "@阿波"]);
+    press("Enter");
+    expect(sentBody(api).mentions).toEqual([
+      { id: ANN, start: 0, length: 3 },
+      { id: BO, start: 4, length: 3 },
+    ]);
+  });
+
+  it("a name of more than one word (「Jarvis Lee」) is one tag meaning that person", async () => {
+    const { api } = await openApp({ principals: [principal(ME_ID, "me_one", "Mei"), principal(ANN, "ann", "小安"), principal(BO, "bo", "Jarvis Lee")] });
+    await openChat("周末小组");
+    pick("", "Jarvis Lee");
+    expect(chips()).toEqual(["@Jarvis Lee"]);
+    expect(spoken()).toEqual(["提到 Jarvis Lee"]);
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "@Jarvis Lee", mentions: [{ id: BO, start: 0, length: 11 }] });
+  });
+
+  it("a draft keeps its tags; another conversation's composer shows none of them", async () => {
+    const { layer, api } = await openApp();
+    await openChat("周末小组");
+    pick("你好 ", "阿波");
+    await openChat("小安");
+    expect(input().value).toBe("");
+    expect(chips()).toEqual([]);
+    expect(spoken()).toEqual([]);
+    edit("私聊的草稿");
+    await openChat("周末小组");
+    expect(input().value).toBe("你好 @阿波 ");
+    expect(chips()).toEqual(["@阿波"]);
+    expect(layer.getSnapshot().model.drafts[G1]).toEqual({ text: "你好 @阿波 ", mentions: [{ id: BO, start: 3, length: 3 }] });
+    expect(layer.getSnapshot().model.drafts[D1]).toBe("私聊的草稿");
+    press("Enter");
+    expect(sentBody(api).mentions).toEqual([{ id: BO, start: 3, length: 3 }]);
+  });
+
+  it("an @ typed and not picked is sent as plain text (the service reads it once)", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    edit("@bo 你好");
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "@bo 你好" });
+  });
+
+  it("phone width: the tags' layer follows the box's own type and padding there", () => {
+    const css = readFileSync("src/styles.css", "utf8");
+    const mobile = css.slice(css.indexOf("@media (max-width: 860px)"));
+    expect(mobile).toMatch(/\.composer textarea,\s*\.composer-mirror\s*\{[^}]*font-size: 14px;[^}]*padding: 12px;/);
+    expect(css).toMatch(/\.composer textarea,\s*\.composer-mirror\s*\{/);
+  });
+});
+
+describe("a stored message shows its mentions as tags", () => {
+  it("over their ranges, each read as 提到 and the name; without mentions it is plain text; mentions that do not fit are left out", async () => {
+    const messages = [
+      wire(G1, 1, ANN, "@阿波 你好 @Mei", { mentions: [{ id: BO, start: 0, length: 3 }, { id: ME_ID, start: 7, length: 4 }] }),
+      wire(G1, 2, ANN, "@阿波 没有存提到"),
+      wire(G1, 3, ANN, "坏的 @阿波", { mentions: [{ id: BO, start: 0, length: 3 }, { id: BO, start: 3, length: 9 }] }),
+    ];
+    await openApp({ messages });
+    await openChat("周末小组");
+    const bubble = (seq) => document.querySelector(`li[data-msg="m${seq}"] .bubble`);
+    const tags = (seq) => [...bubble(seq).querySelectorAll(".mention")].map((t) => [t.querySelector(".sr-only").textContent, t.querySelector('[aria-hidden="true"]').textContent]);
+    expect(tags(1)).toEqual([
+      ["提到 阿波", "@阿波"],
+      ["提到 Mei", "@Mei"],
+    ]);
+    expect(bubble(1).querySelector(".mention").dataset.mention).toBe(BO);
+    expect(tags(2)).toEqual([]);
+    expect(bubble(2).textContent).toBe("@阿波 没有存提到");
+    expect(tags(3)).toEqual([]);
+  });
+
+  it("MentionText: the text as sent, cut at its mentions", () => {
+    const { container } = render(<p><MentionText text="嗨 @Jarvis Lee！" mentions={[{ id: BO, start: 2, length: 11 }]} /></p>);
+    expect(container.querySelector(".mention .sr-only").textContent).toBe("提到 Jarvis Lee");
+    expect(container.querySelector('.mention [aria-hidden="true"]').textContent).toBe("@Jarvis Lee");
+    expect(mentionSegments("嗨 @Jarvis Lee！", [{ id: BO, start: 2, length: 11 }]).map((p) => p.text)).toEqual(["嗨 ", "@Jarvis Lee", "！"]);
+  });
+});
+
+describe("data/mentions.js", () => {
+  it("mentionsIn keeps what fits its text: in bounds, at an @, in order, not overlapping, at most 20", () => {
+    const text = "@a @b @c";
+    expect(mentionsIn(text, [{ id: "x", start: 0, length: 2 }, { id: "y", start: 3, length: 2 }])).toEqual([{ id: "x", start: 0, length: 2 }, { id: "y", start: 3, length: 2 }]);
+    expect(mentionsIn(text, [{ id: "x", start: 1, length: 2 }])).toEqual([]);
+    expect(mentionsIn(text, [{ id: "x", start: 6, length: 3 }])).toEqual([]);
+    expect(mentionsIn(text, [{ id: "x", start: 3, length: 2 }, { id: "y", start: 0, length: 2 }])).toEqual([{ id: "x", start: 3, length: 2 }]);
+    expect(mentionsIn(text, null)).toEqual([]);
+    expect(mentionsIn("@x ".repeat(30), Array.from({ length: 30 }, (_, i) => ({ id: "x", start: i * 3, length: 2 })))).toHaveLength(20);
+  });
+
+  it("editOf takes the change at the caret when several are as small; retag keeps, moves, removes or breaks each tag", () => {
+    expect(editOf("@Ann", "@Annn")).toEqual({ start: 4, end: 4, inserted: "n" });
+    expect(editOf("@Ann", "@Annn", { start: 3, end: 3 })).toEqual({ start: 3, end: 3, inserted: "n" });
+    expect(editOf("@Annn", "@Ann", { start: 5, end: 5 })).toEqual({ start: 4, end: 5, inserted: "" });
+    const tags = [{ id: "a", start: 1, length: 4 }];
+    expect(retag(tags, { start: 0, end: 0, inserted: "xy" }).kept).toEqual([{ id: "a", start: 3, length: 4 }]);
+    expect(retag(tags, { start: 5, end: 5, inserted: "z" }).kept).toEqual(tags);
+    expect(retag(tags, { start: 0, end: 6, inserted: "" }).removed).toEqual(tags);
+    expect(retag(tags, { start: 3, end: 3, inserted: "q" }).broken).toEqual(tags);
+    expect(widenDeletion(tags, { start: 4, end: 5, inserted: "" })).toEqual({ start: 1, end: 5 });
+    expect(widenDeletion(tags, { start: 4, end: 5, inserted: "x" })).toBeNull();
+  });
+
+  it("cleanWithMentions maps the tags onto the text as sent: trimmed, controls and bidi overrides removed, lone surrogates replaced", () => {
+    expect(cleanWithMentions("  \u202E嗨 @阿波\u0007 ", [{ id: BO, start: 5, length: 3 }])).toEqual({ text: "嗨 @阿波", mentions: [{ id: BO, start: 2, length: 3 }] });
+    expect(cleanWithMentions("\uD800 @阿波", [{ id: BO, start: 2, length: 3 }])).toEqual({ text: "\uFFFD @阿波", mentions: [{ id: BO, start: 2, length: 3 }] });
+    expect(cleanWithMentions("@阿波", [{ id: BO, start: 1, length: 2 }])).toEqual({ text: "@阿波", mentions: [] });
+  });
+});

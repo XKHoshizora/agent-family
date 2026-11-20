@@ -10,6 +10,9 @@
 // the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
+import { mentionsIn } from "../data/mentions.js";
+import { markMentions } from "./mentionMarks.js";
+import { MentionText } from "./MentionText.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
 import { inFrame, useMarkdownView } from "./markdownView.jsx";
@@ -72,8 +75,8 @@ function useShownKind(view, kind) {
   }, [view, kind]);
 }
 
-/** A plain result as shown: the text, with the note when it was too complex or too slow. */
-const plainOf = (text, result) => (withNote(result) ? <PlainWithNote text={text} /> : text);
+/** A plain result as shown: the text (`plain`, its mentions as tags), with the note when it was too complex or too slow. */
+const plainOf = (plain, result) => (withNote(result) ? <PlainWithNote text={plain} /> : plain);
 
 /**
  * Shows `rendered` elements of a tree if the conversation's budget allows (it may push others far from view back to
@@ -129,43 +132,50 @@ const plainKnown = (client, text) => {
 /**
  * The text of an Agent's stored message. `id`: the message's (where the browser cannot tell what is near, the newest
  * Agent texts are). Asked for once near — of the worker or of the answers the client has kept, alike; once rich it
- * stays rich while shown (unless the budget pushes it back).
+ * stays rich while shown (unless the budget pushes it back). `mentions`: its stored mentions (ranges of `text`), shown
+ * as tags — plain, and in the rich tree, where the worker is asked for the text with each mention between two marks
+ * (mentionMarks.js; Markdown.jsx turns them into tags, and inside code into nothing: plain text there).
  */
-export const AgentText = memo(function AgentText({ text, id = null }) {
+export const AgentText = memo(function AgentText({ text, id = null, mentions = null }) {
   const shown = useMemo(() => withoutBidiControls(text), [text]);
+  const marks = JSON.stringify(mentions ?? []);
+  // (Only over the text as stored: the service keeps no bidi controls in a reply, so `shown` is `text` whenever it has any.)
+  const tags = useMemo(() => (shown === text ? mentionsIn(shown, JSON.parse(marks)) : []), [shown, text, marks]);
+  const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
+  const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;
   const client = markdownClient();
   const view = useMarkdownView();
   const host = useRef(null);
   const { near, epoch } = useNear(view, host, id);
-  const [held, setHeld] = useState(() => ({ text: shown, result: plainKnown(client, shown) }));
-  const result = held.text === shown ? held.result : null;
+  const [held, setHeld] = useState(() => ({ text: asked, result: plainKnown(client, asked) }));
+  const result = held.text === asked ? held.result : null;
 
   useEffect(() => {
     if (result) return undefined;
-    const now = plainKnown(client, shown);
+    const now = plainKnown(client, asked);
     if (now) {
-      setHeld({ text: shown, result: now });
+      setHeld({ text: asked, result: now });
       return undefined;
     }
     if (!near) return undefined;
     loadMarkdown();
     let wanted = true;
-    client.request(shown, { wanted: () => wanted, priority: () => view.distance(host.current) }).then((answer) => {
-      if (wanted && answer !== DROPPED) setHeld({ text: shown, result: answer });
+    client.request(asked, { wanted: () => wanted, priority: () => view.distance(host.current) }).then((answer) => {
+      if (wanted && answer !== DROPPED) setHeld({ text: asked, result: answer });
     });
     return () => {
       wanted = false;
     };
-  }, [client, view, shown, near, result]);
+  }, [client, view, asked, near, result]);
 
   const granted = useBudget(view, host, result, epoch, true);
-  let body = shown;
+  let body = plain;
   let kind = "plain";
   if (result?.plain) {
-    body = plainOf(shown, result);
+    body = plainOf(plain, result);
     kind = withNote(result) ? "note" : "plain";
   } else if (result?.tree && granted) {
-    body = <Rich tree={result.tree} plain={shown} view={view} />;
+    body = <Rich tree={result.tree} plain={plain} view={view} />;
     kind = "rich";
   }
   useShownKind(view, kind);
