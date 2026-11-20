@@ -389,10 +389,10 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     deps.config.memory.mergeAuto === "on" && merges.length > 0 ? joinedMerges(merges, input.refs, await getMemoryLanguage(db, agent.ownerId)) : { joins: [], skipped: 0 };
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
-  // The vault only fills inwards, across notes too: an answer that removes a note in the vault may carry its content into another note
-  // of that room, by a replace's new text or an add (a combine written as replace + remove). Which text took what cannot be told, so
-  // every such text of that room goes into the vault, whatever the sorting and the owner's setting say. It is recorded with the op,
-  // applied at once or on a card alike, and a confirmed card applies it as recorded.
+  // The vault only fills inwards, across notes too: an answer that removes a note in the vault may carry its content into another note,
+  // of either room (the Agent's own notes are read in groups too), by a replace's new text or an add (a combine written as replace +
+  // remove). Which text took what cannot be told, so every such text of the answer goes into the vault, whatever the sorting and the
+  // owner's setting say. It is recorded with the op, applied at once or on a card alike, and a confirmed card applies it as recorded.
   vaultBesideVaultRemoves(ops, input.refs, sorted.vaults);
   // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
   const mentioned = ops.flatMap((o) => {
@@ -626,21 +626,15 @@ function allowed(op: Op, kinds: ReadonlySet<NoteKind>, group: boolean, refs: Map
 }
 
 /**
- * In every room where `ops` remove a note in the vault, each `replace`'s new text and each `add`'s text of that room is put in the vault
+ * When `ops` remove a note in the vault, each `replace`'s new text and each `add`'s text among them, of either room, is put in the vault
  * (`vaults`, by `vaultKey`, `unsure` false), whatever its sorting said. A text that carries a vault note's content while the answer does
  * not remove that note cannot be told: the sorting alone decides it.
  */
 function vaultBesideVaultRemoves(ops: readonly Op[], refs: ReadonlyMap<string, RefNote>, vaults: Map<string, { vault: boolean; unsure: boolean }>): void {
-  const rooms = new Set(
-    ops.flatMap((op) => {
-      const removed = op.op === "remove" ? refs.get(op.ref) : undefined;
-      return removed?.vault === true ? [removed.kind] : [];
-    }),
-  );
-  if (rooms.size === 0) return;
+  if (!ops.some((op) => op.op === "remove" && refs.get(op.ref)?.vault === true)) return;
   for (const op of ops) {
     const kind = op.op === "replace" ? refs.get(op.ref)?.kind : op.op === "add" ? op.kind : undefined;
-    if ((op.op === "replace" || op.op === "add") && kind !== undefined && rooms.has(kind)) vaults.set(vaultKey(kind, op.text), { vault: true, unsure: false });
+    if ((op.op === "replace" || op.op === "add") && kind !== undefined) vaults.set(vaultKey(kind, op.text), { vault: true, unsure: false });
   }
 }
 

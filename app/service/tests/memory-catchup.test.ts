@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
+import { runCatchUp } from "../src/memory/catchup.ts";
+import type { PipelineDeps } from "../src/memory/pipeline.ts";
 import type { Judge, Question } from "../src/judge/client.ts";
 import { settled } from "../src/memory/stats.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -75,6 +77,19 @@ const catchUps = async (agentId: string) =>
 const counted = async (name: string): Promise<number> => {
   await settled();
   return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
+};
+/** Where the Agent hears from in the group (`agent_group_state.heard_from_seq`). */
+const heardOf = async (agentId: string, g: string) =>
+  (await db.query<{ h: number }>("select heard_from_seq::int as h from agent_group_state where agent_id = $1 and conversation_id = $2", [agentId, g])).rows[0]?.h;
+/** Switching memory on with catchUp while no judgement is configured: the catch-up is stored and waits (for `resume`, or a test). */
+const storedOnly = async (w: World) => {
+  const judgeConfig = app.deps.config.judge;
+  app.deps.config.judge = null;
+  try {
+    await switched(w, { memory: true, catchUp: true });
+  } finally {
+    app.deps.config.judge = judgeConfig;
+  }
 };
 /** The listener questions a catch-up asked (its requests carry no pick). */
 const catchUpCalls = () => scripted.calls.filter((c) => !c.questions.some((q) => q.key === "pick"));
@@ -378,5 +393,61 @@ describe("也回顾一下 in a group: what members said while memory was off", (
     await memory().idle();
     expect((await api(app, w.owner, "GET", "/api/memory/notes")).json.notes.map((n: { text: string }) => n.text)).toEqual(["下个月搬去杭州"]);
     expect(await flagRows(w.agent.id, "own")).toEqual([]);
+  });
+
+  it("an Agent no longer in the group when its catch-up starts: nothing is written for it there, not even its heard position — the membership is checked first", async () => {
+    app.deps.config.memory.catchUpLines = 1;
+    const w = await world("cuh");
+    await switched(w, { memory: false });
+    for (let i = 0; i < 3; i++) await say(w.mia, w.g, `小李的第${i}件事`);
+    await storedOnly(w);
+    await db.query("update memberships set left_seq = (select seq from conversations where id = $2) where principal_id = $1 and conversation_id = $2", [w.agent.id, w.g]);
+    const before = await stateOf(w.agent.id, w.g);
+    await memory().resume();
+    await memory().idle();
+    expect(scripted.calls).toEqual([]);
+    expect(await stateOf(w.agent.id, w.g)).toBe(before);
+    const [row] = await catchUps(w.agent.id);
+    expect(row!.next_seq).toBe(row!.to_seq + 1);
+  });
+
+  it("a catch-up resumed after its first window keeps what that window decided — its bounded start, stored as the row's from — though the 30-day floor, measured again, has passed lines it already judged: counted once, the heard position not moved above the flags it wrote, the rest judged", async () => {
+    app.deps.config.proactive.transcriptMessages = 2;
+    app.deps.config.memory.catchUpLines = 4;
+    const w = await world("cug");
+    await switched(w, { memory: false });
+    const off: number[] = [];
+    for (let i = 0; i < 6; i++) off.push(await say(w.mia, w.g, `小李的第${i}件事`));
+    await storedOnly(w);
+    // Its first window, during which the service begins to stop: the step is recorded, and the job goes no further.
+    const stopping = new AbortController();
+    beforeAnswer = async () => stopping.abort();
+    const deps = {
+      db,
+      config: app.deps.config,
+      models: gateway,
+      judge,
+      log: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
+      inFlight: new Set<string>(),
+      conversations: { publish: () => {} },
+      now: clock.now,
+    } as unknown as PipelineDeps;
+    await runCatchUp(deps, { kind: "catchup", agentId: w.agent.id, conversationId: w.g }, { closing: stopping.signal, flagged: () => {} });
+    beforeAnswer = null;
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off.slice(2, 4));
+    expect((await catchUps(w.agent.id))[0]!.next_seq).toBe(off[3]! + 1);
+    expect(await heardOf(w.agent.id, w.g)).toBe(off[1]);
+    expect(await counted("catchup_group_jobs")).toBe(1);
+
+    // Restarted later: the first four lines are now older than MEMORY.catchUpDays.
+    await db.query("update messages set created_at = now() - interval '31 days' where conversation_id = $1 and seq = any($2::bigint[])", [w.g, off.slice(0, 4)]);
+    scripted.calls.splice(0);
+    await memory().resume();
+    await memory().idle();
+    expect(scripted.calls).toHaveLength(1);
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off.slice(2));
+    expect(await heardOf(w.agent.id, w.g)).toBe(off[1]);
+    expect(await counted("catchup_group_jobs")).toBe(1);
+    expect(await catchUps(w.agent.id)).toEqual([{ from_seq: off[1], to_seq: off[5], next_seq: off[5]! + 1 }]);
   });
 });
