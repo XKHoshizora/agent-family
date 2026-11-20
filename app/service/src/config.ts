@@ -235,7 +235,8 @@ export interface MemoryConfig {
   /**
    * The site's judgement model is asked at most this many times a site day on behalf of one owner's memory (sorting, the duplicate
    * test, the faithful check, the hearsay pre-check): past it that owner's memory checks are skipped as "no answer", so one heavy
-   * owner can never use up what everyone else's checks need. The site's own daily limit stays as the last fuse.
+   * owner can never use up what everyone else's checks need. All owners' memory together stops earlier still, at `judgeShare` of the
+   * site's daily limit.
    */
   judgePerOwnerDay: number;
   /**

@@ -29,6 +29,9 @@ const SITE_FREE = { source: "site", id: "meter_free" } as const;
 const SITE_PAID = { source: "site", id: "meter_paid" } as const;
 
 const setModel = (who: Actor, memoryModel: unknown) => api(app, who, "PATCH", "/api/me", { memoryModel });
+/** A choice as a row written before a rule refused it would hold it. */
+const storeChoice = (ownerId: string, choice: unknown) =>
+  db.query("insert into accounts (principal_id, memory_model) values ($1, $2::jsonb) on conflict (principal_id) do update set memory_model = excluded.memory_model", [ownerId, JSON.stringify(choice)]);
 const me = async (who: Actor) => (await api(app, who, "GET", "/api/me")).json;
 const addProvider = async (who: Actor, models: unknown[] = [{ name: "own-model", contextTokens: 50_000 }], name = "My provider") =>
   (await api(app, who, "POST", "/api/providers", providerBody({ name, baseUrl: "https://own.example.test/v1", models }))).json.id as string;
@@ -96,26 +99,55 @@ describe("the owner's memory model", () => {
     expect(gateway.calls[first]!.model).toBe("own-model");
   });
 
-  it("a paid site model they may use: called, and charged to the memory allowance, never their balance", async () => {
-    const owner = await signUp(app, "mmpaid");
+  it("a free site model they may choose: called, and charged to the memory allowance, never their balance", async () => {
+    const owner = await signUp(app, "mmsitefree");
     await grant(db, owner.id, 5_000_000n);
-    expect((await setModel(owner, SITE_PAID)).status).toBe(200);
-    expect(await me(owner)).toMatchObject({ memoryModel: SITE_PAID, memoryModelUsable: true });
+    expect((await setModel(owner, SITE_FREE)).status).toBe(200);
+    expect(await me(owner)).toMatchObject({ memoryModel: SITE_FREE, memoryModelUsable: true });
     gateway.reply("好", { usage: USAGE });
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBe("好");
-    expect(gateway.calls[first]!.model).toBe("upstream-meter_paid");
+    expect(gateway.calls[first]!.model).toBe("upstream-meter_free");
     expect(await balance(owner.id)).toBe("5000000");
     expect(await records(owner.id)).toMatchObject([
-      { purpose: "memory", source: "site", model: "meter_paid", cost_micro: costOf(USAGE).toString(), balance_micro: "0", free_micro: "0", memory_micro: costOf(USAGE).toString() },
+      { purpose: "memory", source: "site", model: "meter_free", cost_micro: costOf(USAGE).toString(), balance_micro: "0", free_micro: "0", memory_micro: costOf(USAGE).toString() },
     ]);
   });
 
-  it("a paid model with the memory allowance used up: nothing called, nothing recorded, the free model is not used instead, the balance is not touched", async () => {
+  it("memory the site pays for runs only on free-tier site models: a paid site model is refused as a choice (400, as an unknown one)", async () => {
+    const owner = await signUp(app, "mmpaid");
+    const res = await setModel(owner, SITE_PAID);
+    expect([res.status, res.json]).toEqual([400, { error: "invalid_request" }]);
+    expect(await me(owner)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
+  });
+
+  it("a paid site model stored before that rule is not used: the site's memory model is called and recorded instead, and the choice reads as not usable", async () => {
+    const owner = await signUp(app, "mmpaidold");
+    await grant(db, owner.id, 5_000_000n);
+    await storeChoice(owner.id, SITE_PAID);
+    expect(await me(owner)).toMatchObject({ memoryModel: SITE_PAID, memoryModelUsable: false });
+    gateway.reply("好", { usage: USAGE });
+    const first = gateway.calls.length;
+    expect(await memoryCall(deps(), owner.id, INPUT, never)).toBe("好");
+    expect(gateway.calls[first]!.model).toBe("upstream-meter_free");
+    expect(await balance(owner.id)).toBe("5000000");
+    expect(await records(owner.id)).toMatchObject([{ purpose: "memory", source: "site", model: "meter_free", memory_micro: costOf(USAGE).toString(), balance_micro: "0" }]);
+  });
+
+  it("the operator's own MEMORY.model is not limited by the tier: a paid one is called", async () => {
+    const owner = await signUp(app, "mmoperator");
+    const config = { ...app.deps.config, memory: { ...app.deps.config.memory, model: "meter_paid" } };
+    gateway.reply("好", { usage: USAGE });
+    const first = gateway.calls.length;
+    expect(await memoryCall(deps({ config }), owner.id, INPUT, never)).toBe("好");
+    expect(gateway.calls[first]!.model).toBe("upstream-meter_paid");
+  });
+
+  it("a stored paid choice with the memory allowance used up: nothing called, nothing recorded, the balance is not touched", async () => {
     const owner = await signUp(app, "mmnobalance");
     await grant(db, owner.id, 5_000_000n);
     await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 20000000)", [owner.id]);
-    expect((await setModel(owner, SITE_PAID)).status).toBe(200);
+    await storeChoice(owner.id, SITE_PAID);
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBeNull();
     expect(gateway.calls).toHaveLength(first);
@@ -147,8 +179,9 @@ describe("the owner's memory model", () => {
 
   it("null clears the choice; the site's model is used again", async () => {
     const owner = await signUp(app, "mmclear");
-    await setModel(owner, SITE_PAID);
-    expect((await me(owner)).memoryModel).toEqual(SITE_PAID);
+    const choice = { source: "provider", providerId: await addProvider(owner), model: "own-model" };
+    await setModel(owner, choice);
+    expect((await me(owner)).memoryModel).toEqual(choice);
     expect((await setModel(owner, null)).status).toBe(200);
     expect(await me(owner)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
     gateway.reply("好", { usage: USAGE });
@@ -177,9 +210,9 @@ describe("the owner's memory model", () => {
     const res = await api(app, owner, "PATCH", "/api/me", { displayName: "Renamed", newNotes: "vault", memoryModel: { source: "site", id: "nope" } });
     expect([res.status, res.json]).toEqual([400, { error: "invalid_request" }]);
     expect(await me(owner)).toMatchObject({ displayName: "mmatomic", newNotes: "auto", memoryModel: null });
-    const ok = await api(app, owner, "PATCH", "/api/me", { displayName: "Renamed", newNotes: "vault", memoryModel: SITE_PAID });
+    const ok = await api(app, owner, "PATCH", "/api/me", { displayName: "Renamed", newNotes: "vault", memoryModel: SITE_FREE });
     expect(ok.status).toBe(200);
-    expect(await me(owner)).toMatchObject({ displayName: "Renamed", newNotes: "vault", memoryModel: SITE_PAID });
+    expect(await me(owner)).toMatchObject({ displayName: "Renamed", newNotes: "vault", memoryModel: SITE_FREE });
   });
 
   it("a provider key that cannot be opened: null, no call, nothing recorded, not usable, and nothing of the key or the error in /api/me", async () => {
@@ -217,8 +250,8 @@ describe("the owner's memory model", () => {
 
   it("a chosen site model that is no longer configured: null, no call, not usable", async () => {
     const owner = await signUp(app, "mmremoved");
-    await setModel(owner, SITE_PAID);
-    const config = { ...app.deps.config, siteModels: app.deps.config.siteModels.filter((m) => m.id !== "meter_paid") };
+    expect((await setModel(owner, SITE_FREE)).status).toBe(200);
+    const config = { ...app.deps.config, siteModels: app.deps.config.siteModels.filter((m) => m.id !== "meter_free") };
     const first = gateway.calls.length;
     expect(await memoryCall(deps({ config }), owner.id, INPUT, never)).toBeNull();
     expect(gateway.calls).toHaveLength(first);

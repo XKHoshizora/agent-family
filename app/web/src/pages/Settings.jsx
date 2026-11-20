@@ -297,8 +297,10 @@ function MemorySettings() {
     if (res.ok) setSettings((cur) => ({ ...cur, newNotes: res.value }));
   };
 
-  // The chosen model leads the list when it is no longer offered, as it does on the Agent form.
-  const options = settings ? choiceList(sources, settings.memoryModel) : [];
+  // Memory the site pays for runs only on its free models: a paid site model is not offered here. The chosen model leads the list when
+  // it is no longer offered (a paid one chosen before included), as it does on the Agent form.
+  const memorySources = { ...sources, choices: { ...sources.choices, site: sources.choices.site.filter((c) => !c.paid) } };
+  const options = settings ? choiceList(memorySources, settings.memoryModel) : [];
   const changeModel = async (event) => {
     const next = options.find((o) => o.key === event.target.value)?.model ?? null;
     const res = await run("memoryModel", () => settled(actions.setMemoryModel(next)), refusalText);
@@ -360,7 +362,7 @@ function MemorySettings() {
           {options.filter((o) => o.stale).map((o) => (
             <option key={`current-${o.key}`} value={o.key}>{o.label}</option>
           ))}
-          <ModelGroups sources={sources} />
+          <ModelGroups sources={memorySources} />
         </select>
       </Field>
       {settings && !settings.memoryModelUsable && <Reason>选的模型现在用不了，记忆暂时不会更新。</Reason>}

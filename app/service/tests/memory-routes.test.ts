@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { modelNote, ownerNote } from "../src/memory/clean.ts";
+import { cleanText, modelNote, ownerNote } from "../src/memory/clean.ts";
 import { setNewNotes } from "../src/memory/store.ts";
 import { weight } from "../src/memory/weight.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -68,6 +68,35 @@ describe("ownerNote and modelNote", () => {
       expect(clean("\u200b \u200d")).toBeNull();
       // Hidden characters cannot break up a key.
       expect(clean("sk-ab\u200bcdef123456")).toBeNull();
+    }
+  });
+
+  it("a zero-width joiner between two emoji is kept (the sequence is one emoji); anywhere else it goes, as every other invisible character does", () => {
+    const kept = [
+      "\u{1F468}\u200d\u{1F469}\u200d\u{1F467}\u200d\u{1F466}", // the family
+      "\u{1F3F3}\ufe0f\u200d\u{1F308}", // the rainbow flag: the joiner after a variation selector
+      "\u{1F469}\u200d\u{1F4BB}", // a profession
+      "\u{1F469}\u{1F3FD}\u200d\u{1F4BB}", // the same with a skin tone
+      "\u2764\ufe0f\u200d\u{1F525}", // a heart on fire
+    ];
+    for (const clean of [ownerNote, modelNote, cleanText]) {
+      for (const emoji of kept) {
+        const text = `\u5168\u5bb6\u798f ${emoji} \u5728\u5ba2\u5385`;
+        expect([emoji, clean(text)]).toEqual([emoji, text]);
+      }
+      for (const [text, left] of [
+        ["a\u200db", "ab"],
+        ["\u200d\u559c\u6b22\u8336", "\u559c\u6b22\u8336"],
+        ["\u559c\u6b22\u8336\u200d", "\u559c\u6b22\u8336"],
+        ["\u200d\u{1F469}", "\u{1F469}"],
+        ["\u{1F469}\u200d", "\u{1F469}"],
+        ["\u{1F469}\u200d\u200d\u{1F4BB}", "\u{1F469}\u{1F4BB}"],
+        ["\u{1F469}\u200d\u200b\u{1F4BB}", "\u{1F469}\u{1F4BB}"],
+        ["\u{1F469}\u200dx", "\u{1F469}x"],
+        ["\u{1F3F4}\u{E0067}\u{E0062}\u{E007F}", "\u{1F3F4}"],
+      ] as const) {
+        expect([text, clean(text)]).toEqual([text, left]);
+      }
     }
   });
 

@@ -230,7 +230,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const answered = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
   // The ops that change a note in place depend on one another (a merge is a replace plus a remove), so they are decided as one group,
   // before anything else: when any of them names a note a pending change of this owner already touches (the waiting card already asks
-  // about it), or the cleaning refused the text of one of them (it is gone from `answered`: the others would be half of it), ALL of them
+  // about it), or the cleaning refused the text or the shape of one of them (it is gone from `answered`: the others would be half of it), ALL of them
   // are dropped (adds and `seen` still go on). One whose note changed since it was read drops them all too, decided where they are
   // applied (apply.ts `plan`).
   const waits =

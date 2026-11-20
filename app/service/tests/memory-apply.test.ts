@@ -966,3 +966,44 @@ describe("a room holds at most roomNotes notes", () => {
     expect(await undo(w, r!.changeId!, CAP(3))).toBe("undone");
   });
 });
+
+describe("after the final wave", () => {
+  it("when the room's size rule drops one in-place op of an answer, it drops them all (a merge's remove is not applied alone); the adds are planned without them", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "甲".repeat(10));
+    const b = await seed(w, "owner", "乙".repeat(12));
+    const refs = new Map([["a", ref("owner", a)], ["b", ref("owner", b)]]);
+    // 22 of 26 used. The merge (replace a: +15, remove b: −12) grows the room by 3: with the add before it (+2) it is 27, past the limit.
+    const r = await run(w, [{ op: "add", kind: "owner", text: "卯".repeat(2) }, { op: "replace", ref: "a", text: "丙".repeat(25) }, { op: "remove", ref: "b" }], refs, {
+      rooms: { ...ROOMS, owner: 26 },
+      vaults: new Map([[vaultKey("owner", "丙".repeat(25)), OPEN]]),
+    });
+    expect(r!.full).toBe(true);
+    expect(r!.applied.map((x) => x.op)).toEqual(["add"]);
+    expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["甲".repeat(10), "乙".repeat(12), "卯".repeat(2)].sort());
+  });
+
+  it("confirming a held change whose in-place op went stale drops all its in-place ops and applies its adds: applied, only the adds recorded, dropped counted; undo takes back only the adds", async () => {
+    const w = await world();
+    const a = await seed(w, "owner", "喜欢鱼香肉丝", { vault: false });
+    const r = await run(w, [{ op: "replace", ref: "a", text: "喜欢麻婆豆腐" }, { op: "add", kind: "owner", text: "喜欢喝茶" }], new Map([["a", ref("owner", a)]]), { status: "pending" });
+    await patchNote(w, a, { text: "喜欢火锅" });
+    const report = { dropped: 0 };
+    const done = await db.tx((t) => confirmChange(t, w.ownerId, r!.changeId!, ROOMS, report));
+    expect(Array.isArray(done) && done.map((x) => [x.op, x.after])).toEqual([["add", "喜欢喝茶"]]);
+    expect(report.dropped).toBe(1);
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["喜欢火锅", "喜欢喝茶"]);
+    const row = await changeRow(r!.changeId!);
+    expect(row.status).toBe("applied");
+    expect(row.ops.map((x) => x.op)).toEqual(["add"]);
+    expect(await undo(w, r!.changeId!)).toBe("undone");
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["喜欢火锅"]);
+    // With no add, a stale in-place op leaves nothing to apply: stale, discarded, as before.
+    const only = await run(w, [{ op: "replace", ref: "a", text: "喜欢涮羊肉" }], new Map([["a", ref("owner", a)]]), { status: "pending" });
+    await patchNote(w, a, { text: "喜欢烤鸭" });
+    const none = { dropped: 0 };
+    expect(await db.tx((t) => confirmChange(t, w.ownerId, only!.changeId!, ROOMS, none))).toBe("stale");
+    expect((await changeRow(only!.changeId!)).status).toBe("discarded");
+    expect((await ownerNotes(w)).map((n) => n.text)).toEqual(["喜欢烤鸭"]);
+  });
+});

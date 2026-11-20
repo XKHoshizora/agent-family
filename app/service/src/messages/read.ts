@@ -307,10 +307,14 @@ export async function toWireForReaders(
           pending: change?.status === "pending",
           full: change ? change.full : m.body.full === true,
         };
-        // A card that asked first (stored in the future tense) reads in the past once its change was done: written again from what the change recorded.
+        // A card that asked first (stored in the future tense) reads in the past once its change was done: written again from what the change recorded
+        // (only what was applied: a confirmation may have left out in-place ops that went stale), its count with it.
         if (change && m.body.pending === true && m.body.unlock !== true && (change.status === "applied" || change.status === "undone")) {
           const done = change.ops.filter(isNoteOp);
-          if (done.length > 0) Object.assign(wire.system, (phase === "dream" ? dreamLines : linesOf)(done, false));
+          if (done.length > 0) {
+            const told = (phase === "dream" ? dreamLines : linesOf)(done, false);
+            Object.assign(wire.system, told, { count: told.lines.length });
+          }
         }
         list.push(wire);
         continue;

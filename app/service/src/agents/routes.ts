@@ -392,8 +392,6 @@ export function registerAgentRoutes(
           // A deleted Agent stays deleted: deleting again is a no-op, anything else is refused.
           if (current.deleted && !("deleted" in change)) throw deletedError();
           const changed = await setAgentState(t, current, change);
-          // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
-          if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
           // Pausing or deleting ends the Agent's active reply for good, in this transaction (runs.ts); resuming a paused
           // Agent first ends what its pause could not see (`endWhatPauseMissed`).
           const stopping = "deleted" in change || change.paused;
@@ -402,6 +400,9 @@ export function registerAgentRoutes(
             : changed
               ? await endWhatPauseMissed(t, current)
               : null;
+          // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
+          // After the run rows (it takes the owner's account lock): the lock order is agent → run rows → account (runs.ts).
+          if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
           return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted };
         });
         if (interrupted) {

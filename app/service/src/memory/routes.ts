@@ -33,7 +33,8 @@ const agentNoteParams = z.object({ id: uuidParam, noteId: uuidParam });
 const agentHearsayParams = z.object({ id: uuidParam, hearsayId: uuidParam });
 const noteParams = z.object({ id: uuidParam });
 const changeParams = z.object({ id: uuidParam, changeId: uuidParam });
-const changeStatus = z.object({ status: z.enum(["applied", "undone", "discarded"]) });
+/** How a decision on a change ended; `dropped` (a confirmation only, when any): how many of its in-place ops were left out, their note having changed since. */
+const changeStatus = z.object({ status: z.enum(["applied", "undone", "discarded"]), dropped: z.number().int().positive().optional() });
 
 // Far beyond any room: so a too-long entry is `room_full` with what is left, not a 400.
 const textField = z.string().max(10_000);
@@ -463,7 +464,11 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     return { status: wanted };
   }
 
-  const changeRoute = (verb: "undo" | "confirm" | "discard", wanted: "undone" | "applied" | "discarded", act: (t: Tx, ownerId: string, changeId: string) => Promise<"ok" | "stale" | "full" | null>) =>
+  const changeRoute = (
+    verb: "undo" | "confirm" | "discard",
+    wanted: "undone" | "applied" | "discarded",
+    act: (t: Tx, ownerId: string, changeId: string, report: { dropped: number }) => Promise<"ok" | "stale" | "full" | null>,
+  ) =>
     api.post(
       `/api/agents/:id/memory/changes/:changeId/${verb}`,
       { schema: { params: changeParams, querystring: empty, body: empty.nullish(), response: { 200: changeStatus } } },
@@ -471,6 +476,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
         const agent = await ownAgent(me.id, req.params.id);
+        // A confirmation that applied the adds of a change whose in-place ops went stale says how many ops it left out.
+        const report = { dropped: 0 };
         // The notice of the change is pushed to its owner again, now with its new status (read when it is sent) — also when
         // a confirmation found the change stale and discarded it.
         const again = async (): Promise<void> => {
@@ -483,7 +490,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         let decided: { status: typeof wanted };
         try {
           const kind = verb === "discard" ? null : await changeKind(db, req.params.changeId);
-          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId), () => countDecision(db, verb, kind));
+          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId, report), () => countDecision(db, verb, kind));
         } catch (err) {
           if (verb === "confirm" && err instanceof AppError && err.code === "stale_change") await again();
           throw err;
@@ -491,13 +498,13 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         await again();
         // A change the owner confirmed may have left a room nearly full.
         if (verb === "confirm") app.deps.memory?.changed(agent.id);
-        return decided;
+        return report.dropped > 0 ? { ...decided, dropped: report.dropped } : decided;
       },
     );
 
   changeRoute("undo", "undone", async (t, ownerId, changeId) => undoChange(t, ownerId, changeId, limits).then((r) => (r === "undone" ? "ok" : r)));
-  changeRoute("confirm", "applied", async (t, ownerId, changeId) => {
-    const r = await confirmChange(t, ownerId, changeId, limits);
+  changeRoute("confirm", "applied", async (t, ownerId, changeId, report) => {
+    const r = await confirmChange(t, ownerId, changeId, limits, report);
     return r === "stale" || r === "full" || r === null ? r : "ok";
   });
   changeRoute("discard", "discarded", async (t, ownerId, changeId) => ((await discardChange(t, ownerId, changeId)) === null ? null : "ok"));

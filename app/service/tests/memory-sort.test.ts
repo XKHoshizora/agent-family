@@ -284,7 +284,7 @@ describe("the owner's allowance", () => {
     expect(await ownerUsed(rival)).toBe(99 + 2);
   });
 
-  it("the site's daily limit stays the last fuse, and is still counted", async () => {
+  it("at the site's daily limit (past judgeShare of it) memory's checks are skipped, and the calls made are still counted", async () => {
     judge.answer(() => ({ sort: 0.9 }));
     await sortNote(deps(), "x", "owner", "auto");
     expect(await used()).toBe(1);

@@ -49,9 +49,14 @@ export function MemoryNotice({ msg, conv }) {
   const run = async (key, request) => {
     const res = await decide(key, request);
     if (mounted.current && !res.ok && res.error?.code === "stale_change") setStale(true);
+    return res;
   };
   const undo = () => run("undo", actions.undoMemoryChange(conv.agentId, system.changeId));
-  const confirm = () => run("confirm", actions.confirmMemoryChange(conv.agentId, system.changeId));
+  // A confirmation may apply the adds and leave out the in-place ops whose note changed since: it says how many.
+  const confirm = async () => {
+    const res = await run("confirm", actions.confirmMemoryChange(conv.agentId, system.changeId));
+    if (res.ok && res.value?.dropped > 0) dispatch({ type: "toast", text: `有 ${res.value.dropped} 处没有改：那条记忆后来又变过。` });
+  };
   const discard = () => run("discard", actions.discardMemoryChange(conv.agentId, system.changeId));
   const openPalace = () => dispatch({ type: "nav", patch: { pane: "main", section: "settings", settingsPage: "memory" } });
 

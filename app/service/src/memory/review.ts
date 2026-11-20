@@ -15,16 +15,17 @@ import { cutToWeight, weightOf } from "./weight.ts";
 /**
  * What an owner's message may ask for, in three lists (a word that asks to REMEMBER must never open the way to deleting or locking):
  * `REMEMBER` only asks for a review at once; `FORGET` is what lets a `remove` apply at once; `LOCK` is what lets a `lock` apply at once.
- * `EXPLICIT`, their union, is what makes a review run at once. `FORGET` does not match a negated forget or delete, the negation up to four
- * characters or two words before it, or one that asks to remember (`别忘了它`, `不要忘掉`, `别把它删掉`, `不许删掉`, `don't forget`,
- * `don't ever forget`, `never forget`, `I cannot forget`, `I always forget`, `keep forgetting`) nor `别记错`, nor `别记` inside a
- * remember-phrase (`特别记一下`, `区别记住`, `分别记下来`: those are `REMEMBER` only); `LOCK` matches only a few
+ * `EXPLICIT`, their union, is what makes a review run at once. `FORGET` does not match a negated forget or delete, the negation anywhere
+ * before it in the same clause (back to the last `，。！？,.!?` or line break), or one that asks to remember (`别忘了它`, `不要忘掉`,
+ * `千万别把那条笔记删掉`, `不许删掉`, `不用删掉`, `不必删掉`, `不想忘掉`, `没删掉`, `don't forget`, `I don't want you to forget this`,
+ * `never forget`, `I cannot forget`, `doNOT forget`, `I always forget`, `keep forgetting`) nor `别记错`, nor `别记` inside a
+ * remember-phrase or a word (`特别记一下`, `区别记住`, `分别记下来`: those are `REMEMBER` only; `个别记录`); `LOCK` matches only a few
  * whole phrases (`lock it`, never `unlock` or `clock`; `锁起来`, never `门锁上了`). Only a fast path: whatever these miss becomes a card the
  * owner confirms.
  */
 export const REMEMBER = /记住|记一下|记下来|别忘了|remember|覚えて/i;
 export const FORGET =
-  /(?<!(?:别|不要|不能|不许|不会|千万别|别再|不要再)[^，。！？,.!?]{0,4})(?:忘掉|忘了它|删掉)|(?<![特区分])别记(?!错)|不用记|(?<!(?:n't|n’t|\bnot|\bcannot|\bnever|\balways|\bdont)(?:\s+\w+){0,2}\s)\bforget\b|忘れて|消して/i;
+  /(?<!(?:别|不要|不能|不许|不会|千万别|别再|不要再|不用|不必|不想|没)[^，。！？,.!?\n\r]*)(?:忘掉|忘了它|删掉)|(?<![特区分个])别记(?!错)|不用记|(?<!(?:n't|n’t|\bnot|\bdonot|\bcannot|\bnever|\balways|\bdont)[^，。！？,.!?\n\r]*)\bforget\b|忘れて|消して/i;
 export const LOCK = /锁起来|锁进保险箱|放进保险箱|别告诉别人|不要告诉别人|(?<![a-z])lock (?:it|this|that)\b|秘密にして/i;
 export const EXPLICIT = new RegExp([REMEMBER, FORGET, LOCK].map((r) => r.source).join("|"), "i");
 

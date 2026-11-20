@@ -56,8 +56,8 @@ const ONBOARDING = [
 const NORMAL = "主人让你根据对话更新或修改人格设定时，整理一份完整的新设定，写成设定提议。主人没有这样要求时，不要写设定提议。";
 
 /**
- * What an Agent with memory on is told in its own conversation (not in a group, not in onboarding), notes or not: that it has memory, so
- * that it never tells its owner it cannot keep anything.
+ * What an Agent with memory on is told in its own conversation (in onboarding too, where reviews run as well; not in a group), notes or
+ * not: that it has memory, so that it never tells its owner it cannot keep anything.
  */
 const MEMORY_ON =
   "你有记忆：每次聊完，系统会把值得长期记住的事整理成笔记，以后的对话里会交给你。主人让你记住或忘掉什么时，自然地答应就行，不要说自己没有记忆、记不住或没法保存，也不要逐条复述你的笔记来证明。";
@@ -79,8 +79,8 @@ const composed = (before: string, passage: string, after = ""): SystemText => ({
 /**
  * `agent.ownerAppellation` is what its owner wants it to call them (null: by name). When it shows as anything
  * (`shownAppellation`), the first line says so; otherwise the text is as it always was. `agent.memory` (its memory is on): the
- * fixed sentence `MEMORY_ON` comes before the persona, and so before the notes passage (outside onboarding); off or absent, the
- * text is as it was.
+ * fixed sentence `MEMORY_ON` comes before the persona, and so before the notes passage (in onboarding: before the interview); off or
+ * absent, the text is as it was.
  */
 export function systemText(
   agent: { name: string; persona: string; ownerAppellation: string | null; memory?: boolean },
@@ -97,9 +97,9 @@ export function systemText(
     `今天是${siteDate(now, timeZone)}。`,
     NO_TOOLS,
   ].join("\n");
-  if (mode === "onboarding") return composed(`${preamble}\n\n${ONBOARDING}\n\n${PROPOSAL_FORMAT}`, "");
-  const passage = notesPassage(notes, false, timeZone, labelSafe(owner.displayName));
   const memory = agent.memory === true ? `${MEMORY_ON}\n\n` : "";
+  if (mode === "onboarding") return composed(`${preamble}\n\n${memory}${ONBOARDING}\n\n${PROPOSAL_FORMAT}`, "");
+  const passage = notesPassage(notes, false, timeZone, labelSafe(owner.displayName));
   return composed(`${preamble}\n\n${NORMAL}\n\n${PROPOSAL_FORMAT}\n\n${memory}${PERSONA_HEADING}\n\n${agent.persona}${passage === "" ? "" : "\n\n"}`, passage);
 }
 
@@ -175,7 +175,12 @@ const UNSAFE_IN_LABELS = /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Cf}|│┃¦∣⎪❘❙�
  */
 export const labelSafe = (text: string): string => oneLine(text.normalize("NFKC").replace(UNSAFE_IN_LABELS, ""));
 
-const FORMAT_CHARACTERS = /\p{Cf}/gu;
+/**
+ * The invisible format characters the stored text loses (`\p{Cf}`): all of them but a zero-width joiner that stands between two emoji
+ * (an emoji, perhaps with its variation selector or skin tone, on its left; an emoji on its right), which makes them one: 👨‍👩‍👧‍👦,
+ * 🏳️‍🌈, 👩‍💻.
+ */
+const FORMAT_CHARACTERS = /(?!\u200D)\p{Cf}|(?<!\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D|\u200D(?!\p{Extended_Pictographic})/gu;
 const WHITESPACE_RUN = /\s+/g;
 // What the database refuses and no one can read: control characters, and a surrogate with no partner (with `u` a proper
 // pair is one astral character, so what is left in the surrogate range is lone).
@@ -183,7 +188,7 @@ const CONTROL_OR_LONE_SURROGATE = /\p{Cc}|[\ud800-\udfff]/gu;
 
 /**
  * The text as it is stored, before any rule of refusal: on one line with its whitespace runs collapsed, its invisible
- * format characters (zero-width, bidi controls; they could hide anything), control characters and lone surrogates removed,
+ * format characters (zero-width, bidi controls; they could hide anything; a joiner inside an emoji stays: `FORMAT_CHARACTERS`), control characters and lone surrogates removed,
  * trimmed. Nothing else is changed (no folding, no stripping of brackets or quotes). Empty when nothing is left. A memory
  * call's input and the notes passage are cleaned the same way: what is shown is what would be stored, and a JSON string
  * (`JSON.stringify`) is what keeps it from being structure.

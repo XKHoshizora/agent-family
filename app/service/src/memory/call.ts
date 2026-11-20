@@ -17,10 +17,11 @@ import { getMemoryModel, type MemoryModelChoice } from "./store.ts";
  * against the owner's MEMORY allowance (`memory_usage`, paid by the site: never the owner's free allowance or balance) and
  * settled on what the upstream reported. Nothing else of memory calls a model on the owner's account.
  *
- * Whose model: the owner's own choice (`accounts.memory_model`, a model they could give an Agent: a site model or a
+ * Whose model: the owner's own choice (`accounts.memory_model`, a model they could give an Agent: a free-tier site model or a
  * model of their own provider) when they made one, else the site's memory model. A choice that cannot be used is never
- * replaced by the site's model — that would spend what the owner chose not to spend: the call is not made. A site model is
- * charged to the memory allowance, a model of their own provider costs the site nothing (`admitRun`).
+ * replaced by the site's model — that would spend what the owner chose not to spend: the call is not made. The one exception
+ * is a paid site model stored before such a choice was refused (`memoryChoice`): the site pays either way, so it is read as no
+ * choice. A site model is charged to the memory allowance, a model of their own provider costs the site nothing (`admitRun`).
  */
 
 /**
@@ -48,22 +49,35 @@ export function memoryModel(config: Pick<Config, "siteModels" | "memory">): Site
 }
 
 /**
- * The model a call for `ownerId` is made on, ready to call: their choice `own`, else the site's memory model; null when there
- * is none or it does not resolve now (a provider deleted, a model off its list or removed from the site, a site key
+ * Whether `choice` is a site model of the paid tier: memory the site pays for runs only on free-tier site models, so an owner may not
+ * choose one (`PATCH /api/me`), and one stored before that rule is no choice (`memoryChoice`). The operator's `MEMORY.model` is no
+ * owner's choice and is not limited by this.
+ */
+export const paidSiteChoice = (config: Pick<Config, "siteModels">, choice: MemoryModelChoice | null): boolean =>
+  choice?.source === "site" && config.siteModels.find((m) => m.id === choice.id)?.tier === "paid";
+
+/** The owner's choice as memory calls follow it: `own`, or null (the site's memory model) when it is a paid site model (`paidSiteChoice`). */
+export const memoryChoice = (config: Pick<Config, "siteModels">, own: MemoryModelChoice | null): MemoryModelChoice | null => (paidSiteChoice(config, own) ? null : own);
+
+/**
+ * The model a call for `ownerId` is made on, ready to call: their choice `own` (`memoryChoice`), else the site's memory model; null
+ * when there is none or it does not resolve now (a provider deleted, a model off its list or removed from the site, a site key
  * unset). Throws `KeyUnreadableError` when a provider's saved key cannot be opened.
  */
 async function modelFor(q: Queryable, config: Config, ownerId: string, own: MemoryModelChoice | null): Promise<Resolved | null> {
   const site = memoryModel(config);
-  const choice: MemoryModelChoice | null = own ?? (site ? { source: "site", id: site.id } : null);
+  const choice: MemoryModelChoice | null = memoryChoice(config, own) ?? (site ? { source: "site", id: site.id } : null);
   return choice === null ? null : resolveModel(q, config, { model: choice, ownerId });
 }
 
 /**
  * Whether the owner's chosen model `own` (`GET /api/me` `memoryModelUsable`) can be called now; true when they chose none.
- * The static part of a call's checks: it resolves and its context holds its own output (a call's input is judged per call).
+ * The static part of a call's checks: it resolves and its context holds its own output (a call's input is judged per call). A paid
+ * site model is never usable for memory (`paidSiteChoice`: the calls use the site's memory model instead).
  */
 export async function memoryModelUsable(q: Queryable, config: Config, ownerId: string, own: MemoryModelChoice | null): Promise<boolean> {
   if (own === null) return true;
+  if (paidSiteChoice(config, own)) return false;
   try {
     const resolved = await modelFor(q, config, ownerId, own);
     return resolved !== null && resolved.contextTokens > resolved.call.maxOutputTokens;

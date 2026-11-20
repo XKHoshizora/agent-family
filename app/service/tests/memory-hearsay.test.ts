@@ -423,10 +423,13 @@ describe("before the paid call the judgement model is asked whether the batch is
       expect(hearsayCalls()).toHaveLength(0);
       expect((await db.query("select tries from memory_flags where agent_id = $1", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
       expect([(await stat("hearsay_call")) - callsBefore, (await stat("memory_refused_allowance")) - refusedBefore]).toEqual([0, 1]);
-      // Not woken after the quiet time as a failed try would be.
+      // Not woken after the quiet time as a failed try would be: a wake-up would be refused again by the allowance before any question
+      // (still spent), and that refusal would be counted.
       judge.ask = ask;
       await wake();
       expect(hearsayQuestions()).toHaveLength(1);
+      expect((await stat("memory_refused_allowance")) - refusedBefore).toBe(1);
+      expect((await db.query("select tries from memory_flags where agent_id = $1", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
       // No slot of the hour was taken: with one call an hour allowed, the allowance back and a new flag, the call is made.
       app.deps.config.memory.hearsayPerHour = 1;
       await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);

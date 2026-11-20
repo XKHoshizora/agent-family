@@ -298,8 +298,8 @@ type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
  * What the operations would do to the rooms as they stand. A change is judged by its net effect: every remove and every
  * shrinking replace is counted first (they free room), then every growth (a growing replace or an add) in the order the
  * ops came, each dropped (and `full` set) when its room would pass its limit. A note is touched by at most one op (the
- * first). When a replace, remove or lock names a note whose `updated_at` is no longer what the review read (`refs`), every replace,
- * remove and lock is dropped (all or nothing). The result lists removes, replaces and locks first, then the adds, so the notes added
+ * first). When a replace, remove or lock names a note whose `updated_at` is no longer what the review read (`refs`), or when the room
+ * cannot take one of them, every replace, remove and lock is dropped (all or nothing). The result lists removes, replaces and locks first, then the adds, so the notes added
  * list in op order. Nothing is written.
  */
 function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadNote>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
@@ -351,19 +351,28 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
     }
   });
 
-  const sized = netRule(
-    usedIn(state),
-    [
-      ...candidates.map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
-      ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: weight(a.text) })),
-    ],
-    opts.rooms,
-  );
+  const sizeRule = (inPlace: Candidate[]) =>
+    netRule(
+      usedIn(state),
+      [
+        ...inPlace.map((c) => ({ index: c.index, kind: c.note.kind, growth: c.growth })),
+        ...adds.map((a) => ({ index: a.index, kind: a.op.kind, growth: weight(a.text) })),
+      ],
+      opts.rooms,
+    );
+  let kept = candidates;
+  let sized = sizeRule(kept);
+  // The in-place ops stand or fall together here too: when the room cannot take one of them, none is applied (a merge's remove never
+  // alone), and the adds are judged without the room the others would have freed. The room was full all the same.
+  if (kept.some((c) => sized.rejected.has(c.index))) {
+    kept = [];
+    sized = { ...sizeRule(kept), full: true };
+  }
   // A room holds at most so many notes besides its size: an add beyond it is dropped as a full room.
   const tooMany = countRule(
     { owner: state.owner.size, self: state.self.size },
     [
-      ...candidates.filter((c) => c.op === "remove" && !sized.rejected.has(c.index)).map((c) => ({ index: c.index, kind: c.note.kind, count: -1 })),
+      ...kept.filter((c) => c.op === "remove" && !sized.rejected.has(c.index)).map((c) => ({ index: c.index, kind: c.note.kind, count: -1 })),
       ...adds.filter((a) => !sized.rejected.has(a.index)).map((a) => ({ index: a.index, kind: a.op.kind, count: 1 })),
     ],
     noteCap(opts.rooms),
@@ -372,7 +381,7 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
   const full = sized.full || tooMany.size > 0;
 
   const stored: StoredOp[] = [];
-  for (const { index, op, note, text } of candidates) {
+  for (const { index, op, note, text } of kept) {
     if (rejected.has(index)) continue;
     const s = snapshot(base(op, note.kind, note.id), note, state);
     if (op === "remove") {
@@ -992,46 +1001,49 @@ function refreshPending(state: State, ops: StoredOp[]): void {
 }
 
 /**
- * Confirms a pending change of the owner's: applies what it recorded, if every note it names is still as it was
- * (`stale` otherwise: the change is discarded and nothing is written). The one code that opens a note nobody else has
+ * Confirms a pending change of the owner's: applies what it recorded, if every note it names is still as it was. The ops that change a
+ * note in place stand or fall together (a merge is a replace plus a remove): when one of them names a note that is no longer as the
+ * change found it, none of them is applied and the change's adds are (how many were left out is told in `report.dropped`); the change is
+ * then applied with only what was done recorded, so its notice and its undo are about that alone. With no add left to apply it is
+ * `stale`: the change is discarded and nothing is written. The one code that opens a note nobody else has
  * opened: an `unlock` takes it out of the vault, `vault_by` the owner. When the whole change would put a room over its limit
  * it answers `full` and writes nothing (the change stays pending). Null when the change is not the owner's or not pending.
  */
-export async function confirmChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms): Promise<AppliedOp[] | "stale" | "full" | null> {
+export async function confirmChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, report?: { dropped: number }): Promise<AppliedOp[] | "stale" | "full" | null> {
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "pending") return null;
   const w = { ownerId, agentId: change.agentId };
   const state = await loadState(t, w);
-  for (const s of change.ops) {
-    if (s.op === "add") continue;
-    if (!operationStands(state, s, "before")) {
-      await resolve(t, changeId, "discarded");
-      return "stale";
-    }
+  const moved = change.ops.some((s) => s.op !== "add" && !operationStands(state, s, "before"));
+  const ops = moved ? change.ops.filter((s) => s.op === "add") : change.ops;
+  if (moved && ops.length === 0) {
+    await resolve(t, changeId, "discarded");
+    return "stale";
   }
 
   // All or nothing, judged by the net effect of the whole change per room (shrinks count before growth): when a room would
   // end over its limit nothing is written and the change stays pending, for the owner to make room and confirm again.
-  refreshPending(state, change.ops);
+  refreshPending(state, ops);
   const room = usedIn(state);
   const growth = { owner: 0, self: 0 };
   const count = { owner: 0, self: 0 };
-  for (const s of change.ops) {
+  for (const s of ops) {
     growth[s.kind] -= undoGrowth(s);
     if (s.op !== "unlock") count[s.kind] += countGrowth(s);
   }
   for (const kind of ["owner", "self"] as const) {
     if (!fits(room[kind], growth[kind], roomLimit(rooms, kind)) || !fitsCount(state[kind].size, count[kind], noteCap(rooms))) return "full";
   }
-  const done = await execute(t, w, change.ops.filter((s) => s.op !== "unlock"));
-  for (const s of change.ops) {
+  const done = await execute(t, w, ops.filter((s) => s.op !== "unlock"));
+  for (const s of ops) {
     // Here and nowhere else a note leaves the vault by a decision that was not its own owner's earlier choice.
     if (s.op === "unlock" && (await updateNote(t, roomFor(s.kind, w), s.noteId!, { vault: false, vaultBy: "owner", unsure: false }))) done.push(s);
   }
-  const kept = change.ops.filter((s) => done.includes(s));
+  const kept = ops.filter((s) => done.includes(s));
   await stamp(t, w, kept);
   await resolve(t, changeId, "applied", { ops: kept, full: change.full });
+  if (report) report.dropped = change.ops.length - ops.length;
   return kept.map(plain);
 }
 

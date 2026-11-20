@@ -5,7 +5,7 @@ import { resolveModel } from "../models/resolve.ts";
 import type { Db } from "../db.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import { applyDream, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
-import { memoryCall, memoryModel, type MemoryCallReport } from "./call.ts";
+import { memoryCall, memoryChoice, memoryModel, type MemoryCallReport } from "./call.ts";
 import { cleanText, modelNote } from "./clean.ts";
 import { convertSystem, languageName, languageRule, type ConvertJob, type ConvertResult, type MemoryLanguage } from "./language.ts";
 import { MAX_OPS, parseAnswer } from "./ops.ts";
@@ -536,7 +536,7 @@ interface Conversion {
 async function conversionTokens(db: Db, config: Config, ownerId: string, notes: ReadonlyArray<ExactNote>): Promise<number> {
   const wanted = 2 * weightOf(notes.map((n) => n.note)) + 40 * notes.length + 200;
   try {
-    const own = await getMemoryModel(db, ownerId);
+    const own = memoryChoice(config, await getMemoryModel(db, ownerId));
     const site = memoryModel(config);
     const choice = own ?? (site ? ({ source: "site", id: site.id } as const) : null);
     const resolved = choice === null ? null : await resolveModel(db, config, { model: choice, ownerId });
@@ -647,18 +647,34 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
  * One owner's conversion (`POST /api/memory/language/convert`): the shared room (carried out by the owner's Agent that keeps notes
  * and uses them, the lowest id) and then each live Agent's own room, one after another, a room with no notes skipped. A room whose
  * call fails or is not usable leaves its notes as they are (a failed room) and the next room goes on; once the memory allowance refused
- * a room's call no further room is asked (each of them that has notes is a failed room that could not start). `job.settle` is told the
- * tally; it is not called when the service is stopping.
+ * a room's call no further room is asked (each of them that has notes is a failed room that could not start). A read that fails outside a
+ * room's own call (the owner's Agents, a room counted after a refusal) is such a room too: the conversion still ends with its tally, never
+ * left running. `job.settle` is told the tally; it is not called when the service is stopping.
  */
 async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): Promise<void> {
   const { log } = deps;
-  const agents = await liveAgents(deps.db, job.ownerId);
+  const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
+  /** A room that could not even start (no call was made for it): a failed room, unanswered. */
+  const couldNotStart = (): void => {
+    tally.rooms++;
+    tally.failedRooms++;
+    tally.unanswered = (tally.unanswered ?? 0) + 1;
+  };
+  let agents: AgentRow[];
+  try {
+    agents = await liveAgents(deps.db, job.ownerId);
+  } catch (err) {
+    // Not even the rooms are known: one room that could not start stands for them all, and the conversion is over (never left running).
+    if (ctx.closing.aborted) return;
+    log.error({ ...errInfo(err), ownerId: job.ownerId }, "the conversion could not read the owner's Agents; nothing was changed");
+    couldNotStart();
+    return job.settle(tally);
+  }
   const shared = carrierOf(agents);
   const todo: Array<{ room: DreamRoom; carrier: AgentRow }> = [
     ...(shared ? [{ room: { kind: "owner" } as DreamRoom, carrier: shared }] : []),
     ...agents.map((agent) => ({ room: { kind: "self", agentId: agent.id } as DreamRoom, carrier: agent })),
   ];
-  const tally: ConvertResult = { rooms: 0, converted: 0, kept: 0, noRoom: 0, failedRooms: 0 };
   for (const [i, { room, carrier }] of todo.entries()) {
     if (ctx.closing.aborted) return;
     let outcome: Awaited<ReturnType<typeof dreamRoom>> | "threw";
@@ -671,13 +687,18 @@ async function convert(deps: PipelineDeps, ctx: DreamContext, job: ConvertJob): 
     }
     if (outcome === "aborted") return;
     // The allowance is the owner's: the rooms after this one would be refused too. They are not asked; each that has notes is a room that
-    // could not start.
+    // could not start, and so is one whose notes cannot be read now (it could not be finished either way).
     if (outcome === "refused") {
       for (const rest of todo.slice(i + 1)) {
-        if ((await convertibleNotes(deps.db, job.ownerId, rest.room)) === 0) continue;
-        tally.rooms++;
-        tally.failedRooms++;
-        tally.unanswered = (tally.unanswered ?? 0) + 1;
+        let notes: number;
+        try {
+          notes = await convertibleNotes(deps.db, job.ownerId, rest.room);
+        } catch (err) {
+          if (ctx.closing.aborted) return;
+          log.error({ ...errInfo(err), ownerId: job.ownerId }, "the conversion could not read a room it did not ask; it counts as one that could not start");
+          notes = 1;
+        }
+        if (notes > 0) couldNotStart();
       }
       break;
     }

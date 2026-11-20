@@ -798,8 +798,9 @@ describe("用哪个模型整理记忆", () => {
     expect(select.options[0].textContent).toBe("站点的模型（已校准）");
     expect(select.value).toBe("");
     const groups = [...select.querySelectorAll("optgroup")].map((g) => [g.label, [...g.querySelectorAll("option")].map((o) => o.textContent)]);
+    // Memory the site pays for runs only on its free models: a paid one is not offered.
     expect(groups).toEqual([
-      ["站点提供", ["小模型 · 免费", "大模型 · 需余额"]],
+      ["站点提供", ["小模型 · 免费"]],
       ["我的供应商 · 我的 OpenAI", ["gpt-x", "plain", "tiny（上下文太小）"]],
     ]);
     expect(inMain().getByText("换成自己的模型后，记得好不好我们没法保证；安全检查不变。")).toBeTruthy();
@@ -822,9 +823,9 @@ describe("用哪个模型整理记忆", () => {
     await flush();
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(OWN);
     expect([...select().options].find((o) => o.selected).textContent).toBe("gpt-x");
-    fireEvent.change(select(), { target: { value: optionOf("大模型 · 需余额") } });
+    fireEvent.change(select(), { target: { value: optionOf("小模型 · 免费") } });
     await flush();
-    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith({ source: "site", id: "paid-1" });
+    expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith({ source: "site", id: "free-1" });
     fireEvent.change(select(), { target: { value: "" } });
     await flush();
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(null);
@@ -871,6 +872,14 @@ describe("用哪个模型整理记忆", () => {
     const svc = service({ over: { getMe: me({ memoryModel: { source: "provider", providerId: P1, model: "gone" }, memoryModelUsable: false }) } });
     await openPalace(svc);
     expect([...inMain().getByLabelText(PICK).options].find((o) => o.selected).textContent).toContain("已不可用");
+  });
+
+  it("a paid site model chosen before it was refused shows as no longer available, and is not offered again", async () => {
+    const svc = service({ over: { getMe: me({ memoryModel: { source: "site", id: "paid-1" }, memoryModelUsable: false }) } });
+    await openPalace(svc);
+    const options = [...inMain().getByLabelText(PICK).options];
+    expect(options.find((o) => o.selected).textContent).toBe("大模型（当前，已不可用）");
+    expect(options.filter((o) => o.textContent.startsWith("大模型")).map((o) => o.textContent)).toEqual(["大模型（当前，已不可用）"]);
   });
 
   it("when the settings cannot be read, both boxes stay off and say so, with a retry", async () => {

@@ -255,6 +255,19 @@ describe("the confirmation cards", () => {
     expect(li(3).textContent).toContain("要记住：不吃辣");
   });
 
+  it("a confirm that applied the adds but dropped in-place ops (their note changed since) says how many with a toast; one that dropped nothing says nothing", async () => {
+    const confirmMemoryChange = vi.fn(async () => ({ status: "applied", dropped: 1 }));
+    await openChat([...BASE, pending({ lines: ["要改成：喜欢麻婆豆腐", "要记住：喜欢喝茶"] })], { api: { confirmMemoryChange } });
+    await click(inLi(3).getByRole("button", { name: "确认" }));
+    expect(confirmMemoryChange).toHaveBeenCalledWith(AG1, "c1");
+    expect(document.querySelector(".toast").textContent).toBe("有 1 处没有改：那条记忆后来又变过。");
+    expect(inLi(3).queryByRole("alert")).toBeNull();
+    cleanup();
+    await openChat([...BASE, pending()]);
+    await click(inLi(3).getByRole("button", { name: "记住" }));
+    expect(document.querySelector(".toast")).toBeNull();
+  });
+
   it("a card that also forgets, rewrites or locks asks 要这样整理记忆吗？ with 确认 and 不用: never 记住 above a line that forgets", async () => {
     const { api } = await openChat([...BASE, pending({ lines: ["要忘掉：喜欢喝茶", "要锁进保险箱：住在上海"] })]);
     expect(li(3).textContent).toContain("要这样整理记忆吗？");

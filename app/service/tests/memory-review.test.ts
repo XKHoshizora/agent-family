@@ -228,12 +228,38 @@ describe("reviewInput", () => {
       "特别记住",
       "区别记住",
       "分别记下来",
+      // More forms of "do not delete", and a negation anywhere before it in the same clause, however far.
+      "这条不用删掉",
+      "不必删掉",
+      "我不想忘掉",
+      "没删掉吧",
+      "千万别把那条笔记删掉",
+      "I don't want you to forget this",
+      "I cannot  forget",
+      "doNOT forget",
+      "个别记录有问题",
     ]) {
       expect([t, FORGET.test(t)]).toEqual([t, false]);
     }
     for (const t of ["unlock it", "the clock is wrong", "门锁上了吗", "a lock of hair"]) expect([t, LOCK.test(t)]).toEqual([t, false]);
-    // What asks to forget or to lock still does.
-    for (const t of ["忘掉那个", "忘了它吧", "别记这个", "删掉它", "帮我把那条删掉", "把它删掉吧", "Forget it", "please forget my address", "forget it, please"]) expect([t, FORGET.test(t)]).toEqual([t, true]);
+    // What asks to forget or to lock still does; a negation in an earlier clause (or line) does not reach it.
+    for (const t of [
+      "忘掉那个",
+      "忘了它吧",
+      "别记这个",
+      "不用记了",
+      "删掉它",
+      "帮我把那条删掉",
+      "把它删掉吧",
+      "别，删掉吧",
+      "不用了。把住址那条删掉",
+      "没事\n删掉它",
+      "Forget it",
+      "please forget my address",
+      "forget it, please",
+      "Forget about it",
+      "I don't need it, forget it",
+    ]) expect([t, FORGET.test(t)]).toEqual([t, true]);
   });
 
   it("the review window ends at the owner's last line: two Agent lines before an owner line are both shown, a trailing Agent line is left for the next review, and the window stops at the owner's line", async () => {
@@ -527,6 +553,15 @@ describe("what a review does with an answer", () => {
     await seeded(w.owner, w.agent.id, "路由器在客厅", false);
     await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
     await sayAndReview(w, "把路由器那两条合成一条，多的删掉。另外我喜欢茶", ops({ op: "replace", ref: "n1", text: "路由器在客厅，说明书在 https://example.com/manual" }, { op: "remove", ref: "n2" }, add("喜欢茶")));
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "喜欢茶"]);
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
+  });
+
+  it("an in-place op dropped for its shape (a key too many) drops every in-place op of the answer too; its adds still apply", async () => {
+    const w = await owned("stale3");
+    await seeded(w.owner, w.agent.id, "路由器在客厅", false);
+    await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉。另外我喜欢茶", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的", why: "合并" }, { op: "remove", ref: "n2" }, add("喜欢茶")));
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "喜欢茶"]);
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
   });
@@ -1360,6 +1395,26 @@ describe("deciding on a change", () => {
     const pushed = await socket.next((e) => e.type === "message" && e.message.system?.event === "memory_changed");
     expect(pushed.message.system).toMatchObject({ status: "discarded", pending: false });
     expect((await roomOf(w.owner)).notes).toMatchObject([{ text: "喜欢火锅" }]);
+  });
+
+  it("a confirmation whose in-place op went stale still applies the card's adds: 200 with dropped, the note as the owner left it, the notice tells only what was applied, undo takes back only that", async () => {
+    const w = await owned("pia", { memoryAsk: true });
+    const note = await seeded(w.owner, w.agent.id, "喜欢鱼香肉丝", false);
+    await exchange(w, "我现在喜欢麻婆豆腐了，也喜欢喝茶");
+    await quietThen(ops({ op: "replace", ref: "n1", text: "喜欢麻婆豆腐" }, add("喜欢喝茶")));
+    const [chip] = await chips(w.owner, w.conv);
+    expect(chip.system).toMatchObject({ pending: true, lines: ["要改成：喜欢麻婆豆腐", "要记住：喜欢喝茶"] });
+    expect((await api(app, w.owner, "PATCH", `/api/memory/notes/${note.id}`, { text: "喜欢火锅" })).status).toBe(200);
+    const socket = await connect(app, w.owner);
+    const res = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/confirm`);
+    expect(res).toEqual({ status: 200, json: { status: "applied", dropped: 1 } });
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["喜欢火锅", "喜欢喝茶"]);
+    const pushed = await socket.next((e) => e.type === "message" && e.message.system?.event === "memory_changed");
+    expect(pushed.message.system).toMatchObject({ status: "applied", pending: false, lines: ["记住了：喜欢喝茶"], count: 1 });
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ status: "applied", lines: ["记住了：喜欢喝茶"], count: 1 });
+    const undone = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`);
+    expect(undone).toEqual({ status: 200, json: { status: "undone" } });
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["喜欢火锅"]);
   });
 
   it("a notice whose change record has been swept stays, with status expired, its stored lines, and no pending flag; only its owner is sent it", async () => {

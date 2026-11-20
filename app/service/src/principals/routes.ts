@@ -9,6 +9,7 @@ import { sniff } from "../attachments/sniff.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import { assertModelChoice } from "../agents/store.ts";
+import { paidSiteChoice } from "../memory/call.ts";
 import { MEMORY_LANGUAGE_CODES } from "../memory/language.ts";
 import { setDream, setMemoryLanguage, setMemoryModel, setNewNotes } from "../memory/store.ts";
 import { requirePrincipal } from "../session.ts";
@@ -84,8 +85,12 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
       const { displayName: name, newNotes, memoryModel, dream, memoryLanguage } = req.body;
       // All or nothing: a model that is refused changes nothing, the name and the setting included.
       await db.tx(async (t) => {
-        // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider.
-        if (memoryModel !== undefined && memoryModel !== null) await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
+        // As an Agent's model is chosen: a site model that exists, or a model on the list of the owner's own provider. Memory the site
+        // pays for runs only on free-tier site models: a paid one is refused as an unknown one is.
+        if (memoryModel !== undefined && memoryModel !== null) {
+          if (paidSiteChoice(app.deps.config, memoryModel)) throw new AppError(400, "invalid_request");
+          await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
+        }
         if (name !== undefined) await updateDisplayName(t, me.id, name);
         if (newNotes !== undefined) await setNewNotes(t, me.id, newNotes);
         if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);

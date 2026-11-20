@@ -88,9 +88,9 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
 }
 
 /**
- * Whether the answer held an in-place op (`replace`) of the known shape naming a note it was shown whose text `modelNote` refuses (the
- * entries `lookedAt` keeps): `parseOps` drops it, and since the in-place ops of an answer stand or fall together (a merge is a replace
- * plus a remove) the caller drops the others too. Pure and total.
+ * Whether the answer held an in-place op (`replace`, `remove`, `lock`) naming a note it was shown that `parseOps` drops — for its text
+ * (`modelNote` refuses it) or for its shape (a key too many or too few) — among the entries `lookedAt` keeps: since the in-place ops of
+ * an answer stand or fall together (a merge is a replace plus a remove) the caller drops the others too. Pure and total.
  */
 export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boolean {
   try {
@@ -101,7 +101,7 @@ export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boole
     return lookedAt(list).some((raw) => {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
       const o = raw as Record<string, unknown>;
-      return o.op === "replace" && hasExactly(o, ["op", "ref", "text"]) && typeof o.ref === "string" && refs.has(o.ref) && typeof o.text === "string" && modelNote(o.text) === null;
+      return (o.op === "replace" || o.op === "remove" || o.op === "lock") && typeof o.ref === "string" && refs.has(o.ref) && one(raw, refs) === null;
     });
   } catch {
     return false;

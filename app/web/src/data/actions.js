@@ -659,9 +659,9 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
 
   const memoryDecision = (action, agentId, changeId, route) =>
     attempt(() => route(agentId, changeId), {
-      map: (answer) => (typeof answer?.status === "string" ? answer.status : null),
-      after: (status) => {
-        if (status !== null) setModel(setMemoryChangeStatus(getModel(), conversationOfAgent(agentId), changeId, status));
+      map: (answer) => (typeof answer?.status === "string" ? { status: answer.status, dropped: Number(answer.dropped) || 0 } : null),
+      after: (decided) => {
+        if (decided !== null) setModel(setMemoryChangeStatus(getModel(), conversationOfAgent(agentId), changeId, decided.status));
       },
       refetch: refetchAgent(agentId),
       text: agentText(action),
@@ -724,8 +724,9 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         }),
       ),
     /**
-     * Undoes, confirms or discards one change of my Agent's memory (the chip and the cards): the answer's `status` is kept on
-     * the notice at once. A refusal (stale: something changed since) fetches the Agent and its open cards again.
+     * Undoes, confirms or discards one change of my Agent's memory (the chip and the cards) → value `{status, dropped}`: the answer's
+     * `status` is kept on the notice at once; `dropped` (a confirmation, else 0) is how many of its in-place ops were left out because
+     * their note changed since. A refusal (stale: something changed since) fetches the Agent and its open cards again.
      */
     undoMemoryChange: (agentId, changeId) => memoryDecision("memoryUndo", agentId, changeId, api.undoMemoryChange),
     confirmMemoryChange: (agentId, changeId) => memoryDecision("memoryConfirm", agentId, changeId, api.confirmMemoryChange),

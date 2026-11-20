@@ -79,7 +79,7 @@ export interface ConvertResult {
   kept: number;
   noRoom: number;
   failedRooms: number;
-  /** Rooms whose call could not even start (no model, no allowance, too many calls running; not one that started and failed): when that is every room the request is a 503. Not on the wire. */
+  /** Rooms whose call could not even start (no model, no allowance, too many calls running; not one that started and failed): when that is every room the GET says `unavailable`. Not on the wire. */
   unanswered?: number;
 }
 

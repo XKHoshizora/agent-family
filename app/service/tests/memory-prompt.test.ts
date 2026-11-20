@@ -236,9 +236,16 @@ describe("the system text", () => {
     expect(withNotes.rest).toContain(MEMORY_ON);
     expect(withNotes.passage).not.toContain(MEMORY_ON);
     expect(systemTokens(withNotes)).toBe(estimateTokens(withNotes.rest) + weight(withNotes.passage) * TOKENS_PER_WEIGHT);
-    // Memory off: byte for byte what it was. Onboarding and a group: never.
+    // Memory off: byte for byte what it was. In onboarding (no persona yet) memory is on as well: the same sentence, before the interview,
+    // with memory off nothing. A group: never.
     expect(plain.text).toBe(systemPrompt(agent, { displayName: "甲" }, NOW, "normal", ZONE));
-    expect(systemPrompt({ ...on, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE)).toBe(systemPrompt({ ...agent, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE));
+    const interview = systemPrompt({ ...agent, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE);
+    const onboarding = systemText({ ...on, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE);
+    expect(onboarding.text).toBe(interview.replace("\n\n你还没有人格设定", `\n\n${MEMORY_ON}\n\n你还没有人格设定`));
+    expect(onboarding.text).not.toBe(interview);
+    expect(onboarding.passage).toBe("");
+    expect(systemTokens(onboarding) - estimateTokens(interview)).toBe(estimateTokens(`${MEMORY_ON}\n\n`));
+    expect(systemPrompt({ ...off, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE)).toBe(interview);
     const gOn = { ...gAgent, memory: true };
     expect(groupSystemPrompt(gOn, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes)).toBe(groupSystemPrompt(gAgent, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes));
   });
@@ -385,7 +392,7 @@ describe("a run", () => {
     expect(JSON.stringify((await db.query("select row_to_json(x) as r from agent_runs x where agent_id = $1", [agent.id])).rows)).not.toContain("SECRET-NOTE-TEXT");
   });
 
-  it("an Agent that is still in onboarding (no persona) is shown none", async () => {
+  it("an Agent that is still in onboarding (no persona) is shown no notes, and is told it has memory", async () => {
     const owner = await signUp(app, "mponboard");
     const agent = await mustCreateAgent(app, owner, { model: FAST });
     await insertSelf(agent.id, "SELF-NOTE", false);
@@ -399,8 +406,8 @@ describe("a run", () => {
     }
     expect(lastCall().system).toContain("你还没有人格设定");
     expect(lastCall().system).not.toContain("SELF-NOTE");
-    expect(lastCall().system).not.toContain("你有记忆");
-    expect(lastCall().system).not.toContain("笔记");
+    expect(lastCall().system).toContain(`${MEMORY_ON}\n\n你还没有人格设定`);
+    expect(lastCall().system).not.toContain(HEADING);
   });
 });
 

@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readOwnedAgent } from "../src/agents/store.ts";
+import { runDreamJob } from "../src/memory/dream.ts";
 import { languageRule, MEMORY_LANGUAGES, MEMORY_LANGUAGE_CODES } from "../src/memory/language.ts";
+import type { PipelineDeps } from "../src/memory/pipeline.ts";
+import { createReviewer } from "../src/memory/reviewer.ts";
 import { reviewInput } from "../src/memory/review.ts";
 import { weight } from "../src/memory/weight.ts";
 import { siteDay } from "../src/accounts/store.ts";
@@ -546,6 +549,52 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect((await conversion(owner)).json).toEqual({ state: "done", result: { rooms: 3, converted: 1, kept: 0, noRoom: 0, failedRooms: 2 } });
     expect((await refusals()) - refusedBefore).toBe(1);
     expect(convertCallsHere()).toHaveLength(1);
+  });
+
+  it("a read that fails once the conversion is under way ends it done all the same, never left running or lost: the room it could not finish is a failed room", async () => {
+    const owner = await signUp(app, "cfa5");
+    const a = await mustCreateAgent(app, owner, { handle: "cfa5_a", name: "cfa5_a", model: FAST, persona: PERSONA });
+    const b = await mustCreateAgent(app, owner, { handle: "cfa5_b", name: "cfa5_b", model: FAST, persona: PERSONA });
+    await seeded(owner, a.id, "喜欢喝茶", false);
+    await seeded(owner, a.id, "回答要简短", false, "self");
+    await seeded(owner, b.id, "先说结论", false, "self");
+    expect((await setLanguage(owner, "en")).status).toBe(200);
+    // A scheduler of its own whose jobs read through a database that fails one query.
+    let fails = (_sql: string, _params: unknown[]): boolean => false;
+    const failing = new Proxy(db, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop) as unknown;
+        if (prop !== "query") return typeof value === "function" ? value.bind(target) : value;
+        return async (...args: Parameters<typeof db.query>) => {
+          if (typeof args[0] === "string" && fails(args[0], Array.isArray(args[1]) ? args[1] : [])) throw new Error("the connection was lost");
+          return target.query(...args);
+        };
+      },
+    });
+    const pipeline: PipelineDeps = { db: failing, config: app.deps.config, models: gateway, judge, log: app.log, inFlight: new Set<string>(), conversations: app.deps.conversations, now: clock.now };
+    const mine = createReviewer({ db, config: app.deps.config, log: app.log, setTimer: clock.setTimer, run: (job, ctx) => (job.kind === "convert" ? runDreamJob(pipeline, job, ctx) : Promise.resolve()) });
+    try {
+      // The rooms go owner, then the Agents by id: the last is the higher id's, read after the allowance refused the one before it only to count it.
+      const last = [a.id as string, b.id as string].sort().at(-1)!;
+      fails = (sql, params) => sql.includes("from agent_notes") && params[0] === last;
+      const hold = gateway.hang();
+      expect(await mine.convert(owner.id, "en")).toBe("started");
+      await hold.reached;
+      const day = siteDay(new Date(), app.deps.config.siteTimezone);
+      await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [owner.id, day]);
+      hold.release(ops(rewrite("n1", "Likes tea")));
+      await mine.idle();
+      expect(mine.conversion(owner.id)).toEqual({ state: "done", result: { rooms: 3, converted: 1, kept: 0, noRoom: 0, failedRooms: 2, unanswered: 2 } });
+      // A failure before any room (reading the owner's Agents): done, one room that could not start, nothing else.
+      await db.query("delete from memory_usage where owner_id = $1", [owner.id]);
+      fails = (sql) => sql.includes("a.memory and not a.paused");
+      expect(await mine.convert(owner.id, "en")).toBe("started");
+      await mine.idle();
+      expect(mine.conversion(owner.id)).toEqual({ state: "done", result: { rooms: 1, converted: 0, kept: 0, noRoom: 0, failedRooms: 1, unanswered: 1 } });
+      expect(convertCallsHere()).toHaveLength(1);
+    } finally {
+      mine.close();
+    }
   });
 
   it("a call that started and then failed upstream is a failed room in a 200, not a 503: only a call that could not start at all is", async () => {
