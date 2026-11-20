@@ -840,16 +840,24 @@ nothing is learned. **Turning it off** (`PATCH /api/agents/:id` `"memory": false
 that wait for a decision (as deleting it does) and its flags not yet acted on (hearsay, the owner's own remarks in a group), and puts
 every review position of the Agent — its own conversation, every conversation it is a member of, any it was reviewed in — and the
 group judgement's position for it in every group it is in (`agent_group_state.judged_seq`) at the conversation's current seq: what was
-said before memory was switched off and not yet reviewed is never learned (the owner switched it off; that is the point). The reviewer
-drops its quiet timers, flag wake-ups, retry and queued reviews (a review whose call was under way applies nothing, also when memory is
-on again by the time it answers); its notes stay, and no listener raises a flag for an Agent with memory off. **Turning it back on**
-asks the owner (the web app shows the choice under the switch: 关掉期间聊过的内容，要不要也让它回顾一下？ 只记以后的 / 也回顾一下) and
-sends the answer as `catchUp`: `false` (the default) puts those positions at the conversation's current seq again and drops any flag,
-so nothing said while memory was off is ever reviewed, and nothing a member said meanwhile is new to the group's judgement (it is
-neither flagged nor heard); `true` leaves the positions where switching off put them, so the next review reads exactly what was said
-while memory was off, within its usual window (`reviewMessages`, the topic boundary, in a group only what came after the Agent joined),
-one review of the own conversation is queued at once, as after a quiet time, and the group's judgement counts what members said
-meanwhile as new (within its transcript of `transcriptMessages`) (`memory/pipeline.ts` `memorySwitched`, the reviewer's `switched`). Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`, `memoryLanguage`) — reaches
+said before memory was switched off and not yet reviewed is never learned (the owner switched it off; that is the point). A group's
+judgement reads one position for all its Agents, the latest of theirs: moving this Agent's also counts the group's lines up to that
+moment as judged for every other Agent there, any owner's, so a line not yet judged at that instant (normally a matter of seconds) is
+not asked about for them either. The reviewer drops its quiet timers, flag wake-ups, retry and queued reviews (a review or a hearsay
+call that was under way applies nothing, also when memory is on again by the time it answers); its notes stay, and no listener raises
+a flag for an Agent with memory off. **Turning it back on** asks the owner (the web app shows the choice under the switch:
+关掉期间聊过的内容，要不要也让它回顾一下？ 只记以后的 / 也回顾一下) and sends the answer as `catchUp`: `false` (the default) puts those positions
+at the conversation's current seq again and drops any flag, so nothing said while memory was off is ever reviewed, and nothing a
+member said meanwhile is new to the group's judgement (it is neither flagged nor heard); `true` leaves the positions where switching off
+put them and queues one review of the own conversation at once, as after a quiet time, which reads exactly what was said there while
+memory was off, within its usual window (`reviewMessages`, the topic boundary). In a group, with `true`: what the owner said there while
+memory was off is read by the next review of that group (at the Agent's next reply there, or a flag of the owner's own remark), from the
+switch-off on, within the same window and only what came after the Agent joined; what members said there while it was off can be heard
+only through the group's next judgement (when a message comes there; nothing looks back on its own), and only a line that is among the
+judgement's last `transcriptMessages` lines, came after the Agent joined, and that no other Agent of the group has been judged past
+since — the judgement reads the latest position of the group's Agents, so a line another Agent there was judged on while this one was off
+is not asked about again, and its hearsay is not learned. Nothing from before the switch-off is asked about or reviewed, with either
+answer (`memory/pipeline.ts` `memorySwitched`, the reviewer's `switched`). Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`, `memoryLanguage`) — reaches
 anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
 `memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`, `accounts.memory_model`,
 `accounts.dream`, `accounts.dreamed_at` and `accounts.memory_language`, and `strength` and `seen_at` on both kinds of note.

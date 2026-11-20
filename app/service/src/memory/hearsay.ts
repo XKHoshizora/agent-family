@@ -4,6 +4,7 @@ import { VISIBLE_JOIN } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Queryable } from "../db.ts";
 import type { Question } from "../judge/client.ts";
+import type { StoredMessage } from "../messages/model.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import { applyHearsay, type NewHearsay } from "./apply.ts";
 import { allowanceRefuses, memoryCall, type MemoryCallReport } from "./call.ts";
@@ -452,9 +453,12 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     const { text: _said, ...who } = input.candidates.get(e.from)!;
     return { conversationId, ...who, text: e.text };
   });
-  const notices = await inLockedAgent(db, agent.id, async (t, locked) => {
+  const notices = await inLockedAgent(db, agent.id, async (t, locked): Promise<StoredMessage[] | null> => {
+    // The flags the call was made for are deleted first. None of them left: memory was switched off meanwhile (and on again by now:
+    // `memorySwitched` deletes every flag of the Agent, under this same lock) — what the call read was said before that, never recorded.
+    const deleted = await t.query(DELETE_FLAGS, [agent.id, conversationId, "hearsay", input.seqs]);
+    if ((deleted.rowCount ?? 0) === 0) return null;
     const written = await applyHearsay(t, { ownerId: locked.ownerId, agentId: agent.id }, { conversationId: locked.conversationId, entries: fresh, drop, room: roomOf(config).hearsay });
-    await t.query(DELETE_FLAGS, [agent.id, conversationId, "hearsay", input.seqs]);
     if (written === null) return [];
     const title = (await t.query<{ title: string | null }>("select title from conversations where id = $1", [conversationId])).rows[0]?.title ?? null;
     const group = (title === null ? "" : labelSafe(title)) || NO_GROUP_TITLE;
@@ -472,7 +476,8 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
         status: "applied",
       }),
     ];
-  });
+    // Its entries point at the group's row: taken first, before the Agent's (`inLockedAgent`).
+  }, conversationId);
   announce(deps, notices, agent.id);
   if (notices !== null) count(db, "flags_dropped_overflow", overflow);
   log.info({ metric: "memory_hearsay", agentId: agent.id, conversationId, entries: fresh.length, notices: notices?.length ?? 0 }, "a hearsay consolidation ended");

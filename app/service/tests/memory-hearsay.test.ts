@@ -1186,6 +1186,25 @@ describe("memory switched off and on again", () => {
     for (const f of decided.flags ?? []) memory().flagged(f.agentId, f.conversationId, f.kind);
   };
 
+  it("switched off and on again while a hearsay call is under way: what that call read (said before memory was switched off) is never recorded or told", async () => {
+    for (const body of [{ memory: true }, { memory: true, catchUp: true }] as const) {
+      const w = await world(`swc${"catchUp" in body ? 1 : 0}`);
+      const seq = await say(w.mia, w.g, "小李下周要去北京出差");
+      await flag(w.agent.id, w.g, seq, "hearsay");
+      const hold = gateway.hang();
+      // The group's quiet time: the wake-up asks the pre-check (no answer: it fails open), then makes the paid call, which hangs.
+      clock.advance(2 * MIN);
+      await hold.reached;
+      expect((await patch(w, { memory: false })).status).toBe(200);
+      expect((await patch(w, body)).status).toBe(200);
+      hold.release(answer([entry("m1", SAID)]));
+      await memory().idle();
+      expect([body, await hearsayRows(w.agent.id)]).toEqual([body, []]);
+      expect([body, await chips(w.owner, w.agent.conversationId)]).toEqual([body, []]);
+      clock.reset();
+    }
+  });
+
   it("on again without looking back, nothing a member said while it was off is new to the group's judgement: no flag, no hearsay call, no entry", async () => {
     const w = await world("swo");
     // Judged once while memory was on: the Agent is judged up to this message.

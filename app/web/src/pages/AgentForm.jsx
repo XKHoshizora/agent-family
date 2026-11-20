@@ -653,22 +653,30 @@ export function AgentForm({ agent = null }) {
           <div className="field">
             <Switch checked={f.memory} onChange={setMemory} label="记忆" hint={MEMORY_HELPER} hintClass="field-hint" />
           </div>
-          {askCatchUp && (
-            <div className="memory-catch-up" ref={catchUpRef}>
-              {/* Announced: the switch itself stays off until it is answered, so a screen reader hears what happened. */}
-              <p role="status">{CATCH_UP_QUESTION}</p>
-              <div className="card-actions">
-                <Btn variant="primary" disabled={catchUp.busy !== null} onClick={() => answerCatchUp(false)}>
-                  {catchUp.busy === "later" ? "处理中…" : "只记以后的"}
-                </Btn>
-                <Btn disabled={catchUp.busy !== null} onClick={() => answerCatchUp(true)}>
-                  {catchUp.busy === "back" ? "处理中…" : "也回顾一下"}
-                </Btn>
-              </div>
-              {catchUp.refusal && (
-                <p className="field-msg" role="alert">
-                  {catchUp.refusal}
-                </p>
+          {editing && (
+            <div className={askCatchUp ? "memory-catch-up" : undefined} ref={catchUpRef}>
+              {/* Announced: the switch itself stays off until it is answered, so a screen reader is told the question. Its live region is
+                  there all along, empty and unseen, and the question is put into it (one that arrives with its text inside is often not
+                  announced); emptied again when the question closes. */}
+              <p role="status" className={askCatchUp ? undefined : "sr-only"}>
+                {askCatchUp ? CATCH_UP_QUESTION : ""}
+              </p>
+              {askCatchUp && (
+                <>
+                  <div className="card-actions">
+                    <Btn variant="primary" disabled={catchUp.busy !== null} onClick={() => answerCatchUp(false)}>
+                      {catchUp.busy === "later" ? "处理中…" : "只记以后的"}
+                    </Btn>
+                    <Btn disabled={catchUp.busy !== null} onClick={() => answerCatchUp(true)}>
+                      {catchUp.busy === "back" ? "处理中…" : "也回顾一下"}
+                    </Btn>
+                  </div>
+                  {catchUp.refusal && (
+                    <p className="field-msg" role="alert">
+                      {catchUp.refusal}
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}

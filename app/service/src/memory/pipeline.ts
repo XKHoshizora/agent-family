@@ -108,7 +108,11 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
  * window (`reviewMessages`, the topic, in a group what came after it joined). The positions: every review position of the Agent — its
  * own conversation, every conversation it is a member of, any it was reviewed in — and, in every group it is in, what the group's
  * judgement counts as judged for it (`agent_group_state.judged_seq`: what came after it is 【新】, asked about and flagged), each the
- * conversation's current seq, never moved back.
+ * conversation's current seq, never moved back. A group's judgement reads one position for all its Agents, the latest of theirs
+ * (candidates.ts `requestFor`, state.ts `judgedUpTo`): moving this Agent's to now also counts every line of the group up to now as
+ * judged for every other Agent there, any owner's — a line that had not been judged yet at that instant (normally a matter of seconds,
+ * or one a skipped judgement left) is then not asked about for them either. It cannot be otherwise without a position per Agent.
+ * The caller has taken the rows of the groups written here first (`lockSwitchGroups`), before the Agent's.
  */
 export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">, on: boolean, catchUp: boolean): Promise<void> {
   if (on && catchUp) return;
@@ -133,12 +137,36 @@ export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerI
 }
 
 /**
+ * Before the switch's transaction takes the Agent's row (agents/routes.ts, before `lockOwnedAgent`, when the update names `memory`):
+ * the rows of the groups `memorySwitched` writes state rows for — every group the Agent is a current member of, or has a review or a
+ * judgement position in — `for key share` (the lock those rows' foreign keys take), in id order, one statement. A send in a group takes
+ * the group's row and then the Agent's (agents/store.ts's lock order): taken first, while nothing else is held, no switch ever holds the
+ * Agent while it waits for a group. The Agent's own conversation is not among them: `lockAgent` takes it `for update` next (a shared lock
+ * of it taken first would leave two switches of one Agent each waiting to strengthen theirs). Nothing is taken for anyone else's Agent.
+ */
+export async function lockSwitchGroups(t: Tx, ownerId: string, agentId: string): Promise<void> {
+  await t.query(
+    `select c.id from conversations c
+      where c.id in (select m.conversation_id from memberships m where m.principal_id = $1 and m.left_seq is null
+                     union select s.conversation_id from memory_review_state s where s.agent_id = $1
+                     union select g.conversation_id from agent_group_state g where g.agent_id = $1)
+        and c.id is distinct from (select a.conversation_id from agent_conversations a where a.agent_id = $1)
+        and exists (select 1 from principals p where p.id = $1 and p.owner_id = $2)
+      order by c.id
+        for key share of c`,
+    [agentId, ownerId],
+  );
+}
+
+/**
  * The transaction prologue of everything that writes an Agent's memory: the Agent's conversation and row locked (the order
  * every writer uses), then `work` — unless the Agent was deleted, paused or turned memory off meanwhile: then nothing
- * happens and null comes back.
+ * happens and null comes back. `group`: the group whose rows `work` writes rows that point at (a group review's position and notes,
+ * hearsay entries), taken `for key share` first, before the Agent's (a send there takes the group, then the Agent).
  */
-export async function inLockedAgent<T>(db: Db, agentId: string, work: (t: Tx, locked: AgentRow) => Promise<T>): Promise<T | null> {
+export async function inLockedAgent<T>(db: Db, agentId: string, work: (t: Tx, locked: AgentRow) => Promise<T>, group?: string): Promise<T | null> {
   return db.tx(async (t) => {
+    if (group !== undefined) await t.query("select 1 from conversations where id = $1 for key share", [group]);
     const locked = await lockAgent(t, agentId);
     if (locked.deleted || locked.paused || !locked.memory) return null;
     return work(t, locked);
@@ -407,7 +435,8 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       stored.push(notice);
     }
     return stored;
-  });
+    // In a group, its position and the notes it adds point at the group's row: taken first (`inLockedAgent`).
+  }, group ? conversationId : undefined);
   announce(deps, notices, agentId);
   if (notices !== null) {
     countNoteOps(db, made);

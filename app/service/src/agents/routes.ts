@@ -7,7 +7,7 @@ import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { discardPendingOf } from "../memory/apply.ts";
-import { memorySwitched } from "../memory/pipeline.ts";
+import { lockSwitchGroups, memorySwitched } from "../memory/pipeline.ts";
 import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
@@ -352,6 +352,8 @@ export function registerAgentRoutes(
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
       const { agent, switched } = await db.tx(async (t) => {
+        // Turning memory off or on writes rows of the Agent's groups: their rows first, before the Agent's (the lock order).
+        if (req.body.memory !== undefined) await lockSwitchGroups(t, me.id, req.params.id);
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
         assertProactiveAvailable(config, req.body.proactive);

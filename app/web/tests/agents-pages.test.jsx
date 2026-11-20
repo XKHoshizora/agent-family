@@ -2035,12 +2035,19 @@ describe("the 记忆 section of the form", () => {
       expect(sw(MEMORY).checked).toBe(false);
     });
 
-    it("the question is announced (a polite live region), not only shown", async () => {
+    it("the question is announced: a polite live region is there, empty, before it asks, and the question is put into that same region", async () => {
       await openEditOf({ memory: false });
+      const section = sw(MEMORY).closest("fieldset");
+      // Present before anything is said in it (a region that arrives with its text already inside is often not announced).
+      const live = within(section).getByRole("status");
+      expect(live.textContent).toBe("");
       fireEvent.click(sw(MEMORY));
-      const live = question().closest('[role="status"], [aria-live="polite"]');
-      expect(live).not.toBeNull();
-      expect(live.textContent).toContain(QUESTION);
+      expect(within(section).getByRole("status")).toBe(live);
+      expect(live.textContent).toBe(QUESTION);
+      // Answered or closed, it is emptied again (and so announces the question afresh the next time).
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(live.textContent).toBe("");
+      expect(within(section).getByRole("status")).toBe(live);
     });
 
     it("memory turned on elsewhere (another tab) while the question is open: the question closes, the switch follows the record, and a later 保存 does not send memory", async () => {

@@ -531,6 +531,96 @@ describe("switching memory off and on again", () => {
     expect(await chips(w.owner, w.conv)).toEqual([]);
   });
 
+  /** Another connection holds group `g`'s row (as a send there does) until `release`; then, as a mention does, it asks for the Agent's row. */
+  const holdGroupThenAgent = (g: string, agentId: string) => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const groupLocked = new Promise<void>((r) => (locked = r));
+    const done = db.tx(async (t) => {
+      await t.query("select 1 from conversations where id = $1 for update", [g]);
+      locked();
+      await held;
+      await t.query("select 1 from agents where principal_id = $1 for update", [agentId]);
+    });
+    return { groupLocked, release, done };
+  };
+  /** At least `n` statements of this database are waiting for a lock. */
+  const someoneWaits = (n = 1) =>
+    vi.waitFor(
+      async () => {
+        const { rows } = await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
+        expect(rows[0]!.n).toBeGreaterThanOrEqual(n);
+      },
+      { timeout: 5000 },
+    );
+  const stateRows = async (agentId: string, g: string) =>
+    (await db.query<{ n: number }>("select (select count(*) from memory_review_state where agent_id = $1 and conversation_id = $2)::int + (select count(*) from agent_group_state where agent_id = $1 and conversation_id = $2)::int as n", [agentId, g])).rows[0]!.n;
+
+  it("the switch takes the groups' rows before the Agent's (the lock order): a send holding a group the Agent has no state row in, then asking for the Agent, waits for nothing it holds — both commit, no deadlock", async () => {
+    for (const body of [{ memory: false }, { memory: true }] as const) {
+      const w = await owned(`swl${body.memory ? 1 : 0}`);
+      const g = await group(app, w.owner, "读书会", [await signUp(app, `swl${body.memory ? 1 : 0}_mia`), await signUp(app, `swl${body.memory ? 1 : 0}_ned`)]);
+      expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+      if (body.memory) expect((await patch(w, { memory: false })).status).toBe(200);
+      await db.query("delete from memory_review_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g]);
+      await db.query("delete from agent_group_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g]);
+      // No state row in the group: the switch's rows there are new, and their foreign key takes the group's row.
+      expect(await stateRows(w.agent.id, g)).toBe(0);
+      const sender = holdGroupThenAgent(g, w.agent.id);
+      await sender.groupLocked;
+      const switching = patch(w, body);
+      await someoneWaits();
+      sender.release();
+      await sender.done;
+      expect([body, (await switching).status]).toEqual([body, 200]);
+      expect(await stateRows(w.agent.id, g)).toBe(2);
+    }
+  });
+
+  it("two switches of one Agent at once (two tabs), both arriving while its own conversation is held, go through one after the other", async () => {
+    const w = await owned("swt");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swt_mia"), await signUp(app, "swt_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    // Another route on the Agent holds its own conversation (as every one does, first) while both switches arrive and wait.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const ownLocked = new Promise<void>((r) => (locked = r));
+    const holder = db.tx(async (t) => {
+      await t.query("select 1 from conversations where id = $1 for update", [w.conv]);
+      locked();
+      await held;
+    });
+    await ownLocked;
+    const both = Promise.all([patch(w, { memory: false }), patch(w, { memory: false })]);
+    await someoneWaits(2);
+    release();
+    await holder;
+    expect((await both).map((r) => r.status)).toEqual([200, 200]);
+    expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(false);
+  });
+
+  it("a review of a group takes the group's row before the Agent's: a send holding the group, then asking for the Agent, waits for nothing it holds — both commit, and the review applies", async () => {
+    const w = await owned("swr2");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swr2_mia"), await signUp(app, "swr2_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await say(w.owner, g, "我最近在学吉他");
+    judge.answer(() => ({ sort: 0.05 }));
+    gateway.reply(ops(add("在学吉他")));
+    const sender = holdGroupThenAgent(g, w.agent.id);
+    await sender.groupLocked;
+    const deps: PipelineDeps = { db, config: app.deps.config, models: gateway, judge, log: app.log, inFlight: new Set<string>(), conversations: app.deps.conversations, now: clock.now };
+    // Its notes begin in the group, and its position there is a new row: both take the group's row.
+    const reviewing = runReview(deps, { kind: "review", agentId: w.agent.id, conversationId: g }, { closing: new AbortController().signal, attempted: () => {} });
+    await someoneWaits();
+    sender.release();
+    await sender.done;
+    await reviewing;
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["在学吉他"]);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+  });
+
   it("the reviewer drops what waits for an Agent whose memory is switched — its quiet timer, its flags' wake-up, its queued jobs (one under way is left to find memory off) — and with a look back queues one review of its own conversation", async () => {
     const w = await owned("sw6");
     const g = await group(app, w.owner, "读书会", [await signUp(app, "sw6_mia"), await signUp(app, "sw6_ned")]);
