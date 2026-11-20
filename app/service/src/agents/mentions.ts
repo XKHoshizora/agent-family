@@ -122,13 +122,15 @@ export function codeRanges(text: string): Range[] {
     if (block.end < text.length) prose.push([block.end, text.length]);
   } else if (proseStart >= 0 && proseStart < text.length) prose.push([proseStart, text.length]);
 
-  const gaps = /\n[ \t]*\n/g;
+  // Each prose part's paragraphs (a blank line ends one), looked for in that part alone: a search from a part's start
+  // never runs on past its end (it did, to the next blank line or the end of the text: quadratic in a text of many short
+  // parts between fences; tidy round, m-1). No blank line crosses a part's end: a part ends where a fence or a block's
+  // first line, never blank, begins.
   for (const [from, to] of prose) {
     let start = from;
-    gaps.lastIndex = from;
-    for (let gap = gaps.exec(text); gap !== null && gap.index < to; gap = gaps.exec(text)) {
-      out.push(...backtickSpans(text, start, gap.index));
-      start = gap.index + gap[0].length;
+    for (const gap of text.slice(from, to).matchAll(/\n[ \t]*\n/g)) {
+      out.push(...backtickSpans(text, start, from + gap.index!));
+      start = from + gap.index! + gap[0].length;
     }
     if (start < to) out.push(...backtickSpans(text, start, to));
   }
@@ -139,16 +141,46 @@ export function codeRanges(text: string): Range[] {
  * The addresses of `text`, in which an `@name` is part of the address and names nobody (fix round 1, I-3: a name inside
  * an address is not someone being addressed): a URL — a scheme and `://`, or `www.`, then everything up to white space
  * or `<` `>` — and a Markdown link's target, `](` up to its `)` or white space. (An `@` right after `/` is an address
- * too, wherever it is: `mentionTokens`, `checkPicked`.) A scheme is tried only where a run of its characters begins
- * (the lookbehind), so a long run of letters is passed once: linear in the text (fix round 2, I-4; it was tried at every
- * character of a run, to the run's end each time). The web's copy (app/web/src/data/mentions.js) is this text exactly
- * (a test compares them).
+ * too, wherever it is: `inAddress`.) A scheme is tried only where a run of its characters begins (the lookbehind), so
+ * a long run of letters is passed once: linear in the text (fix round 2, I-4; it was tried at every character of a run,
+ * to the run's end each time). The web's copy (app/web/src/data/mentions.js) is this text exactly: both test suites
+ * assert the shared table app/shared/address-cases.json (the pattern, and every case of `addressRanges` and
+ * `inAddress`).
  */
 export const ADDRESS_PATTERN = /(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
 
-/** The addresses of `text` (`ADDRESS_PATTERN`), in order. */
-export function addressRanges(text: string): Range[] {
-  return [...text.matchAll(ADDRESS_PATTERN)].map((m) => [m.index!, m.index! + m[0].length] as const);
+/**
+ * `text` with every character of `taken` (the picked tags' ranges) as `_`: a tag's own text is never read as an address
+ * — a person named `www.anna` or `a://b` is picked like anyone, the tag is decided by its id (tidy round, m-6) — while an
+ * address that runs into a tag still holds it (`_` is no scheme character, no white space, no `<` `>` `)`). Ranges are
+ * clamped to the text.
+ */
+function withTagsHidden(text: string, taken: readonly Range[]): string {
+  if (taken.length === 0) return text;
+  let out = "";
+  let at = 0;
+  for (const [a, b] of [...taken].sort((x, y) => x[0] - y[0])) {
+    const from = Math.max(a, at);
+    const to = Math.min(b, text.length);
+    if (to <= from) continue;
+    out += text.slice(at, from) + "_".repeat(to - from);
+    at = to;
+  }
+  return out + text.slice(at);
+}
+
+/** The addresses of `text` (`ADDRESS_PATTERN`), in order; the text of `taken` (picked tags) is never read as one. */
+export function addressRanges(text: string, taken: readonly Range[] = []): Range[] {
+  return [...withTagsHidden(text, taken).matchAll(ADDRESS_PATTERN)].map((m) => [m.index!, m.index! + m[0].length] as const);
+}
+
+/**
+ * Whether `[start, start + length)` of `text` is part of an address: right after a `/` (`example.org/@anna`), or
+ * overlapping one of `ranges` (the text's `addressRanges`, found once for all its mentions). The web's `inAddress` is
+ * the same test (the shared table).
+ */
+export function inAddress(text: string, start: number, length: number, ranges: readonly Range[]): boolean {
+  return text[start - 1] === "/" || ranges.some(([a, b]) => start < b && start + length > a);
 }
 
 /** The backtick spans of `text` in `[from, to)` (`codeRanges`): an opening run's next run of the same length closes it. */
@@ -227,11 +259,11 @@ function readableIn(text: string, skip: readonly Range[]): (start: number, lengt
 }
 
 /**
- * The parts of `text` a typed `@…` is never read in — code (`codeRanges`), addresses (`addressRanges`, or the
- * `addresses` its caller has already found) and the picked ranges (`picked`) — and the `@…` read outside them
- * (`mentionTokens`): the whole reading at send but its lookups, linear in the text.
+ * The parts of `text` a typed `@…` is never read in — code (`codeRanges`), addresses (`addressRanges`, the picked
+ * tags' own text never one, or the `addresses` its caller has already found) and the picked ranges (`picked`) — and the
+ * `@…` read outside them (`mentionTokens`): the whole reading at send but its lookups, linear in the text.
  */
-export function typedReading(text: string, picked: readonly Range[] = [], addresses: readonly Range[] = addressRanges(text)): { tokens: Token[]; skip: Range[] } {
+export function typedReading(text: string, picked: readonly Range[] = [], addresses: readonly Range[] = addressRanges(text, picked)): { tokens: Token[]; skip: Range[] } {
   const skip = [...codeRanges(text), ...addresses, ...picked];
   return { tokens: mentionTokens(text, skip), skip };
 }
@@ -356,8 +388,9 @@ const oneMention = (range: string): boolean => {
 /**
  * The mentions picked from the @ list, as sent with a message (`POST …/messages` `mentions`), checked against its text as
  * it is stored (`text`) and its conversation: at most MENTION_LIMIT; each range inside the text, not cutting a surrogate
- * pair, one `@name` (`oneMention`), not part of an address (right after `/`, or inside a URL or a link's target:
- * `addressRanges`), in ascending order and not overlapping the one before; each id a current member of the
+ * pair, one `@name` (`oneMention`), not part of an address (`inAddress`: right after `/`, or inside a URL or a link's
+ * target, `addressRanges` — a tag's own text is never one), in ascending order and not overlapping the one before; each
+ * id a current member of the
  * conversation (a person, or an Agent that is not deleted — who can be called there is decided by the triggers, as for
  * any mention). The text in a range is otherwise free: it is the name as the sender saw it. Anything else: 400
  * `bad_mentions`, and nothing is stored. One query, none when nothing was picked.
@@ -367,16 +400,18 @@ export async function checkPicked(
   conversationId: string,
   text: string,
   picked: readonly Mention[],
-  addresses: readonly Range[] = addressRanges(text),
+  addresses: readonly Range[] = addressRanges(
+    text,
+    picked.map((m) => [m.start, m.start + m.length] as const),
+  ),
 ): Promise<void> {
   if (picked.length === 0) return;
   if (picked.length > MENTION_LIMIT) throw bad();
   let end = 0;
-  const free = outside(addresses);
   for (const { start, length } of picked) {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < end || length < 1 || start + length > text.length) throw bad();
     if (text[start] !== "@" || splitsPair(text, start + length) || !oneMention(text.slice(start, start + length))) throw bad();
-    if (text[start - 1] === "/" || !free(start, length)) throw bad();
+    if (inAddress(text, start, length, addresses)) throw bad();
     end = start + length;
   }
   const ids = [...new Set(picked.map((m) => m.id))];

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { ADDRESS_PATTERN, codeRanges, mentionsAtSend } from "../src/agents/mentions.ts";
+import { ADDRESS_PATTERN, addressRanges, codeRanges, inAddress, mentionsAtSend } from "../src/agents/mentions.ts";
 import { judgeable, namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { postAsAgent } from "../src/agents/conversation.ts";
@@ -517,10 +517,37 @@ describe("fix round 2: addresses (M-5)", () => {
     expect(await stored(w.g, text)).toEqual([{ id: w.anna.id, start: 1, length: 5 }]);
   });
 
-  it("the server's address pattern is the web's, character for character (app/web/src/data/mentions.js)", () => {
-    const web = readFileSync(new URL("../../web/src/data/mentions.js", import.meta.url), "utf8");
-    const source = /const ADDRESS = \/(.+)\/g;/.exec(web)?.[1];
-    expect(source).toBe(ADDRESS_PATTERN.source);
+  it("the address rule is the shared table's (app/shared/address-cases.json, which the web's tests assert too): the pattern, the addresses, a picked tag's own text never an address, in an address or not (tidy round, m-6, m-7)", () => {
+    const table = JSON.parse(readFileSync(new URL("../../shared/address-cases.json", import.meta.url), "utf8")) as {
+      pattern: string;
+      cases: Array<{ note: string; text: string; taken: Array<[number, number]>; addresses: Array<[number, number]>; checks: Array<[number, number, boolean]> }>;
+    };
+    expect(ADDRESS_PATTERN.source).toBe(table.pattern);
+    expect(table.cases.length).toBeGreaterThan(10);
+    for (const c of table.cases) {
+      const found = addressRanges(c.text, c.taken);
+      expect([c.note, found]).toEqual([c.note, c.addresses]);
+      for (const [start, length, expected] of c.checks) expect([c.note, start, inAddress(c.text, start, length, found)]).toEqual([c.note, start, expected]);
+    }
+  });
+
+  it("a person whose display name looks like an address (www., ://) is picked like anyone: stored, no bad_mentions (tidy round, m-6)", async () => {
+    const w = await world();
+    const site = await signUp(app, "wwwanna");
+    expect((await api(app, site, "PATCH", "/api/me", { displayName: "www.anna" })).status).toBe(200);
+    const scheme = await signUp(app, "schemeb");
+    expect((await api(app, scheme, "PATCH", "/api/me", { displayName: "a://b" })).status).toBe(200);
+    await join(w.g, site.id);
+    await join(w.g, scheme.id);
+    const picked = [
+      { id: site.id, start: 0, length: 9 },
+      { id: scheme.id, start: 12, length: 6 },
+    ];
+    const seq = await say(w.anna, w.g, "@www.anna 和 @a://b 你们好", picked);
+    expect(await stored(w.g, seq)).toEqual(picked);
+    // A tag a URL runs into is still in an address: refused.
+    const glued = await send(w.anna, w.g, "看 https://x.example?n=@www.anna", [{ id: site.id, start: 22, length: 9 }]);
+    expect([glued.status, glued.json?.error]).toEqual([400, "bad_mentions"]);
   });
 });
 

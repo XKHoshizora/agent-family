@@ -120,9 +120,11 @@ function timeRatio(large: () => void, small: () => void): number {
   return ratios.sort((a, b) => a - b)[2]!;
 }
 
-describe("the reading at send is linear in the text, at the longest a message may be (fix round 2, I-4)", () => {
-  it("code, addresses and tokens of 8 000 characters (MESSAGE_TEXT_MAX) take about four times what 2 000 take, whatever the text holds", () => {
+describe("the reading at send is linear in the text, at the longest a message may be (fix round 2, I-4; tidy round, m-1)", () => {
+  it("code, addresses and tokens of 16 000 code units (MESSAGE_TEXT_MAX code points, each up to two units) take about four times what 4 000 take, whatever the text holds", () => {
     expect(MESSAGE_TEXT_MAX).toBe(8000);
+    // The reading works on UTF-16 code units: a text of MESSAGE_TEXT_MAX code points holds up to twice as many.
+    const longest = MESSAGE_TEXT_MAX * 2;
     const cases: Array<[string, (n: number) => string]> = [
       ["@ and a run of letters", (n) => `@${"a".repeat(n - 1)}`],
       ["a run of letters, dots and dashes", (n) => `@x ${"a.b-c+".repeat(n / 6)}`.slice(0, n)],
@@ -131,16 +133,21 @@ describe("the reading at send is linear in the text, at the longest a message ma
       ["link targets", (n) => `@x ${"](".repeat(n / 2)}`.slice(0, n)],
       ["backticks", (n) => `@x ${"`a``".repeat(n / 4)}`.slice(0, n)],
       ["mentions after slashes", (n) => "/@anna ".repeat(n / 7)],
+      ["URLs between spaces", (n) => `@x ${"http://x/@y ".repeat(n / 12)}`.slice(0, n)],
+      // Short lines of text between fences: many paragraphs, no blank line between them (m-1).
+      ["fences between short lines", (n) => `@x\n${"```\n```\na\n".repeat(n / 10)}`.slice(0, n)],
+      ["list fences between short lines", (n) => `@x\n${"- ```\n  ```\na\n".repeat(n / 14)}`.slice(0, n)],
+      ["blank lines between short paragraphs", (n) => `@x\n${"a `b\n\n".repeat(n / 6)}`.slice(0, n)],
     ];
     for (const [name, make] of cases) {
-      const [small, large] = [make(2000), make(MESSAGE_TEXT_MAX)];
-      expect(Array.from(large).length, name).toBeGreaterThanOrEqual(MESSAGE_TEXT_MAX - 7);
+      const [small, large] = [make(longest / 4), make(longest)];
+      expect(large.length, name).toBeGreaterThanOrEqual(longest - 14);
       // Linear: four times the text, about four times the time (a quadratic reading takes sixteen).
       const ratio = timeRatio(() => typedReading(large), () => typedReading(small));
       expect(ratio, `${name}: 4× the text took ${ratio.toFixed(1)}× the time`).toBeLessThan(8);
     }
-    // (Seven shapes, each about a second of measuring: more than the usual limit of a test.)
-  }, 60_000);
+    // (Eleven shapes, each about a second of measuring: more than the usual limit of a test.)
+  }, 120_000);
 });
 
 /** Puts principal `id` into conversation `conv` from its current seq on. */

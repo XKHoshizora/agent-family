@@ -524,10 +524,14 @@ picked from the @ list mean anyone but the one picked.
   or `www.`, up to white space or `<` `>`) or a Markdown link's target (`](` up to `)` or white space), is not read, and a
   picked range there is 400 `bad_mentions` (the web's composer turns such a tag into plain text before it is sent, and
   says so under the box). A scheme counts only where a run of its characters (`A–Z a–z 0–9 + . -`) begins, as GFM's
-  autolinks have it (`1http://x` is no URL; it was one before fix round 2). The pattern (`ADDRESS_PATTERN`,
-  `src/agents/mentions.ts`) is the web's (`app/web/src/data/mentions.js`) character for character — a test compares
-  them — and is found once per text; the whole reading at send (code, addresses, `@…`) is linear in the text, tested at
-  the longest a message may be (`MESSAGE_TEXT_MAX`, 8 000 characters, `src/messages/send.ts`) against a quarter of it.
+  autolinks have it (`1http://x` is no URL; it was one before fix round 2). A picked tag's own text is never read as an
+  address — the tag is decided by its id, so a person named `www.anna` or `a://b` is picked like anyone — while an
+  address that runs into a tag (`https://x.example?n=@anna`) still holds it. The pattern (`ADDRESS_PATTERN`,
+  `src/agents/mentions.ts`) and the test (`addressRanges`, `inAddress`) are the web's (`app/web/src/data/mentions.js`)
+  character for character: both test suites assert the shared table `app/shared/address-cases.json`. The addresses are
+  found once per text (not at all in a text without an `@`); the whole reading at send (code, addresses, `@…`) is linear
+  in the text, whatever it holds, tested at the longest a message's text may be in UTF-16 code units (`MESSAGE_TEXT_MAX`
+  is 8 000 code points, `src/messages/send.ts`: up to 16 000 units) against a quarter of it.
 - **Consequences of these rules**, as they stand:
   - `@anna/@bob` and `A/@B` read nobody for the second name (the `/` rule).
   - A URL glued to Chinese punctuation or text swallows a following `@name` up to the next white space

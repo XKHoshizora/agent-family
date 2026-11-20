@@ -82,8 +82,9 @@ export async function sendMessage(
 
   const text = input.text ?? "";
   const picked = input.mentions ?? [];
-  // The text's addresses, found once for both (fix round 2).
-  const addresses = addressRanges(text);
+  // The text's addresses, found once for both (fix round 2) — the picked tags' own text never one (tidy round, m-6);
+  // none to find in a text without an `@`, where nothing is picked or read (m-8).
+  const addresses = text.includes("@") ? addressRanges(text, picked.map((m) => [m.start, m.start + m.length] as const)) : [];
   await checkPicked(t, conversationId, text, picked, addresses);
   const read = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked, addresses);
   const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn, read);
