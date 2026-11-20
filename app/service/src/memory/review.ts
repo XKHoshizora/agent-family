@@ -38,6 +38,8 @@ export interface RefNote {
   vault: boolean;
   /** When it last changed: what ranks it among notes a new one may repeat. */
   updatedAt: Date;
+  /** When it was written first: the order a review's merge joins notes in (oldest first). */
+  createdAt: Date;
 }
 
 export interface ReviewInput {
@@ -198,7 +200,7 @@ export async function readReview(
       const text = cleanText(n.text);
       if (text === "") continue;
       const ref = `n${refs.size + 1}`;
-      refs.set(ref, { kind, id: n.id, text: n.text, vault: n.vault, updatedAt: n.updatedAt });
+      refs.set(ref, { kind, id: n.id, text: n.text, vault: n.vault, updatedAt: n.updatedAt, createdAt: n.createdAt });
       notes.push({ ref, room: kind, text });
     }
   }

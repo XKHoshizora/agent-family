@@ -284,11 +284,6 @@ export interface MemoryConfig {
   napAt: number;
   faithfulAt: number;
   /**
-   * A review's merge (`mergeAuto` "on") is applied at once only when the judgement model is this sure of the same question: a bar of its
-   * own, at least `faithfulAt` (the schema refuses less), because nobody asked for it.
-   */
-  reviewMergeAt: number;
-  /**
    * The site's judgement model is asked at most this many times a site day on behalf of one owner's memory (sorting, the duplicate
    * test, the faithful check, the hearsay pre-check, whether the owner asked): past it that owner's memory checks are skipped as "no answer", so one heavy
    * owner can never use up what everyone else's checks need. All owners' memory together stops earlier still, at `judgeShare` of the
@@ -302,18 +297,17 @@ export interface MemoryConfig {
    */
   judgeShare: number;
   /**
-   * In the owner's own conversation a review's `remove` (one that is not part of a faithful merge) is applied at once only when the
+   * In the owner's own conversation a review's `remove` (one that is not part of a merge the review joins) is applied at once only when the
    * judgement model is at least this sure that the owner's words in the review's window asked to forget or delete something; otherwise,
    * or with no answer, it waits for the owner's yes. (A `lock` is applied at once without asking.) Above 0, at most 1.
    */
   explicitAt: number;
   /**
-   * What a review does with a merge (a room's one replace and its removes) in the owner's own conversation: "on" applies it at once when
-   * the judgement model finds it faithful (`reviewMergeAt`), as a dream's merge; "observe" (default) asks the question and counts what it
-   * would have done (`merge_would_auto` / `merge_would_card`) but applies nothing at once — the merge's replace and removes follow the
-   * rules of any other (a card, unless the owner asked to forget); "off" does not ask.
+   * What a review does with a merge (a room's one replace and its removes) in the owner's own conversation: "on" (default) joins the
+   * notes' own texts as they are (memory/clean.ts `joinNotes`) — never the model's merged text, and nobody is asked — and applies the
+   * joined note at once as one change (with 先问我再记: as a card); "off" treats a merge's shape as a replace and removes like any other.
    */
-  mergeAuto: "off" | "observe" | "on";
+  mergeAuto: "off" | "on";
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
   roomNotes: number;
   /**
@@ -373,20 +367,18 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   dreamEveryMs: positive(72_000_000, 2_592_000_000),
   napAt: probability(0.8),
   faithfulAt: probability(0.6),
-  // A review's merge applies without the owner asking: a stricter bar than a dream's (calibration/memory-merge.jsonl), never a looser one.
-  reviewMergeAt: probability(0.7),
   judgePerOwnerDay: positive(300, 1_000_000),
   judgeShare: probability(0.5),
   // Above 0: at 0 every answer would be a yes. 0.7 as calibrated on the real judgement model (memory/sort.ts `ownerAsked`).
   explicitAt: probability(0.7).refine((p) => p > 0),
-  // Observed until the faithful question has been measured on review merges (calibration/memory-merge.jsonl).
-  mergeAuto: z.enum(["off", "observe", "on"]).default("observe"),
+  // A review's merge joins the notes verbatim (the product owner's decision of 2026-11-21): no model text, no judge question.
+  mergeAuto: z.enum(["off", "on"]).default("on"),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
   // 0 (no timer) or at least a minute: anything between would sweep back to back.
   changesSweepMs: z.number().int().min(0).max(86_400_000).refine((ms) => ms === 0 || ms >= 60_000).default(3_600_000),
-}).refine((m) => m.reviewMergeAt >= m.faithfulAt, { path: ["reviewMergeAt"], message: "must be at least faithfulAt" }));
+}));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */

@@ -1,7 +1,19 @@
 import { askable, type Answer, type Judge, type Question } from "../../src/judge/client.ts";
 
-/** What a scripted answer says: a number answers a `noul` question, an object of option → probability a `choice`. */
+/**
+ * What a scripted answer says: a number answers a `noul` question, an object of option → probability a `choice`. A key that ends in `*`
+ * answers every question whose key begins with what comes before it and is not answered by its own key (`"faithful*": 0.9` answers a
+ * dream's faithful question, whether it is the one `faithful` or `faithful_1`, `faithful_2`, …, `faithful_added`).
+ */
 export type ScriptedAnswers = Record<string, number | Record<string, number>>;
+
+/** What `answers` says to the question keyed `key`: its own key, else the longest `prefix*` key it begins with. */
+function scriptedFor(answers: ScriptedAnswers, key: string): number | Record<string, number> | undefined {
+  if (Object.hasOwn(answers, key)) return answers[key];
+  const prefixes = Object.keys(answers).filter((k) => k.endsWith("*") && key.startsWith(k.slice(0, -1)));
+  const longest = prefixes.sort((a, b) => b.length - a.length)[0];
+  return longest === undefined ? undefined : answers[longest];
+}
 
 /** What the script does with a call: answer, fail (the `Error` is thrown), or never answer until the signal aborts. */
 export type JudgeScript = (state: string, questions: readonly Question[]) => ScriptedAnswers | Error | "hang";
@@ -70,7 +82,7 @@ export function scriptedJudge(): ScriptedJudge {
       if (result instanceof Error) throw result;
       const out = new Map<string, Answer>();
       for (const q of questions) {
-        const given = (result as ScriptedAnswers)[q.key];
+        const given = scriptedFor(result as ScriptedAnswers, q.key);
         if (q.type === "noul") {
           if (typeof given === "number" && Number.isFinite(given) && given >= 0 && given <= 1) out.set(q.key, { type: "noul", p: given });
         } else if (typeof given === "object" && given !== null) {

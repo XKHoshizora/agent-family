@@ -50,7 +50,7 @@ export function linesOf(ops: ReadonlyArray<StoredOp>, pending = false): NoticeLi
   const sources = new Set<number>();
   for (const s of ops) {
     switch (s.op) {
-      // A review's merge (one found faithful, applied at once: pipeline.ts) is told as a dream's is.
+      // A review's merge (its notes joined, pipeline.ts) is told as a dream's is.
       case "merge":
         mergeLines(s, pending, lines, vaultLines, sources);
         break;

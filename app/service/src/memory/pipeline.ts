@@ -8,14 +8,14 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
 import type { ModelGateway } from "../models/gateway.ts";
-import { applyDream, applyOps, discardPendingOf, proposeUnlocks, recordRoomFull, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
+import { applyDream, applyOps, discardPendingOf, proposeUnlocks, vaultKey, type AppliedOp, type DreamOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
-import { modelNote } from "./clean.ts";
+import { joinedNote, joinNotes, modelNote } from "./clean.ts";
 import { lookedAt, parseAnswer, parseOps, refusedInPlace, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
-import { addsNothing, duplicateOf, ownerAsked, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
+import { duplicateOf, ownerAsked, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
 import { count, countNoteOps } from "./stats.ts";
-import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
+import { getMemoryLanguage, getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { bumpNotes, stampsOf } from "./write.ts";
 
 /**
@@ -29,8 +29,8 @@ import { bumpNotes, stampsOf } from "./write.ts";
  * that cannot be used (garbage, cut, empty) changes nothing but is reviewed (`reviewed_seq` moves, as it does when there
  * was no owner message to look at). In a group only additions are applied: forgetting and locking by speech are the
  * owner's, in their own conversation. What this owner has pending already counts as known. In the owner's own conversation memory asks
- * as little as it can (`runReview`): a lock and (with `MEMORY.mergeAuto` "on") a faithful merge apply at once, a remove only when the
- * owner asked for it.
+ * as little as it can (`runReview`): a lock and (with `MEMORY.mergeAuto` "on", the default) a merge, its notes joined in their own words,
+ * apply at once, a remove only when the owner asked for it.
  */
 
 export interface PipelineDeps {
@@ -261,13 +261,13 @@ export async function memoryNotice(
  *
  * What of an answer applies at once, in the owner's own conversation without 先问我再记: its adds; its locks (a lock only makes a note more
  * private, and is undone in one tap: never asked about; never of a note the owner took out of the vault, apply.ts `plan`); with
- * `MEMORY.mergeAuto` "on", a merge — a room's one replace and its removes (`mergesOf`) — that the judgement finds faithful, the dream's
- * way (`faithfulOf`), applied as a dream's merge, ONE change of its own ("observe", the default, asks and counts but applies none: such a
- * merge is replaces and removes like any other); and the replaces and removes left only when none of them needs the owner's word
- * (`needsWords`: a remove needs the owner to have asked, `askedFor`), else they wait together in ONE card. The ops that change a note in
- * place stand or fall together — save the faithful merge, the one deliberate exception: it is judged and applied apart from the answer's
- * other replaces and removes. A merge's shape that is not merged so, with a note in the vault among its notes, puts its new text in the
- * vault whatever the sorting (it carries that note's content). With 先问我再记 everything waits as one card; a group only adds.
+ * `MEMORY.mergeAuto` "on" (the default), a merge — a room's one replace and its removes (`mergesOf`) — as the notes' own texts joined
+ * (`joinedMerges`; the model's merged text is never used, nobody is asked), applied as a dream's merge, ONE change of its own; and the
+ * replaces and removes left only when none of them needs the owner's word (`needsWords`: a remove needs the owner to have asked,
+ * `askedFor`), else they wait together in ONE card. The ops that change a note in place stand or fall together — save the merge, the
+ * one deliberate exception: it is applied apart from the answer's other replaces and removes. With "off" a merge's shape is a replace
+ * and removes like any other, and with a note in the vault among its notes it puts its new text in the vault whatever the sorting (it
+ * carries that note's content). With 先问我再记 everything waits: the joined merge as a card of its own; a group only adds.
  */
 export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<"refused" | undefined> {
   const { db, config, log } = deps;
@@ -318,7 +318,16 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       return note !== undefined && pending.touched.has(noteKey(note.kind, note.id));
     });
   const ops = waits ? answered.filter((op) => !inPlace(op)) : answered;
-  const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
+  // A merge (a room's one replace and its removes, `mergesOf`) is not the model's to write: with MEMORY.mergeAuto "on" (the default) the
+  // notes are joined in their own words, oldest first (`joinedMerges`), nobody is asked, and the replace's text is never used. A shape whose
+  // notes say one same thing is no merge, and one whose joined note cannot be written is skipped: either way nothing happens to its notes.
+  const shapes = mergesOf(ops.filter(inPlace), input.refs);
+  const { joins, dropped, skipped } =
+    deps.config.memory.mergeAuto === "on" && shapes.length > 0 ? joinedMerges(shapes, input.refs, await getMemoryLanguage(db, agent.ownerId)) : { joins: [], dropped: new Set<Op>(), skipped: 0 };
+  const joined = joins.map((j) => j.merge);
+  const inJoin = opsOf(joined);
+  // The joined notes are not sorted (no judge): their vault state follows their notes' (apply.ts `planDream`).
+  const sorted = await sortOps(deps, agent, ops.filter((op) => !dropped.has(op) && !inJoin.has(op)), input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;
   // What the owner said again: the notes the answer's adds repeat, by the judgement or word for word, are one stronger (below).
   const mentioned = ops.flatMap((o) => {
@@ -327,23 +336,17 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   });
   const repeats = [...sorted.repeats, ...mentioned, ...(await exactRepeats(deps, agent, kinds, answer, ops))];
   // A `seen` only says the owner mentioned a note again (above): there is nothing in it to apply, record or tell.
-  const changing = ops.filter((o) => o.op !== "seen");
-  // Judged outside any transaction: which of the answer's merges are faithful (one request each), then, for the replaces and removes
-  // left, whether the owner asked to forget (one request for the answer, when it can matter). A lock needs neither.
-  const merges = mergesOf(changing.filter(inPlace), input.refs);
-  const { judged, faithful } = await faithfulOf(deps, agent, merges, input.refs, group, ctx.closing);
-  if (ctx.closing.aborted) return;
-  // Applied at once only with MEMORY.mergeAuto "on"; observed ("observe"), a faithful merge is replaces and removes like any other.
-  const applying = deps.config.memory.mergeAuto === "on" ? faithful : [];
-  const observed = deps.config.memory.mergeAuto === "observe";
-  const unfaithful = judged.filter((m) => !faithful.includes(m));
-  const asked = await askedFor(deps, agent, inPlaceLeft(changing, applying, true), input, group, ctx.closing);
+  const changing = ops.filter((o) => o.op !== "seen" && !dropped.has(o));
+  // Judged outside any transaction: for the replaces and removes left once the merges are taken out, whether the owner asked to forget (one
+  // request for the answer, when it can matter). A lock needs nothing.
+  const asked = await askedFor(deps, agent, inPlaceLeft(changing, joined, true), input, group, ctx.closing);
   if (ctx.closing.aborted) return;
 
   // What took effect, counted once the transaction has committed (`stats.ts`).
   const made: AppliedOp[] = [];
   let strengthened = 0;
   let mergedNow = 0;
+  let joinSkipped = skipped;
   const shown: CardReason[] = [];
   const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[] | null> => {
     // Memory was switched off and on again while the call was under way (`memorySwitched` moved the position past what it read): what it
@@ -360,46 +363,44 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
     strengthened = bumped.size;
-    // In the owner's own conversation, without 先问我再记 (`auto`), memory asks as little as it can. A lock is applied at once. So is, with
-    // MEMORY.mergeAuto "on", a merge the judgement found faithful (`applying`), as a dream's merge, one change of its own, judged and applied apart from the other
-    // ops in place: the one exception to their standing or falling together. The replaces and removes left need the owner's words
+    // In the owner's own conversation, without 先问我再记 (`auto`), memory asks as little as it can. A lock is applied at once. So is a merge
+    // whose notes are joined (`joins`), as a dream's merge, one change of its own, apart from the other ops in place (with 先问我再记 it is a
+    // card of its own): the one exception to their standing or falling together. The replaces and removes left need the owner's words
     // (`needsWords`, `asked`), and they depend on one another (the room check of the one counts on the space the other frees): when ANY of
     // them is held ALL of them are, together in one pending change, the card 先问我再记 produces. Adds apply at once. With 先问我再记 on
-    // everything waits as one change anyway; a group review has nothing but adds.
+    // everything waits anyway; a group review has nothing but adds.
     const auto = !group && !locked.memoryAsk;
-    const merged = auto ? applying : [];
-    const inMerge = opsOf(merged);
-    const left = inPlaceLeft(changing, merged, auto);
+    const left = inPlaceLeft(changing, joined, auto);
     const held: Op[] = auto && left.some((op) => needsWords(op, input, asked)) ? left : [];
-    const direct = changing.filter((op) => !held.includes(op) && !inMerge.has(op));
-    // A merge's shape not merged here (not faithful, not answered, observed, not asked) is a replace and removes like any other — but its
-    // new text is meant to carry what its other notes said: with one of them in the vault, it goes into the vault, whatever the sorting.
-    for (const m of merges) {
+    const direct = changing.filter((op) => !held.includes(op) && !inJoin.has(op));
+    // A merge's shape not joined (MEMORY.mergeAuto "off") is a replace and removes like any other — but its new text is meant to carry what
+    // its other notes said: with one of them in the vault, it goes into the vault, whatever the sorting.
+    for (const m of shapes) {
       const notes = [m.replace, ...m.removes].map((op) => input.refs.get(op.ref)!);
-      if (!merged.includes(m) && notes.some((n) => n.vault)) sorted.vaults.set(vaultKey(notes[0]!.kind, m.replace.text), { vault: true, unsure: false });
+      if (!joined.includes(m) && notes.some((n) => n.vault)) sorted.vaults.set(vaultKey(notes[0]!.kind, m.replace.text), { vault: true, unsure: false });
     }
-    if (merged.length > 0) {
+    if (joins.length > 0) {
       // First: what it frees in a room is there for the adds below.
-      const notes = merged.flatMap((m) => [m.replace, ...m.removes]).map((op) => input.refs.get(op.ref)!);
-      const result = await applyDream(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, merged.map(dreamMerge), refsOf(input.refs), {
+      const notes = joined.flatMap((m) => [m.replace, ...m.removes]).map((op) => input.refs.get(op.ref)!);
+      const result = await applyDream(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, joins.map(joinedOp), refsOf(input.refs), {
         conversationId: locked.conversationId,
-        status: "applied",
+        status: locked.memoryAsk ? "pending" : "applied",
         phase: "rest",
-        vaults: sorted.vaults,
-        checked: new Set(merged.keys()),
+        // A joined note with a note of it in the vault is in the vault (apply.ts `planDream`); else it stays out, as its notes were.
+        vaults: new Map(joins.map((j) => [vaultKey(input.refs.get(j.merge.replace.ref)!.kind, j.text), { vault: false, unsure: false }])),
+        checked: new Set(joins.keys()),
         read: await asReviewed(t, ids, notes),
         resorted: new Map(),
         rooms: roomOf(config),
-        // What the review read: the merged text keeps an origin only when that conversation is its notes' origin too.
+        // What the review read: the joined note keeps an origin only when that conversation is its notes' origin too.
         heardIn: conversationId,
       });
       if (result?.changeId) {
-        mergedNow = result.applied.filter((o) => o.op === "merge").length;
-        written.push({ changeId: result.changeId, unlock: false, reason: null });
-      } else if (result?.full) {
-        // Its room could not hold it: the notes stay as they are, and the owner is told the room is full, as for any review.
-        written.push({ changeId: await recordRoomFull(t, ids, locked.conversationId), unlock: false, reason: null });
+        if (!locked.memoryAsk) mergedNow = result.applied.filter((o) => o.op === "merge").length;
+        written.push({ changeId: result.changeId, unlock: false, reason: locked.memoryAsk ? "ask_first" : null });
       }
+      // A room that cannot take a joined note: nothing happens to its notes, nobody is told.
+      joinSkipped += result?.noRoom ?? 0;
     }
     const apply = (list: Op[], status: "applied" | "pending") =>
       applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, list, input.refs, {
@@ -425,7 +426,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     }
     if (held.length > 0) {
       const result = await apply(held, "pending");
-      if (result?.changeId) written.push({ changeId: result.changeId, unlock: false, reason: heldFor(held, unfaithful) });
+      if (result?.changeId) written.push({ changeId: result.changeId, unlock: false, reason: heldFor(held) });
     }
     await markReviewed(t, agentId, conversationId, input.upToSeq);
     const stored: StoredMessage[] = [];
@@ -443,12 +444,9 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
     count(db, "strength_bump", strengthened);
     // Every lock a review applies is one nobody was asked about.
     count(db, "lock_auto", made.filter((o) => o.op === "lock").length);
-    count(db, "merge_auto", mergedNow);
-    // Observed: what "on" would have done with each merge judged — applied it at once, or left it to the rules of before.
-    if (observed) {
-      count(db, "merge_would_auto", faithful.length);
-      count(db, "merge_would_card", unfaithful.length);
-    }
+    count(db, "merge_joined", mergedNow);
+    // A merge whose joined note could not be written (too long, or its room full): its notes stay as they were.
+    count(db, "merge_join_skipped", joinSkipped);
     for (const reason of shown) count(db, `card_shown_${reason}`);
   }
   // A change that was applied may have left a room nearly full: that room is tidied now rather than at night.
@@ -472,7 +470,7 @@ function needsWords(op: Op, input: Pick<ReviewInput, "ownerAt" | "refs">, asked:
 }
 
 /**
- * Whether the owner asked to forget, for the removes among `left` (the answer's replaces and removes once its faithful merges are taken
+ * Whether the owner asked to forget, for the removes among `left` (the answer's replaces and removes once its merges are taken
  * out): the judgement's answer (`ownerAsked`), ONE request for the whole answer, made whatever words the owner used, but only when it can
  * change what is applied at once — in the owner's own conversation (a group review only adds), without 先问我再记 (everything waits then),
  * when `left` holds a remove, not when a replace of `left` waits whatever the answer (no owner line after its note's last change: the ops
@@ -485,15 +483,11 @@ async function askedFor(deps: PipelineDeps, agent: AgentRow, left: Op[], input: 
   return ownerAsked({ db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log }, input.said, closing);
 }
 
-/** Why a card waits for the owner (`card_shown_<reason>`): a remove not asked for, a merge not found faithful, 先问我再记, or anything else (a replace before the owner's word, a request to unlock). */
-type CardReason = "remove" | "unfaithful_merge" | "ask_first" | "other";
+/** Why a card waits for the owner (`card_shown_<reason>`): a remove not asked for, 先问我再记, or anything else (a replace before the owner's word, a request to unlock). */
+type CardReason = "remove" | "ask_first" | "other";
 
-/**
- * Why the replaces and removes `held` wait: one of them is of a merge the judgement did not find faithful (or did not answer about,
- * `unfaithful`), else one is a remove the owner did not ask for (an observed faithful merge's too), else a replace waits for the owner's word.
- */
-const heldFor = (held: readonly Op[], unfaithful: readonly Merge[]): CardReason =>
-  unfaithful.some((m) => held.includes(m.replace)) ? "unfaithful_merge" : held.some((op) => op.op === "remove") ? "remove" : "other";
+/** Why the replaces and removes `held` wait: one is a remove the owner did not ask for, else a replace waits for the owner's word. */
+const heldFor = (held: readonly Op[]): CardReason => (held.some((op) => op.op === "remove") ? "remove" : "other");
 
 /** A merge in a review's answer: the replace of a note, whose new text is meant to carry what the notes the removes name said. */
 interface Merge {
@@ -503,7 +497,7 @@ interface Merge {
 
 /**
  * The merges among an answer's ops in place, found by their shape alone: in a room, its one `replace` (of note X) and every `remove` of
- * that room, one at least. Whether the new text of X carries what the removed notes said is the judgement's question (`faithfulOf`). No
+ * that room, one at least. Its new text is never used: the notes are joined in their own words (`joinedMerges`, MEMORY.mergeAuto "on"). No
  * merge in a room with two replaces or more (which one carries the removed notes is not known), nor when a note of it is named by another
  * op in place of the answer (X among the removes, a lock of X, a note removed twice): those follow the rule of before.
  */
@@ -528,33 +522,36 @@ function mergesOf(inPlaceOps: ReadonlyArray<Op>, refs: ReadonlyMap<string, RefNo
   return merges;
 }
 
+/** A merge to apply as the notes' own texts joined (`joinNotes`), oldest first. */
+interface Join {
+  merge: Merge;
+  text: string;
+}
+
 /**
- * Which of `merges` were asked about (`judged`) and which the judgement finds faithful, asked exactly as a dream's merge is (sort.ts
- * `addsNothing`: the old texts of the replaced note and of the removed ones as the sources, the new text as the result) but held to a bar of
- * its own, `reviewMergeAt` (never below a dream's `faithfulAt`: nobody asked for this one), one
- * request each, outside any transaction; only where a merge may apply at once — in the owner's own conversation (a group review only
- * adds), without 先问我再记 (everything waits then), with `MEMORY.mergeAuto` not "off" ("observe" asks, to count what it would do) — and
- * not once the service is closing (a request under way ends with it). No answer is not faithful: such a merge follows the rule of before.
+ * What becomes of the merges of an answer (MEMORY.mergeAuto "on"): each one's notes — X, the replaced one, and the removed ones — joined in
+ * their own words, oldest first (`createdAt`), in the notebook's language's way (`language`, clean.ts `joinNotes`), the model's text left
+ * unused. A merge whose notes all say the same (after trimming) is no merge, and one whose joined note cannot be written (clean.ts
+ * `joinedNote`: longer than an entry may be) is skipped: the ops of both are `dropped` — nothing happens to their notes — and `skipped`
+ * counts the second kind.
  */
-async function faithfulOf(
-  deps: PipelineDeps,
-  agent: AgentRow,
-  merges: readonly Merge[],
-  refs: ReadonlyMap<string, RefNote>,
-  group: boolean,
-  closing: AbortSignal,
-): Promise<{ judged: Merge[]; faithful: Merge[] }> {
-  const judged: Merge[] = [];
-  const faithful: Merge[] = [];
-  if (group || agent.memoryAsk || deps.config.memory.mergeAuto === "off") return { judged, faithful };
-  const sortDeps: SortDeps = { db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log };
-  for (const m of merges) {
-    if (closing.aborted) break;
-    const sources = [m.replace, ...m.removes].map((op) => refs.get(op.ref)!.text);
-    judged.push(m);
-    if (await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, deps.config.memory.reviewMergeAt, closing)) faithful.push(m);
+function joinedMerges(merges: readonly Merge[], refs: ReadonlyMap<string, RefNote>, language: string | null): { joins: Join[]; dropped: Set<Op>; skipped: number } {
+  const joins: Join[] = [];
+  const dropped = new Set<Op>();
+  let skipped = 0;
+  for (const merge of merges) {
+    const notes = [merge.replace, ...merge.removes].map((op) => refs.get(op.ref)!);
+    const texts = [...notes].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()).map((n) => n.text);
+    const one = new Set(texts.map((t) => t.trim())).size < 2;
+    const text = one ? null : joinedNote(joinNotes(texts, language));
+    if (text !== null) {
+      joins.push({ merge, text });
+      continue;
+    }
+    for (const op of [merge.replace, ...merge.removes]) dropped.add(op);
+    if (!one) skipped++;
   }
-  return { judged, faithful };
+  return { joins, dropped, skipped };
 }
 
 /** The ops of `merged`. */
@@ -566,8 +563,8 @@ function inPlaceLeft(changing: readonly Op[], merged: readonly Merge[], auto: bo
   return changing.filter((op) => inPlace(op) && !inMerge.has(op) && !(auto && op.op === "lock"));
 }
 
-/** A faithful merge as the dream's op that applies it (apply.ts `applyDream`). */
-const dreamMerge = (m: Merge): DreamOp => ({ op: "merge", into: m.replace.ref, from: m.removes.map((r) => r.ref), text: m.replace.text });
+/** A joined merge as the dream's op that applies it (apply.ts `applyDream`): its text the notes' own, taken as it is. */
+const joinedOp = (j: Join): DreamOp => ({ op: "merge", into: j.merge.replace.ref, from: j.merge.removes.map((r) => r.ref), text: j.text, joined: true });
 
 /** The notes a review's refs name, as `applyDream` takes them. */
 const refsOf = (refs: ReadonlyMap<string, RefNote>): Map<string, { kind: NoteKind; id: string }> => new Map([...refs].map(([ref, n]) => [ref, { kind: n.kind, id: n.id }]));

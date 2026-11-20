@@ -111,7 +111,8 @@ export interface StoredNote {
 
 /** What a dream may ask for (dream.ts `parseDreamOps` makes them from the model's answer, refs being the numbers it was shown). */
 export type DreamOp =
-  | { op: "merge"; into: string; from: string[]; text: string }
+  /** `joined`: a review's merge, its text the notes' own words joined (clean.ts `joinNotes`, checked by `joinedNote`), taken as it is. */
+  | { op: "merge"; into: string; from: string[]; text: string; joined?: true }
   | { op: "rewrite"; ref: string; text: string }
   | { op: "split"; ref: string; texts: string[] }
   | { op: "lock"; ref: string };
@@ -544,14 +545,14 @@ export interface DreamApplyOpts {
   status: "applied" | "pending";
   /** The sorting verdict by `vaultKey(kind, text)` of a text a merge or split makes (a rewrite keeps its note's vault state); a text with none goes into the vault, unsure. */
   vaults: Map<string, { vault: boolean; unsure: boolean }>;
-  /** The indexes (in the `ops` given) of the merges, rewrites and splits the judgement found to add nothing and lose nothing (sort.ts `addsNothing`): any other is dropped. */
+  /** The indexes (in the `ops` given) of the merges, rewrites and splits the judgement found to add nothing and lose nothing (sort.ts `addsNothing`), and of a review's joined merges (nothing to judge: the notes' own words): any other is dropped. */
   checked: ReadonlySet<number>;
   /** Every note the dream was shown: its id and exact `updated_at` as it was read. An op naming a note that has changed (or is gone) since is dropped. */
   read: ReadonlyMap<string, string>;
   /** The sorting verdict (sort.ts `resortNote`) of each open note that is new since the last dream: one that no op touched, that is not the owner's choice and has not changed since it was read is locked when its verdict says so. A note with no entry has no verdict and stays. */
   resorted: ReadonlyMap<string, { vault: boolean; unsure: boolean }>;
   rooms: Rooms;
-  /** Whose change it is (`memory_changes.phase`): a dream's (the default), or a review's — a merge a review found faithful (pipeline.ts) is applied here as a dream's is, but it is the review's doing. */
+  /** Whose change it is (`memory_changes.phase`): a dream's (the default), or a review's — a review's merge, its notes joined (pipeline.ts), is applied here as a dream's is, but it is the review's doing. */
   phase?: "rest" | "dream";
   /**
    * A review's merge: the conversation the review read, one more origin of what the merged text may carry (`keptOrigin`), so that the
@@ -593,7 +594,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       if (!into || from.some((n) => n === null)) return;
       const sources = [into, ...(from as Note[])];
       if (new Set(sources.map((n) => n.id)).size !== sources.length || sources.some((n) => n.kind !== into.kind)) return;
-      const text = modelNote(op.text);
+      const text = op.joined === true ? op.text : modelNote(op.text);
       if (text === null) return;
       sources.forEach((n) => touched.add(n.id));
       // Any source in the vault puts the result there (the owner's only when every source was); else it is sorted afresh.
@@ -683,8 +684,8 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
  * Applies a dream's operations (or, with status `pending`, only records them as one change for the owner to confirm), in the
  * caller's transaction, under the account lock. `who.agentId` is the Agent carrying the dream out, `who.kinds` the room it
  * consolidates. The change is judged by its net effect on the room (`planDream`). Null when no op took effect; also when the
- * Agent is not the owner's. A review's merge the judgement found faithful is applied here too (pipeline.ts), the very same way, as a
- * change of phase `rest`.
+ * Agent is not the owner's. A review's merge, its notes joined in their own words, is applied here too (pipeline.ts), the very same way,
+ * as a change of phase `rest`.
  */
 export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): Promise<ApplyResult | null> {
   await lockAccount(t, who.ownerId);
@@ -698,12 +699,6 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, opts.phase ?? "dream");
   return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [], noRoom: planned.noRoom };
 }
-
-/**
- * Records, in the caller's transaction (which holds the account lock), that a room could not take what a review would have written: an
- * applied change with no ops and `full`, whose notice says the room is full (a review's merge its room could not hold, pipeline.ts).
- */
-export const recordRoomFull = (t: Tx, who: Ids, conversationId: string): Promise<string> => writeChange(t, who, conversationId, "applied", [], true);
 
 /** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */
 export interface NewHearsay {

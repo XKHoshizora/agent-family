@@ -37,7 +37,7 @@ beforeEach(async () => {
   clock.reset();
   first = gateway.calls.length;
   judge.calls.splice(0);
-  judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+  judge.answer(() => ({ sort: 0.95, "faithful*": 0.9 }));
   // The dream sweep is armed once at start (`resume`); the clock was reset above, which forgot its timer.
   await memory().resume();
 });
@@ -231,7 +231,7 @@ describe("converting the existing notes", () => {
   const convertCalls = () => callsOf("笔记语言整理员");
   const rewrite = (ref: string, text: string) => ({ op: "rewrite", ref, text });
   /** The judge finds a result faithful unless it holds the word INVENTED; sorting answers harmless. */
-  const faithfulUnlessInvented = (state: string, qs: ReadonlyArray<{ key: string }>): ScriptedAnswers => (qs[0]!.key === "faithful" ? { faithful: state.includes("INVENTED") ? 0.1 : 0.9 } : { sort: 0.95 });
+  const faithfulUnlessInvented = (state: string, qs: ReadonlyArray<{ key: string }>): ScriptedAnswers => (qs[0]!.key.startsWith("faithful") ? { "faithful*": state.includes("INVENTED") ? 0.1 : 0.9 } : { sort: 0.95 });
 
   it("is refused 409 no_language while the setting is automatic, and for anyone who is not signed in", async () => {
     const owner = await signUp(app, "cv0");
@@ -364,7 +364,7 @@ describe("a conversion changes the language and nothing else, and says what it c
     await settled();
     return (await db.query("select coalesce(sum(n), 0)::int as n from memory_stats where name = 'memory_refused_allowance'")).rows[0].n;
   };
-  const faithfulOnly = (_s: string, qs: ReadonlyArray<{ key: string }>): ScriptedAnswers => (qs[0]!.key === "faithful" ? { faithful: 0.9 } : { sort: 0.05 });
+  const faithfulOnly = (_s: string, qs: ReadonlyArray<{ key: string }>): ScriptedAnswers => (qs[0]!.key.startsWith("faithful") ? { "faithful*": 0.9 } : { sort: 0.05 });
 
   it("keeps every note's vault, vault_by and unsure exactly as they are, and asks the judge only the faithful question", async () => {
     const owner = await signUp(app, "cf1");
@@ -380,7 +380,8 @@ describe("a conversion changes the language and nothing else, and says what it c
     expect(await converted(owner)).toMatchObject({ converted: 4, kept: 0 });
     expect((await rows(owner.id)).map((r) => r.text)).toEqual(["Likes tea", "Eats spicy food", "Allergic to peanuts", "Lives in Shanghai"]);
     expect((await rows(owner.id)).map(({ vault, vault_by, unsure }) => ({ vault, vault_by, unsure }))).toEqual(before);
-    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key))).toEqual(["faithful", "faithful", "faithful", "faithful"]);
+    // A rewrite is asked note by note: its one note, and whether anything was added.
+    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key))).toEqual(Array.from({ length: 4 }, () => ["faithful_1", "faithful_added"]).flat());
   });
 
   it("origin_conversation_id is not changed by a conversion", async () => {

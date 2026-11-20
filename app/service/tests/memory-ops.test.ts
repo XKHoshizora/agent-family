@@ -364,3 +364,51 @@ describe("modelEntryMax", () => {
     }
   });
 });
+
+describe("joinNotes and joinedNote (a review's merge: the notes in their own words)", () => {
+  it("joins the texts in the order given, each trimmed, by 「；」 for Chinese or Japanese and 「; 」 for any other language", async () => {
+    const { joinNotes } = await import("../src/memory/clean.ts");
+    expect(joinNotes(["喜欢喝茶", "不加糖"], "zh-Hans")).toBe("喜欢喝茶；不加糖");
+    expect(joinNotes([" 喜欢喝茶 ", "不加糖", "早上喝"], "zh-Hant")).toBe("喜欢喝茶；不加糖；早上喝");
+    expect(joinNotes(["猫を飼っている", "名前はミケ"], "ja")).toBe("猫を飼っている；名前はミケ");
+    expect(joinNotes(["Has a dog", "Called Biscuit"], "en")).toBe("Has a dog; Called Biscuit");
+    expect(joinNotes(["Hat einen Hund", "Er heißt Bello"], "de")).toBe("Hat einen Hund; Er heißt Bello");
+    // The language set decides, not the writing.
+    expect(joinNotes(["喜欢喝茶", "不加糖"], "en")).toBe("喜欢喝茶; 不加糖");
+    expect(joinNotes(["Drinks tea", "No sugar"], "ja")).toBe("Drinks tea；No sugar");
+  });
+
+  it("with no language set (automatic), the writing decides: Chinese characters or kana anywhere join by 「；」", async () => {
+    const { joinNotes } = await import("../src/memory/clean.ts");
+    expect(joinNotes(["Likes tea", "No sugar"], null)).toBe("Likes tea; No sugar");
+    expect(joinNotes(["喜欢 jazz", "favourite is Bill Evans"], null)).toBe("喜欢 jazz；favourite is Bill Evans");
+    expect(joinNotes(["コーヒーはブラック", "two cups a day"], null)).toBe("コーヒーはブラック；two cups a day");
+  });
+
+  it("takes one sentence-final mark (。．.！!？?；;) off every part but the last, and nothing else", async () => {
+    const { joinNotes } = await import("../src/memory/clean.ts");
+    expect(joinNotes(["喜欢喝茶。", "不加糖！", "早上喝？", "晚上不喝。"], "zh-Hans")).toBe("喜欢喝茶；不加糖；早上喝；晚上不喝。");
+    expect(joinNotes(["Has a dog.", "Is he called Biscuit?", "Yes!", "Walks him daily;", "Done."], "en")).toBe("Has a dog; Is he called Biscuit; Yes; Walks him daily; Done.");
+    expect(joinNotes(["猫がいる．", "ミケ;", "三歳"], "ja")).toBe("猫がいる；ミケ；三歳");
+    // One only, and only at the end; brackets, commas and marks inside stay.
+    expect(joinNotes(["Wait...", "现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）。", "好"], "zh-Hans")).toBe("Wait..；现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）；好");
+  });
+
+  it("a text that repeats an earlier one exactly (after trimming) is written once, where it first came", async () => {
+    const { joinNotes } = await import("../src/memory/clean.ts");
+    expect(joinNotes(["喜欢喝茶", "不加糖", " 喜欢喝茶 "], "zh-Hans")).toBe("喜欢喝茶；不加糖");
+    expect(joinNotes(["Likes tea", "likes tea", "Likes tea"], "en")).toBe("Likes tea; likes tea");
+    // Not the same once a mark differs: both stay.
+    expect(joinNotes(["喜欢喝茶。", "喜欢喝茶"], "zh-Hans")).toBe("喜欢喝茶；喜欢喝茶");
+    expect(joinNotes(["喜欢喝茶", "喜欢喝茶"], "zh-Hans")).toBe("喜欢喝茶");
+  });
+
+  it("joinedNote takes a joined text as it is, up to modelEntryMax weight; longer, or nothing, cannot be written", async () => {
+    const { joinedNote } = await import("../src/memory/clean.ts");
+    expect(joinedNote("字".repeat(200))).toBe("字".repeat(200));
+    expect(joinedNote("字".repeat(201))).toBeNull();
+    expect(joinedNote("")).toBeNull();
+    // An owner's own words may hold what a model's may not (a link): they are the owner's.
+    expect(joinedNote("常用网站是 example.com；喜欢喝茶")).toBe("常用网站是 example.com；喜欢喝茶");
+  });
+});

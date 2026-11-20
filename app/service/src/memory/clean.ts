@@ -70,3 +70,34 @@ export function modelNote(text: string): string | null {
   if (clean === null || weight(clean) > modelEntryMaxNow) return null;
   return URL_LIKE.some((p) => p.test(clean)) || BARE_DOMAIN_PATH.test(clean) || STATES_A_PASSWORD.test(clean) || ADDRESSES_THE_READER.test(clean) ? null : clean;
 }
+
+/** A mark that ends a sentence, of which one is taken off the end of every part of a joined note but its last. */
+const SENTENCE_END = /[。．.！!？?；;]$/u;
+/** Writing that joins with the full-width `；`: Chinese characters and kana. */
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+
+/**
+ * Notes joined into one in their own words (a review's merge, memory/pipeline.ts): `texts` in the order given (oldest first), each
+ * trimmed, a text that repeats an earlier one exactly (after trimming) once, one sentence-final mark (`。．.！!？?；;`) taken off the end of
+ * every part but the last, joined by `；` when the notebook's language (`lang`, `accounts.memory_language`) is Chinese or Japanese and by
+ * `; ` otherwise — with no language set (automatic), by `；` when the texts are written in Chinese characters or kana. Nothing is
+ * reworded. Pure.
+ */
+export function joinNotes(texts: readonly string[], lang: string | null): string {
+  const parts: string[] = [];
+  for (const text of texts) {
+    const trimmed = text.trim();
+    if (trimmed !== "" && !parts.includes(trimmed)) parts.push(trimmed);
+  }
+  const cjk = lang === null ? CJK.test(parts.join("")) : lang === "ja" || lang.startsWith("zh");
+  return parts.map((p, i) => (i < parts.length - 1 ? p.replace(SENTENCE_END, "") : p)).join(cjk ? "；" : "; ");
+}
+
+/**
+ * A joined note as it may be stored: the owner's rules (it is made of notes already stored, so nothing in it is the model's) and no more
+ * than `modelEntryMax` weight, the longest entry anything but the owner writes; null when it cannot be written so.
+ */
+export function joinedNote(text: string): string | null {
+  const clean = tidy(text);
+  return clean !== null && clean === text && weight(clean) <= modelEntryMaxNow ? clean : null;
+}
