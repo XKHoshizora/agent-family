@@ -121,13 +121,16 @@ describe("while a reply's tool runs, and what the reply keeps of it", () => {
       { type: "run", conversationId: own, run: running, activity: "search" },
       { type: "run", conversationId: own, run: running, activity: null },
     ]);
-    // In order with the reply: the kind while the tool ran, none once the model wrote again, then the reply.
+    // In order with the reply: what it said before the tool (its acknowledgement, a message of its own), the kind while
+    // the tool ran, none once the model wrote again, then the reply.
     const at = (pred: (e: Push) => boolean) => socket.events.findIndex(pred);
-    const replySeq = askSeq + 1;
+    const replySeq = askSeq + 2;
+    const acknowledged = at((e) => e.type === "message" && e.message.seq === askSeq + 1 && e.message.conversationId === own);
     const searching = at((e) => e.type === "run" && e.activity === "search");
     const writing = at((e) => e.type === "run" && "activity" in e && e.activity === null);
     const reply = at((e) => e.type === "message" && e.message.seq === replySeq && e.message.conversationId === own);
-    expect(searching).toBeGreaterThan(0);
+    expect(searching).toBeGreaterThan(acknowledged);
+    expect(acknowledged).toBeGreaterThan(0);
     expect(writing).toBeGreaterThan(searching);
     expect(reply).toBeGreaterThan(writing);
     // No frame but the owner's own copy of the reply names the words; none, the tool's results or anything elsewhere.
@@ -138,12 +141,13 @@ describe("while a reply's tool runs, and what the reply keeps of it", () => {
     }
 
     // Stored with the reply: the counts, what was found (in order) and the words.
-    expect(await bodyOf(own, replySeq)).toEqual({ text: "我先查一下。\n\n叫蜀香。", lookups: { search: 1 }, found: foundNow, queries: [QUERY] });
+    expect(await bodyOf(own, askSeq + 1)).toEqual({ text: "我先查一下。", ack: true });
+    expect(await bodyOf(own, replySeq)).toEqual({ text: "叫蜀香。", lookups: { search: 1 }, found: foundNow, queries: [QUERY] });
     // The owner reads the counts, of what was found what they can see, and the words — pushed and read alike.
     const mine = { lookups: { search: 1 }, found: [ref(own, askSeq), ref(home, homeSeq)], queries: [QUERY] };
     expect(messageFrame(socket, own, replySeq)!.message).toMatchObject(mine);
     const read = (await api(app, owner, "GET", `/api/conversations/${own}/messages/${replySeq}`)).json.message;
-    expect(read).toMatchObject({ text: "我先查一下。\n\n叫蜀香。", ...mine });
+    expect(read).toMatchObject({ text: "叫蜀香。", ...mine });
     expect((await api(app, owner, "GET", `/api/conversations/${own}/messages`)).json.messages.at(-1)).toMatchObject(mine);
 
     // The words, the counts and what was found are no text to search: nothing matches them.

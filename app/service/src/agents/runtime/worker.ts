@@ -345,6 +345,24 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
   }
 
+  /**
+   * What `out` has said so far, posted as the reply's acknowledgement (`AgentPort.acknowledge`), what is pending of it
+   * pushed first so the owner's stream is in order with the message. Once it is posted, or found to show nothing, the
+   * reply starts again (its text and reasoning are that message's, or nothing); refused, or failing (only the log hears
+   * of a failure), what it said stays the reply's. Whether it was posted.
+   */
+  async function acknowledge(run: RunTicket, out: ReplyStream): Promise<boolean> {
+    out.flushNow();
+    try {
+      const posted = await port.acknowledge(run, { text: cleanModelText(out.text), reasoning: cleanModelText(out.reasoning) });
+      if (posted !== "refused") out.restart();
+      return posted === "posted";
+    } catch (err) {
+      log.error({ err, runId: run.id }, "agent run: could not post its acknowledgement; what it said stays with the reply");
+      return false;
+    }
+  }
+
   /** `AgentPort.toolsUnusable`, whose failure only the log hears of: the reply goes on without the tools either way. */
   async function toolsUnusable(run: RunTicket, why: "refused" | "garbled"): Promise<void> {
     try {
@@ -471,7 +489,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * `no_quota`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
    * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
    * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
-   * paragraph break. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
+   * paragraph break. What a round that calls tools has said by then, when it shows anything, is posted at once — before
+   * its tools run — as the reply's acknowledgement (`acknowledge`; one per reply, the first), and the answer is what the
+   * reply says after it; a later round's text before its calls is part of the answer. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
    * reported usage, or of its estimate when it reported none (the conversation's, plus the tools and the steps it carried,
    * at the model's ratio — no tools for a round whose upstream refused them; what it wrote, its calls included); a round
    * that failed counts only the usage its upstream reported. Only counts and outcome classes are logged.
@@ -500,6 +520,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     /** The upstream refused a later round: the reply is asked for once more as one without tools (`prepared.call`). */
     let plain = false;
     let unusable = false;
+    /** The reply's acknowledgement was posted: no later round's text is. */
+    let acknowledged = false;
     /** What the tools that ran looked up, for the reply's message. */
     const looked = new LookedUp();
     /** What the reply's status says now: the kind of the tool that is running, or nothing. */
@@ -596,6 +618,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         ending = { last: round };
         break;
       }
+      // Work follows: what the reply said before it, when it shows anything, is posted at once as its acknowledgement —
+      // one per reply — and the answer is what it says after it.
+      if (!acknowledged && hasVisibleText(cleanModelText(out.text))) acknowledged = await acknowledge(run, out);
 
       guard.roundDone();
       tally.rounds++;

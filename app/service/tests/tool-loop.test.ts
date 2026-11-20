@@ -42,6 +42,10 @@ interface Fake {
   ticket: RunTicket;
   deltas: Delta[];
   posted: Reply[];
+  /** What was posted as the reply's acknowledgement (`AgentPort.acknowledge`). */
+  acks: Array<{ text: string; reasoning: string }>;
+  /** What the worker did, in order: an acknowledgement, a tool call, a post. */
+  order: string[];
   finished: Array<{ end: RunEnd; usage: Usage | null; fallback: Estimated }>;
   tools: ToolCall[];
   extends: Array<{ spent: Usage | null; estimated: Estimated; next: number }>;
@@ -61,6 +65,8 @@ interface FakeOptions {
   tool?: (call: ToolCall, signal: AbortSignal, fake: Fake) => Promise<ToolOutcome>;
   /** What `extend` answers (default "ok"). */
   extend?: (n: number, fake: Fake) => Promise<"ok" | "final" | "stop"> | "ok" | "final" | "stop";
+  /** How an acknowledgement is answered (default "posted"). */
+  acknowledge?: (said: { text: string; reasoning: string }) => Promise<"posted" | "refused" | "empty">;
 }
 
 /** A port in memory: one run, prepared with `options`, recording everything the worker does with it. */
@@ -107,6 +113,8 @@ function fakePort(options: FakeOptions = {}): Fake {
     prepared,
     deltas: [],
     posted: [],
+    acks: [],
+    order: [],
     finished: [],
     tools: [],
     extends: [],
@@ -118,7 +126,14 @@ function fakePort(options: FakeOptions = {}): Fake {
       claimNext: async () => (claimed ? null : ((claimed = true), ticket)),
       begin: async () => prepared,
       emit: (_run, delta) => void fake.deltas.push(delta),
+      acknowledge: async (_run, said) => {
+        fake.order.push("ack");
+        const answer = options.acknowledge ? await options.acknowledge(said) : "posted";
+        if (answer === "posted") fake.acks.push(said);
+        return answer;
+      },
       post: async (_run, reply) => {
+        fake.order.push("post");
         fake.posted.push(reply);
         return "posted";
       },
@@ -126,6 +141,7 @@ function fakePort(options: FakeOptions = {}): Fake {
       release: async () => void fake.released++,
       shouldStop: () => stopped,
       tool: async (_run, call, signal) => {
+        fake.order.push("tool");
         fake.tools.push(call);
         return options.tool ? options.tool(call, signal, fake) : { output: { hits: [call.input] }, activity: call.name === READ.name ? "file" : "search" };
       },
@@ -245,16 +261,61 @@ describe("a reply that offers tools", () => {
     expect(fake.unusable).toEqual([]);
   });
 
-  it("text written before a tool call is kept in the reply, streamed as it came, and the next round's text follows it", async () => {
+  it("text written before a tool call is posted at once as the reply's acknowledgement, with its reasoning, before the tool runs; the answer is what comes after it; both streamed as they came", async () => {
     const gateway = scriptedGateway()
       .callTools([{ name: "search", input: { query: "川菜" } }], { text: "我先查一下。", reasoning: "要查记录。" })
       .reply("查到了：去吃川菜。", { reasoning: "找到了。" });
     const fake = fakePort();
     await runOn(fake, gateway);
-    const text = "我先查一下。\n\n查到了：去吃川菜。";
-    expect(fake.posted).toEqual([{ text, reasoning: "要查记录。\n\n找到了。", stopped: false, truncated: false, lookups: { search: 1 } }]);
-    expect(fake.deltas.map((d) => d.text ?? "").join("")).toBe(text);
+    expect(fake.order).toEqual(["ack", "tool", "post"]);
+    expect(fake.acks).toEqual([{ text: "我先查一下。", reasoning: "要查记录。" }]);
+    expect(fake.posted).toEqual([{ text: "查到了：去吃川菜。", reasoning: "找到了。", stopped: false, truncated: false, lookups: { search: 1 } }]);
+    // The stream: what the acknowledgement said, then the answer, with no paragraph break carried over.
+    expect(fake.deltas.map((d) => d.text ?? "").join("")).toBe("我先查一下。查到了：去吃川菜。");
     expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+  });
+
+  it("no acknowledgement without a tool call, nor for text that shows nothing; at most one per reply, a later round's text before its call being part of the answer", async () => {
+    const plain = scriptedGateway().reply("直接回答。");
+    const none = fakePort();
+    await runOn(none, plain);
+    expect([none.acks, none.posted.map((p) => p.text)]).toEqual([[], ["直接回答。"]]);
+
+    const blank = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: " \n " }).reply("好。");
+    const quiet = fakePort();
+    await runOn(quiet, blank);
+    expect([quiet.acks, quiet.posted.map((p) => p.text)]).toEqual([[], ["好。"]]);
+
+    const twice = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" })
+      .callTools([{ name: "search", input: { query: "b" } }], { text: "再看看。" })
+      .reply("都有了。");
+    const once = fakePort();
+    await runOn(once, twice);
+    expect(once.acks.map((a) => a.text)).toEqual(["我先查一下。"]);
+    expect(once.posted.map((p) => p.text)).toEqual(["再看看。\n\n都有了。"]);
+    expect(once.order).toEqual(["ack", "tool", "tool", "post"]);
+  });
+
+  it("an acknowledgement that could not be posted (the port failed, or nothing of it showed) leaves the reply as it was: what was said stays with the answer, and a later round may still acknowledge", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" })
+      .reply("查到了。");
+    const failing = fakePort({ acknowledge: () => Promise.reject(new Error("the database is gone")) });
+    const log = recordingLog();
+    await runOn(failing, gateway, { log });
+    expect(failing.posted.map((p) => p.text)).toEqual(["我先查一下。\n\n查到了。"]);
+    expect(log.lines).toContainEqual(expect.objectContaining({ level: "error", msg: expect.stringContaining("acknowledgement") }));
+
+    const empty = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { text: "〔只有暗记〕" })
+      .callTools([{ name: "search", input: { query: "b" } }], { text: "再查一个。" })
+      .reply("好。");
+    let n = 0;
+    const second = fakePort({ acknowledge: async () => (++n === 1 ? "empty" : "posted") });
+    await runOn(second, empty);
+    expect(second.acks.map((a) => a.text)).toEqual(["再查一个。"]);
+    expect(second.posted.map((p) => p.text)).toEqual(["好。"]);
   });
 
   it("8 rounds of distinct calls: a 9th call that may call no tool, with the same tools, every step and the fixed line, and its reply is posted", async () => {
@@ -426,7 +487,8 @@ describe("a reply that offers tools", () => {
     expect(gateway.calls).toHaveLength(3);
     const { signal: _signal, ...plain } = gateway.calls[2]!;
     expect(plain).toStrictEqual(fake.prepared.call); // no tools, no steps, no choice: the ordinary call
-    expect(fake.posted.map((p) => p.text)).toEqual(["我先查一下。\n\n不查也能说：川菜。"]);
+    expect(fake.acks.map((a) => a.text)).toEqual(["我先查一下。"]);
+    expect(fake.posted.map((p) => p.text)).toEqual(["不查也能说：川菜。"]);
     expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(180, 18), fallback: expect.any(Object) }]);
     // Its cost was held first, at an ordinary call's bound.
     expect(fake.extends).toHaveLength(2);
@@ -478,8 +540,21 @@ describe("a reply that offers tools", () => {
     await runOn(withText, said);
     expect(said.calls).toHaveLength(2);
     expect(withText.extends).toHaveLength(2);
-    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
-    expect(finishedAs(withText)).toEqual([{ status: "done" }]);
+    // What it said before its tool call was its acknowledgement, posted then; after it, it wrote nothing: as a reply that
+    // could hold nothing more and wrote nothing.
+    expect(withText.acks.map((a) => a.text)).toEqual(["我先查一下。"]);
+    expect(withText.posted).toEqual([]);
+    expect(finishedAs(withText)).toEqual([{ status: "failed", error: "no_quota" }]);
+    // Had the acknowledgement not been posted, what it said would stand, as cut.
+    const kept = fakePort({ extend: (n) => (n === 1 ? "ok" : "stop"), acknowledge: async () => "refused" });
+    await runOn(
+      kept,
+      scriptedGateway()
+        .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
+        .fail("provider_unavailable", { status: 400 }),
+    );
+    expect(kept.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
+    expect(finishedAs(kept)).toEqual([{ status: "done" }]);
 
     const mute = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) })
@@ -491,7 +566,7 @@ describe("a reply that offers tools", () => {
     expect(finishedAs(silent)).toEqual([{ status: "failed", error: "no_quota" }]);
   });
 
-  it("the owner's stop between rounds, or between two tool calls: what was written is posted as stopped, nothing more is called or run", async () => {
+  it("the owner's stop between rounds, or between two tool calls: the acknowledgement stays, nothing more is called, run or posted, and the run ends stopped", async () => {
     const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
     const between = fakePort({
       extend: (_n, fake) => {
@@ -501,8 +576,21 @@ describe("a reply that offers tools", () => {
     });
     await runOn(between, gateway);
     expect(gateway.calls).toHaveLength(1);
-    expect(between.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false, lookups: { search: 1 } }]);
+    expect(between.acks.map((a) => a.text)).toEqual(["我先查一下。"]);
+    expect(between.posted).toEqual([]);
     expect(finishedAs(between)).toEqual([{ status: "stopped" }]);
+    // What was written after the acknowledgement, when there is some, is posted as stopped.
+    const after = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
+    const withText = fakePort({
+      acknowledge: async () => "refused",
+      extend: (_n, fake) => {
+        fake.stop();
+        return "ok";
+      },
+    });
+    await runOn(withText, after);
+    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false, lookups: { search: 1 } }]);
+    expect(finishedAs(withText)).toEqual([{ status: "stopped" }]);
 
     const two = scriptedGateway().callTools(
       [
@@ -521,7 +609,8 @@ describe("a reply that offers tools", () => {
     expect(two.calls).toHaveLength(1);
     expect(inTools.tools.map((c) => c.input)).toEqual([{ query: "a" }]);
     expect(inTools.extends).toEqual([]);
-    expect(inTools.posted).toEqual([{ text: "我查两样。", reasoning: "", stopped: true, truncated: false, lookups: { search: 1 } }]);
+    expect(inTools.acks.map((a) => a.text)).toEqual(["我查两样。"]);
+    expect(inTools.posted).toEqual([]);
     expect(finishedAs(inTools)).toEqual([{ status: "stopped" }]);
     expect(inTools.activities.at(-1)).toBe(null);
   });
@@ -557,18 +646,23 @@ describe("a reply that offers tools", () => {
   });
 
   it("the reply's own time limit ends it between rounds or inside a tool: what was written is posted as cut, nothing more is called", async () => {
+    // (Its acknowledgement not posted here: what it wrote before the tool is the reply's.)
     const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
-    const fake = fakePort({ tool: () => new Promise((resolve) => setTimeout(() => resolve({ output: "晚了", activity: "search" }), 3_000)) });
+    const fake = fakePort({ acknowledge: async () => "refused", tool: () => new Promise((resolve) => setTimeout(() => resolve({ output: "晚了", activity: "search" }), 3_000)) });
     const began = Date.now();
     await runOn(fake, gateway, { tools: { runTimeoutMs: 1_000 } });
     expect(Date.now() - began).toBeLessThan(2_500);
     expect(gateway.calls).toHaveLength(1);
     expect(fake.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
     expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+    // Acknowledged, it wrote nothing after: failed, as a reply that timed out having said nothing.
+    const acked = fakePort({ tool: () => new Promise((resolve) => setTimeout(() => resolve({ output: "晚了", activity: "search" }), 3_000)) });
+    await runOn(acked, scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" }), { tools: { runTimeoutMs: 1_000 } });
+    expect([acked.acks.map((a) => a.text), acked.posted, finishedAs(acked)]).toEqual([["我先查一下。"], [], [{ status: "failed", error: "provider_unavailable" }]]);
 
     // Past it between two rounds (the port took long to answer about money): no next call.
     const later = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
-    const slow = fakePort({ extend: () => new Promise((resolve) => setTimeout(() => resolve("ok"), 1_200)) });
+    const slow = fakePort({ acknowledge: async () => "refused", extend: () => new Promise((resolve) => setTimeout(() => resolve("ok"), 1_200)) });
     await runOn(slow, later, { tools: { runTimeoutMs: 1_000 } });
     expect(later.calls).toHaveLength(1);
     expect(slow.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
@@ -662,8 +756,9 @@ describe("a reply that offers tools", () => {
     expect(isFinal(finalGateway.calls[1]!)).toBe(true);
     expect(final.posted.map((p) => p.text)).toEqual(["就这样。"]);
 
+    // (Its acknowledgement not posted here: what it wrote before the tool is the reply's.)
     const said = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) });
-    const stopWithText = fakePort({ extend: () => "stop" });
+    const stopWithText = fakePort({ extend: () => "stop", acknowledge: async () => "refused" });
     await runOn(stopWithText, said);
     expect(said.calls).toHaveLength(1);
     expect(stopWithText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
@@ -677,8 +772,9 @@ describe("a reply that offers tools", () => {
   });
 
   it("the port failing to answer about money ends the reply with what it wrote, as cut; with nothing written it fails busy, our own trouble", async () => {
+    // (Its acknowledgement not posted here: what it wrote before the tool is the reply's.)
     const said = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) });
-    const withText = fakePort({ extend: () => Promise.reject(new Error("the database is gone")) });
+    const withText = fakePort({ extend: () => Promise.reject(new Error("the database is gone")), acknowledge: async () => "refused" });
     await runOn(withText, said);
     expect(said.calls).toHaveLength(1);
     expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
@@ -879,6 +975,7 @@ describe("what a reply's tools are doing, and what it looked up", () => {
   it("a tool cut off by the reply's stop: its status was shown while it ran and goes once the reply ends; it is not counted", async () => {
     const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "慢" } }], { text: "我先查一下。" });
     const fake = fakePort({
+      acknowledge: async () => "refused",
       tool: (_call, signal, f) =>
         new Promise((_resolve, reject) => {
           f.stop();
@@ -887,6 +984,7 @@ describe("what a reply's tools are doing, and what it looked up", () => {
     });
     await runOn(fake, gateway);
     expect(fake.activities).toEqual(["search", null]);
+    // (Its acknowledgement not posted here: what it wrote is the reply's, posted as stopped and counting nothing.)
     expect(fake.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false }]);
   });
 });

@@ -204,6 +204,13 @@ export interface AgentPort {
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
   /**
+   * Posts what a reply said before it calls a tool, at once, as a message of its own ("先应一声、再交付"): its
+   * acknowledgement — at most one per reply (the worker's rule), the answer coming later as its reply (`post`). Its text
+   * and reasoning are kept as a reply's are (in a group without the run's mark), it calls nobody (its mentions are not
+   * read), and it ends nothing: the run goes on. "refused" and "empty" as `post` says them.
+   */
+  acknowledge(run: RunTicket, said: { text: string; reasoning: string }): Promise<"posted" | "refused" | "empty">;
+  /**
    * Settles the call and records how the run ended (one transaction, one usage record), then queues the follow-up for
    * messages that came meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts,
    * and the record says it was estimated. A reply of several rounds (one that offers tools) is settled once, on their

@@ -7,6 +7,7 @@ import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { citesOf, foundOf, lookupsOf, queriesOf, type LookupFields, type MessageRef } from "../messages/lookups.ts";
+import { acknowledgementTxn } from "../messages/read.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
@@ -211,6 +212,14 @@ export interface AgentReply extends LookupFields {
  *
  * Null, storing nothing, when there is nothing to show: no visible text and, in its own conversation, no reasoning kept;
  * in a group no visible text (its members would be shown an empty message), whatever reasoning there is.
+ *
+ * `as` "ack": what the reply said before it called a tool, posted at once as its acknowledgement ("先应一声、再交付"),
+ * under the same locks and checks and cleaned the same way, but never read for a proposal (whatever follows its first
+ * `<af-` is dropped, as in a group), with `client_txn` `ack:<run id>` (messages/read.ts `acknowledgementTxn`: one per run,
+ * posting it again returns it), a body `{text, reasoning?, ack: true}` and nothing of what tools looked up; it calls
+ * nobody (its mentions are not read). The reply posted after it (`as` "reply", the default) quotes the question it
+ * answers (`replyToSeq`: the seq the run covers) when anyone but the Agent wrote a text or file message in the
+ * conversation after the acknowledgement; otherwise it is posted as ever.
  */
 export async function postAsAgent(
   t: Tx,
@@ -220,12 +229,15 @@ export async function postAsAgent(
   reply: AgentReply,
   mark: string | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
+  as: "reply" | "ack" = "reply",
 ): Promise<{ message: StoredMessage; duplicate: boolean; triggered: Triggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
   const own = conversationId === agent.conversationId;
+  const ack = as === "ack";
+  const txn = ack ? acknowledgementTxn(runId) : runId;
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
-    [conversationId, agentId, runId],
+    [conversationId, agentId, txn],
   );
   if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: noneTriggered() };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
@@ -244,9 +256,9 @@ export async function postAsAgent(
   if (!own && mark === null) throw new Error("a reply in a group is posted only with the mark its run drew");
 
   let text = cleanModelText(reply.text);
-  // In a group nothing is a proposal, and no block of one is shown.
-  const proposal = own ? parseProposalBlock(text) : null;
-  if (!own) text = withoutUnfinishedBlock(text);
+  // In a group nothing is a proposal, and no block of one is shown; nor in an acknowledgement.
+  const proposal = own && !ack ? parseProposalBlock(text) : null;
+  if (!own || ack) text = withoutUnfinishedBlock(text);
   const proposalId = proposal ? randomUUID() : null;
   if (proposal) text = hasVisibleText(proposal.visible) ? proposal.visible : PROPOSAL_PLACEHOLDER;
   let truncated = reply.truncated;
@@ -275,6 +287,19 @@ export async function postAsAgent(
   if (reply.stopped) body.stopped = true;
   if (truncated) body.truncated = true;
   if (proposalId !== null) body.proposalId = proposalId;
+  if (ack) {
+    body.ack = true;
+    return { message: await insertMessage(t, conversationId, agentId, "text", body, txn), duplicate: false, triggered: noneTriggered() };
+  }
+  // Someone else wrote after its acknowledgement: the answer says which question it answers.
+  const overtaken = await t.query(
+    `select 1 from messages a
+       join messages m on m.conversation_id = a.conversation_id and m.seq > a.seq and m.sender_id <> a.sender_id and m.kind in ('text', 'file')
+      where a.conversation_id = $1 and a.sender_id = $2 and a.client_txn = $3
+      limit 1`,
+    [conversationId, agentId, acknowledgementTxn(runId)],
+  );
+  if (overtaken.rowCount !== 0) body.replyToSeq = Number(run.rows[0].covers);
   // What its tools looked up: the counts, and the messages found (each reader is sent only those they can see,
   // messages/read.ts) — in a group only that group's own, the only ones a reply there may find; the search words only in
   // its own conversation, its owner's to read — in a group they are not kept.

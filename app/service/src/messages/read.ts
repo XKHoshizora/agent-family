@@ -107,16 +107,24 @@ function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
   return { model, reasoning: r.via_reasoning, points: formatPoints(BigInt(r.via_points)), ...(r.via_proactive === true ? { proactive: true as const } : {}) };
 }
 
-/** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
-const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+/**
+ * A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there for its reply, and `ack:` and the
+ * run's id for its acknowledgement (`acknowledgementTxn`); a person's is any string.
+ */
+const RUN_TXN_TEXT = "^(ack:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+/** The `client_txn` of run `runId`'s acknowledgement (agents/conversation.ts `postAsAgent`, "先应一声、再交付"). */
+export const acknowledgementTxn = (runId: string): string => `ack:${runId}`;
 
 /**
  * SQL: run `run` (an `agent_runs` alias) posted message `message` (a `messages` alias, spliced in: only aliases) — a
- * reply run of its sender in its conversation whose id is the message's `client_txn` (`postAsAgent`). A person's
- * message names no run. The `via` of a reply here, and who is behind an Agent's message (agents/runs.ts `followUp`).
+ * reply run of its sender in its conversation whose id the message's `client_txn` names (`postAsAgent`): its reply, or
+ * its acknowledgement. A person's message names no run. Who is behind an Agent's message (agents/runs.ts `followUp`),
+ * whom it heard from (`heardIn`), where it belongs in a later reply's context (agents/context.ts), and the `via` of a
+ * reply here (its reply only).
  */
 export const postingRun = (message: string, run: string): string =>
-  `${run}.id = case when ${message}.client_txn ~ '${RUN_ID_TEXT}' then ${message}.client_txn::uuid end
+  `${run}.id = case when ${message}.client_txn ~ '${RUN_TXN_TEXT}' then right(${message}.client_txn, 36)::uuid end
    and ${run}.agent_id = ${message}.sender_id and ${run}.conversation_id = ${message}.conversation_id and ${run}.purpose = 'reply'`;
 
 /** A memory-change notice (`memory_changed`, written by the reviewer): for its owner alone. */
@@ -212,6 +220,7 @@ function toWire(
     // Only an Agent's reply carries these (postAsAgent); nobody can send them. Its reasoning only to whom it is for.
     if (withReasoning && typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
     if (msg.body.stopped === true) wire.stopped = true;
+    if (msg.body.ack === true) wire.ack = true;
     if (msg.body.truncated === true) wire.truncated = true;
     if (proposal) wire.proposal = toWireProposal(proposal);
     if (via) wire.via = via;
@@ -268,7 +277,7 @@ export async function toWireForReaders(
          select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points, run.lane = 'proactive' as proactive
            from agent_runs run
            join usage_records u on u.run_id = run.id
-          where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")}
+          where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")} and m.client_txn = run.id::text
             and run.source is not null and run.model is not null and run.reasoning is not null
        ) via on true
       where m.id = any($2::bigint[])`,

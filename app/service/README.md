@@ -2189,6 +2189,8 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                                        // nowhere else. Show it folded; never in previews, quotes or search, never
                                        // sent to a model again
   "stopped": true,                     // an Agent's reply its owner stopped: text is what had been said by then
+  "ack": true,                         // an Agent's acknowledgement: what its reply said before it looked something up,
+                                       // a message of its own; the answer comes later as another (Agents and runs)
   "truncated": true,                   // an Agent's reply that was cut (model's output limit, time limit, 8 000 characters)
   "proposal": { "id": "…", "status": "open" | "confirmed" | "discarded" | "superseded" | "stale",
                 "persona": "…", "intro": "…", "field": "…" },
@@ -2209,8 +2211,8 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
 }
 ```
 
-An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated`, `proposal`, `via`,
-`lookups`, `found`, `queries` and `cites` appear only on those, only when they apply. Render its text as Markdown (spec 6.6);
+An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `ack`, `truncated`, `proposal`,
+`via`, `lookups`, `found`, `queries` and `cites` appear only on those, only when they apply. Render its text as Markdown (spec 6.6);
 people's text stays plain; a `〔mN〕` in it whose number `cites` names may be shown as a link to that message.
 
 **What a reply looked up** (`messages/lookups.ts`, `messages/read.ts` `toWireForReaders`; `tests/tool-lookups.test.ts`): a
@@ -2888,8 +2890,9 @@ with what it wrote, as
 `truncated` (with nothing written: `failed`, `no_quota`). The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
 all, each call and each tool also within `AGENT_RUN_TIMEOUT_MS` — and the service closing are honoured between events,
 between tool calls and between rounds, and end the reply as they end one of one call. What the rounds write streams as it
-comes, a later round's after a paragraph break, and is posted as one reply (text written before a tool call is kept);
-reasoning likewise, cut at 32 000 characters as always. While a tool runs, the reply's status says what kind of work it
+comes, a later round's after a paragraph break, and is posted as one reply — but for what the reply said before its
+first tool call, which is posted at once as its acknowledgement (below); reasoning likewise, cut at 32 000 characters
+as always. While a tool runs, the reply's status says what kind of work it
 is (`activity`, its kind from the offer, `ToolRun.kinds`: told as the tool starts, again only when it changes, and none as
 soon as the model is called again; a tool with no kind shows none and clears what was shown: Wire shapes, Pushes); what
 the calls that ran and answered with something usable looked up goes with the posted reply (`lookups`, `found`,
@@ -2965,6 +2968,28 @@ up). **Citations** (design rule 4; `refs.ts` `citesIn`, `port-impl.ts` `post`): 
 of the text. Each reader is sent of `cites` only the messages they can see (in the same statement that decides `found`;
 the key is absent when none is left); a `〔mN〕` they are sent no entry for is plain text to them. A reply offered no tools
 is posted as written.
+
+**An acknowledgement, then the answer** ("先应一声、再交付", the product owner's design; `runtime/worker.ts` `toolReply`,
+`port-impl.ts` `acknowledge`, `conversation.ts` `postAsAgent`; `tests/tools-ack.test.ts`, `tests/tool-loop.test.ts`). In
+the Agent's own conversation and in a group alike: when a round of a reply offered tools calls a tool, what the reply
+has said by then — when it shows anything — is posted at once, before the tool runs, as a message of its own, its
+acknowledgement: its text and reasoning kept as a reply's are (in a group without the run's mark, a proposal block never
+read), `client_txn` `ack:<run id>` (`messages/read.ts` `acknowledgementTxn`), body `{"text", "reasoning"?, "ack":
+true}`; the wire says `"ack": true` to everyone who reads it. At most one per reply, the first; text a later round writes
+before its calls is part of the answer. Text with no tool call after it is the answer as ever; text that shows nothing
+posts nothing. The answer is the reply's message (`client_txn` the run's id), posted later with what was written after
+the acknowledgement; when anyone but the Agent wrote a text or file message in the conversation after the
+acknowledgement, it quotes the question it answers (`replyToSeq`: the seq the run covers), else it is posted as ever.
+Everything else belongs to the one reply: one run, one hold, one settlement, its status, `正在回复…` (the web keeps the
+reply shown as being written: an acknowledgement is never taken for the reply), `via` on the answer only. Stopped after
+its acknowledgement, the acknowledgement stays and the run ends as a stopped reply does (nothing more said: `stopped`,
+no further message); a reply that then can hold nothing more, times out or fails having written nothing after it ends
+as one that wrote nothing (`no_quota`, `provider_unavailable`, …), its acknowledgement still there. An acknowledgement
+counts as the Agent's message for every rule that reads one — whom its run heard from (`heardIn`: it names its run,
+`postingRun`), unread counts, a memory review (the reviewer is told after the run as for a reply, also when the
+acknowledgement is all it posted), its place in a later reply's context (before the answer) — but it calls nobody: its
+mentions are not read. Not posted (refused, or the store failed: logged), what the reply said stays with its answer.
+The system text of a reply offered tools asks for it (The three tools).
 
 **Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
 (Metering):
