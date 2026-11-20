@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { NOTHING } from "../src/agents/runtime/port.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -118,6 +119,9 @@ describe("a block made after a call, as the reply begins", () => {
     expect(text).not.toContain("SECRET-r2");
     const run = await latest(w.agent.id, w.g);
     expect(run).toMatchObject({ status: "done", error: null, lane: "others", caller: w.mia.id, calls: [mine] });
+    // What it covers ended at the call it answered; the dropped call is not followed up (no queued reply after it).
+    expect((await db.query("select covers_seq::int as covers from agent_runs where agent_id = $1 and status = 'done'", [w.agent.id])).rows).toEqual([{ covers: mine }]);
+    expect((await db.query("select 1 from agent_runs where agent_id = $1 and status in ('queued', 'running')", [w.agent.id])).rowCount).toBe(0);
   });
 
   it("the owner's own call taking over a queued reply that holds a blocked member's call: that member's call is not answered", async () => {
@@ -146,5 +150,55 @@ describe("a block made after a call, as the reply begins", () => {
     expect(callsHere()).toEqual([]);
     expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "cancelled", error: null });
     expect((await api(app, w.mia, "GET", `/api/conversations/${w.g}/runs`)).json.runs).toEqual([]);
+  });
+
+  it("a follow-up whose only call is from someone blocked since it was noted: no second answer, no call", async () => {
+    const w = await world();
+    await say(w.mia, w.g, "@helper_bot MIA-ASK-r5 在吗？");
+    const ticket = (await app.agentPort.claimNext())!;
+    // Noted on the reply under way (its follow-up would answer it).
+    const noted = await say(w.ned, w.g, "@helper_bot NED-ASK-r5 还有我");
+    expect((await db.query<{ pending: number }>("select pending_seq::int as pending from agent_runs where id = $1", [ticket.id])).rows[0]!.pending).toBe(noted);
+    await block(w.owner, w.ned);
+    await app.agentPort.finish(ticket, { status: "done" }, null, NOTHING);
+    // Whatever the follow-up does, ned's call is answered by nothing: no model call, no message, nothing still waiting.
+    while (await app.agentWorker.runOnce());
+    expect(callsHere()).toEqual([]);
+    expect((await db.query("select 1 from messages where conversation_id = $1 and sender_id = $2 and kind = 'text'", [w.g, w.agent.id])).rowCount).toBe(0);
+    const after = (await db.query<{ status: string; error: string | null }>("select status, error from agent_runs where agent_id = $1 and id <> $2", [w.agent.id, ticket.id])).rows;
+    expect(after.every((r) => r.status === "cancelled" && r.error === null)).toBe(true);
+  });
+
+  it("a call relayed through another of the owner's Agents, the person behind it blocked since: dropped, the reply ends quietly", async () => {
+    const w = await world();
+    const relay = await mustCreateAgent(app, w.owner, { handle: "relay_bot", name: "传话", model: FAST, persona: "你负责传话。" });
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/members`, { principalId: relay.id })).status).toBe(201);
+    await say(w.mia, w.g, "@relay_bot 帮我问问小助手");
+    gateway.reply("@helper_bot RELAY-ASK-r6 米娅想问点事");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    // The relay's message called the Agent for mia, the person behind it.
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "queued", lane: "others", caller: w.mia.id });
+    await block(w.mia, w.owner);
+
+    const before = callsHere().length;
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(callsHere()).toHaveLength(before);
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "cancelled", error: null });
+  });
+
+  it("the owner's own call noted after the claim, the first caller blocked since: the reply becomes the owner's own (lane own, caller the owner)", async () => {
+    const w = await world();
+    await say(w.mia, w.g, "@helper_bot MIA-ASK-r7 在吗？");
+    const ticket = (await app.agentPort.claimNext())!;
+    const own = await say(w.owner, w.g, "@helper_bot OWNER-ASK-r7 我也问一句");
+    // Noted while it ran: it is still mia's (a call noted on a running reply changes neither caller nor lane).
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "running", lane: "others", caller: w.mia.id });
+    await block(w.owner, w.mia);
+
+    const prepared = await app.agentPort.begin(ticket);
+    expect("call" in prepared).toBe(true);
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "running", lane: "own", caller: w.owner.id, calls: [own] });
+    expect((await latest(w.agent.id, w.g)).askers).not.toContain(w.mia.id);
+    await app.agentPort.releaseRun(ticket.id);
   });
 });
