@@ -27,15 +27,19 @@ export function pickIndex(id, size) {
 
 const startsWith = (prefix) => (line) => line.startsWith(prefix);
 const isHearsay = startsWith("听说：");
-const isTidy = (line) => line.startsWith("忘掉了：") || line.startsWith("锁进了保险箱：") || line.startsWith("取出来：");
+const isTidy = (line) => line.startsWith("忘掉了：") || line.startsWith("锁进了保险箱：") || line.startsWith("取出来：") || line.startsWith("合并了 ");
 const isRecord = (line) => line.startsWith("记住了：") || line.startsWith("改成了：");
+/** A line under a merge that says what it merged (`原来：…`, one per note it joined): part of the merge's line, never a change of its own. */
+export const isMergedSource = startsWith("原来：");
 
 /**
  * The sentence of an applied notice: `{name, changeId, phase, lines, count, full}`. `phase` "dream" has its own set; a rest
- * with only hearsay has its own; one of only tidying (forgetting, locking, taking out) or of tidying mixed with records counts only the records.
+ * with only hearsay has its own; one of only tidying (forgetting, locking, taking out, merging) or of tidying mixed with records counts
+ * only the records. The lines that list what a merge joined (`原来：…`) are not counted, and `count` (the number of lines) without them.
  */
-export function memorySentence({ name, changeId, phase, lines, count, full }) {
-  let n = Number.isFinite(count) ? count : lines.length;
+export function memorySentence({ name, changeId, phase, lines: all, count, full }) {
+  const lines = all.filter((line) => !isMergedSource(line));
+  let n = (Number.isFinite(count) ? count : all.length) - (all.length - lines.length);
   let set;
   if (lines.length === 0 && full) return `${name}的记忆宫殿快满了`;
   if (phase === "dream") set = DREAM;

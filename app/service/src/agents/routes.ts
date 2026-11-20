@@ -7,6 +7,7 @@ import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { discardPendingOf } from "../memory/apply.ts";
+import { memorySwitched } from "../memory/pipeline.ts";
 import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
@@ -352,19 +353,23 @@ export function registerAgentRoutes(
       schema: {
         params: idParams,
         querystring: empty,
-        // Strict: the handle and the owner are not keys, so naming them is a 400.
-        body: z.strictObject({ name: agentName.optional(), ...agentSettings }),
+        // Strict: the handle and the owner are not keys, so naming them is a 400. `catchUp` only with `memory` turned back on.
+        body: z.strictObject({ name: agentName.optional(), ...agentSettings, catchUp: z.boolean().optional() }),
         response: { 200: agentView },
       },
     },
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      const agent = await db.tx(async (t) => {
+      const { agent, switched } = await db.tx(async (t) => {
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
         assertProactiveAvailable(config, req.body.proactive);
-        const { chainBudget: budget, othersBudget: others, proactiveBudget: proactiveBudgetPoints, ...fields } = req.body;
+        const { chainBudget: budget, othersBudget: others, proactiveBudget: proactiveBudgetPoints, catchUp, ...fields } = req.body;
+        // Turning memory off or on: what it does to what memory would read, waits for or is waiting on, in this same transaction
+        // (memory/pipeline.ts `memorySwitched`). Whether to look back at what was said while it was off is said only when turning it on.
+        const switching = req.body.memory !== undefined && req.body.memory !== current.memory;
+        if (catchUp !== undefined && !(switching && req.body.memory === true)) throw new AppError(400, "invalid_request");
         const patch: AgentPatch = {
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
           ...(budget === undefined ? {} : { chainBudgetMicro: budget }),
@@ -374,8 +379,12 @@ export function registerAgentRoutes(
         };
         const next = { ...current, ...patch };
         if ("model" in patch || "reasoning" in patch) await assertModelChoice(t, me.id, next.model, next.reasoning, config);
-        return updateAgent(t, current, patch);
+        const updated = await updateAgent(t, current, patch);
+        if (switching) await memorySwitched(t, current, req.body.memory === true, catchUp === true);
+        return { agent: updated, switched: switching ? { lookBack: req.body.memory === true && catchUp === true } : null };
       });
+      // After commit: the reviewer drops what it had waiting for the Agent (and, looking back, reviews its own conversation now).
+      if (switched) app.deps.memory?.switched(agent.id, agent.conversationId, switched.lookBack);
       conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
       app.realtime.pushAgentChanged(me.id, agent.id);
       return viewOf(agent);

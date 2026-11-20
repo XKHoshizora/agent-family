@@ -84,8 +84,9 @@ export interface ContextRun {
    * history its model is shown — `maxTokens` tokens, counted as the plan counts them (text in weight, attachments at their
    * estimate; the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
    * messages only — and nothing at or before seq `after`, the run's asker's line (`askerLine`): no message, no quote of
-   * one, no attachment of one — but the calls it answers, at `calls` (`callsSeen`; each with its own attachment, its quote
-   * of a message at or before the line left out). The Agent's own conversation is limited by the model's context alone.
+   * one, no attachment of one — but the calls it answers, at `calls` (`callsSeen`): one after the line whole, one at or
+   * before it as its text only (neither its own attachment nor its quote, fix round 3). The Agent's own conversation is
+   * limited by the model's context alone.
    */
   group: { maxTokens: number; maxMessages: number; after: number; calls: readonly number[] } | null;
   /**
@@ -241,21 +242,22 @@ export async function askerLine(q: Queryable, runId: string): Promise<number> {
 }
 
 /**
- * The calls reply run `runId` of Agent `agentId` answers that the Agent can see, by seq, oldest first: of the messages
- * that called for it (`agent_runs.call_seqs`, and the latest it covers, `covers_seq`; its `covers_seq` alone when not
- * known), those that are text or file messages the Agent can see (`VISIBLE_JOIN`). In a group they are shown to its model
- * even at or before its line (`askerLine`): what it was asked is answered, whoever spoke since. None: nothing is left to
- * answer.
+ * The calls reply run `runId` of Agent `agentId` answers that the Agent can see and show, by seq, oldest first: of the
+ * messages that called for it (`agent_runs.call_seqs`, and the latest it covers, `covers_seq`; its `covers_seq` alone when
+ * not known), those that are text or file messages the Agent can see (`VISIBLE_JOIN`) — one at or before the run's line
+ * `line` (`askerLine`) only when it has text: it is shown even there, but as its text only (fix round 3: not its file).
+ * What it was asked is answered, whoever spoke since. None: nothing is left to answer.
  */
-export async function callsSeen(q: Queryable, agentId: string, runId: string): Promise<number[]> {
+export async function callsSeen(q: Queryable, agentId: string, runId: string, line: number): Promise<number[]> {
   const { rows } = await q.query<{ seq: string }>(
     `select m.seq::text as seq
        from agent_runs r
        join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, '{}'::bigint[]) || r.covers_seq)
        ${VISIBLE_JOIN}
       where r.id = $2 and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
+        and (m.seq > $3 or coalesce(m.body ->> 'text', '') <> '')
       order by m.seq`,
-    [agentId, runId],
+    [agentId, runId, line],
   );
   return rows.map((r) => Number(r.seq));
 }
@@ -349,7 +351,8 @@ const inGroupNow = (ms: string): string =>
  * the Agent's own output, so it can revise what it proposed; it counts toward the budget like any text and is never
  * read for a block again. (A reply in a group never proposes: nothing is looked up there.) In a group a quote of a
  * message at or before the asker's line (`ContextRun.group.after`) is left out as one the Agent cannot see is: the
- * quoting message's own text only; and the calls the run answers (`ContextRun.group.calls`) belong whatever `from` is.
+ * quoting message's own text only; and the calls the run answers (`ContextRun.group.calls`) belong whatever `from` is,
+ * one at or before `from` as its text only (no attachment: it is not read).
  * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -364,7 +367,7 @@ async function loadPage(
     `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
             $8::boolean and exists (select 1 from memberships sm
                                      where sm.conversation_id = m.conversation_id and sm.principal_id = m.sender_id and ${inGroupNow("sm")}) as sender_present,
-            m.body ->> 'text' as text, m.body -> 'attachment' as attachment,
+            m.body ->> 'text' as text, case when m.seq > $3 then m.body -> 'attachment' end as attachment,
             m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
        from messages m ${VISIBLE_JOIN}

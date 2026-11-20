@@ -5,17 +5,20 @@
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ChevronDown, Lock } from "../icons.js";
-import { memorySentence } from "../data/memoryPhrases.js";
+import { isMergedSource, memorySentence } from "../data/memoryPhrases.js";
 import { entity, publishBlock } from "../state/selectors.js";
 import { Btn, Tag } from "../ui/primitives.jsx";
 import { useDecision } from "./AgentChatBits.jsx";
 
-/** The lines of a change, each with the vault tag when it went into (or came out of) the vault. */
+/**
+ * The lines of a change, each with the vault tag when it went into (or came out of) the vault. Under a merge's line (`合并了 n 条：…`)
+ * the notes it joined (`原来：…`), set in under it: what a merge kept is there to see, and what its 撤销 brings back.
+ */
 function MemoryLines({ system }) {
   return (
     <ul className="memory-lines">
       {system.lines.map((line, i) => (
-        <li key={i}>
+        <li key={i} className={isMergedSource(line) ? "memory-merged" : undefined}>
           {line}
           {system.vaultLines[i] && <Tag tone="muted">保险箱</Tag>}
         </li>

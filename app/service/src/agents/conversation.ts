@@ -286,11 +286,13 @@ export async function postAsAgent(
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who
   // is behind its message there is decided by this run's caller and lane (read above; a running run's never change); the
   // runs it calls answer this run's askers (Task 10b: the person whose message started the chain) — with everyone who
-  // wrote while it ran, before its message, whom they will hear from (fix round 2: recorded on this run, `hearFrom`).
+  // wrote while it ran, before its message, whom they will hear from (fix round 2: recorded on this run, `hearFrom` —
+  // only once its message reaches a run, fix round 3).
   const postedBy = { id: run.rows[0].caller_id, lane: run.rows[0].lane };
+  const covered = Number(run.rows[0].covers);
   const triggered = own
     ? noneTriggered()
-    : await triggerFromAgent(t, conversationId, message, agent, postedBy, config, await hearFrom(t, runId, Number(run.rows[0].covers), message.seq));
+    : await triggerFromAgent(t, conversationId, message, agent, postedBy, config, () => hearFrom(t, runId, covered, message.seq));
   return { message, duplicate: false, triggered };
 }
 

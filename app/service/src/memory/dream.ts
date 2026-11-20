@@ -745,14 +745,14 @@ async function judge(
     if (closing.aborted) break;
     if (op.op === "merge") {
       const sources = [op.into, ...op.from].map((r) => refs.get(r)!);
-      if (!(await addsNothing(sortDeps, { kind: "merge", sources: sources.map((n) => n.text), result: op.text }))) continue;
+      if (!(await addsNothing(sortDeps, { kind: "merge", sources: sources.map((n) => n.text), result: op.text }, closing))) continue;
       checked.add(index);
       sources.forEach((n) => named.add(n.id));
       // A result with a note in the vault is in the vault: nothing to ask.
       if (sources.every((n) => !n.vault)) await sort(sources[0]!.kind, op.text);
     } else if (op.op === "rewrite") {
       const note = refs.get(op.ref)!;
-      if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }))) continue;
+      if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }, closing))) continue;
       checked.add(index);
       named.add(note.id);
       // A faithful restatement has the same meaning: the note keeps its vault state (apply.ts `planDream`), nothing is sorted.
@@ -760,7 +760,7 @@ async function judge(
       const note = refs.get(op.ref)!;
       // Parts that together are far longer than the note add something: not even asked about.
       if (weightOf(op.texts.map((text) => ({ text }))) > 2 * weight(note.text) + 40) continue;
-      if (!(await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }))) continue;
+      if (!(await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }, closing))) continue;
       checked.add(index);
       named.add(note.id);
       if (!note.vault) for (const text of op.texts) await sort(note.kind, text);

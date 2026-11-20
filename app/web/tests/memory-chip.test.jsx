@@ -182,6 +182,17 @@ describe("the chip's sentence", () => {
     expect(li(3).textContent).toBe(first);
   });
 
+  it("opened, a merge lists what it merged on the lines under it (原来：…), each with its vault tag; the chip's sentence is the merge's alone", async () => {
+    const lines = ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"];
+    await openChat([...BASE, changed(3, { lines, vaultLines: [true, false, true], count: 3 })]);
+    expect(li(3).textContent).toBe("小助手小憩时理了理记忆");
+    await click(inLi(3).getByRole("button", { name: "小助手小憩时理了理记忆" }));
+    const items = [...li(3).querySelectorAll(".memory-lines li")];
+    expect(items.map((x) => x.textContent)).toEqual(["合并了 2 条：路由器在客厅，是华硕的保险箱", "原来：路由器在客厅", "原来：路由器是华硕的保险箱"]);
+    expect(items.map((x) => x.classList.contains("memory-merged"))).toEqual([false, true, true]);
+    expect(inLi(3).getByRole("button", { name: "撤销" })).toBeTruthy();
+  });
+
   it("opened after dream lines, the lines are listed as they came", async () => {
     await openChat([...BASE, changed(3, { phase: "dream", count: 2, lines: ["合并了：爱吃面", "拆成了：a；b"], vaultLines: [false, false] })]);
     await click(inLi(3).getByRole("button", { name: sentence({ phase: "dream", count: 2 }) }));

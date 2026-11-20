@@ -383,7 +383,7 @@ describe("what a dream may do", () => {
     expect(rows[0]).toMatchObject({ id: a.id, text: "爱喝茶，不加糖", vault: false, strength: 5 });
     expect(rows[0].seen_at.toISOString()).toBe("2026-11-15T00:00:00.000Z");
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ event: "memory_changed", phase: "dream", count: 1, lines: ["合并了 2 条：爱喝茶，不加糖"], vaultLines: [false], pending: false, status: "applied" });
+    expect(chip.system).toMatchObject({ event: "memory_changed", phase: "dream", count: 3, lines: ["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶"], vaultLines: [false, false, false], pending: false, status: "applied" });
     expect(await chips(w.owner, w.conv)).toHaveLength(1);
     expect(await dreamedAt(w.owner.id)).not.toBeNull();
   });
@@ -398,7 +398,8 @@ describe("what a dream may do", () => {
     let rows = await ownerNotes(w.owner.id);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ vault: true, vault_by: "auto" });
-    expect((await chips(w.owner, w.conv))[0].system.vaultLines).toEqual([true]);
+    // The merge's line, then the notes it merged as they were (原来：…): one open, one in the vault.
+    expect((await chips(w.owner, w.conv))[0].system.vaultLines).toEqual([true, false, true]);
 
     // Both locked by the owner: the result stays the owner's.
     const w2 = await owned("dc2b");
@@ -660,7 +661,8 @@ describe("undo and asking first", () => {
     expect(after).not.toEqual(before);
     expect(after.map((r) => r.text).sort()).toEqual(["对花生过敏", "周末爬山", "喜欢咖啡", "爱吃辣的", "爱喝茶，不加糖"].sort());
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ phase: "dream", count: 4 });
+    // Four changes; the merge's line has its two 原来 lines under it (the chip's sentence counts the four).
+    expect(chip.system).toMatchObject({ phase: "dream", count: 6 });
     const undone = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`);
     expect(undone).toEqual({ status: 200, json: { status: "undone" } });
     expect(await exactRows(w.owner.id)).toEqual(before);
@@ -698,7 +700,7 @@ describe("undo and asking first", () => {
     expect((await changeRows(w.owner.id)).map((r) => r.status)).toEqual(["pending"]);
     const done = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${cards[0].system.changeId}/confirm`);
     expect(done).toEqual({ status: 200, json: { status: "applied" } });
-    expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：爱喝茶，不加糖", "拆成了：喜欢茶；对花生过敏"]);
+    expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶", "拆成了：喜欢茶；对花生过敏"]);
     expect((await ownerNotes(w.owner.id)).map((r) => [r.text, r.vault])).toEqual([
       ["爱喝茶，不加糖", false],
       ["喜欢茶", false],
@@ -721,7 +723,7 @@ describe("rooms, carriers and retries", () => {
     await night();
     expect(dreamCalls()).toHaveLength(1);
     expect((await db.query("select text from agent_notes where agent_id = $1", [w.agent.id])).rows).toEqual([{ text: "回答简短，先说结论" }]);
-    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ phase: "dream", lines: ["合并了 2 条：回答简短，先说结论"] });
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ phase: "dream", lines: ["合并了 2 条：回答简短，先说结论", "原来：回答要简短", "原来：先说结论"] });
   });
 
   it("the owner's shared room is carried out by the owner's Agent with the lowest id that has memory and shared notes on; with none the shared room does not dream", async () => {
@@ -1103,7 +1105,7 @@ describe("a merge or rewrite is checked for what it invents or drops", () => {
     expect(JSON.parse(faithfulCalls().at(-1)!.state)).toEqual({ sources: ["喜欢喝茶", "不吃香菜"], results: ["喜欢喝茶，不吃香菜"] });
     expect(faithfulCalls().at(-1)!.questions[0]).toMatchObject({ key: "faithful", type: "noul" });
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ lines: ["合并了 2 条：喜欢喝茶，不吃香菜"], count: 1 });
+    expect(chip.system).toMatchObject({ lines: ["合并了 2 条：喜欢喝茶，不吃香菜", "原来：喜欢喝茶", "原来：不吃香菜"], count: 3 });
   });
 
   it("a note that tells the merger what to add: the scripted model complies, the judge sees an invented claim, nothing changes", async () => {

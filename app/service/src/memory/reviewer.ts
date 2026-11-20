@@ -72,6 +72,12 @@ export interface Reviewer {
   /** After commit: a change was applied (or confirmed) in the notes of this Agent's owner, which may have left a room nearly full. */
   changed(agentId: string): void;
   /**
+   * After commit: Agent `agentId`'s `memory` was switched off or on (pipeline.ts `memorySwitched`). What was waiting for it is dropped —
+   * its quiet timers, its flags' wake-ups, its retry, its queued reviews (one under way applies nothing once memory is off). `lookBack`
+   * (turned on with `catchUp`): one review of its own conversation `conversationId` is queued, as after a quiet time.
+   */
+  switched(agentId: string, conversationId: string, lookBack: boolean): void;
+  /**
    * The owner asked for their notes to be restated in `language` (dream.ts `ConvertJob`): "started" once the job is queued (it runs
    * on its own; `conversion` says how it stands); "busy" when a dream or a conversion of theirs is already under way or waiting; null
    * when the service is stopping.
@@ -336,6 +342,25 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     },
     changed(agentId) {
       enqueue({ kind: "nap", agentId, conversationId: "nap" });
+    },
+    switched(agentId, conversationId, lookBack) {
+      if (closed) return;
+      const its = (key: string): boolean => key.startsWith(`${agentId}|`);
+      for (const armed of [timers, retries]) {
+        for (const [key, timer] of armed) {
+          if (!its(key)) continue;
+          timer.clear();
+          armed.delete(key);
+        }
+      }
+      for (const [key, pair] of flagTimers) {
+        if (!its(key)) continue;
+        for (const timer of pair) timer.clear();
+        flagTimers.delete(key);
+      }
+      waiting = waiting.filter((j) => j.agentId !== agentId || (j.kind !== "review" && j.kind !== "flags"));
+      if (lookBack) void enqueueIfNew({ kind: "review", agentId, conversationId });
+      settleIdle();
     },
     async convert(ownerId, language) {
       if (closed) return null;

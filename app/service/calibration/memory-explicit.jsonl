@@ -271,8 +271,8 @@
 {"id":"ja-plain-05","lang":"ja","cat":"plain","said":["古い自転車はもういらない"],"expect":{"forget":false}}
 {"id":"ja-plain-06","lang":"ja","cat":"plain","said":["大阪の出張、なくなった","あのメモはもういらないから"],"expect":{"forget":true}}
 {"id":"ja-plain-07","lang":"ja","cat":"plain","said":["彼とは別れた","彼についてのメモは全部なしにして"],"expect":{"forget":true}}
-{"id":"ja-plain-08","lang":"ja","cat":"plain","said":["明日のリマインダー？","いらないよ"],"expect":{"forget":false}}
-{"id":"ja-plain-09","lang":"ja","cat":"plain","said":["引っ越ししたんだ","前の住所のメモは要らなくなったね"],"expect":{"forget":false}}
+{"id":"ja-plain-08","lang":"ja","cat":"plain","said":["明日の天気、調べてくれる？","やっぱりいらないよ、自分で見るから"],"expect":{"forget":false}}
+{"id":"ja-plain-09","lang":"ja","cat":"plain","said":["引っ越ししたんだ","前の住所のメモは要らなくなったね"],"expect":{"forget":true}}
 {"id":"ja-plain-10","lang":"ja","cat":"plain","said":["週末どこ行こうかな","もういいや、家にいよう"],"expect":{"forget":false}}
 {"id":"en-plain-01","lang":"en","cat":"plain","said":["that note about my salary — drop it"],"expect":{"forget":true}}
 {"id":"en-plain-02","lang":"en","cat":"plain","said":["you don't need to keep my old phone number anymore"],"expect":{"forget":true}}
