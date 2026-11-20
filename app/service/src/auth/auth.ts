@@ -13,7 +13,7 @@ import { clientIp } from "../limits.ts";
 import { lockAccountEmail } from "./accounts.ts";
 import { holdUntilFloor, startAnswerClock, type AnswerFloor } from "./answer-floor.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS, resetPasswordMail, verifyEmailMail } from "./mail-copy.ts";
-import { sendMail } from "./mailer.ts";
+import { mailPolicy, sendMail } from "./mailer.ts";
 
 export const AUTH_BASE_PATH = "/api/auth";
 const SESSION_LIFETIME_SECONDS = 7 * 24 * 60 * 60;
@@ -226,6 +226,7 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
   // Mail caused by a registration commits with it (and cannot be written once that transaction is
   // over); everything else writes straight to the pool.
   const mailDb = (): Queryable => currentDb(db);
+  const policy = mailPolicy(config);
   const isHttps = new URL(config.appOrigin).protocol === "https:";
 
   return betterAuth({
@@ -276,7 +277,7 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
       sendResetPassword: async ({ user, token }) => {
         const link = `${config.appOrigin}/reset-password?token=${encodeURIComponent(token)}`;
         const mail = resetPasswordMail(link);
-        await sendMail(mailDb(), "reset_password", user.email, mail.subject, mail.body);
+        await sendMail(mailDb(), "reset_password", user.email, mail.subject, mail.body, policy);
       },
     },
     emailVerification: {
@@ -287,7 +288,7 @@ export function createAuth(config: Config, db: Db, sessions: SessionEvents, log:
       sendOnSignIn: true,
       sendVerificationEmail: async ({ user, url }) => {
         const mail = verifyEmailMail(url);
-        await sendMail(mailDb(), "verify_email", user.email, mail.subject, mail.body);
+        await sendMail(mailDb(), "verify_email", user.email, mail.subject, mail.body, policy);
       },
     },
     databaseHooks: {

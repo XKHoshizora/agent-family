@@ -18,6 +18,8 @@
     "invite:create:prod": "node --enable-source-maps dist/cli.js invite:create",
     "inbox:list": "tsx src/cli.ts inbox:list",
     "inbox:list:prod": "node --enable-source-maps dist/cli.js inbox:list",
+    "mail:status": "tsx src/cli.ts mail:status",
+    "mail:status:prod": "node --enable-source-maps dist/cli.js mail:status",
     "attachments:sweep": "tsx src/cli.ts attachments:sweep",
     "attachments:sweep:prod": "node --enable-source-maps dist/cli.js attachments:sweep",
     "credits:grant": "tsx src/cli.ts credits:grant",

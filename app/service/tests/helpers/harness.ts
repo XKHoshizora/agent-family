@@ -144,7 +144,7 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory"> & { memory?: boolean } = {},
 ): { app: FastifyInstance; db: Db; clock: TestClock } {
-  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, memory = false, ...overrides } =
+  const { env, config: configured, logStream, sweepInitialDelayMs, answerFloor = NO_ANSWER_FLOOR, allowInsecureLocal, agentWorker, staleRunSweep = false, proactive = false, memory = false, mail, ...overrides } =
     extra;
   const clock = testClock();
   const options: BuildOptions = {
@@ -156,6 +156,8 @@ export function useApp(
     ...(sweepInitialDelayMs === undefined ? {} : { sweepInitialDelayMs }),
     ...(allowInsecureLocal ? { allowInsecureLocal } : {}),
     ...(agentWorker === false ? { agentWorker } : {}),
+    // The mail sender's timer is off in tests unless a file asks for it (`app.mailSender.runOnce()` delivers by hand).
+    mail: { sender: false, ...mail },
   };
   let instance: FastifyInstance | undefined;
   let database: Db | undefined;

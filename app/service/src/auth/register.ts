@@ -11,7 +11,7 @@ import { holdUntilFloor, startAnswerClock, type AnswerFloor } from "./answer-flo
 import { runInTransaction } from "./auth.ts";
 import { lockUsableInvite, markInviteUsed } from "./invites.ts";
 import { registrationAttemptMail } from "./mail-copy.ts";
-import { sendMail } from "./mailer.ts";
+import { mailPolicy, sendMail, type MailPolicy } from "./mailer.ts";
 
 const UNIQUE_VIOLATION = "23505";
 
@@ -30,7 +30,7 @@ const ATTEMPT_NOTICE_INTERVAL = "1 hour";
  * Tells the owner of a verified account that someone tried to register its address; at most once per
  * ATTEMPT_NOTICE_INTERVAL per address (the caller holds the address's lock, so two attempts cannot both send).
  */
-async function noticeRegistrationAttempt(t: Tx, account: ExistingAccount, appOrigin: string): Promise<void> {
+async function noticeRegistrationAttempt(t: Tx, account: ExistingAccount, appOrigin: string, policy: MailPolicy): Promise<void> {
   const recent = await t.query(
     `select 1 from mail_outbox
       where recipient = $1 and kind = 'registration_attempt' and created_at > now() - $2::interval limit 1`,
@@ -38,7 +38,7 @@ async function noticeRegistrationAttempt(t: Tx, account: ExistingAccount, appOri
   );
   if (recent.rowCount) return;
   const mail = registrationAttemptMail(`${appOrigin}/signin`, `${appOrigin}/forgot`);
-  await sendMail(t, "registration_attempt", account.email, mail.subject, mail.body);
+  await sendMail(t, "registration_attempt", account.email, mail.subject, mail.body, policy);
 }
 
 export function registerRegistrationRoutes(
@@ -86,7 +86,7 @@ export function registerRegistrationRoutes(
           const existing = await findAccountByEmail(client, email);
           if (existing?.verified) {
             // Never touched: its owner is told that someone tried, and nothing is created.
-            await noticeRegistrationAttempt(client, existing, config.appOrigin);
+            await noticeRegistrationAttempt(client, existing, config.appOrigin, mailPolicy(config));
             if (needsInvite) await markInviteUsed(client, inviteCode!, null);
             return [];
           }
