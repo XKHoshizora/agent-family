@@ -36,7 +36,7 @@ Other commands run in the same image, e.g. the first invitation, the mail outbox
 ```
 docker exec <container> node dist/cli.js invite:create --ttl-hours 72
 docker exec <container> node dist/cli.js inbox:list --to someone@example.com
-docker exec <container> node dist/cli.js mail:status            # mails queued / sent / failed (counts only)
+docker exec <container> node dist/cli.js mail:status            # mails per day: queued / sent / failed / expired / retries (counts only)
 docker exec <container> node dist/cli.js attachments:sweep      # by hand only; the server sweeps by itself
 docker exec <container> node dist/cli.js memory:stats --days 7  # the memory feature's counters (counts only), days as columns
 ```
@@ -64,10 +64,11 @@ start-up with a message naming the variable. Values in the right column are for 
 | `CLIENT_IP_HEADER` | Header your proxy sets to the real client address, replacing any client value. Rate limits count per address; without it every request looks like the proxy. | `x-real-ip` |
 | `TRUST_PROXY` | Alternative to the above: the proxies' addresses/CIDRs whose `X-Forwarded-For` is read. Never `true` or a number (refused). | unset |
 | `REGISTRATION_MODE` | `invite` (an invite code is required) or `open`. | `invite` |
-| `MAIL_MODE` | `outbox` (default): mail is only written to the `mail_outbox` table and read with `inbox:list`; nothing is sent. `resend`: every mail is still written to `mail_outbox` first, then delivered through Resend (https://resend.com, HTTP API) by a sender inside the service: retried with growing waits on network errors, 429 and 5xx (five tries over about 30 minutes), failed at once on other 4xx, and not sent at all once it is more than an hour old (a stale link). Survives restarts (queued rows are picked up again). `resend` needs the next two variables; start-up fails naming the one that is missing. Delivery never holds up a request: the pages answer as they do in `outbox` mode. See "Changing the sending domain" below. | `resend` once the sending domain is verified at the provider |
+| `MAIL_MODE` | `outbox` (default): mail is only written to the `mail_outbox` table and read with `inbox:list`; nothing is sent. `resend`: every mail is still written to `mail_outbox` first, then delivered through Resend (https://resend.com, HTTP API) by a sender inside the service: retried with growing waits (1, 4, 10, then every 15 minutes) on network errors, 429, 5xx and a refused key, until the mail's own expiry (the time its link stops working: 1 hour for a password reset, 24 hours for a verification and for the notice that someone tried to register an address); failed at once on any other answer that cannot succeed. A row remembers at queue time whether it is to be delivered: rows written in `outbox` mode are never sent, whatever mode runs later. Survives restarts. `resend` needs the next variables; start-up fails naming the one that is missing. Delivery never holds up a request. See "Changing the sending domain" below. | `resend` once the sending domain is verified at the provider |
 | `RESEND_API_KEY` | A **secret**: the provider API key (sending access is enough). Required when `MAIL_MODE` is `resend`; never logged, never stored in the database, never named as a site model key. | the key of the acceptance account |
 | `MAIL_FROM` | The sender of every mail, e.g. `Haiyo <no-reply@notify.example.org>` (an example: use an address on your own verified sending domain). Required when `MAIL_MODE` is `resend`; no address is built into the service. | an address on the verified sending domain |
 | `MAIL_REPLY_TO` | Optional: where a reader's reply goes. Unset: no reply-to is asked for. | unset |
+| `MAIL_PER_ADDRESS_HOUR` | At most this many mails of one kind (verification, reset, registration notice) are delivered to one address in an hour, whichever IPs ask (1 to 1000, default 5). Over it the mail is still written to the outbox but marked `failed`/`capped` and not sent; the person who asked gets the same answer as always. Only in `resend` mode has it an effect. | default |
 | `BLOB_DIR` | Where avatars and attachments live when `S3_*` is not set. Image default `/data/blobs` (mount a volume there or it is lost with the container; the container runs as the unprivileged `node` user, uid 1000, so a bind-mounted host directory must be writable by uid 1000, e.g. `chown 1000:1000 <dir>`). | unused if S3 is set |
 | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | S3-compatible object storage; all five or none. | all five (container disks are not durable) |
 | `RATE_LIMIT_SCALE` | Multiplier on every rate limit. | `1` |
@@ -128,11 +129,11 @@ object is a broken attachment. Rehearsed on the acceptance environment on 2026-1
 
 1. At the mail provider, add the new domain and publish the DNS records it shows you (SPF and DKIM at least; a DMARC record is advised), then wait until it reads as verified. Mail from an unverified domain is refused (a 4xx, so the mail is marked `failed`, not retried).
 2. Set `MAIL_FROM` (and `MAIL_REPLY_TO` if you use one) to addresses on the new domain, and restart the service. Nothing else in the service names a domain.
-3. Mail already waiting is sent from the new address after the restart; a mail more than an hour old is closed as `expired`.
+3. Mail already waiting is sent from the new address after the restart (a mail past its own expiry ends `expired` instead).
 
 If the **site** address changes, change `APP_ORIGIN` (links in mail follow it) and see the move notes above; `MAIL_FROM` need not change.
 
-What the service shows of the mail: `docker exec <container> node dist/cli.js mail:status` prints how many mails are queued, sent and failed (counts only); the daily counters `mail_sent`, `mail_retry`, `mail_failed` are in `memory:stats`.
+What the service shows of the mail: `docker exec <container> node dist/cli.js mail:status` prints, per day for the last 7 days, how many mails were queued, sent, failed (`capped` ones included) and expired, and how many retries there were, and how many rows were written in `outbox` mode and are never to be sent (in `outbox` mode every row stays `queued` and that number is all there is; the table is read with `inbox:list`). Everything is counted from `mail_outbox`; nothing is written to the memory counters.
 
 ## Not covered here
 
