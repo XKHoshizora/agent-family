@@ -92,18 +92,16 @@ const idleNow = async (idle: (() => Promise<void>) | undefined): Promise<boolean
  * `IDLE_WAIT_MS` (something a test leaves running on purpose then costs that, once, as it always did the truncate).
  */
 async function untilIdle(app: FastifyInstance, db: Db, backgroundWorker: boolean): Promise<void> {
-  const hub = app.hasDecorator("realtime") ? (app.realtime as unknown as { queues?: Map<string, unknown> }) : null;
   const deadline = Date.now() + IDLE_WAIT_MS;
   let quiet = 0;
   while (quiet < 2 && Date.now() < deadline) {
     await memoryCountsSettled();
     let busy = !(await idleNow(app.deps.memory?.idle.bind(app.deps.memory))) || !(await idleNow(app.deps.proactive?.idle.bind(app.deps.proactive)));
-    busy ||= (hub?.queues?.size ?? 0) > 0;
+    busy ||= !(await idleNow(app.hasDecorator("realtime") ? () => app.realtime.idle() : undefined));
     if (backgroundWorker) {
       // What the loop has not yet claimed is run now (by this hook, in the loop's place); what it has claimed is waited for.
       if ((await app.agentWorker.drain()) > 0) busy = true;
-      const running = await db.query<{ id: string }>("select id from agent_runs where status = 'running'");
-      if (running.rows.some((r) => app.agentWorker.isWorking(r.id))) busy = true;
+      if (!(await idleNow(() => app.agentWorker.idle()))) busy = true;
     }
     const active = await db.query<{ n: number }>(
       "select count(*)::int as n from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and state = 'active'",

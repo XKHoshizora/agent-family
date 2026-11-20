@@ -22,6 +22,7 @@ const MAX_PAIRS = 25;
 /** For the `it(…, { timeout })` of a test that calls `expectLinear` several times: a loaded machine takes several times longer to measure. */
 export const LOADED_TIMEOUT_MS = 60_000;
 const MAX_REPS = 5_000;
+const MAX_N = 50_000_000;
 
 const timed = (run: () => void, reps: number): number => {
   const started = performance.now();
@@ -29,25 +30,36 @@ const timed = (run: () => void, reps: number): number => {
   return performance.now() - started;
 };
 
-export function expectLinear<T>(options: { n: number; factor?: number; make: (n: number) => T; run: (input: T) => void }): { small: number; large: number; reps: number } {
-  const { n, factor = 4, make, run } = options;
+export function expectLinear<T>(options: { n: number; factor?: number; make: (n: number) => T; run: (input: T) => void }): { small: number; large: number; reps: number; n: number } {
+  const { factor = 4, make, run } = options;
+  let n = options.n;
   expect(factor).toBeGreaterThanOrEqual(4);
-  const [small, large] = [make(n), make(n * factor)];
+  // A call too quick to measure (a sample of MAX_REPS calls still under MIN_SAMPLE_MS) is made longer by growing the input,
+  // never judged as it is: sub-millisecond samples decide nothing.
+  let probe = 0;
+  let [small, large] = [make(n), make(n * factor)];
+  for (;;) {
+    const once = () => run(small);
+    once(); // warm up (compilation), and the result is checked once
+    run(large);
+    probe = Math.max(timed(once, 1), 0.001);
+    if (probe * MAX_REPS >= MIN_SAMPLE_MS || n >= MAX_N) break;
+    n *= 4;
+    [small, large] = [make(n), make(n * factor)];
+  }
   const [once, twice] = [() => run(small), () => run(large)];
-  once(); // warm up (compilation), and the result is checked once
-  twice();
-  // How many calls make a sample of the smaller size last long enough.
-  const probe = Math.max(timed(once, 1), 0.001);
   const reps = Math.min(MAX_REPS, Math.max(1, Math.ceil(MIN_SAMPLE_MS / probe)));
   let [fastSmall, fastLarge] = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY];
   // Pairs of samples, until the fastest of each size (so far) are in proportion, but at least `MIN_PAIRS` of them: noise only
-  // ever adds time, so a busy machine takes more pairs, not a different answer, and a pass gone quadratic (16 times, not 4)
-  // stays above the bound in every pair until `MAX_PAIRS` end it.
+  // ever adds time, so a busy machine takes more pairs, not a different answer (the fastest of each size, not the median,
+  // because noise is one-sided: a median of a loaded machine is a measurement of the load), and a pass gone quadratic
+  // (16 times, not 4) stays above the bound in every pair until `MAX_PAIRS` end it.
   for (let pair = 0; pair < MAX_PAIRS; pair++) {
     fastSmall = Math.min(fastSmall, timed(once, reps));
     fastLarge = Math.min(fastLarge, timed(twice, reps));
     if (pair + 1 >= MIN_PAIRS && fastLarge / fastSmall < 2 * factor) break;
   }
-  expect([`${factor} times the input`, fastLarge / fastSmall < 2 * factor], `large ${fastLarge.toFixed(1)} ms, small ${fastSmall.toFixed(1)} ms, ${reps} calls a sample`).toEqual([`${factor} times the input`, true]);
-  return { small: fastSmall, large: fastLarge, reps };
+  expect(fastSmall, "the smaller input is still too quick to measure: give `expectLinear` a larger `n`").toBeGreaterThanOrEqual(MIN_SAMPLE_MS / 4);
+  expect([`${factor} times the input`, fastLarge / fastSmall < 2 * factor], `large ${fastLarge.toFixed(1)} ms, small ${fastSmall.toFixed(1)} ms, ${reps} calls a sample, n ${n}`).toEqual([`${factor} times the input`, true]);
+  return { small: fastSmall, large: fastLarge, reps, n };
 }
