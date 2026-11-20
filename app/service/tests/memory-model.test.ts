@@ -121,11 +121,23 @@ describe("the owner's memory model", () => {
     expect(await me(owner)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
   });
 
-  it("a paid site model stored before that rule is not used: the site's memory model is called and recorded instead, and the choice reads as not usable", async () => {
+  it("a paid site model stored before that rule is no choice also when read: /api/me says null and usable, as for no choice; the row is left as it is; an unusable choice of their own provider still reads as it is", async () => {
+    const owner = await signUp(app, "mmpaidread");
+    await storeChoice(owner.id, SITE_PAID);
+    expect(await me(owner)).toMatchObject({ memoryModel: null, memoryModelUsable: true });
+    expect((await db.query("select memory_model from accounts where principal_id = $1", [owner.id])).rows).toEqual([{ memory_model: SITE_PAID }]);
+    const other = await signUp(app, "mmownread");
+    const providerId = await addProvider(other);
+    const choice = { source: "provider", providerId, model: "own-model" };
+    await setModel(other, choice);
+    expect((await api(app, other, "DELETE", `/api/providers/${providerId}`)).status).toBeLessThan(300);
+    expect(await me(other)).toMatchObject({ memoryModel: choice, memoryModelUsable: false });
+  });
+
+  it("a paid site model stored before that rule is not used: the site's memory model is called and recorded instead", async () => {
     const owner = await signUp(app, "mmpaidold");
     await grant(db, owner.id, 5_000_000n);
     await storeChoice(owner.id, SITE_PAID);
-    expect(await me(owner)).toMatchObject({ memoryModel: SITE_PAID, memoryModelUsable: false });
     gateway.reply("好", { usage: USAGE });
     const first = gateway.calls.length;
     expect(await memoryCall(deps(), owner.id, INPUT, never)).toBe("好");

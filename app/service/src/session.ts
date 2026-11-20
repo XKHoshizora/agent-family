@@ -5,7 +5,7 @@ import { z } from "zod";
 import { authCall } from "./auth/auth.ts";
 import type { Queryable } from "./db.ts";
 import { AppError } from "./errors.ts";
-import { memoryModelUsable } from "./memory/call.ts";
+import { memoryChoice, memoryModelUsable } from "./memory/call.ts";
 import { MEMORY_LANGUAGE_CODES } from "./memory/language.ts";
 import { getDream, getMemoryLanguage, getMemoryModel, getNewNotes } from "./memory/store.ts";
 
@@ -88,7 +88,8 @@ export function registerSessionRoutes(app: FastifyInstance): void {
       const p = await requirePrincipal(req);
       const { db, config } = app.deps;
       const newNotes = await getNewNotes(db, p.id);
-      const memoryModel = await getMemoryModel(db, p.id);
+      // A paid site model stored before such a choice was refused is no choice, here as in the calls (`memoryChoice`); the row is left as it is.
+      const memoryModel = memoryChoice(config, await getMemoryModel(db, p.id));
       const usable = await memoryModelUsable(db, config, p.id, memoryModel);
       const dream = await getDream(db, p.id);
       const memoryLanguage = await getMemoryLanguage(db, p.id);

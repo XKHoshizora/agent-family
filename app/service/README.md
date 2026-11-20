@@ -1576,9 +1576,9 @@ accepted but not used: the mail links to the web app).
 `newNotes` (`"auto"`, `"vault"` or `"open"`; `"auto"` until chosen) is what newly written notes of their Agents' memory do
 about the vault (An Agent's memory); only they are ever shown it. So are `memoryModel` (`null`, or the model they chose to tidy
 their memory, `{"source": "site", "id"}` or `{"source": "provider", "providerId", "model"}` as an Agent's model is written;
-Memory calls) and `memoryModelUsable` (`false` when that model cannot be called now: its provider was deleted or its key
-cannot be opened, the model is off the provider's list or no longer on the site, or it is a paid site model stored before those were
-refused; always `true` while `memoryModel` is `null`).
+Memory calls; a paid site model stored before those were refused is no choice and reads `null`, the stored row left as it is)
+and `memoryModelUsable` (`false` when that model cannot be called now: its provider was deleted or its key
+cannot be opened, the model is off the provider's list or no longer on the site; always `true` while `memoryModel` is `null`).
 `dream` (a boolean, `true` until chosen) says whether their notes are consolidated while they are away (An Agent's memory, 入梦).
 `memoryLanguage` (`null`, the default: automatic; else one of `zh-Hans`, `zh-Hant`, `ja`, `en`, `ko`, `fr`, `de`, `es`, `pt`, `ru`, `it`, `vi`, `th`, `id`) is the one language their notes are written in (An Agent's memory, *One language*).
 

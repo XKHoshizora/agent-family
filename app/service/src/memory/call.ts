@@ -73,11 +73,10 @@ async function modelFor(q: Queryable, config: Config, ownerId: string, own: Memo
 /**
  * Whether the owner's chosen model `own` (`GET /api/me` `memoryModelUsable`) can be called now; true when they chose none.
  * The static part of a call's checks: it resolves and its context holds its own output (a call's input is judged per call). A paid
- * site model is never usable for memory (`paidSiteChoice`: the calls use the site's memory model instead).
+ * site model stored before it was refused is no choice (`memoryChoice`), so true as for none.
  */
 export async function memoryModelUsable(q: Queryable, config: Config, ownerId: string, own: MemoryModelChoice | null): Promise<boolean> {
-  if (own === null) return true;
-  if (paidSiteChoice(config, own)) return false;
+  if (memoryChoice(config, own) === null) return true;
   try {
     const resolved = await modelFor(q, config, ownerId, own);
     return resolved !== null && resolved.contextTokens > resolved.call.maxOutputTokens;
