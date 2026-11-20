@@ -17,16 +17,16 @@ import {
   newMark,
   shownAppellation,
   speakerLabel,
+  speakerRole,
   systemTokens,
   withoutMark,
   withSummary,
   type GroupPerson,
   type GroupScene,
-  type SpeakerRole,
   type SystemText,
 } from "./runtime/prompt.ts";
 import type { AgentRow } from "./store.ts";
-import { countPlaced, readSummary, type Summary } from "./summary/store.ts";
+import { countPlaced, readSummary, summaryBase, type Summary } from "./summary/store.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -126,11 +126,12 @@ export interface LoadedContext {
   topicStart: number;
   /**
    * What the conversation part left out (README "The rolling summary"): the messages the Agent could see placed (agents/
-   * summary/store.ts: a message's seq, an Agent's reply the seq its run covered) from `from` to `to`, both included — after
-   * where the part starts (the topic start; in a group the asker's line too; the summary shown, `summary`, what it covers) and
-   * before the oldest message the plan shows (by name: `ContextPlan.shownAt`) — in its own conversation because they did not
-   * fit, in a group also because they fell before the latest `maxMessages`; `messages` how many (`countPlaced`). Null when
-   * none was left out.
+   * summary/store.ts: a message's seq, an Agent's reply the seq its run covered) from `from` to `to`, both
+   * included — after where the part starts (the topic start; in a group the asker's line too) and past what the pair's summary
+   * covers (shown to this run or not), and before the oldest message the plan shows (by name: `ContextPlan.shownAt`; in the
+   * Agent's own conversation, at the last reply of the Agent's before it: `leftOutTo`) — in its own conversation because they
+   * did not fit, in a group also because they fell before the latest `maxMessages`; `messages` how many. Null when none was
+   * left out.
    */
   leftOut: LeftOut | null;
   /** The pair's summary as the system text carries it (`withSummary`); null when it carries none. */
@@ -344,12 +345,6 @@ interface MessageRow {
 
 const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
 
-/**
- * Who the sender of a message is to the Agent (design rule 3), by account and never by name: its owner (whatever either
- * is called), another person, or any Agent — the owner's other Agents included.
- */
-const speakerRole = (senderId: string, kind: "human" | "agent", ownerId: string): SpeakerRole =>
-  kind === "agent" ? "Agent" : senderId === ownerId ? "你的主人" : "群成员";
 
 /**
  * SQL: membership `ms` (an alias) is of someone in its group now, as a group's system text counts them (its other
@@ -520,11 +515,15 @@ export async function loadContext(
   };
   const start = await topicStart(q, run.agentId, run.conversationId);
   const line = run.group?.after ?? 0;
-  // The pair's rolling summary, shown only when everything it covers is after the topic start and, in a group, after the
-  // asker's line (it is text about those messages: a reply is shown nothing derived from what is at or before its line),
-  // and it leaves the run something to answer. Not shown, the conversation part is read as if there were none.
+  // The pair's rolling summary. It belongs to the pair only when everything it covers is after where the Agent may be shown
+  // the conversation from now — its current stay and the latest new topic (`summaryBase`); one of an earlier stay or topic is
+  // no summary (the write side checks the same, job.ts). It is shown only when, besides, everything it covers is after the
+  // asker's line (it is text about those messages: a reply is shown nothing derived from what is at or before its line), and
+  // it leaves the run something to answer. Not shown, the conversation part is read as if there were none.
   const stored = await readSummary(q, run.conversationId, run.agentId);
-  const summary = stored !== null && stored.fromSeq > Math.max(start, line) && stored.uptoSeq < run.coversSeq ? stored : null;
+  const base = stored === null ? null : await summaryBase(q, run.agentId, run.conversationId);
+  const owned = stored !== null && base !== null && stored.fromSeq > base ? stored : null;
+  const summary = owned !== null && owned.fromSeq > line && owned.uptoSeq < run.coversSeq ? owned : null;
   const carrying = (text: string | null) => (mark: string, speakers: readonly Speaker[]): SystemText => withSummary(system(mark, speakers), text);
   const withPassage = carrying(summary?.text ?? null);
   const reading = budgetWith(withPassage("", []));
@@ -568,12 +567,19 @@ export async function loadContext(
   // The attachments of every message the plan could keep (those it keeps with no attachment contents at all).
   const could = new ContextPlan(entries, budget, ratio);
   could.keepOlder();
-  // What it left out, by place: from where the conversation part starts to the oldest message it shows (after `from`).
-  const shownPlaces = could.shownAt().flatMap((at) => (ordered[at]!.answers > from ? [ordered[at]!.answers] : []));
-  const to = shownPlaces.length === 0 ? null : Math.min(...shownPlaces) - 1;
-  const left =
-    to === null || to <= from ? 0 : await countPlaced(q, { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null }, from, to);
-  const leftOut = left > 0 && to !== null ? { from: from + 1, to, messages: left } : null;
+  // What it left out, by place: from where the conversation part starts — or, past it, what the pair's summary covers
+  // already, shown to this run or not — to the oldest message it shows (after `from`).
+  const after = Math.max(from, owned?.uptoSeq ?? 0);
+  const to = leftOutTo(ordered, could.shownAt(), from, run.group === null);
+  let leftOut: LeftOut | null = null;
+  if (to !== null && to > after) {
+    // Counted in two parts, so that no read reaches past `to`: what is stored at or before it, and what was loaded after it
+    // (every message after it is among those loaded) whose place is not.
+    const late = loaded.filter((l) => l.seq > to && l.answers > after && l.answers <= to).length;
+    const reader = { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null };
+    const messages = (await countPlaced(q, reader, after, to, to)) + late;
+    if (messages > 0) leftOut = { from: after + 1, to, messages };
+  }
   const attachments = new Map<string, Downloadable>();
   for (const [, a] of [...could.attachments(false), ...could.attachments(true)]) {
     if (a.image && !resolved.vision) continue;
@@ -581,6 +587,22 @@ export async function loadContext(
     if (found) attachments.set(a.id, found);
   }
   return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start, leftOut, summary: carried };
+}
+
+/**
+ * The last place a conversation part left out (`LoadedContext.leftOut`), given what was loaded in answered order (`ordered`),
+ * where the plan's shown messages are in it (`ContextPlan.shownAt`) and where the part starts (`from`): one below the place of
+ * the oldest shown message after `from` — in the Agent's own conversation (`own`), the place of the last reply of the
+ * Agent's before it instead, so that a turn of several lines of the owner's is never split from the reply that answered it
+ * (a run covers the last line of its turn: what of a turn is not shown waits, unsummarised, until its reply is left out
+ * too). Null when nothing is left out (or, in its own conversation, no reply of the Agent's is loaded before it).
+ */
+function leftOutTo(ordered: readonly Loaded[], shownAt: readonly number[], from: number, own: boolean): number | null {
+  const first = shownAt.find((at) => ordered[at]!.answers > from);
+  if (first === undefined) return null;
+  if (!own) return ordered[first]!.answers - 1;
+  for (let i = first - 1; i >= 0; i--) if (ordered[i]!.entry.role === "assistant") return ordered[i]!.answers;
+  return null;
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */

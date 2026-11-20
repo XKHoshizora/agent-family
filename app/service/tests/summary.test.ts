@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runSummary, type SummaryContext } from "../src/agents/summary/job.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { settled } from "../src/memory/stats.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
@@ -411,8 +412,8 @@ describe("in a group", () => {
     const sent = textOf(call);
     expect(sent).not.toContain("BEFORE-JOIN-");
     const input = JSON.parse((call.messages[0]!.parts[0] as { text: string }).text);
-    expect(input.messages[0]).toEqual({ who: "gav", role: "主人", text: short(0, "AFTER-") });
-    expect(input.messages[1]).toEqual({ who: "gam", role: "群成员", text: short(1, "AFTER-") });
+    expect(input.messages[0]).toEqual({ who: "主人（gav（@gav））", role: "主人", text: short(0, "AFTER-") });
+    expect(input.messages[1]).toEqual({ who: "gam（@gam）", role: "群成员", text: short(1, "AFTER-") });
     const row = (await summaryOf(w.g, w.agent.id))!;
     expect(row.from).toBeGreaterThan(joined);
     expect(row.text).toBe(ANSWER);
@@ -562,6 +563,220 @@ describe("a summary never leaves its pair", () => {
 });
 
 // --- the pure parts ---------------------------------------------------------------------------------------------------
+
+// --- fix round 1 -----------------------------------------------------------------------------------------------------
+
+/** What the job is handed when a test runs it straight (`runSummary`), and what it said of its attempt. */
+function jobContext(tried: number | null = null): { ctx: SummaryContext; attempts: Array<number | null> } {
+  const attempts: Array<number | null> = [];
+  return { ctx: { closing: new AbortController().signal, summaryTried: tried, summaryAttempted: (upTo) => void attempts.push(upTo) }, attempts };
+}
+const jobDeps = () => ({ db, config: app.deps.config, models: gateway, log: app.log, inFlight: new Set<string>() });
+const seqOf = async (conv: string): Promise<number> => Number((await db.query<{ s: string }>("select seq::text as s from conversations where id = $1", [conv])).rows[0]!.s);
+
+describe("fix round 1", () => {
+  it("I-1: replies a later joiner asks for, the summary hidden from them, call nothing until 20 are left out past what it covers", { timeout: 180_000 }, async () => {
+    const w = await groupWorld("ia", 0);
+    const joined = await joinedSeq(w.g, w.agent.id);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 10 }, (_, i) => short(i, "早")));
+    const s = await signUp(app, "ias");
+    await befriend(app, w.v, s);
+    await addMember(w.v, w.g, s.id);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 150 }, (_, i) => short(i)));
+    // It covers everything but the 79 newest: the joiner's first question is the 80th, so nothing past it is left out yet.
+    const upto = (await seqOf(w.g)) - 79;
+    await storeSummary(w.g, w.agent.id, joined + 1, upto, ANSWER);
+    const limit = app.deps.config.agentCallerRunsPerMinute;
+    app.deps.config.agentCallerRunsPerMinute = 100;
+    try {
+      // Ten replies: each leaves out more than 20 since the joiner's line, but fewer than 20 past what the summary covers.
+      for (let k = 0; k < 10; k++) {
+        await say(s, w.g, `@${w.agent.handle} 问题${k}`);
+        await reply("好。");
+      }
+      expect(summaryCalls()).toHaveLength(0);
+      expect((await summaryOf(w.g, w.agent.id))!.upto).toBe(upto);
+      // Thirty more: now more than 20 lie past it: one call.
+      await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 30 }, (_, i) => short(i, "后")));
+      await say(s, w.g, `@${w.agent.handle} 再问`);
+      await reply("好。", `${ANSWER}
+又说了很多`);
+      expect(summaryCalls()).toHaveLength(1);
+      expect((await summaryOf(w.g, w.agent.id))!.upto).toBeGreaterThan(upto);
+    } finally {
+      app.deps.config.agentCallerRunsPerMinute = limit;
+    }
+  });
+
+  it("I-1: a job whose window holds fewer than summaryMinMessages makes no call and sets no gate", async () => {
+    const w = await own("ib");
+    const seeded = await longConversation(w, 30);
+    const seqs = [...seeded.values()];
+    await storeSummary(w.conv, w.agent.id, seqs[0]!, seqs[19]!, ANSWER);
+    const { ctx, attempts } = jobContext();
+    await runSummary(jobDeps(), { kind: "summary", agentId: w.agent.id, conversationId: w.conv, upTo: seqs[29]! }, ctx);
+    expect(summaryCalls()).toHaveLength(0);
+    expect(attempts).toEqual([]);
+  });
+
+  it("I-2: speakers are told apart by a unique label; the owner is 主人（…） by account, never by a name", async () => {
+    const [v, m, n] = [await signUp(app, "rina"), await signUp(app, "rinb"), await signUp(app, "zhuren")];
+    // A member who took the owner's display name, and one who calls themself 主人.
+    await db.query("update principals set display_name = 'rina' where id = $1", [m.id]);
+    await db.query("update principals set display_name = '主人' where id = $1", [n.id]);
+    const g = await group(app, v, "同名群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "same_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    await seed(g, [v.id, m.id, n.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(v, g, "@same_bot 说到哪了");
+    await reply("好。", ANSWER);
+    const call = summaryCalls()[0]!;
+    const input: Array<{ who: string; role?: string; text: string }> = JSON.parse((call.messages[0]!.parts[0] as { text: string }).text).messages;
+    const byText = new Map(input.map((l) => [l.text, l]));
+    expect(byText.get(short(0))).toEqual({ who: "主人（rina（@rina））", role: "主人", text: short(0) });
+    expect(byText.get(short(1))).toEqual({ who: "rina（@rinb）", role: "群成员", text: short(1) });
+    expect(byText.get(short(2))).toEqual({ who: "zhuren（@zhuren）", role: "群成员", text: short(2) });
+    // Only the owner's lines carry 主人; nobody else's label starts with it.
+    for (const l of input) expect([l.who, l.who.startsWith("主人")]).toEqual([l.who, l.role === "主人"]);
+    expect(call.system).toContain("说话人只用 who 标识");
+  });
+
+  it("I-3: a summary of the Agent's earlier stay in a group is never shown after it was added back", async () => {
+    const w = await groupWorld("ic", 0);
+    const first = await joinedSeq(w.g, w.agent.id);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 6 }, (_, i) => short(i, "第一次")));
+    expect((await api(app, w.v, "DELETE", `/api/conversations/${w.g}/members/${w.agent.id}`)).status).toBe(200);
+    await addMember(w.v, w.g, w.agent.id);
+    expect(await joinedSeq(w.g, w.agent.id)).toBeGreaterThan(first + 6);
+    // As if a write had slipped through: a row of the earlier stay.
+    await storeSummary(w.g, w.agent.id, first + 1, first + 6, "EARLIER-STAY-CANARY");
+    await say(w.m, w.g, `@${w.agent.handle} 你好`);
+    await reply("好。");
+    expect(JSON.stringify(replyCalls()[0])).not.toContain("EARLIER-STAY-CANARY");
+  });
+
+  it("I-3: the Agent taken out while a summary call is under way: nothing is written, counted dropped", async () => {
+    const w = await groupWorld("id", 0);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    gateway.reply("好。");
+    const held = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await held.reached;
+    expect((await api(app, w.v, "DELETE", `/api/conversations/${w.g}/members/${w.agent.id}`)).status).toBe(200);
+    held.release(ANSWER);
+    await memory().idle();
+    expect(await summaryOf(w.g, w.agent.id)).toBeNull();
+    expect(await counted("summary_dropped")).toBe(1);
+  });
+
+  it("I-3: taken out and added back while a summary call is under way: nothing is written, and no later reply is shown it", async () => {
+    const w = await groupWorld("ie", 0);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    gateway.reply("好。");
+    const held = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await held.reached;
+    expect((await api(app, w.v, "DELETE", `/api/conversations/${w.g}/members/${w.agent.id}`)).status).toBe(200);
+    await addMember(w.v, w.g, w.agent.id);
+    held.release("STALE-STAY-CANARY\n" + ANSWER);
+    await memory().idle();
+    expect(await summaryOf(w.g, w.agent.id)).toBeNull();
+    expect(await counted("summary_dropped")).toBe(1);
+    await say(w.m, w.g, `@${w.agent.handle} 你好`);
+    await reply("好。");
+    expect(JSON.stringify(replyCalls().at(-1))).not.toContain("STALE-STAY-CANARY");
+  });
+
+  it("I-3: a new topic while a summary call is under way: nothing is written, and no later reply is shown it", async () => {
+    const w = await own("if");
+    await longConversation(w, 60);
+    await say(w.owner, w.conv, "一");
+    gateway.reply("好。");
+    const held = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await held.reached;
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.conv}/topic`)).status).toBe(201);
+    held.release("OLD-TOPIC-SUMMARY-CANARY\n" + ANSWER);
+    await memory().idle();
+    expect(await summaryOf(w.conv, w.agent.id)).toBeNull();
+    expect(await counted("summary_dropped")).toBe(1);
+    await say(w.owner, w.conv, "新话题");
+    await reply("好。");
+    expect(JSON.stringify(replyCalls().at(-1))).not.toContain("OLD-TOPIC-SUMMARY-CANARY");
+  });
+
+  it("M-1: in the Agent's own conversation the boundary never splits a turn of several lines from the reply that answered it", async () => {
+    const w = await own("ig");
+    // Twenty turns: a long line and a short one of the owner's, then the reply to the turn (its run covered the last line).
+    for (let i = 0; i < 20; i++) {
+      const [, last] = await seed(w.conv, [w.owner.id], [`第${i}轮甲：` + "很长的一句话".repeat(50), `第${i}轮乙`]);
+      const run = await db.query<{ id: string }>(
+        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, started_at, finished_at)
+         values ('reply', $1, $2, $3, 'done', $4, now() - interval '1 hour', now() - interval '1 hour', now() - interval '1 hour') returning id`,
+        [w.conv, w.agent.id, w.owner.id, last],
+      );
+      await db.tx((t) => insertMessage(t, w.conv, w.agent.id, "text", { text: `第${i}轮答` }, run.rows[0]!.id));
+    }
+    await say(w.owner, w.conv, "最后");
+    await reply("好。", ANSWER);
+    expect(summaryCalls()).toHaveLength(1);
+    const summarised = (JSON.parse((summaryCalls()[0]!.messages[0]!.parts[0] as { text: string }).text).messages as Array<{ text: string }>).map((l) => l.text);
+    await say(w.owner, w.conv, "继续");
+    await reply("好。");
+    const turns = turnsOf(replyCalls()[1]!);
+    for (let i = 0; i < 20; i++) {
+      const lines = [`第${i}轮甲：`, `第${i}轮乙`, `第${i}轮答`];
+      const inSummary = lines.map((l) => summarised.some((t) => t.startsWith(l)));
+      // A turn and its reply: all three summarised, or none.
+      expect([i, inSummary]).toEqual([i, inSummary.map(() => inSummary[2])]);
+      if (inSummary[2]) expect([i, lines.some((l) => turns.includes(l))]).toEqual([i, false]);
+    }
+  });
+
+  it("M-2: a call that could not start because the owner had as many calls running as they may sets no gate", async () => {
+    const w = await own("ih");
+    const seqs = [...(await longConversation(w, 40)).values()];
+    const running = await db.query<{ id: string }>(
+      `insert into agent_runs (purpose, owner_id, status, started_at, caller_id, lane)
+       select 'memory', $1, 'running', now(), $1, 'own' from generate_series(1, $2) returning id`,
+      [w.owner.id, app.deps.config.agentMaxConcurrentRuns],
+    );
+    const job = { kind: "summary" as const, agentId: w.agent.id, conversationId: w.conv, upTo: seqs[35]! };
+    const capped = jobContext();
+    await runSummary(jobDeps(), job, capped.ctx);
+    expect(summaryCalls()).toHaveLength(0);
+    expect(capped.attempts).toEqual([]);
+    await db.query("delete from agent_runs where id = any($1::uuid[])", [running.rows.map((r) => r.id)]);
+    gateway.reply(ANSWER);
+    const free = jobContext();
+    await runSummary(jobDeps(), job, free.ctx);
+    expect(summaryCalls()).toHaveLength(1);
+    expect(free.attempts).toEqual([null]);
+  });
+
+  it("M-3: an answer of headings only never replaces a summary that says something", async () => {
+    const w = await own("ii");
+    const seqs = [...(await longConversation(w, 50)).values()];
+    await storeSummary(w.conv, w.agent.id, seqs[0]!, seqs[9]!, ANSWER);
+    gateway.reply(["人物与称呼", "说过的事", "定下的事", "还没解决的"].join("\n"));
+    const { ctx, attempts } = jobContext();
+    await runSummary(jobDeps(), { kind: "summary", agentId: w.agent.id, conversationId: w.conv, upTo: seqs[40]! }, ctx);
+    expect(summaryCalls()).toHaveLength(1);
+    expect((await summaryOf(w.conv, w.agent.id))!).toEqual({ from: seqs[0], upto: seqs[9], text: ANSWER });
+    expect(await counted("summary_failed")).toBe(1);
+    expect(attempts).toEqual([seqs[40]]);
+  });
+
+  it("M-4: a deleted Agent's summary of its own conversation goes with the delete", async () => {
+    const w = await own("ij");
+    const seqs = [...(await longConversation(w, 4)).values()];
+    await storeSummary(w.conv, w.agent.id, seqs[0]!, seqs[3]!, "OWN-SUMMARY");
+    expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200);
+    expect(await summaryOf(w.conv, w.agent.id)).toBeNull();
+  });
+});
 
 describe("the summary's text", () => {
   it("the reply's passage: the fixed heading, then the text as one JSON string", async () => {

@@ -37,10 +37,16 @@ const PLACED_WHERE = `where m.conversation_id = $2 and m.kind in ('text', 'file'
 
 const placedParams = (r: PlacedReader, after: number, upto: number) => [r.agentId, r.conversationId, after, upto, r.group, r.ownerId];
 
-/** How many messages `r` reads whose place is after `after` and at most `upto`. */
-export async function countPlaced(q: Queryable, r: PlacedReader, after: number, upto: number): Promise<number> {
+/**
+ * How many messages `r` reads whose place is after `after` and at most `upto` — of them, with `maxSeq`, only those stored at
+ * or before seq `maxSeq` (a read bounded on both sides; agents/context.ts counts the rest from what it loaded).
+ */
+export async function countPlaced(q: Queryable, r: PlacedReader, after: number, upto: number, maxSeq?: number): Promise<number> {
   if (upto <= after) return 0;
-  const { rows } = await q.query<{ n: number }>(`select count(*)::int as n ${PLACED_FROM} ${PLACED_WHERE}`, placedParams(r, after, upto));
+  const { rows } = await q.query<{ n: number }>(`select count(*)::int as n ${PLACED_FROM} ${PLACED_WHERE} and ($7::bigint is null or m.seq <= $7::bigint)`, [
+    ...placedParams(r, after, upto),
+    maxSeq ?? null,
+  ]);
   return rows[0]?.n ?? 0;
 }
 

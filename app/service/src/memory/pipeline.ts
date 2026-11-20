@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import { listenersFor } from "../agents/proactive/listeners.ts";
-import { lockAgent, readOwnedAgent, type AgentRow } from "../agents/store.ts";
+import { liveAgent, lockAgent, type AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { lockConversationKeys } from "../conversations/store.ts";
@@ -75,10 +75,8 @@ export const errInfo = (err: unknown): { code?: string; name?: string } => ({
 
 /** The Agent when it keeps notes and may be reviewed for (memory on, not paused, not deleted); else null. */
 export async function reviewableAgent(db: Db, agentId: string): Promise<AgentRow | null> {
-  const owner = await db.query<{ owner_id: string }>("select owner_id from principals where id = $1", [agentId]);
-  if (!owner.rows[0]) return null;
-  const agent = await readOwnedAgent(db, owner.rows[0].owner_id, agentId);
-  return agent && agent.memory && !agent.paused && !agent.deleted ? agent : null;
+  const agent = await liveAgent(db, agentId);
+  return agent && agent.memory ? agent : null;
 }
 
 export async function reviewedSeq(db: Queryable, agentId: string, conversationId: string): Promise<number> {

@@ -4,9 +4,9 @@ import { memoryCall, type MemoryCallDeps, type MemoryCallReport } from "../../me
 import { shown } from "../../memory/review.ts";
 import { count } from "../../memory/stats.ts";
 import { attachmentLabel } from "../runtime/context.ts";
-import { labelName } from "../runtime/prompt.ts";
-import { lockAgent, readOwnedAgent } from "../store.ts";
-import { cleanSummary, OWNER, SELF, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
+import { speakerRole } from "../runtime/prompt.ts";
+import { liveAgent, lockAgent } from "../store.ts";
+import { cleanSummary, hasContent, OWNER, SELF, speakerOf, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
 import { countPlaced, readPlaced, readSummary, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
 /**
@@ -16,10 +16,11 @@ import { countPlaced, readPlaced, readSummary, summaryBase, writeSummary, type P
  * purpose `memory`, held and settled on the memory allowance the site pays — or, on a model of the owner's own provider,
  * nothing), into the pair's summary, updated in place.
  *
- * Fail closed: a call that could not be made, failed, was abandoned, or answered nothing usable changes nothing; so does an
- * answer that is not shorter than what it would replace (the old summary and the messages it now covers, in weight), and so
- * does one that arrives once the pair has moved on (a new topic, the Agent out of the group, another write). Nothing of any
- * text is logged: counters only (memory/stats.ts).
+ * Fail closed: a call that could not be made, failed, was abandoned, or answered nothing usable changes nothing — nor does
+ * an answer of section headings only where the old summary said something; so does an answer that is not shorter than what
+ * it would replace (the old summary and the messages it now covers, in weight), and so does one that arrives once the pair
+ * has moved on (a new topic, the Agent out of the group or added back, another write). Nothing of any text is logged:
+ * counters only (memory/stats.ts).
  */
 
 export interface SummaryJob {
@@ -44,29 +45,34 @@ export type SummaryDeps = MemoryCallDeps;
 /** The most messages one job reads; the rest waits for the next job. */
 export const SUMMARY_MAX_MESSAGES = 200;
 
-/** Who a message is from, as the call is shown it (prompt.ts `SummaryLine`). */
+/**
+ * A message as the call is shown it (prompt.ts `SummaryLine`): in a group, who said it by a label no one else has
+ * (`speakerOf`: the name and the handle, the owner's as `主人（…）` by account) and who they are to the Agent by account
+ * (`speakerRole`, the labels' own mapping).
+ */
 function lineOf(m: PlacedMessage, reader: PlacedReader, maxWeight: number): SummaryLine {
   const label = m.attachment ? attachmentLabel({ name: m.attachment.name, image: m.attachment.inline === true }) : "";
   const text = shown([label, m.text].filter((s) => s !== "").join(" "), maxWeight);
   if (m.senderId === reader.agentId) return { who: SELF, text };
   if (!reader.group) return { who: OWNER, text };
-  const role = m.kind === "agent" ? "Agent" : m.senderId === reader.ownerId ? "主人" : "群成员";
-  return { who: labelName(m.name, m.handle), role, text };
+  const role = speakerRole(m.senderId, m.kind, reader.ownerId);
+  return { who: speakerOf(m.name, m.handle, role === "你的主人"), role: role === "你的主人" ? "主人" : role, text };
 }
 
 /**
  * The job: what to read, the call, what to keep. The window is the pair's messages placed after what its summary covers
  * (or, with none, after where the Agent may be shown the conversation from: `summaryBase`) and up to `job.upTo`, at most
  * `SUMMARY_MAX_MESSAGES` of them and at most what a review is shown in weight (`reviewMessages` × `reviewMessageWeight`, each
- * cut at `reviewMessageWeight`), cut between places — so an exchange is never split; the rest waits for the next job. A pair
- * whose last attempt wrote nothing is not asked again until `summaryMinMessages` more messages lie past that attempt.
+ * cut at `reviewMessageWeight`), cut between places — so an exchange is never split; the rest waits for the next job. No
+ * call is made while fewer than `summaryMinMessages` messages lie past what the summary covers (whatever the reply's context
+ * counted from its own line), and a pair whose last attempt wrote nothing is not asked again until `summaryMinMessages` more
+ * lie past that attempt — but for a call that could not start because the owner had as many calls running as they may.
  */
 export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: SummaryContext): Promise<void> {
   const { db, config } = deps;
   if (ctx.closing.aborted) return;
-  const owner = await db.query<{ owner_id: string }>("select owner_id from principals where id = $1", [job.agentId]);
-  const agent = owner.rows[0] ? await readOwnedAgent(db, owner.rows[0].owner_id, job.agentId) : null;
-  if (!agent || agent.deleted || agent.paused) return;
+  const agent = await liveAgent(db, job.agentId);
+  if (!agent) return;
   const reader: PlacedReader = { agentId: agent.id, ownerId: agent.ownerId, conversationId: job.conversationId, group: job.conversationId !== agent.conversationId };
 
   const base = await summaryBase(db, agent.id, job.conversationId);
@@ -76,6 +82,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   const old = stored !== null && stored.fromSeq > base ? stored : null;
   const start = old?.uptoSeq ?? base;
   if (job.upTo <= start) return;
+  if ((await countPlaced(db, reader, start, job.upTo)) < config.memory.summaryMinMessages) return;
   const tried = ctx.summaryTried;
   if (tried !== null && tried >= start && (await countPlaced(db, reader, tried, job.upTo)) < config.memory.summaryMinMessages) return;
 
@@ -117,11 +124,14 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     report,
   );
   if (ctx.closing.aborted) return;
-  const text = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
+  const cleaned = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
+  // Headings and nothing else never replace a summary that said something.
+  const text = cleaned !== null && !hasContent(cleaned) && old !== null && hasContent(old.text) ? null : cleaned;
   if (text === null) {
     // A refusal for the allowance is counted where it is decided (`memory_refused_allowance`).
     if (!report.refused) count(db, "summary_failed");
-    ctx.summaryAttempted(job.upTo);
+    // A call that could not start for the owner's calls running at once may be asked again after the next reply.
+    if (!report.capped) ctx.summaryAttempted(job.upTo);
     return;
   }
   // Shorter than what it replaces — the old summary and the messages it now covers — or not at all.

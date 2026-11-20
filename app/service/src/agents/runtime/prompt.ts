@@ -218,6 +218,14 @@ export const hasVerticalSpace = (text: string): boolean => HAS_VERTICAL_SPACE.te
  */
 export type SpeakerRole = "你的主人" | "群成员" | "Agent";
 
+/**
+ * Who the sender of a message is to the Agent (design rule 3), by account and never by name: its owner (whatever either
+ * is called), another person, or any Agent — the owner's other Agents included. The one mapping: a group's labels and
+ * roster (agents/context.ts) and the rolling summary's speakers (agents/summary/job.ts) both take it from here.
+ */
+export const speakerRole = (senderId: string, kind: "human" | "agent", ownerId: string): SpeakerRole =>
+  kind === "agent" ? "Agent" : senderId === ownerId ? "你的主人" : "群成员";
+
 /** A name as a label shows it (design rule 4a): `labelSafe`; the handle when nothing is left. */
 export function labelName(name: string, handle: string): string {
   const shown = labelSafe(name);
