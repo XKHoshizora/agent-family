@@ -431,8 +431,6 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
-      // Whether its name part alone calls it there (mentions.ts): then the system text names both ways it is called.
-      const bare = group && (await resolveMentions(t, run.conversationId, [agent.namePart])).get(agent.namePart) === agent.id ? agent.namePart : null;
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
@@ -447,6 +445,10 @@ export class DbAgentPort implements AgentPort {
         return { end: KEY_UNREADABLE };
       }
       if (!resolved) return { end: UNAVAILABLE };
+      // Whether its name part alone calls it there (mentions.ts): then the system text names both ways it is called. Not
+      // for a reply nobody asked for, whose text says nobody called it.
+      const bare =
+        group && state.lane !== "proactive" && (await resolveMentions(t, run.conversationId, [agent.namePart])).get(agent.namePart) === agent.id ? agent.namePart : null;
       // The model's learned ratio, read once for the run: the context is planned at it when it is above 1 (`planRatio`),
       // and step 3 corrects by it the input estimate settlement falls back on (never the hold).
       const key = ratioKey(resolved);

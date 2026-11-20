@@ -996,7 +996,7 @@ async function chainBudgetSpent(
  * Each Agent refused so, or for a block, is recorded with the message (`recordRefusedCalls`): nothing was noted for it,
  * and should the message lie among what a later follow-up of that Agent answers, it is no call of it (`followUp`). One
  * the query does not find at all (paused, deleted, without a model, only its owner's to call, not a member) is not
- * recorded: a follow-up reads those of the Agent as they are when it is decided.
+ * recorded: nothing was noted for it, so it is no call of a follow-up either (`call_seqs`).
  * The rest are reached as a person's message reaches them (`reachAgents`), as an Agent's (`triggered_by` `agent`),
  * called for by the person behind the message (`behindAgentMessage`, from `postedBy`, the caller and lane of the run that
  * posted it; null when no run did): the caller of that run when it is not its owner's own, else the poster's owner —
@@ -1142,8 +1142,8 @@ export function followUpOf(run: Announced | null, told: Told = noneTold()): Foll
  * when it was posted — an Agent's for the group's halt, the chain limit, its chain budget, its others' daily budget or a
  * block (`triggerFromAgent`), a person's for its others' daily budget (`triggerInGroup`) — is no call at all
  * (`refused_agent_calls`): nothing was noted for it, though it may lie among what the follow-up answers. One refused
- * because the Agent was paused, had no model or let only its owner call it is not recorded: those are read as they are
- * when the follow-up is decided. Whose questions it answers (`Askers`, Task 10b) comes from the same calls: each
+ * because the Agent was paused, had no model or let only its owner call it is not recorded: nothing was noted for it,
+ * so it is no call of the follow-up either (`call_seqs`). Whose questions it answers (`Askers`, Task 10b) comes from the same calls: each
  * person's sender, and the askers of the run that posted each Agent's — not known (null) when one of those is not (or
  * no run posted it), or when no call is left — and everyone who wrote in (covers, pending] besides (fix round 2,
  * `heardIn`); it answers those calls (`call_seqs`). In the Agent's own conversation, its owner.

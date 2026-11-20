@@ -461,7 +461,9 @@ to it (409 `handle_taken`, exactly as for one held now); it finds nobody (`GET /
 and calls nobody (`@old` or `@old.jarvis`) while it is not their handle; its former holder may take it back once their
 year has passed. (WeChat's rule — a released WeChat ID is never anyone else's — rather than GitHub's, which frees an old
 name at once and so invites impersonation.) How a message calls an Agent by its handle, in full or by the name part
-alone: Agents and runs, In a group.
+alone: Agents and runs, In a group. A member whose display name is an Agent's name part (「jarvis」) makes a bare `@jarvis`
+call nobody in the groups they are in — people first; anyone may take that display name — while the full form
+`@owner.jarvis` always calls the Agent.
 
 ### Agents
 
@@ -2478,10 +2480,13 @@ message calls it: `@` + its handle on a token boundary — not preceded or follo
 it: names are not unique in a group). Its handle in full, `@owner.name` (Handles), always calls it; the name part alone,
 `@name`, calls the one Agent member of the group with that name part — nobody when a person member has that handle or
 that display name (trimmed, case ignored, the whole name: people first — `@anna` is the person anna when she is a member,
-and so is `@Jarvis` when a member is called 「Jarvis」, which is what the @ picker writes for a person), and nobody when
-two or more Agent members have it, exactly as a handle nobody there has (no run, no notice). A full handle two live
+and so is `@Jarvis` when a member is called 「Jarvis」), and nobody when two or more Agent members have it, exactly as a handle nobody there has (no run, no notice). A full handle two live
 Agents would share (only a writer that skipped the owner's account lock could make one) calls nobody too. An Agent's
-message is read the same way (one of two `jarvis` may be itself). The proactive judgement's "someone was named" reads
+message is read the same way (one of two `jarvis` may be itself). The @ picker writes a person as `@` and their display
+name: that is safe only for a display name of one word (made of `A-Za-z0-9_`, as 「Jarvis」). A display name of more than
+one word picked there — 「Jarvis Lee」 written `@Jarvis Lee` — reads as `@jarvis`, and still calls `*.jarvis` where it is
+the only one, until a mention carries its target rather than its text (planned next); the same for a name with a dot
+(「Anna.Lee」 → the full form `anna.lee`). The proactive judgement's "someone was named" reads
 bare names the same way (`namesAgentMember`). A mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
 name part of 2–24 after it: a `.` not followed by one of them is punctuation (`ask @xiaolin.jarvis.` calls
 `xiaolin.jarvis`), `@a.b.c` is `a.b` and then text, and a part out of those lengths calls nobody. A dot followed by a
