@@ -154,7 +154,7 @@ describe("the worker's side of a run in another conversation", () => {
       const claimed = (await app.agentPort.claimNext())!;
       expect(claimed).toEqual({ id: runId, agentId: s.agent.id, ownerId: s.owner.id, conversationId: s.other });
       // Nothing of the owner's is there for the Agent to answer: it ends without a call.
-      expect(await app.agentPort.begin(claimed)).toEqual({ status: "failed", error: "busy" });
+      expect(await app.agentPort.begin(claimed)).toEqual({ status: "cancelled" });
       return claimed;
     });
     // As if the reply had been posted there while the owner wrote more (seq 5).
