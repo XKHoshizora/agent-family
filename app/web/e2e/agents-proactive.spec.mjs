@@ -74,7 +74,7 @@ test("an Agent replies unasked when the judgement picks it: its owner sees ` · 
       await expect(proactive).not.toBeChecked();
       await expect(form).toContainText("打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。");
       await proactive.check();
-      await expect(form.getByLabel("话多话少", { exact: true })).toHaveValue("normal");
+      await expect(form.getByLabel("话多话少", { exact: true })).toHaveAttribute("value", "normal");
       await expect(form.getByLabel("主动回复每天最多花", { exact: true })).toHaveValue("20");
     },
   });
