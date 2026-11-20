@@ -1,7 +1,7 @@
 import type { FastifyRequest } from "fastify";
 import { once } from "node:events";
 import net from "node:net";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { ANSWER_FLOOR, holdUntilFloor, startAnswerClock } from "../src/auth/answer-floor.ts";
 import { createInvite } from "../src/auth/invites.ts";
 import { api, signUp } from "./helpers/actors.ts";
@@ -42,16 +42,27 @@ describe("holdUntilFloor", () => {
   test("waits out what is left of the floor, and does not pad work that already took longer", async () => {
     const fresh = {} as FastifyRequest;
     await startAnswerClock(fresh);
-    let t0 = performance.now();
+    const t0 = performance.now();
     await holdUntilFloor(fresh, { ms: 80, jitterMs: 0 });
     expect(performance.now() - t0).toBeGreaterThanOrEqual(75);
 
     const slow = {} as FastifyRequest;
     await startAnswerClock(slow);
     await new Promise((resolve) => setTimeout(resolve, 60));
-    t0 = performance.now();
-    await holdUntilFloor(slow, { ms: 50, jitterMs: 0 });
-    expect(performance.now() - t0).toBeLessThan(10);
+    // More than the floor has passed whatever the load (it can only add to the 60 ms): the answer is held for nothing, which
+    // is that no timer is set at all, not that something returned within some number of milliseconds.
+    const timers = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void) => (fn(), 0)) as unknown as typeof setTimeout);
+    try {
+      await holdUntilFloor(slow, { ms: 50, jitterMs: 0 });
+      expect(timers).not.toHaveBeenCalled();
+      // … and the same call on a fresh clock does set one (the spy sees the pad it is there to count).
+      const again = {} as FastifyRequest;
+      await startAnswerClock(again);
+      await holdUntilFloor(again, { ms: 1_000_000, jitterMs: 0 });
+      expect(timers).toHaveBeenCalledTimes(1);
+    } finally {
+      timers.mockRestore();
+    }
   });
 });
 

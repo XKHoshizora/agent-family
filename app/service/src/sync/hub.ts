@@ -143,6 +143,11 @@ export class Hub {
     this.timer.unref();
   }
 
+  /** Resolves once no delivery is queued or under way (for tests: what a finished test leaves running). */
+  async idle(): Promise<void> {
+    while (!this.stopped && this.queues.size > 0) await new Promise<void>((r) => setImmediate(r));
+  }
+
   stop(): void {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);

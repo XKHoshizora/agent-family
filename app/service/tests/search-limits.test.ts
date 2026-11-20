@@ -4,8 +4,10 @@ import { api, befriend, signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
 import { listen } from "./helpers/ws.ts";
 
-const SEARCH_MS = 600;
-const POOL_MS = 1500;
+// Long enough for a slow machine to see the waiting statement before its own timeout ends it; the file waits it out once per search route.
+const SEARCH_MS = 2000;
+// Far above the search's own timeout, so that a busy machine can never make "cut off by its own timeout, not the pool's" a matter of speed.
+const POOL_MS = 10_000;
 const { app, db } = useApp({ env: { SEARCH_STATEMENT_TIMEOUT_MS: String(SEARCH_MS), DB_STATEMENT_TIMEOUT_MS: String(POOL_MS) } });
 
 const BUSY = { status: 503, json: { error: "busy" } };
@@ -97,12 +99,25 @@ describe("search statement timeout", () => {
     const release = await blockMessages();
     try {
       for (const url of ["/api/search?q=find", `/api/conversations/${dm}/search?q=find`]) {
-        const t0 = performance.now();
-        expect(await api(app, a, "GET", url)).toEqual(BUSY);
-        const took = performance.now() - t0;
-        // Its own timeout, not the pool's.
-        expect(took).toBeGreaterThanOrEqual(SEARCH_MS - 50);
-        expect(took).toBeLessThan(POOL_MS);
+        const answered = api(app, a, "GET", url);
+        // The statement is waiting for the lock: it was neither refused up front nor answered early for another reason.
+        let since = "";
+        await vi.waitFor(
+          async () => {
+            const { rows } = await db.query<{ since: string }>(
+              "select query_start::text as since from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query ilike '%messages%'",
+            );
+            expect(rows).toHaveLength(1);
+            since = rows[0]!.since;
+          },
+          { timeout: 5000 },
+        );
+        expect(await answered).toEqual(BUSY);
+        // Cut off by the search's own timeout: the statement had waited at least that long when it ended, by the database's
+        // own clock (neither this process's nor the machine's speed enters), and the pool's timeout (POOL_MS) was far off.
+        const waited = await db.query<{ ms: number }>("select extract(epoch from clock_timestamp() - $1::timestamptz) * 1000 as ms", [since]);
+        expect(Number(waited.rows[0]!.ms)).toBeGreaterThanOrEqual(SEARCH_MS);
+        expect(Number(waited.rows[0]!.ms)).toBeLessThan(POOL_MS);
       }
     } finally {
       await release();

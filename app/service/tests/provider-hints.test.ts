@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { inferModelHints, modelHints } from "../src/providers/hints.ts";
+import { expectLinear, LOADED_TIMEOUT_MS } from "./helpers/linear.ts";
 
 /**
  * What a model's name says it can do (README "Model providers", `POST /api/providers/:id/models/list`): hints for the
@@ -53,11 +54,9 @@ describe("modelHints: the catalogue first", () => {
     expect(modelHints("acme/claude-house-blend")).toEqual({ vision: true, pdf: true, reasoning: true, chat: true, known: false });
   });
 
-  it("takes a long name in time linear in its length", () => {
-    const started = performance.now();
-    for (let i = 0; i < 2000; i++) modelHints(`gpt-${"-".repeat(40)}${"a".repeat(50)}`);
-    for (let i = 0; i < 2000; i++) modelHints(`claude-sonnet-5-5${"-x".repeat(40)}`);
-    expect(performance.now() - started).toBeLessThan(500);
+  it("takes a long name in time linear in its length", { timeout: LOADED_TIMEOUT_MS }, () => {
+    expectLinear({ n: 40, make: (n) => `gpt-${"-".repeat(n)}${"a".repeat(n + 10)}`, run: (name) => void modelHints(name) });
+    expectLinear({ n: 40, make: (n) => `claude-sonnet-5-5${"-x".repeat(n)}`, run: (name) => void modelHints(name) });
   });
 });
 
@@ -163,11 +162,10 @@ describe("inferModelHints", () => {
     for (const name of not) expect([name, hints(name).reasoning]).toEqual([name, false]);
   });
 
-  it("ignores case, and takes a long name in time linear in its length", () => {
+  it("ignores case, and takes a long name in time linear in its length", { timeout: LOADED_TIMEOUT_MS }, () => {
     expect(hints("CLAUDE-SONNET-4")).toEqual({ vision: true, pdf: true, reasoning: true, chat: true });
     expect(hints("Text-Embedding-Ada-002")).toEqual(NOT_CHAT);
-    const started = performance.now();
-    for (let i = 0; i < 200; i++) hints(`${"-".repeat(50)}${"o".repeat(50)}`);
-    expect(performance.now() - started).toBeLessThan(200);
+    // Four times the name, about four times the time (`expectLinear`, helpers/linear.ts), not a number of milliseconds.
+    expectLinear({ n: 50, make: (n) => `${"-".repeat(n)}${"o".repeat(n)}`, run: (name) => void hints(name) });
   });
 });

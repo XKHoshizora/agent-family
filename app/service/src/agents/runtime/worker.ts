@@ -98,6 +98,8 @@ export interface AgentWorker {
   isWorking(runId: string): boolean;
   /** `runOnce` until nothing is queued (follow-ups included); how many ran. */
   drain(): Promise<number>;
+  /** Resolves once no claim is under way and no run is in flight (for tests: what a finished test leaves running). */
+  idle(): Promise<void>;
   /**
    * Stops (once; later calls wait for the same stop): no more claims; calls in flight, and replies still reading their
    * attachments, are abandoned without posting or admitting, and each such run is ended here as recovery would end it
@@ -743,6 +745,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       let n = 0;
       while (await this.runOnce()) n++;
       return n;
+    },
+    async idle() {
+      while (pumping || inFlight.size > 0) await Promise.allSettled([pumping, ...inFlight]);
     },
     stop() {
       stopping ??= (async () => {
