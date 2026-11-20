@@ -8,13 +8,14 @@
 import * as routes from "../api/routes.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
 import { ME } from "./identities.js";
-import { agentErrorText, commonErrorText, providerErrorText, replyErrorText, whisperErrorText } from "./errorTexts.js";
+import { agentErrorText, commonErrorText, profileErrorText, providerErrorText, replyErrorText, whisperErrorText } from "./errorTexts.js";
 import {
   applyAgent,
   applyAgents,
   applyGone,
   applyGroupRun,
   applyModels,
+  applyMyHandle,
   applyMyName,
   applyNewerInWindow,
   applyOlder,
@@ -615,6 +616,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (err?.agents) error.agents = err.agents;
     if (Number.isFinite(err?.left)) error.left = err.left;
     if (err?.count === true) error.count = true;
+    if (err?.availableAt) error.availableAt = err.availableAt;
     return error;
   };
   const failure = (error, text) => ({ ok: false, error, text });
@@ -1027,6 +1029,19 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** Resolves the name as stored; throws the route's error (a 401 signs out). */
     updateDisplayName: (displayName) =>
       call(() => api.updateMe(displayName), (res) => setModel(applyMyName(getModel(), res?.displayName ?? displayName))),
+    /**
+     * My handle, once a year: value the handle as stored; me, my entry and my Agents' full handles change at once. A
+     * refusal's text is `profileErrorText("handle")`'s (`handle_taken`, `handle_change_too_soon` with its date).
+     */
+    changeHandle: (handle) =>
+      attempt(() => api.updateHandle(handle), {
+        map: (res) => (typeof res?.handle === "string" ? res.handle : handle),
+        after: (stored) => setModel(applyMyHandle(getModel(), stored)),
+        text: (error) => profileErrorText("handle", error),
+      }),
+    /** value: when my handle may change again (an ISO time), or null when it may now (`GET /api/me`). */
+    loadHandleChange: () =>
+      attempt(() => api.getMe(), { map: (me) => (typeof me?.handleChangeAvailableAt === "string" ? me.handleChangeAvailableAt : null), text: commonErrorText }),
     /** Uploads my new avatar; on success every URL of it gets a new version. */
     uploadAvatar: (file) => call(() => api.uploadAvatar(file), () => setModel(bumpAvatar(getModel(), now()))),
     // social

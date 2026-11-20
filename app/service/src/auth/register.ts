@@ -4,6 +4,7 @@ import { APIError } from "better-auth/api";
 import { z } from "zod";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
+import { handleFree, HANDLE_PATTERN } from "../principals/store.ts";
 import { displayName } from "../schemas.ts";
 import { findAccountByEmail, lockAccountEmail, removeUnverifiedAccount, type ExistingAccount } from "./accounts.ts";
 import { holdUntilFloor, startAnswerClock, type AnswerFloor } from "./answer-floor.ts";
@@ -19,7 +20,7 @@ export const registerBody = z.object({
   email: z.email().max(254),
   password: z.string().min(10).max(128),
   displayName,
-  handle: z.string().regex(/^[a-z0-9_]{3,24}$/),
+  handle: z.string().regex(HANDLE_PATTERN),
 });
 
 /** How often, at most, the owner of an address hears that someone tried to register it again. */
@@ -76,10 +77,9 @@ export function registerRegistrationRoutes(
             if (!inviteCode || !(await lockUsableInvite(client, inviteCode))) throw new AppError(400, "invalid_invite");
           }
 
-          // Whoever holds the handle — also an unverified account this registration would replace — it is taken:
-          // the answer must not depend on whose e-mail is being registered.
-          const taken = await client.query("select 1 from principals where handle = $1", [handle]);
-          if (taken.rowCount) throw new AppError(409, "handle_taken");
+          // Whoever holds the handle — also an unverified account this registration would replace — or gave it up
+          // (`reserved_handles`: theirs for good), it is taken: the answer must not depend on whose e-mail is being registered.
+          if (!(await handleFree(client, handle, null))) throw new AppError(409, "handle_taken");
 
           // From here on the answer is 201, account or not, and the invite is used up either way.
           await lockAccountEmail(client, email);

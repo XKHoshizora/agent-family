@@ -50,10 +50,15 @@ export const SITE_ENV = {
 
 let counter = 0;
 
-/** `POST /api/agents` with a fresh handle unless `over` names one. */
+/**
+ * `POST /api/agents` with a fresh name part unless `over` names one (`namePart`). A `handle` in `over` is taken as the
+ * name part, as these tests named their Agents before family names: the Agent's handle is then `<owner's handle>.<it>`,
+ * and a bare `@<it>` still calls it in a group where no other Agent has that name part.
+ */
 export function createAgent(app: FastifyInstance, owner: Actor, over: Record<string, unknown> = {}): Promise<ApiResult> {
   const n = ++counter;
-  return api(app, owner, "POST", "/api/agents", { handle: `bot_${n}_${Date.now() % 100000}`, name: `Bot ${n}`, ...over });
+  const { handle, ...rest } = over;
+  return api(app, owner, "POST", "/api/agents", { namePart: handle ?? `bot_${n}_${Date.now() % 100000}`, name: `Bot ${n}`, ...rest });
 }
 
 /** The same, expecting 201; returns the Agent. */

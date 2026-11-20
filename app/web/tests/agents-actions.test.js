@@ -209,7 +209,7 @@ describe("Agents", () => {
     expect(transport.log.filter((x) => x === "sync")).toHaveLength(syncs + 1);
 
     createAgent.mockRejectedValueOnce(apiError(409, "handle_taken"));
-    await expect(actions.createAgent(body)).resolves.toMatchObject({ ok: false, error: { code: "handle_taken" }, text: "这个账号名已被占用，请换一个。" });
+    await expect(actions.createAgent(body)).resolves.toMatchObject({ ok: false, error: { code: "handle_taken" }, text: "你已经有一个用这个账号名的 Agent 了，请换一个。" });
     createAgent.mockRejectedValueOnce(apiError(403, "agent_limit"));
     await expect(actions.createAgent(body)).resolves.toMatchObject({ ok: false, text: "你的 Agent 数量已达到当前档位的上限。" });
     createAgent.mockRejectedValueOnce(apiError(418, "something_new"));

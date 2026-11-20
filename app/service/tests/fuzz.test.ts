@@ -456,7 +456,7 @@ function plausibleBody(route: RouteEntry, fx: Fixture): Record<string, unknown> 
     case "POST /api/sync/catchup":
       return { positions: { [fx.group]: 0 } };
     case "POST /api/agents":
-      return { handle: `fz_${n}`, name: "Fuzz", groupMentions: "owner", chainBudget: "50" };
+      return { namePart: `fz_${n}`, name: "Fuzz", groupMentions: "owner", chainBudget: "50" };
     case "PATCH /api/agents/:id":
       return { intro: "fuzz", groupMentions: "members", chainBudget: "12.5" };
     case "POST /api/agents/draft-persona":

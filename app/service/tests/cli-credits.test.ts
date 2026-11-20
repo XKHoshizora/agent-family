@@ -58,10 +58,12 @@ describe("credits:grant", () => {
     );
     await db.query("insert into agents (principal_id) values ($1)", [rows[0]!.id]);
     for (const args of [["credits:grant", "--points", "5"], ["credits:show"], ["tier:set", "--tier", "plus"]]) {
-      const r = await cli(args[0]!, "--handle", "cli_bot", ...args.slice(1));
+      // Its handle is its owner's, a dot and its name part (family names); the name part alone is nobody's.
+      const r = await cli(args[0]!, "--handle", "cliowner.cli_bot", ...args.slice(1));
       expect([args[0], r.code === 0]).toEqual([args[0], false]);
       expect(r.stderr).toContain("Agent");
     }
+    expect((await cli("credits:show", "--handle", "cli_bot")).stderr).toContain("no such handle");
     expect((await db.query("select 1 from balance_ledger")).rowCount).toBe(0);
     expect((await db.query("select 1 from accounts")).rowCount).toBe(0);
   }, TIMEOUT);

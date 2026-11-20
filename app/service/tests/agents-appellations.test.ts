@@ -74,7 +74,7 @@ describe("ownerAppellation", () => {
     const agent = await mustCreateAgent(app, owner);
     for (const value of ["", "   ", "一".repeat(21), "a\nb", "a\rb", "a\u2028b", "a\u0085b", "a\u000bb", ...UNSTORABLE, 5, {}]) {
       expect([value, (await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { ownerAppellation: value })).status]).toEqual([value, 400]);
-      const body = { handle: `bad_${randomUUID().slice(0, 8)}`, name: "B", ownerAppellation: value };
+      const body = { namePart: `bad_${randomUUID().slice(0, 8)}`, name: "B", ownerAppellation: value };
       expect([value, (await api(app, owner, "POST", "/api/agents", body)).status]).toEqual([value, 400]);
     }
     expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { ownerAppellation: "一".repeat(20) })).status).toBe(200);

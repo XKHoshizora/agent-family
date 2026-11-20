@@ -142,7 +142,13 @@ describe("an Agent is invisible to everyone but its owner", () => {
     expect(requests.rowCount).toBe(0);
     // A person is still found by handle.
     expect((await observe(owner, "GET", `/api/principals/lookup?handle=${stranger.handle}`)).status).toBe(200);
-    expect(agent.handle).toBe("lookup_bot");
+    // Its full handle (family names) is no handle the lookup takes: 400 for everyone, as any malformed one.
+    expect(agent.handle).toBe("ora.lookup_bot");
+    for (const who of [owner, stranger]) {
+      const full = await observe(who, "GET", "/api/principals/lookup?handle=ora.lookup_bot");
+      expect([full.status, full.body]).toEqual([400, '{"error":"invalid_request"}']);
+      expect(full).toEqual(await observe(who, "GET", "/api/principals/lookup?handle=ora.nobody_here"));
+    }
   });
 
   it("an Agent id among a new group's members is refused byte-identically to a random uuid, for its owner and for a stranger; adding it to a group is its owner's alone, a stranger answered as for a random uuid", async () => {

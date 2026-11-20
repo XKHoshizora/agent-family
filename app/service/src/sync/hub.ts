@@ -8,6 +8,7 @@ import { currentMemberIds, peekConversation } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
 import { toWireForReaders, type ReadEvents, type ReadMarker } from "../messages/read.ts";
+import { handleOf } from "../principals/store.ts";
 import { liveSessions } from "../session.ts";
 import type { SocialEvents } from "../social/events.ts";
 import type { WireWhisper } from "../whispers/wire.ts";
@@ -44,7 +45,7 @@ export type PushEvent =
   | { type: "gone"; id: string }
   | { type: "social" }
   | { type: "agent"; id: string }
-  | { type: "principal"; id: string; avatarVersion: number }
+  | { type: "principal"; id: string; avatarVersion: number; handle: string }
   // An Agent's own conversation: to its owner. `activity`: what its running reply's tool is doing (`pushActivity`).
   | { type: "run"; conversationId: string; run: WireRun; activity?: Activity | null }
   // A group: to the Agent's owner, and what every other current member is told of it.
@@ -154,15 +155,15 @@ export class Hub {
   }
 
   /**
-   * After a committed avatar change of `principalId`: tells everyone who can see that principal (they themselves, whoever
-   * shares a conversation with them now, their friends, and an Agent's owner) the new `avatarVersion`, so their clients
-   * load the image again. Recipients and version are read in one query, so nobody who shares nothing with them hears of it.
+   * After a committed avatar or handle change of `principalId`: tells everyone who can see that principal (they themselves,
+   * whoever shares a conversation with them now, their friends, and an Agent's owner) the new `avatarVersion` and `handle`
+   * (an Agent's full one, `handleOf`), so their clients load the image again and show the handle. Recipients and version are read in one query, so nobody who shares nothing with them hears of it.
    * Never throws: the change is already committed, and a client that missed the push learns the version at its next sync.
    */
   async pushPrincipalChanged(principalId: string): Promise<void> {
     if (this.stopped || this.byPrincipal.size === 0) return;
     try {
-      const { rows } = await this.deps.db.query<{ version: number | null; recipients: string[] }>(
+      const { rows } = await this.deps.db.query<{ version: number | null; handle: string; recipients: string[] }>(
         `with seen as (
            select $1::uuid as id
            union select m2.principal_id
@@ -172,13 +173,13 @@ export class Hub {
            union select case when f.a_id = $1 then f.b_id else f.a_id end from friendships f where f.a_id = $1 or f.b_id = $1
            union select owner_id from principals where id = $1 and owner_id is not null
          )
-         select (select avatar_version from principals where id = $1) as version, array(select id from seen) as recipients`,
+         select p.avatar_version as version, ${handleOf("p")} as handle, array(select id from seen) as recipients from principals p where p.id = $1`,
         [principalId],
       );
       const version = rows[0]?.version;
       if (version === null || version === undefined) return;
       for (const id of this.connectedAmong(rows[0]!.recipients)) {
-        this.push(id, { type: "principal", id: principalId.toLowerCase(), avatarVersion: version });
+        this.push(id, { type: "principal", id: principalId.toLowerCase(), avatarVersion: version, handle: rows[0]!.handle });
       }
     } catch (err) {
       this.deps.log.error({ err, principalId }, "avatar announcement failed");

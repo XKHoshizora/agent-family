@@ -251,6 +251,39 @@ function raiseVersionsOf(versions, principals) {
   return next;
 }
 
+/**
+ * A `principal` push's `handle` (a rename; an Agent's full handle follows its owner's): the latest word, set wherever the
+ * principal is held — its entry, my Agent's record, me. Not a string: no change.
+ */
+export function setPrincipalHandle(state, principalId, handle) {
+  if (typeof principalId !== "string" || typeof handle !== "string" || handle === "") return state;
+  let next = state;
+  const entry = next.principals[principalId];
+  if (entry && entry.handle !== handle) next = { ...next, principals: { ...next.principals, [principalId]: { ...entry, handle } } };
+  const agent = next.agents?.[principalId];
+  if (agent && agent.handle !== handle) next = { ...next, agents: { ...next.agents, [principalId]: { ...agent, handle } } };
+  if (next.me?.id === principalId && next.me.handle !== handle) next = { ...next, me: { ...next.me, handle } };
+  return next;
+}
+
+/**
+ * My handle, changed (`PATCH /api/me`): me, my entry, and my Agents' full handles (`<my handle>.<name part>`), at once —
+ * the pushes that follow say the same.
+ */
+export function applyMyHandle(state, handle) {
+  if (!state.me || typeof handle !== "string" || handle === "") return state;
+  const old = state.me.handle;
+  let next = setPrincipalHandle(state, state.me.id, handle);
+  const mine = (h) => typeof h === "string" && h.startsWith(`${old}.`);
+  for (const [id, p] of Object.entries(next.principals)) {
+    if (p?.kind === "agent" && p.ownerId === state.me.id && mine(p.handle)) next = setPrincipalHandle(next, id, `${handle}.${p.handle.slice(old.length + 1)}`);
+  }
+  for (const [id, a] of Object.entries(next.agents ?? {})) {
+    if (mine(a?.handle)) next = setPrincipalHandle(next, id, `${handle}.${a.handle.slice(old.length + 1)}`);
+  }
+  return next;
+}
+
 /** A `principal` push: someone's avatar changed. The push is the latest word, so it sets the version. */
 export function setAvatarVersion(state, principalId, version) {
   if (typeof principalId !== "string" || !isVersion(version) || state.avatarVersions[principalId] === version) return state;

@@ -3,6 +3,7 @@ import { REASONING_LEVELS, type ProactiveLevel, type ReasoningLevel } from "../c
 import { lockConversation } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
+import { handleOf } from "../principals/store.ts";
 import { lockProviderModels } from "../providers/store.ts";
 
 export type ReplyMode = "always" | "mention";
@@ -17,7 +18,10 @@ export type AgentModel = { source: "site"; id: string } | { source: "provider"; 
 export interface AgentRow {
   id: string;
   ownerId: string;
+  /** Its full handle, `<owner's handle>.<name part>` (`handleOf`), read now. */
   handle: string;
+  /** Its name part (`principals.handle` of an Agent): unique among its owner's Agents that are not deleted. */
+  namePart: string;
   /** `principals.display_name`. */
   name: string;
   /** `principals.avatar_version`. */
@@ -65,6 +69,7 @@ interface AgentDbRow {
   id: string;
   owner_id: string;
   handle: string;
+  name_part: string;
   name: string;
   avatar_version: number;
   intro: string;
@@ -93,7 +98,7 @@ interface AgentDbRow {
   created_at: Date;
 }
 
-const SELECT = `select p.id, p.owner_id, p.handle::text as handle, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
+const SELECT = `select p.id, p.owner_id, ${handleOf("p")} as handle, p.handle::text as name_part, p.display_name as name, p.avatar_version, a.intro, a.field, a.persona,
        a.persona_version, a.reply_mode, a.group_mentions, a.chain_budget_micro::text,
        a.others_budget_micro::text, a.proactive, a.proactive_level, a.proactive_budget_micro::text, a.memory, a.memory_ask, a.shared_notes, a.owner_appellation, a.reasoning, a.model_source, a.site_model_id, a.provider_id, a.provider_model,
        a.paused, a.deleted_at is not null as deleted, ac.conversation_id, a.created_at
@@ -112,6 +117,7 @@ function toAgent(r: AgentDbRow): AgentRow {
     id: r.id,
     ownerId: r.owner_id,
     handle: r.handle,
+    namePart: r.name_part,
     name: r.name,
     avatarVersion: r.avatar_version,
     intro: r.intro,
@@ -341,14 +347,14 @@ export async function appellationEntriesOf(q: Queryable, agentIds: readonly stri
   const found = new Map<string, AppellationEntry[]>(agentIds.map((id) => [id, []]));
   if (agentIds.length === 0) return found;
   const { rows } = await q.query<AppellationEntry & { agent_id: string; gone: boolean; theirs: boolean }>(
-    `select aa.agent_id, p.id as "principalId", p.kind, p.handle::text as handle, p.display_name as name, aa.appellation,
+    `select aa.agent_id, p.id as "principalId", p.kind, ${handleOf("p")} as handle, p.display_name as name, aa.appellation,
             ta.deleted_at is not null as gone, p.kind = 'agent' and p.owner_id <> a.owner_id as theirs
        from agent_appellations aa
        join principals p on p.id = aa.principal_id
        join principals a on a.id = aa.agent_id
        left join agents ta on ta.principal_id = p.id
       where aa.agent_id = any($1::uuid[])
-      order by p.handle, p.id`,
+      order by handle, p.id`,
     [agentIds],
   );
   // Someone else's Agent is shown only while it is in a group with this one.

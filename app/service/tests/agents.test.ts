@@ -26,7 +26,8 @@ describe("creating an Agent", () => {
     const res = await createAgent(app, owner, { handle: "helper_one", name: "小助手", intro: "hi", field: "writing" });
     expect(res.status).toBe(201);
     expect(res.json).toMatchObject({
-      handle: "helper_one",
+      // Its owner's handle, a dot and the name part it was created with (family names).
+      handle: "olivia.helper_one",
       name: "小助手",
       intro: "hi",
       field: "writing",
@@ -57,7 +58,7 @@ describe("creating an Agent", () => {
     expect(agentConvs[0].members.map((m: any) => m.id).sort()).toEqual([owner.id, agent.id].sort());
     expect(view.messages).toHaveLength(1);
     expect(view.messages[0]).toMatchObject({ conversationId: agent.conversationId, seq: 1, senderId: agent.id, kind: "text", text: GREETING("小助手") });
-    expect(view.principals.find((p: any) => p.id === agent.id)).toMatchObject({ kind: "agent", displayName: "小助手", handle: "helper_one" });
+    expect(view.principals.find((p: any) => p.id === agent.id)).toMatchObject({ kind: "agent", displayName: "小助手", handle: "olivia.helper_one" });
 
     const stored = await db.query("select client_txn, body from messages where conversation_id = $1", [agent.conversationId]);
     expect(stored.rows).toEqual([{ client_txn: null, body: { text: GREETING("小助手"), fixed: true } }]);
@@ -76,12 +77,13 @@ describe("creating an Agent", () => {
     expect(view.conversations.find((c: any) => c.type === "agent")).toMatchObject({ lastSeq: 0, unread: 0 });
   });
 
-  it("refuses a taken handle (a person's or an Agent's) with 409 handle_taken", async () => {
+  it("refuses a name part one of the owner's Agents has with 409 handle_taken; a person's handle or another owner's Agent's name part is free (family names)", async () => {
     const owner = await signUp(app, "hank");
     const other = await signUp(app, "hilda");
-    expect(await createAgent(app, owner, { handle: other.handle })).toMatchObject({ status: 409, json: { error: "handle_taken" } });
+    expect((await mustCreateAgent(app, owner, { handle: other.handle })).handle).toBe("hank.hilda");
     await mustCreateAgent(app, owner, { handle: "taken_bot" });
-    expect(await createAgent(app, other, { handle: "taken_bot" })).toMatchObject({ status: 409, json: { error: "handle_taken" } });
+    expect(await createAgent(app, owner, { handle: "taken_bot" })).toMatchObject({ status: 409, json: { error: "handle_taken" } });
+    expect((await mustCreateAgent(app, other, { handle: "taken_bot" })).handle).toBe("hilda.taken_bot");
     expect(await createAgent(app, other, { handle: "TAKEN_BOT" })).toMatchObject({ status: 400 });
   });
 
@@ -90,7 +92,7 @@ describe("creating an Agent", () => {
     const bad: Array<Record<string, unknown>> = [
       { name: "" },
       { name: "x".repeat(21) },
-      { handle: "ab" },
+      { handle: "a" },
       { handle: "Bad-Handle" },
       { intro: "x".repeat(41) },
       { field: "x".repeat(21) },
@@ -407,7 +409,7 @@ describe("avatar announcements", () => {
     const so = await connect(app, owner);
     const sx = await connect(app, other);
     expect(await putAvatar(owner, agent.id)).toEqual({ status: 200, json: { ok: true } });
-    expect(await so.next((e) => e.type === "principal")).toEqual({ type: "principal", id: agent.id, avatarVersion: 1 });
+    expect(await so.next((e) => e.type === "principal")).toEqual({ type: "principal", id: agent.id, avatarVersion: 1, handle: agent.handle });
     await api(app, other, "POST", "/api/friend-requests", { handle: owner.handle });
     await sx.next((e) => e.type === "social");
     expect(sx.events.filter((e) => e.type === "principal")).toEqual([]);

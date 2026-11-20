@@ -2,6 +2,7 @@ import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import type { PairEvent, StoredMessage } from "../messages/model.ts";
 import { AGENT_PROFILE_COLUMNS, AGENT_PROFILE_JOIN, agentProfile, type AgentProfile, type AgentProfileRow } from "../messages/principals.ts";
+import { handleOf } from "../principals/store.ts";
 import { lockPair, orderedPair } from "../social/pair.ts";
 import { canDirectSend } from "../social/relations.ts";
 import { appendSystem } from "./system.ts";
@@ -311,7 +312,7 @@ export async function listMembers(q: Queryable, readerId: string, conversationId
       is_creator: boolean;
     } & AgentProfileRow
   >(
-    `select p.id, p.handle::text as handle, p.display_name, p.avatar_version, p.kind, ms.role,
+    `select p.id, ${handleOf("p")} as handle, p.display_name, p.avatar_version, p.kind, ms.role,
             (c.type = 'group' and c.creator_id = p.id) as is_creator, ${AGENT_PROFILE_COLUMNS}
        from memberships me
        join conversations c on c.id = me.conversation_id

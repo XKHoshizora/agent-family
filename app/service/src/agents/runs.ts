@@ -10,7 +10,7 @@ import type { StoredMessage, SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
-import { mentionedHandles } from "./mentions.ts";
+import { mentionedHandles, resolveMentions } from "./mentions.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
@@ -188,10 +188,13 @@ export interface Announced {
   run: WireRun;
 }
 
-/** Whether `text` calls the Agent: `@` and its handle or its current name, case ignored (spec 6.5 "触发"). */
-export function mentions(text: string, agent: Pick<AgentRow, "handle" | "name">): boolean {
-  const lower = text.toLowerCase();
-  return lower.includes(`@${agent.handle.toLowerCase()}`) || lower.includes(`@${agent.name.toLowerCase()}`);
+/**
+ * Whether `text` calls the Agent: its handle or its name part as a whole mention (`mentionedHandles`: `@jarvis_2` is not
+ * `@jarvis`), or `@` and its current name anywhere, case ignored (spec 6.5 "触发").
+ */
+export function mentions(text: string, agent: Pick<AgentRow, "handle" | "namePart" | "name">): boolean {
+  const named = mentionedHandles(text);
+  return named.includes(agent.handle.toLowerCase()) || named.includes(agent.namePart.toLowerCase()) || text.toLowerCase().includes(`@${agent.name.toLowerCase()}`);
 }
 
 /** The Agent of `conversationId` when it is an Agent conversation of `ownerId`'s, else null. */
@@ -840,7 +843,7 @@ export async function budgetReachedWith(
 
 /**
  * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
- * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles
+ * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members those handles call (`resolveMentions`)
  * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
  * as a direct chat reads it: neither of the two calls the other's Agents, nor spends the other's points); each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
  * deleted, paused or has no model, or only its owner may call it (`groupMentions` `owner`) and this is someone else's
@@ -854,14 +857,15 @@ export async function budgetReachedWith(
 async function triggerInGroup(t: Tx, conversationId: string, message: StoredMessage, config: RunLimits): Promise<Triggered> {
   const handles = mentionedHandles(textOf(message));
   if (handles.length === 0) return noneTriggered();
+  const called = [...(await resolveMentions(t, conversationId, handles)).values()];
   const { rows } = await t.query<{ id: string }>(
     `select p.id from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
-      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[])
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id = any($2::uuid[])
         and not ${blockedEitherWay("p.owner_id", "$3::uuid")}
       order by p.id`,
-    [conversationId, handles, message.senderId],
+    [conversationId, called, message.senderId],
   );
   const dayStart = siteToday(config);
   const told = noneTold();
@@ -962,7 +966,7 @@ async function chainBudgetSpent(
 /**
  * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
  * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
- * One query finds the group's current Agent members with those handles that an Agent may call: not deleted, not
+ * One query finds the group's current Agent members those handles call (`resolveMentions`) that an Agent may call: not deleted, not
  * paused, with a model, `groupMentions` `members`, and of an owner with no block, in either direction, between them and
  * the poster's owner, nor between them and the person behind the message (`behindAgentMessage`; none when nobody is) —
  * neither of two people calls the other's Agents, through their own Agent or someone else's no more than themselves: a
@@ -992,7 +996,7 @@ async function chainBudgetSpent(
  * Each Agent refused so, or for a block, is recorded with the message (`recordRefusedCalls`): nothing was noted for it,
  * and should the message lie among what a later follow-up of that Agent answers, it is no call of it (`followUp`). One
  * the query does not find at all (paused, deleted, without a model, only its owner's to call, not a member) is not
- * recorded: a follow-up reads those of the Agent as they are when it is decided.
+ * recorded: nothing was noted for it, so it is no call of a follow-up either (`call_seqs`).
  * The rest are reached as a person's message reaches them (`reachAgents`), as an Agent's (`triggered_by` `agent`),
  * called for by the person behind the message (`behindAgentMessage`, from `postedBy`, the caller and lane of the run that
  * posted it; null when no run did): the caller of that run when it is not its owner's own, else the poster's owner —
@@ -1014,9 +1018,10 @@ export async function triggerFromAgent(
   config: RunLimits & Pick<Config, "agentChainLimit">,
   askers: Askers | (() => Promise<Askers>),
 ): Promise<Triggered> {
-  const own = poster.handle.toLowerCase();
-  const handles = mentionedHandles(textOf(message)).filter((h) => h !== own);
+  const handles = mentionedHandles(textOf(message));
   if (handles.length === 0) return noneTriggered();
+  const called = [...(await resolveMentions(t, conversationId, handles)).values()].filter((id) => id !== poster.id);
+  if (called.length === 0) return noneTriggered();
   const behind = behindAgentMessage(poster.ownerId, postedBy);
   // A block, either way, between a target's owner and the poster's owner or the person behind the message (none to
   // match when nobody is: `$5` null) refuses the target.
@@ -1026,10 +1031,10 @@ export async function triggerFromAgent(
        from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
-      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.handle = any($2::citext[]) and p.id <> $3
+      where m.conversation_id = $1 and m.left_seq is null and p.kind = 'agent' and p.id = any($2::uuid[]) and p.id <> $3
         and a.deleted_at is null and not a.paused and a.model_source is not null and a.group_mentions = 'members'
       order by p.id`,
-    [conversationId, handles, poster.id, poster.ownerId, behind],
+    [conversationId, called, poster.id, poster.ownerId, behind],
   );
   // The targets refused below (a block, the halt, the chain limit, a chain budget, an others' daily budget), recorded with
   // the message as this returns, so that none of them counts it as a call later (`followUp`).
@@ -1108,7 +1113,8 @@ export function followUpOf(run: Announced | null, told: Told = noneTold()): Foll
 /**
  * The follow-up of a run of `agent` in `conversationId` that ended having noted messages up to `pending` beyond what it
  * covered (`covers`), under that conversation's row and the Agent's (`finish`, recovery): a queued reply answering up
- * to `pending`. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
+ * to `pending`. A message there "calls" it only when the run noted it as a call when it was sent (`callSeqs`, the run's
+ * `call_seqs`; none when null), whatever its text would name now. In the Agent's own conversation it is its owner's, as always, and is queued whatever the owner's
  * replies a minute (it answers what its owner wrote meanwhile; README "Replies started"). In a group it is a person's
  * when a person's message in (covers, pending] calls the Agent (one its `groupMentions` lets call it, from a person with no block between them and its owner, in either direction); otherwise only
  * Agents' messages called for it: it is an Agent's, and is not queued at all when the latest of them (`pending`) came
@@ -1136,8 +1142,8 @@ export function followUpOf(run: Announced | null, told: Told = noneTold()): Foll
  * when it was posted — an Agent's for the group's halt, the chain limit, its chain budget, its others' daily budget or a
  * block (`triggerFromAgent`), a person's for its others' daily budget (`triggerInGroup`) — is no call at all
  * (`refused_agent_calls`): nothing was noted for it, though it may lie among what the follow-up answers. One refused
- * because the Agent was paused, had no model or let only its owner call it is not recorded: those are read as they are
- * when the follow-up is decided. Whose questions it answers (`Askers`, Task 10b) comes from the same calls: each
+ * because the Agent was paused, had no model or let only its owner call it is not recorded: nothing was noted for it,
+ * so it is no call of the follow-up either (`call_seqs`). Whose questions it answers (`Askers`, Task 10b) comes from the same calls: each
  * person's sender, and the askers of the run that posted each Agent's — not known (null) when one of those is not (or
  * no run posted it), or when no call is left — and everyone who wrote in (covers, pending] besides (fix round 2,
  * `heardIn`); it answers those calls (`call_seqs`). In the Agent's own conversation, its owner.
@@ -1148,6 +1154,7 @@ export async function followUp(
   conversationId: string,
   covers: number,
   pending: number,
+  callSeqs: readonly (number | string)[] | null,
   config: RunLimits,
 ): Promise<FollowUp> {
   const owners = callerOf(agent.ownerId, agent.ownerId);
@@ -1157,8 +1164,8 @@ export async function followUp(
   // when it was refused for this Agent when it was posted (`refused_agent_calls`), nor when there is a block, either way,
   // between the Agent's owner and the sender or the sending Agent's owner, or the person behind it (nobody behind it
   // matches no block).
-  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null; askers: string[] | null }>(
-    `select m.seq::text as seq, p.kind, m.sender_id, m.body ->> 'text' as text, bh.caller_id, r.asker_ids as askers
+  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; askers: string[] | null }>(
+    `select m.seq::text as seq, p.kind, m.sender_id, bh.caller_id, r.asker_ids as askers
        from messages m
        join principals p on p.id = m.sender_id
        left join agent_runs r on p.kind = 'agent' and ${postingRun("m", "r")}
@@ -1169,10 +1176,12 @@ export async function followUp(
       order by m.seq`,
     [conversationId, covers, pending, agent.ownerId, agent.id],
   );
-  const handle = agent.handle.toLowerCase();
+  // The calls the run noted (`callSeqs`, its `call_seqs`: each recorded as it was accepted when it was sent), never read
+  // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1).
+  const noted = new Set((callSeqs ?? []).map(Number));
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
   const calls = rows.filter(
-    (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && mentionedHandles(r.text ?? "").includes(handle),
+    (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && noted.has(Number(r.seq)),
   );
   const asked = calls.some((r) => r.kind === "human");
   // None of them (or none that names someone): others', with no caller.

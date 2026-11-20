@@ -237,7 +237,7 @@ describe("the settings on the wire", () => {
     for (const key of ["memory", "memoryAsk", "sharedNotes"]) {
       for (const bad of ["yes", null, 1]) {
         expect([key, bad, (await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { [key]: bad })).status]).toEqual([key, bad, 400]);
-        expect([key, bad, (await api(app, owner, "POST", "/api/agents", { handle: `bad_${key.toLowerCase()}`, name: "x", [key]: bad })).status]).toEqual([key, bad, 400]);
+        expect([key, bad, (await api(app, owner, "POST", "/api/agents", { namePart: `bad_${key.toLowerCase()}`, name: "x", [key]: bad })).status]).toEqual([key, bad, 400]);
       }
     }
     expect((await api(app, owner, "PATCH", `/api/agents/${agent.id}`, { memory: false, memoryAsk: true, sharedNotes: false })).json).toMatchObject({
@@ -246,7 +246,7 @@ describe("the settings on the wire", () => {
       sharedNotes: false,
     });
     expect((await api(app, owner, "GET", `/api/agents/${agent.id}`)).json).toMatchObject({ memory: false, memoryAsk: true, sharedNotes: false });
-    const made = await api(app, owner, "POST", "/api/agents", { handle: "mem_made", name: "Made", memory: false, memoryAsk: true, sharedNotes: false });
+    const made = await api(app, owner, "POST", "/api/agents", { namePart: "mem_made", name: "Made", memory: false, memoryAsk: true, sharedNotes: false });
     expect(made).toMatchObject({ status: 201, json: { memory: false, memoryAsk: true, sharedNotes: false } });
   });
 

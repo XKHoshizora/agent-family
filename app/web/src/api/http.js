@@ -20,6 +20,8 @@ export class ApiError extends Error {
     this.left = Number.isFinite(details?.left) ? details.left : null;
     /** True on a 409 `room_full` that refused for the room's number of notes (`left` is then still the weight really left). */
     this.count = details?.count === true;
+    /** When a 429 `handle_change_too_soon` says the handle may change again (an ISO time). */
+    this.availableAt = typeof details?.availableAt === "string" ? details.availableAt : null;
   }
 }
 
@@ -101,7 +103,8 @@ function apiErrorOf(status, data, path, epoch) {
     ? data.agents.filter((a) => a && typeof a.id === "string" && typeof a.name === "string").map((a) => ({ id: a.id, name: a.name }))
     : null;
   const left = Number.isFinite(data?.left) ? data.left : null;
-  const error = new ApiError(status, code, reason, { resetsAt, agents, left, count: data?.count === true });
+  const availableAt = typeof data?.availableAt === "string" ? data.availableAt : null;
+  const error = new ApiError(status, code, reason, { resetsAt, agents, left, count: data?.count === true, availableAt });
   if (status === 401 && onUnauthenticated && epoch === sessionEpoch && !path.startsWith(AUTH_PREFIX)) {
     try {
       onUnauthenticated(error);

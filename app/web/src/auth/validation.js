@@ -2,6 +2,8 @@
 // Each rule returns an error text, or "" when the value is fine.
 
 export const HANDLE_PATTERN = /^[a-z0-9_]{3,24}$/;
+/** An Agent's name part (family names): its handle is `<owner's handle>.<name part>`. */
+export const NAME_PART_PATTERN = /^[a-z0-9_]{2,24}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
@@ -79,6 +81,13 @@ export function appellation(value) {
 export function handle(value) {
   if (!value) return "请输入账号名";
   if (!HANDLE_PATTERN.test(value)) return "账号名为 3 到 24 位小写字母、数字或下划线";
+  return "";
+}
+
+/** An Agent's name part, the part of its account name after its owner's handle and the dot. */
+export function namePart(value) {
+  if (!value) return "请输入账号名";
+  if (!NAME_PART_PATTERN.test(value)) return "账号名为 2 到 24 位小写字母、数字或下划线";
   return "";
 }
 

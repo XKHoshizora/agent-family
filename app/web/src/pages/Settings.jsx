@@ -1,8 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { profileErrorText } from "../data/errorTexts.js";
-import { displayName as displayNameProblem } from "../auth/validation.js";
+import { dayText, profileErrorText } from "../data/errorTexts.js";
+import { displayName as displayNameProblem, handle as handleProblem } from "../auth/validation.js";
 import { entity, nameOf } from "../state/selectors.js";
 import { Avatar, Btn, Field, KV, Reason, Switch, Tag } from "../ui/primitives.jsx";
 import { ListHeader } from "./ChatList.jsx";
@@ -109,6 +109,73 @@ function NameForm({ account }) {
   );
 }
 
+/**
+ * My account name (账号名), changed once a year (`PATCH /api/me {handle}`, Task N): my Agents' full handles follow it. When it
+ * may change again is read from `GET /api/me` when the page opens and after a change (`loadHandleChange`); while the
+ * service says a date the box is locked and the date is shown. Unread or unreadable: no date, and the service decides.
+ * Refusals (`这个名字已经有人用了`, the year not up) are shown under the box, never toasted.
+ */
+function HandleForm({ account }) {
+  const { dispatch, actions } = useStore();
+  const { busy, run } = useAction();
+  const [handle, setHandle] = useState(account.handle);
+  const [error, setError] = useState("");
+  const [availableAt, setAvailableAt] = useState(null);
+  useEffect(() => setHandle(account.handle), [account.handle]);
+  useEffect(() => {
+    let live = true;
+    actions.loadHandleChange().then((res) => {
+      if (live && res.ok) setAvailableAt(res.value);
+    });
+    return () => {
+      live = false;
+    };
+  }, [actions]);
+  const day = availableAt === null ? null : dayText(availableAt);
+  const waiting = day !== null;
+  const unchanged = handle === account.handle;
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (busy !== null || unchanged || waiting) return;
+    const problem = handleProblem(handle);
+    setError(problem);
+    if (problem) return;
+    const res = await run("handle", () => settled(actions.changeHandle(handle)), () => "");
+    if (!res.ok) {
+      if (res.error?.code === "busy_here") return;
+      setError(refusalText(res.error));
+      // Too soon: the date the service says locks the box, as a read of it would.
+      if (res.error?.error?.code === "handle_change_too_soon" && dayText(res.error.error.availableAt)) setAvailableAt(res.error.error.availableAt);
+      return;
+    }
+    dispatch({ type: "toast", text: "账号名已更新" });
+    const next = await actions.loadHandleChange();
+    if (next.ok) setAvailableAt(next.value);
+  };
+
+  return (
+    <form onSubmit={submit}>
+      <Field label="账号名" error={error} hint={waiting ? `一年可以改一次，${day}起可以再改` : "3 到 24 位小写字母、数字或下划线。一年可以改一次。"}>
+        <input
+          value={handle}
+          disabled={waiting}
+          onChange={(e) => {
+            setHandle(e.target.value);
+            setError("");
+          }}
+          autoComplete="off"
+          autoCapitalize="none"
+          spellCheck={false}
+        />
+      </Field>
+      <Btn type="submit" variant="primary" disabled={busy !== null || unchanged || waiting}>
+        {busy === "handle" ? "保存中…" : "修改账号名"}
+      </Btn>
+    </form>
+  );
+}
+
 function ProfilePage() {
   const { state, dispatch, actions } = useStore();
   const session = useSession();
@@ -134,9 +201,11 @@ function ProfilePage() {
         <AvatarEditor upload={actions.uploadAvatar} errorText={(e) => profileErrorText("avatar", e)} />
         <h3>昵称</h3>
         <NameForm account={account} />
+        <h3>账号名</h3>
+        <HandleForm account={account} />
         <h3>账户</h3>
-        <KV rows={[["账号名", `@${account.handle}`], ["邮箱", account.email ?? ""]]} />
-        <p className="muted">账号名和邮箱不能修改。</p>
+        <KV rows={[["邮箱", account.email ?? ""]]} />
+        <p className="muted">邮箱不能修改。</p>
         {session && (
           <div className="stack-actions row-actions">
             <Btn variant="danger" onClick={signOut}>退出登录</Btn>

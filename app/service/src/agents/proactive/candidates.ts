@@ -1,8 +1,9 @@
 import type { ProactiveConfig } from "../../config.ts";
 import type { Queryable } from "../../db.ts";
 import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
+import { handleOf } from "../../principals/store.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
-import { mentionedHandles } from "../mentions.ts";
+import { mentionedHandles, namesAgentMember } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
 import { heardFromOf, type Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
@@ -69,8 +70,8 @@ const cut = (text: string, chars: number): string => Array.from(oneLine(text)).s
 /**
  * The sender of the message at `seq` when it is one to judge (design rule 3): the conversation is an open group, the
  * message is its latest that is not a notice, a person sent it, Agents were not halted at or after it (a halt keeps them
- * out until a person writes again, rule 13), and its text (a file's caption) names no Agent by `@handle` — any Agent,
- * in the group or not: whoever names an Agent asked that one, and none other answers in its place. Null otherwise.
+ * out until a person writes again, rule 13), and its text (a file's caption) names no Agent by `@handle` (`namesAnAgent`):
+ * whoever names an Agent asked that one, and none other answers in its place. Null otherwise.
  */
 export async function judgeable(q: Queryable, conversationId: string, seq: number): Promise<{ senderId: string } | null> {
   const { rows } = await q.query<{ type: string; closed: boolean; halted: string | null; seq: string | null; sender_id: string | null; kind: string | null; text: string | null }>(
@@ -85,19 +86,31 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
   const r = rows[0];
   if (!r || r.type !== "group" || r.closed || r.seq === null || Number(r.seq) !== seq || r.kind !== "human" || r.sender_id === null) return null;
   if (r.halted !== null && Number(r.halted) >= seq) return null;
-  if (await namesAnAgent(q, r.text ?? "")) return null;
+  if (await namesAnAgent(q, conversationId, r.text ?? "")) return null;
   return { senderId: r.sender_id };
 }
 
 /**
- * Whether `text` names an Agent by `@handle` — any Agent, in the group or not: such a message is no one to judge
- * (`judgeable`, the decision's first read). One query, only when the text has a handle.
+ * Whether `text` names an Agent by `@handle` — by its full handle `owner.name` any Agent, in the group or not; by a bare
+ * name part an Agent member of group `conversationId` (one or more: two of one name part call nobody, but the message
+ * asked an Agent all the same), read as a mention is read there (mentions.ts `namesAgentMember`: a person member's handle
+ * or display name is a person first): such a message is no one to judge (`judgeable`, the decision's first read). At most
+ * two queries, none when the text has no handle.
  */
-export async function namesAnAgent(q: Queryable, text: string): Promise<boolean> {
+export async function namesAnAgent(q: Queryable, conversationId: string, text: string): Promise<boolean> {
   const handles = mentionedHandles(text);
   if (handles.length === 0) return false;
-  const named = await q.query("select 1 from principals where kind = 'agent' and handle = any($1::citext[]) limit 1", [handles]);
-  return Boolean(named.rowCount);
+  const full = handles.filter((h) => h.includes("."));
+  if (full.length > 0) {
+    const named = await q.query(
+      `select 1 from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
+        where o.kind = 'human' and o.handle = any($1::citext[]) and (o.handle::text || '.' || p.handle::text) = any($2::text[])
+        limit 1`,
+      [full.map((h) => h.slice(0, h.indexOf("."))), full],
+    );
+    if (named.rowCount) return true;
+  }
+  return namesAgentMember(q, conversationId, handles.filter((h) => !h.includes(".")));
 }
 
 /**
@@ -120,7 +133,7 @@ export const mayAnswerUnasked = (seq: string, sender: string): string =>
 export async function optionsFor(q: Queryable, conversationId: string, seq: number, senderId: string): Promise<Option[]> {
   const { rows } = await q.query<{ id: string; handle: string; name: string; intro: string; field: string; joined_seq: string }>(
     `select x.* from (
-       select p.id, p.handle::text as handle, p.display_name as name, a.intro, a.field, m.joined_seq::text as joined_seq
+       select p.id, ${handleOf("p")} as handle, p.display_name as name, a.intro, a.field, m.joined_seq::text as joined_seq
          from memberships m
          join principals p on p.id = m.principal_id
          join agents a on a.principal_id = p.id
@@ -187,7 +200,7 @@ export async function requestFor(
   if (options.length === 0 && listeners.length === 0) return null;
   const after = Math.max(...(options.length > 0 ? options : listeners).map((o) => o.joinedSeq));
   const { rows } = await q.query<{ seq: string; sender_id: string; sender_kind: string; name: string; handle: string; kind: string; text: string | null; file: string | null }>(
-    `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, p.handle::text as handle, m.kind,
+    `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, ${handleOf("p")} as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
        from messages m join principals p on p.id = m.sender_id
       where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind in ('text', 'file')

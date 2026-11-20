@@ -6,7 +6,7 @@ import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
 import type { StoredMessage } from "../messages/model.ts";
-import { findByHandle } from "../principals/store.ts";
+import { findByHandle, HANDLE_PATTERN } from "../principals/store.ts";
 import { requirePrincipal } from "../session.ts";
 import { blockChanged, blockPrincipal, unblockPrincipal, type BlockResult } from "./blocks.ts";
 import type { SocialListener } from "./events.ts";
@@ -99,7 +99,7 @@ export function registerSocialRoutes(app: FastifyInstance): void {
             .string()
             .max(100)
             .transform((s) => s.toLowerCase())
-            .pipe(z.string().regex(/^[a-z0-9_]{3,24}$/)),
+            .pipe(z.string().regex(HANDLE_PATTERN)),
         }),
         response: { 201: z.object({ id: z.string() }) },
       },
