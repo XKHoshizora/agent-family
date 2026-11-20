@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mentionedHandles } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend } from "../src/agents/mentions.ts";
 import { namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
@@ -116,6 +116,10 @@ const covered = async (agentId: string, conv: string): Promise<number[]> =>
   );
 
 const allRuns = async () => Number((await db.query("select count(*) n from agent_runs")).rows[0].n);
+/** Who the message at `seq` names, as stored when it was sent (Task M). */
+const storedMentions = async (conv: string, seq: number) =>
+  (await db.query<{ mentions: Array<{ id: string; start: number; length: number }> | null }>("select mentions from messages where conversation_id = $1 and seq = $2", [conv, seq])).rows[0]!
+    .mentions;
 const notices = async (conv: string) => Number((await db.query("select count(*) n from messages where conversation_id = $1 and kind = 'system'", [conv])).rows[0].n);
 const settleAll = () => db.query("update agent_runs set status = 'done', finished_at = now() where status in ('queued', 'running')");
 
@@ -123,7 +127,7 @@ const settleAll = () => db.query("update agent_runs set status = 'done', finishe
 const agentSays = (agentId: string, conv: string, text: string) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
-    const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+    const message = await insertMessage(t, conv, agentId, "text", { text }, null, await mentionsAtSend(t, { id: conv, type: "group" }, text));
     return triggerFromAgent(t, conv, message, poster, null, app.deps.config, null);
   });
 
@@ -279,21 +283,21 @@ describe("a person member's display name is a person first (fix round 1, I2)", (
     await join(w.g, tony.id);
     const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
     const runs = await allRuns();
-    await say(w.anna, w.g, "@Jarvis 你好");
+    const named = await say(w.anna, w.g, "@Jarvis 你好");
     expect(await allRuns()).toBe(runs);
     expect(Number((await db.query("select count(*) n from usage_records")).rows[0].n)).toBe(0);
-    // Nor does it name an Agent for the proactive judgement: it named the person.
-    expect(await namesAnAgent(db, w.g, "@Jarvis 你好")).toBe(false);
+    // Nor does it name an Agent for the proactive judgement: it named the person (as stored when it was sent, Task M).
+    expect(await namesAnAgent(db, await storedMentions(w.g, named))).toBe(false);
     // The full form is never a person's.
     const one = await say(w.anna, w.g, "@xiaolin.jarvis 你好");
     expect(await covered(jarvis.id, w.g)).toEqual([one]);
-    expect(await namesAnAgent(db, w.g, "@xiaolin.jarvis")).toBe(true);
+    expect(await namesAnAgent(db, await storedMentions(w.g, one))).toBe(true);
     await settleAll();
     const elsewhere = await group(app, w.xiaolin, "elsewhere", [w.bobby, w.anna]);
     await join(elsewhere, jarvis.id);
     const two = await say(w.anna, elsewhere, "@jarvis 你好");
     expect(await covered(jarvis.id, elsewhere)).toEqual([two]);
-    expect(await namesAnAgent(db, elsewhere, "@jarvis 你好")).toBe(true);
+    expect(await namesAnAgent(db, await storedMentions(elsewhere, two))).toBe(true);
   });
 });
 

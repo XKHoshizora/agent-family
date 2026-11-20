@@ -10,7 +10,6 @@ import type { StoredMessage, SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
-import { mentionedHandles, resolveMentions } from "./mentions.ts";
 import { lockAgent, type AgentRow } from "./store.ts";
 
 /**
@@ -19,7 +18,8 @@ import { lockAgent, type AgentRow } from "./store.ts";
  * `runAudience`: the owner the run, everyone else its state). The worker's side is `port-impl.ts`. A run belongs to
  * one conversation (`conversation_id`), and everything here acts on that one: an Agent has at most one queued or
  * running run per conversation, and a message is folded only into the active run of its own conversation. In a group
- * a message calls Agents by `@handle` (`triggerInGroup`, `triggerFromAgent`), under brakes on Agents calling Agents
+ * a message calls the Agents its stored mentions mean (`messages.mentions`, decided once when it was sent:
+ * mentions.ts; `triggerInGroup`, `triggerFromAgent`), under brakes on Agents calling Agents
  * (the chain limit, the halt, the chain budget) and, on what other people's calls spend of an owner's points, the
  * Agent's others' daily budget (`othersBudgetSpent`). Lock order everywhere: the run's conversation row → `agents` rows
  * (`lockAgent`; several in id order) → run rows → `accounts` rows (several in id order).
@@ -189,12 +189,12 @@ export interface Announced {
 }
 
 /**
- * Whether `text` calls the Agent: its handle or its name part as a whole mention (`mentionedHandles`: `@jarvis_2` is not
- * `@jarvis`), or `@` and its current name anywhere, case ignored (spec 6.5 "触发").
+ * The principals `message`'s stored mentions mean (`messages.mentions`, decided once when it was sent: mentions.ts
+ * `mentionsAtSend`), each once, in the order they are first named; none for a message that names nobody, and for every
+ * message from before mentions were stored. Its text is never read for it.
  */
-export function mentions(text: string, agent: Pick<AgentRow, "handle" | "namePart" | "name">): boolean {
-  const named = mentionedHandles(text);
-  return named.includes(agent.handle.toLowerCase()) || named.includes(agent.namePart.toLowerCase()) || text.toLowerCase().includes(`@${agent.name.toLowerCase()}`);
+export function mentionedIds(message: Pick<StoredMessage, "mentions">): string[] {
+  return [...new Set((message.mentions ?? []).map((m) => m.id))];
 }
 
 /** The Agent of `conversationId` when it is an Agent conversation of `ownerId`'s, else null. */
@@ -554,8 +554,6 @@ async function rateLimitedInGroup(
   return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
 
-const textOf = (message: StoredMessage): string => (typeof message.body.text === "string" ? message.body.text : "");
-
 /**
  * A call on someone else's Agent refused by its caller's limit (`agentCallerRunsPerMinute`): it started nothing and
  * nothing of it is recorded — no run, no `rate_limited` line, no notice; it is only logged, after commit
@@ -842,9 +840,9 @@ export async function budgetReachedWith(
 }
 
 /**
- * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
- * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members those handles call (`resolveMentions`)
- * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
+ * A person's message in a group (plan rulings 6–8; Task M): no stored mention (`mentionedIds`; a file's caption is its
+ * text, read at send) → nothing, not even a query. Otherwise one query finds, among those it means, the group's current
+ * Agent members whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and
  * as a direct chat reads it: neither of the two calls the other's Agents, nor spends the other's points); each, in id order, is locked (`lockAgent` on the group, whose row the send already holds) and called unless it is
  * deleted, paused or has no model, or only its owner may call it (`groupMentions` `owner`) and this is someone else's
  * message. `replyMode` plays no part in a group. Someone else's message is then held to the Agent's others' daily
@@ -855,9 +853,8 @@ export async function budgetReachedWith(
  * `reachAgents`, each called for by the sender (`callerOf`).
  */
 async function triggerInGroup(t: Tx, conversationId: string, message: StoredMessage, config: RunLimits): Promise<Triggered> {
-  const handles = mentionedHandles(textOf(message));
-  if (handles.length === 0) return noneTriggered();
-  const called = [...(await resolveMentions(t, conversationId, handles)).values()];
+  const called = mentionedIds(message);
+  if (called.length === 0) return noneTriggered();
   const { rows } = await t.query<{ id: string }>(
     `select p.id from memberships m
        join principals p on p.id = m.principal_id
@@ -965,8 +962,9 @@ async function chainBudgetSpent(
 
 /**
  * An Agent's own message in a group (plan rulings 10–12), in `postAsAgent`'s transaction, which holds the group's row
- * and the poster's `agents` row. The handles it names, less its own (an Agent never calls itself); no handle → nothing.
- * One query finds the group's current Agent members those handles call (`resolveMentions`) that an Agent may call: not deleted, not
+ * and the poster's `agents` row. Those its stored mentions mean (`mentionedIds`: read once at its post, Task M), less
+ * itself (an Agent never calls itself); none → nothing.
+ * One query finds, among them, the group's current Agent members that an Agent may call: not deleted, not
  * paused, with a model, `groupMentions` `members`, and of an owner with no block, in either direction, between them and
  * the poster's owner, nor between them and the person behind the message (`behindAgentMessage`; none when nobody is) —
  * neither of two people calls the other's Agents, through their own Agent or someone else's no more than themselves: a
@@ -1018,9 +1016,7 @@ export async function triggerFromAgent(
   config: RunLimits & Pick<Config, "agentChainLimit">,
   askers: Askers | (() => Promise<Askers>),
 ): Promise<Triggered> {
-  const handles = mentionedHandles(textOf(message));
-  if (handles.length === 0) return noneTriggered();
-  const called = [...(await resolveMentions(t, conversationId, handles)).values()].filter((id) => id !== poster.id);
+  const called = mentionedIds(message).filter((id) => id !== poster.id);
   if (called.length === 0) return noneTriggered();
   const behind = behindAgentMessage(poster.ownerId, postedBy);
   // A block, either way, between a target's owner and the poster's owner or the person behind the message (none to
@@ -1257,9 +1253,10 @@ export async function haltAgents(t: Tx, conversationId: string, actorId: string)
 
 /**
  * The trigger (spec 6.5): in the send transaction, after a person's `message` was stored (not a repeat), under the
- * send's locks. In a group: `triggerInGroup`, the Agent members its text names by `@handle`. In an Agent conversation
+ * send's locks. In a group: `triggerInGroup`, the Agent members its stored mentions mean. In an Agent conversation
  * only a message from the owner counts, and nothing happens when the Agent is paused, deleted or has no model, or
- * answers only when called (`replyMode` `mention`) and the text calls it neither by `@handle` nor by `@name`. With a
+ * answers only when called (`replyMode` `mention`) and its stored mentions do not mean it (picked, or typed as its full
+ * handle, its name part or `@` and its name: mentions.ts `mentionsAtSend`). With a
  * reply of the Agent already active in this conversation the message is folded into it: a queued one now covers it, a
  * running one notes it in `pending_seq` (one follow-up answers everything that came meanwhile); a reply active in
  * another conversation is not touched. Otherwise a reply is queued here — unless the owner has started their own
@@ -1277,7 +1274,7 @@ export async function maybeTrigger(t: Tx, lock: WriteLock, message: StoredMessag
   if (!found.rows[0]) return noneTriggered();
   const agent = await lockAgent(t, found.rows[0].agent_id, conversationId);
   if (message.senderId !== agent.ownerId || agent.paused || agent.deleted || agent.model === null) return noneTriggered();
-  if (agent.replyMode === "mention" && !mentions(textOf(message), agent)) return noneTriggered();
+  if (agent.replyMode === "mention" && !mentionedIds(message).includes(agent.id)) return noneTriggered();
   // Its owner's message: every reply here is the owner's own.
   const caller = callerOf(agent.ownerId, message.senderId);
 

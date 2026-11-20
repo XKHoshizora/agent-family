@@ -1,9 +1,9 @@
 import type { ProactiveConfig } from "../../config.ts";
 import type { Queryable } from "../../db.ts";
 import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
+import type { Mention } from "../../messages/model.ts";
 import { handleOf } from "../../principals/store.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
-import { mentionedHandles, namesAgentMember } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
 import { heardFromOf, type Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
@@ -70,14 +70,14 @@ const cut = (text: string, chars: number): string => Array.from(oneLine(text)).s
 /**
  * The sender of the message at `seq` when it is one to judge (design rule 3): the conversation is an open group, the
  * message is its latest that is not a notice, a person sent it, Agents were not halted at or after it (a halt keeps them
- * out until a person writes again, rule 13), and its text (a file's caption) names no Agent by `@handle` (`namesAnAgent`):
- * whoever names an Agent asked that one, and none other answers in its place. Null otherwise.
+ * out until a person writes again, rule 13), and its stored mentions mean no Agent (`namesAnAgent`): whoever names an
+ * Agent asked that one, and none other answers in its place. Null otherwise.
  */
 export async function judgeable(q: Queryable, conversationId: string, seq: number): Promise<{ senderId: string } | null> {
-  const { rows } = await q.query<{ type: string; closed: boolean; halted: string | null; seq: string | null; sender_id: string | null; kind: string | null; text: string | null }>(
-    `select c.type, c.closed_at is not null as closed, c.agents_halted_seq::text as halted, m.seq::text as seq, m.sender_id, p.kind, m.body ->> 'text' as text
+  const { rows } = await q.query<{ type: string; closed: boolean; halted: string | null; seq: string | null; sender_id: string | null; kind: string | null; mentions: Mention[] | null }>(
+    `select c.type, c.closed_at is not null as closed, c.agents_halted_seq::text as halted, m.seq::text as seq, m.sender_id, p.kind, m.mentions
        from conversations c
-       left join lateral (select x.seq, x.sender_id, x.body from messages x
+       left join lateral (select x.seq, x.sender_id, x.mentions from messages x
                            where x.conversation_id = c.id and x.kind <> 'system' order by x.seq desc limit 1) m on true
        left join principals p on p.id = m.sender_id
       where c.id = $1`,
@@ -86,31 +86,23 @@ export async function judgeable(q: Queryable, conversationId: string, seq: numbe
   const r = rows[0];
   if (!r || r.type !== "group" || r.closed || r.seq === null || Number(r.seq) !== seq || r.kind !== "human" || r.sender_id === null) return null;
   if (r.halted !== null && Number(r.halted) >= seq) return null;
-  if (await namesAnAgent(q, conversationId, r.text ?? "")) return null;
+  if (await namesAnAgent(q, r.mentions)) return null;
   return { senderId: r.sender_id };
 }
 
 /**
- * Whether `text` names an Agent by `@handle` — by its full handle `owner.name` any Agent, in the group or not; by a bare
- * name part an Agent member of group `conversationId` (one or more: two of one name part call nobody, but the message
- * asked an Agent all the same), read as a mention is read there (mentions.ts `namesAgentMember`: a person member's handle
- * or display name is a person first): such a message is no one to judge (`judgeable`, the decision's first read). At most
- * two queries, none when the text has no handle.
+ * Whether a message's stored mentions (`messages.mentions`, decided once when it was sent: mentions.ts) mean an Agent —
+ * one picked from the @ list, or typed and read at send (its full handle, or its name part where that named it): such a
+ * message is no one to judge (`judgeable`, the decision's first read). Its text is never read for it: a message that
+ * names nobody (null, as every message from before mentions were stored does) names no Agent, and nor does an `@…`
+ * that meant nobody when it was sent (an Agent outside the group, two Agents of one name part). One query, none when it
+ * names nobody.
  */
-export async function namesAnAgent(q: Queryable, conversationId: string, text: string): Promise<boolean> {
-  const handles = mentionedHandles(text);
-  if (handles.length === 0) return false;
-  const full = handles.filter((h) => h.includes("."));
-  if (full.length > 0) {
-    const named = await q.query(
-      `select 1 from principals o join principals p on p.owner_id = o.id and p.kind = 'agent'
-        where o.kind = 'human' and o.handle = any($1::citext[]) and (o.handle::text || '.' || p.handle::text) = any($2::text[])
-        limit 1`,
-      [full.map((h) => h.slice(0, h.indexOf("."))), full],
-    );
-    if (named.rowCount) return true;
-  }
-  return namesAgentMember(q, conversationId, handles.filter((h) => !h.includes(".")));
+export async function namesAnAgent(q: Queryable, mentions: readonly Mention[] | null): Promise<boolean> {
+  const ids = [...new Set((mentions ?? []).map((m) => m.id))];
+  if (ids.length === 0) return false;
+  const { rowCount } = await q.query("select 1 from principals where id = any($1::uuid[]) and kind = 'agent' limit 1", [ids]);
+  return rowCount !== 0;
 }
 
 /**

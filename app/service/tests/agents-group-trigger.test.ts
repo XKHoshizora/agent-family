@@ -1,6 +1,6 @@
 import type { FastifyInstance, InjectOptions } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mentionedHandles } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend } from "../src/agents/mentions.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { maybeTrigger, noneTriggered, triggerFromAgent, type RunLimits } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
@@ -78,7 +78,7 @@ const say = async (who: Actor, conv: string, text: string, extra: object = {}): 
 const agentSays = (agentId: string, conv: string, text: string, config: RunLimits & Pick<Config, "agentChainLimit"> = app.deps.config) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
-    const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+    const message = await insertMessage(t, conv, agentId, "text", { text }, null, await mentionsAtSend(t, { id: conv, type: "group" }, text));
     // Posted by no run: whose question it carries is not known (null, the safe side; Task 10b).
     return { message, ...(await triggerFromAgent(t, conv, message, poster, null, config, null)) };
   });
@@ -169,7 +169,7 @@ describe("a person's message in a group", () => {
   it("without a mention, no Agent is looked up and no run is created", async () => {
     const w = await world();
     await agentOf(w.owner, "anna", w.g, { replyMode: "always" });
-    // Not one query: the text names no handle.
+    // Not one query: the message names nobody (its stored mentions, Task M — whatever its text says).
     const query = vi.fn();
     const fake = { query } as unknown as Tx;
     const lock = {
@@ -186,9 +186,10 @@ describe("a person's message in a group", () => {
       body,
       clientTxn: "x",
       createdAt: new Date(),
+      mentions: null,
     });
     const nothing = noneTriggered();
-    for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@a @ 安娜 @x.y" }, {}]) {
+    for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@a @ 安娜 @x.y" }, { text: "@anna 你好" }, {}]) {
       expect(await maybeTrigger(fake, lock, message(body), app.deps.config)).toEqual(nothing);
     }
     expect(await maybeTrigger(fake, lock, message({ text: "@anna" }, "system"), app.deps.config)).toEqual(nothing);
@@ -563,7 +564,7 @@ describe("an Agent's message in a group", () => {
       db.tx(async (t) => {
         const poster = await lockAgent(t, agentId, conv);
         await meet();
-        const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+        const message = await insertMessage(t, conv, agentId, "text", { text }, null, await mentionsAtSend(t, { id: conv, type: "group" }, text));
         // Posted by no run: whose question it carries is not known (null).
         return triggerFromAgent(t, conv, message, poster, null, app.deps.config, null);
       });
@@ -773,7 +774,7 @@ describe("POST /api/conversations/:id/agents/halt", () => {
       const refused = await db.tx(async (t) => {
         await t.query("set local lock_timeout = '2s'");
         const poster = await lockAgent(t, a.id, w.g);
-        const message = await insertMessage(t, w.g, a.id, "text", { text: "@beta 你看看" }, null);
+        const message = await insertMessage(t, w.g, a.id, "text", { text: "@beta 你看看" }, null, await mentionsAtSend(t, { id: w.g, type: "group" }, "@beta 你看看"));
         // Posted by no run: whose question it carries is not known (null).
         return { message, ...(await triggerFromAgent(t, w.g, message, poster, null, app.deps.config, null)) };
       });

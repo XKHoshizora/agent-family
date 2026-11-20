@@ -1,7 +1,8 @@
 import type { FastifyBaseLogger } from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
-import { MAX_AGENT_OPTIONS, optionsFor, requestFor } from "../src/agents/proactive/candidates.ts";
+import { mentionsAtSend } from "../src/agents/mentions.ts";
+import { judgeable, MAX_AGENT_OPTIONS, optionsFor, requestFor } from "../src/agents/proactive/candidates.ts";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
 import { listenersFor } from "../src/agents/proactive/listeners.ts";
 import { actOnTriggered, noneTriggered, triggerFromAgent, type Caller, type Triggered } from "../src/agents/runs.ts";
@@ -640,8 +641,12 @@ describe.each([false, true])("when the judgement model is not asked (memory %s)"
 
     await say(w.member, w.g, "问个问题");
     expect(await decide(w.g, await agentSays(anna.id, w.g, "我在"))).toEqual(noneTriggered());
-    // An Agent outside the group is named by its full handle (family names); one in it by its name part too.
-    for (const text of ["@anna 在吗", "@member.loner_bot 你在哪", "@ANNA", "@Owner.Anna"]) expect(await decide(w.g, await say(w.member, w.g, text))).toEqual(noneTriggered());
+    // An Agent of the group named by its name part or its full handle (as stored when the message was sent, Task M).
+    for (const text of ["@anna 在吗", "@ANNA", "@Owner.Anna"]) expect(await decide(w.g, await say(w.member, w.g, text))).toEqual(noneTriggered());
+    // An Agent outside the group meant nobody when the message was sent (nothing is stored for it, Task M): the message
+    // is one to judge like any other (before Task M a full handle named any Agent anywhere for this).
+    const outside = await say(w.member, w.g, "@member.loner_bot 你在哪");
+    expect(await judgeable(db, w.g, outside)).toEqual({ senderId: w.member.id });
     await settleAndAge();
     const stale = await say(w.member, w.g, "第一句");
     await say(w.third, w.g, "第二句");
@@ -1085,7 +1090,7 @@ describe.each([false, true])("the rows it locks, and a proactive reply someone a
     const agentCalls = (posterId: string, text: string, postedBy: Caller | null = null) =>
       db.tx(async (t) => {
         const poster = await lockAgent(t, posterId, w.g);
-        const message = await insertMessage(t, w.g, posterId, "text", { text }, null);
+        const message = await insertMessage(t, w.g, posterId, "text", { text }, null, await mentionsAtSend(t, { id: w.g, type: "group" }, text));
         // Posted by no run here: whose question it carries is not known (null, the safe side; Task 10b).
         await triggerFromAgent(t, w.g, message, poster, postedBy, app.deps.config, null);
         return message.seq;

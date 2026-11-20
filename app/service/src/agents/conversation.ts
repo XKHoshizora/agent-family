@@ -10,6 +10,7 @@ import { foundOf, lookupsOf, queriesOf, type LookupFields } from "../messages/lo
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
+import { mentionsAtSend } from "./mentions.ts";
 import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinishedBlock } from "./persona.ts";
 import { RunNotRunning } from "./runtime/port.ts";
 import { withoutMark, withoutMarkAtCut } from "./runtime/prompt.ts";
@@ -203,7 +204,9 @@ export interface AgentReply extends LookupFields {
  * uncleaned. What was cut for length — the text when it is `truncated`, the reasoning when it was cut here or the reply
  * was — also loses what the cut left at its very end of the mark or of a label (`withoutMarkAtCut`); `truncated` says
  * what it always said. The text then loses again any block that taking the mark out put together; a reply that was
- * nothing but the mark and labels is left with no visible text (null, below). The message may then call other Agents there,
+ * nothing but the mark and labels is left with no visible text (null, below). Who its mentions mean is read once from that
+ * text and stored with it (mentions.ts `mentionsAtSend`, Task M). The message may then call other Agents there — those
+ * its stored mentions mean —
  * in this same transaction (runs.ts `triggerFromAgent`, which locks no further `agents` row, not even by a foreign key of
  * what it writes), as the call of the person
  * behind it (`behindAgentMessage`): this run's caller when the run is not its owner's own — a member's call relayed
@@ -284,7 +287,10 @@ export async function postAsAgent(
   if (found.length > 0) body.found = found;
   const queries = own ? queriesOf(reply.queries) : [];
   if (queries.length > 0) body.queries = queries;
-  const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
+  // Who its mentions mean, read once, now, from the text it stores (Task M: a model's text is typed text), and stored with
+  // it: what it calls below, and everything after, reads that.
+  const mentions = await mentionsAtSend(t, { id: conversationId, type: own ? "agent" : "group" }, text);
+  const message = await insertMessage(t, conversationId, agentId, "text", body, runId, mentions);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who
   // is behind its message there is decided by this run's caller and lane (read above; a running run's never change); the

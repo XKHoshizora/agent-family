@@ -1,8 +1,9 @@
+import { checkPicked, mentionsAtSend } from "../agents/mentions.ts";
 import { claimAttachment, linkAttachment } from "../attachments/store.ts";
 import { assertCanSend, lockForWrite, VISIBLE_JOIN, type WriteLock } from "../conversations/store.ts";
 import type { Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
-import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "./model.ts";
+import { insertMessage, MESSAGE_COLUMNS, toStored, type Mention, type MessageBody, type MessageRow, type StoredMessage } from "./model.ts";
 
 /** The longest text a message holds, in characters: the send schema's limit (people's messages are refused above it; an
  * Agent's reply is cut there). */
@@ -16,6 +17,11 @@ export interface SendInput {
   replyToSeq?: number;
   /** The client's retry key: one message per (conversation, sender, clientTxn). */
   clientTxn: string;
+  /**
+   * The mentions picked from the @ list (Task M): who each means and the range of `text` (as stored) that names them;
+   * checked here (agents/mentions.ts `checkPicked`: 400 `bad_mentions`).
+   */
+  mentions?: readonly Mention[];
 }
 
 const invalid = () => new AppError(400, "invalid_request");
@@ -28,6 +34,11 @@ const invalid = () => new AppError(400, "invalid_request");
  * A repeated `clientTxn` returns the stored message with `duplicate: true` and writes nothing — even if
  * sending is no longer allowed or its attachment is linked by now — provided the sender can still read
  * it; otherwise 409 `client_txn_reused`. `lock` is what the transaction holds (for the reply trigger).
+ *
+ * Who its mentions mean is decided here, once, under the conversation's lock (Task M): the picked ones are checked
+ * against the text and the current members (`checkPicked`, 400 `bad_mentions`, nothing stored), and what is typed and
+ * not picked is read (`mentionsAtSend`); both are stored with the message (`messages.mentions`). Nothing reads its text
+ * again to decide who was meant.
  */
 export async function sendMessage(
   t: Tx,
@@ -69,7 +80,11 @@ export async function sendMessage(
     body.attachment = attachment;
   }
 
-  const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn);
+  const text = input.text ?? "";
+  const picked = input.mentions ?? [];
+  await checkPicked(t, conversationId, text, picked);
+  const mentions = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked);
+  const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn, mentions);
   if (body.attachment && !(await linkAttachment(t, body.attachment.id, message.id))) throw invalid();
   return { message, duplicate: false, lock };
 }

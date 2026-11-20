@@ -879,10 +879,11 @@ describe("what comes of it, with the reply worker running", () => {
   it("a message naming an Agent the call did not reach is noted, and its decision refuses it: the judge is never asked", async () => {
     const w = await world(app);
     const anna = await agentIn(app, w.owner, "anna", w.g);
-    await agentIn(app, w.third, "bobbot", null, { proactive: false });
+    // An Agent of the group only its owner may call: a member's mention of it means it (stored with the message, Task M)
+    // but reaches nothing. (One outside the group would mean nobody when sent: that message is judged like any other.)
+    await agentIn(app, w.third, "bobbot", w.g, { proactive: false, groupMentions: "owner" });
     judge.answer(byName({ anna: 0.9 }));
     const noted = vi.spyOn(app.deps.proactive!, "noted");
-    // An Agent outside the group is named by its full handle (family names).
     const asked = await say(app, w.member, w.g, "@third.bobbot 今晚做什么菜好？");
     expect(noted.mock.calls).toEqual([[w.g, asked, w.member.id, false]]);
     expect(await idleNow(app.deps.proactive!)).toBe(false);
