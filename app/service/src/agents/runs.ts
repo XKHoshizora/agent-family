@@ -230,15 +230,23 @@ export async function latestRun(q: Queryable, conversationId: string): Promise<R
 
 /**
  * The limits on replies started a minute — an owner's own lane, the others' (every other lane together), one caller's —
- * and the site's time zone, whose day the others' daily budget is counted in (`othersBudgetSpent`).
+ * and the site's time zone, whose day the others' daily budget is counted in (`othersBudgetSpent`); and the site's models,
+ * by which someone else's call on an Agent whose model is gone is refused as it is made (`reachAgents`).
  */
-export type RunLimits = Pick<Config, "agentRunsPerMinute" | "agentOthersRunsPerMinute" | "agentCallerRunsPerMinute" | "siteTimezone">;
+export type RunLimits = Pick<Config, "agentRunsPerMinute" | "agentOthersRunsPerMinute" | "agentCallerRunsPerMinute" | "siteTimezone" | "siteModels">;
 
 /**
  * Of `agent_runs`: a reply started in the last minute — not one a limit refused (`rate_limited`), which started nothing
  * (`startedLastMinute`, `calledLastMinute`).
  */
 const STARTED_LAST_MINUTE = "purpose = 'reply' and created_at > now() - interval '1 minute' and error is distinct from 'rate_limited'";
+
+/**
+ * `STARTED_LAST_MINUTE` as an owner's minute counts it (`startedLastMinute`): not a reply whose model was not there to
+ * call either (`model_gone`) — it called nothing and spent nothing of the owner's, so calls on an Agent whose model is gone
+ * cannot crowd out calls on the owner's other Agents. A caller's own minute counts it (`calledLastMinute`).
+ */
+const OWNER_STARTED_LAST_MINUTE = `${STARTED_LAST_MINUTE} and error is distinct from 'model_gone'`;
 
 /**
  * Replies `ownerId` has started in the last minute in one lane: their own (`own`, `agentRunsPerMinute`), or else
@@ -250,7 +258,7 @@ const STARTED_LAST_MINUTE = "purpose = 'reply' and created_at > now() - interval
  */
 async function startedLastMinute(t: Tx, ownerId: string, own: boolean): Promise<number> {
   await lockAccount(t, ownerId);
-  const { rows } = await t.query<{ n: number }>(`select count(*)::int as n from agent_runs where owner_id = $1 and (lane = 'own') = $2 and ${STARTED_LAST_MINUTE}`, [
+  const { rows } = await t.query<{ n: number }>(`select count(*)::int as n from agent_runs where owner_id = $1 and (lane = 'own') = $2 and ${OWNER_STARTED_LAST_MINUTE}`, [
     ownerId,
     own,
   ]);
@@ -515,6 +523,15 @@ export async function dropBlockedCalls(t: Tx, runId: string, ownerId: string): P
   return updated.rows[0]!;
 }
 
+/** The model of Agent `agentId` as its `agents` row says now (`agentModelOf`); null for none, or no such Agent. */
+async function modelOfAgent(q: Queryable, agentId: string): Promise<AgentRow["model"]> {
+  const { rows } = await q.query<Parameters<typeof agentModelOf>[0]>(
+    "select model_source, site_model_id, provider_id, provider_model from agents where principal_id = $1",
+    [agentId],
+  );
+  return rows[0] ? agentModelOf(rows[0]) : null;
+}
+
 /** That run `runId` answers the calls at `seqs` too (`call_seqs`, migration 046), besides those it has. */
 async function answersCalls(t: Tx, runId: string, seqs: readonly number[]): Promise<void> {
   if (seqs.length === 0) return;
@@ -553,7 +570,9 @@ export async function queueRun(
  * A reply in `conversationId` the owner's replies a minute in its lane refused (`overLaneLimit`): recorded `failed`,
  * `rate_limited` (retryable), covering `coversSeq`, with whose message and which `caller` called for it and whose
  * questions it answers (`askers`), so the owner sees it and can retry. It never reached a model: no hold, no usage
- * record, and it is not active (it takes no concurrency slot, and the Agent's one active run there stays free).
+ * record, and it is not active (it takes no concurrency slot, and the Agent's one active run there stays free). With
+ * `error` `model_gone`: someone else's call on an Agent whose model is not there to call, refused as it is made
+ * (`reachAgents`), recorded the same way so the group shows its one line and the caller's own limit counts it.
  */
 async function recordRateLimited(
   t: Tx,
@@ -563,11 +582,12 @@ async function recordRateLimited(
   triggeredBy: TriggeredBy,
   caller: Caller,
   askers: Askers,
+  error: "rate_limited" | "model_gone" = "rate_limited",
 ): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
     `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, error, covers_seq, finished_at, triggered_by, caller_id, lane, asker_ids, call_seqs)
-     values ('reply', $1, $2, $3, 'failed', 'rate_limited', $4, now(), $5, $6, $7, $8, array[$4::bigint]) returning ${RUN_COLUMNS}`,
-    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy, caller.id, caller.lane, askersParam(askers)],
+     values ('reply', $1, $2, $3, 'failed', $9, $4, now(), $5, $6, $7, $8, array[$4::bigint]) returning ${RUN_COLUMNS}`,
+    [conversationId, agent.id, agent.ownerId, coversSeq, triggeredBy, caller.id, caller.lane, askersParam(askers), error],
   );
   return { ownerId: agent.ownerId, conversationId, run: toWireRun(rows[0]!) };
 }
@@ -753,6 +773,13 @@ async function reachAgents(
   for (const { agent, by, askers, othersCaller } of unfolded) {
     if (othersCaller !== null && (await calledLastMinute(t, othersCaller)) >= config.agentCallerRunsPerMinute) {
       reached.callerLimited.push({ callerId: othersCaller, agentId: agent.id, conversationId });
+      continue;
+    }
+    // Someone else's call on an Agent whose model is not there to call (models/resolve.ts `modelUsable`) queues no reply
+    // and is not held to its owner's minute (it would spend nothing of theirs): recorded failed `model_gone` at once.
+    // Its owner's own call is queued as any (it ends `model_gone` as it begins, with 换一个模型 for them).
+    if (by.lane !== "own" && !(await modelUsable(t, config, { ownerId: agent.ownerId, model: await modelOfAgent(t, agent.id) }))) {
+      reached.runs.push(await recordRateLimited(t, agent, conversationId, seq, triggeredBy, by, askers, "model_gone"));
       continue;
     }
     const over = await overLaneLimit(t, agent.ownerId, by.lane, config);

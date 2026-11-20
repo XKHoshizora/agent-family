@@ -132,7 +132,8 @@ describe("a model that comes back", () => {
     expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
     await w.trim();
     await say(member, g, "@back_bot 在吗");
-    expect(await app.agentWorker.runOnce()).toBe(true);
+    // Someone else's call on it is refused as it is made (recorded failed at once): nothing is queued.
+    expect(await app.agentWorker.runOnce()).toBe(false);
     const mine = async () => (await api(app, w.owner, "GET", `/api/conversations/${g}/runs`)).json.runs[0].run;
     expect(await mine()).toMatchObject({ error: "model_gone", retryable: false });
     expect(await api(app, w.owner, "POST", `/api/conversations/${g}/runs/retry`, { agentId: w.agent.id })).toEqual({ status: 409, json: { error: "model_gone" } });
@@ -176,12 +177,53 @@ describe("a reply on a model that is gone", () => {
     await w.trim();
     for (const text of ["@gone_bot 帮我看看", "@gone_bot 还在吗"]) {
       await say(member, g, text);
-      expect(await app.agentWorker.runOnce()).toBe(true);
+      // Refused as it is made (recorded failed at once): nothing is queued for the worker.
+      expect(await app.agentWorker.runOnce()).toBe(false);
     }
     expect(gateway.calls.length).toBe(first);
     expect((await api(app, member, "GET", `/api/conversations/${g}/runs`)).json.runs).toEqual([{ agentId: w.agent.id, state: "unavailable" }]);
     const mine = (await api(app, w.owner, "GET", `/api/conversations/${g}/runs`)).json.runs;
     expect(mine).toEqual([{ agentId: w.agent.id, state: "unavailable", run: expect.objectContaining({ status: "failed", error: "model_gone", retryable: false }) }]);
     expect(await charged(w.agent.id)).toBe("0");
+  });
+});
+
+describe("someone else's calls on an Agent whose model is gone", () => {
+  it("queue no reply and do not count toward its owner's others a minute: after 25 of them a call on the owner's working Agent is answered; each caller's own limit still holds", async () => {
+    const w = await providerAgent("mg_spam", { handle: "dead_bot", name: "小死" });
+    const live = await mustCreateAgent(app, w.owner, { handle: "live_bot", name: "小活", model: FAST, persona: "简短地回答。" });
+    const members: Actor[] = [];
+    for (let i = 0; i < 6; i++) members.push(await signUp(app, `mg_sp${i}`));
+    const g = await group(app, w.owner, "team", members);
+    for (const id of [w.agent.id, live.id]) expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: id })).status).toBe(201);
+    await w.trim();
+
+    // Five members, five calls each (a person's own limit is 5 a minute): 25 calls, more than the owner's 20 a minute.
+    for (const m of members.slice(0, 5)) {
+      for (let i = 0; i < 5; i++) {
+        await say(m, g, `@dead_bot 在吗 ${i}`);
+        while (await app.agentWorker.runOnce());
+      }
+    }
+    expect(gateway.calls.length).toBe(first);
+    // No reply was queued for them: each was recorded failed at once, as model_gone.
+    const dead = await db.query<{ status: string; error: string | null; lane: string }>("select status, error, lane from agent_runs where agent_id = $1", [w.agent.id]);
+    expect(dead.rows).toHaveLength(25);
+    expect(dead.rows.every((r) => r.status === "failed" && r.error === "model_gone" && r.lane === "others")).toBe(true);
+    // The one who called most is held by their own limit, as before: a sixth call is not even recorded.
+    const callsOf = async (who: Actor) => Number((await db.query("select count(*) as n from agent_runs where caller_id = $1", [who.id])).rows[0].n);
+    await say(members[0]!, g, "@dead_bot 再问一次");
+    while (await app.agentWorker.runOnce());
+    expect(await callsOf(members[0]!)).toBe(5);
+    // A member sees the one 暂时无法回复 line; its owner, a failure nothing can retry while the model is gone.
+    expect((await api(app, members[1]!, "GET", `/api/conversations/${g}/runs`)).json.runs).toEqual([{ agentId: w.agent.id, state: "unavailable" }]);
+    const mine = (await api(app, w.owner, "GET", `/api/conversations/${g}/runs`)).json.runs;
+    expect(mine).toEqual([{ agentId: w.agent.id, state: "unavailable", run: expect.objectContaining({ error: "model_gone", retryable: false }) }]);
+
+    // Another member's call on the owner's working Agent is answered.
+    await say(members[5]!, g, "@live_bot 你好");
+    gateway.reply("你好！");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await db.query<{ status: string }>("select status from agent_runs where agent_id = $1", [live.id])).rows).toEqual([{ status: "done" }]);
   });
 });
