@@ -92,11 +92,19 @@ const openCreate = async () => {
   await click(inList().getByRole("button", { name: "创建 Agent" }));
 };
 const type = (label, value) => fireEvent.change(inMain().getByLabelText(label), { target: { value } });
+/** The model picker's button (labelled 模型). */
 const modelBox = () => inMain().getByLabelText("模型");
+/**
+ * Opens the picker and chooses the row whose accessible name is `name` — or begins with it: a row reads its name, then
+ * its marks (“小模型 · 免费 · 工具”).
+ */
 const chooseModel = async (name) => {
-  const option = within(modelBox()).getByRole("option", { name });
-  fireEvent.change(modelBox(), { target: { value: option.value } });
-  await flush();
+  if (modelBox().getAttribute("aria-expanded") !== "true") await click(modelBox());
+  const option = [...document.querySelectorAll('.model-pop [role="option"]')].find((o) => {
+    const label = o.getAttribute("aria-label") ?? "";
+    return label === name || label.startsWith(`${name} · `);
+  });
+  await click(option);
 };
 const levels = () => within(inMain().getByLabelText("思考程度")).getAllByRole("option").map((o) => o.textContent);
 const createButton = () => inMain().getByRole("button", { name: /^创建 Agent$|^创建中…$/ });

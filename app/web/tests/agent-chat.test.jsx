@@ -25,6 +25,7 @@ import {
   providerOf,
   runOf,
   syncOf,
+  usageOf,
   wire,
 } from "./fixtures.js";
 import { click, dialog, elapse, flush, installBrowser, mainText, openApp, push, toastText } from "./harness.jsx";
@@ -122,27 +123,29 @@ describe("the header and the list row", () => {
     expect(input().disabled).toBe(false);
   });
 
-  it("the header names the Agent's model now, with its lab's logo; the model opens the Agent's edit form; no model reads 未选模型", async () => {
+  it("the header names the Agent's model now, with its brand mark; the model opens the model picker right there; no model reads 未选模型", async () => {
     const subtitle = () => document.querySelector(".chat-head .chat-title p");
     await openAgentChat({ agent: { model: PROVIDER_MODEL }, providers: [providerOf()] });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · gpt-x");
     const model = within(subtitle()).getByRole("button", { name: "模型：gpt-x，点击更改" });
-    expect(model.querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(model.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(model.querySelector(".model-brand").dataset.brand).toBe("openai");
     await click(model);
-    expect(screen.getByRole("heading", { name: "编辑 小助手" })).toBeTruthy();
-    expect(screen.getByLabelText("人格文档")).toBeTruthy();
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "搜索模型" }));
+    // Still the conversation: no form opened.
+    expect(screen.queryByLabelText("人格文档")).toBeNull();
     expect(model.getAttribute("aria-label")).toBe("模型：gpt-x，点击更改");
     cleanup();
 
     await openAgentChat({ agent: { model: SITE_PAID } });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 大模型");
-    expect(within(subtitle()).getByRole("button", { name: "模型：大模型，点击更改" }).querySelector("img")).toBeNull();
+    expect(within(subtitle()).getByRole("button", { name: "模型：大模型，点击更改" }).querySelector(".model-brand").dataset.brand).toBe("generic");
     cleanup();
 
     await openAgentChat({ agent: { model: null } });
     expect(subtitle().textContent).toBe("你的 Agent · 专属会话 · 未选模型");
-    await click(within(subtitle()).getByRole("button", { name: "模型：未选模型，点击更改" }));
-    expect(screen.getByLabelText("人格文档")).toBeTruthy();
+    expect(within(subtitle()).getByRole("button", { name: "模型：未选模型，点击更改" }).querySelector(".model-brand")).toBeNull();
   });
 
   it("a deleted Agent's row reads 已删除 after its tag", async () => {
@@ -1898,5 +1901,159 @@ describe("Agents in a group (batch 2C)", () => {
     await click(haltButton());
     expect(toastText()).toBe("叫停太频繁了，请稍等一会儿再试。");
     expect(haltButton().disabled).toBe(false);
+  });
+
+  it("a group offers no model picker, in its header or in its details panel, though my Agent is in it", async () => {
+    await openGroup();
+    expect(document.querySelector(".chat-head").querySelector('[aria-haspopup="listbox"]')).toBeNull();
+    await click(screen.getByRole("button", { name: "会话资料" }));
+    const side = document.querySelector(".side-col");
+    expect(side.querySelector('[aria-haspopup="listbox"]')).toBeNull();
+    expect([...side.querySelectorAll(".kv-row dt")].map((dt) => dt.textContent)).not.toContain("模型");
+  });
+});
+
+describe("switching the model where I am (my Agent's own conversation)", () => {
+  const headModel = () => document.querySelector(".chat-head .chat-title p button");
+  const listbox = () => screen.queryByRole("listbox");
+  const rowOf = (name) => [...listbox().querySelectorAll('[role="option"]')].find((o) => o.querySelector(".model-name")?.textContent === name);
+  const side = () => document.querySelector(".side-col");
+  const sideModel = () => [...side().querySelectorAll(".kv-row")].find((r) => r.querySelector("dt").textContent === "模型") ?? null;
+  const openDetails = () => click(screen.getByRole("button", { name: "会话资料" }));
+  const keep = (record) => vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+
+  it("the chat reads no models until the picker opens; then it lists the site's and my providers' models, the current one marked", async () => {
+    const getUsage = vi.fn(async () => usageOf());
+    const { api } = await openAgentChat({ providers: [providerOf()], api: { getUsage } });
+    expect(api.listProviders).not.toHaveBeenCalled();
+    expect(getUsage).not.toHaveBeenCalled();
+    await click(headModel());
+    expect(api.listProviders).toHaveBeenCalledTimes(1);
+    expect([...listbox().querySelectorAll('[role="group"]')].map((g) => g.getAttribute("aria-label"))).toEqual(["站点提供", "我的供应商 · 我的 OpenAI"]);
+    expect(rowOf("小模型").getAttribute("aria-selected")).toBe("true");
+    expect(rowOf("gpt-x").getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("choosing a model saves it with one update of the Agent (its level kept when the new model takes it, else 不思考), the button off meanwhile", async () => {
+    const record = agentOf(AG1, { model: SITE_PAID, reasoning: "high" });
+    const saving = deferred();
+    const patchAgent = vi.fn(() => saving.promise);
+    await openAgentChat({ agent: { model: SITE_PAID, reasoning: "high" }, providers: [providerOf()], api: { patchAgent } });
+    await click(headModel());
+    await click(rowOf("gpt-x"));
+    expect(patchAgent).toHaveBeenCalledTimes(1);
+    expect(patchAgent).toHaveBeenCalledWith(AG1, { model: PROVIDER_MODEL, reasoning: "high" });
+    expect(listbox()).toBeNull();
+    // Off while it saves: it opens nothing, yet keeps the focus.
+    expect(headModel().getAttribute("aria-disabled")).toBe("true");
+    expect(document.activeElement).toBe(headModel());
+    await click(headModel());
+    expect(listbox()).toBeNull();
+    expect(headModel().textContent).toBe("gpt-x");
+    await act(async () => saving.resolve({ ...record, model: PROVIDER_MODEL }));
+    await flush();
+    expect(headModel().getAttribute("aria-disabled")).toBeNull();
+    expect(headModel().textContent).toBe("gpt-x");
+    expect(headModel().getAttribute("aria-label")).toBe("模型：gpt-x，点击更改");
+    expect(toastText()).toBeNull();
+
+    patchAgent.mockImplementation(keep({ ...record, model: PROVIDER_MODEL }));
+    await click(headModel());
+    await click(rowOf("小模型"));
+    expect(patchAgent).toHaveBeenLastCalledWith(AG1, { model: SITE_FREE, reasoning: "none" });
+    expect(headModel().textContent).toBe("小模型");
+  });
+
+  it("while my providers are being read it says so, and no key chooses a row it does not show", async () => {
+    const reading = deferred();
+    const patchAgent = vi.fn();
+    await openAgentChat({ api: { listProviders: vi.fn(() => reading.promise), patchAgent } });
+    await click(headModel());
+    expect(listbox()).toBeNull();
+    const line = document.querySelector(".model-pop .model-empty");
+    expect(line.getAttribute("role")).toBe("status");
+    expect(line.textContent).toBe("正在读取可用的模型…");
+    const search = screen.getByRole("combobox", { name: "搜索模型" });
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    await flush();
+    expect(patchAgent).not.toHaveBeenCalled();
+    await act(async () => reading.resolve({ providers: [providerOf()] }));
+    await flush();
+    expect(rowOf("gpt-x")).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await flush();
+    expect(listbox()).toBeNull();
+    expect(document.activeElement).toBe(headModel());
+  });
+
+  it("choosing the model it has already sends nothing", async () => {
+    const patchAgent = vi.fn();
+    await openAgentChat({ providers: [providerOf()], api: { patchAgent } });
+    await click(headModel());
+    await click(rowOf("小模型"));
+    expect(listbox()).toBeNull();
+    expect(patchAgent).not.toHaveBeenCalled();
+  });
+
+  it("a refused save says why (the update's own words) and the button goes back to the stored model", async () => {
+    const patchAgent = vi.fn(async () => {
+      throw apiError(400, "invalid_request");
+    });
+    await openAgentChat({ providers: [providerOf()], api: { patchAgent } });
+    await click(headModel());
+    await click(rowOf("大模型"));
+    expect(toastText()).toBe("填写的内容有误，或所选模型、思考程度不可用。");
+    expect(headModel().textContent).toBe("小模型");
+    expect(headModel().getAttribute("aria-disabled")).toBeNull();
+  });
+
+  it("an Agent deleted elsewhere: the save says so, and the model is a plain label from then on", async () => {
+    const patchAgent = vi.fn(async () => {
+      throw apiError(409, "agent_deleted");
+    });
+    await openAgentChat({ providers: [providerOf()], api: { patchAgent } });
+    await click(headModel());
+    await click(rowOf("大模型"));
+    expect(toastText()).toBe("这个 Agent 已删除。");
+    expect(document.querySelector(".chat-head .chat-title p").textContent).toBe("你的 Agent · 专属会话 · 小模型");
+    expect(patchAgent).toHaveBeenCalledTimes(1);
+    cleanup();
+    await openAgentChat({ agent: { deleted: true }, providers: [providerOf()] });
+    expect(document.querySelector(".chat-head .chat-title p").textContent).toContain("小模型");
+    expect(headModel()).toBeNull();
+  });
+
+  it("管理供应商 at the foot of the list leads to Settings › 模型供应商", async () => {
+    await openAgentChat({ providers: [providerOf()] });
+    await click(headModel());
+    await click(within(document.querySelector(".model-foot")).getByRole("button", { name: "管理供应商" }));
+    expect(listbox()).toBeNull();
+    expect(screen.getByRole("heading", { name: "我的模型供应商" })).toBeTruthy();
+  });
+
+  it("the details panel has a 模型 row above 操作 with the same picker, which saves the same way", async () => {
+    const record = agentOf(AG1, { model: SITE_FREE });
+    const patchAgent = vi.fn(keep(record));
+    await openAgentChat({ providers: [providerOf()], api: { patchAgent } });
+    await openDetails();
+    const row = sideModel();
+    expect(row).not.toBeNull();
+    const heading = [...side().querySelectorAll("h3")].find((h) => h.textContent === "操作");
+    expect(row.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const button = within(row).getByRole("button", { name: "模型：小模型，点击更改" });
+    expect(button.getAttribute("aria-haspopup")).toBe("listbox");
+    await click(button);
+    await click(rowOf("plain"));
+    expect(patchAgent).toHaveBeenCalledWith(AG1, { model: { source: "provider", providerId: P1, model: "plain" }, reasoning: "none" });
+    expect(within(sideModel()).getByRole("button").textContent).toBe("plain");
+    expect(headModel().textContent).toBe("plain");
+  });
+
+  it("a deleted Agent's details panel shows its model as a plain label", async () => {
+    await openAgentChat({ agent: { deleted: true } });
+    await openDetails();
+    expect(sideModel().querySelector("dd").textContent).toBe("小模型");
+    expect(within(sideModel()).queryByRole("button")).toBeNull();
   });
 });

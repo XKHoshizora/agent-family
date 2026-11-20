@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { profileErrorText } from "../data/errorTexts.js";
@@ -14,7 +14,8 @@ import { ChevronLeft } from "../icons.js";
 import { useSession } from "../auth/AuthRoot.jsx";
 import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
 import { MEMORY_LANGUAGES, languageName } from "../data/memoryLanguages.js";
-import { ModelGroups, choiceList, modelKey, useModelSources } from "./ModelPicker.jsx";
+import { PROVIDERS_PAGE, choiceList, modelKey, pickerGroups, staleRows, useModelSources } from "./ModelPicker.jsx";
+import { ModelSelect } from "./ModelSelect.jsx";
 import { refusalText, settled, useAction } from "./useAction.js";
 
 export function SettingsList() {
@@ -223,10 +224,14 @@ function convertedLine(result) {
     .join("");
 }
 
+/** The first row of 用哪个模型整理记忆: the site's calibrated model (stored as no choice, null). */
+const CALIBRATED = { key: "", name: "站点的模型（已校准）", terms: ["站点的模型（已校准）"] };
+
 function MemorySettings() {
-  const { actions } = useStore();
+  const { dispatch, actions } = useStore();
   const { busy, run } = useAction();
   const sources = useModelSources();
+  const pickId = useId();
   const [settings, setSettings] = useState(null);
   const [attempt, setAttempt] = useState(0);
   // The language just chosen, while I am asked whether to convert the notes already there; and how the conversion went.
@@ -298,11 +303,15 @@ function MemorySettings() {
   };
 
   // Memory the site pays for runs only on its free models: a paid site model is not offered here. The chosen model leads the list when
-  // it is no longer offered, as it does on the Agent form.
+  // it is no longer offered, as it does on the Agent form, after the site's calibrated model (no choice: null).
   const memorySources = { ...sources, choices: { ...sources.choices, site: sources.choices.site.filter((c) => !c.paid) } };
   const options = settings ? choiceList(memorySources, settings.memoryModel) : [];
-  const changeModel = async (event) => {
-    const next = options.find((o) => o.key === event.target.value)?.model ?? null;
+  const lead = [CALIBRATED, ...staleRows(options)];
+  const groups = pickerGroups(memorySources);
+  const modelValue = settings ? modelKey(settings.memoryModel) : null;
+  const shownModel = [...lead, ...groups.flatMap((g) => g.options)].find((o) => o.key === modelValue) ?? null;
+  const changeModel = async (key) => {
+    const next = options.find((o) => o.key === key)?.model ?? null;
     const res = await run("memoryModel", () => settled(actions.setMemoryModel(next)), refusalText);
     if (!res.ok) return;
     // Whether it can be used is the service's to say (its key may be unset or unreadable): read the settings again; when
@@ -355,16 +364,23 @@ function MemorySettings() {
           ))}
         </select>
       </Field>
-      <Field label="用哪个模型整理记忆" hint="换成自己的模型后，记得好不好我们没法保证；安全检查不变。">
-        <select value={settings ? modelKey(settings.memoryModel) : ""} disabled={off || sources.status !== "ready"} onChange={changeModel}>
-          {!settings && unread}
-          <option value="">站点的模型（已校准）</option>
-          {options.filter((o) => o.stale).map((o) => (
-            <option key={`current-${o.key}`} value={o.key}>{o.label}</option>
-          ))}
-          <ModelGroups sources={memorySources} />
-        </select>
-      </Field>
+      <div className="field">
+        <label id={`${pickId}-label`} htmlFor={pickId}>用哪个模型整理记忆</label>
+        <ModelSelect
+          id={pickId}
+          labelledBy={`${pickId}-label`}
+          describedBy={`${pickId}-hint`}
+          value={modelValue}
+          current={shownModel && { name: shownModel.name, brand: shownModel.brand }}
+          placeholder={settings === null ? "正在读取…" : "读取失败"}
+          lead={lead}
+          groups={groups}
+          disabled={off || sources.status !== "ready"}
+          footer={<Btn small variant="text" onClick={() => dispatch({ type: "nav", patch: PROVIDERS_PAGE })}>管理供应商</Btn>}
+          onChange={changeModel}
+        />
+        <p id={`${pickId}-hint`} className="field-hint">换成自己的模型后，记得好不好我们没法保证；安全检查不变。</p>
+      </div>
       {settings && !settings.memoryModelUsable && <Reason>选的模型现在用不了，记忆暂时不会更新。</Reason>}
       {settings === "" && (
         <Reason>

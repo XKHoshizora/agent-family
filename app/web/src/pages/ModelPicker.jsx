@@ -1,7 +1,11 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Btn, Notice, Reason } from "../ui/primitives.jsx";
-import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
+import { labOfModel } from "../ui/LabLogo.jsx";
+import { ModelBrand } from "../ui/ModelBrand.jsx";
+import { brandOf } from "../ui/modelBrands.js";
+import { ModelSelect } from "./ModelSelect.jsx";
+import { refusalText, settled, useAction } from "./useAction.js";
 
 /** The reasoning levels in the service's order, and how the form says them. */
 export const LEVELS = [
@@ -39,17 +43,49 @@ export function modelLab(state, model) {
   return labOfModel(model.model);
 }
 
+/** The brand of a chosen model, for its mark in the picker: a site model by its id, then its label; a provider model by its name. */
+export function modelBrand(state, model) {
+  if (!model) return null;
+  if (model.source === "site") return brandOf(model.id) ?? brandOf(state.siteModels.find((m) => m.id === model.id)?.label);
+  return brandOf(model.model);
+}
+
+/** What a model is called where it is switched (the header, the details panel): a site model's label, a provider model's name. */
+export function modelName(state, model) {
+  if (model?.source === "site") return state.siteModels.find((m) => m.id === model.id)?.label ?? model.id;
+  if (model?.source === "provider") return model.model;
+  return null;
+}
+
+const lower = (text) => String(text ?? "").toLowerCase();
+
 /**
  * What can be chosen now: the site's models and each of my providers with its models. Each choice is
  * `{key, model, label, paid, levels, usable}`: `levels` the reasoning levels it allows (`none` first); a provider model whose
- * context is not larger than the output limit its calls get cannot be used (the service refuses it).
+ * context is not larger than the output limit its calls get cannot be used (the service refuses it). For the picker's
+ * row each also has `name`, `brand`, `marks` (免费 / 需余额 for a site model by its tier, 思考 when it can think, 工具
+ * unless its entry says tools: false), `terms` (what a search finds it by: its name, its id or its provider's name) and,
+ * when it cannot be used, `reason`.
  */
 export function modelChoices(state) {
   const limit = state.providerDefaults?.maxOutputTokens ?? 0;
   const site = state.siteModels.map((m) => {
     const model = { source: "site", id: m.id };
     const paid = m.tier === "paid";
-    return { key: modelKey(model), model, label: `${m.label} · ${paid ? "需余额" : "免费"}`, paid, levels: ALL_LEVELS.filter((l) => l === "none" || m.reasoning.includes(l)), usable: true };
+    const name = m.label ?? m.id;
+    const marks = [paid ? "paid" : "free", ...(m.reasoning.length > 0 ? ["thinking"] : []), ...(m.tools !== false ? ["tools"] : [])];
+    return {
+      key: modelKey(model),
+      model,
+      label: `${m.label} · ${paid ? "需余额" : "免费"}`,
+      name,
+      brand: brandOf(m.id) ?? brandOf(m.label),
+      marks,
+      terms: [lower(name), lower(m.id)],
+      paid,
+      levels: ALL_LEVELS.filter((l) => l === "none" || m.reasoning.includes(l)),
+      usable: true,
+    };
   });
   const providers = Object.values(state.providers).map((p) => ({
     id: p.id,
@@ -59,12 +95,53 @@ export function modelChoices(state) {
       const tooSmall = Number.isFinite(m.contextTokens) && m.contextTokens <= limit;
       // A model that lists the levels it supports offers those (as a site model does), else every level when it reasons.
       const levels = !m.reasoning ? ["none"] : m.reasoningLevels ? ALL_LEVELS.filter((l) => l === "none" || m.reasoningLevels.includes(l)) : ALL_LEVELS;
-      return { key: modelKey(model), model, label: tooSmall ? `${m.name}（上下文太小）` : m.name, paid: false, levels, usable: !tooSmall };
+      const marks = [...(m.reasoning ? ["thinking"] : []), ...(m.tools !== false ? ["tools"] : [])];
+      return {
+        key: modelKey(model),
+        model,
+        label: tooSmall ? `${m.name}（上下文太小）` : m.name,
+        name: m.name,
+        brand: brandOf(m.name),
+        marks,
+        terms: [lower(m.name), lower(p.name)],
+        ...(tooSmall ? { reason: "上下文太小" } : {}),
+        paid: false,
+        levels,
+        usable: !tooSmall,
+      };
     }),
   }));
   const any = site.length > 0 || providers.some((p) => p.models.some((m) => m.usable));
   return { site, providers, any };
 }
+
+/** A choice as a row of the picker (`ModelSelect`). A current model that is no longer offered reads as its `label` says. */
+const rowOfChoice = (choice) => ({
+  key: choice.key,
+  name: choice.stale ? choice.label : choice.name,
+  brand: choice.brand,
+  marks: choice.stale ? [] : choice.marks,
+  terms: choice.terms ?? [lower(choice.label)],
+  disabled: !choice.usable,
+  reason: choice.reason ?? null,
+});
+
+/**
+ * The picker's groups in the order and with the words the Agent form always had: 站点提供 (or what it says when the
+ * site's models cannot be read or are none), then one group per provider, 我的供应商 · <name> (or one 我的供应商 saying
+ * there is none, or that they cannot be read). `sources`: `useModelSources()` (its `choices.site` may be narrowed).
+ */
+export function pickerGroups(sources) {
+  const { site, providers } = sources.choices;
+  const siteGroup = { id: "site", label: "站点提供", empty: sources.modelsKnown ? "尚未开放" : "暂时读取不到", options: sources.modelsKnown ? site.map(rowOfChoice) : [] };
+  if (!sources.providersKnown || providers.length === 0) {
+    return [siteGroup, { id: "providers", label: "我的供应商", empty: sources.providersKnown ? "还没有添加供应商" : "暂时读取不到", options: [] }];
+  }
+  return [siteGroup, ...providers.map((p) => ({ id: `provider:${p.id}`, label: `我的供应商 · ${p.name}`, empty: "没有可选的模型", options: p.models.map(rowOfChoice) }))];
+}
+
+/** The rows the picker leads with: the current model when it is no longer offered (`choiceList`'s `stale` one). */
+export const staleRows = (options) => options.filter((o) => o.stale).map(rowOfChoice);
 
 /**
  * The choices of a form as one list: what can be chosen, and before it the Agent's current model when it cannot be
@@ -75,14 +152,16 @@ export function choiceList(sources, current = null, currentReasoning = "none") {
   const key = modelKey(current);
   if (!current || offered.some((c) => c.key === key && c.usable)) return offered.filter((c) => c.usable);
   const levels = ALL_LEVELS.filter((l) => l === "none" || l === currentReasoning);
-  return [{ key, model: current, label: `${sources.labelOf(current)}（当前，已不可用）`, paid: false, levels, usable: true, stale: true }, ...offered.filter((c) => c.usable)];
+  const label = `${sources.labelOf(current)}（当前，已不可用）`;
+  return [{ key, model: current, label, brand: sources.brandOf(current), terms: [lower(label)], paid: false, levels, usable: true, stale: true }, ...offered.filter((c) => c.usable)];
 }
 
 /**
- * Loads what the picker offers (the site's models, my providers, my usage for the balance) when a form opens, and says
- * how far that got: `status` "loading" | "ready"; `nothing` once it is known that no model at all can be chosen.
+ * Loads what the picker offers (the site's models, my providers, my usage for the balance) when a form opens — or, with
+ * `load: false`, once `load` turns true (a picker that reads them only when it is first opened) — and says how far that
+ * got: `status` "loading" | "ready"; `nothing` once it is known that no model at all can be chosen.
  */
-export function useModelSources() {
+export function useModelSources({ load = true } = {}) {
   const { state, actions } = useStore();
   const [providers, setProviders] = useState("loading");
   const [models, setModels] = useState("loading");
@@ -97,10 +176,11 @@ export function useModelSources() {
     setModels(res.ok ? "ok" : "failed");
   }, [actions]);
   useEffect(() => {
+    if (!load) return;
     loadProviders();
     loadModels();
     actions.loadUsage();
-  }, [actions, loadProviders, loadModels]);
+  }, [load, actions, loadProviders, loadModels]);
 
   // The site's models are known once any load of them succeeded (the connection loads them too).
   const modelsKnown = state.providerDefaults !== null || models === "ok";
@@ -119,6 +199,7 @@ export function useModelSources() {
     choices,
     usage: state.usage,
     labelOf: (model) => modelLabel(state, model),
+    brandOf: (model) => modelBrand(state, model),
   };
 }
 
@@ -131,56 +212,21 @@ function paidText(usage) {
   return `需要余额：这个模型按用量从余额扣点，你现在的余额是 ${usage.balanceText} 点，余额用完后它不会回复；最后一次回复可能把余额扣成负数。`;
 }
 
-/**
- * The groups of options a model `<select>` offers: 站点提供 (each model 免费 or 需余额) and 我的供应商 (provider → its
- * models); what cannot be read yet is said inside its group. `sources`: `useModelSources()`.
- */
-export function ModelGroups({ sources }) {
-  const { site, providers } = sources.choices;
-  return (
-    <>
-      <optgroup label="站点提供">
-        {!sources.modelsKnown ? (
-          <option disabled value="site-unknown">暂时读取不到</option>
-        ) : site.length === 0 ? (
-          <option disabled value="site-closed">尚未开放</option>
-        ) : (
-          site.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)
-        )}
-      </optgroup>
-      {!sources.providersKnown || providers.length === 0 ? (
-        <optgroup label="我的供应商">
-          <option disabled value="providers-none">{sources.providersKnown ? "还没有添加供应商" : "暂时读取不到"}</option>
-        </optgroup>
-      ) : (
-        providers.map((p) => (
-          <optgroup key={p.id} label={`我的供应商 · ${p.name}`}>
-            {p.models.length === 0 ? (
-              <option disabled value={`provider-empty-${p.id}`}>没有可选的模型</option>
-            ) : (
-              p.models.map((m) => (
-                <option key={m.key} value={m.key} disabled={!m.usable}>{m.label}</option>
-              ))
-            )}
-          </optgroup>
-        ))
-      )}
-    </>
-  );
-}
+/** Settings › 模型供应商, where models come from (the existing way there). */
+export const PROVIDERS_PAGE = { section: "settings", settingsPage: "providers", pane: "main" };
 
 /**
- * The model field of the Agent form: two groups, 站点提供 (each model 免费 or 需余额) and 我的供应商 (provider → its models);
- * a notice leading to Settings › 模型供应商 when nothing at all can be chosen; the privacy notice beside it.
- * `options`: `choiceList(sources, …)`; `value`: the chosen key; `onChange(key)`.
+ * The model field of the Agent form: the picker (`ModelSelect`) with its two groups, 站点提供 (each model 免费 or 需余额)
+ * and 我的供应商 (provider → its models); a notice leading to Settings › 模型供应商 when nothing at all can be chosen; the
+ * privacy notice beside it. `options`: `choiceList(sources, …)`; `value`: the chosen key; `onChange(key)`. (No
+ * 管理供应商 under its list: leaving for it would drop what the form holds.)
  */
 export function ModelPicker({ sources, options, value, onChange }) {
   const { dispatch } = useStore();
   const id = useId();
   const chosen = options.find((o) => o.key === value) ?? null;
-  const stale = options.filter((o) => o.stale);
   const showSelect = sources.status === "ready" && !sources.nothing;
-  const addProvider = () => dispatch({ type: "nav", patch: { section: "settings", settingsPage: "providers", pane: "main" } });
+  const addProvider = () => dispatch({ type: "nav", patch: PROVIDERS_PAGE });
 
   let control;
   if (sources.status === "loading") control = <p className="muted">正在读取可用的模型…</p>;
@@ -191,21 +237,26 @@ export function ModelPicker({ sources, options, value, onChange }) {
       </Notice>
     );
   } else {
+    const shown = chosen && rowOfChoice(chosen);
     control = (
-      <select id={id} value={chosen ? value : ""} onChange={(e) => onChange(e.target.value)} aria-describedby={chosen?.paid ? `${id}-paid` : undefined}>
-        {!chosen && <option value="">请选择模型</option>}
-        {stale.map((o) => (
-          <option key={`current-${o.key}`} value={o.key}>{o.label}</option>
-        ))}
-        <ModelGroups sources={sources} />
-      </select>
+      <ModelSelect
+        id={id}
+        labelledBy={`${id}-label`}
+        describedBy={chosen?.paid ? `${id}-paid` : undefined}
+        value={chosen ? value : null}
+        current={shown && { name: shown.name, brand: shown.brand }}
+        placeholder="请选择模型"
+        lead={staleRows(options)}
+        groups={pickerGroups(sources)}
+        onChange={onChange}
+      />
     );
   }
 
   return (
     <div>
       <div className="field">
-        {showSelect ? <label htmlFor={id}>模型</label> : <span className="field-label">模型</span>}
+        {showSelect ? <label id={`${id}-label`} htmlFor={id}>模型</label> : <span className="field-label">模型</span>}
         {control}
         {sources.failed && (
           <Reason>
@@ -217,5 +268,65 @@ export function ModelPicker({ sources, options, value, onChange }) {
       </div>
       <Notice tone="info">{PRIVACY_TEXT}</Notice>
     </div>
+  );
+}
+
+/**
+ * The model of one of my Agents, switched where I am (its own conversation's header, the conversation's details panel):
+ * the compact picker, which reads what can be chosen only once it is first opened (and again when that failed), and saves
+ * a choice with the Agent's one update — the model with its thinking level, kept when the new model takes it, else
+ * 不思考, as the Agent form sends them. While that is saved the button shows the choice and does nothing; a refusal is
+ * toasted in the update's own words and the button shows the stored model again. Nothing for an Agent not mine or not
+ * loaded; a deleted one's model is a plain label.
+ */
+export function AgentModelSwitch({ agentId }) {
+  const { state, dispatch, actions } = useStore();
+  const agent = state.agents[agentId];
+  const [opened, setOpened] = useState(false);
+  const sources = useModelSources({ load: opened });
+  const { busy, run } = useAction();
+  const [saving, setSaving] = useState(null);
+  if (!agent?.mine || !agent.loaded) return null;
+
+  const model = saving ?? agent.model;
+  const name = modelName(state, model);
+  const current = model ? { name, brand: modelBrand(state, model) } : null;
+  if (agent.deleted) {
+    return (
+      <span className="head-model">
+        {current && <ModelBrand brand={current.brand} size={14} />}
+        {name ?? "未选模型"}
+      </span>
+    );
+  }
+
+  const options = choiceList(sources, agent.model, agent.reasoning);
+  const choose = async (key) => {
+    const next = options.find((o) => o.key === key && !o.stale);
+    if (!next) return;
+    const reasoning = next.levels.includes(agent.reasoning) ? agent.reasoning : "none";
+    setSaving(next.model);
+    await run("model", () => settled(actions.patchAgent(agentId, { model: next.model, reasoning })), refusalText);
+    setSaving(null);
+  };
+  const open = () => {
+    setOpened(true);
+    if (sources.failed) sources.retry();
+  };
+  return (
+    <ModelSelect
+      compact
+      label={`模型：${name ?? "未选模型"}，点击更改`}
+      value={modelKey(agent.model)}
+      current={current}
+      placeholder="未选模型"
+      lead={staleRows(options)}
+      groups={pickerGroups(sources)}
+      status={opened && sources.status === "loading" ? "正在读取可用的模型…" : null}
+      busy={busy !== null}
+      footer={<Btn small variant="text" onClick={() => dispatch({ type: "nav", patch: PROVIDERS_PAGE })}>管理供应商</Btn>}
+      onOpen={open}
+      onChange={choose}
+    />
   );
 }

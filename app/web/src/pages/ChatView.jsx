@@ -3,8 +3,7 @@ import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { convTitle, convSubtitle, isAgent, nameOf, publishBlock } from "../state/selectors.js";
 import { ConvAvatar, Btn, IconBtn, Notice, Tag } from "../ui/primitives.jsx";
-import { LabLogo } from "../ui/LabLogo.jsx";
-import { modelLab } from "./ModelPicker.jsx";
+import { AgentModelSwitch } from "./ModelPicker.jsx";
 import { MarkdownView, NEWEST_NEAR } from "../ui/markdownView.jsx";
 import { withoutBidiControls } from "../ui/markdownRules.js";
 import { REVEAL_FINISH_MS } from "../ui/reveal.js";
@@ -64,35 +63,18 @@ const topWithin = (node, list) => node.getBoundingClientRect().top - list.getBou
 
 /**
  * The header line of my Agent's own conversation ends with the Agent's model now — a site model's label, a provider
- * model's name, 未选模型 when it has none — and its lab's logo; it opens the Agent's edit form. Nothing until the
- * Agent's record is loaded (its model is not known before then); not a link once the Agent is deleted.
+ * model's name, 未选模型 when it has none — and its brand mark; it opens the model picker right there
+ * (`AgentModelSwitch`). Nothing until the Agent's record is loaded (its model is not known before then), nothing for an
+ * Agent not mine; a plain label once the Agent is deleted.
  */
 function AgentModel({ agentId }) {
-  const { state, dispatch } = useStore();
+  const { state } = useStore();
   const agent = state.agents[agentId];
-  if (!agent?.loaded) return null;
-  const model = agent.model;
-  let name = "未选模型";
-  if (model?.source === "site") name = (state.siteModels ?? []).find((m) => m.id === model.id)?.label ?? model.id;
-  else if (model?.source === "provider") name = model.model;
-  const lab = modelLab(state, model);
-  const shown = (
-    <>
-      <LabLogo lab={lab} size={14} />
-      {name}
-    </>
-  );
-  const edit = () => dispatch({ type: "nav", patch: { section: "agents", agentId, agentView: "edit", pane: "main" } });
+  if (!agent?.loaded || !agent.mine) return null;
   return (
     <>
       {" · "}
-      {agent.deleted ? (
-        <span className="head-model">{shown}</span>
-      ) : (
-        <button type="button" className="head-model" aria-label={`模型：${name}，点击更改`} onClick={edit}>
-          {shown}
-        </button>
-      )}
+      <AgentModelSwitch agentId={agentId} />
     </>
   );
 }

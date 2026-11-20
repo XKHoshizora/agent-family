@@ -5,6 +5,7 @@ import { blockedMe, iBlocked } from "../state/social.js";
 import { Avatar, ConvAvatar, IdentityLine, IconBtn, Btn, Tag, KV, Reason } from "../ui/primitives.jsx";
 import { BlockModal } from "./BlockModal.jsx";
 import { NewTopicModal } from "./AgentChatBits.jsx";
+import { AgentModelSwitch } from "./ModelPicker.jsx";
 import { X } from "../icons.js";
 
 /** What my Agent does not get from its conversation with me. */
@@ -20,6 +21,9 @@ export function DetailsPanel({ conv }) {
   const blocked = conv.type === "human" && iBlocked(state, other);
   const blockedByThem = conv.type === "human" && blockedMe(state, other);
   const deleted = agentChat && agentDeleted(state, conv);
+  // My Agent's own conversation: its model, switched right here (as in the header), once its record is loaded.
+  const myAgent = agentChat ? state.agents[conv.agentId] : null;
+  const modelRow = myAgent?.mine && myAgent.loaded ? [["模型", <AgentModelSwitch key="model" agentId={conv.agentId} />]] : [];
   const go = (patch) => dispatch({ type: "nav", patch: { pane: "main", ...patch } });
 
   return (
@@ -48,6 +52,7 @@ export function DetailsPanel({ conv }) {
           rows={[
             ["谁能看", conv.members.map((id) => nameOf(state, id)).join("、")],
             ...(agentChat ? [["不随关系获得", AGENT_NOT_GRANTED]] : []),
+            ...modelRow,
           ]}
         />
 

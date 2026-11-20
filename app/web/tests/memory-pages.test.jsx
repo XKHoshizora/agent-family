@@ -789,47 +789,62 @@ describe("用哪个模型整理记忆", () => {
     });
   };
 
+  /** The picker's button; its list (open); a row by its name; choosing a row (opening the list first). */
+  const picker = () => inMain().getByLabelText(PICK);
+  const list = () => screen.queryByRole("listbox");
+  const rowNamed = (name) => [...list().querySelectorAll('[role="option"]')].find((o) => o.querySelector(".model-name")?.textContent === name);
+  const choose = async (name) => {
+    if (!list()) await click(picker());
+    await click(rowNamed(name));
+  };
+
   it("sits right under 新记下的内容: the site's calibrated model first, then the site's and my providers' models as the Agent form groups them", async () => {
     const svc = service();
     await openPalace(svc);
-    const select = inMain().getByLabelText(PICK);
-    expect(select.compareDocumentPosition(inMain().getByLabelText("新记下的内容")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
-    expect(select.compareDocumentPosition(room("关于我")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(select.options[0].textContent).toBe("站点的模型（已校准）");
-    expect(select.value).toBe("");
-    const groups = [...select.querySelectorAll("optgroup")].map((g) => [g.label, [...g.querySelectorAll("option")].map((o) => o.textContent)]);
+    expect(picker().compareDocumentPosition(inMain().getByLabelText("新记下的内容")) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+    expect(picker().compareDocumentPosition(room("关于我")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(picker().getAttribute("aria-haspopup")).toBe("listbox");
+    expect(picker().textContent).toBe("站点的模型（已校准）");
+    await click(picker());
+    const first = list().querySelector('[role="option"]');
+    expect(first.querySelector(".model-name").textContent).toBe("站点的模型（已校准）");
+    expect(first.getAttribute("aria-selected")).toBe("true");
+    const groups = [...list().querySelectorAll('[role="group"]')].map((g) => [
+      g.getAttribute("aria-label"),
+      [...g.querySelectorAll('[role="option"]')].map((o) => (o.getAttribute("aria-disabled") === "true" ? `(${o.querySelector(".model-name").textContent})` : o.querySelector(".model-name").textContent)),
+    ]);
     // Memory the site pays for runs only on its free models: a paid one is not offered.
     expect(groups).toEqual([
-      ["站点提供", ["小模型 · 免费"]],
-      ["我的供应商 · 我的 OpenAI", ["gpt-x", "plain", "tiny（上下文太小）"]],
+      ["站点提供", ["小模型"]],
+      ["我的供应商 · 我的 OpenAI", ["gpt-x", "plain", "(tiny)"]],
     ]);
+    expect(rowNamed("tiny").getAttribute("title")).toBe("上下文太小");
+    // Settings: the foot of the list leads to my providers.
+    expect(within(document.querySelector(".model-foot")).getByRole("button", { name: "管理供应商" })).toBeTruthy();
     expect(inMain().getByText("换成自己的模型后，记得好不好我们没法保证；安全检查不变。")).toBeTruthy();
+    expect(picker().getAttribute("aria-describedby")).toBe(inMain().getByText("换成自己的模型后，记得好不好我们没法保证；安全检查不变。").id);
     expect(inMain().queryByText("选的模型现在用不了，记忆暂时不会更新。")).toBeNull();
   });
 
   it("shows the stored choice", async () => {
     const svc = service({ over: { getMe: me({ memoryModel: OWN }) } });
     await openPalace(svc);
-    const select = inMain().getByLabelText(PICK);
-    expect([...select.options].find((o) => o.selected).textContent).toBe("gpt-x");
+    expect(picker().textContent).toBe("gpt-x");
+    await click(picker());
+    expect(rowNamed("gpt-x").getAttribute("aria-selected")).toBe("true");
   });
 
   it("choosing a model sends memoryModel and keeps it; choosing the site's sends null", async () => {
     const svc = keeping();
     await openPalace(svc);
-    const select = () => inMain().getByLabelText(PICK);
-    const optionOf = (label) => [...select().options].find((o) => o.textContent === label).value;
-    fireEvent.change(select(), { target: { value: optionOf("gpt-x") } });
-    await flush();
+    await choose("gpt-x");
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(OWN);
-    expect([...select().options].find((o) => o.selected).textContent).toBe("gpt-x");
-    fireEvent.change(select(), { target: { value: optionOf("小模型 · 免费") } });
-    await flush();
+    expect(picker().textContent).toBe("gpt-x");
+    await choose("小模型");
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith({ source: "site", id: "free-1" });
-    fireEvent.change(select(), { target: { value: "" } });
-    await flush();
+    await choose("站点的模型（已校准）");
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(null);
-    expect(select().value).toBe("");
+    expect(picker().textContent).toBe("站点的模型（已校准）");
   });
 
   it("a refused change goes back to the stored choice and says so", async () => {
@@ -841,10 +856,8 @@ describe("用哪个模型整理记忆", () => {
       },
     });
     await openPalace(svc);
-    const select = inMain().getByLabelText(PICK);
-    fireEvent.change(select, { target: { value: [...select.options].find((o) => o.textContent === "gpt-x").value } });
-    await flush();
-    expect(inMain().getByLabelText(PICK).value).toBe("");
+    await choose("gpt-x");
+    expect(picker().textContent).toBe("站点的模型（已校准）");
     expect(document.querySelector(".toast")).toBeTruthy();
   });
 
@@ -852,8 +865,7 @@ describe("用哪个模型整理记忆", () => {
     const svc = keeping({ memoryModel: OWN, memoryModelUsable: false });
     await openPalace(svc);
     expect(inMain().getByText("选的模型现在用不了，记忆暂时不会更新。")).toBeTruthy();
-    fireEvent.change(inMain().getByLabelText(PICK), { target: { value: "" } });
-    await flush();
+    await choose("站点的模型（已校准）");
     expect(inMain().queryByText("选的模型现在用不了，记忆暂时不会更新。")).toBeNull();
   });
 
@@ -861,9 +873,7 @@ describe("用哪个模型整理记忆", () => {
     const svc = service();
     await openPalace(svc);
     svc.api.getMe.mockImplementation(async () => ({ ...ME, newNotes: "auto", memoryModel: OWN, memoryModelUsable: false }));
-    const select = inMain().getByLabelText(PICK);
-    fireEvent.change(select, { target: { value: [...select.options].find((o) => o.textContent === "gpt-x").value } });
-    await flush();
+    await choose("gpt-x");
     expect(svc.api.updateMemoryModel).toHaveBeenLastCalledWith(OWN);
     expect(inMain().getByText("选的模型现在用不了，记忆暂时不会更新。")).toBeTruthy();
   });
@@ -871,7 +881,10 @@ describe("用哪个模型整理记忆", () => {
   it("a choice that is no longer offered stays shown (as the Agent form shows its current model)", async () => {
     const svc = service({ over: { getMe: me({ memoryModel: { source: "provider", providerId: P1, model: "gone" }, memoryModelUsable: false }) } });
     await openPalace(svc);
-    expect([...inMain().getByLabelText(PICK).options].find((o) => o.selected).textContent).toContain("已不可用");
+    expect(picker().textContent).toContain("已不可用");
+    await click(picker());
+    const current = [...list().querySelectorAll('[role="option"]')].find((o) => o.getAttribute("aria-selected") === "true");
+    expect(current.querySelector(".model-name").textContent).toContain("已不可用");
   });
 
   it("when the settings cannot be read, both boxes stay off and say so, with a retry", async () => {

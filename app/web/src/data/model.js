@@ -1451,6 +1451,8 @@ export function applyModels(state, answer) {
       pdf: Boolean(m.pdf),
       reasoning: Array.isArray(m.reasoning) ? m.reasoning : [],
       contextTokens: m.contextTokens,
+      // Whether its replies may be offered tools (the service says it; absent: not said, so they are).
+      ...(typeof m.tools === "boolean" ? { tools: m.tools } : {}),
     }));
   const d = answer.providerDefaults;
   const providerDefaults = d && typeof d === "object" ? { contextTokens: d.contextTokens, maxOutputTokens: d.maxOutputTokens } : state.providerDefaults;
