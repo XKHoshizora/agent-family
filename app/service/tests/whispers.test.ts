@@ -532,6 +532,37 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
       delete ANSWER_HOOKS.found_elsewhere;
     }
   }, 60_000);
+
+  it("two accepts of one Agent's whispers in two groups at the same moment, 20 times, with a hook that locks the Agent for update: both answered, never a deadlock", async () => {
+    const w = await world();
+    const g2 = await group(app, w.owner, "two", [w.mia, w.ned]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g2}/members`, { principalId: w.agent.id })).status).toBe(201);
+    // Each accept's hook waits (a little) for the other's to get there too before it locks the Agent's row: if both answers
+    // could hold the row at once (for share), both would then wait for the other's lock to go.
+    let meet: { arrived: number; both: Promise<void>; release: () => void };
+    const round = () => {
+      const both = deferred();
+      meet = { arrived: 0, both: both.promise, release: () => both.resolve() };
+    };
+    ANSWER_HOOKS.found_elsewhere = {
+      accepted: async (t, x) => {
+        if (++meet.arrived === 2) meet.release();
+        await Promise.race([meet.both, new Promise((r) => setTimeout(r, 300))]);
+        await t.query("select 1 from agents where principal_id = $1 for update", [x.agentId]);
+      },
+    };
+    try {
+      for (let i = 0; i < 20; i++) {
+        round();
+        const [a, b] = [await whisper(w), await whisper(w, { conversationId: g2 })];
+        const answers = await Promise.all([a, b].map((x) => api(app, w.owner, "POST", `/api/whispers/${x.id}/accept`)));
+        expect([i, answers.map((r) => r.status)]).toEqual([i, [200, 200]]);
+        expect([i, await statusOf(a.id), await statusOf(b.id)]).toEqual([i, "accepted", "accepted"]);
+      }
+    } finally {
+      delete ANSWER_HOOKS.found_elsewhere;
+    }
+  }, 60_000);
 });
 
 describe("expiry", () => {

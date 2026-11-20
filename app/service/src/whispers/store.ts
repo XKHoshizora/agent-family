@@ -19,13 +19,14 @@ import { weight } from "../metering/tokens.ts";
  * was made (`removeOldWhispers`, the same sweep). Nothing here reads, logs or returns a whisper's text to anyone but its owner.
  *
  * Lock order, one rule for everything here and for whatever calls it: the conversation's row → the Agent's `agents` row
- * (taken `for share` here) → run rows → `accounts` rows (runs.ts's order) → whisper rows, always last. `createWhisper` and
- * `resolveWhisper` take the conversation's row and the Agent's before they insert or lock a whisper; the delete
- * (agents/routes.ts) and leaving (conversations/groups.ts, agents/group-leave.ts) expire whisper rows after everything else
- * they lock; the sweep never waits for a row (`skip locked`) and takes what it can in id order. An answer's hook
- * (whispers/routes.ts) runs with its whisper's row held and may then lock the Agent's row for update, run rows and accounts:
- * the Agent's row, which `resolveWhisper` holds before the whisper's, keeps out the one transaction that takes those and
- * then this whisper's row (the Agent's delete); other conversations' leavings take other whisper rows.
+ * (`createWhisper` takes it for share, `resolveWhisper` for update) → run rows → `accounts` rows (runs.ts's order) → whisper
+ * rows, always last. `createWhisper` and `resolveWhisper` take the conversation's row and the Agent's before they insert or
+ * lock a whisper; the delete (agents/routes.ts) and leaving (conversations/groups.ts, agents/group-leave.ts) expire whisper
+ * rows after everything else they lock; the sweep never waits for a row (`skip locked`) and takes what it can in id order.
+ * An answer's hook (whispers/routes.ts) runs with its whisper's row held and may then lock the Agent's row (already its
+ * answer's, for update), run rows and accounts: the Agent's row, which `resolveWhisper` holds before the whisper's, keeps out
+ * the one transaction that takes those and then this whisper's row (the Agent's delete), and any other answer about the
+ * same Agent; other conversations' leavings take other whisper rows.
  */
 
 export const WHISPER_KINDS = ["found_elsewhere", "tools_off", "memory"] as const;
@@ -229,15 +230,16 @@ export async function createWhisper(
  * no whisper `id` of `ownerId`'s — anyone else's and none are found by the same single read —, and as well when its Agent
  * is deleted or it or its owner is no longer a current member of the conversation (whatever expired it or not); "stale"
  * when it is not open any more, or does not offer that answer's button. Takes, in the lock order, the conversation's row,
- * the Agent's (`for share`: what an answer's hook will lock next, so a delete in flight is waited for before the whisper's
- * row is taken), then the whisper's.
+ * the Agent's (`for update`: what an answer's hook will lock next, held from here, so a delete in flight is waited for before
+ * the whisper's row is taken, and two answers about one Agent never both hold it and then wait to strengthen it), then the
+ * whisper's.
  */
 export async function resolveWhisper(t: Tx, ownerId: string, id: string, to: WhisperAnswer): Promise<Whisper | "gone" | "stale"> {
   const found = await t.query<{ conversation_id: string; agent_id: string }>("select conversation_id, agent_id from whispers where id = $1 and owner_id = $2", [id, ownerId]);
   if (!found.rows[0]) return "gone";
   const { conversation_id: conversationId, agent_id: agentId } = found.rows[0];
   await lockConversation(t, conversationId);
-  const agent = await t.query<{ deleted: boolean }>("select deleted_at is not null as deleted from agents where principal_id = $1 for share", [agentId]);
+  const agent = await t.query<{ deleted: boolean }>("select deleted_at is not null as deleted from agents where principal_id = $1 for update", [agentId]);
   const { rows } = await t.query<WhisperRow>(`select ${COLUMNS} from whispers where id = $1 and owner_id = $2 for update`, [id, ownerId]);
   const row = rows[0];
   if (!row || agent.rows[0]?.deleted !== false) return "gone";
