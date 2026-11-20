@@ -351,6 +351,46 @@ describe("parseOps", () => {
   });
 });
 
+describe("parseOps: a merge (ids only)", () => {
+  it("reads a merge as the distinct notes it names, two or more, in the order named — no text", () => {
+    expect(parseOps(answer([{ op: "merge", refs: ["o2", "o1"] }]), REFS)).toEqual([{ op: "merge", refs: ["o2", "o1"] }]);
+    expect(parseOps(answer([{ op: "merge", refs: ["o1", "o1", "o2", "s1"] }]), REFS)).toEqual([{ op: "merge", refs: ["o1", "o2", "s1"] }]);
+  });
+
+  it("drops a merge naming fewer than two distinct notes it was shown, an unknown one, or with any key but op and refs (a text included); the rest of the answer stands", () => {
+    const keep = { op: "add", kind: "owner", text: "喜欢喝美式" };
+    for (const bad of [
+      { op: "merge", refs: ["o1"] },
+      { op: "merge", refs: ["o1", "o1"] },
+      { op: "merge", refs: [] },
+      { op: "merge", refs: ["o1", "o9"] },
+      { op: "merge", refs: ["o1", 2] },
+      { op: "merge", refs: "o1,o2" },
+      { op: "merge", refs: ["o1", "o2"], text: "o1 和 o2 合在一起" },
+      { op: "merge", refs: ["o1", "o2"], kind: "owner" },
+      { op: "merge", into: "o1", from: ["o2"], text: "合在一起" },
+    ]) {
+      expect([bad, parseOps(answer([bad, keep]), REFS)]).toEqual([bad, [keep]]);
+    }
+  });
+
+  it("drops a merge naming a note another op of the answer names too — a replace, remove, lock, unlock, seen or another merge of it — and keeps that op", () => {
+    const merge = { op: "merge", refs: ["o1", "o2"] };
+    for (const other of [
+      { op: "replace", ref: "o2", text: "改喝拿铁了" },
+      { op: "remove", ref: "o1" },
+      { op: "lock", ref: "o2" },
+      { op: "unlock", ref: "o1" },
+      { op: "seen", ref: "o2" },
+      { op: "merge", refs: ["o2", "s1"] },
+    ]) {
+      expect([other, parseOps(answer([merge, other]), REFS)]).toEqual([other, other.op === "merge" ? [] : [other]]);
+    }
+    // A note of neither: both stand.
+    expect(parseOps(answer([merge, { op: "remove", ref: "s1" }]), REFS)).toEqual([merge, { op: "remove", ref: "s1" }]);
+  });
+});
+
 describe("modelEntryMax", () => {
   it("the longest entry a model may write is the configured one (MEMORY.modelEntryMax), set when the service is built", async () => {
     const { modelNote, setModelEntryMax, modelEntryMax } = await import("../src/memory/clean.ts");
@@ -392,6 +432,14 @@ describe("joinNotes and joinedNote (a review's merge: the notes in their own wor
     expect(joinNotes(["猫がいる．", "ミケ;", "三歳"], "ja")).toBe("猫がいる；ミケ；三歳");
     // One only, and only at the end; brackets, commas and marks inside stay.
     expect(joinNotes(["Wait...", "现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）。", "好"], "zh-Hans")).toBe("Wait..；现在喜欢麻婆豆腐（以前喜欢鱼香肉丝，2026 年 11 月改的）；好");
+  });
+
+  it("a part that is only a sentence-final mark is left out: no separator stands alone at either end or twice in the middle", async () => {
+    const { joinNotes } = await import("../src/memory/clean.ts");
+    expect(joinNotes(["。", "喜欢喝茶"], "zh-Hans")).toBe("喜欢喝茶");
+    expect(joinNotes(["喜欢喝茶", "?", "不加糖"], "en")).toBe("喜欢喝茶; 不加糖");
+    expect(joinNotes(["Likes tea.", "!"], "en")).toBe("Likes tea.");
+    expect(joinNotes(["。", "？"], null)).toBe("");
   });
 
   it("a text that repeats an earlier one exactly (after trimming) is written once, where it first came", async () => {

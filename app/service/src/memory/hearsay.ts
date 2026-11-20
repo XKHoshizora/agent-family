@@ -120,7 +120,8 @@ interface SaidRow {
  * Everything untrusted is a string of one JSON object (`JSON.stringify`): `{"owner": the owner's name, "window": [{"id"?:
  * "m1", "who": the speaker's name, "text", "owner": boolean, "agent": boolean}…], "existing": [{"ref": "e1", "who", "text"}…]}`.
  * The window is shown once: the messages from `flaggedContext` before the earliest flagged one to `flaggedContext` after the
- * latest, as the Agent itself may read them (`VISIBLE_JOIN`: nothing from before it joined), `id` on the flagged ones
+ * latest, as the Agent itself may read them (`VISIBLE_JOIN`: nothing from before it joined) and may hear them (`HEARD_FROM`: nothing at or
+ * before where it hears from in the group, so nothing said while its memory was off), `id` on the flagged ones
  * (at most the newest `flaggedMax`, and never more than `WINDOW_MAX`). When that would be more than `WINDOW_MAX` messages
  * each flagged message keeps its nearest neighbours, the nearest first, and the middle goes. Names and texts are
  * `cleanText`ed, a text cut to `reviewMessageWeight` weight. A flagged message is read only if it is a person's (not
@@ -147,7 +148,7 @@ export async function hearsayInput(
     `select m.seq::text, m.sender_id, m.created_at, m.body ->> 'text' as text, p.display_name, p.handle::text as handle
        from messages m ${VISIBLE_JOIN} join principals p on p.id = m.sender_id
       where m.conversation_id = $2 and m.seq = any($3::bigint[]) and m.kind in ('text', 'file') and m.sender_id <> $1 and m.sender_id <> $4
-        and p.kind = 'human' and not ${blockedEitherWay("$4::uuid", "m.sender_id")} and ${UNSPOKEN}
+        and p.kind = 'human' and not ${blockedEitherWay("$4::uuid", "m.sender_id")} and ${UNSPOKEN} and m.seq > ${HEARD_FROM}
       order by m.seq`,
     [agent.id, conversationId, newest, agent.ownerId],
   );
@@ -166,7 +167,7 @@ export async function hearsayInput(
          from unnest($3::bigint[]) as c (seq)
         cross join lateral (
           select m.* from messages m ${VISIBLE_JOIN}
-           where m.conversation_id = $2 and m.seq ${side === "before" ? "<" : ">"} c.seq and m.kind in ('text', 'file') and ${UNSPOKEN}
+           where m.conversation_id = $2 and m.seq ${side === "before" ? "<" : ">"} c.seq and m.kind in ('text', 'file') and ${UNSPOKEN} and m.seq > ${HEARD_FROM}
            order by m.seq ${side === "before" ? "desc" : "asc"} limit $4) m
         join principals p on p.id = m.sender_id
         order by c.seq, m.seq ${side === "before" ? "desc" : "asc"}`,
@@ -185,7 +186,7 @@ export async function hearsayInput(
   const stretch = await q.query<SaidRow>(
     `select m.seq::text, m.sender_id, m.body ->> 'text' as text, p.display_name, p.handle::text as handle
        from messages m ${VISIBLE_JOIN} join principals p on p.id = m.sender_id
-      where m.conversation_id = $2 and m.seq between $3 and $4 and m.kind in ('text', 'file') and ${UNSPOKEN}
+      where m.conversation_id = $2 and m.seq between $3 and $4 and m.kind in ('text', 'file') and ${UNSPOKEN} and m.seq > ${HEARD_FROM}
       order by m.seq limit ${WINDOW_MAX + 1}`,
     [agent.id, conversationId, lower, upper],
   );
@@ -255,9 +256,20 @@ const ABUSE_KEY = "hearsay_abuse";
 const HOUR = 3_600_000;
 const DELETE_FLAGS = "delete from memory_flags where agent_id = $1 and conversation_id = $2 and kind = $3 and seq = any($4::bigint[])";
 
-/** The flags of `kind` the pair has now, by seq. */
+/**
+ * SQL, `$1` the Agent and `$2` the group: where the Agent hears from there (`agent_group_state.heard_from_seq`, 0 without a row). Nothing
+ * at or below it is read for the Agent — no flag, no line of a hearsay call's window, flagged or context — as `VISIBLE_JOIN` reads
+ * nothing from before its join: what was said while its memory was off (and, without catchUp, until it was switched on again) is never
+ * heard.
+ */
+const HEARD_FROM = "coalesce((select h.heard_from_seq from agent_group_state h where h.agent_id = $1 and h.conversation_id = $2), 0)";
+
+/** The flags of `kind` the pair has now that the Agent may hear (above `HEARD_FROM`), by seq. */
 async function flagSeqs(q: Queryable, agentId: string, conversationId: string, kind: FlagKind): Promise<number[]> {
-  const { rows } = await q.query<{ s: string }>("select seq::text as s from memory_flags where agent_id = $1 and conversation_id = $2 and kind = $3 order by memory_flags.seq", [agentId, conversationId, kind]);
+  const { rows } = await q.query<{ s: string }>(
+    `select seq::text as s from memory_flags where agent_id = $1 and conversation_id = $2 and kind = $3 and seq > ${HEARD_FROM} order by memory_flags.seq`,
+    [agentId, conversationId, kind],
+  );
   return rows.map((r) => Number(r.s));
 }
 
@@ -280,6 +292,8 @@ export async function runFlags(deps: PipelineDeps, job: FlagsJob, ctx: FlagsCont
     [agentId, conversationId],
   );
   countDroppedFlags(db, stale.rows);
+  // A flag the Agent may not hear (one a judgement wrote while its memory was being switched off) is nobody's to act on.
+  await db.query(`delete from memory_flags where agent_id = $1 and conversation_id = $2 and seq <= ${HEARD_FROM}`, [agentId, conversationId]);
   // Mutes that have run out are of no use to anyone: this owner's go at every wake-up (a mute is checked and written only here).
   await db.query("delete from hearsay_mutes where owner_id = $1 and until <= now()", [agent.ownerId]);
   for (const [kind, run] of [

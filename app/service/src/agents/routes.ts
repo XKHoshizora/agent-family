@@ -360,9 +360,10 @@ export function registerAgentRoutes(
       await writeLimit(req, me.id);
       // Turning memory off or on writes rows of the Agent's groups: their rows first, before the Agent's (the lock order;
       // memory/pipeline.ts `lockSwitchGroups`). Only when it switches: a `memory` that is what it already is takes nothing. What it
-      // is now is looked at first, outside the transaction; when it has changed by the time the Agent is locked, or the Agent joined
-      // a group in between (`SwitchAgain`), the transaction runs again with the groups taken first — at most `SWITCH_TRIES` times,
-      // the last one waiting for any group as for any lock.
+      // is now is looked at first, outside the transaction. When it switches after all (another request switched it since the look),
+      // or the Agent joined a group in between, `memorySwitched` takes the groups it was not given without waiting while the Agent is
+      // held; one held by anyone (`SwitchAgain`) runs the transaction again with the groups taken first — at most `SWITCH_TRIES`
+      // times, the last one waiting for any group as for any lock.
       const looked = req.body.memory === undefined ? null : await readOwnedAgent(db, me.id, req.params.id);
       let groupsFirst = looked !== null && looked.memory !== req.body.memory;
       // One try: `last`, the switch waits for a group it did not take first as for any lock.
@@ -376,8 +377,6 @@ export function registerAgentRoutes(
         // (memory/pipeline.ts `memorySwitched`). Whether to look back at what was said while it was off is said only when turning it on.
         const switching = req.body.memory !== undefined && req.body.memory !== current.memory;
         if (catchUp !== undefined && !(switching && req.body.memory === true)) throw new AppError(400, "invalid_request");
-        // It switches after all (another request switched it since the look): again, its groups first.
-        if (switching && groups === null) throw new SwitchAgain();
         const patch: AgentPatch = {
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
           ...(budget === undefined ? {} : { chainBudgetMicro: budget }),

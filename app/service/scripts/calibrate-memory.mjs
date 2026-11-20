@@ -330,7 +330,8 @@ const reviewSystem = (today, language = null) => {
     S(F.review, 'review l', '- 主人又提到了已有的某一条、没有新内容：用 {"op":"seen","ref":"n1"} 记一下，不要重复新增。'),
     S(F.review, 'review l', '- 关于主人的事用 kind "owner"；助手自己该怎么做事（回答的长短、格式、先说什么）用 kind "self"。'),
     S(F.review, 'review l', '- 主人说之前记错了、不是那样（“不是周三，是周四”）：用 replace 把那一条改成对的，错的内容不要留下，也不要写成“以前……”。只有事情真的变了（以前确实是那样，现在换了）才写成“现在…（以前…，YYYY 年 M 月改的）”。年月按今天的日期。'),
-    S(F.review, 'review l', '- 房间快满时（还能记的字数很少），把相近的几条用 replace 合成一条，再用 remove 去掉多出来的，并先删括号里的旧经过。'),
+    S(F.review, 'review l', '- 房间快满时（还能记的字数很少），只记最要紧的，先用 replace 删掉括号里的旧经过；新说的事和已有的某一条是同一件事，就用 replace 把它写进那一条，不要另外新增。'),
+    S(F.review, 'review l', '- 已有的几条说的是同一件事的几部分，合成一条更好读：用 merge 列出它们的 ref（同一个 room，两条或更多），系统会把它们的原话拼成一条，你不写文字。merge 不能用来纠正、缩短、删掉或改写任何内容，这些仍用 replace 和 remove。'),
     S(F.review, 'review l', '- 主人让你忘掉某件事：用 remove；让你把某条锁起来：用 lock；让你把某条从保险箱拿出来：用 unlock（这只是提出请求，主人还要自己点确认）。'),
     '',
     S(F.review, 'review l', '输出：只输出一个 JSON 对象 {"ops":[…]}，不要别的文字。操作只有这几种：'),
@@ -340,8 +341,9 @@ const reviewSystem = (today, language = null) => {
     S(F.review, 'review l', '{"op":"remove","ref":"n3"}'),
     S(F.review, 'review l', '{"op":"lock","ref":"n3"}'),
     S(F.review, 'review l', '{"op":"unlock","ref":"n3"}'),
+    S(F.review, 'review l', '{"op":"merge","refs":["n3","n4"]}'),
     S(F.review, 'review l', '{"op":"seen","ref":"n3"}'),
-    S(F.review, 'review l', '其中 ref 必须是 notes 里已有笔记的 ref。'),
+    S(F.review, 'review l', '其中 ref 和 refs 里的必须是 notes 里已有笔记的 ref。'),
     S(F.review, 'review l', '没有值得记的，输出 {"ops":[]}。'),
   ].join('\n')
 }
@@ -529,6 +531,9 @@ SN(F.ops, 'op ref', 'const ref = typeof o.ref === "string" && refs.has(o.ref) ? 
 SN(F.ops, 'op add', 'if (!hasExactly(o, ["op", "kind", "text"]) || (o.kind !== "owner" && o.kind !== "self") || typeof o.text !== "string") return null;')
 SN(F.ops, 'op replace', 'if (!hasExactly(o, ["op", "ref", "text"]) || ref === null || typeof o.text !== "string") return null;')
 SN(F.ops, 'op remove', 'return hasExactly(o, ["op", "ref"]) && ref !== null ? { op: o.op, ref } : null;')
+SN(F.ops, 'op merge', 'if (!hasExactly(o, ["op", "refs"]) || !Array.isArray(o.refs) || !o.refs.every((r) => typeof r === "string" && refs.has(r))) return null;')
+SN(F.ops, 'op merge distinct', 'return named.length < 2 ? null : { op: "merge", refs: named };')
+SN(F.ops, 'merge shares no note', 'return ops.filter((op) => op.op !== "merge" || op.refs.every((ref) => named.get(ref) === 1));')
 function oneOp(raw, refs) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
   const o = raw
@@ -548,9 +553,20 @@ function oneOp(raw, refs) {
     case 'lock':
     case 'unlock':
       return hasExactly(o, ['op', 'ref']) && ref !== null ? { op: o.op, ref } : null
+    case 'merge': {
+      if (!hasExactly(o, ['op', 'refs']) || !Array.isArray(o.refs) || !o.refs.every((r) => typeof r === 'string' && refs.has(r))) return null
+      const named = [...new Set(o.refs)]
+      return named.length < 2 ? null : { op: 'merge', refs: named }
+    }
     default:
       return null
   }
+}
+/** ops.ts: a merge naming a note another op of the answer names too is dropped. */
+function withoutSharedMerges(ops) {
+  const named = new Map()
+  for (const op of ops) for (const ref of op.op === 'add' ? [] : op.op === 'merge' ? op.refs : [op.ref]) named.set(ref, (named.get(ref) ?? 0) + 1)
+  return ops.filter((op) => op.op !== 'merge' || op.refs.every((ref) => named.get(ref) === 1))
 }
 SN(F.ops, 'parseOps seen', 'if (op.op === "add" && (key === "" || seen.has(key))) continue;')
 /** ops.ts `parseOps`: the operations of a review's answer ([] for anything else). */
@@ -572,10 +588,26 @@ function parseOps(answer, refs, existing = []) {
       }
       ops.push(op)
     }
-    return ops
+    return withoutSharedMerges(ops)
   } catch {
     return []
   }
+}
+
+// clean.ts joinNotes: a review's merge, the notes' own texts joined.
+const SENTENCE_END = RX(F.clean, 'SENTENCE_END', /[。．.！!？?；;]$/u)
+const CJK = RX(F.clean, 'CJK', /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u)
+SN(F.clean, 'joinNotes marks', 'const said = parts.filter((p) => p.replace(SENTENCE_END, "") !== "");')
+SN(F.clean, 'joinNotes', 'return said.map((p, i) => (i < said.length - 1 ? p.replace(SENTENCE_END, "") : p)).join(cjk ? "；" : "; ");')
+function joinNotes(texts, lang) {
+  const parts = []
+  for (const text of texts) {
+    const trimmed = text.trim()
+    if (trimmed !== '' && !parts.includes(trimmed)) parts.push(trimmed)
+  }
+  const cjk = lang === null ? CJK.test(parts.join('')) : lang === 'ja' || lang.startsWith('zh')
+  const said = parts.filter((p) => p.replace(SENTENCE_END, '') !== '')
+  return said.map((p, i) => (i < said.length - 1 ? p.replace(SENTENCE_END, '') : p)).join(cjk ? '；' : '; ')
 }
 
 // ---------- configured defaults (config.ts `MEMORY`, `PROACTIVE`), verified against the source by --check
@@ -1744,7 +1776,11 @@ function reviewRequest(s, { mixed, today, model, language }) {
   return { body: chatBody(model, reviewSystem(today, language), user), refs: mixed ? new Set() : new Set(refs.keys()), refMap: refs, existing }
 }
 
-/** What the notes read after the ops are applied: `{owner: [...], self: [...]}`. */
+/**
+ * What the notes read after the ops are applied: `{owner: [...], self: [...]}`. A merge (of one room's notes, as pipeline.ts `allowed`
+ * requires) is their own texts joined into the first of them, in the room's order (the samples list a room oldest first), as clean.ts
+ * `joinNotes` joins them with the language automatic (the notes' writing decides the separator).
+ */
 function applyOps(s, ops, refMap) {
   const notes = { owner: [...s.notes.owner], self: [...s.notes.self] }
   const marks = new Map() // ref → { kind, text } to replace / drop
@@ -1752,6 +1788,13 @@ function applyOps(s, ops, refMap) {
     if (op.op === 'add') notes[op.kind].push(op.text)
     else if (op.op === 'replace') marks.set(op.ref, { replace: op.text })
     else if (op.op === 'remove') marks.set(op.ref, { drop: true })
+    else if (op.op === 'merge') {
+      const order = [...refMap.keys()]
+      const named = [...op.refs].sort((a, b) => order.indexOf(a) - order.indexOf(b))
+      if (new Set(named.map((r) => refMap.get(r).kind)).size !== 1) continue
+      marks.set(named[0], { replace: joinNotes(named.map((r) => refMap.get(r).text), null) })
+      for (const r of named.slice(1)) marks.set(r, { drop: true })
+    }
   }
   const out = { owner: [], self: [] }
   const added = { owner: notes.owner.slice(s.notes.owner.length), self: notes.self.slice(s.notes.self.length) }
@@ -1765,7 +1808,7 @@ function applyOps(s, ops, refMap) {
   return out
 }
 
-const EXPECT_OPS = { add: ['add'], replace: ['replace'], remove: ['remove'], merge: ['replace'], lock: ['lock'], unlock: ['unlock'] }
+const EXPECT_OPS = { add: ['add'], replace: ['replace'], remove: ['remove'], merge: ['merge'], lock: ['lock'], unlock: ['unlock'] }
 function scoreReview(s, ops, refMap) {
   const e = s.expect
   const reasons = []

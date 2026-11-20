@@ -376,7 +376,7 @@ describe("what a dream may do", () => {
     const b = await seeded(w.owner, w.agent.id, "爱喝茶", false);
     await db.query("update owner_notes set strength = 2, seen_at = '2026-11-10 00:00:00+00' where id = $1", [a.id]);
     await db.query("update owner_notes set strength = 3, seen_at = '2026-11-15 00:00:00+00' where id = $1", [b.id]);
-    // A dream's merge is held to faithfulAt (0.6), not to the bar of a review's merge (reviewMergeAt, 0.7).
+    // A dream's merge is held to faithfulAt (0.6): every per-note answer at 0.65 passes.
     judge.answer(() => ({ sort: 0.95, "faithful*": 0.65 }));
     gateway.reply(dreamAns(merge("n1", ["n2"], "爱喝茶，不加糖")));
     await night();
@@ -481,6 +481,9 @@ describe("what a dream may do", () => {
     expect(parseDreamOps("not json", refs)).toEqual([]);
     const refs12 = new Set(Array.from({ length: 12 }, (_, i) => `n${i + 1}`));
     expect(parseDreamOps(dreamAns(...Array.from({ length: 12 }, (_, i) => lock(`n${i + 1}`))), refs12)).toHaveLength(8);
+    // A merge takes two to four notes (the faithful question was measured on those): five is dropped whole.
+    expect(parseDreamOps(dreamAns(merge("n1", ["n2", "n3", "n4"], "一")), refs12)).toEqual([{ op: "merge", into: "n1", from: ["n2", "n3", "n4"], text: "一" }]);
+    expect(parseDreamOps(dreamAns(merge("n1", ["n2", "n3", "n4", "n5"], "一")), refs12)).toEqual([]);
   });
 
   it("a scripted remove, add or unlock is never applied end to end", async () => {

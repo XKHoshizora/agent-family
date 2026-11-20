@@ -150,9 +150,6 @@ describe("a review", () => {
   });
 
   it("with an explicit request replaces, removes and locks: one count each, the lock as applied at once (lock_auto), and the question whether the owner asked to forget: one request, one statement", async () => {
-    // The replace and the remove have a merge's shape (one room's one replace and a remove): with MEMORY.mergeAuto on they would be joined.
-    // What is counted for a replace and a remove is seen with it off.
-    app.deps.config.memory.mergeAuto = "off";
     const w = await owned("st3");
     await seeded(w.owner, "喜欢鱼香肉丝", false);
     await seeded(w.owner, "住在东门", false);
@@ -184,7 +181,7 @@ describe("a review", () => {
     const w = await owned("st3d");
     await seeded(w.owner, "路由器在客厅", false);
     await seeded(w.owner, "路由器是华硕的", false);
-    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
     expect(await stats()).toEqual({ review_run: 1, merge_joined: 1 });
   });
 
@@ -196,7 +193,7 @@ describe("a review", () => {
     const w = await owned("st3e");
     await seeded(w.owner, "路由器在客厅", false);
     await seeded(w.owner, "路由器是华硕的", false);
-    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
     await undo(w);
     expect(await stats()).toMatchObject({ merge_joined: 1, merge_undone: 1, undo_rest: 1 });
     judge.answer(() => ({ sort: 0.95 }));
@@ -206,19 +203,25 @@ describe("a review", () => {
     expect(await stats()).toMatchObject({ merge_undone: 1, undo_rest: 2 });
   });
 
-  it("a merge whose joined note cannot be written counts merge_join_skipped, and nothing else; with MEMORY.mergeAuto off a merge's shape counts as the replace and remove it is", async () => {
+  it("a merge whose joined note cannot be written counts merge_join_skipped, and nothing else; with MEMORY.mergeAuto off a merge op counts nothing at all; a replace and a remove count as what they are", async () => {
     const w = await owned("st3g");
     await seeded(w.owner, "甲".repeat(120), false);
     await seeded(w.owner, "乙".repeat(120), false);
-    await sayAndReview(w, "把那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "甲乙" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(w, "把那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
     expect(await stats()).toEqual({ review_run: 1, merge_join_skipped: 1 });
     app.deps.config.memory.mergeAuto = "off";
-    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9 }));
     const v = await owned("st3h");
     await seeded(v.owner, "路由器在客厅", false);
     await seeded(v.owner, "路由器是华硕的", false);
-    await sayAndReview(v, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
-    expect(await stats()).toMatchObject({ review_run: 2, merge_join_skipped: 1, note_replaced: 1, note_removed: 1 });
+    await sayAndReview(v, "把路由器那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
+    expect(await stats()).toEqual({ review_run: 2, merge_join_skipped: 1 });
+    app.deps.config.memory.mergeAuto = "on";
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9 }));
+    const x = await owned("st3i");
+    await seeded(x.owner, "路由器在客厅", false);
+    await seeded(x.owner, "路由器是华硕的", false);
+    await sayAndReview(x, "路由器其实在书房，华硕那条删掉", ops({ op: "replace", ref: "n1", text: "路由器在书房" }, { op: "remove", ref: "n2" }));
+    expect(await stats()).toMatchObject({ review_run: 3, merge_join_skipped: 1, note_replaced: 1, note_removed: 1 });
     expect(await stats()).not.toHaveProperty("merge_joined");
   });
 
@@ -322,20 +325,18 @@ describe("what the owner does about what a review made", () => {
     expect(found).not.toHaveProperty("pending_discarded");
   });
 
-  it("a card is counted by why it waits — a remove not asked for (a merge's shape's too, with MEMORY.mergeAuto off), anything else (a replace before the owner's word, an unlock) — and a card nobody answered is counted when the sweep discards it", async () => {
+  it("a card is counted by why it waits — a remove not asked for (with a replace beside it too), anything else (a replace before the owner's word, an unlock) — and a card nobody answered is counted when the sweep discards it", async () => {
     // A remove the owner did not ask for.
     const a = await owned("cs1");
     await seeded(a.owner, "住在东门", false);
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
     await sayAndReview(a, "住址那条处理一下，记住", ops({ op: "remove", ref: "n1" }));
-    // A merge's shape not joined (MEMORY.mergeAuto off), with the owner not asking for its remove.
-    app.deps.config.memory.mergeAuto = "off";
+    // A replace and a remove of one room (never a merge), with the owner not asking for the remove.
     const b = await owned("cs2");
     await seeded(b.owner, "路由器在客厅", false);
     await seeded(b.owner, "路由器是华硕的", false);
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
     await sayAndReview(b, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是小米的" }, { op: "remove", ref: "n2" }));
-    app.deps.config.memory.mergeAuto = "on";
     // A replace of a note changed after the owner's last line, and a request to take a note out of the vault.
     const c = await owned("cs3");
     await exchange(c, "其实我不喝茶了");

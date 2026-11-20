@@ -107,13 +107,13 @@ describe("the owner's own remark, flagged", () => {
     expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key)).filter((k) => k.startsWith("explicit_") || k.startsWith("faithful"))).toEqual([]);
   });
 
-  it("a merge's shape in a group (a replace and a remove of one room, the judgement ready to call it faithful) is dropped like any op in place: nothing merged, no faithful question, only the add", async () => {
+  it("a merge op in a group, and a replace and a remove there, are dropped (a group review only adds): nothing merged, no judgement question, only the add", async () => {
     const w = await world("bm");
     await api(app, w.owner, "POST", "/api/memory/notes", { text: "路由器在客厅", vault: false });
     await api(app, w.owner, "POST", "/api/memory/notes", { text: "路由器是华硕的", vault: false });
     const seq = await say(w.owner, w.g, "路由器那两条合成一条吧，我还养了只猫");
     judge.answer(() => ({ sort: 0.95, "faithful*": 0.95, explicit_forget: 0.95 }));
-    gateway.reply(ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, add("养了一只猫")));
+    gateway.reply(ops({ op: "merge", refs: ["n1", "n2"] }, { op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, add("养了一只猫")));
     await flag(w.agent.id, w.g, seq, "own");
     await wake();
     expect((await notesOf(w.owner)).map((n) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "养了一只猫"]);

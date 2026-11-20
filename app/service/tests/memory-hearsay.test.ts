@@ -1206,6 +1206,37 @@ describe("memory switched off and on again", () => {
     }
   });
 
+  it("a hearsay call's window starts after where the Agent hears from: off, a member's line, on again without catchUp, a flagged line — the model is never shown the off-period line, so no entry can carry it; with catchUp it is shown, and nothing from before the switch-off is", async () => {
+    for (const catchUp of [false, true]) {
+      const w = await world(`swh${catchUp ? 1 : 0}`);
+      const before = await say(w.mia, w.g, "小李上周换了新工作");
+      expect((await patch(w, { memory: false })).status).toBe(200);
+      const off = await say(w.mia, w.g, "小李的妈妈住院了");
+      expect((await patch(w, catchUp ? { memory: true, catchUp: true } : { memory: true })).status).toBe(200);
+      const seq = await say(w.mia, w.g, "希望她早日康复");
+      gateway.reply(answer([entry("m1", "主人的妈妈住院了")]));
+      // Without catchUp, a flag of the off-period line (as a judgement racing the switch-off could have written it): never read.
+      if (!catchUp) await flag(w.agent.id, w.g, off, "hearsay", false);
+      await flag(w.agent.id, w.g, seq, "hearsay");
+      await wake();
+      const [call] = hearsayCalls();
+      const window = JSON.parse(textOf(call!)).window as Array<{ id?: string; text: string }>;
+      expect([catchUp, window]).toEqual([
+        catchUp,
+        catchUp
+          ? [
+              { who: "miaswh1", text: "小李的妈妈住院了", owner: false, agent: false },
+              { id: "m1", who: "miaswh1", text: "希望她早日康复", owner: false, agent: false },
+            ]
+          : [{ id: "m1", who: "miaswh0", text: "希望她早日康复", owner: false, agent: false }],
+      ]);
+      expect(window.map((l) => l.text)).not.toContain("小李上周换了新工作");
+      expect(before).toBeLessThan(off);
+      expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+      first = gateway.calls.length;
+    }
+  });
+
   it("on again without looking back, nothing a member said while it was off is heard for the Agent: no question about it, no flag, no hearsay call, no entry", async () => {
     const w = await world("swo");
     // Judged once while memory was on: the Agent is judged up to this message.

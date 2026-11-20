@@ -123,6 +123,11 @@ async function quietThen(answer: string, ms = 10 * MIN): Promise<void> {
   clock.advance(ms);
   await memory().idle();
 }
+/** A memory counter's total so far (`memory_stats`), once what was counted is written. */
+const counted = async (name: string): Promise<number> => {
+  await settled();
+  return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
+};
 const memoryRecords = async (ownerId: string) =>
   (await db.query<{ purpose: string; n: number }>("select purpose, count(*)::int as n from usage_records where owner_id = $1 group by purpose order by purpose", [ownerId])).rows;
 
@@ -171,7 +176,7 @@ describe("reviewInput", () => {
       "用 replace 把那一条改成对的",
       "现在…（以前…，YYYY 年 M 月改的）",
       "房间快满时",
-      "先删括号里的旧经过",
+      "删掉括号里的旧经过",
       "remove",
       "lock",
       "unlock",
@@ -181,6 +186,10 @@ describe("reviewInput", () => {
       '{"op":"seen","ref":"n3"}',
     ]) expect([part, system.includes(part)]).toEqual([part, true]);
     for (const op of ["add", "replace", "remove", "lock", "unlock"]) expect([op, system.includes(op)]).toEqual([op, true]);
+    // A merge names notes, writes no text, and is no way to correct, shorten, drop or reword; a replace and removes never stand for one.
+    expect(system).toContain('{"op":"merge","refs":["n3","n4"]}');
+    expect(system).toContain("你不写文字");
+    expect(system).not.toContain("用 replace 合成一条");
   });
 
   it("is null without an owner message; counts only text and file captions, newest 40, each cut to 500 weight (500 Chinese characters, 1500 English letters); notices are not shown", async () => {
@@ -598,6 +607,9 @@ describe("switching memory off and on again", () => {
   /** What `p` came to within `ms`: its value, the error's name when it failed, or `waited` (it was still waiting). */
   const within = <T,>(p: Promise<T>, ms = 2000): Promise<T | string> =>
     Promise.race([p.catch((e: unknown) => (e instanceof Error ? e.name : String(e))), new Promise<string>((r) => setTimeout(() => r("waited"), ms))]);
+  /** Whether `p` answers before any statement matching `like` is seen waiting for a lock: `answered`, or `waited`. */
+  const answersWithoutWaiting = (p: Promise<unknown>, like: readonly string[]): Promise<string> =>
+    Promise.race([p.then(() => "answered"), someoneWaits(db, like).then(() => "waited", () => "never seen waiting")]);
 
   it("a group the Agent has left but still has state rows in is among the rows the switch takes first: a send holding it, then asking for the Agent, waits for nothing the switch holds", async () => {
     const w = await owned("swlg");
@@ -624,41 +636,50 @@ describe("switching memory off and on again", () => {
     expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
     const holder = holdThen(db, ["select 1 from conversations where id = $1 for update", [g]], ["select 1", []]);
     await holder.locked;
+    const answer = patch(w, { memory: true });
     try {
-      expect(await within(patch(w, { memory: true }).then((r) => r.status))).toBe(200);
+      expect(await answersWithoutWaiting(answer, ["%for key share%"])).toBe("answered");
+      expect((await answer).status).toBe(200);
     } finally {
       holder.release();
       await holder.done;
+      await answer.catch(() => undefined);
     }
   });
 
-  it("memory switched by another request between this one's look and its transaction: it runs again, the groups' rows first, and switches", async () => {
+  it("memory switched by another request between this one's look and its transaction: the groups it did not take first are taken without waiting while the Agent is held — one held by a send there, it gives up and runs again, the groups first, and switches; the send commits too", async () => {
     const w = await owned("swr");
     const g = await group(app, w.owner, "读书会", [await signUp(app, "swr_mia"), await signUp(app, "swr_ned")]);
     expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    // Another request holds the Agent's own conversation and switches memory off; it commits only later.
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
     let locked!: () => void;
     const ownLocked = new Promise<void>((r) => (locked = r));
-    const holder = db.tx(async (t) => {
+    const other = db.tx(async (t) => {
       await t.query("select 1 from conversations where id = $1 for update", [w.conv]);
+      await t.query("update agents set memory = false where principal_id = $1", [w.agent.id]);
       locked();
       await held;
     });
     await ownLocked;
-    // First in line: memory off. Then, while memory still reads on, a request to turn it on (the same value at its look: no groups taken).
-    const off = patch(w, { memory: false });
-    let on: ReturnType<typeof patch> | undefined;
+    // This request looks while memory still reads on: turning it on is no switch at the look, so it takes no group first.
+    const on = patch(w, { memory: true });
+    let sender: ReturnType<typeof holdGroupThenAgent> | undefined;
     try {
       await someoneWaits(db, ["%from conversations where id = $1 for update%"]);
-      on = patch(w, { memory: true });
-      await someoneWaits(db, ["%from conversations where id = $1 for update%"], 2);
+      // A send in the group holds it, and will ask for the Agent.
+      sender = holdGroupThenAgent(db, g, w.agent.id);
+      await sender.locked;
     } finally {
       release();
     }
-    await holder;
-    expect([(await off).status, (await on!).status]).toEqual([200, 200]);
-    // The second found memory off under the Agent's lock: a switch after all, made with the groups' rows taken first.
+    await other;
+    // Under the Agent's lock it finds memory off: a switch. The group is held: it gives up and, run again, waits for the group first,
+    // holding nothing.
+    await someoneWaits(db, ["%for key share%"]).finally(() => sender?.release());
+    await sender!.done;
+    expect((await on).status).toBe(200);
     expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(true);
     expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
   });
@@ -927,7 +948,7 @@ describe("what a review does with an answer", () => {
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
   });
 
-  it("an in-place op whose text the cleaning refuses drops every in-place op of the answer (a merge's remove is not applied alone); its adds still apply", async () => {
+  it("an in-place op whose text the cleaning refuses drops every in-place op of the answer (the remove is not applied alone); its adds still apply", async () => {
     const w = await owned("stale2");
     await seeded(w.owner, w.agent.id, "路由器在客厅", false);
     await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
@@ -945,7 +966,7 @@ describe("what a review does with an answer", () => {
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
   });
 
-  it("an in-place op that falls past the 8-op cap drops every in-place op of the answer (a merge is not cut in two); the adds inside the cap still apply", async () => {
+  it("an in-place op that falls past the 8-op cap drops every in-place op of the answer (the replace is not applied without its remove); the adds inside the cap still apply", async () => {
     const w = await owned("stale4");
     await seeded(w.owner, w.agent.id, "路由器在客厅", false);
     await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
@@ -1014,9 +1035,6 @@ describe("what a review does with an answer", () => {
   });
 
   it("replace, remove and lock are told in the owner's words, and undo puts everything back", async () => {
-    // A replace and a remove of one room have a merge's shape: with MEMORY.mergeAuto on (the default) they would be joined. What this test is
-    // about — a replace and a remove as such — is seen with it off.
-    app.deps.config.memory.mergeAuto = "off";
     const w = await owned("yan");
     const [a, b, c] = [await seeded(w.owner, w.agent.id, "喜欢鱼香肉丝", false), await seeded(w.owner, w.agent.id, "住在北京", false), await openAuto(w.owner, w.agent.id, "不吃辣")];
     const before = await roomOf(w.owner);
@@ -1404,9 +1422,6 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
   });
 
   it("a replace plus a remove that frees its room, in a nearly full room, with the owner not asking for the remove (the judgement's no): nothing applied, ONE pending change holding both; confirming applies both by the net room rule", async () => {
-    // A replace and a remove of one room have a merge's shape: with MEMORY.mergeAuto on (the default) they would be joined. What this test is
-    // about — a replace and a remove as such — is seen with it off.
-    app.deps.config.memory.mergeAuto = "off";
     const w = await owned("hub");
     judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
     // 1 + 1100 + 800 of 2000 weight: the longer text fits only once the second note is gone.
@@ -1443,9 +1458,6 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
   });
 
   it("a replace n1 + remove n2 held, then a second review that answers a reworded replace n1 + remove n2: nothing in place is applied or newly held, and the first card still confirms both", async () => {
-    // A replace and a remove of one room have a merge's shape: with MEMORY.mergeAuto on (the default) they would be joined. What this test is
-    // about — a replace and a remove as such — is seen with it off.
-    app.deps.config.memory.mergeAuto = "off";
     const w = await owned("hug");
     // Not asked for: held.
     judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
@@ -1524,7 +1536,7 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     await seeded(w.owner, w.agent.id, "住在上海", false);
     judge.answer(() => ({ sort: 0.95, ...ASKED }));
     judge.calls.splice(0);
-    await sayAndReview(w, "把路由器那两条合成一条，多的删掉，住址锁起来", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, { op: "lock", ref: "n3" }));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉，住址锁起来", ops({ op: "merge", refs: ["n1", "n2"] }, { op: "lock", ref: "n3" }));
     const notices = await chips(w.owner, w.conv);
     expect(notices.map((n) => [n.system.pending, n.system.lines])).toEqual([
       [true, ["要合并成：路由器在客厅；路由器是华硕的"]],
@@ -1535,16 +1547,16 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
   });
 });
 
-describe("a merge in a review: a room's one replace and its removes, its notes joined in their own words and applied at once", () => {
+describe("a merge in a review: the answer's merge op (the ids of notes that are one thing, no text), its notes joined in their own words and applied at once", () => {
   const routers = async (name: string, over: Record<string, unknown> = {}) => {
     const w = await owned(name, over);
     const a = await seeded(w.owner, w.agent.id, "路由器在客厅", false);
     const b = await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
     return { ...w, a, b };
   };
-  /** The model's merged text: never written anywhere. */
+  /** A text of the model's: a merge op carries none, and one that brings it is no merge. */
   const MODEL_TEXT = "路由器在客厅，是华硕的";
-  const MERGE = ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "remove", ref: "n2" });
+  const MERGE = ops({ op: "merge", refs: ["n1", "n2"] });
   /** What is written: the two notes as they are, oldest first, joined by 「；」 (Chinese). */
   const JOINED = "路由器在客厅；路由器是华硕的";
   const ASK = "把路由器那两条合成一条，多的删掉";
@@ -1572,12 +1584,8 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
       )
     ).rows[0]!.id;
   const changeRows = async (w: World) => (await db.query("select status, phase, ops from memory_changes where owner_id = $1 order by created_at", [w.owner.id])).rows;
-  const counted = async (name: string): Promise<number> => {
-    await settled();
-    return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
-  };
 
-  it("joined (MEMORY.mergeAuto on, the default): applied at once as ONE change, the dream's merge — the notes' own texts, oldest first, joined by 「；」; never the model's text; nobody asked; the strengths summed; the notice 合并了 2 条 with the notes it joined; undo puts both back exactly", async () => {
+  it("joined (MEMORY.mergeAuto on, the default): applied at once as ONE change, the dream's merge — the notes' own texts, oldest first, joined by 「；」 into the oldest; nobody asked; the strengths summed; the notice 合并了 2 条 with the notes it joined; undo puts both back exactly", async () => {
     expect(app.deps.config.memory.mergeAuto).toBe("on");
     const w = await routers("mg1");
     await db.query("update owner_notes set strength = 2 where id = $1", [w.a.id]);
@@ -1586,7 +1594,6 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     judge.calls.splice(0);
     await sayAndReview(w, ASK, MERGE);
     expect(await exactRows(w.owner.id)).toMatchObject([{ id: w.a.id, text: JOINED, vault: false, strength: 5 }]);
-    expect(JSON.stringify(await roomOf(w.owner))).not.toContain(MODEL_TEXT);
     const notices = await chips(w.owner, w.conv);
     expect(notices).toHaveLength(1);
     expect(notices[0].system).toMatchObject({
@@ -1610,11 +1617,11 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     expect(await exactRows(w.owner.id)).toEqual(before);
   });
 
-  it("oldest first, whichever note the model writes into; three notes too; 「；」 for Chinese or Japanese (the notebook's language, or with none set the notes' writing), 「; 」 for any other; one sentence-final mark taken off every part but the last", async () => {
-    // The model writes into the newer note: the older one's words still come first, in the note it wrote into.
+  it("oldest first, in whatever order the op names them, into the oldest note; three notes too; 「；」 for Chinese or Japanese (the notebook's language, or with none set the notes' writing), 「; 」 for any other; one sentence-final mark taken off every part but the last", async () => {
+    // The op names the newer note first: the older one's words still come first, in the older note.
     const v = await routers("mgo1");
-    await sayAndReview(v, ASK, ops({ op: "replace", ref: "n2", text: MODEL_TEXT }, { op: "remove", ref: "n1" }));
-    expect((await exactRows(v.owner.id)).map((r) => [r.id, r.text])).toEqual([[v.b.id, JOINED]]);
+    await sayAndReview(v, ASK, ops({ op: "merge", refs: ["n2", "n1"] }));
+    expect((await exactRows(v.owner.id)).map((r) => [r.id, r.text])).toEqual([[v.a.id, JOINED]]);
 
     const cases: Array<[string, string | null, string[], string]> = [
       ["mgl1", "en", ["Has a dog.", "The dog is called Biscuit.", "Walks him at 7 every evening."], "Has a dog; The dog is called Biscuit; Walks him at 7 every evening."],
@@ -1627,9 +1634,14 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
       const w = await owned(name);
       if (language !== null) await db.query("update accounts set memory_language = $2 where principal_id = $1", [w.owner.id, language]);
       for (const [i, text] of notes.entries()) await noteAt(w, text, 30 - i);
-      const answer = ops({ op: "replace", ref: "n1", text: "Something the model made up" }, ...notes.slice(1).map((_, i) => ({ op: "remove", ref: `n${i + 2}` })));
+      const was = await exactRows(w.owner.id);
+      const answer = ops({ op: "merge", refs: notes.map((_, i) => `n${i + 1}`) });
       await sayAndReview(w, ASK, answer);
       expect([name, await texts(w)]).toEqual([name, [[joined, false]]]);
+      // Undone, every note is back exactly, three as well as two.
+      const [chip] = await chips(w.owner, w.conv);
+      expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
+      expect([name, await exactRows(w.owner.id)]).toEqual([name, was]);
     }
   });
 
@@ -1638,14 +1650,14 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     await noteAt(w, "喜欢喝茶", 30);
     await noteAt(w, "不加糖", 20);
     await noteAt(w, " 喜欢喝茶 ", 10);
-    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: "爱喝茶" }, { op: "remove", ref: "n2" }, { op: "remove", ref: "n3" }));
+    await sayAndReview(w, ASK, ops({ op: "merge", refs: ["n1", "n2", "n3"] }));
     expect(await texts(w)).toEqual([["喜欢喝茶；不加糖", false]]);
 
     const v = await owned("mgd2");
     await noteAt(v, "喜欢喝茶", 30);
     await noteAt(v, "喜欢喝茶 ", 20);
     const before = await exactRows(v.owner.id);
-    await sayAndReview(v, ASK, ops({ op: "replace", ref: "n1", text: "爱喝茶" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(v, ASK, ops({ op: "merge", refs: ["n1", "n2"] }));
     expect(await exactRows(v.owner.id)).toEqual(before);
     expect(await changeRows(v)).toEqual([]);
     expect(await chips(v.owner, v.conv)).toEqual([]);
@@ -1700,7 +1712,7 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     await noteAt(w, "甲".repeat(120), 30);
     await noteAt(w, "乙".repeat(120), 20);
     const before = await exactRows(w.owner.id);
-    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: "甲乙" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(w, ASK, ops({ op: "merge", refs: ["n1", "n2"] }));
     expect(await exactRows(w.owner.id)).toEqual(before);
     expect(await changeRows(w)).toEqual([]);
     expect(await chips(w.owner, w.conv)).toEqual([]);
@@ -1712,25 +1724,38 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     await noteAt(v, "咖啡", 20);
     await seeded(v.owner, v.agent.id, "字".repeat(1997), true);
     const was = await exactRows(v.owner.id);
-    await sayAndReview(v, "把茶和咖啡那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "喜欢喝茶，也喜欢喝咖啡" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(v, "把茶和咖啡那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
     expect(await exactRows(v.owner.id)).toEqual(was);
     expect(await changeRows(v)).toEqual([]);
     expect(await chips(v.owner, v.conv)).toEqual([]);
     expect(await counted("merge_join_skipped")).toBe(2);
   });
 
-  it("with MEMORY.mergeAuto off a merge's shape is the rule of before: a replace (the model's text) and a remove — a card when the owner did not ask to forget, applied when they did", async () => {
+  it("two merges in one answer, one its room cannot hold: the other is applied, and its notice says nothing of a full room; the one left is counted", async () => {
+    const w = await owned("mgx3");
+    // 1 + 2 + 1 + 1 + 1994 of 2000: one weight left, and each join weighs one more (its 「；」).
+    await noteAt(w, "茶", 50);
+    await noteAt(w, "咖啡", 40);
+    await noteAt(w, "猫", 30);
+    await noteAt(w, "狗", 20);
+    await noteAt(w, "字".repeat(1994), 10);
+    await sayAndReview(w, ASK, ops({ op: "merge", refs: ["n1", "n2"] }, { op: "merge", refs: ["n3", "n4"] }));
+    expect((await texts(w)).map(([t]: [string]) => t).slice(0, 3)).toEqual(["茶；咖啡", "猫", "狗"]);
+    const notices = await chips(w.owner, w.conv);
+    expect(notices.map((n) => [n.system.lines[0], n.system.full])).toEqual([["合并了 2 条：茶；咖啡", false]]);
+    expect(await counted("merge_join_skipped")).toBe(1);
+  });
+
+  it("with MEMORY.mergeAuto off a merge op is ignored: nothing happens to its notes, no change, no card, nothing counted; the rest of the answer stands", async () => {
     app.deps.config.memory.mergeAuto = "off";
-    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
-    const w = await routers("mo1");
-    await sayAndReview(w, ASK, MERGE);
-    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
-    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, [`要改成：${MODEL_TEXT}`, "要忘掉：路由器是华硕的"]]]);
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
-    const v = await routers("mo2");
-    await sayAndReview(v, ASK, MERGE);
-    expect(await texts(v)).toEqual([[MODEL_TEXT, false]]);
-    expect((await chips(v.owner, v.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, [`改成了：${MODEL_TEXT}`, "忘掉了：路由器是华硕的"]]]);
+    const w = await routers("mo1");
+    const before = await exactRows(w.owner.id);
+    await sayAndReview(w, ASK, ops({ op: "merge", refs: ["n1", "n2"] }, add("喜欢茶")));
+    expect((await exactRows(w.owner.id)).slice(0, 2)).toEqual(before);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, ["记住了：喜欢茶"]]]);
+    expect(await counted("merge_joined")).toBe(0);
+    expect(await counted("merge_join_skipped")).toBe(0);
   });
 
   it("with 先问我再记 the joined merge waits as a card of its own (要合并成：…, the notes' own words); confirmed, it is applied as a merge", async () => {
@@ -1750,7 +1775,7 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
       judge.answer(() => ({ sort: 0.95, explicit_forget: forget }));
       const w = await routers(name);
       await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
-      await sayAndReview(w, "把路由器那两条合成一条，多的删掉，回答简短那条也不要了", ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "remove", ref: "n2" }, { op: "remove", ref: "n3" }));
+      await sayAndReview(w, "把路由器那两条合成一条，多的删掉，回答简短那条也不要了", ops({ op: "merge", refs: ["n1", "n2"] }, { op: "remove", ref: "n3" }));
       expect(await texts(w)).toEqual([[JOINED, false]]);
       const own = (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json.notes.map((n: { text: string }) => n.text);
       const notices = await chips(w.owner, w.conv);
@@ -1768,25 +1793,54 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     }
   });
 
-  it("is no merge, and follows the rules of before: the replace's note also among the removes, two replaces in the room, a removed note a waiting card already asks about", async () => {
+  it("a merge op is dropped — and the rest of the answer stands — when it names fewer than two distinct notes it was shown, an unknown ref, notes of two rooms, or brings a text (or any other key): the model's words never reach a joined note", async () => {
+    judge.answer(() => ({ sort: 0.95 }));
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ["mr1", { op: "merge", refs: ["n1"] }],
+      ["mr2", { op: "merge", refs: ["n1", "n1"] }],
+      ["mr3", { op: "merge", refs: ["n1", "n9"] }],
+      ["mr4", { op: "merge", refs: ["n1", "n3"] }],
+      ["mr5", { op: "merge", refs: ["n1", "n2"], text: MODEL_TEXT }],
+      ["mr6", { op: "merge", into: "n1", from: ["n2"], text: MODEL_TEXT }],
+      ["mr7", { op: "merge", refs: "n1,n2" }],
+    ];
+    for (const [name, op] of cases) {
+      const w = await routers(name);
+      // n3: a note of the Agent's own room.
+      await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
+      await sayAndReview(w, ASK, ops(op, add("喜欢茶")));
+      expect([name, await texts(w)]).toEqual([name, [["路由器在客厅", false], ["路由器是华硕的", false], ["喜欢茶", false]]]);
+      expect([name, (await chips(w.owner, w.conv)).map((c) => c.system.lines)]).toEqual([name, [["记住了：喜欢茶"]]]);
+      expect(JSON.stringify(await roomOf(w.owner))).not.toContain(MODEL_TEXT);
+    }
+  });
+
+  it("a merge op naming a note another op of the answer names too — a remove, a seen, another merge — is dropped, and that op goes on by its own rule; so is one naming a note a waiting card already asks about", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    // With a remove of n2: the remove is the forget question's (yes here), the merge is gone.
+    const w = await routers("mx1");
+    await sayAndReview(w, ASK, ops({ op: "merge", refs: ["n1", "n2"] }, { op: "remove", ref: "n2" }));
+    expect(await texts(w)).toEqual([["路由器在客厅", false]]);
+    expect((await chips(w.owner, w.conv)).map((c) => c.system.lines)).toEqual([["忘掉了：路由器是华硕的"]]);
+    // With a seen of n1: n1 one stronger, nothing merged.
+    const v = await routers("mx2");
+    await sayAndReview(v, ASK, ops({ op: "merge", refs: ["n1", "n2"] }, { op: "seen", ref: "n1" }));
+    expect(await texts(v)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await exactRows(v.owner.id)).map((r) => r.strength)).toEqual([1, 0]);
+    expect(await chips(v.owner, v.conv)).toEqual([]);
+    // Two merges sharing n2: neither.
+    const x = await routers("mx3");
+    await seeded(x.owner, x.agent.id, "路由器密码贴在背面", false);
+    await sayAndReview(x, ASK, ops({ op: "merge", refs: ["n1", "n2"] }, { op: "merge", refs: ["n2", "n3"] }));
+    expect(await texts(x)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false], ["路由器密码贴在背面", false]]);
+    // A waiting card already asks about n2: the merge is dropped, the card stays as it was.
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
-    // The replaced note is removed too.
-    const w = await routers("mg7a");
-    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "remove", ref: "n1" }, { op: "remove", ref: "n2" }));
-    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
-    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, [`要改成：${MODEL_TEXT}`, "要忘掉：路由器是华硕的"]]]);
-    // Two replaces in the room: which one carries the removed note is not known.
-    const v = await routers("mg7b");
-    await seeded(v.owner, v.agent.id, "住在上海", false);
-    await sayAndReview(v, ASK, ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "replace", ref: "n3", text: "住在北京" }, { op: "remove", ref: "n2" }));
-    expect((await chips(v.owner, v.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, [`要改成：${MODEL_TEXT}`, "要改成：住在北京", "要忘掉：路由器是华硕的"]]]);
-    // A card already asks about the removed note: every in-place op of the answer is dropped, as before.
-    const x = await routers("mg7c");
-    await sayAndReview(x, "路由器是华硕的那条删掉", ops({ op: "remove", ref: "n2" }));
-    expect((await chips(x.owner, x.conv)).map((c) => c.system.pending)).toEqual([true]);
-    await sayAndReview(x, ASK, MERGE);
-    expect(await texts(x)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
-    expect(await chips(x.owner, x.conv)).toHaveLength(1);
+    const y = await routers("mx4");
+    await sayAndReview(y, "路由器是华硕的那条删掉", ops({ op: "remove", ref: "n2" }));
+    expect((await chips(y.owner, y.conv)).map((c) => c.system.pending)).toEqual([true]);
+    await sayAndReview(y, ASK, MERGE);
+    expect(await texts(y)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect(await chips(y.owner, y.conv)).toHaveLength(1);
   });
 
   it("a merge whose note changed while the review was thinking is dropped, as any in-place op on a note that moved; nothing is held for it", async () => {
@@ -1804,33 +1858,11 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     expect(await changeRows(w)).toEqual([]);
   });
 
-  it("a merge's shape with MEMORY.mergeAuto off applied at once on the owner's forget: with a note in the vault the new text goes into the vault (vault_by auto), whatever the owner's sorting (全部不进保险箱); left to a card, the same once confirmed", async () => {
-    app.deps.config.memory.mergeAuto = "off";
-    for (const [name, forget] of [["mv1", 0.95], ["mv4", 0.1]] as const) {
-      judge.answer(() => ({ sort: 0.95, explicit_forget: forget }));
-      const w = await owned(name);
-      await setNewNotes(db, w.owner.id, "open");
-      await openAuto(w.owner, w.agent.id, "周末去爬山");
-      // The owner locked it: the group must not know.
-      await seeded(w.owner, w.agent.id, "和小林一起去", true);
-      await sayAndReview(w, "这两条合成一条，重复的那条删掉", ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
-      const [notice] = await chips(w.owner, w.conv);
-      if (forget < 0.5) {
-        expect([notice.system.pending, notice.system.lines, notice.system.vaultLines]).toEqual([true, ["要改成：周末和小林去爬山，七点出发", "要忘掉：和小林一起去"], [true, true]]);
-        expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${notice.system.changeId}/confirm`)).status).toBe(200);
-      } else {
-        expect([notice.system.pending, notice.system.lines, notice.system.vaultLines]).toEqual([false, ["改成了：周末和小林去爬山，七点出发", "忘掉了：和小林一起去"], [true, true]]);
-      }
-      const rows = (await db.query("select text, vault, vault_by from owner_notes where owner_id = $1", [w.owner.id])).rows;
-      expect([name, rows]).toEqual([name, [{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]]);
-    }
-  });
-
   it("a merge in the Agent's own room is the same: joined, applied at once as ONE change", async () => {
     const w = await owned("mgs");
     await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
     await seeded(w.owner, w.agent.id, "先说结论", false, "self");
-    await sayAndReview(w, "把说话方式那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "回答要简短，先说结论" }, { op: "remove", ref: "n2" }));
+    await sayAndReview(w, "把说话方式那两条合成一条，多的删掉", ops({ op: "merge", refs: ["n1", "n2"] }));
     const own = (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json.notes.map((n: { text: string }) => n.text);
     expect(own).toEqual(["回答要简短；先说结论"]);
     expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[false, ["合并了 2 条：回答要简短；先说结论", "原来：回答要简短", "原来：先说结论"]]]);
@@ -1844,7 +1876,7 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     await sayAndReview(
       w,
       ASK,
-      ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "remove", ref: "n2" }, { op: "replace", ref: "n3", text: "回答要简短，先说结论" }, { op: "remove", ref: "n4" }),
+      ops({ op: "merge", refs: ["n1", "n2"] }, { op: "merge", refs: ["n3", "n4"] }),
     );
     expect(await texts(w)).toEqual([[JOINED, false]]);
     const rows = await changeRows(w);
@@ -1871,17 +1903,6 @@ describe("a merge in a review: a room's one replace and its removes, its notes j
     await quietThen(MERGE);
     expect(await texts(w)).toEqual([[JOINED, false]]);
     expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines[0]])).toEqual([[false, `合并了 2 条：${JOINED}`]]);
-  });
-
-  it("is no merge either when the replaced note is also locked, or a removed note is named twice: the rules of before", async () => {
-    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
-    const w = await routers("mg7d");
-    await sayAndReview(w, ASK, ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "lock", ref: "n1" }, { op: "remove", ref: "n2" }));
-    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
-    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, [`要改成：${MODEL_TEXT}`, "要忘掉：路由器是华硕的"]]]);
-    const v = await routers("mg7e");
-    await sayAndReview(v, ASK, ops({ op: "replace", ref: "n1", text: MODEL_TEXT }, { op: "remove", ref: "n2" }, { op: "remove", ref: "n2" }));
-    expect((await chips(v.owner, v.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, [`要改成：${MODEL_TEXT}`, "要忘掉：路由器是华硕的"]]]);
   });
 });
 
@@ -1990,21 +2011,13 @@ describe("whether the owner asked to forget: the judgement decides, whatever the
     expect(await texts(w)).toEqual([["喜欢喝茶", false], ["住在上海", false]]);
   });
 
-  it("a replace and an unrelated remove of one room have a merge's shape: with MEMORY.mergeAuto on (the default) the two notes are joined as they are — the replace's text is not used and the removed note's words stay, in the joined note — and nothing is asked", async () => {
+  it("a correction and a forget of another note of the same room are a replace and a remove, never a merge: nothing is joined — the forget question's yes applies both (the correction in its own words), its no holds both in ONE card", async () => {
     const w = await heldWorld("ask7j");
-    judge.calls.splice(0);
-    await sayAndReview(w, "我现在住北京了，喝茶那条删掉", ops({ op: "replace", ref: "n2", text: "住在北京" }, { op: "remove", ref: "n1" }));
-    expect((await texts(w)).map(([t]: [string]) => t)).toEqual(["喜欢喝茶；住在上海"]);
-    expect(judge.calls).toEqual([]);
-  });
-
-  it("with MEMORY.mergeAuto off, a replace and an unrelated remove of one room stand or fall together as before — the forget question's yes applies both, its no holds both in ONE card", async () => {
-    app.deps.config.memory.mergeAuto = "off";
-    const w = await heldWorld("ask7");
     await sayAndReview(w, "我现在住北京了，喝茶那条删掉", ops({ op: "replace", ref: "n2", text: "住在北京" }, { op: "remove", ref: "n1" }));
     expect(await texts(w)).toEqual([["住在北京", true]]);
     expect(await lastChip(w)).toMatchObject({ pending: false, lines: ["改成了：住在北京", "忘掉了：喜欢喝茶"] });
     expect(explicitCalls().flatMap((c) => c.questions.map((q) => q.key))).toEqual(["explicit_forget"]);
+    expect(await counted("merge_joined")).toBe(0);
     const v = await heldWorld("ask7b");
     judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
     await sayAndReview(v, "我现在住北京了，喝茶那条删掉", ops({ op: "replace", ref: "n2", text: "住在北京" }, { op: "remove", ref: "n1" }));
@@ -2239,7 +2252,7 @@ describe("the review input is structure, so nothing typed can spoof it", () => {
     ]);
     for (const word of ["replace", "remove", "lock", "unlock", "合并", "替换", "删除", "锁"]) expect([word, call!.system.includes(word)]).toEqual([word, false]);
     expect(call!.system).toContain("add");
-    for (const offered of ['{"op":"remove"', '{"op":"replace"', '{"op":"lock"', '{"op":"unlock"']) expect(call!.system).not.toContain(offered);
+    for (const offered of ['{"op":"remove"', '{"op":"replace"', '{"op":"lock"', '{"op":"unlock"', '{"op":"merge"']) expect(call!.system).not.toContain(offered);
     expect((await roomOf(owner)).notes.map((n: any) => [n.id, n.text, n.vault])).toEqual([
       [note.id, "喜欢喝茶", false],
       [expect.any(String), "不吃香菜", false],

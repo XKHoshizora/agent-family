@@ -306,7 +306,7 @@ type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
  */
 function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadNote>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
-  // The in-place ops of an answer stand or fall together (a merge is a replace plus a remove): when one names a note that changed (or is
+  // The in-place ops of an answer stand or fall together (the room check of one counts on the space another frees): when one names a note that changed (or is
   // gone) since the review read it, none of them is applied — what the model wrote was about a note that is no longer there.
   const moved = ops.some((op) => {
     if (op.op !== "replace" && op.op !== "remove" && op.op !== "lock") return false;
@@ -321,8 +321,9 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
   const unlocks: string[] = [];
 
   ops.forEach((op, index) => {
-    // The owner mentioning a note again is no change (the review counts it, pipeline.ts).
-    if (op.op === "seen") return;
+    // The owner mentioning a note again is no change (the review counts it, pipeline.ts); a merge is never applied here (pipeline.ts joins
+    // its notes and applies it as a dream's merge, `applyDream`).
+    if (op.op === "seen" || op.op === "merge") return;
     if (op.op === "add") {
       if (!allowed(op.kind)) return;
       const text = modelNote(op.text);
@@ -560,6 +561,12 @@ export interface DreamApplyOpts {
    * result keeps an origin only when every source and that conversation agree. A dream reads none.
    */
   heardIn?: string;
+  /**
+   * Whether the change says a room was too full for some of it (`memory_changes.full`, the notice's 快满了): a dream's does (the default);
+   * a review's joins do not — a join its room cannot hold is only counted (`merge_join_skipped`, pipeline.ts), and the one applied beside
+   * it says nothing of it.
+   */
+  tellFull?: boolean;
 }
 
 /**
@@ -697,8 +704,9 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   if (opts.status === "applied") await stamp(t, who, stored);
   // A room too full to take a longer text is nothing a dream has to say (a conversion is told how many it left for that: `noRoom`).
   if (stored.length === 0) return planned.noRoom > 0 ? { changeId: null, applied: [], full: planned.full, unlocks: [], noRoom: planned.noRoom } : null;
-  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, opts.phase ?? "dream");
-  return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [], noRoom: planned.noRoom };
+  const full = planned.full && opts.tellFull !== false;
+  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, full, opts.phase ?? "dream");
+  return { changeId, applied: stored.map(plain), full, unlocks: [], noRoom: planned.noRoom };
 }
 
 /** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */
@@ -1063,7 +1071,7 @@ function refreshPending(state: State, ops: StoredOp[]): void {
 
 /**
  * Confirms a pending change of the owner's: applies what it recorded, if every note it names is still as it was. The ops that change a
- * note in place stand or fall together (a merge is a replace plus a remove): when one of them names a note that is no longer as the
+ * note in place stand or fall together (the room check of one counts on the space another frees): when one of them names a note that is no longer as the
  * change found it, none of them is applied and the change's adds are (how many were left out is told in `report.dropped`); the change is
  * then applied with only what was done recorded, so its notice and its undo are about that alone. With no add left to apply it is
  * `stale`: the change is discarded and nothing is written. The one code that opens a note nobody else has

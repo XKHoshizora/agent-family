@@ -202,6 +202,9 @@ function convertInput(notes: ReadonlyArray<ExactNote>, kind: NoteKind, language:
 
 // --- what the answer may ask for -------------------------------------------------------------------------------------
 
+/** The most notes a dream's merge takes besides the one it writes into: four in all. */
+const MERGE_FROM_MAX = 3;
+
 const hasExactly = (o: Record<string, unknown>, keys: string[]): boolean => {
   const own = Object.keys(o);
   return own.length === keys.length && keys.every((k) => Object.hasOwn(o, k));
@@ -213,7 +216,8 @@ function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
   const known = (v: unknown): v is string => typeof v === "string" && refs.has(v);
   switch (o.op) {
     case "merge": {
-      if (!hasExactly(o, ["op", "into", "from", "text"]) || !known(o.into) || !Array.isArray(o.from) || o.from.length === 0 || typeof o.text !== "string") return null;
+      // Two to four notes: the faithful question asks one question per note, and was measured on two to four (calibration/memory-merge*.jsonl).
+      if (!hasExactly(o, ["op", "into", "from", "text"]) || !known(o.into) || !Array.isArray(o.from) || o.from.length === 0 || o.from.length > MERGE_FROM_MAX || typeof o.text !== "string") return null;
       const from = o.from as unknown[];
       if (!from.every(known) || new Set(from).size !== from.length || from.includes(o.into)) return null;
       const text = modelNote(o.text);
@@ -240,8 +244,8 @@ function one(raw: unknown, refs: ReadonlySet<string>): DreamOp | null {
  * The operations of a dream's answer: one JSON object `{"ops":[…]}`, bare or in a fenced block (ops.ts `parseAnswer`);
  * anything else answers `[]`. Of the first `MAX_OPS` entries only `merge`, `rewrite`, `split` and `lock` of exactly their
  * shapes are kept — no add, no bare remove, no unlock — with refs from `refs`, every text through `modelNote`; a note is named
- * by one op only (the first), so an op naming one already used, a merge of a note into itself or a split into fewer than two
- * or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8), only `ops`
+ * by one op only (the first), so an op naming one already used, a merge of a note into itself or of more than four notes, or a
+ * split into fewer than two or more than four parts is dropped. A conversion asks for `max` entries (a room's notes may be more than 8), only `ops`
  * `["rewrite"]`. Pure and total: it never throws.
  */
 export function parseDreamOps(answer: string, refs: ReadonlySet<string>, only: { max?: number; ops?: ReadonlyArray<DreamOp["op"]> } = {}): DreamOp[] {

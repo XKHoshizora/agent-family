@@ -14,7 +14,12 @@ export type Op =
   | { op: "lock"; ref: string }
   | { op: "unlock"; ref: string }
   /** The owner mentioned this existing note again: one stronger, seen now (no change is recorded, nobody is told). */
-  | { op: "seen"; ref: string };
+  | { op: "seen"; ref: string }
+  /**
+   * These notes (two or more, distinct) say parts of one thing: they are joined in their own words (pipeline.ts `joinedMerges`). Ids
+   * only — the op carries no text, so nothing of the model's is written by it.
+   */
+  | { op: "merge"; refs: string[] };
 
 /** The most operations of one answer that are looked at (a `seen` is no operation on a note: it is capped apart); the rest are dropped. */
 export const MAX_OPS = 8;
@@ -82,6 +87,12 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
     case "unlock":
     case "seen":
       return hasExactly(o, ["op", "ref"]) && ref !== null ? { op: o.op, ref } : null;
+    case "merge": {
+      // Exactly `op` and `refs`: a merge that brings a text (or anything else) is no merge, and is dropped whole.
+      if (!hasExactly(o, ["op", "refs"]) || !Array.isArray(o.refs) || !o.refs.every((r) => typeof r === "string" && refs.has(r))) return null;
+      const named = [...new Set(o.refs as string[])];
+      return named.length < 2 ? null : { op: "merge", refs: named };
+    }
     default:
       return null;
   }
@@ -90,7 +101,7 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
 /**
  * Whether the answer held an in-place op (`replace`, `remove`, `lock`) naming a note it was shown that `parseOps` drops — for its text
  * (`modelNote` refuses it), for its shape (a key too many or too few), or because it falls past the cap (`lookedAt`): since the in-place ops of
- * an answer stand or fall together (a merge is a replace plus a remove) the caller drops the others too. Pure and total.
+ * an answer stand or fall together (the room check of one counts on the space another frees) the caller drops the others too. Pure and total.
  */
 export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boolean {
   try {
@@ -115,7 +126,10 @@ export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boole
  * block is ignored); anything else answers `[]`. Of the first `MAX_OPS` entries (and the first `MAX_SEEN` `seen` ones, counted apart), an entry with an unknown key, an unknown
  * `ref` (one not in `refs`), the wrong shape, or a text `modelNote` refuses is dropped. An `add` whose text equals one of
  * `existing`, or the text of an earlier `add` or `replace` of this answer, once case, whitespace and punctuation are
- * ignored, is dropped as well. A `seen` of a note already `seen` in this answer is dropped.
+ * ignored, is dropped as well. A `seen` of a note already `seen` in this answer is dropped. A `merge` names two or more distinct notes it
+ * was shown and nothing else (no text); one naming fewer, an unknown ref, or a note another op of the answer names too (a replace, remove,
+ * lock, unlock, seen or another merge of it: what the note becomes would depend on which goes first) is dropped, and the rest of the
+ * answer stands. Whether its notes are of one room, and whether a merge may be applied at all, is the caller's (pipeline.ts `allowed`).
  */
 export function parseOps(answer: string, refs: ReadonlySet<string>, existing: ReadonlyArray<string> = []): Op[] {
   try {
@@ -141,8 +155,18 @@ export function parseOps(answer: string, refs: ReadonlySet<string>, existing: Re
       }
       ops.push(op);
     }
-    return ops;
+    return withoutSharedMerges(ops);
   } catch {
     return [];
   }
+}
+
+/** The notes `op` names. */
+const refsOf = (op: Op): string[] => (op.op === "add" ? [] : op.op === "merge" ? op.refs : [op.ref]);
+
+/** `ops` without every `merge` that names a note some other op of them names too. */
+function withoutSharedMerges(ops: Op[]): Op[] {
+  const named = new Map<string, number>();
+  for (const op of ops) for (const ref of refsOf(op)) named.set(ref, (named.get(ref) ?? 0) + 1);
+  return ops.filter((op) => op.op !== "merge" || op.refs.every((ref) => named.get(ref) === 1));
 }

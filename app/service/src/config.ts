@@ -297,15 +297,15 @@ export interface MemoryConfig {
    */
   judgeShare: number;
   /**
-   * In the owner's own conversation a review's `remove` (one that is not part of a merge the review joins) is applied at once only when the
-   * judgement model is at least this sure that the owner's words in the review's window asked to forget or delete something; otherwise,
-   * or with no answer, it waits for the owner's yes. (A `lock` is applied at once without asking.) Above 0, at most 1.
+   * In the owner's own conversation a review's `remove` is applied at once only when the judgement model is at least this sure that the
+   * owner's words in the review's window asked to forget or delete something; otherwise, or with no answer, it waits for the owner's
+   * yes. (A `lock` is applied at once without asking.) Above 0, at most 1.
    */
   explicitAt: number;
   /**
-   * What a review does with a merge (a room's one replace and its removes) in the owner's own conversation: "on" (default) joins the
-   * notes' own texts as they are (memory/clean.ts `joinNotes`) — never the model's merged text, and nobody is asked — and applies the
-   * joined note at once as one change (with 先问我再记: as a card); "off" treats a merge's shape as a replace and removes like any other.
+   * What a review does with a `merge` op (the notes it names are one thing; ids only, memory/ops.ts) in the owner's own conversation:
+   * "on" (default) joins the notes' own texts as they are (memory/clean.ts `joinNotes`) — nobody is asked — and applies the joined note
+   * at once as one change (with 先问我再记: as a card); "off" ignores the op. A replace and removes are never read as a merge.
    */
   mergeAuto: "off" | "on";
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
@@ -371,7 +371,7 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   judgeShare: probability(0.5),
   // Above 0: at 0 every answer would be a yes. 0.7 as calibrated on the real judgement model (memory/sort.ts `ownerAsked`).
   explicitAt: probability(0.7).refine((p) => p > 0),
-  // A review's merge joins the notes verbatim (the product owner's decision of 2026-11-21): no model text, no judge question.
+  // A review's merge op joins the notes verbatim (the product owner's decision of 2026-11-21): no model text, no judge question.
   mergeAuto: z.enum(["off", "on"]).default("on"),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),

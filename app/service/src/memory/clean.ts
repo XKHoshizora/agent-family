@@ -78,8 +78,8 @@ const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 
 /**
  * Notes joined into one in their own words (a review's merge, memory/pipeline.ts): `texts` in the order given (oldest first), each
- * trimmed, a text that repeats an earlier one exactly (after trimming) once, one sentence-final mark (`。．.！!？?；;`) taken off the end of
- * every part but the last, joined by `；` when the notebook's language (`lang`, `accounts.memory_language`) is Chinese or Japanese and by
+ * trimmed, a text that repeats an earlier one exactly (after trimming) once, a part that is only a sentence-final mark left out, one
+ * sentence-final mark (`。．.！!？?；;`) taken off the end of every part but the last, joined by `；` when the notebook's language (`lang`, `accounts.memory_language`) is Chinese or Japanese and by
  * `; ` otherwise — with no language set (automatic), by `；` when the texts are written in Chinese characters or kana. Nothing is
  * reworded. Pure.
  */
@@ -90,7 +90,9 @@ export function joinNotes(texts: readonly string[], lang: string | null): string
     if (trimmed !== "" && !parts.includes(trimmed)) parts.push(trimmed);
   }
   const cjk = lang === null ? CJK.test(parts.join("")) : lang === "ja" || lang.startsWith("zh");
-  return parts.map((p, i) => (i < parts.length - 1 ? p.replace(SENTENCE_END, "") : p)).join(cjk ? "；" : "; ");
+  // A part that is only a mark ("。", "?") says nothing: it is left out, so no separator stands alone.
+  const said = parts.filter((p) => p.replace(SENTENCE_END, "") !== "");
+  return said.map((p, i) => (i < said.length - 1 ? p.replace(SENTENCE_END, "") : p)).join(cjk ? "；" : "; ");
 }
 
 /**

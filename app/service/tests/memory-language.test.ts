@@ -164,8 +164,10 @@ describe("the review's system text", () => {
     expect(system).toContain(
       "主人说之前记错了、不是那样（“不是周三，是周四”）：用 replace 把那一条改成对的，错的内容不要留下，也不要写成“以前……”。只有事情真的变了（以前确实是那样，现在换了）才写成“现在…（以前…，YYYY 年 M 月改的）”。",
     );
-    expect(system).toContain("用 replace 合成一条，再用 remove 去掉多出来的");
-    expect(system).not.toContain("merge");
+    // A merge names notes and writes nothing; it is not a way to correct, shorten, drop or reword.
+    expect(system).toContain("用 merge 列出它们的 ref（同一个 room，两条或更多），系统会把它们的原话拼成一条，你不写文字。merge 不能用来纠正、缩短、删掉或改写任何内容，这些仍用 replace 和 remove。");
+    expect(system).toContain('{"op":"merge","refs":["n3","n4"]}');
+    expect(system).not.toContain("用 replace 合成一条");
     expect(system).not.toContain("旧的不留");
     expect(system).toContain('{"op":"add","kind":"owner","text":"…"}');
     expect(system).toContain('{"op":"add","kind":"self","text":"…"}');

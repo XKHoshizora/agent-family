@@ -98,16 +98,19 @@ const reviewSystem = (group: boolean, today: string, language: MemoryLanguage | 
       ? ["- 这是一个群聊里的对话：只能新增，只输出 add 和 seen。房间快满时，只记最要紧的。"]
       : [
           "- 主人说之前记错了、不是那样（“不是周三，是周四”）：用 replace 把那一条改成对的，错的内容不要留下，也不要写成“以前……”。只有事情真的变了（以前确实是那样，现在换了）才写成“现在…（以前…，YYYY 年 M 月改的）”。年月按今天的日期。",
-          "- 房间快满时（还能记的字数很少），把相近的几条用 replace 合成一条，再用 remove 去掉多出来的，并先删括号里的旧经过。",
+          "- 房间快满时（还能记的字数很少），只记最要紧的，先用 replace 删掉括号里的旧经过；新说的事和已有的某一条是同一件事，就用 replace 把它写进那一条，不要另外新增。",
+          "- 已有的几条说的是同一件事的几部分，合成一条更好读：用 merge 列出它们的 ref（同一个 room，两条或更多），系统会把它们的原话拼成一条，你不写文字。merge 不能用来纠正、缩短、删掉或改写任何内容，这些仍用 replace 和 remove。",
           "- 主人让你忘掉某件事：用 remove；让你把某条锁起来：用 lock；让你把某条从保险箱拿出来：用 unlock（这只是提出请求，主人还要自己点确认）。",
         ]),
     "",
     "输出：只输出一个 JSON 对象 {\"ops\":[…]}，不要别的文字。操作只有这几种：",
     '{"op":"add","kind":"owner","text":"…"}',
     '{"op":"add","kind":"self","text":"…"}',
-    ...(group ? [] : ['{"op":"replace","ref":"n3","text":"…"}', '{"op":"remove","ref":"n3"}', '{"op":"lock","ref":"n3"}', '{"op":"unlock","ref":"n3"}']),
+    ...(group
+      ? []
+      : ['{"op":"replace","ref":"n3","text":"…"}', '{"op":"remove","ref":"n3"}', '{"op":"lock","ref":"n3"}', '{"op":"unlock","ref":"n3"}', '{"op":"merge","refs":["n3","n4"]}']),
     '{"op":"seen","ref":"n3"}',
-    "其中 ref 必须是 notes 里已有笔记的 ref。",
+    group ? "其中 ref 必须是 notes 里已有笔记的 ref。" : "其中 ref 和 refs 里的必须是 notes 里已有笔记的 ref。",
     '没有值得记的，输出 {"ops":[]}。',
   ].join("\n");
 
