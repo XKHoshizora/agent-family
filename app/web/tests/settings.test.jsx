@@ -60,8 +60,9 @@ describe("profile page", () => {
     await openApp({ sync: baseSync });
     await goSettings();
     const kv = document.querySelector(".kv");
-    expect(kv.textContent).toContain("@me_one");
+    expect(kv.textContent).not.toContain("me_one");
     expect(kv.textContent).toContain("me@example.test");
+    expect(document.querySelector(".profile-head").textContent).toContain("@me_one");
     expect(inMain().queryByDisplayValue("me@example.test")).toBeNull();
     expect(inMain().queryByDisplayValue("@me_one")).toBeNull();
     expect(nameBox().value).toBe("Mei");
@@ -126,6 +127,79 @@ describe("display name", () => {
     });
     await click(button("保存"));
     expect(toastText()).toBe("操作太频繁了，请稍等一分钟再试。");
+  });
+});
+
+describe("account name (账号名, Task N)", () => {
+  const handleBox = () => screen.getByLabelText("账号名");
+  const changeButton = () => inMain().getByRole("button", { name: /^修改账号名$|^保存中…$/ });
+  const handleField = () => handleBox().closest(".field");
+  /** A local date at 10:00, as the service would send it. */
+  const dayAt = (y, m, d) => new Date(y, m - 1, d, 10, 0).toISOString();
+
+  it("says it can change once a year; while it may change now there is no date", async () => {
+    const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: null }));
+    await openApp({ sync: baseSync, api: { getMe } });
+    await goSettings();
+    expect(handleBox().value).toBe("me_one");
+    expect(handleField().textContent).toContain("一年可以改一次");
+    expect(handleField().textContent).not.toContain("之后可以再改");
+    expect(changeButton().disabled).toBe(true);
+  });
+
+  it("within the year shows the next date it may change, and the box stays as it is", async () => {
+    const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: dayAt(2027, 11, 21) }));
+    const updateHandle = vi.fn();
+    await openApp({ sync: baseSync, api: { getMe, updateHandle } });
+    await goSettings();
+    expect(handleField().textContent).toContain("一年可以改一次，2027年11月21日 之后可以再改");
+    expect(handleBox().disabled).toBe(true);
+    expect(changeButton().disabled).toBe(true);
+    expect(updateHandle).not.toHaveBeenCalled();
+  });
+
+  it("changes it: checked first, sent, shown everywhere at once, with the next date", async () => {
+    let changed = null;
+    const getMe = vi.fn(async () => ({ ...ME, handle: changed ?? ME.handle, handleChangeAvailableAt: changed ? dayAt(2027, 11, 21) : null }));
+    const updateHandle = vi.fn(async (handle) => {
+      changed = handle;
+      return { id: ME_ID, handle, displayName: "Mei", avatarVersion: 0 };
+    });
+    await openApp({ sync: baseSync, api: { getMe, updateHandle } });
+    await goSettings();
+    fireEvent.change(handleBox(), { target: { value: "Mei.2" } });
+    await click(changeButton());
+    expect(handleField().textContent).toContain("账号名为 3 到 24 位小写字母、数字或下划线");
+    expect(updateHandle).not.toHaveBeenCalled();
+    fireEvent.change(handleBox(), { target: { value: "mei_2" } });
+    await click(changeButton());
+    expect(updateHandle).toHaveBeenCalledWith("mei_2");
+    expect(toastText()).toBe("账号名已更新");
+    expect(document.querySelector(".profile-head").textContent).toContain("@mei_2");
+    expect(document.querySelector(".settings-me").textContent).toContain("mei_2");
+    expect(handleField().textContent).toContain("2027年11月21日 之后可以再改");
+  });
+
+  it("says why a change was refused: the name is taken, or the year has not passed", async () => {
+    const getMe = vi.fn(async () => ({ ...ME, handleChangeAvailableAt: null }));
+    const updateHandle = vi.fn(async () => {
+      throw apiError(409, "handle_taken");
+    });
+    await openApp({ sync: baseSync, api: { getMe, updateHandle } });
+    await goSettings();
+    fireEvent.change(handleBox(), { target: { value: "ann" } });
+    await click(changeButton());
+    expect(handleField().textContent).toContain("这个名字已经有人用了");
+    expect(handleBox().getAttribute("aria-invalid")).toBe("true");
+    expect(toastText()).toBeNull();
+    updateHandle.mockImplementation(async () => {
+      throw apiError(429, "handle_change_too_soon", null, { availableAt: dayAt(2027, 3, 5) });
+    });
+    fireEvent.change(handleBox(), { target: { value: "mei_3" } });
+    await click(changeButton());
+    expect(handleField().textContent).toContain("离上次改名还不到一年，2027年3月5日 之后可以再改");
+    expect(handleBox().disabled).toBe(true);
+    expect(document.querySelector(".profile-head").textContent).toContain("@me_one");
   });
 });
 

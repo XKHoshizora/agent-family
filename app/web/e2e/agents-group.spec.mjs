@@ -41,9 +41,9 @@ test.beforeEach(async () => {
 /** The site's free model (support/system.mjs `siteModels`) as an Agent's model. */
 const FREE = { source: "site", id: "e2e-free" };
 
-/** An Agent of `owner`'s made through the API; resolves with the owner's view of it (`id`, `handle`, `name`…). */
+/** An Agent of `owner`'s made through the API (its handle is `<owner handle>.<namePart>`); resolves with the owner's view of it (`id`, `handle`, `name`…). */
 async function agentApi(owner, { name, intro, field, persona, model = FREE, reasoning }) {
-  const data = { handle: `ag_${uniq(10)}`, name, model };
+  const data = { namePart: `ag_${uniq(10)}`, name, model };
   if (intro) data.intro = intro;
   if (field) data.field = field;
   if (persona) data.persona = persona;

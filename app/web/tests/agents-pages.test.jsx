@@ -176,7 +176,7 @@ describe("creating an Agent", () => {
     await click(createButton());
     expect(createAgent).toHaveBeenCalledTimes(1);
     expect(createAgent.mock.calls[0][0]).toEqual({
-      handle: "mybot",
+      namePart: "mybot",
       name: "MyBot",
       replyMode: "always",
       groupMentions: "members",
@@ -212,8 +212,11 @@ describe("creating an Agent", () => {
     expect(handleBox().value).toBe("my_bot_2");
     type("名称", "小助手");
     expect(handleBox().value).toBe(random);
-    type("名称", "ab");
+    type("名称", "a");
     expect(handleBox().value).toBe(random);
+    // A name part may be 2 characters (family names).
+    type("名称", "ab");
+    expect(handleBox().value).toBe("ab");
     type("账号名", "my_own");
     type("名称", "Different");
     expect(handleBox().value).toBe("my_own");
@@ -231,7 +234,7 @@ describe("creating an Agent", () => {
     type("擅长领域", "领".repeat(21));
     fireEvent.change(personaBox(), { target: { value: "人".repeat(20001) } });
     await click(createButton());
-    for (const text of ["请填写名称", "账号名为 3 到 24 位小写字母、数字或下划线", "简介不超过 40 个字", "擅长领域不超过 20 个字", "人格文档不超过 20000 个字"]) {
+    for (const text of ["请填写名称", "账号名为 2 到 24 位小写字母、数字或下划线", "简介不超过 40 个字", "擅长领域不超过 20 个字", "人格文档不超过 20000 个字"]) {
       expect(screen.getByText(text)).toBeTruthy();
     }
     type("名称", "名".repeat(21));
@@ -255,7 +258,7 @@ describe("creating an Agent", () => {
     pickOption(inMain().getByLabelText("私聊回复方式"), "mention");
     await click(createButton());
     expect(createAgent.mock.calls[0][0]).toEqual({
-      handle: "traveller",
+      namePart: "traveller",
       name: "旅行家",
       intro: "陪你规划旅行",
       field: "旅行",
@@ -279,7 +282,7 @@ describe("creating an Agent", () => {
     await chooseModel("小模型 · 免费");
     await click(createButton());
     const handleField = inMain().getByLabelText("账号名").closest(".field");
-    expect(handleField.textContent).toContain("这个账号名已被占用，请换一个。");
+    expect(handleField.textContent).toContain("你已经有一个用这个账号名的 Agent 了，请换一个。");
     expect(inMain().getByLabelText("账号名").getAttribute("aria-invalid")).toBe("true");
     expect(toastText()).toBeNull();
     expect(sectionShown()).toContain("Agent");
@@ -510,6 +513,36 @@ describe("no model source at all", () => {
     await click(inMain().getByRole("button", { name: "添加模型供应商" }));
     expect(sectionShown()).toContain("设置");
     expect(createAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("family names: an Agent's account name hangs under mine (Task N)", () => {
+  it("the create form shows my handle as a fixed prefix before the name part, and sends the name part", async () => {
+    const createAgent = vi.fn(async () => agentOf(AG1, { handle: "me_one.jarvis", name: "贾维斯" }));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    const field = inMain().getByLabelText("账号名").closest(".field");
+    expect(field.querySelector(".handle-prefix").textContent).toBe("me_one.");
+    expect(field.textContent).toContain("2 到 24 位小写字母、数字或下划线");
+    type("名称", "贾维斯");
+    type("账号名", "jarvis");
+    await chooseModel("小模型 · 免费");
+    await click(createButton());
+    expect(createAgent.mock.calls[0][0]).toMatchObject({ namePart: "jarvis", name: "贾维斯" });
+    expect(createAgent.mock.calls[0][0]).not.toHaveProperty("handle");
+  });
+
+  it("the Agent page, its edit form and the list show the full handle; deleting it says the name part is free again", async () => {
+    const agent = agentOf(AG1, { handle: "me_one.jarvis", name: "贾维斯", model: SITE_MODEL });
+    await openAgents({ agents: [agent] });
+    await openRow("贾维斯");
+    expect(document.querySelector(".main-col .profile-head").textContent).toContain("@me_one.jarvis · 主人：你");
+    await click(inMain().getByRole("button", { name: /删除/ }));
+    expect(dialog().textContent).toContain("它不会再回复。账号名 @me_one.jarvis 可以给你的新 Agent 再用。");
+    await click(within(dialog()).getByRole("button", { name: "取消" }));
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(inMain().queryByLabelText("账号名")).toBeNull();
+    expect(mainText()).toContain("me_one.jarvis（创建后不可修改）");
   });
 });
 

@@ -363,6 +363,25 @@ describe("principal pushes (spec 6.11 item 1)", () => {
     // No refetch is needed for it.
     expect(t.log).toEqual(["connect", "sync", "social"]);
   });
+
+  it("carries the handle now (a rename; an Agent's full handle follows its owner's): shown everywhere at once, mine included", async () => {
+    const t = agentsTransport();
+    const { box } = run(t);
+    await settle();
+    t.socket.emit({ type: "principal", id: ANN, avatarVersion: 0, handle: "ann_2" });
+    t.socket.emit({ type: "principal", id: AG1, avatarVersion: 0, handle: "mei_2.helper" });
+    t.socket.emit({ type: "principal", id: ME_ID, avatarVersion: 0, handle: "mei_2" });
+    // Malformed: ignored.
+    t.socket.emit({ type: "principal", id: ANN, avatarVersion: 0, handle: 7 });
+    expect(box.model.principals[ANN].handle).toBe("ann_2");
+    expect(box.model.principals[AG1].handle).toBe("mei_2.helper");
+    expect(box.model.agents[AG1].handle).toBe("mei_2.helper");
+    expect(box.model.me.handle).toBe("mei_2");
+    const view = toView(box.model, { now: 0 });
+    expect(view.people[ANN].handle).toBe("@ann_2");
+    expect(view.account.handle).toBe("mei_2");
+    expect(t.log).toEqual(["connect", "sync", "social"]);
+  });
 });
 
 describe("agent pushes", () => {

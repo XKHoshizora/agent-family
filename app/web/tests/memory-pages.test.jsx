@@ -105,6 +105,8 @@ async function openPalace(svc) {
   const app = await openApp({ sync: baseSync, api: svc.api });
   fireEvent.click(rail(/^设置/));
   await flush();
+  // The profile page, shown first, read /api/me for when the account name may change (Task N): counted from here on.
+  svc.api.getMe?.mockClear?.();
   await click(screen.getByText("记忆宫殿", { selector: ".list-col .row-name" }));
   return app;
 }

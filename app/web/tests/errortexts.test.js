@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { agentErrorText, friendErrorText, groupErrorText, noQuotaText, providerErrorText, replyErrorText, runFailureText } from "../src/data/errorTexts.js";
+import { agentErrorText, friendErrorText, groupErrorText, noQuotaText, profileErrorText, providerErrorText, replyErrorText, runFailureText } from "../src/data/errorTexts.js";
 
 const GENERIC = "操作没有成功，请稍后再试。";
 const err = (code, status = 400) => ({ code, status, reason: null });
@@ -122,11 +122,21 @@ for (const [label, textOf, routes] of [
   });
 }
 
+describe("changing my account name (Task N)", () => {
+  it("says the name is taken, or when the year is up (a local date)", () => {
+    expect(profileErrorText("handle", err("handle_taken", 409))).toBe("这个名字已经有人用了");
+    const availableAt = new Date(2027, 10, 21, 9, 30).toISOString();
+    expect(profileErrorText("handle", { ...err("handle_change_too_soon", 429), availableAt })).toBe("离上次改名还不到一年，2027年11月21日 之后可以再改");
+    expect(profileErrorText("handle", err("handle_change_too_soon", 429))).toBe("离上次改名还不到一年，暂时不能再改");
+    expect(profileErrorText("handle", err("invalid_request"))).toBe("账号名为 3 到 24 位小写字母、数字或下划线");
+  });
+});
+
 describe("the sentences batch 2A names", () => {
   const NOW = new Date(2026, 10, 16, 12, 0).getTime();
   it("each code reads as what it means", () => {
     expect(agentErrorText("create", err("agent_limit"))).toBe("你的 Agent 数量已达到当前档位的上限。");
-    expect(agentErrorText("create", err("handle_taken"))).toBe("这个账号名已被占用，请换一个。");
+    expect(agentErrorText("create", err("handle_taken"))).toBe("你已经有一个用这个账号名的 Agent 了，请换一个。");
     expect(agentErrorText("edit", err("agent_deleted"))).toBe("这个 Agent 已删除。");
     expect(replyErrorText("retry", err("agent_paused"))).toBe("这个 Agent 已暂停，恢复后才能重试。");
     expect(replyErrorText("retry", err("busy_run"))).toBe("它正在回复，请等这次回复结束。");
