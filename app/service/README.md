@@ -2101,12 +2101,30 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                                        // an Agent's reply, for the Agent's owner only (absent for everyone else): the
                                        // model and reasoning level its run used, and what you were charged for it (below);
                                        // `proactive: true` only when nobody called the Agent for it (otherwise absent)
+  "lookups": { "search": 2, "file": 1, "time": 1 },   // an Agent's reply whose tools ran: how many calls of each kind
+                                       // (only kinds above 0), to whoever reads the reply (What a reply looked up, below)
+  "found": [{ "conversationId": "…", "seq": 12 }],   // of the messages its tools found, those you can see now, in order
+  "queries": ["川菜馆"],               // the words its searches were for: the Agent's owner, its own conversation only
   "createdAt": "2026-11-16T01:02:03.000Z"
 }
 ```
 
-An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated`, `proposal` and `via`
-appear only on those, only when they apply. Render its text as Markdown (spec 6.6); people's text stays plain.
+An Agent's reply is an ordinary `text` message from the Agent; `reasoning`, `stopped`, `truncated`, `proposal`, `via`,
+`lookups`, `found` and `queries` appear only on those, only when they apply. Render its text as Markdown (spec 6.6);
+people's text stays plain.
+
+**What a reply looked up** (`messages/lookups.ts`, `messages/read.ts` `toWireForReaders`; `tests/tool-lookups.test.ts`): a
+reply whose tools ran (Agents and runs, Tools in a reply) keeps, with its message, how many calls of each kind ran and
+answered (`lookups`: `search`, `file`, `time`; a call answered with a note or an error is not counted), the messages its
+tools found (`found`: the first 20, in the order they came, each once) and, in the Agent's own conversation only, the
+words its searches were for (`queries`: the first 6, each once, cut to a weight of 60). None of it is text: no search
+matches it, no model is ever shown it, no preview or quote carries it. Each reader is sent their part, decided when the
+message is read (history, a single message, `GET /api/sync`, catch-up, both searches, every push): `lookups` to everyone
+who sees the reply (a count of lookups, not of results); of `found` only the messages that reader can see now, by the
+same rule as any message — a message from before they joined a group, one of a conversation they are not in, or one not
+there any more is left out without a trace, and the key is absent when none is left; `queries` only to the owner of the
+Agent that sent it, in the Agent's own conversation (in a group they are not even kept). A reply whose tools ran none,
+and one offered none, carries none of these keys.
 
 **`via`** (the product owner's decision of 2026-11-18): which model and reasoning level an Agent's reply used, and what it
 cost its owner. Only the owner of the Agent that sent it receives it — the sender principal's `owner_id` when the message
@@ -2178,6 +2196,9 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "run", "conversationId": "…", "agentId": "…", "state": "replying" | "unavailable" | null }
                                         // a group: another member's Agent `agentId` is replying, cannot reply now, or
                                         // shows nothing (Replies, In a group)
+                                        // any of the three, while a reply runs tools: also "activity": "search" | "file"
+                                        // | "time" — what the tool now running does — or null once the model writes again
+                                        // (below)
 { "type": "delta", "conversationId": "…", "runId": "…", "text"?: "…", "reasoning"?: "…" }
                                         // the next piece of the reply being generated: append it to the "replying"
                                         // bubble; the posted `message` replaces the bubble
@@ -2206,6 +2227,14 @@ tried once more when it fails; failing again, that one delivery is dropped for e
 stay as it was until the next `run` of that Agent there or a reload. None of this is stored or replayed: after a
 reconnect, `GET /api/conversations/:id/run` (an Agent's own conversation) says whether a reply is still under way (its
 text so far is not sent again; the posted message follows), and `GET /api/conversations/:id/runs` what a group shows.
+
+While a reply runs tools (Agents and runs, Tools in a reply) its `run` comes again whenever what it is doing changes, with
+`activity`: as a tool starts, the kind of its work — `"search"` (the chat history), `"file"`, `"time"` —, and `null` as
+soon as the model is called again (and once the reply ends, if a tool was the last thing shown). The Agent's owner gets
+it with the Run (`running`), in its own conversation and in a group alike (where nothing else of the reply streams); in a
+group every other current member gets it with `agentId` and `"state": "replying"` — only while that is the Agent's state
+there. Only the kind: never which tool, its words, its input or what it gave. A frame without `activity` says nothing of
+it: show the reply as written. Not sent once a pause, delete or removal interrupted the reply.
 
 ## Sync and realtime (`src/sync/`)
 
@@ -2739,8 +2768,11 @@ with what it wrote, as
 all, each call and each tool also within `AGENT_RUN_TIMEOUT_MS` — and the service closing are honoured between events,
 between tool calls and between rounds, and end the reply as they end one of one call. What the rounds write streams as it
 comes, a later round's after a paragraph break, and is posted as one reply (text written before a tool call is kept);
-reasoning likewise, cut at 32 000 characters as always. The status line follows what the tools did (`activity`: after each
-tool that ran, then none once the tool phase is over; not shown anywhere yet). One settlement for the reply: the rounds'
+reasoning likewise, cut at 32 000 characters as always. While a tool runs, the reply's status says what kind of work it
+is (`activity`, its kind from the offer, `ToolRun.kinds`: told as the tool starts, again only when it changes, and none as
+soon as the model is called again; a tool with no kind shows none: Wire shapes, Pushes); what the calls that ran and
+answered looked up goes with the posted reply (`lookups`, `found`, `queries`: Wire shapes, What a reply looked up — a
+reply whose tools ran none is posted as one offered none). One settlement for the reply: the rounds'
 summed usage, or, with any round unreported (the record then says `estimated`), the sum, per round, of its reported usage
 (its hidden reasoning included, as the upstream counts it), or of its estimate when it reported none — the
 conversation's, plus the tools and the rounds it carried (none for a round whose upstream refused the tools), at the

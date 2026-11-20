@@ -88,6 +88,8 @@ function fakePort(options: FakeOptions = {}): Fake {
         ? null
         : {
             perTool: options.perTool ?? {},
+            // What each tool's work shows while it runs, as an offer names it.
+            kinds: { search: "search", read_file: "file" },
             contextTokens,
             fixedTokens: 0,
             ratio: 1,
@@ -232,7 +234,7 @@ describe("a reply that offers tools", () => {
     expect(second.tools).toEqual(TOOLS);
     expect(second).not.toHaveProperty("toolChoice");
     expect(resultsOf(second, 0)).toEqual([{ id: fake.tools[0]!.id, name: "search", output: { hits: [{ query: "川菜" }] } }]);
-    expect(fake.posted).toEqual([{ text: "去吃川菜吧。", reasoning: "", stopped: false, truncated: false }]);
+    expect(fake.posted).toEqual([{ text: "去吃川菜吧。", reasoning: "", stopped: false, truncated: false, lookups: { search: 1 } }]);
     // One settlement, on the rounds' summed usage.
     expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(700, 50), fallback: expect.any(Object) }]);
     // The port was asked about money once, between the rounds, with what the first round cost.
@@ -250,7 +252,7 @@ describe("a reply that offers tools", () => {
     const fake = fakePort();
     await runOn(fake, gateway);
     const text = "我先查一下。\n\n查到了：去吃川菜。";
-    expect(fake.posted).toEqual([{ text, reasoning: "要查记录。\n\n找到了。", stopped: false, truncated: false }]);
+    expect(fake.posted).toEqual([{ text, reasoning: "要查记录。\n\n找到了。", stopped: false, truncated: false, lookups: { search: 1 } }]);
     expect(fake.deltas.map((d) => d.text ?? "").join("")).toBe(text);
     expect(finishedAs(fake)).toEqual([{ status: "done" }]);
   });
@@ -272,8 +274,8 @@ describe("a reply that offers tools", () => {
     expect(fake.posted.map((p) => p.text)).toEqual(["查了很多，结论是川菜。"]);
     expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(900, 90), fallback: expect.any(Object) }]);
     expect(fake.extends).toHaveLength(8);
-    expect(fake.activities.at(-1)).toBe(null);
-    expect(fake.activities.filter((a) => a === null)).toHaveLength(1);
+    // Each round: the search while it ran, none as soon as the model was called again.
+    expect(fake.activities).toEqual(Array.from({ length: 8 }, () => ["search", null]).flat());
   });
 
   it("the same call three times: run once, the second answered with the fixed note, the third ends the tool phase", async () => {
@@ -315,6 +317,8 @@ describe("a reply that offers tools", () => {
     expect(outputsOf(gateway.calls[2]!, 1)).toEqual([{ note: OVER_CAP }]);
     expect(isFinal(gateway.calls[2]!)).toBe(false);
     expect(fake.posted.map((p) => p.text)).toEqual(["好了。"]);
+    // What was looked up counts the calls that ran, never one answered with the note.
+    expect(fake.posted[0]!.lookups).toEqual({ search: 2, file: 1 });
   });
 
   it("two garbled calls (an unknown tool, an input its schema refuses) are never run: the fixed error each, the tools marked unusable, then the last call", async () => {
@@ -456,7 +460,7 @@ describe("a reply that offers tools", () => {
     await runOn(withText, said);
     expect(said.calls).toHaveLength(2);
     expect(withText.extends).toHaveLength(2);
-    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
     expect(finishedAs(withText)).toEqual([{ status: "done" }]);
 
     const mute = scriptedGateway()
@@ -479,7 +483,7 @@ describe("a reply that offers tools", () => {
     });
     await runOn(between, gateway);
     expect(gateway.calls).toHaveLength(1);
-    expect(between.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false }]);
+    expect(between.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false, lookups: { search: 1 } }]);
     expect(finishedAs(between)).toEqual([{ status: "stopped" }]);
 
     const two = scriptedGateway().callTools(
@@ -499,7 +503,7 @@ describe("a reply that offers tools", () => {
     expect(two.calls).toHaveLength(1);
     expect(inTools.tools.map((c) => c.input)).toEqual([{ query: "a" }]);
     expect(inTools.extends).toEqual([]);
-    expect(inTools.posted).toEqual([{ text: "我查两样。", reasoning: "", stopped: true, truncated: false }]);
+    expect(inTools.posted).toEqual([{ text: "我查两样。", reasoning: "", stopped: true, truncated: false, lookups: { search: 1 } }]);
     expect(finishedAs(inTools)).toEqual([{ status: "stopped" }]);
     expect(inTools.activities.at(-1)).toBe(null);
   });
@@ -549,7 +553,7 @@ describe("a reply that offers tools", () => {
     const slow = fakePort({ extend: () => new Promise((resolve) => setTimeout(() => resolve("ok"), 1_200)) });
     await runOn(slow, later, { tools: { runTimeoutMs: 1_000 } });
     expect(later.calls).toHaveLength(1);
-    expect(slow.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(slow.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
 
     // And with nothing written: failed, as a reply that timed out having said nothing.
     const mute = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }]);
@@ -641,7 +645,7 @@ describe("a reply that offers tools", () => {
     const stopWithText = fakePort({ extend: () => "stop" });
     await runOn(stopWithText, said);
     expect(said.calls).toHaveLength(1);
-    expect(stopWithText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(stopWithText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
     expect(stopWithText.finished).toEqual([{ end: { status: "done" }, usage: U(100, 10), fallback: expect.any(Object) }]);
 
     const nothing = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) });
@@ -656,7 +660,7 @@ describe("a reply that offers tools", () => {
     const withText = fakePort({ extend: () => Promise.reject(new Error("the database is gone")) });
     await runOn(withText, said);
     expect(said.calls).toHaveLength(1);
-    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true, lookups: { search: 1 } }]);
     expect(finishedAs(withText)).toEqual([{ status: "done" }]);
 
     const mute = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) });
@@ -727,6 +731,116 @@ describe("a reply that offers tools", () => {
     await runOn(fake, gateway, { log });
     expect(log.lines.length).toBeGreaterThan(0);
     expect(JSON.stringify(log.lines)).not.toMatch(/CANARY|附近有什么好吃的|你是一个助手/);
+  });
+});
+
+describe("what a reply's tools are doing, and what it looked up", () => {
+  /** A tool that, as it runs, notes the status the port was last told (what is shown while it runs). */
+  const watching = (shown: Array<Activity | null>, outcome: (call: ToolCall) => ToolOutcome = (call) => ({ output: { hits: [call.input] } })) =>
+    async (call: ToolCall, _signal: AbortSignal, fake: Fake) => {
+      shown.push(fake.activities.at(-1) ?? null);
+      return outcome(call);
+    };
+
+  it("the status is the kind of the tool that is running, from the offer, said as it starts and once per change; none as soon as the model is called again", async () => {
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "a" } },
+        { name: "search", input: { query: "b" } },
+        { name: "read_file", input: { name: "菜单.txt" } },
+      ])
+      .callTools([{ name: "search", input: { query: "c" } }])
+      .reply("好了。");
+    const shown: Array<Activity | null> = [];
+    const fake = fakePort({ tool: watching(shown) });
+    await runOn(fake, gateway);
+    // While each ran, its own kind was shown; the second search of the round said nothing new.
+    expect(shown).toEqual(["search", "search", "file", "search"]);
+    expect(fake.activities).toEqual(["search", "file", null, "search", null]);
+    expect(fake.posted.map((p) => p.text)).toEqual(["好了。"]);
+  });
+
+  it("a tool the offer names no kind for shows no status and is not counted", async () => {
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "a" } },
+        { name: "read_file", input: { name: "菜单.txt" } },
+      ])
+      .reply("好了。");
+    const fake = fakePort({ toolRun: { kinds: { search: "search" } } });
+    await runOn(fake, gateway);
+    expect(fake.tools).toHaveLength(2);
+    expect(fake.activities).toEqual(["search", null]);
+    expect(fake.posted[0]!.lookups).toEqual({ search: 1 });
+  });
+
+  it("the reply carries what was looked up: per kind the tools that ran; what they found, in order, without repeats, the first 20; the first 6 search words, each cut to 60 weight", async () => {
+    const long = "川".repeat(100);
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "q1" } },
+        // A repeat (answered with the note), a garbled call, a tool that fails: none of them counts.
+        { name: "search", input: { query: "q1" } },
+        { name: "search", input: { limit: 3 } },
+        { name: "read_file", input: { name: "菜单.txt" } },
+        { name: "search", input: { query: "fails" } },
+      ])
+      .callTools(["q2", "q3", long, "q5", "q6", "q7"].map((query) => ({ name: "search", input: { query } })))
+      .reply("好了。");
+    const ref = (conversationId: string, seq: number) => ({ conversationId, seq });
+    const A = "00000000-0000-4000-8000-00000000000a";
+    const B = "00000000-0000-4000-8000-00000000000b";
+    const range = (conversationId: string, from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => ref(conversationId, from + i));
+    const fake = fakePort({
+      tool: async (call) => {
+        const input = call.input as { query?: string; name?: string };
+        if (input.query === "fails") throw new Error("the store is gone");
+        if (call.name === "read_file") return { output: "菜单", found: [ref(A, 11), ref(A, 12), ...range(B, 1, 12)] };
+        if (input.query === "q1") return { output: { hits: 12 }, found: range(A, 1, 12), query: "q1" };
+        // What is not a message reference or a search word is not kept.
+        return {
+          output: { hits: 1 },
+          found: [ref(A, 1), { conversationId: 5, seq: 1 }, ref(B, 0), ref(B, -1), ref(B, 1.5), ref(B, 2 ** 53), ref("", 1), ref("not-a-conversation", 1), null] as never,
+          query: input.query,
+        };
+      },
+    });
+    await runOn(fake, gateway);
+    const [posted] = fake.posted;
+    expect(posted!.lookups).toEqual({ search: 7, file: 1 });
+    expect(posted!.found).toEqual([...range(A, 1, 12), ...range(B, 1, 8)]);
+    expect(posted!.queries).toEqual(["q1", "q2", "q3", "川".repeat(60), "q5", "q6"]);
+    // A word that shows nothing is no word.
+    const blank = scriptedGateway().callTools([{ name: "search", input: { query: "  " } }]).reply("好。");
+    const quiet = fakePort({ tool: async (call) => ({ output: {}, query: (call.input as { query: string }).query }) });
+    await runOn(quiet, blank);
+    expect(quiet.posted).toEqual([{ text: "好。", reasoning: "", stopped: false, truncated: false, lookups: { search: 1 } }]);
+  });
+
+  it("a reply whose tools ran none posts exactly what a reply offered none posts: no key about lookups", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "web_search", input: { query: "川菜" } }])
+      .callTools([{ name: "search", input: { limit: 3 } }])
+      .reply("不用工具也能回答。");
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(fake.tools).toEqual([]);
+    expect(fake.posted).toEqual([{ text: "不用工具也能回答。", reasoning: "", stopped: false, truncated: false }]);
+    expect(fake.activities).toEqual([]);
+  });
+
+  it("a tool cut off by the reply's stop: its status was shown while it ran and goes once the reply ends; it is not counted", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "慢" } }], { text: "我先查一下。" });
+    const fake = fakePort({
+      tool: (_call, signal, f) =>
+        new Promise((_resolve, reject) => {
+          f.stop();
+          signal.addEventListener("abort", () => reject(signal.reason));
+        }),
+    });
+    await runOn(fake, gateway);
+    expect(fake.activities).toEqual(["search", null]);
+    expect(fake.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false }]);
   });
 });
 

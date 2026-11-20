@@ -74,7 +74,7 @@ export interface AgentPortDeps {
   config: Config;
   /** Where attachments are read from for what the model is shown (`buildContext`). */
   blobs: BlobStore;
-  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushAgentChanged" | "pushChargedReply">;
+  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushActivity" | "pushAgentChanged" | "pushChargedReply">;
   conversations: ConversationEvents;
   reads: ReadEvents;
   log: Pick<FastifyBaseLogger, "error" | "warn" | "info">;
@@ -90,12 +90,14 @@ export interface AgentPortDeps {
 
 /**
  * Where a reply's tools come from (`AgentPortDeps.toolbox`): what a run is offered, with at most how many calls of each
- * tool one reply may run (`ToolRun.perTool`), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot
- * answer, its signal honoured). Nothing is offered while `TOOLS.enabled` is false. `offer` is asked once per run, in
- * `begin`'s first step (inside its transaction, under the run's locks), before the context is planned.
+ * tool one reply may run (`ToolRun.perTool`) and what each tool's work is (`ToolRun.kinds`: the status while it runs,
+ * what it is counted under), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot answer, its
+ * signal honoured; what it found and searched for in its outcome, `ToolOutcome`). Nothing is offered while
+ * `TOOLS.enabled` is false. `offer` is asked once per run, in `begin`'s first step (inside its transaction, under the
+ * run's locks), before the context is planned.
  */
 export interface Toolbox {
-  offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number> };
+  offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number>; kinds: Record<string, Activity> };
   run(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
 }
 
@@ -554,6 +556,7 @@ export class DbAgentPort implements AgentPort {
               ? null
               : {
                   perTool: offer.perTool,
+                  kinds: offer.kinds,
                   contextTokens: resolved.contextTokens,
                   fixedTokens: context.fixedTokens,
                   ratio,
@@ -643,8 +646,17 @@ export class DbAgentPort implements AgentPort {
     }
   }
 
-  /** `AgentPort.activity`: nothing is shown of it yet (no status line). */
-  activity(_run: RunTicket, _activity: Activity | null): void {}
+  /**
+   * `AgentPort.activity`: the kind, or null, to the run's owner with the run, and in a group to every other current member
+   * with the Agent's state (`Hub.pushActivity`) — in its own conversation and in a group alike, though nothing of a group's
+   * reply streams. Dropped like a delta once the Agent's pause, delete or removal has silenced the run, also one still
+   * waiting in the hub's queue; nothing for a run this process is not working on.
+   */
+  activity(run: RunTicket, activity: Activity | null): void {
+    const flags = this.flags.get(run.id);
+    if (!flags || flags.silenced) return;
+    this.deps.realtime.pushActivity(run.conversationId, run.id, activity, () => !flags.silenced);
+  }
 
   /** `AgentPort.toolsUnusable`: nothing is recorded of it yet. */
   async toolsUnusable(_run: RunTicket, _why: "refused" | "garbled"): Promise<void> {}

@@ -1,0 +1,129 @@
+import type { Activity } from "../agents/runtime/port.ts";
+import { cutToWeight } from "../metering/tokens.ts";
+import { cleanModelText, hasVisibleText } from "../schemas.ts";
+
+/**
+ * What an Agent's reply looked up with its tools (README "Wire shapes", WireMessage `lookups`, `found`, `queries`; Agents
+ * and runs, Tools in a reply): their shapes and limits, and the one check of each — for the worker that collects them
+ * (`LookedUp`), the post that stores them (agents/conversation.ts `postAsAgent`) and the read that sends each reader
+ * their part (messages/read.ts `toWireForReaders`). None of it is text: no search matches it, no model is shown it.
+ */
+
+/** The kinds of a tool's work, as a reply's status line says them and its lookups count them. */
+export const LOOKUP_KINDS: readonly Activity[] = ["search", "file", "time"];
+
+/** How many tool calls of each kind ran for a reply: only kinds above 0. */
+export type Lookups = Partial<Record<Activity, number>>;
+
+/** A message a reply's tools found: its conversation and seq. */
+export interface MessageRef {
+  conversationId: string;
+  seq: number;
+}
+
+/** What a reply's message keeps of what it looked up; a key only when there is something under it. */
+export interface LookupFields {
+  lookups?: Lookups;
+  /** In the order the tools gave them, each once, at most `FOUND_MAX`. */
+  found?: MessageRef[];
+  /** The words its searches were for, at most `QUERIES_MAX`, each at most `QUERY_MAX_WEIGHT`: kept only in the Agent's own conversation. */
+  queries?: string[];
+}
+
+/** The most messages a reply keeps of what its tools found: the first ones. */
+export const FOUND_MAX = 20;
+/** The most search words a reply keeps: the first ones. */
+export const QUERIES_MAX = 6;
+/** The most a search word weighs as it is kept (metering/tokens.ts `weight`): longer ones are cut. */
+export const QUERY_MAX_WEIGHT = 60;
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Whether `x` names a message: a conversation id (lower-case, as the database writes it) and a seq of 1 or more. */
+export const isMessageRef = (x: unknown): x is MessageRef =>
+  typeof x === "object" &&
+  x !== null &&
+  typeof (x as MessageRef).conversationId === "string" &&
+  UUID.test((x as MessageRef).conversationId) &&
+  Number.isSafeInteger((x as MessageRef).seq) &&
+  (x as MessageRef).seq >= 1;
+
+/** The counts of `value` (a stored body's `lookups`) that are whole numbers above 0, of a known kind; null when none is. */
+export function lookupsOf(value: unknown): Lookups | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out: Lookups = {};
+  for (const kind of LOOKUP_KINDS) {
+    const n = Object.hasOwn(value, kind) ? (value as Record<string, unknown>)[kind] : undefined;
+    if (typeof n === "number" && Number.isSafeInteger(n) && n > 0) out[kind] = n;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** Adds to `into` the messages `value` names that it does not hold yet (`seen`: theirs, by key), in order, up to `FOUND_MAX`. */
+function addFound(into: MessageRef[], seen: Set<string>, value: unknown): void {
+  if (!Array.isArray(value)) return;
+  for (const r of value) {
+    if (into.length >= FOUND_MAX) return;
+    if (!isMessageRef(r)) continue;
+    const key = `${r.conversationId}|${r.seq}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    into.push({ conversationId: r.conversationId, seq: r.seq });
+  }
+}
+
+/** The messages `value` names (a stored body's `found`), each once, in order, at most `FOUND_MAX`. */
+export function foundOf(value: unknown): MessageRef[] {
+  const out: MessageRef[] = [];
+  addFound(out, new Set(), value);
+  return out;
+}
+
+/** A search word as it is kept: what message text would keep of it (`cleanModelText`), cut to `QUERY_MAX_WEIGHT`; null when it shows nothing. */
+export function queryOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = cutToWeight(cleanModelText(value), QUERY_MAX_WEIGHT).trimEnd();
+  return hasVisibleText(text) ? text : null;
+}
+
+/** Adds `value` to `into` as a search word is kept (`queryOf`), unless it is there already or `into` holds `QUERIES_MAX`. */
+function addQuery(into: string[], value: unknown): void {
+  if (into.length >= QUERIES_MAX) return;
+  const q = queryOf(value);
+  if (q !== null && !into.includes(q)) into.push(q);
+}
+
+/** The search words `value` holds (a stored body's `queries`), each once, at most `QUERIES_MAX`. */
+export function queriesOf(value: unknown): string[] {
+  const out: string[] = [];
+  if (Array.isArray(value)) for (const v of value) addQuery(out, v);
+  return out;
+}
+
+/**
+ * What the tools of one reply looked up, as they ran (agents/runtime/worker.ts `toolReply`): a call that ran — its tool
+ * answered — counts under its tool's kind (one with no kind counts nothing); what it found and the word it searched for
+ * are kept by the rules above, in the order the calls ran. A call answered with a note or an error is never `ran`.
+ */
+export class LookedUp {
+  private readonly counts: Lookups = {};
+  private readonly found: MessageRef[] = [];
+  private readonly seen = new Set<string>();
+  private readonly words: string[] = [];
+
+  ran(kind: Activity | undefined, outcome: { found?: unknown; query?: unknown }): void {
+    if (kind !== undefined) this.counts[kind] = (this.counts[kind] ?? 0) + 1;
+    addFound(this.found, this.seen, outcome.found);
+    addQuery(this.words, outcome.query);
+  }
+
+  /** As the reply's message carries it: a key only for what there is (a reply whose tools ran none carries none). */
+  fields(): LookupFields {
+    const lookups = lookupsOf(this.counts);
+    return {
+      ...(lookups ? { lookups } : {}),
+      ...(this.found.length > 0 ? { found: [...this.found] } : {}),
+      ...(this.words.length > 0 ? { queries: [...this.words] } : {}),
+    };
+  }
+}

@@ -1,3 +1,4 @@
+import type { LookupFields } from "../../messages/lookups.ts";
 import type { ModelCall, ToolCall, ToolSpec } from "../../models/gateway.ts";
 
 /**
@@ -41,6 +42,11 @@ export interface Prepared {
 export interface ToolRun {
   /** At most how many calls of each tool, by name, one reply runs (loop.ts `LoopGuard`); a tool not named has only the round cap. */
   readonly perTool: Readonly<Record<string, number>>;
+  /**
+   * What each tool's work is, by name: what the reply's status says while it runs (`AgentPort.activity`) and what it is
+   * counted under in what the reply looked up (`Reply.lookups`). A tool not named shows nothing and counts nothing.
+   */
+  readonly kinds: Readonly<Record<string, Activity>>;
   /** The model's context, in tokens. */
   readonly contextTokens: number;
   /** The images and PDFs the call shows, at their constants (metering/prices.ts): sent, and held, in every round. */
@@ -66,10 +72,17 @@ export interface ToolRun {
 /** The status a tool's work shows while a reply runs tools. */
 export type Activity = "search" | "file" | "time";
 
-/** What a tool call gave: its output (JSON-serialisable) and what kind of work it was. */
+/**
+ * What a tool call gave: its output (JSON-serialisable), for the model; and, for what the reply keeps of it
+ * (messages/lookups.ts), the messages it found — conversation and seq, those it handed the model, in its order — and the
+ * words it searched for. Neither is shown to the model, and each reader of the reply is sent only their part of them.
+ */
 export interface ToolOutcome {
   output: unknown;
-  activity: Activity;
+  /** Its kind of work. Not read: the kind comes with the offer (`ToolRun.kinds`), known before the call runs. */
+  activity?: Activity;
+  found?: ReadonlyArray<{ conversationId: string; seq: number }>;
+  query?: string;
 }
 
 /**
@@ -148,8 +161,11 @@ export interface Delta {
   reasoning?: string;
 }
 
-/** What the worker posts as the Agent's message. */
-export interface Reply {
+/**
+ * What the worker posts as the Agent's message; a reply whose tools ran also what they looked up (`LookupFields`: a key
+ * only for what there is, so a reply that ran none is posted as one offered none).
+ */
+export interface Reply extends LookupFields {
   text: string;
   reasoning: string;
   stopped: boolean;
@@ -217,8 +233,9 @@ export interface AgentPort {
    */
   extend(run: RunTicket, spent: Usage | null, estimated: Estimated, nextInputTokens: number): Promise<"ok" | "final" | "stop">;
   /**
-   * What the reply's tools are doing, for its status line: after each tool that ran, what it did; null once the reply's
-   * tool phase is over (its last call, or it ended). Nothing is stored.
+   * What the reply's tools are doing, for its status line: as a tool starts, its kind (`ToolRun.kinds`; told again only
+   * when it changes); null as soon as the model is called again, a tool with no kind starts, or the reply ends while one
+   * was shown. Only the kind: never a tool's name, input or output. Nothing is stored.
    */
   activity(run: RunTicket, activity: Activity | null): void;
   /**

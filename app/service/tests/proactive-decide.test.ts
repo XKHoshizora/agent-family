@@ -1145,7 +1145,7 @@ describe("what reaches anyone", () => {
       }
     return into;
   };
-  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq"];
+  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries"];
 
   it("no frame and no view of another member names proactive replies, lanes, callers, thresholds or probabilities; the log only ids and reasons", async () => {
     const w = await world();

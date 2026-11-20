@@ -80,7 +80,7 @@ const plus = (...us: Array<{ inputTokens: number; outputTokens: number }>) =>
 
 /** A toolbox that offers the search tool and runs it with `run` (default: an empty result at once). */
 function toolbox(run: (call: ToolCall) => Promise<ToolOutcome> | ToolOutcome = () => ({ output: { hits: [] }, activity: "search" })): Toolbox {
-  return { offer: () => ({ tools: TOOLS, perTool: { search: 6 } }), run: async (_run, call) => run(call) };
+  return { offer: () => ({ tools: TOOLS, perTool: { search: 6 }, kinds: { search: "search" } }), run: async (_run, call) => run(call) };
 }
 
 /** The app's own port, but with `box`, and a worker on it run by hand. */
@@ -261,7 +261,7 @@ describe("the money of a reply that offers tools", () => {
 
   it("the dearest model, at the default limits: six searches and four file reads of 3 000 weight, then the last call held at its own most; reported, nothing is forgiven; unreported, at most what its output estimate passes its output limit by", async () => {
     const box: Toolbox = {
-      offer: () => ({ tools: [SEARCH, READ], perTool: { search: 6, read_file: 4 } }),
+      offer: () => ({ tools: [SEARCH, READ], perTool: { search: 6, read_file: 4 }, kinds: { search: "search", read_file: "file" } }),
       run: async (_run, call) => ({ output: "川".repeat(3000), activity: call.name === "read_file" ? "file" : "search" }),
     };
     const ten = [
@@ -709,7 +709,7 @@ describe("the money of a reply that offers tools", () => {
 
 describe("the tools' definitions, and room for what they bring back, in the context plan", () => {
   /** A toolbox offering `BIG`. */
-  const big: Toolbox = { offer: () => ({ tools: [BIG], perTool: { search: 6 } }), run: async () => ({ output: { hits: [] }, activity: "search" }) };
+  const big: Toolbox = { offer: () => ({ tools: [BIG], perTool: { search: 6 }, kinds: { search: "search" } }), run: async () => ({ output: { hits: [] }, activity: "search" }) };
 
   it("a small model whose system text leaves the conversation a few hundred tokens, too few beside 600 of tool definitions: no tools are offered, and the reply is one call, as one without tools", async () => {
     const owner = await signUp(app, "smallplan");

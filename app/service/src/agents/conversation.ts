@@ -6,6 +6,7 @@ import { currentMembership } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
+import { foundOf, lookupsOf, queriesOf, type LookupFields } from "../messages/lookups.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
@@ -156,8 +157,8 @@ export async function createAgent(
   return { agent, change: { messages: greeting, conversations: [{ conversationId, principalIds: [ownerId, id] }] } };
 }
 
-/** An Agent's reply as the worker hands it over. */
-export interface AgentReply {
+/** An Agent's reply as the worker hands it over, with what its tools looked up when they ran (messages/lookups.ts). */
+export interface AgentReply extends LookupFields {
   text: string;
   reasoning: string;
   stopped: boolean;
@@ -181,7 +182,9 @@ export interface AgentReply {
  * (`proposalId`). The text is then cut at 8 000 characters, which marks it `truncated`. Without a proposal, a reply that
  * was stopped or cut (`truncated`) loses everything from its first `<af-` on (`withoutUnfinishedBlock`: it ended inside
  * a block it never finished); a complete reply with a malformed block keeps it as written. `reasoning` follows the rules
- * of message text, is cut at 32 000 characters (no mark) and is stored only when there is some.
+ * of message text, is cut at 32 000 characters (no mark) and is stored only when there is some. What its tools looked up
+ * (messages/lookups.ts) is kept as checked there — the counts and the messages found wherever it posts, the search words
+ * only in its own conversation —, each only when there is some.
  *
  * Anywhere else — a group (plan Task 5) — the Agent must be a current member of that conversation, read under its row's
  * lock, which every membership change takes: else 409 `agent_removed`. Its reply is never read for a proposal: whatever
@@ -270,6 +273,14 @@ export async function postAsAgent(
   if (reply.stopped) body.stopped = true;
   if (truncated) body.truncated = true;
   if (proposalId !== null) body.proposalId = proposalId;
+  // What its tools looked up: the counts, and the messages found (each reader is sent only those they can see,
+  // messages/read.ts); the search words only in its own conversation, its owner's to read — in a group they are not kept.
+  const lookups = lookupsOf(reply.lookups);
+  if (lookups) body.lookups = lookups;
+  const found = foundOf(reply.found);
+  if (found.length > 0) body.found = found;
+  const queries = own ? queriesOf(reply.queries) : [];
+  if (queries.length > 0) body.queries = queries;
   const message = await insertMessage(t, conversationId, agentId, "text", body, runId);
   if (proposal && proposalId !== null) await storeProposal(t, agent, proposalId, message.id, proposal.proposal);
   // An Agent posts only in its own conversation and in groups it is a member of: elsewhere than its own is a group. Who

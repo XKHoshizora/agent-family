@@ -1,6 +1,7 @@
 import type { WebSocket } from "@fastify/websocket";
 import type { FastifyBaseLogger } from "fastify";
 import { runAudience, type GroupRunState, type RunAudience, type WireRun } from "../agents/runs.ts";
+import type { Activity } from "../agents/runtime/port.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, peekConversation } from "../conversations/store.ts";
@@ -44,11 +45,11 @@ export type PushEvent =
   | { type: "social" }
   | { type: "agent"; id: string }
   | { type: "principal"; id: string; avatarVersion: number }
-  // An Agent's own conversation: to its owner.
-  | { type: "run"; conversationId: string; run: WireRun }
+  // An Agent's own conversation: to its owner. `activity`: what its running reply's tool is doing (`pushActivity`).
+  | { type: "run"; conversationId: string; run: WireRun; activity?: Activity | null }
   // A group: to the Agent's owner, and what every other current member is told of it.
-  | { type: "run"; conversationId: string; agentId: string; run: WireRun }
-  | { type: "run"; conversationId: string; agentId: string; state: GroupRunState }
+  | { type: "run"; conversationId: string; agentId: string; run: WireRun; activity?: Activity | null }
+  | { type: "run"; conversationId: string; agentId: string; state: GroupRunState; activity?: Activity | null }
   | { type: "delta"; conversationId: string; runId: string; text?: string; reasoning?: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
   // A whisper of yours, made or changed (answered, expired): to its owner only.
@@ -73,9 +74,9 @@ type Task =
   | { kind: "charged"; principalId: string; seq: number }
   /**
    * Run `runId` of the conversation: `run` to the owner its row names (none: the owner is not told), its state to a
-   * group's others.
+   * group's others. `activity` (`pushActivity`): what its tool is doing, with both — dropped if `wanted` says no by then.
    */
-  | { kind: "run"; conversationId: string; runId: string; run: WireRun | null };
+  | { kind: "run"; conversationId: string; runId: string; run: WireRun | null; activity?: Activity | null; wanted?: () => boolean };
 
 interface Queue {
   tasks: Task[];
@@ -111,7 +112,7 @@ export interface HubDeps {
  * - a reply's progress (`run`, `delta`), in order with the conversation's messages: `delta` to the Agent's owner only;
  *   `run` to the owner the run's row names (also after they left a group), and in a group also its state
  *   (`replying` / `unavailable` / null) to every other current member, read once per delivery whatever their number
- *   (`announceRun`).
+ *   (`announceRun`); what its tool is doing (`pushActivity`) with both, as a kind only.
  */
 export class Hub {
   /** Open connections per principal, oldest first. */
@@ -201,6 +202,18 @@ export class Hub {
    */
   pushRunState(conversationId: string, runId: string): void {
     this.enqueue(conversationId, { kind: "run", conversationId, runId, run: null });
+  }
+
+  /**
+   * What the tool of running reply `runId` is doing now — the kind of its work, or null once the model writes again —
+   * for its status line: delivered as the run is (`announceRun`), the run, still `running`, to its owner with `activity`,
+   * and in a group `activity` with the Agent's state to every other current member while that state is `replying`;
+   * nothing of the tool itself (its name, input or output) to anyone. Through the conversation's queue, in order with
+   * the reply's other pushes; dropped if `wanted` says no by the time it is delivered (the reply was interrupted).
+   */
+  pushActivity(conversationId: string, runId: string, activity: Activity | null, wanted?: () => boolean): void {
+    const run: WireRun = { id: runId, status: "running", retryable: false };
+    this.enqueue(conversationId, { kind: "run", conversationId, runId, run, activity, ...(wanted ? { wanted } : {}) });
   }
 
   /**
@@ -372,6 +385,7 @@ export class Hub {
         if (task.wanted?.() !== false) this.push(task.principalId, task.event);
         return Promise.resolve();
       case "run":
+        if (task.wanted?.() === false) return Promise.resolve();
         return this.announceRun(task);
       case "charged":
         return this.pushCharged(conversationId, task.principalId, task.seq);
@@ -403,10 +417,13 @@ export class Hub {
    * - A group: `{…, agentId, run}` to the Agent's owner — also when they have just left the group with it, so its last
    *   run there ends what their client showed —; `{…, agentId, state}` to every other current member, the Agent's state
    *   there now (wire contract "Run state": never the run, its id, `error`, `retryable` or `resetsAt`); nobody else.
+   * - What a running reply's tool is doing (`pushActivity`): `activity` with each of those, the kind only; to the others
+   *   only while the Agent's state there is `replying` (it is that reply's, then).
    */
   private async announceRun(task: Extract<Task, { kind: "run" }>): Promise<void> {
     if (this.byPrincipal.size === 0) return;
     const { conversationId, runId, run } = task;
+    const tool = task.activity === undefined ? {} : { activity: task.activity };
     let audience: RunAudience | null;
     try {
       audience = await runAudience(this.deps.db, conversationId, runId);
@@ -421,13 +438,14 @@ export class Hub {
     if (!audience) return;
     const ownerId = audience.ownerId.toLowerCase();
     if (audience.type !== "group") {
-      if (run) this.push(ownerId, { type: "run", conversationId, run });
+      if (run) this.push(ownerId, { type: "run", conversationId, run, ...tool });
       return;
     }
     const { agentId, state } = audience;
-    if (run) this.push(ownerId, { type: "run", conversationId, agentId, run });
+    if (run) this.push(ownerId, { type: "run", conversationId, agentId, run, ...tool });
+    if (task.activity !== undefined && state !== "replying") return;
     for (const id of this.connectedAmong(audience.memberIds)) {
-      if (id !== ownerId) this.push(id, { type: "run", conversationId, agentId, state });
+      if (id !== ownerId) this.push(id, { type: "run", conversationId, agentId, state, ...tool });
     }
   }
 

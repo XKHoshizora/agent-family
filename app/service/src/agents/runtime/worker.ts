@@ -1,4 +1,5 @@
 import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
+import { LookedUp, type LookupFields } from "../../messages/lookups.ts";
 import { isCount } from "../../metering/prices.ts";
 import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
 import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
@@ -10,6 +11,7 @@ import {
   NOTHING,
   RunNotRunning,
   UNAVAILABLE,
+  type Activity,
   type AgentPort,
   type Estimated,
   type Prepared,
@@ -354,8 +356,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
 
   /**
    * The end of a reply once its model has stopped — after its one call, or the last round of several (`last`): what it
-   * said is posted, or the run fails, and it is settled on `usage`, else `fallback` (`failedFallback` when the run fails).
-   * `noAnswer`: how a reply that said nothing fails when it did not fail otherwise.
+   * said is posted, with what its tools looked up (`looked`; nothing for a reply offered none), or the run fails, and it
+   * is settled on `usage`, else `fallback` (`failedFallback` when the run fails). `noAnswer`: how a reply that said
+   * nothing fails when it did not fail otherwise.
    */
   async function conclude(
     run: RunTicket,
@@ -365,6 +368,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     fallback: Estimated,
     failedFallback: Estimated,
     noAnswer: RunEnd = UNAVAILABLE,
+    looked: LookupFields = {},
   ): Promise<void> {
     const { finished, failure, why } = last;
     // The service is closing: nothing is posted, and the run is ended here as recovery would end it (no charge).
@@ -387,7 +391,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     if (finished === null && why === "stop") {
       // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
       if (!said) return finish(run, { status: "stopped" }, usage, fallback);
-      const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
+      const posted = await post(run, { text, reasoning, stopped: true, truncated: false, ...looked });
       // All it said was inside a persona block it never finished (in a group, also: it only thought, or said only the
       // mark and labels): as a stop with nothing said.
       if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
@@ -395,7 +399,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
     // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
     if (!said) return failed(noAnswer);
-    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
+    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated, ...looked });
     // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, or said only the
     // mark and labels): as an answer that said nothing.
     if (posted === "empty") return failed(noAnswer);
@@ -451,6 +455,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    *   model's context has left for the rounds (`room`: what the plan's limit, `ToolRun.limit`, leaves beside the planned
    *   input, the tools' definitions and the last call's line, at the plan's ratio, and what providers add around the
    *   definitions — at least the room the plan kept for results).
+   * While a tool runs the reply's status says its kind (`AgentPort.activity`, from `ToolRun.kinds`, once per change), and
+   * nothing as soon as the model is called again; the counts, the messages found and the search words of the calls that
+   * ran and answered go with the posted reply (messages/lookups.ts `LookedUp`).
    * Then the port holds what the next call can cost (`extend`; its bound: the call's text, the tools and every step at
    * their bytes, as admission holds a call, and what providers add around tool definitions, `TOOL_PREAMBLE_TOKENS`). The
    * tool phase ends — the next call is the last: the same tools and steps,
@@ -486,10 +493,13 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     /** The upstream refused a later round: the reply is asked for once more as one without tools (`prepared.call`). */
     let plain = false;
     let unusable = false;
-    let active = false;
+    /** What the tools that ran looked up, for the reply's message. */
+    const looked = new LookedUp();
+    /** What the reply's status says now: the kind of the tool that is running, or nothing. */
+    let shown: Activity | null = null;
     const quiet = (): void => {
-      if (!active) return;
-      active = false;
+      if (shown === null) return;
+      shown = null;
       port.activity(run, null);
     };
     /** What ends the reply now, between two rounds or two tool calls. */
@@ -512,7 +522,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         ending = { last: { finished: null, failure: null, why: now } };
         break;
       }
-      if (final || plain) quiet();
+      // The model is called again: no tool is running.
+      quiet();
       const request: Omit<ModelCall, "signal"> = plain
         ? prepared.call
         : {
@@ -602,6 +613,14 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
             tally.over++;
             output = { note: OVER_CAP };
           } else {
+            // The status says what this tool does while it runs (its kind from the offer), once per change; a tool with
+            // no kind shows nothing.
+            const kind = Object.hasOwn(bounds.kinds, toolCall.name) ? bounds.kinds[toolCall.name] : undefined;
+            if (kind === undefined) quiet();
+            else if (kind !== shown) {
+              shown = kind;
+              port.activity(run, kind);
+            }
             const ran = await runTool(run, toolCall, shutdown, deadline);
             if (ran.interrupted !== null) {
               cut = ran.interrupted;
@@ -612,11 +631,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
               output = { error: UNUSABLE };
             } else {
               tally.ran++;
-              active = true;
-              port.activity(run, ran.outcome.activity);
               const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), bounds.planRatio);
               try {
                 output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), bounds.planRatio)));
+                // It ran and answered: what it looked up is the reply's.
+                looked.ran(kind, ran.outcome);
               } catch {
                 // Not JSON (a port's bug): nothing of it goes to the model.
                 tally.failed++;
@@ -660,7 +679,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     quiet();
     log.info({ metric: "tool_rounds", runId: run.id, ...tally, final }, "agent run: its tool rounds");
     const estimate = meter.estimated();
-    return conclude(run, out, ending.last, meter.usage(), estimate, estimate, ending.noAnswer);
+    return conclude(run, out, ending.last, meter.usage(), estimate, estimate, ending.noAnswer, looked.fields());
   }
 
   function track(run: RunTicket): Promise<void> {

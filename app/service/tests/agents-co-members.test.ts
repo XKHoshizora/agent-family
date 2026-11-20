@@ -43,6 +43,8 @@ const HIDDEN = {
   hearsay: "HEARSAY-zq7 said in the group",
   /** A whisper (悄悄话) of the owner's about the Agent in the group: theirs alone (whispers-privacy.test.ts). */
   whisper: "WHISPER-zq7 只给主人看",
+  /** What a reply searched for: its owner's to read in its own conversation only — never in a group, not even theirs. */
+  query: "QUERY-zq7 主人的搜索词",
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
@@ -89,6 +91,8 @@ const HIDDEN_KEYS = [
   "whisper",
   "whispers",
   "afterSeq",
+  // What a reply searched for (its owner's, in its own conversation only).
+  "queries",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 
@@ -195,6 +199,10 @@ async function world() {
   const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high", "proactive");
   const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
+  // A reply of it there that looked things up, its body as stored, words and all (a reply in a group is never stored with
+  // them: this is the wire's own rule): what it found includes a message of the owner's private chat.
+  const looked = { search: 2 };
+  const lookedSeq = await postBody(g, agent.id, { text: "looked up co7", lookups: looked, found: [{ conversationId: dedicated, seq: 1 }, { conversationId: g, seq: agentSeq }], queries: [HIDDEN.query] });
   // An open whisper of the owner's about it there, pushed to them: the owner's alone.
   const whisper = await db.tx((t) => createWhisper(t, { conversationId: g, ownerId: owner.id, agentId: agent.id, kind: "found_elsewhere", body: { text: HIDDEN.whisper, actions: ["tell", "dismiss"] } }));
   app.realtime.pushWhisper(owner.id, toWireWhisper(whisper!));
@@ -224,7 +232,17 @@ async function world() {
   for (const value of [HIDDEN.privateAsk, HIDDEN.privateReply, HIDDEN.proposed, HIDDEN.reasoning]) expect(privateChat).toContain(value);
 
   const expected = { id: agent.id, handle: "team_bot", displayName: "Team Bot", avatarVersion: 1, kind: "agent", ownerId: owner.id, intro: INTRO, field: FIELD };
-  return { owner, mia, ned, sam, agent, dedicated, provider, g, agentSeq, quoteSeq, expected };
+  return { owner, mia, ned, sam, agent, dedicated, provider, g, agentSeq, quoteSeq, lookedSeq, looked, expected };
+}
+
+/** A text message from `senderId` in `conv` with `body` as it is, written straight into the table; returns its seq. */
+async function postBody(conv: string, senderId: string, body: Record<string, unknown>): Promise<number> {
+  const { rows } = await db.query<{ seq: string }>(
+    `with c as (update conversations set seq = seq + 1 where id = $1 returning seq)
+     insert into messages (conversation_id, seq, sender_id, kind, body) select $1, c.seq, $2, 'text', $3::jsonb from c returning seq`,
+    [conv, senderId, JSON.stringify(body)],
+  );
+  return Number(rows[0]!.seq);
 }
 
 describe("an Agent's fellow group members see its name, avatar, handle, intro, field and owner", () => {
@@ -260,11 +278,17 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
   });
 
   it("and nothing else: no response a fellow member gets carries its persona, model, provider, settings, pause, proposals, runs, private chat or the thinking of its replies there", async () => {
-    const { owner, mia, agent, dedicated, provider, g, agentSeq, quoteSeq } = await world();
+    const { owner, mia, agent, dedicated, provider, g, agentSeq, quoteSeq, lookedSeq, looked } = await world();
     // Its owner does read the thinking stored with its message in the group, and which model and level gave it (so
     // their absence below means something).
     const ownersCopy = (await api(app, owner, "GET", `/api/conversations/${g}/messages/${agentSeq}`)).json.message;
     expect([ownersCopy.reasoning, ownersCopy.via]).toEqual([HIDDEN.groupReasoning, { model: { source: "provider", model: HIDDEN.model }, reasoning: "high", points: "0", proactive: true }]);
+    // What a reply looked up: its owner reads all it found (their private chat's message too), a fellow member only what
+    // they can see; both the counts; neither the words — in a group not even its owner.
+    const ownersLooked = (await api(app, owner, "GET", `/api/conversations/${g}/messages/${lookedSeq}`)).json.message;
+    expect([ownersLooked.lookups, ownersLooked.found, "queries" in ownersLooked]).toEqual([looked, [{ conversationId: dedicated, seq: 1 }, { conversationId: g, seq: agentSeq }], false]);
+    const miasLooked = (await api(app, mia, "GET", `/api/conversations/${g}/messages/${lookedSeq}`)).json.message;
+    expect([miasLooked.lookups, miasLooked.found, "queries" in miasLooked]).toEqual([looked, [{ conversationId: g, seq: agentSeq }], false]);
     const bodies: Array<[string, unknown]> = [];
     const read = async (label: string, method: "GET" | "POST", url: string, body?: unknown) => {
       const res = await api(app, mia, method, url, body);

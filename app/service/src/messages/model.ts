@@ -83,8 +83,9 @@ export interface AttachmentRef {
  * `messages.body`. Text messages carry `text` (and `replyToSeq` when quoting); file messages carry
  * `attachment` and an optional caption in `text`; system notices carry a `SystemEvent` plus the rendered
  * `text`. An Agent's reply (`postAsAgent`) may add `reasoning` (non-empty), `stopped: true`, `truncated: true` and
- * `proposalId` (the `persona_proposals` row it made); its greeting `fixed: true`. Later kinds (task cards...) add
- * fields, so readers must not assume more than this.
+ * `proposalId` (the `persona_proposals` row it made), and what its tools looked up (messages/lookups.ts: `lookups`,
+ * `found`, and in its own conversation `queries` — never sent as stored: messages/read.ts); its greeting `fixed: true`.
+ * Later kinds (task cards...) add fields, so readers must not assume more than this.
  */
 export type MessageBody = {
   text?: string;
@@ -228,6 +229,15 @@ export const wireMessageSchema = z.object({
       proactive: z.literal(true).optional(),
     })
     .optional(),
+  /**
+   * An Agent's reply whose tools ran: how many calls of each kind (only kinds above 0), to whoever reads the reply. A
+   * count of lookups, not of what they found.
+   */
+  lookups: z.object({ search: z.number().optional(), file: z.number().optional(), time: z.number().optional() }).optional(),
+  /** Of the messages its tools found, those this reader can see now (VISIBLE_JOIN), in order; absent when none is. */
+  found: z.array(z.object({ conversationId: z.string(), seq: z.number() })).optional(),
+  /** The words its searches were for: to the Agent's owner, in the Agent's own conversation only. */
+  queries: z.array(z.string()).optional(),
   createdAt: z.string(),
 });
 

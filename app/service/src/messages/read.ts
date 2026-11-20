@@ -5,6 +5,7 @@ import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversatio
 import type { Queryable } from "../db.ts";
 import type { StoredOp } from "../memory/apply.ts";
 import { dreamLines, linesOf } from "../memory/lines.ts";
+import { foundOf, lookupsOf, queriesOf, type MessageRef } from "./lookups.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
 
@@ -147,12 +148,20 @@ async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<{ c
 /** Whether `op` is a note's own operation (a change holds only one kind: a hearsay change has none of these). */
 const isNoteOp = (op: ChangeRow["ops"][number]): op is StoredOp => op.op !== "hearsay_add" && op.op !== "hearsay_drop";
 
+/** What this reader is sent of what a reply's tools looked up besides its counts: the messages found they can see, and the words when they are for them. */
+interface Looked {
+  found: MessageRef[];
+  queries: string[];
+}
+const NOTHING_LOOKED: Looked = { found: [], queries: [] };
+
 /**
- * Module-private on purpose: it renders whatever quote, proposal and `via` it is handed, and the reasoning when told
- * to. Every exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether
- * `visibleQuote` is; shows a proposal and `via` to the Agent's owner only; and `withReasoning` only when this reader may
- * read the reasoning (`toWireForReaders`): otherwise each field is absent, so the message is exactly as one stored
- * without any.
+ * Module-private on purpose: it renders whatever quote, proposal, `via` and `looked` it is handed, and the reasoning when
+ * told to. Every exported path decides per reader, through VISIBLE_JOIN, both whether `msg` is shown at all and whether
+ * `visibleQuote` is — and each message its tools found (`looked.found`); shows a proposal and `via` to the Agent's owner
+ * only, the search words (`looked.queries`) to that owner in the Agent's own conversation only; and `withReasoning`
+ * only when this reader may read the reasoning (`toWireForReaders`): otherwise each field is absent, so the message is
+ * exactly as one stored without any. A reply's `lookups` — counts only — go to whoever is shown it.
  */
 function toWire(
   msg: StoredMessage,
@@ -160,6 +169,7 @@ function toWire(
   proposal: ProposalRow | null,
   withReasoning: boolean,
   via: WireVia | null,
+  looked: Looked = NOTHING_LOOKED,
 ): WireMessage {
   const wire: WireMessage = {
     conversationId: msg.conversationId,
@@ -201,6 +211,10 @@ function toWire(
     if (msg.body.truncated === true) wire.truncated = true;
     if (proposal) wire.proposal = toWireProposal(proposal);
     if (via) wire.via = via;
+    const lookups = lookupsOf(msg.body.lookups);
+    if (lookups) wire.lookups = lookups;
+    if (looked.found.length > 0) wire.found = looked.found;
+    if (looked.queries.length > 0) wire.queries = looked.queries;
   }
   return wire;
 }
@@ -217,8 +231,13 @@ function toWire(
  * either place: what the run that posted it (`client_txn` = the run's id, a run of that Agent in that conversation) was
  * admitted on — source, model, reasoning level — and charged (its usage record), read in that same query by one more
  * join, which looks only when the reader owns the sender; absent when the reply has no run, or a record of it is gone.
- * Both visibility decisions go through VISIBLE_JOIN, so an owner who left the group reads nothing of it; at most three
- * queries however many readers and messages there are. `config`: the site models' labels, read now.
+ * What an Agent's reply looked up with its tools (messages/lookups.ts): its counts (`lookups`) to every reader of it; of
+ * the messages its tools found (`found`), each reader only those they can see now, by VISIBLE_JOIN as the reply itself —
+ * the others dropped without a trace, the key absent when none is left; its search words (`queries`) only to the owner
+ * of the Agent that sent it, in the Agent's own conversation (in the same query that decides visibility), never in a
+ * group, whatever the stored body holds.
+ * Every visibility decision goes through VISIBLE_JOIN, so an owner who left the group reads nothing of it; a fixed number
+ * of queries however many readers and messages there are. `config`: the site models' labels, read now.
  */
 export async function toWireForReaders(
   q: Queryable,
@@ -230,9 +249,10 @@ export async function toWireForReaders(
   const out = new Map<string, WireMessage[]>(readers.map((r) => [r, []]));
   if (readers.length === 0 || msgs.length === 0) return out;
 
-  const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean } & ViaRow>(
+  const shown = await q.query<{ reader_id: string; id: string; with_reasoning: boolean; with_queries: boolean } & ViaRow>(
     `select r.reader_id, m.id,
             coalesce(c.type = 'agent' or (c.type = 'group' and sender.owner_id = r.reader_id), false) as with_reasoning,
+            coalesce(c.type = 'agent' and sender.owner_id = r.reader_id, false) as with_queries,
             via.source as via_source, via.model as via_model, via.reasoning as via_reasoning, via.points as via_points,
             via.proactive as via_proactive
        from unnest($1::uuid[]) as r (reader_id)
@@ -253,6 +273,8 @@ export async function toWireForReaders(
   const shownToAnyone = new Set(shown.rows.map((r) => r.id));
   /** reader|message pairs whose reasoning this reader is sent. */
   const reasoningFor = new Set(shown.rows.filter((r) => r.with_reasoning === true).map((r) => `${r.reader_id}|${r.id}`));
+  /** reader|message pairs whose search words this reader is sent: the Agent's owner, in its own conversation. */
+  const queriesFor = new Set(shown.rows.filter((r) => r.with_queries === true).map((r) => `${r.reader_id}|${r.id}`));
   /** reader|message → what the run that posted it used, for the owner of the Agent that sent it. */
   const viaFor = new Map<string, WireVia>();
   for (const r of shown.rows) {
@@ -273,6 +295,33 @@ export async function toWireForReaders(
     );
     for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, toStored(r));
   }
+
+  // What a reply's tools found: each message by the same rule as the reply itself (VISIBLE_JOIN, the reader's own), so a
+  // reader is pointed only at what they can open — not at a message from before they joined, of a conversation they are
+  // not in, or that is not there. One query for every reader and reply.
+  const foundIn = new Map(msgs.filter((m) => m.kind === "text" && shownToAnyone.has(m.id)).map((m) => [m.id, foundOf(m.body.found)]));
+  const refs = new Map<string, MessageRef>();
+  for (const list of foundIn.values()) for (const r of list) refs.set(`${r.conversationId}|${r.seq}`, r);
+  /** reader|conversation|seq of the messages found that this reader can see. */
+  const foundSeen = new Set<string>();
+  if (refs.size > 0) {
+    const wanted = [...refs.values()];
+    const { rows } = await q.query<{ reader_id: string; conversation_id: string; seq: string }>(
+      `select r.reader_id, m.conversation_id, m.seq::text
+         from unnest($1::uuid[]) as r (reader_id)
+         cross join unnest($2::uuid[], $3::bigint[]) as wanted (conversation_id, seq)
+         join messages m on m.conversation_id = wanted.conversation_id and m.seq = wanted.seq
+         ${visibleJoin("r.reader_id")}
+        where m.kind in ('text', 'file')`,
+      [readers, wanted.map((r) => r.conversationId), wanted.map((r) => r.seq)],
+    );
+    for (const r of rows) foundSeen.add(`${r.reader_id}|${r.conversation_id}|${r.seq}`);
+  }
+  /** What `reader` is sent of what `m`'s tools looked up besides the counts (`key`: reader|message). */
+  const lookedFor = (reader: string, m: StoredMessage, key: string): Looked => ({
+    found: (foundIn.get(m.id) ?? []).filter((r) => foundSeen.has(`${reader}|${r.conversationId}|${r.seq}`)),
+    queries: queriesFor.has(key) ? queriesOf(m.body.queries) : [],
+  });
 
   const proposals = await proposalsOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
   /** The proposal `m` made, when `reader` owns the Agent that made it. */
@@ -320,7 +369,7 @@ export async function toWireForReaders(
         continue;
       }
       const quote = quotes.get(`${reader}|${m.conversationId}|${m.body.replyToSeq}`) ?? null;
-      list.push(toWire(m, quote, proposalFor(reader, m), reasoningFor.has(key), viaFor.get(key) ?? null));
+      list.push(toWire(m, quote, proposalFor(reader, m), reasoningFor.has(key), viaFor.get(key) ?? null, lookedFor(reader, m, key)));
     }
   }
   return out;
