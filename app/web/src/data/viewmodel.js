@@ -280,6 +280,34 @@ function viaView(via) {
   return { model, reasoning: via.reasoning, points: via.points, ...(via.proactive === true ? { proactive: true } : {}) };
 }
 
+const LOOKUP_KINDS = ["search", "file", "time"];
+const isCountAbove0 = (n) => Number.isSafeInteger(n) && n > 0;
+
+/** A reply's `lookups` (how many calls of each kind its tools ran), only the counts that are whole numbers above 0; null when none is. */
+function lookupsView(lookups) {
+  if (!lookups || typeof lookups !== "object") return null;
+  const out = {};
+  for (const kind of LOOKUP_KINDS) if (Object.hasOwn(lookups, kind) && isCountAbove0(lookups[kind])) out[kind] = lookups[kind];
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** A reply's `found` (the messages its tools found that I can see), as {conversationId, seq}; [] for anything else. */
+function foundView(found) {
+  if (!Array.isArray(found)) return [];
+  return found.filter((f) => f && typeof f.conversationId === "string" && isCountAbove0(f.seq)).map((f) => ({ conversationId: f.conversationId, seq: f.seq }));
+}
+
+/**
+ * The quiet line under a reply that looked things up: 查了 n 次聊天记录 and 看了 n 个文件, joined with ，; time lookups are
+ * never in it. Null when there is nothing to say (no lookups, or only at the time).
+ */
+export function lookupLine(lookups) {
+  const parts = [];
+  if (lookups?.search > 0) parts.push(`查了 ${lookups.search} 次聊天记录`);
+  if (lookups?.file > 0) parts.push(`看了 ${lookups.file} 个文件`);
+  return parts.length > 0 ? parts.join("，") : null;
+}
+
 /** A byte count for people: "932 B", "1.4 KB", "12 MB" (one decimal below 10, base 1024). */
 export function formatSize(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "";
@@ -348,6 +376,14 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     stopped: Boolean(m.stopped),
     truncated: Boolean(m.truncated),
     proposal: m.proposal ?? null,
+    // What its tools looked up (an Agent's reply): the counts, the messages found that I can see (the service sends no
+    // more), and the words searched for — only in my Agent's own conversation, whatever a message carries elsewhere.
+    lookups: m.kind === "text" ? lookupsView(m.lookups) : null,
+    found: m.kind === "text" ? foundView(m.found) : [],
+    queries:
+      m.kind === "text" && typeof agentId === "string" && m.senderId === agentId && Array.isArray(m.queries)
+        ? m.queries.filter((q) => typeof q === "string" && q.trim() !== "")
+        : [],
     // Under my own message only: the Agents my own calls a minute kept it from (what its send answered, model.js `markSent`).
     notCalled: m.senderId === meId && Array.isArray(m.notCalled) && m.notCalled.length > 0 ? notCalledText(m.notCalled, nameOf) : null,
   };
@@ -363,19 +399,21 @@ const ENDED_IN_GROUP = new Set(["halted", "agent_removed"]);
 
 /**
  * One row of a group's Agent replies (model.js `groupRuns`), or null when there is nothing to show:
- * - `replying`: being written (its owner gets `run`, to stop it);
+ * - `replying`: being written (its owner gets `run`, to stop it), and `activity` while its tool runs (what it looks at);
  * - `status`: my Agent's reply failed, was halted, or its Agent was taken out — the status line, with `run`;
  * - `unavailable`: someone else's Agent could not reply (no reason is known, nor shown).
  */
 function groupRunRow(agentId, slot) {
+  // A reply being written that runs a tool now: what kind of thing it looks at (its status line); no key otherwise.
+  const activity = slot.activity ? { activity: slot.activity } : {};
   if ("run" in slot) {
     const run = slot.run;
     if (!run) return null;
-    if (runActive(run.status)) return slot.posted || slot.unknown ? null : { agentId, mine: true, kind: "replying", run };
+    if (runActive(run.status)) return slot.posted || slot.unknown ? null : { agentId, mine: true, kind: "replying", run, ...activity };
     if (run.status === "failed" || (run.status === "cancelled" && ENDED_IN_GROUP.has(run.error))) return { agentId, mine: true, kind: "status", run };
     return null;
   }
-  if (slot.state === "replying") return slot.posted || slot.unknown ? null : { agentId, mine: false, kind: "replying" };
+  if (slot.state === "replying") return slot.posted || slot.unknown ? null : { agentId, mine: false, kind: "replying", ...activity };
   if (slot.state === "unavailable") return { agentId, mine: false, kind: "unavailable" };
   return null;
 }
@@ -703,7 +741,7 @@ export function toView(model, { now = Date.now() } = {}) {
       stream: streamed
         ? { runId: run.id, text: streamed.text, reasoning: streamed.reasoning, cut: Boolean(streamed.cut), reasoningCut: Boolean(streamed.reasoningCut) }
         : null,
-      /** [{agentId, mine, kind: "replying" | "status" | "unavailable", run?}] (`groupRunRow`); empty but in a group. */
+      /** [{agentId, mine, kind: "replying" | "status" | "unavailable", run?, activity?}] (`groupRunRow`); empty but in a group. */
       agentRuns: agentRuns.map((row) => ({ ...row, agentId: alias(row.agentId) })),
       agentsTalking: conv.type === "group" && agentsTalking(model, conv, held, agentRuns),
       /** My whispers here (悄悄话), ascending by where they sit: [{id, afterSeq, kind, text, actions, status, createdAt, agentId}]. */

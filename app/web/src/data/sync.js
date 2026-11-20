@@ -613,7 +613,8 @@ export function start(
           return;
         }
         if (!event.run) return;
-        setModel(applyRun(model, event.conversationId, event.run, { since }));
+        // (`activity`: what its tool is doing now, while it runs tools; only a kind.)
+        setModel(applyRun(model, event.conversationId, event.run, { since, activity: event.activity }));
         return;
       }
       case "delta":

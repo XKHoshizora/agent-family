@@ -516,6 +516,25 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
   }
 
   /**
+   * One message a reply's tools found (`GET /api/conversations/:id/messages/:seq`), for the list under the reply: the
+   * people it names join the model (its sender's name and avatar); the message itself is not kept here (it may lie far
+   * from the loaded ones). Resolves {ok: true, message} or {ok: false, error} (404: I cannot see it now).
+   */
+  async function foundMessage(conversationId, seq) {
+    const token = epoch();
+    try {
+      const res = await api.getMessage(conversationId, seq);
+      if (token !== epoch()) return { ok: false, error: dropped("stopped") };
+      setModel(applyPrincipals(getModel(), res?.principals));
+      return res?.message ? { ok: true, message: res.message } : { ok: false, error: dropped("not_found") };
+    } catch (err) {
+      const error = errorOf(err);
+      if (token === epoch() && error.status === 401) signedOut();
+      return { ok: false, error };
+    }
+  }
+
+  /**
    * One search request: the people it names join the model (so hits show names and avatars); the hits themselves are
    * not kept here (they may lie far from the loaded messages). Resolves {ok, hits, nextBefore} or {ok: false, error}.
    */
@@ -996,6 +1015,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     loadOlder,
     loadNewer,
     jumpToMessage,
+    foundMessage,
     closeWindow: closeWindowOf,
     /** `before`: the previous page's `nextBefore` (a seq here). */
     searchConversation: (conversationId, { q, before } = {}) =>

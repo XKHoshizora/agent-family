@@ -208,8 +208,8 @@ export function ChatView({ conv }) {
   const hasAgents = group && conv.members.some((id) => isAgent(state, id));
   const live = state.connection === "live";
   /** What changes at the end of the list besides messages: the bubble growing, the status lines coming or going. */
-  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${finishing ? `finishing:${finishing.runId}` : ""}|${failedRun?.id ?? ""}|${groupRows
-    .map((r) => `${r.agentId}:${r.kind}:${r.run?.id ?? ""}`)
+  const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}:${run.activity ?? ""}` : ""}|${finishing ? `finishing:${finishing.runId}` : ""}|${failedRun?.id ?? ""}|${groupRows
+    .map((r) => `${r.agentId}:${r.kind}:${r.run?.id ?? ""}:${r.activity ?? ""}`)
     .join(",")}|${whispers.map((w) => `${w.id}:${w.status}`).join(",")}`;
   // A group with Agents: what their replies are now is fetched when it opens, and again when the connection comes back
   // (the pushes of a break are not sent again).
@@ -558,7 +558,7 @@ export function ChatView({ conv }) {
             ) : whisper ? (
               <Whisper key={`w:${whisper.id}`} whisper={whisper} conv={conv} />
             ) : (
-              <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
+              <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} onJump={jumpTo} />
             ),
           )}
           {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}

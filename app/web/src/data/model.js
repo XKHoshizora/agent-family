@@ -1073,6 +1073,10 @@ function wireRun(run) {
 
 const isActive = (status) => status === "queued" || status === "running";
 
+/** The kinds of a tool's work a running reply's status may say (a `run` push's `activity`); anything else is none. */
+const ACTIVITIES = new Set(["search", "file", "time"]);
+const isActivity = (value) => typeof value === "string" && ACTIVITIES.has(value);
+
 /** Whether a message of the conversation's Agent after `since` is held (or shown in a detached window). */
 function heldReplyAfter(state, conversationId, since) {
   const conv = state.conversations[conversationId];
@@ -1092,9 +1096,10 @@ function heldReplyAfter(state, conversationId, since) {
  * run's reply (the snapshot brought it), so the run is posted at once.
  * Either way the same run's status only moves forward and it keeps what is known of it (`posted`, `since`); a failed
  * run I dismissed does not come back; a run that is not running, or not in order, has no stream; a newer run ends the
- * older one's stream.
+ * older one's stream. `activity`: what the push says its tool is doing now (`search`, `file`, `time`), kept on a run
+ * that is running and in order only; every push says it anew (one without it: nothing is being looked at).
  */
-export function applyRun(state, conversationId, run, { ordered = true, since } = {}) {
+export function applyRun(state, conversationId, run, { ordered = true, since, activity } = {}) {
   const conv = state.conversations[conversationId];
   if (!conv) return state;
   if (run !== null && !(run && typeof run.id === "string" && typeof run.status === "string")) return state;
@@ -1118,6 +1123,7 @@ export function applyRun(state, conversationId, run, { ordered = true, since } =
     next.since = from;
     if (!next.posted && heldReplyAfter(state, conversationId, from)) next.posted = true;
   }
+  if (next && ordered && !next.joined && next.status === "running" && isActivity(activity)) next.activity = activity;
   let streams = state.streams;
   if (prev && prev.id !== next?.id) streams = without(streams, prev.id);
   if (next && (next.status !== "running" || next.joined)) streams = without(streams, next.id);
@@ -1244,8 +1250,10 @@ export function ownsAgent(state, agentId) {
  * Agent nothing but `state` is ever read, whatever else the entry carries.
  */
 function slotValue(state, agentId, entry) {
-  if (ownsAgent(state, agentId) && isRun(entry.run)) return { run: wireRun(entry.run) };
-  if ("state" in entry && isGroupState(entry.state)) return { state: entry.state };
+  // What its tool is doing now (a push's `activity`), for either: a kind, never more.
+  const activity = isActivity(entry.activity) ? { activity: entry.activity } : {};
+  if (ownsAgent(state, agentId) && isRun(entry.run)) return { run: wireRun(entry.run), ...activity };
+  if ("state" in entry && isGroupState(entry.state)) return { state: entry.state, ...activity };
   return null;
 }
 
@@ -1258,8 +1266,8 @@ function heldMessageOf(state, conversationId, agentId, since) {
   return shown.some((m) => m.seq > since && m.senderId === agentId && m.kind !== "system");
 }
 
-/** My Agent's slot after `run` (or none): `applyRun`'s rules, for one Agent of the group. */
-function ownerSlot(prev, run, ordered, from, heldReply) {
+/** My Agent's slot after `run` (or none): `applyRun`'s rules, for one Agent of the group (`activity` likewise). */
+function ownerSlot(prev, run, ordered, from, heldReply, activity) {
   const prevRun = prev && "run" in prev ? prev.run : null;
   let next = run;
   if (next && next.status === "failed" && prev?.dismissed === next.id) next = null;
@@ -1282,17 +1290,22 @@ function ownerSlot(prev, run, ordered, from, heldReply) {
     slot.since = from;
     if (!slot.posted && heldReply(from)) slot.posted = true;
   }
+  if (ordered && !slot.joined && next?.status === "running" && activity) slot.activity = activity;
   return slot;
 }
 
-/** Someone else's Agent's slot after `value` (there is no run id to tell runs apart: a push is the latest word). */
-function memberSlot(prev, value, ordered, from, heldReply) {
+/**
+ * Someone else's Agent's slot after `value` (there is no run id to tell runs apart: a push is the latest word), and what
+ * its tool is doing while it is replying (`activity`, a push's).
+ */
+function memberSlot(prev, value, ordered, from, heldReply, activity) {
   if (!ordered && prev && !prev.joined && !prev.unknown) return prev;
   const slot = { state: value };
   if (!ordered) slot.joined = true;
   else {
     slot.since = from;
     if (value === "replying" && heldReply(from)) slot.posted = true;
+    if (value === "replying" && activity) slot.activity = activity;
   }
   return slot;
 }
@@ -1303,7 +1316,8 @@ function putGroupSlot(state, conversationId, agentId, value, { ordered, since })
   const prev = slots[agentId] ?? null;
   const from = typeof since === "number" ? since : conv.lastSeq;
   const heldReply = (after) => heldMessageOf(state, conversationId, agentId, after);
-  const next = "run" in value ? ownerSlot(prev, value.run, ordered, from, heldReply) : memberSlot(prev, value.state, ordered, from, heldReply);
+  const next =
+    "run" in value ? ownerSlot(prev, value.run, ordered, from, heldReply, value.activity) : memberSlot(prev, value.state, ordered, from, heldReply, value.activity);
   if (next === prev) return state;
   return putGroupSlots(state, conversationId, emptySlot(next) ? without(slots, agentId) : { ...slots, [agentId]: next });
 }

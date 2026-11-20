@@ -10,6 +10,7 @@ import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 import { levelLabel } from "./ModelPicker.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { MemoryNotice } from "./MemoryChip.jsx";
+import { ReplyLookups } from "./ReplyLookups.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
 /** The quoted message as the reader may see it: the service says whether it is visible to them. */
@@ -125,7 +126,8 @@ function ReplyVia({ via }) {
   );
 }
 
-export function MessageItem({ msg, conv, onReply, flash = false }) {
+/** One message of `conv`; `onJump(conversationId, seq)`: the chat's jump (to a message an Agent's reply found). */
+export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
   const { state, dispatch, actions } = useStore();
   // A notice of an event this client does not know shows nothing.
   if (msg.hidden) return null;
@@ -182,6 +184,8 @@ export function MessageItem({ msg, conv, onReply, flash = false }) {
         </div>
         {thinking && <Thinking text={msg.reasoning} />}
         <Body msg={msg} agent={agent} />
+        {/* What the reply looked up with its tools: one quiet line, for whoever reads the reply (its own per conversation). */}
+        {agent && <ReplyLookups key={`${conv.id}:${msg.id}`} msg={msg} conv={conv} onJump={onJump} />}
         {ownChat && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
         {thinking && msg.via && <ReplyVia via={msg.via} />}
         <div className="msg-foot">

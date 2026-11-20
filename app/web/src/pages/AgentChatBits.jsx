@@ -78,6 +78,11 @@ function Writing({ text = "正在回复…" }) {
   );
 }
 
+/** What a reply says while its tool runs, by the kind of the tool's work (a run's `activity`). */
+const ACTIVITY_LINES = { search: "正在查聊天记录…", file: "正在看文件…", time: "正在看时间…" };
+/** The line for `activity` (`search`, `file`, `time`), or null for none — or for a kind this page does not know. */
+export const activityLine = (activity) => (typeof activity === "string" && Object.hasOwn(ACTIVITY_LINES, activity) ? ACTIVITY_LINES[activity] : null);
+
 /** What a reply that thinks says before its text: 正在思考…, then the whole seconds it has been thinking. */
 export const thinkingLine = (seconds) => (seconds > 0 ? `正在思考… ${seconds} 秒` : "正在思考…");
 
@@ -222,7 +227,9 @@ function StopButton({ conversationId, agentId = null, runId, disabled = false, o
  * unrevealed, so the bubble shows that stream (`finishing.stream`, `finishing.run`) to its end within REVEAL_FINISH_MS,
  * 停止生成 disabled, and calls `onFinished()` then. `onReveal(runId, done)` tells ChatView, whenever it changes, whether
  * all the text received is shown. Busy for assistive technology while it grows: the stored reply that replaces it is
- * announced instead (ChatView).
+ * announced instead (ChatView). While its tool runs (`run.activity`) it says what kind of thing it looks at
+ * (`activityLine`: 正在查聊天记录…, 正在看文件…, 正在看时间…) — in place of 正在回复… / 正在思考… before any text, under the
+ * text written so far after it.
  */
 export function StreamBubble({ conv, finishing = null, onReveal = null, onFinished = null }) {
   const { state } = useStore();
@@ -239,9 +246,11 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
   let summary = "思考过程";
   if (thinking) summary = line;
   else if (thinks && clock.textAt) summary = thoughtFor(clock.textAt - clock.start);
+  // What its tool looks at now, while one runs.
+  const doing = finishing ? null : activityLine(run.activity);
   // (While its thinking streams, the line heads it: the bubble keeps the dots only; so it does for the frame before
   // the first characters of the text of a reply that thought.)
-  const waiting = <Writing text={thinking ? (reasoning ? "" : line) : undefined} />;
+  const waiting = <Writing text={doing ?? (thinking ? (reasoning ? "" : line) : undefined)} />;
   return (
     <li className="msg theirs streaming" aria-busy="true">
       <Avatar id={conv.agentId} size={40} />
@@ -270,6 +279,11 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
                 }}
               />
               {stream.cut && <StreamCutNote />}
+              {doing && (
+                <p className="muted">
+                  <Writing text={doing} />
+                </p>
+              )}
             </>
           ) : (
             waiting
@@ -285,8 +299,9 @@ export function StreamBubble({ conv, finishing = null, onReveal = null, onFinish
 
 /**
  * An Agent's reply being written in a group (`row` of `conv.agentRuns`): its identity line as a finished Agent message has it
- * (name, Agent tag, 主人：<name>), then 正在回复… only — nothing streams in a group, nor
- * is any thinking shown. Its owner may stop it; nobody else has a control.
+ * (name, Agent tag, 主人：<name>), then 正在回复… only — or, while its tool runs (`row.activity`), what kind of thing it
+ * looks at (`activityLine`) — nothing streams in a group, nor is any thinking shown. Its owner may stop it; nobody else
+ * has a control.
  */
 export function GroupReplying({ conv, row }) {
   const { state } = useStore();
@@ -300,7 +315,7 @@ export function GroupReplying({ conv, row }) {
           <span className="owner">主人：{nameOf(state, ownerOf(state, row.agentId))}</span>
         </div>
         <div className="bubble">
-          <Writing />
+          <Writing text={activityLine(row.activity) ?? undefined} />
         </div>
         {row.mine && (
           <div className="msg-foot">
