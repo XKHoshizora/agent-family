@@ -37,6 +37,7 @@ describe("production build", () => {
       "credits:show:prod",
       "inbox:list:prod",
       "invite:create:prod",
+      "mail:status:prod",
       "memory:stats:prod",
       "migrate:prod",
       "models:list:prod",
