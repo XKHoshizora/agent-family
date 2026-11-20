@@ -533,6 +533,8 @@ const envSchema = z.object({
   MAIL_FROM: optionalString,
   /** Where a reply to a mail goes; unset: none is asked for. */
   MAIL_REPLY_TO: optionalString,
+  /** Mails of one kind one address may be sent in an hour (the rest are written but never delivered); every request counts alike. */
+  MAIL_PER_ADDRESS_HOUR: wholeNumber(5, 1, 1000),
   /** A header your proxy sets to the client's address, replacing any client value (Railway: `x-real-ip`). */
   CLIENT_IP_HEADER: optionalString.pipe(
     z
@@ -660,6 +662,8 @@ export interface Config {
   mailMode: "outbox" | "resend";
   /** What `resend` sends with; undefined in `outbox` mode. The key is a secret: never print this object. */
   mail: { apiKey: string; from: string; replyTo?: string } | undefined;
+  /** `MAIL_PER_ADDRESS_HOUR`: mails of one kind to one address delivered in an hour. */
+  mailPerAddressHour: number;
   rateLimitScale: number;
   /** Lower-case header name holding the client's address (src/limits.ts `clientIp`); unset: not consulted. */
   clientIpHeader: string | undefined;
@@ -827,6 +831,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     registrationMode: e.REGISTRATION_MODE,
     mailMode: e.MAIL_MODE,
     mail: mailSettings(e),
+    mailPerAddressHour: e.MAIL_PER_ADDRESS_HOUR,
     rateLimitScale: e.RATE_LIMIT_SCALE,
     clientIpHeader: e.CLIENT_IP_HEADER,
     trustProxy: e.TRUST_PROXY,

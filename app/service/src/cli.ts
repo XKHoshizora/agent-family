@@ -82,7 +82,12 @@ if (command === "migrate") {
   const db = createDb(databaseUrl());
   try {
     const c = await mailCounts(db);
-    console.log(`queued ${c.queued}  sent ${c.sent}  failed ${c.failed}`);
+    console.log("day         queued  sent  failed  expired  retries");
+    for (const d of c.days) {
+      console.log(`${d.day}  ${String(d.queued).padStart(6)}  ${String(d.sent).padStart(4)}  ${String(d.failed).padStart(6)}  ${String(d.expired).padStart(7)}  ${String(d.retries).padStart(7)}`);
+    }
+    if (c.days.length === 0) console.log("(no mail was to be delivered in the last 7 days)");
+    console.log(`rows written in outbox mode, never to be sent: ${c.outboxOnly}`);
   } finally {
     await db.close();
   }

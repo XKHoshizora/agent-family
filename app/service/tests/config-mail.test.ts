@@ -52,4 +52,11 @@ describe("mail configuration", () => {
   test("RESEND_API_KEY is one of the service's own secrets (tests/config-agents.test.ts: no site model may name it as its key)", () => {
     expect(SERVICE_SECRET_VARIABLES).toContain("RESEND_API_KEY");
   });
+
+  test("MAIL_PER_ADDRESS_HOUR: mails to one address per kind per hour, default 5, 1 to 1000", () => {
+    expect(loadConfig(base).mailPerAddressHour).toBe(5);
+    expect(loadConfig({ ...base, MAIL_PER_ADDRESS_HOUR: "12" }).mailPerAddressHour).toBe(12);
+    expect(loadConfig({ ...base, MAIL_PER_ADDRESS_HOUR: "" }).mailPerAddressHour).toBe(5);
+    for (const bad of ["0", "1001", "-1", "1.5", "many"]) expect(() => loadConfig({ ...base, MAIL_PER_ADDRESS_HOUR: bad }), bad).toThrow(/MAIL_PER_ADDRESS_HOUR/);
+  });
 });
