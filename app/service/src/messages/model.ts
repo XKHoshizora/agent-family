@@ -51,6 +51,8 @@ export type SystemEvent =
       changeId: string;
       lines: string[];
       vaultLines: boolean[];
+      /** Only when a merge was applied: one per line, true for each `原来：…` line (a note the merge above it joined), never told by its text. */
+      sourceLines?: boolean[];
       pending: boolean;
       unlock: boolean;
       full: boolean;

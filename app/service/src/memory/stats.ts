@@ -79,10 +79,16 @@ export function countDroppedFlags(db: Queryable, dropped: ReadonlyArray<{ tries:
   count(db, "flags_dropped_age", dropped.length - tried);
 }
 
-/** The owner's decision on a change, counted when it took effect: `kind` is `changeKind` of the change (read before the decision). A card shown is counted where it is made (`card_shown_<reason>`), one nobody answered where the sweep discards it (`card_expired`). */
+/**
+ * The owner's decision on a change, counted when it took effect: `kind` is `changeKind` of the change (read before the decision). A card
+ * shown is counted where it is made (`card_shown_<reason>`), one nobody answered where the sweep discards it (`card_expired`). Undoing a
+ * review's merge applied at once is `undo_rest` and `merge_undone`: the live sign that such a merge lost something.
+ */
 export function countDecision(db: Queryable, verb: "undo" | "confirm" | "discard", kind: Awaited<ReturnType<typeof changeKind>> | null): void {
-  if (verb === "undo") count(db, kind === "hearsay" ? "undo_hearsay" : kind === "dream" ? "undo_dream" : "undo_rest");
-  else if (verb === "discard") count(db, "card_discarded");
+  if (verb === "undo") {
+    count(db, kind === "hearsay" ? "undo_hearsay" : kind === "dream" ? "undo_dream" : "undo_rest");
+    if (kind === "merge") count(db, "merge_undone");
+  } else if (verb === "discard") count(db, "card_discarded");
   else {
     count(db, "card_confirmed");
     // Confirming a request to take notes out of the vault takes them out.
@@ -90,14 +96,22 @@ export function countDecision(db: Queryable, verb: "undo" | "confirm" | "discard
   }
 }
 
-/** What kind of change this is, for counting the owner's decision on it (`undo_*`, `owner_unlocked`): its first op and phase say. Never throws. */
-export async function changeKind(q: Queryable, changeId: string): Promise<"rest" | "dream" | "hearsay" | "unlock"> {
+/**
+ * What kind of change this is, for counting the owner's decision on it (`undo_*`, `merge_undone`, `owner_unlocked`): its first op and phase
+ * say; `merge` is a review's (phase `rest`) that holds a merge — only a review's merge applied at once is stored so (a merge left to a card
+ * is a replace and removes). Never throws.
+ */
+export async function changeKind(q: Queryable, changeId: string): Promise<"rest" | "merge" | "dream" | "hearsay" | "unlock"> {
   try {
-    const { rows } = await q.query<{ phase: string; first: string | null }>("select phase, ops -> 0 ->> 'op' as first from memory_changes where id = $1", [changeId]);
+    const { rows } = await q.query<{ phase: string; first: string | null; merged: boolean }>(
+      `select phase, ops -> 0 ->> 'op' as first, ops @> '[{"op":"merge"}]'::jsonb as merged from memory_changes where id = $1`,
+      [changeId],
+    );
     const first = rows[0]?.first ?? "";
     if (first.startsWith("hearsay_")) return "hearsay";
     if (first === "unlock") return "unlock";
-    return rows[0]?.phase === "dream" ? "dream" : "rest";
+    if (rows[0]?.phase === "dream") return "dream";
+    return rows[0]?.merged === true ? "merge" : "rest";
   } catch {
     // Only a count is lost.
     return "rest";

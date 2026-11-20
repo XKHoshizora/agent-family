@@ -80,20 +80,23 @@ function systemView(system, alias) {
 const MEMORY_STATUSES = new Set(["applied", "undone", "pending", "discarded", "expired"]);
 
 /**
- * A `memory_changed` event as the chip and the cards read it: `lines` (strings only), `vaultLines` the same length (absent
- * or malformed: all false), the three flags as booleans, and a known `status` (else the flag `pending` says it); `phase`
- * "rest" (absent or unknown) or "dream"; `count` the number the sentence says (absent: the number of lines).
+ * A `memory_changed` event as the chip and the cards read it: `lines` (strings only), `vaultLines` and `sourceLines` (which lines are
+ * notes a merge joined) the same length (absent or malformed: all false), the three flags as booleans, and a known `status` (else the
+ * flag `pending` says it); `phase` "rest" (absent or unknown) or "dream"; `count` the number the sentence says (absent: the number of lines).
  */
 function memoryChangeView(event) {
   const lines = Array.isArray(event.lines) ? event.lines.filter((l) => typeof l === "string") : [];
-  // One mark per kept line; a vault array of another length is not trusted.
-  const trusted = Array.isArray(event.vaultLines) && event.vaultLines.length === event.lines?.length;
-  const vaultLines = (Array.isArray(event.lines) ? event.lines : []).flatMap((l, i) => (typeof l === "string" ? [trusted && event.vaultLines[i] === true] : []));
+  // One mark per kept line; an array of marks of another length is not trusted.
+  const marks = (list) => {
+    const trusted = Array.isArray(list) && list.length === event.lines?.length;
+    return (Array.isArray(event.lines) ? event.lines : []).flatMap((l, i) => (typeof l === "string" ? [trusted && list[i] === true] : []));
+  };
   const pending = event.pending === true;
   return {
     ...event,
     lines,
-    vaultLines,
+    vaultLines: marks(event.vaultLines),
+    sourceLines: marks(event.sourceLines),
     pending,
     unlock: event.unlock === true,
     full: event.full === true,

@@ -10,7 +10,7 @@
 //     split          memory-split.jsonl          does a split of a note add nothing and lose nothing: the question a merge and a rewrite share too (sort.ts addsNothing)
 //     hearsay-check  memory-hearsay-check.jsonl  the two pre-check questions before a hearsay call (hearsay.ts worthACall)
 //     explicit       memory-explicit.jsonl       did the owner ask to forget or delete: the question that lets a review's remove apply at once (sort.ts ownerAsked), asked of every window whatever its words
-//     merge          memory-merge.jsonl          does a review's merge (a replace and the removes of its room) keep everything and add nothing: the faithful question a review asks before a merge may apply at once (pipeline.ts faithfulOf; MEMORY.mergeAuto)
+//     merge          memory-merge.jsonl          does a review's merge (a replace and the removes of its room) keep everything and add nothing: the faithful question a review asks before a merge may apply at once, at its own bar (pipeline.ts faithfulOf; MEMORY.reviewMergeAt, MEMORY.mergeAuto)
 //   modes through a chat model (MEMORY_CHAT_URL, MEMORY_CHAT_KEY, MEMORY_CHAT_MODEL; POST <url>/chat/completions):
 //     review         memory-review.jsonl         the review call over an owner's own conversation (review.ts)  [--mixed-notes] [--today YYYY-MM-DD] [--language <code>]
 //     rooms          (built in)                  a notes room filled to its limit in weight, per language, in the reply prompt (prompt.ts notesPassage), one note first / middle / last, with the provider's real prompt tokens next to its weight (does 1 weight = 1 token hold?); and the dream call over it  [--repeat <n>] [--no-dream] [--language <code>]
@@ -68,7 +68,7 @@ const FILE_MODES = {
   [F.language]: ['review', 'rooms'],
   [F.ops]: ['review'],
   [F.clean]: ['review', 'merge'],
-  [F.dream]: ['rooms'],
+  [F.dream]: ['rooms', 'split'],
   [F.prompt]: ['review', 'flags', 'rooms', 'explicit'],
   [F.store]: ['review', 'rooms'],
   [F.weight]: ['review', 'rooms', 'explicit', 'merge'],
@@ -156,7 +156,9 @@ SN(F.sort, 'faithful state', 'JSON.stringify({ sources, results })')
 SN(F.sort, 'faithful question', '{ key: FAITHFUL, type: "noul", instructions: FAITHFUL_INSTRUCTIONS }')
 SN(F.sort, 'share rule', 'if (answer.p >= shareAt) return { vault: false, unsure: false };')
 SN(F.sort, 'same rule', 'if (answer?.type === "noul" && answer.p >= deps.config.memory.sameAt && (best === null || answer.p > best.p)) best = { id: n.id, p: answer.p };')
-SN(F.sort, 'faithful rule', 'return answer?.type === "noul" && answer.p >= deps.config.memory.faithfulAt;')
+// The bar is the caller's: a dream's merge, rewrite and split at faithfulAt (split mode), a review's merge at reviewMergeAt (merge mode).
+SN(F.sort, 'faithful rule', 'return answer?.type === "noul" && answer.p >= at;')
+SN(F.dream, 'split bar', 'await addsNothing(sortDeps, { kind: "split", source: note.text, parts: op.texts }, config.memory.faithfulAt, closing)')
 // Whether the owner asked to forget (sort.ts ownerAsked): one request, the owner's words as the state's JSON, one fixed question.
 const FORGET_ASKED_INSTRUCTIONS = S(
   F.sort,
@@ -173,9 +175,10 @@ const EXPLICIT_KEY = 'explicit_forget'
 // src/memory/pipeline.ts: a review's merge is asked the faithful question exactly as a dream's (sort.ts addsNothing, kind merge): the
 // stored texts of the replaced note and of the removed ones as the sources, the replace's new text (cleaned, modelNote) as the result.
 SN(F.pipeline, 'merge sources', 'const sources = [m.replace, ...m.removes].map((op) => refs.get(op.ref)!.text);')
-SN(F.pipeline, 'merge question', 'await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, closing)')
+SN(F.pipeline, 'merge question', 'await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, deps.config.memory.reviewMergeAt, closing)')
 SN(F.pipeline, 'merge applied only on', 'const applying = deps.config.memory.mergeAuto === "on" ? faithful : [];')
 SN(F.config, 'mergeAuto default', 'mergeAuto: z.enum(["off", "observe", "on"]).default("observe"),')
+SN(F.config, 'reviewMergeAt never below faithfulAt', '.refine((m) => m.reviewMergeAt >= m.faithfulAt, { path: ["reviewMergeAt"], message: "must be at least faithfulAt" })')
 
 // src/agents/proactive/candidates.ts and listeners.ts
 const NEW_MARK = '【新】'
@@ -552,6 +555,7 @@ const DEFAULTS = {
   hearsayAt: 0.65,
   ownAt: 0.6,
   faithfulAt: 0.6,
+  reviewMergeAt: 0.7,
   explicitAt: 0.7,
   hearsayNewAt: 0.7,
   hearsayAbuseAt: 0.6,
@@ -927,13 +931,18 @@ function checkExplicit(samples) {
   return { errors, counts: countBy(samples, (s) => s.cat) }
 }
 
-// A review's merge: 'faithful' keeps every fact of every source and adds none (2 and 3 sources; `reworded`: said quite differently, dates
-// and numbers included). The near misses must not pass: 'dropped' (a source's fact left out), 'changed' (`what`: a number, a date, a name
-// or a negation changed), 'added' (a detail no source has), 'fused' (two people or two events made one), 'correction' (a later note
-// corrects an earlier one and the result keeps the wrong value), 'unrelated' (a remove of something else pulled into the merge: its fact
-// is gone).
-const MERGE_CATS = ['faithful', 'dropped', 'changed', 'added', 'fused', 'correction', 'unrelated']
+// A review's merge: 'faithful' keeps every fact of every source and adds none (2 to 4 sources; `reworded`: said quite differently, dates
+// and numbers included); 'resolved' too (a later note corrects an earlier one's mistake and the result keeps only the right value: the wrong
+// one is rightly gone). The near misses must not pass: 'dropped' (a source's fact left out, a small detail of a long note or a whole source
+// of three or four), 'changed' (`what`: a number, a date, a name or a negation changed), 'modality' (`what`: a plan stated as done, usually
+// made always, might made will, a wish made a decision), 'added' (a detail no source has), 'fused' (two people or two events made one),
+// 'correction' (a later note corrects an earlier one and the result keeps the wrong value), 'unrelated' (a remove of something else pulled
+// into the merge: its fact is gone). `long`: the notes are two or three sentences each.
+const MERGE_CATS = ['faithful', 'resolved', 'dropped', 'changed', 'modality', 'added', 'fused', 'correction', 'unrelated']
+const FAITHFUL_CATS = ['faithful', 'resolved']
 const MERGE_CHANGES = ['number', 'date', 'name', 'negation']
+const MERGE_MODALITIES = ['plan', 'always', 'will', 'decision']
+const MERGE_WHATS = { changed: MERGE_CHANGES, modality: MERGE_MODALITIES }
 function checkMerge(samples) {
   const errors = []
   baseChecks(samples, errors, LANGS)
@@ -943,19 +952,24 @@ function checkMerge(samples) {
     if (!isStrArr(s.sources) || s.sources.length < 2 || s.sources.length > 4) errors.push(`${at}: sources 要是 2 到 4 条字符串（被替换的那条在前，再是被删掉的）`)
     if (!isStr(s.result)) errors.push(`${at}: result 缺失`)
     else if (modelNote(s.result) !== s.result) errors.push(`${at}: result 不是生产会留下的样子（modelNote 会改它或拒绝它）`)
+    const want = FAITHFUL_CATS.includes(s.cat)
     if (typeof s.expect?.faithful !== 'boolean' || Object.keys(s.expect ?? {}).length !== 1) errors.push(`${at}: expect 只要一个布尔的 faithful`)
-    else if (s.expect.faithful !== (s.cat === 'faithful')) errors.push(`${at}: ${s.cat} 的 expect.faithful 应为 ${s.cat === 'faithful'}`)
-    if (s.cat === 'changed' && !MERGE_CHANGES.includes(s.what)) errors.push(`${at}: changed 要写 what（${MERGE_CHANGES.join(' / ')}）`)
-    if (s.cat !== 'changed' && s.what !== undefined) errors.push(`${at}: 只有 changed 写 what`)
+    else if (s.expect.faithful !== want) errors.push(`${at}: ${s.cat} 的 expect.faithful 应为 ${want}`)
+    const whats = MERGE_WHATS[s.cat]
+    if (whats && !whats.includes(s.what)) errors.push(`${at}: ${s.cat} 要写 what（${whats.join(' / ')}）`)
+    if (!whats && s.what !== undefined) errors.push(`${at}: 只有 ${Object.keys(MERGE_WHATS).join(' / ')} 写 what`)
     if (s.reworded !== undefined && (s.reworded !== true || s.cat !== 'faithful')) errors.push(`${at}: reworded 只用在 faithful 上，写 true`)
+    if (s.long !== undefined && s.long !== true) errors.push(`${at}: long 只写 true`)
   }
-  if (samples.length < 60) errors.push(`一共 ${samples.length} 条，至少要 60`)
+  if (samples.length < 80) errors.push(`一共 ${samples.length} 条，至少要 80`)
   for (const c of MERGE_CATS) if (!samples.some((s) => s.cat === c)) errors.push(`缺 ${c} 的样本`)
   for (const l of LANGS) if (!samples.some((s) => s.lang === l)) errors.push(`缺 ${l} 的样本`)
   const faithful = samples.filter((s) => s.cat === 'faithful')
-  for (const k of [2, 3]) if (!faithful.some((s) => s.sources?.length === k)) errors.push(`faithful 缺 ${k} 条合成一条的样本`)
+  for (const k of [2, 3, 4]) if (!faithful.some((s) => s.sources?.length === k)) errors.push(`faithful 缺 ${k} 条合成一条的样本`)
   if (!faithful.some((s) => s.reworded === true)) errors.push('faithful 缺换了说法（reworded）的样本')
-  for (const w of MERGE_CHANGES) if (!samples.some((s) => s.cat === 'changed' && s.what === w)) errors.push(`changed 缺 what = ${w} 的样本`)
+  for (const c of ['faithful', 'dropped']) if (!samples.some((s) => s.cat === c && s.long === true)) errors.push(`${c} 缺长笔记（long）的样本`)
+  for (const k of [3, 4]) if (!samples.some((s) => s.cat === 'dropped' && s.sources?.length === k)) errors.push(`dropped 缺 ${k} 条里丢了一条的样本`)
+  for (const [cat, whats] of Object.entries(MERGE_WHATS)) for (const w of whats) if (!samples.some((s) => s.cat === cat && s.what === w)) errors.push(`${cat} 缺 what = ${w} 的样本`)
   return { errors, counts: countBy(samples, (s) => s.cat) }
 }
 
@@ -1562,17 +1576,20 @@ function mergeReport(results, model) {
   const lines = []
   const out = (s = '') => lines.push(s)
   const ths = grid(0.4, 0.95, 0.05)
-  const at = DEFAULTS.faithfulAt
-  out(`复习时的合并校验校准报告（merge；MEMORY.mergeAuto 为 on 时分数 >= faithfulAt 的合并不问主人就生效）  模型 ${model}  样本 ${rec.length}（成功 ${ok.length}，失败 ${failed.length}）  默认 faithfulAt = ${at}，mergeAuto 默认 observe`)
-  out('  faithful 应当过；dropped / changed / added / fused / correction / unrelated 一条都不该过（必须是 0：过了就是没问主人就删掉了笔记里的一件事，30 天内可撤销）。')
+  // A review's merge has its own bar (MEMORY.reviewMergeAt); the dream's faithfulAt is shown beside it only for reference.
+  const at = DEFAULTS.reviewMergeAt
+  const dreamAt = DEFAULTS.faithfulAt
+  out(`复习时的合并校验校准报告（merge；MEMORY.mergeAuto 为 on 时分数 >= reviewMergeAt 的合并不问主人就生效）  模型 ${model}  样本 ${rec.length}（成功 ${ok.length}，失败 ${failed.length}）  默认 reviewMergeAt = ${at}（入梦的 faithfulAt = ${dreamAt}），mergeAuto 默认 observe`)
+  out(`  ${FAITHFUL_CATS.join(' / ')} 应当过；${MERGE_CATS.filter((c) => !FAITHFUL_CATS.includes(c)).join(' / ')} 一条都不该过（必须是 0：过了就是没问主人就删掉或改掉了笔记里的一件事，30 天内可撤销）。`)
   out()
   out('一、分数分布（最小 / 中位 / 最大）')
   const groupings = [
     ['按类别', (r) => r.cat],
     ['按语言', (r) => r.lang],
     ['按类别 / 语言', (r) => `${r.cat} / ${r.lang}`],
-    ['changed 按改了什么', (r) => (r.cat === 'changed' ? r.what : null)],
-    ['faithful 按来源条数', (r) => (r.cat === 'faithful' ? `${r.sources.length} 条${r.reworded ? '（换了说法）' : ''}` : null)],
+    ['changed / modality 按改了什么', (r) => (MERGE_WHATS[r.cat] ? `${r.cat} ${r.what}` : null)],
+    ['按类别 / 来源条数', (r) => `${r.cat} / ${r.sources.length} 条${r.reworded ? '（换了说法）' : ''}`],
+    ['长笔记（long）按类别', (r) => (r.long ? r.cat : null)],
   ]
   for (const [title, f] of groupings) {
     out(`  ${title}`)
@@ -1583,27 +1600,30 @@ function mergeReport(results, model) {
   out('二、各类别里达到 T（会马上合并）的条数')
   tableOf(out, [...groupBy(ok, (r) => r.cat)].sort(), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`)
   out('  按语言（faithful 过 / 总；其余过 / 总）')
-  tableOf(out, [...groupBy(ok.filter((r) => r.cat === 'faithful'), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`)
-  tableOf(out, [...groupBy(ok.filter((r) => r.cat !== 'faithful'), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`not faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`, 24)
+  const isGood = (r) => FAITHFUL_CATS.includes(r.cat)
+  tableOf(out, [...groupBy(ok.filter(isGood), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`)
+  tableOf(out, [...groupBy(ok.filter((r) => !isGood(r)), (r) => r.lang)].sort((a, b) => byLang(a[0], b[0])).map(([k, v]) => [`not faithful ${k}`, v]), ths, (items, T) => `${items.filter((r) => r.score >= T).length}/${items.length}`, 24)
   out()
   const pass = (items, T) => items.filter((r) => r.score >= T).length
-  const good = ok.filter((r) => r.cat === 'faithful')
-  const bad = ok.filter((r) => r.cat !== 'faithful')
+  const good = ok.filter(isGood)
+  const bad = ok.filter((r) => !isGood(r))
+  const near = (a, b) => Math.abs(a - b) < 1e-9
   out('  T     faithful 过    不该过却过了(必须0)')
-  for (const T of ths) out(`  ${T.toFixed(2)}  ${pad(`${pass(good, T)}/${good.length}`, 13)}  ${pass(bad, T)}/${bad.length}`)
+  for (const T of ths) out(`  ${T.toFixed(2)}  ${pad(`${pass(good, T)}/${good.length}`, 13)}  ${pad(`${pass(bad, T)}/${bad.length}`, 8)}${near(T, at) ? '  ← reviewMergeAt' : near(T, dreamAt) ? '  ← faithfulAt（入梦）' : ''}`)
+  out(`  在 reviewMergeAt = ${at}：faithful 过 ${pass(good, at)} / ${good.length}，不该过却过了 ${pass(bad, at)} / ${bad.length}；不该过的最高分 ${bad.length ? f2(Math.max(...bad.map((r) => r.score))) : '—'}。`)
   out()
-  out(`三、站在错误一侧的样本（按默认 faithfulAt = ${at}）`)
-  const wrong = ok.filter((r) => (r.cat === 'faithful' ? r.score < at : r.score >= at))
+  out(`三、站在错误一侧的样本（按默认 reviewMergeAt = ${at}）`)
+  const wrong = ok.filter((r) => (isGood(r) ? r.score < at : r.score >= at))
   if (wrong.length === 0) out('  没有')
-  for (const r of wrong.sort((a, b) => Number(a.cat === 'faithful') - Number(b.cat === 'faithful') || b.score - a.score)) {
-    out(`  ${pad(r.id, 18)} ${pad(r.cat, 10)} ${f2(r.score)}  ${r.cat === 'faithful' ? '忠实的合并被拒（照旧变成卡片）' : '漏了/改了/多了内容的合并被放行'}：${r.sources.join(' ＋ ')} → ${r.result}`)
+  for (const r of wrong.sort((a, b) => Number(isGood(a)) - Number(isGood(b)) || b.score - a.score)) {
+    out(`  ${pad(r.id, 18)} ${pad(r.cat, 10)} ${f2(r.score)}  ${isGood(r) ? '忠实的合并被拒（照旧变成卡片）' : '漏了/改了/多了内容的合并被放行'}：${r.sources.join(' ＋ ')} → ${r.result}`)
   }
   if (failed.length) out(`\n请求失败的样本（不计入）：${failed.map((r) => `${r.id}（${r.error}）`).join('、')}`)
   out()
   out('需要决定的数字')
   const T0 = lowest(ths, (T) => pass(bad, T) === 0)
-  out(`  - faithfulAt：当前 ${at}，误放 ${pass(bad, at)} / ${bad.length}，faithful 过 ${pass(good, at)} / ${good.length}。零误放的最低门槛：${T0?.toFixed(2) ?? '格子里没有'}${T0 === undefined ? '' : `；这时 faithful 能过 ${pass(good, T0)} / ${good.length}`}。`)
-  out('  - MEMORY.mergeAuto：只有在用的 faithfulAt 下误放为 0，才考虑从 observe 改成 on；线上 observe 期间看 merge_would_auto / merge_would_card（memory:stats）。')
+  out(`  - reviewMergeAt：当前 ${at}，误放 ${pass(bad, at)} / ${bad.length}，faithful 过 ${pass(good, at)} / ${good.length}。零误放的最低门槛：${T0?.toFixed(2) ?? '格子里没有'}${T0 === undefined ? '' : `；这时 faithful 能过 ${pass(good, T0)} / ${good.length}`}。（不能低于入梦的 faithfulAt = ${dreamAt}：配置会拒绝。）`)
+  out('  - MEMORY.mergeAuto：只有在用的 reviewMergeAt 下误放为 0（不该过的最高分也明显低于它），才考虑从 observe 改成 on；线上看 merge_would_auto / merge_would_card（observe）和 merge_undone（on）（memory:stats）。')
   return lines.join('\n')
 }
 

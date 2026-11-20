@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { siteDay } from "../src/accounts/store.ts";
+import { decideProactive } from "../src/agents/proactive/decide.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { parseEntries } from "../src/memory/hearsay.ts";
@@ -1173,5 +1174,36 @@ describe("where it is used (end to end through real runs)", () => {
     expect(inB).not.toContain('"heard"');
     expect(own).toContain(SAID);
     expect(own).toContain('"group":"甲群"');
+  });
+});
+
+describe("memory switched off and on again", () => {
+  const patch = (w: World, body: Record<string, unknown>) => api(app, w.owner, "PATCH", `/api/agents/${w.agent.id}`, body);
+  const quiet = { info: () => {}, debug: () => {} };
+  /** The group's judgement of message `seq`, as the scheduler asks it; what it flags is told to the reviewer, as the scheduler does. */
+  const decide = async (w: World, seq: number) => {
+    const decided = await decideProactive({ db, judge, config: app.deps.config, log: quiet }, w.g, seq);
+    for (const f of decided.flags ?? []) memory().flagged(f.agentId, f.conversationId, f.kind);
+  };
+
+  it("on again without looking back, nothing a member said while it was off is new to the group's judgement: no flag, no hearsay call, no entry", async () => {
+    const w = await world("swo");
+    // Judged once while memory was on: the Agent is judged up to this message.
+    judge.answer(() => ({ h1: 0.1 }));
+    await decide(w, await say(w.mia, w.g, "大家早"));
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    // Said while memory is off: the Agent does not listen, and no other Agent is judged in the group meanwhile.
+    await say(w.mia, w.g, "小李下个月要做手术");
+    expect((await patch(w, { memory: true, catchUp: false })).status).toBe(200);
+    judge.calls.splice(0);
+    judge.answer(() => ({ h1: 0.9 }));
+    await decide(w, await say(w.owner, w.g, "今天好热"));
+    // The line may be shown as context, never as new; only the owner's own line is new, so no hearsay question is asked.
+    expect(judge.calls.some((c) => /【新】[^\n]*小李下个月要做手术/.test(c.state))).toBe(false);
+    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key))).not.toContain("h1");
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    await wake();
+    expect(hearsayCalls()).toHaveLength(0);
+    expect(await hearsayRows(w.agent.id)).toEqual([]);
   });
 });

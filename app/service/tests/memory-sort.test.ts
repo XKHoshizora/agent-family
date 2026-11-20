@@ -265,7 +265,7 @@ describe("the owner's allowance", () => {
     expect(await sortNote(deps({}, lim()), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
     expect(await resortNote(deps({}, lim()), "x", "owner")).toBeNull();
     expect(await duplicateOf(deps({}, lim()), "新", [{ id: "a", text: "a" }])).toBeNull();
-    expect(await addsNothing(deps({}, lim()), { kind: "rewrite", sources: ["a"], result: "b" })).toBe(false);
+    expect(await addsNothing(deps({}, lim()), { kind: "rewrite", sources: ["a"], result: "b" }, 0.6)).toBe(false);
     expect(judge.calls).toHaveLength(before);
     expect(await ownerUsed()).toBe(2);
     expect(await used()).toBe(2);
@@ -304,7 +304,7 @@ describe("the owner's allowance", () => {
     expect(await sortNote(deps({}, site), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
     expect(await resortNote(deps({}, site), "x", "owner")).toBeNull();
     expect(await duplicateOf(deps({}, site), "新", [{ id: "a", text: "a" }])).toBeNull();
-    expect(await addsNothing(deps({}, site), { kind: "rewrite", sources: ["a"], result: "b" })).toBe(false);
+    expect(await addsNothing(deps({}, site), { kind: "rewrite", sources: ["a"], result: "b" }, 0.6)).toBe(false);
     expect(judge.calls).toHaveLength(before);
     expect(await used()).toBe(5);
     // A larger share lets them on.
@@ -340,26 +340,35 @@ describe("the owner's allowance", () => {
 describe("addsNothing", () => {
   it("is one question, whatever the change: the notes it was made from and what it made, at the threshold", async () => {
     judge.answer(() => ({ faithful: 0.6 }));
-    expect(await addsNothing(deps(), { kind: "merge", sources: ["喜欢茶", "爱喝茶"], result: "爱喝茶" })).toBe(true);
+    expect(await addsNothing(deps(), { kind: "merge", sources: ["喜欢茶", "爱喝茶"], result: "爱喝茶" }, 0.6)).toBe(true);
     expect(judge.calls[0]!.questions).toEqual([{ key: "faithful", type: "noul", instructions: FAITH_TEXT }]);
     expect(JSON.parse(judge.calls[0]!.state)).toEqual({ sources: ["喜欢茶", "爱喝茶"], results: ["爱喝茶"] });
-    expect(await addsNothing(deps(), { kind: "rewrite", sources: ["周三去了医院"], result: "2026 年 11 月 18 日：去了医院" })).toBe(true);
+    expect(await addsNothing(deps(), { kind: "rewrite", sources: ["周三去了医院"], result: "2026 年 11 月 18 日：去了医院" }, 0.6)).toBe(true);
     expect(JSON.parse(judge.calls[1]!.state)).toEqual({ sources: ["周三去了医院"], results: ["2026 年 11 月 18 日：去了医院"] });
-    expect(await addsNothing(deps(), { kind: "split", source: "喜欢茶，对花生过敏", parts: ["喜欢茶", "对花生过敏"] })).toBe(true);
+    expect(await addsNothing(deps(), { kind: "split", source: "喜欢茶，对花生过敏", parts: ["喜欢茶", "对花生过敏"] }, 0.6)).toBe(true);
     expect(JSON.parse(judge.calls[2]!.state)).toEqual({ sources: ["喜欢茶，对花生过敏"], results: ["喜欢茶", "对花生过敏"] });
     expect(judge.calls[2]!.questions[0]).toMatchObject({ key: "faithful" });
     expect(await used()).toBe(3);
     judge.answer(() => ({ faithful: 0.59 }));
-    expect(await addsNothing(deps(), { kind: "merge", sources: ["a", "b"], result: "a" })).toBe(false);
+    expect(await addsNothing(deps(), { kind: "merge", sources: ["a", "b"], result: "a" }, 0.6)).toBe(false);
+  });
+
+  it("the bar is its caller's: 0.65 passes a dream's faithfulAt (0.6) and not a review merge's reviewMergeAt (0.7); MEMORY.faithfulAt alone decides nothing", async () => {
+    judge.answer(() => ({ faithful: 0.65 }));
+    const change = { kind: "merge" as const, sources: ["喜欢茶", "爱喝茶"], result: "爱喝茶" };
+    expect(await addsNothing(deps(), change, app.deps.config.memory.faithfulAt)).toBe(true);
+    expect(await addsNothing(deps(), change, app.deps.config.memory.reviewMergeAt)).toBe(false);
+    expect(await addsNothing(deps({}, withMemory({ faithfulAt: 0.1 })), change, 0.7)).toBe(false);
+    expect(await addsNothing(deps({}, withMemory({ faithfulAt: 0.99 })), change, 0.65)).toBe(true);
   });
 
   it("false on an error, nothing usable, no judge or the limit", async () => {
     const change = { kind: "rewrite" as const, sources: ["a"], result: "b" };
     judge.answer(() => new JudgeError("auth"));
-    expect(await addsNothing(deps(), change)).toBe(false);
+    expect(await addsNothing(deps(), change, 0.6)).toBe(false);
     judge.answer(() => ({}));
-    expect(await addsNothing(deps(), change)).toBe(false);
-    expect(await addsNothing(deps({ judge: null }), change)).toBe(false);
+    expect(await addsNothing(deps(), change, 0.6)).toBe(false);
+    expect(await addsNothing(deps({ judge: null }), change, 0.6)).toBe(false);
   });
 
   it("the closing signal: nothing is asked once the service is closing, and a request under way ends with it (not faithful)", async () => {
@@ -367,7 +376,7 @@ describe("addsNothing", () => {
     judge.answer(() => ({ faithful: 0.9 }));
     const closed = new AbortController();
     closed.abort();
-    expect(await addsNothing(deps(), change, closed.signal)).toBe(false);
+    expect(await addsNothing(deps(), change, 0.6, closed.signal)).toBe(false);
     expect(judge.calls).toHaveLength(0);
     expect(await used()).toBe(0);
     // A request that would wait a minute for its answer ends as soon as the service closes.
@@ -375,7 +384,7 @@ describe("addsNothing", () => {
     const closing = new AbortController();
     setTimeout(() => closing.abort(), 20);
     const started = Date.now();
-    expect(await addsNothing(deps({}, { judge: { ...JUDGE, timeoutMs: 60_000 } }), change, closing.signal)).toBe(false);
+    expect(await addsNothing(deps({}, { judge: { ...JUDGE, timeoutMs: 60_000 } }), change, 0.6, closing.signal)).toBe(false);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(judge.calls).toHaveLength(1);
   });

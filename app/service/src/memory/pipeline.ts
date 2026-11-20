@@ -24,7 +24,8 @@ import { bumpNotes, stampsOf } from "./write.ts";
  * (outside any transaction), then one transaction that applies them (`applyOps`), moves `reviewed_seq` and writes the
  * owner's notice, and the notice's announcement after commit.
  *
- * Fail closed: a call that could not be made, failed or was abandoned changes nothing and leaves `reviewed_seq`; an answer
+ * Fail closed: a call that could not be made, failed or was abandoned changes nothing and leaves `reviewed_seq`, and so does one whose
+ * Agent had memory switched off meanwhile, also when it is on again by the time the call answers (`memorySwitched`); an answer
  * that cannot be used (garbage, cut, empty) changes nothing but is reviewed (`reviewed_seq` moves, as it does when there
  * was no owner message to look at). In a group only additions are applied: forgetting and locking by speech are the
  * owner's, in their own conversation. What this owner has pending already counts as known. In the owner's own conversation memory asks
@@ -79,7 +80,7 @@ export async function reviewableAgent(db: Db, agentId: string): Promise<AgentRow
   return agent && agent.memory && !agent.paused && !agent.deleted ? agent : null;
 }
 
-export async function reviewedSeq(db: Db, agentId: string, conversationId: string): Promise<number> {
+export async function reviewedSeq(db: Queryable, agentId: string, conversationId: string): Promise<number> {
   const { rows } = await db.query<{ s: string }>("select reviewed_seq::text as s from memory_review_state where agent_id = $1 and conversation_id = $2", [agentId, conversationId]);
   return Number(rows[0]?.s ?? 0);
 }
@@ -99,19 +100,20 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
 
 /**
  * In the transaction that turns an Agent's `memory` off or on (agents/routes.ts, `PATCH /api/agents/:id`; the Agent's row locked). Off:
- * its waiting cards are discarded (as when it is deleted) and its flags not yet acted on (hearsay, the owner's own remarks) dropped;
- * its notes stay. On: every review position of the Agent — its own conversation, every conversation it is a member of, any it was
- * reviewed in — becomes the conversation's current seq, and any flag is dropped, so nothing said while memory was off is ever
- * reviewed; unless the owner asked it to look back (`catchUp`): then the positions stay where they were, and the next review reads
- * what was said meanwhile within its usual window (`reviewMessages`, the topic, in a group what came after it joined).
+ * its waiting cards are discarded (as when it is deleted), its flags not yet acted on (hearsay, the owner's own remarks) dropped, and
+ * its positions moved to now (below): what was said before it was switched off and not yet reviewed is never learned — the owner
+ * switched it off, that is the point; its notes stay. On: the positions are moved to now again and any flag is dropped, so nothing said
+ * while memory was off is ever reviewed, nor new to a group's judgement; unless the owner asked it to look back (`catchUp`): then the
+ * positions stay where switching off put them, and the next review reads exactly what was said while it was off within its usual
+ * window (`reviewMessages`, the topic, in a group what came after it joined). The positions: every review position of the Agent — its
+ * own conversation, every conversation it is a member of, any it was reviewed in — and, in every group it is in, what the group's
+ * judgement counts as judged for it (`agent_group_state.judged_seq`: what came after it is 【新】, asked about and flagged), each the
+ * conversation's current seq, never moved back.
  */
 export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">, on: boolean, catchUp: boolean): Promise<void> {
   if (on && catchUp) return;
   await t.query("delete from memory_flags where agent_id = $1", [agent.id]);
-  if (!on) {
-    await discardPendingOf(t, agent.ownerId, agent.id);
-    return;
-  }
+  if (!on) await discardPendingOf(t, agent.ownerId, agent.id);
   await t.query(
     `insert into memory_review_state (agent_id, conversation_id, reviewed_seq)
        select $1, c.id, c.seq from conversations c
@@ -119,6 +121,13 @@ export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerI
            or c.id in (select conversation_id from memberships where principal_id = $1 and left_seq is null)
            or c.id in (select conversation_id from memory_review_state where agent_id = $1)
      on conflict (agent_id, conversation_id) do update set reviewed_seq = greatest(memory_review_state.reviewed_seq, excluded.reviewed_seq)`,
+    [agent.id, agent.conversationId],
+  );
+  await t.query(
+    `insert into agent_group_state (agent_id, conversation_id, judged_seq)
+       select $1, c.id, c.seq from memberships m join conversations c on c.id = m.conversation_id
+        where m.principal_id = $1 and m.left_seq is null and c.id <> $2
+     on conflict (agent_id, conversation_id) do update set judged_seq = greatest(coalesce(agent_group_state.judged_seq, 0), excluded.judged_seq)`,
     [agent.id, agent.conversationId],
   );
 }
@@ -194,7 +203,7 @@ export async function memoryNotice(
   t: Tx,
   locked: AgentRow,
   changeId: string,
-  how: { unlock: boolean; phase: "rest" | "dream"; linesOf: (ops: StoredOp[], pending: boolean) => { lines: string[]; vaultLines: boolean[] } },
+  how: { unlock: boolean; phase: "rest" | "dream"; linesOf: (ops: StoredOp[], pending: boolean) => { lines: string[]; vaultLines: boolean[]; sourceLines?: boolean[] } },
 ): Promise<StoredMessage> {
   const row = (await t.query<{ ops: StoredOp[]; full: boolean; status: "applied" | "pending" }>(`select ops, "full", status from memory_changes where id = $1`, [changeId])).rows[0]!;
   let status = row.status;
@@ -202,13 +211,14 @@ export async function memoryNotice(
     await t.query("update memory_changes set status = 'applied', resolved_at = now() where id = $1", [changeId]);
     status = "applied";
   }
-  const { lines, vaultLines } = how.linesOf(row.ops, status === "pending");
+  const { lines, vaultLines, sourceLines } = how.linesOf(row.ops, status === "pending");
   return appendSystem(t, locked.conversationId, {
     event: "memory_changed",
     actorId: locked.id,
     changeId,
     lines,
     vaultLines,
+    ...(sourceLines ? { sourceLines } : {}),
     pending: status === "pending",
     unlock: how.unlock,
     full: row.full,
@@ -307,7 +317,10 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   let strengthened = 0;
   let mergedNow = 0;
   const shown: CardReason[] = [];
-  const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[]> => {
+  const notices = await inLockedAgent(db, agentId, async (t, locked): Promise<StoredMessage[] | null> => {
+    // Memory was switched off and on again while the call was under way (`memorySwitched` moved the position past what it read): what it
+    // read was said before memory was switched off, and is never learned.
+    if ((await reviewedSeq(t, agentId, conversationId)) >= input.upToSeq) return null;
     const ids = { ownerId: locked.ownerId, agentId };
     // Why each change, if it is a card (pending), waits for the owner (`card_shown_<reason>`); null: never a card.
     const written: Array<{ changeId: string; unlock: boolean; reason: CardReason | null }> = [];
@@ -488,7 +501,8 @@ function mergesOf(inPlaceOps: ReadonlyArray<Op>, refs: ReadonlyMap<string, RefNo
 
 /**
  * Which of `merges` were asked about (`judged`) and which the judgement finds faithful, asked exactly as a dream's merge is (sort.ts
- * `addsNothing`: the old texts of the replaced note and of the removed ones as the sources, the new text as the result, `faithfulAt`), one
+ * `addsNothing`: the old texts of the replaced note and of the removed ones as the sources, the new text as the result) but held to a bar of
+ * its own, `reviewMergeAt` (never below a dream's `faithfulAt`: nobody asked for this one), one
  * request each, outside any transaction; only where a merge may apply at once — in the owner's own conversation (a group review only
  * adds), without 先问我再记 (everything waits then), with `MEMORY.mergeAuto` not "off" ("observe" asks, to count what it would do) — and
  * not once the service is closing (a request under way ends with it). No answer is not faithful: such a merge follows the rule of before.
@@ -509,7 +523,7 @@ async function faithfulOf(
     if (closing.aborted) break;
     const sources = [m.replace, ...m.removes].map((op) => refs.get(op.ref)!.text);
     judged.push(m);
-    if (await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, closing)) faithful.push(m);
+    if (await addsNothing(sortDeps, { kind: "merge", sources, result: m.replace.text }, deps.config.memory.reviewMergeAt, closing)) faithful.push(m);
   }
   return { judged, faithful };
 }

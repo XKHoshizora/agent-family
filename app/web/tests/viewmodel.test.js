@@ -471,7 +471,13 @@ describe("Agents (batch 2A)", () => {
     // vaultLines absent → all false; malformed lines are dropped.
     const bare = [notice(A1, 1, "记忆已更新", { ...event, vaultLines: undefined, lines: ["a", 3, "b"] })];
     const b = toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 })], messages: bare }), { now: NOW });
-    expect(b.convs[A1].messages[0].system).toMatchObject({ lines: ["a", "b"], vaultLines: [false, false] });
+    expect(b.convs[A1].messages[0].system).toMatchObject({ lines: ["a", "b"], vaultLines: [false, false], sourceLines: [false, false] });
+    // sourceLines (which lines are notes a merge joined) as the vault marks: kept when of the lines' length, else all false.
+    const view = (fields) => toView(agentModel({ conversations: [agentConv(A1, AG1, { lastSeq: 1, readSeq: 1 })], messages: [notice(A1, 1, "记忆已更新", { ...event, ...fields })] }), { now: NOW }).convs[A1].messages[0].system;
+    expect(view({ lines: ["合并了 2 条：x", "原来：a", "原来：b"], vaultLines: [false, false, true], sourceLines: [false, true, true] }).sourceLines).toEqual([false, true, true]);
+    expect(view({ lines: ["合并了 2 条：x", "原来：a", 3, "原来：b"], sourceLines: [false, true, true, true] }).sourceLines).toEqual([false, true, true]);
+    expect(view({ lines: ["合并了 2 条：x", "原来：a"], sourceLines: [true] }).sourceLines).toEqual([false, false]);
+    expect(view({ lines: ["原来：a"], sourceLines: ["yes"] }).sourceLines).toEqual([false]);
     // In a group the notice has no Agent conversation: nothing is shown.
     const inGroup = [notice(G1, 1, "记忆已更新", event)];
     const g = toView(M.applySync(M.initial(), syncOf([group(G1, { lastSeq: 1, readSeq: 1 })], inGroup)), { now: NOW });

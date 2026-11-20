@@ -73,7 +73,8 @@ export interface Reviewer {
   changed(agentId: string): void;
   /**
    * After commit: Agent `agentId`'s `memory` was switched off or on (pipeline.ts `memorySwitched`). What was waiting for it is dropped —
-   * its quiet timers, its flags' wake-ups, its retry, its queued reviews (one under way applies nothing once memory is off). `lookBack`
+   * its quiet timers, its flags' wake-ups, its retry, its queued reviews (one under way applies nothing once memory is off, nor once it
+   * is on again: pipeline.ts `runReview`). `lookBack`
    * (turned on with `catchUp`): one review of its own conversation `conversationId` is queued, as after a quiet time.
    */
   switched(agentId: string, conversationId: string, lookBack: boolean): void;

@@ -375,7 +375,8 @@ describe("what a dream may do", () => {
     const b = await seeded(w.owner, w.agent.id, "爱喝茶", false);
     await db.query("update owner_notes set strength = 2, seen_at = '2026-11-10 00:00:00+00' where id = $1", [a.id]);
     await db.query("update owner_notes set strength = 3, seen_at = '2026-11-15 00:00:00+00' where id = $1", [b.id]);
-    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    // A dream's merge is held to faithfulAt (0.6), not to the bar of a review's merge (reviewMergeAt, 0.7).
+    judge.answer(() => ({ sort: 0.95, faithful: 0.65 }));
     gateway.reply(dreamAns(merge("n1", ["n2"], "爱喝茶，不加糖")));
     await night();
     const rows = await ownerNotes(w.owner.id);
@@ -383,7 +384,16 @@ describe("what a dream may do", () => {
     expect(rows[0]).toMatchObject({ id: a.id, text: "爱喝茶，不加糖", vault: false, strength: 5 });
     expect(rows[0].seen_at.toISOString()).toBe("2026-11-15T00:00:00.000Z");
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ event: "memory_changed", phase: "dream", count: 3, lines: ["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶"], vaultLines: [false, false, false], pending: false, status: "applied" });
+    expect(chip.system).toMatchObject({
+      event: "memory_changed",
+      phase: "dream",
+      count: 3,
+      lines: ["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶"],
+      vaultLines: [false, false, false],
+      sourceLines: [false, true, true],
+      pending: false,
+      status: "applied",
+    });
     expect(await chips(w.owner, w.conv)).toHaveLength(1);
     expect(await dreamedAt(w.owner.id)).not.toBeNull();
   });
@@ -697,10 +707,15 @@ describe("undo and asking first", () => {
     const cards = await chips(w.owner, w.conv);
     expect(cards).toHaveLength(1);
     expect(cards[0].system).toMatchObject({ phase: "dream", pending: true, status: "pending", count: 2, lines: ["要合并成：爱喝茶，不加糖", "要拆成：喜欢茶；对花生过敏"] });
+    expect(cards[0].system).not.toHaveProperty("sourceLines");
     expect((await changeRows(w.owner.id)).map((r) => r.status)).toEqual(["pending"]);
     const done = await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${cards[0].system.changeId}/confirm`);
     expect(done).toEqual({ status: 200, json: { status: "applied" } });
-    expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶", "拆成了：喜欢茶；对花生过敏"]);
+    // Written again in the past once confirmed, the notes it merged marked as such.
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({
+      lines: ["合并了 2 条：爱喝茶，不加糖", "原来：喜欢喝茶", "原来：爱喝茶", "拆成了：喜欢茶；对花生过敏"],
+      sourceLines: [false, true, true, false],
+    });
     expect((await ownerNotes(w.owner.id)).map((r) => [r.text, r.vault])).toEqual([
       ["爱喝茶，不加糖", false],
       ["喜欢茶", false],

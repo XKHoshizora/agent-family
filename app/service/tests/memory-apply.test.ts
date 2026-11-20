@@ -150,6 +150,21 @@ describe("applyOps", () => {
     expect((await ownerNotes(w)).map((n) => [n.vault, n.vaultBy])).toEqual([[true, "owner"]]);
   });
 
+  it("a lock applied at once of a note already in the vault is no change (the dream's rule): nothing recorded, updated_at untouched; a pending one still asks the owner, whose yes makes it theirs", async () => {
+    const w = await world();
+    const sorted = await seed(w, "owner", "locked by the sorter", { vault: true, vaultBy: "auto" });
+    const stamp = async () => (await db.query("select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') as at from owner_notes where id = $1", [sorted])).rows[0].at;
+    const before = await stamp();
+    const refs = new Map([["a", ref("owner", sorted)]]);
+    expect(await run(w, [{ op: "lock", ref: "a" }], refs)).toBeNull();
+    expect(await stamp()).toBe(before);
+    expect((await ownerNotes(w)).map((n) => [n.vault, n.vaultBy])).toEqual([[true, "auto"]]);
+    const pending = await run(w, [{ op: "lock", ref: "a" }], refs, { status: "pending" });
+    expect(pending!.applied.map((a) => a.op)).toEqual(["lock"]);
+    expect(await confirm(w, pending!.changeId!)).toMatchObject([{ op: "lock" }]);
+    expect((await ownerNotes(w)).map((n) => [n.vault, n.vaultBy])).toEqual([[true, "owner"]]);
+  });
+
   it("does removes and replaces before adds: a merge frees room for its add", async () => {
     const w = await world();
     const a = await seed(w, "owner", "地".repeat(10));
@@ -466,11 +481,15 @@ describe("undoChange", () => {
     expect((await ownerNotes(w)).find((n) => n.id === a)).toMatchObject({ text: "open one", vault: false, vaultBy: "owner", unsure: false });
     expect((await ownerNotes(w)).find((n) => n.id === l)).toMatchObject({ text: "to lock", vault: false, vaultBy: "auto" });
 
-    // A note that was inside stays inside, and a lock of one already inside gets its vault_by back.
+    // A note that was inside stays inside, and a lock of one already inside gets its vault_by back: applied at once such a lock is no
+    // change at all; confirmed on a card it makes the lock the owner's, and its undo gives the sorter's back.
     const r1 = await run(w, [{ op: "replace", ref: "b", text: "edited locked" }], refs, { vaults: new Map([[vaultKey("owner", "edited locked"), OPEN]]) });
     expect(await undo(w, r1!.changeId!)).toBe("undone");
     expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ text: "locked one", vault: true });
-    const r1b = await run(w, [{ op: "lock", ref: "b" }], refs);
+    expect(await run(w, [{ op: "lock", ref: "b" }], refs)).toBeNull();
+    const r1b = await run(w, [{ op: "lock", ref: "b" }], refs, { status: "pending" });
+    await confirm(w, r1b!.changeId!);
+    expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ vault: true, vaultBy: "owner" });
     expect(await undo(w, r1b!.changeId!)).toBe("undone");
     expect((await ownerNotes(w)).find((n) => n.id === b)).toMatchObject({ vault: true, vaultBy: "auto" });
 

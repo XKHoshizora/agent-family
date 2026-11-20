@@ -53,15 +53,23 @@ describe("memorySentence", () => {
     const seen = new Set(ids.map((changeId) => memorySentence(notice({ phase: "dream", lines: ["合并了：x"], count: 4, changeId }))));
     expect(seen).toEqual(new Set(["小助手入梦时整理了 4 条记忆", "小助手昨夜入梦，把 4 条记忆理顺了", "小助手在梦里收拾了 4 条记忆"]));
   });
-  it("a review's merge is tidying (理了理记忆), and the lines under a merge that list what it merged (原来：…) never change the sentence", () => {
+  it("a review's merge is tidying (理了理记忆), and the lines under a merge that list what it merged (原来：…, marked so by the notice's sourceLines) never change the sentence", () => {
     expect(memorySentence(notice({ lines: ["合并了 2 条：x"], count: 1 }))).toBe("小助手小憩时理了理记忆");
-    expect(memorySentence(notice({ lines: ["合并了 2 条：x", "原来：a", "原来：b"], count: 3 }))).toBe("小助手小憩时理了理记忆");
+    expect(memorySentence(notice({ lines: ["合并了 2 条：x", "原来：a", "原来：b"], sourceLines: [false, true, true], count: 3 }))).toBe("小助手小憩时理了理记忆");
     for (const changeId of ids.slice(0, 20)) {
-      const listed = notice({ changeId, phase: "dream", lines: ["合并了 2 条：x", "原来：a", "原来：b", "改成了：y"], count: 4 });
+      const listed = notice({ changeId, phase: "dream", lines: ["合并了 2 条：x", "原来：a", "原来：b", "改成了：y"], sourceLines: [false, true, true, false], count: 4 });
       expect(memorySentence(listed)).toBe(memorySentence(notice({ changeId, phase: "dream", lines: ["合并了 2 条：x", "改成了：y"], count: 2 })));
       expect(memorySentence(listed)).toMatch(/ 2 条记忆/);
-      const mixed = notice({ changeId, lines: ["合并了 3 条：x", "原来：a", "原来：b", "原来：c", "记住了：y"], count: 5 });
+      const mixed = notice({ changeId, lines: ["合并了 3 条：x", "原来：a", "原来：b", "原来：c", "记住了：y"], sourceLines: [false, true, true, true, false], count: 5 });
       expect(memorySentence(mixed)).toBe(memorySentence(notice({ changeId, lines: ["记住了：y"], count: 1 })));
+    }
+  });
+  it("a line is one a merge joined only when the notice marks it so: a note whose own text begins with 原来： is a line like any other", () => {
+    for (const changeId of ids.slice(0, 20)) {
+      // A line that is a note's own text (as a request to unlock is), and a dream's lines next to one: counted as they are.
+      expect(memorySentence(notice({ changeId, lines: ["原来：住在北京"], count: 1 }))).toBe(memorySentence(notice({ changeId, lines: ["住在北京"], count: 1 })));
+      const dream = notice({ changeId, phase: "dream", lines: ["改成了：原来：x", "原来：y"], sourceLines: [false, false], count: 2 });
+      expect(memorySentence(dream)).toMatch(/ 2 条记忆/);
     }
   });
   it("full adds 快满了; a full notice without lines says the palace is nearly full", () => {

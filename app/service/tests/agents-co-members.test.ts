@@ -102,6 +102,8 @@ const HIDDEN_KEYS = [
   // Which messages called for a reply (`agent_runs.call_seqs`, fix round 2): never on the wire either.
   "callSeqs",
   "call_seqs",
+  // Which lines of a memory notice are the notes a merge joined (its owner's notice only).
+  "sourceLines",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 

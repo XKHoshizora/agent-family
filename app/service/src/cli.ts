@@ -5,7 +5,7 @@ import { applyLedger, ensureAccount, formatPoints, lockAccount, parsePoints } fr
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
-import { formatStats, readStats } from "./memory/stats.ts";
+import { configureStats, formatStats, readStats } from "./memory/stats.ts";
 import { CHANGE_KEEP_DAYS, sweepMemoryChanges } from "./memory/sweep.ts";
 import { expireWhispers, removeOldWhispers, WHISPER_KEEP_DAYS, WHISPER_OPEN_DAYS } from "./whispers/store.ts";
 import { runMigrations } from "./migrate.ts";
@@ -83,6 +83,8 @@ if (command === "migrate") {
   const olderThan = Number(raw);
   const config = loadConfig(); // the blob store settings, as the server uses them
   const db = createDb(config.databaseUrl, { statementTimeoutMs: config.dbStatementTimeoutMs, acquireTimeoutMs: config.dbAcquireTimeoutMs });
+  // What it counts (the cards it discards, `card_expired`) is counted on the site's day, as the server counts it.
+  configureStats({ siteTimezone: config.siteTimezone, log: null });
   try {
     const log = {
       error: ({ err, ...what }: Record<string, unknown>, msg: string) =>

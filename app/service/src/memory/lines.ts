@@ -11,29 +11,48 @@ import type { StoredOp } from "./apply.ts";
  * the reader of notices (messages/read.ts) may render a notice again once its card has been decided.
  */
 
+/** A notice's lines: what each says, whether its note is in the vault, and — only when a merge was applied — which are the notes it joined. */
+export interface NoticeLines {
+  lines: string[];
+  vaultLines: boolean[];
+  /** One per line, true for a `原来：…` line (a note the merge above it joined: part of that merge's line); absent when there is none. */
+  sourceLines?: boolean[];
+}
+
 /**
  * A merge's lines, a dream's or a review's alike: `要合并成：…` while it waits; once done `合并了 {k} 条：…` (k the notes it joined), and
  * under it each note it joined as it was, `原来：…` (the one written into first, then the removed ones), with whether that note was in
- * the vault — what a merge kept is there to see, and what its 撤销 brings back.
+ * the vault — what a merge kept is there to see, and what its 撤销 brings back. Those lines are marked (`sources`) by where they are, never
+ * by their text: a note's own text may begin with 原来： too.
  */
-function mergeLines(s: StoredOp, pending: boolean, lines: string[], vaultLines: boolean[]): void {
+function mergeLines(s: StoredOp, pending: boolean, lines: string[], vaultLines: boolean[], sources: Set<number>): void {
   if (pending) {
     lines.push(`要合并成：${s.after}`);
     vaultLines.push(s.vaultAfter === true);
     return;
   }
-  lines.push(`合并了 ${1 + s.removed!.length} 条：${s.after}`, `原来：${s.before}`, ...s.removed!.map((r) => `原来：${r.text}`));
-  vaultLines.push(s.vaultAfter === true, s.vaultBefore === true, ...s.removed!.map((r) => r.vault));
+  lines.push(`合并了 ${1 + s.removed!.length} 条：${s.after}`);
+  vaultLines.push(s.vaultAfter === true);
+  for (const [text, vault] of [[s.before, s.vaultBefore === true] as const, ...s.removed!.map((r) => [r.text, r.vault] as const)]) {
+    sources.add(lines.length);
+    lines.push(`原来：${text}`);
+    vaultLines.push(vault);
+  }
 }
 
-export function linesOf(ops: ReadonlyArray<StoredOp>, pending = false): { lines: string[]; vaultLines: boolean[] } {
+/** The notice's lines with the merges' source lines marked, when there are any. */
+const marked = (lines: string[], vaultLines: boolean[], sources: ReadonlySet<number>): NoticeLines =>
+  sources.size === 0 ? { lines, vaultLines } : { lines, vaultLines, sourceLines: lines.map((_, i) => sources.has(i)) };
+
+export function linesOf(ops: ReadonlyArray<StoredOp>, pending = false): NoticeLines {
   const lines: string[] = [];
   const vaultLines: boolean[] = [];
+  const sources = new Set<number>();
   for (const s of ops) {
     switch (s.op) {
       // A review's merge (one found faithful, applied at once: pipeline.ts) is told as a dream's is.
       case "merge":
-        mergeLines(s, pending, lines, vaultLines);
+        mergeLines(s, pending, lines, vaultLines, sources);
         break;
       case "add":
         lines.push(`${pending ? "要记住：" : "记住了："}${s.after}`);
@@ -57,16 +76,17 @@ export function linesOf(ops: ReadonlyArray<StoredOp>, pending = false): { lines:
         break;
     }
   }
-  return { lines, vaultLines };
+  return marked(lines, vaultLines, sources);
 }
 
 /** A dream's lines (`linesOf`'s counterpart): `合并了 {k} 条：…` with its `原来：…` / `要合并成：…`, `改成了：…`, `拆成了：{part}；{part}` / `要拆成：…`, `锁进了保险箱：…`. A split's mark: whether any part is in the vault. */
-export function dreamLines(ops: ReadonlyArray<StoredOp>, pending = false): { lines: string[]; vaultLines: boolean[] } {
+export function dreamLines(ops: ReadonlyArray<StoredOp>, pending = false): NoticeLines {
   const lines: string[] = [];
   const vaultLines: boolean[] = [];
+  const sources = new Set<number>();
   for (const s of ops) {
     if (s.op === "merge") {
-      mergeLines(s, pending, lines, vaultLines);
+      mergeLines(s, pending, lines, vaultLines, sources);
     } else if (s.op === "replace") {
       lines.push(`${pending ? "要改成：" : "改成了："}${s.after}`);
       vaultLines.push(s.vaultAfter === true);
@@ -78,5 +98,5 @@ export function dreamLines(ops: ReadonlyArray<StoredOp>, pending = false): { lin
       vaultLines.push(true);
     }
   }
-  return { lines, vaultLines };
+  return marked(lines, vaultLines, sources);
 }

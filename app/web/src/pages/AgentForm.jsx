@@ -208,6 +208,11 @@ export function AgentForm({ agent = null }) {
     };
   }, [askCatchUp, catchUp.busy]);
 
+  // Memory turned out to be on already (turned on elsewhere, another tab): there is nothing left to ask.
+  useEffect(() => {
+    if (record.memory) setAskCatchUp(false);
+  }, [record.memory]);
+
   // Keyed by the record's values (the view model makes a new Agent object whenever anything changes).
   useEffect(() => {
     if (!editing) return;
@@ -295,6 +300,9 @@ export function AgentForm({ agent = null }) {
    */
   const setMemory = (event) => {
     if (editing && event.target.checked && !record.memory && !f.memory) {
+      // The form's 记忆 equals the record's (off) again: an earlier change of it in this form is no change any more, so 保存 never
+      // sends it, and the record (turned on by the answer, or elsewhere) is what the switch shows.
+      edited.current.delete("memory");
       setAskCatchUp(true);
       return;
     }
@@ -647,7 +655,8 @@ export function AgentForm({ agent = null }) {
           </div>
           {askCatchUp && (
             <div className="memory-catch-up" ref={catchUpRef}>
-              <p>{CATCH_UP_QUESTION}</p>
+              {/* Announced: the switch itself stays off until it is answered, so a screen reader hears what happened. */}
+              <p role="status">{CATCH_UP_QUESTION}</p>
               <div className="card-actions">
                 <Btn variant="primary" disabled={catchUp.busy !== null} onClick={() => answerCatchUp(false)}>
                   {catchUp.busy === "later" ? "处理中…" : "只记以后的"}

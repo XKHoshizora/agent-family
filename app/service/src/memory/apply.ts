@@ -338,8 +338,9 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
     if (touched.has(note.id) || moved) return;
     if (op.op === "lock") {
       // The owner's choice is final: a note they locked, and — when nobody asks them (`applied`: a lock applies at once) — one they took
-      // out of the vault, which the model never puts back (the dream's rule). A pending card still carries it, for their yes.
-      if (note.vaultBy === "owner" && (note.vault || opts.status === "applied")) return;
+      // out of the vault, which the model never puts back (the dream's rule). A pending card still carries it, for their yes. Applied at
+      // once, a lock of a note already in the vault is no change at all (the dream's rule too): nothing told, counted or stamped.
+      if (opts.status === "applied" ? note.vault || note.vaultBy === "owner" : note.vault && note.vaultBy === "owner") return;
       touched.add(note.id);
       candidates.push({ index, op: "lock", note, text: note.text, growth: 0 });
     } else if (op.op === "remove") {

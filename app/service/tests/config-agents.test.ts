@@ -459,6 +459,7 @@ describe("the memory configuration", () => {
     dreamEveryMs: 72_000_000,
     napAt: 0.8,
     faithfulAt: 0.6,
+    reviewMergeAt: 0.7,
     judgePerOwnerDay: 300,
     judgeShare: 0.5,
     explicitAt: 0.7,
@@ -502,6 +503,14 @@ describe("the memory configuration", () => {
   test("what a review does with a merge the judgement finds faithful, mergeAuto: observe by default (asked and counted, not applied at once), on, or off", () => {
     for (const mode of ["off", "observe", "on"]) expect(loadConfig({ ...base, MEMORY: JSON.stringify({ mergeAuto: mode }) }).memory.mergeAuto).toBe(mode);
     for (const bad of ['{"mergeAuto":"yes"}', '{"mergeAuto":true}', '{"mergeAuto":null}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+  });
+
+  test("a review's merge has a bar of its own, reviewMergeAt: 0.7 by default, a probability never below faithfulAt (the dream's bar); less refuses", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"reviewMergeAt":0.85}' }).memory.reviewMergeAt).toBe(0.85);
+    expect(loadConfig({ ...base, MEMORY: '{"reviewMergeAt":0.6}' }).memory.reviewMergeAt).toBe(0.6);
+    expect(loadConfig({ ...base, MEMORY: '{"faithfulAt":0.8,"reviewMergeAt":0.9}' }).memory).toMatchObject({ faithfulAt: 0.8, reviewMergeAt: 0.9 });
+    for (const bad of ['{"reviewMergeAt":0.59}', '{"faithfulAt":0.8}', '{"faithfulAt":0.8,"reviewMergeAt":0.75}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY.*reviewMergeAt/);
+    for (const bad of ['{"reviewMergeAt":1.5}', '{"reviewMergeAt":-0.1}', '{"reviewMergeAt":"0.7"}', '{"reviewMergeAt":null}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
   });
 
   test("the hearsay limits can be set", () => {

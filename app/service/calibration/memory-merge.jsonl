@@ -3,7 +3,7 @@
 {"id":"zh-faithful-03","lang":"zh","cat":"faithful","sources":["女儿叫小雨","女儿今年 6 岁","女儿在上一年级"],"result":"女儿小雨今年 6 岁，在上一年级","expect":{"faithful":true}}
 {"id":"zh-faithful-04","lang":"zh","cat":"faithful","reworded":true,"sources":["2026 年 3 月 12 日搬到杭州","新家在西湖区，离公司 5 公里"],"result":"从 2026 年 3 月 12 日起住在杭州西湖区，新家到公司五公里","expect":{"faithful":true}}
 {"id":"zh-faithful-05","lang":"zh","cat":"faithful","sources":["对花生过敏","花生过敏会起疹子"],"result":"对花生过敏，吃了会起疹子","expect":{"faithful":true}}
-{"id":"zh-faithful-06","lang":"zh","cat":"faithful","sources":["每周二晚上打羽毛球","打球的地方在体育中心","一般和同事一起打"],"result":"每周二晚上和同事在体育中心打羽毛球","expect":{"faithful":true}}
+{"id":"zh-faithful-06","lang":"zh","cat":"faithful","sources":["每周二晚上打羽毛球","打球的地方在体育中心","一般和同事一起打"],"result":"每周二晚上在体育中心打羽毛球，一般和同事一起打","expect":{"faithful":true}}
 {"id":"zh-faithful-07","lang":"zh","cat":"faithful","sources":["不吃香菜","也不吃葱"],"result":"不吃香菜和葱","expect":{"faithful":true}}
 {"id":"zh-dropped-01","lang":"zh","cat":"dropped","sources":["喜欢喝茶","喜欢喝绿茶，不加糖"],"result":"爱喝绿茶","expect":{"faithful":false}}
 {"id":"zh-dropped-02","lang":"zh","cat":"dropped","sources":["女儿叫小雨","女儿今年 6 岁","女儿对芒果过敏"],"result":"女儿小雨今年 6 岁","expect":{"faithful":false}}
@@ -16,6 +16,17 @@
 {"id":"zh-fused-02","lang":"zh","cat":"fused","sources":["3 月去日本旅行了","10 月去泰国旅行了"],"result":"3 月去日本和泰国旅行了","expect":{"faithful":false}}
 {"id":"zh-correction-01","lang":"zh","cat":"correction","sources":["生日是 5 月 3 日","之前记错了，生日其实是 5 月 13 日"],"result":"生日是 5 月 3 日","expect":{"faithful":false}}
 {"id":"zh-unrelated-01","lang":"zh","cat":"unrelated","sources":["喜欢喝茶","住在上海"],"result":"喜欢喝茶","expect":{"faithful":false}}
+{"id":"zh-faithful-08","lang":"zh","cat":"faithful","long":true,"sources":["每周三晚上去游泳，在小区旁边的体育馆，一次游一千米。","游完会在楼下的面馆吃一碗牛肉面。"],"result":"每周三晚上去小区旁边的体育馆游泳，一次游一千米，游完在楼下的面馆吃一碗牛肉面。","expect":{"faithful":true}}
+{"id":"zh-faithful-09","lang":"zh","cat":"faithful","sources":["养了一只狗叫豆豆","豆豆是柯基","豆豆今年三岁","每天晚上遛豆豆"],"result":"养了一只三岁的柯基叫豆豆，每天晚上遛它","expect":{"faithful":true}}
+{"id":"zh-dropped-03","lang":"zh","cat":"dropped","long":true,"sources":["每周三晚上去游泳，在小区旁边的体育馆，一次游一千米。","游完会在楼下的面馆吃一碗牛肉面。"],"result":"每周三晚上去小区旁边的体育馆游泳，游完在楼下的面馆吃一碗牛肉面。","expect":{"faithful":false}}
+{"id":"zh-dropped-04","lang":"zh","cat":"dropped","long":true,"sources":["对青霉素过敏，去年打针后起了一身疹子。","看病时要提醒医生，也不能用阿莫西林。"],"result":"对青霉素过敏，去年打针后起了一身疹子，看病时要提醒医生。","expect":{"faithful":false}}
+{"id":"zh-dropped-05","lang":"zh","cat":"dropped","sources":["养了一只狗叫豆豆","豆豆是柯基","豆豆今年三岁","每天晚上遛豆豆"],"result":"养了一只三岁的柯基叫豆豆","expect":{"faithful":false}}
+{"id":"zh-modality-01","lang":"zh","cat":"modality","what":"always","sources":["每周二晚上打羽毛球","打球的地方在体育中心","一般和同事一起打"],"result":"每周二晚上和同事在体育中心打羽毛球","expect":{"faithful":false}}
+{"id":"zh-modality-02","lang":"zh","cat":"modality","what":"plan","sources":["计划下个月考驾照","报了周末的驾校班"],"result":"下个月考到了驾照，报的是周末的驾校班","expect":{"faithful":false}}
+{"id":"zh-modality-03","lang":"zh","cat":"modality","what":"will","sources":["可能下周去上海出差","去的话住在静安"],"result":"下周去上海出差，住在静安","expect":{"faithful":false}}
+{"id":"zh-modality-04","lang":"zh","cat":"modality","what":"decision","sources":["想换一份离家近的工作","最近在看杭州的机会"],"result":"决定换一份离家近的工作，最近在看杭州的机会","expect":{"faithful":false}}
+{"id":"zh-resolved-01","lang":"zh","cat":"resolved","sources":["生日是 5 月 3 日","之前记错了，生日其实是 5 月 13 日"],"result":"生日是 5 月 13 日","expect":{"faithful":true}}
+{"id":"zh-resolved-02","lang":"zh","cat":"resolved","sources":["女儿叫小雨","女儿今年 6 岁","记错了，女儿今年 7 岁"],"result":"女儿小雨今年 7 岁","expect":{"faithful":true}}
 {"id":"ja-faithful-01","lang":"ja","cat":"faithful","sources":["コーヒーはブラックで飲む","コーヒーは一日二杯まで"],"result":"コーヒーはブラックで、一日二杯まで","expect":{"faithful":true}}
 {"id":"ja-faithful-02","lang":"ja","cat":"faithful","sources":["猫を飼っている","猫の名前はミケ"],"result":"ミケという猫を飼っている","expect":{"faithful":true}}
 {"id":"ja-faithful-03","lang":"ja","cat":"faithful","sources":["毎朝七時に起きる","起きたらまずストレッチをする","朝ごはんはパン"],"result":"毎朝七時に起きてまずストレッチをし、朝ごはんはパンを食べる","expect":{"faithful":true}}
@@ -32,10 +43,16 @@
 {"id":"ja-fused-01","lang":"ja","cat":"fused","sources":["姉は大阪に住んでいる","妹は札幌に住んでいる"],"result":"姉は大阪と札幌に住んでいる","expect":{"faithful":false}}
 {"id":"ja-correction-01","lang":"ja","cat":"correction","sources":["会議は毎週月曜","会議は月曜から火曜に変わった"],"result":"会議は毎週月曜","expect":{"faithful":false}}
 {"id":"ja-unrelated-01","lang":"ja","cat":"unrelated","sources":["辛いものが苦手","車はトヨタ"],"result":"辛いものが苦手","expect":{"faithful":false}}
+{"id":"ja-faithful-07","lang":"ja","cat":"faithful","long":true,"sources":["毎週土曜の朝、近所の公園で友だちとテニスをしている。雨の日は中止になる。","テニスのあとはいつもカフェでモーニングを食べる。"],"result":"毎週土曜の朝、近所の公園で友だちとテニスをしていて、雨の日は中止になる。テニスのあとはいつもカフェでモーニングを食べる。","expect":{"faithful":true}}
+{"id":"ja-dropped-03","lang":"ja","cat":"dropped","long":true,"sources":["毎週土曜の朝、近所の公園で友だちとテニスをしている。雨の日は中止になる。","テニスのあとはいつもカフェでモーニングを食べる。"],"result":"毎週土曜の朝、近所の公園で友だちとテニスをして、そのあとはいつもカフェでモーニングを食べる。","expect":{"faithful":false}}
+{"id":"ja-dropped-04","lang":"ja","cat":"dropped","sources":["弟は大学生","弟は京都に住んでいる","弟はカフェでアルバイトをしている"],"result":"大学生の弟は京都に住んでいる","expect":{"faithful":false}}
+{"id":"ja-modality-01","lang":"ja","cat":"modality","what":"always","sources":["朝はたいていコーヒーを飲む","コーヒーはブラック"],"result":"朝はいつもブラックコーヒーを飲む","expect":{"faithful":false}}
+{"id":"ja-modality-02","lang":"ja","cat":"modality","what":"will","sources":["来年、転勤になるかもしれない","転勤先は福岡になりそう"],"result":"来年、福岡に転勤になる","expect":{"faithful":false}}
+{"id":"ja-resolved-01","lang":"ja","cat":"resolved","sources":["娘の誕生日は3月8日","さっきのは間違いで、娘の誕生日は3月18日"],"result":"娘の誕生日は3月18日","expect":{"faithful":true}}
 {"id":"en-faithful-01","lang":"en","cat":"faithful","sources":["Drinks tea","Takes tea without sugar"],"result":"Drinks tea without sugar","expect":{"faithful":true}}
 {"id":"en-faithful-02","lang":"en","cat":"faithful","sources":["Has a dog","The dog is called Biscuit"],"result":"Has a dog called Biscuit","expect":{"faithful":true}}
 {"id":"en-faithful-03","lang":"en","cat":"faithful","sources":["Works as a nurse","Works night shifts","Works at St. Mary's Hospital"],"result":"Works night shifts as a nurse at St. Mary's Hospital","expect":{"faithful":true}}
-{"id":"en-faithful-04","lang":"en","cat":"faithful","reworded":true,"sources":["Moving to Berlin on 2026-09-01","Will rent a flat in Kreuzberg for 1,200 euros a month"],"result":"From 1 September 2026: living in Berlin, in a Kreuzberg flat rented at €1,200 per month","expect":{"faithful":true}}
+{"id":"en-faithful-04","lang":"en","cat":"faithful","reworded":true,"sources":["Moving to Berlin on 2026-09-01","Will rent a flat in Kreuzberg for 1,200 euros a month"],"result":"Moving to Berlin on 1 September 2026, where they will rent a Kreuzberg flat at €1,200 per month","expect":{"faithful":true}}
 {"id":"en-faithful-05","lang":"en","cat":"faithful","sources":["Allergic to penicillin","Penicillin gives them a rash"],"result":"Allergic to penicillin: it gives them a rash","expect":{"faithful":true}}
 {"id":"en-faithful-06","lang":"en","cat":"faithful","sources":["Plays guitar","Has played guitar for ten years","Plays in a band on Fridays"],"result":"Has played guitar for ten years and plays in a band on Fridays","expect":{"faithful":true}}
 {"id":"en-dropped-01","lang":"en","cat":"dropped","sources":["Likes running","Runs 10 km every Sunday"],"result":"Likes running on Sundays","expect":{"faithful":false}}
@@ -48,6 +65,14 @@
 {"id":"en-fused-01","lang":"en","cat":"fused","sources":["Visited Rome in May","Visited Lisbon in October"],"result":"Visited Rome and Lisbon in May","expect":{"faithful":false}}
 {"id":"en-correction-01","lang":"en","cat":"correction","sources":["Flight to Tokyo is on June 2","Correction: the Tokyo flight moved to June 5"],"result":"Flight to Tokyo is on June 2","expect":{"faithful":false}}
 {"id":"en-unrelated-01","lang":"en","cat":"unrelated","sources":["Likes jazz","Lives in Leeds"],"result":"Likes jazz","expect":{"faithful":false}}
+{"id":"en-faithful-07","lang":"en","cat":"faithful","long":true,"sources":["Works from home on Mondays and Fridays. Goes to the office in Leeds the other days, by train.","Leaves the office early on Wednesdays to pick up the kids."],"result":"Works from home on Mondays and Fridays and goes to the Leeds office by train the other days, leaving early on Wednesdays to pick up the kids.","expect":{"faithful":true}}
+{"id":"en-faithful-08","lang":"en","cat":"faithful","sources":["Allergic to peanuts","Allergic to shellfish","Carries an EpiPen","Avoids sesame too"],"result":"Allergic to peanuts and shellfish, avoids sesame too, and carries an EpiPen","expect":{"faithful":true}}
+{"id":"en-dropped-03","lang":"en","cat":"dropped","long":true,"sources":["Works from home on Mondays and Fridays. Goes to the office in Leeds the other days, by train.","Leaves the office early on Wednesdays to pick up the kids."],"result":"Works from home on Mondays and Fridays and goes to the Leeds office by train the other days, leaving early on Wednesdays.","expect":{"faithful":false}}
+{"id":"en-dropped-04","lang":"en","cat":"dropped","sources":["Allergic to peanuts","Allergic to shellfish","Carries an EpiPen","Avoids sesame too"],"result":"Allergic to peanuts and shellfish, and carries an EpiPen","expect":{"faithful":false}}
+{"id":"en-modality-01","lang":"en","cat":"modality","what":"plan","sources":["Moving to Berlin on 2026-09-01","Will rent a flat in Kreuzberg for 1,200 euros a month"],"result":"From 1 September 2026: living in Berlin, in a Kreuzberg flat rented at €1,200 per month","expect":{"faithful":false}}
+{"id":"en-modality-02","lang":"en","cat":"modality","what":"always","sources":["Usually cycles to work","Takes the train when it snows"],"result":"Always cycles to work, and takes the train when it snows","expect":{"faithful":false}}
+{"id":"en-modality-03","lang":"en","cat":"modality","what":"decision","sources":["Would like to learn the piano","Has been looking at teachers nearby"],"result":"Has decided to learn the piano and is looking at teachers nearby","expect":{"faithful":false}}
+{"id":"en-resolved-01","lang":"en","cat":"resolved","sources":["Lives in flat 12B","Got it wrong before: the flat is 21B, not 12B"],"result":"Lives in flat 21B","expect":{"faithful":true}}
 {"id":"mix-faithful-01","lang":"mix","cat":"faithful","sources":["喜欢 jazz","最喜欢的乐手是 Bill Evans"],"result":"喜欢 jazz，最喜欢的乐手是 Bill Evans","expect":{"faithful":true}}
 {"id":"mix-faithful-02","lang":"mix","cat":"faithful","sources":["用 iPhone 15","手机壳是蓝色的"],"result":"用 iPhone 15，配蓝色手机壳","expect":{"faithful":true}}
 {"id":"mix-faithful-03","lang":"mix","cat":"faithful","sources":["Works at a bank","在北京分行","做风控"],"result":"Works at a bank：在北京分行做风控","expect":{"faithful":true}}
@@ -64,3 +89,9 @@
 {"id":"mix-fused-02","lang":"mix","cat":"fused","sources":["Mom's birthday is May 2","爸爸生日是 8 月 9 日"],"result":"爸妈的生日都是 May 2","expect":{"faithful":false}}
 {"id":"mix-correction-01","lang":"mix","cat":"correction","sources":["Lives on the 5th floor","更正：其实住 6 楼"],"result":"Lives on the 5th floor","expect":{"faithful":false}}
 {"id":"mix-unrelated-01","lang":"mix","cat":"unrelated","sources":["Prefers short answers","家里有两只猫"],"result":"Prefers short answers","expect":{"faithful":false}}
+{"id":"mix-faithful-07","lang":"mix","cat":"faithful","long":true,"sources":["每天早上 7 点起床，先 stretching 十分钟。然后喝一杯 black coffee，不加糖。","周末会睡到 9 点。"],"result":"每天早上 7 点起床，先 stretching 十分钟，再喝一杯不加糖的 black coffee；周末会睡到 9 点。","expect":{"faithful":true}}
+{"id":"mix-dropped-03","lang":"mix","cat":"dropped","long":true,"sources":["每天早上 7 点起床，先 stretching 十分钟。然后喝一杯 black coffee，不加糖。","周末会睡到 9 点。"],"result":"每天早上 7 点起床，先 stretching 十分钟，再喝一杯 black coffee；周末会睡到 9 点。","expect":{"faithful":false}}
+{"id":"mix-dropped-04","lang":"mix","cat":"dropped","sources":["Son plays football","比赛在周六上午","教练叫 Mr. Patel"],"result":"Son plays football，比赛在周六上午","expect":{"faithful":false}}
+{"id":"mix-modality-01","lang":"mix","cat":"modality","what":"will","sources":["Might adopt a cat this winter","想要一只橘猫"],"result":"今年冬天会领养一只橘猫","expect":{"faithful":false}}
+{"id":"mix-modality-02","lang":"mix","cat":"modality","what":"plan","sources":["Planning a trip to 冲绳 in July","想住海边的民宿"],"result":"7 月去了冲绳，住在海边的民宿","expect":{"faithful":false}}
+{"id":"mix-resolved-01","lang":"mix","cat":"resolved","sources":["Lives on the 5th floor","更正：其实住 6 楼"],"result":"Lives on the 6th floor","expect":{"faithful":true}}

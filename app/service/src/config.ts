@@ -275,7 +275,7 @@ export interface MemoryConfig {
    * 入梦: the sweep that looks for owners to consolidate comes every `dreamSweepMs`. An owner dreams after they have sent no
    * message anywhere for `dreamIdleMs`, with something new since their last dream, and not twice within `dreamEveryMs`.
    * A room left at `napAt` of its limit by a change is consolidated at once (a nap), at most once per `dreamEveryMs`.
-   * A merge, a rewrite or a split of entries is applied when the judgement model is `faithfulAt` sure the result adds nothing the
+   * A dream's merge, rewrite or split of entries is applied when the judgement model is `faithfulAt` sure the result adds nothing the
    * entries did not say and loses nothing they did.
    */
   dreamSweepMs: number;
@@ -283,6 +283,11 @@ export interface MemoryConfig {
   dreamEveryMs: number;
   napAt: number;
   faithfulAt: number;
+  /**
+   * A review's merge (`mergeAuto` "on") is applied at once only when the judgement model is this sure of the same question: a bar of its
+   * own, at least `faithfulAt` (the schema refuses less), because nobody asked for it.
+   */
+  reviewMergeAt: number;
   /**
    * The site's judgement model is asked at most this many times a site day on behalf of one owner's memory (sorting, the duplicate
    * test, the faithful check, the hearsay pre-check, whether the owner asked): past it that owner's memory checks are skipped as "no answer", so one heavy
@@ -304,7 +309,7 @@ export interface MemoryConfig {
   explicitAt: number;
   /**
    * What a review does with a merge (a room's one replace and its removes) in the owner's own conversation: "on" applies it at once when
-   * the judgement model finds it faithful (`faithfulAt`), as a dream's merge; "observe" (default) asks the question and counts what it
+   * the judgement model finds it faithful (`reviewMergeAt`), as a dream's merge; "observe" (default) asks the question and counts what it
    * would have done (`merge_would_auto` / `merge_would_card`) but applies nothing at once — the merge's replace and removes follow the
    * rules of any other (a card, unless the owner asked to forget); "off" does not ask.
    */
@@ -368,6 +373,8 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   dreamEveryMs: positive(72_000_000, 2_592_000_000),
   napAt: probability(0.8),
   faithfulAt: probability(0.6),
+  // A review's merge applies without the owner asking: a stricter bar than a dream's (calibration/memory-merge.jsonl), never a looser one.
+  reviewMergeAt: probability(0.7),
   judgePerOwnerDay: positive(300, 1_000_000),
   judgeShare: probability(0.5),
   // Above 0: at 0 every answer would be a yes. 0.7 as calibrated on the real judgement model (memory/sort.ts `ownerAsked`).
@@ -379,7 +386,7 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
   // 0 (no timer) or at least a minute: anything between would sweep back to back.
   changesSweepMs: z.number().int().min(0).max(86_400_000).refine((ms) => ms === 0 || ms >= 60_000).default(3_600_000),
-}));
+}).refine((m) => m.reviewMergeAt >= m.faithfulAt, { path: ["reviewMergeAt"], message: "must be at least faithfulAt" }));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);
 /** `REASONING_ALLOWANCE_TOKENS`: an object of levels (`low`..`max`), each 0–200 000; a level left out keeps its default. */

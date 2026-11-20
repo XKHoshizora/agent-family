@@ -188,6 +188,25 @@ describe("a review", () => {
     expect(await stats()).toEqual({ review_run: 1, merge_auto: 1, judge_memory_call_faithful: 1, judge_memory_call_sort: 1 });
   });
 
+  it("the owner undoing a review's merge applied at once counts merge_undone (and undo_rest); undoing another change of a review does not", async () => {
+    app.deps.config.memory.mergeAuto = "on";
+    const undo = async (o: Owned) => {
+      const [chip] = await chips(o.owner, o.conv);
+      expect((await api(app, o.owner, "POST", `/api/agents/${o.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
+    };
+    const w = await owned("st3e");
+    await seeded(w.owner, "路由器在客厅", false);
+    await seeded(w.owner, "路由器是华硕的", false);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
+    await undo(w);
+    expect(await stats()).toMatchObject({ merge_auto: 1, merge_undone: 1, undo_rest: 1 });
+    const v = await owned("st3f");
+    await sayAndReview(v, "记住我不吃香菜", ops(add("不吃香菜")));
+    await undo(v);
+    expect(await stats()).toMatchObject({ merge_undone: 1, undo_rest: 2 });
+  });
+
   it("observed (MEMORY.mergeAuto observe, the default): a merge the judgement finds faithful counts merge_would_auto, one it does not (or with no answer) merge_would_card; neither is applied at once; off asks and counts nothing", async () => {
     const merge = ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" });
     const routers = async (name: string) => {
@@ -524,6 +543,8 @@ describe("a dream", () => {
     const [chip] = await chips(w.owner, w.conv);
     expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`)).status).toBe(200);
     expect((await stats()).undo_dream).toBe(1);
+    // A dream's merge is not a review's: merge_undone counts only what a review merged without asking.
+    expect(await stats()).not.toHaveProperty("merge_undone");
   });
 
   it("a new open note locked again by the sorting is counted as a re-sort, not as the model's lock", async () => {

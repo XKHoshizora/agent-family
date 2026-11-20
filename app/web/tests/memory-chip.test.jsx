@@ -184,13 +184,21 @@ describe("the chip's sentence", () => {
 
   it("opened, a merge lists what it merged on the lines under it (原来：…), each with its vault tag; the chip's sentence is the merge's alone", async () => {
     const lines = ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"];
-    await openChat([...BASE, changed(3, { lines, vaultLines: [true, false, true], count: 3 })]);
+    await openChat([...BASE, changed(3, { lines, vaultLines: [true, false, true], sourceLines: [false, true, true], count: 3 })]);
     expect(li(3).textContent).toBe("小助手小憩时理了理记忆");
     await click(inLi(3).getByRole("button", { name: "小助手小憩时理了理记忆" }));
     const items = [...li(3).querySelectorAll(".memory-lines li")];
     expect(items.map((x) => x.textContent)).toEqual(["合并了 2 条：路由器在客厅，是华硕的保险箱", "原来：路由器在客厅", "原来：路由器是华硕的保险箱"]);
     expect(items.map((x) => x.classList.contains("memory-merged"))).toEqual([false, true, true]);
     expect(inLi(3).getByRole("button", { name: "撤销" })).toBeTruthy();
+  });
+
+  it("a line is set in as a note a merge joined only when the notice marks it so (sourceLines): a note whose text begins with 原来： is a line like any other", async () => {
+    await openChat([...BASE, changed(3, { lines: ["改成了：原来：住在北京", "原来：住在上海"], vaultLines: [false, true], count: 2 })]);
+    await click(inLi(3).getByRole("button", { name: /小助手/ }));
+    const items = [...li(3).querySelectorAll(".memory-lines li")];
+    expect(items.map((x) => x.textContent)).toEqual(["改成了：原来：住在北京", "原来：住在上海保险箱"]);
+    expect(items.map((x) => x.classList.contains("memory-merged"))).toEqual([false, false]);
   });
 
   it("opened after dream lines, the lines are listed as they came", async () => {

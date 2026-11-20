@@ -1920,7 +1920,13 @@ describe("the 记忆 section of the form", () => {
     app.transport.handlers.agent = () => record;
     await openRow("小助手");
     await click(inMain().getByRole("button", { name: /编辑/ }));
-    return { patchAgent };
+    /** The record changes elsewhere while the form is open (another tab): an `agent` push. */
+    const elsewhere = async (changed) => {
+      app.transport.handlers.agent = () => ({ ...record, ...changed });
+      await push(app.transport, { type: "agent", id: AG1 });
+      await flush();
+    };
+    return { patchAgent, elsewhere };
   };
 
   it("a 记忆 section after 称呼 has three switches with the helper; a record that says nothing is the service's defaults", async () => {
@@ -2027,6 +2033,42 @@ describe("the 记忆 section of the form", () => {
       await flush();
       expect(within(question().closest(".memory-catch-up")).getByRole("alert").textContent).not.toBe("");
       expect(sw(MEMORY).checked).toBe(false);
+    });
+
+    it("the question is announced (a polite live region), not only shown", async () => {
+      await openEditOf({ memory: false });
+      fireEvent.click(sw(MEMORY));
+      const live = question().closest('[role="status"], [aria-live="polite"]');
+      expect(live).not.toBeNull();
+      expect(live.textContent).toContain(QUESTION);
+    });
+
+    it("memory turned on elsewhere (another tab) while the question is open: the question closes, the switch follows the record, and a later 保存 does not send memory", async () => {
+      const { patchAgent, elsewhere } = await openEditOf({ memory: false });
+      fireEvent.click(sw(MEMORY));
+      expect(question()).toBeTruthy();
+      await elsewhere({ memory: true });
+      expect(question()).toBeNull();
+      expect(sw(MEMORY).checked).toBe(true);
+      type("名称", "新名字");
+      await save();
+      expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ name: "新名字" }]);
+    });
+
+    it("记忆 switched off in this form before the record turned it off elsewhere: after 只记以后的 the switch is on, nothing says it changed elsewhere, and 保存 never sends memory again", async () => {
+      const { patchAgent, elsewhere } = await openEditOf({ memory: true });
+      fireEvent.click(sw(MEMORY));
+      await elsewhere({ memory: false });
+      // On again: the record says off, so it asks.
+      fireEvent.click(sw(MEMORY));
+      expect(question()).toBeTruthy();
+      await click(inMain().getByRole("button", { name: ONLY_LATER }));
+      expect(question()).toBeNull();
+      expect(sw(MEMORY).checked).toBe(true);
+      expect(mainText()).not.toContain("别处有改动");
+      type("名称", "新名字");
+      await save();
+      expect(patchAgent.mock.calls.map((c) => c[1])).toEqual([{ memory: true, catchUp: false }, { name: "新名字" }]);
     });
 
     it("Esc, or a press anywhere else, leaves it off and sends nothing", async () => {

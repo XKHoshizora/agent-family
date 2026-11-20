@@ -1,8 +1,17 @@
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
+import { siteDay } from "../src/accounts/store.ts";
 import { buildApp } from "../src/app.ts";
 import { CHANGE_KEEP_DAYS, CHANGE_SWEEP_BATCH, sweepMemoryChanges } from "../src/memory/sweep.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
+import { testDatabaseUrl } from "./helpers/env.ts";
 import { useApp } from "./helpers/harness.ts";
 
 /**
@@ -156,6 +165,42 @@ describe("the sweep of memory changes", () => {
       await sweeping.close();
     }
   });
+
+  it("run by hand (attachments:sweep), the cards it discards are counted (card_expired) on the site's day, as the server counts them", async () => {
+    const w = await world();
+    await change(w, "pending", 31);
+    // A zone whose day is not UTC's at this moment: UTC+14 from 10:00 UTC on, UTC−12 before it.
+    const zone = new Date().getUTCHours() >= 10 ? "Etc/GMT-14" : "Etc/GMT+12";
+    const before = siteDay(new Date(), zone);
+    expect(before).not.toBe(new Date().toISOString().slice(0, 10));
+    const blobDir = mkdtempSync(join(tmpdir(), "af-sweep-"));
+    try {
+      const env = {
+        ...process.env,
+        DATABASE_URL: testDatabaseUrl(),
+        BLOB_DIR: blobDir,
+        APP_ORIGIN: "http://localhost:5173",
+        AUTH_SECRET: "test-secret-test-secret-test-secret-0000",
+        PROVIDER_KEY_SECRET: "test-provider-key-secret-0000000000",
+        SITE_TIMEZONE: zone,
+        S3_ENDPOINT: "",
+        S3_REGION: "",
+        S3_BUCKET: "",
+        S3_ACCESS_KEY_ID: "",
+        S3_SECRET_ACCESS_KEY: "",
+      };
+      const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+      const cwd = fileURLToPath(new URL("..", import.meta.url));
+      const { stdout } = await promisify(execFile)(process.execPath, [tsx, "src/cli.ts", "attachments:sweep"], { cwd, env });
+      expect(stdout).toContain("discarded 1 that nobody answered");
+    } finally {
+      rmSync(blobDir, { recursive: true, force: true });
+    }
+    const rows = (await db.query<{ day: string; n: number }>("select day::text as day, n::int as n from memory_stats where name = 'card_expired'")).rows;
+    expect(rows).toHaveLength(1);
+    expect([before, siteDay(new Date(), zone)]).toContain(rows[0]!.day);
+    expect(rows[0]!.n).toBe(1);
+  }, 60_000);
 
   it("changesSweepMs 0 is no timer at all, whatever SWEEP_INTERVAL_MINUTES says; the test harness sets 0", async () => {
     expect(app.deps.config.memory.changesSweepMs).toBe(0);

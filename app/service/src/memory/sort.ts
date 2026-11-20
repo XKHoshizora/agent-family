@@ -139,17 +139,17 @@ export type DreamChange = { kind: "split"; source: string; parts: ReadonlyArray<
 
 /**
  * Whether what a dream made holds nothing the notes did not say and keeps what they said (checked by meaning, not by length:
- * parts repeat a subject or a date, and languages differ in length): one question to the site's judgement model, `faithfulAt` or
- * more sure — the same question and the same threshold for a split, a merge and a rewrite. False whenever it cannot be asked or
- * answers nothing usable: the change is dropped then. Once `closing` has fired nothing is asked, and a request under way ends with it
- * (no answer).
+ * parts repeat a subject or a date, and languages differ in length): one question to the site's judgement model, `at` or more sure —
+ * the same question for a split, a merge and a rewrite; the bar is the caller's (a dream's `faithfulAt`, a review's merge
+ * `reviewMergeAt`). False whenever it cannot be asked or answers nothing usable: the change is dropped then. Once `closing` has fired
+ * nothing is asked, and a request under way ends with it (no answer).
  */
-export async function addsNothing(deps: SortDeps, change: DreamChange, closing?: AbortSignal): Promise<boolean> {
+export async function addsNothing(deps: SortDeps, change: DreamChange, at: number, closing?: AbortSignal): Promise<boolean> {
   if (closing?.aborted === true) return false;
   const sources = change.kind === "split" ? [change.source] : change.sources;
   const results = change.kind === "split" ? change.parts : [change.result];
   const answer = await ask(deps, JSON.stringify({ sources, results }), { key: FAITHFUL, type: "noul", instructions: FAITHFUL_INSTRUCTIONS }, "faithful", closing);
-  return answer?.type === "noul" && answer.p >= deps.config.memory.faithfulAt;
+  return answer?.type === "noul" && answer.p >= at;
 }
 
 /**

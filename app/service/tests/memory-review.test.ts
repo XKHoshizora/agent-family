@@ -354,6 +354,8 @@ describe("when a review runs", () => {
       system: { event: "memory_changed", actorId: w.agent.id, lines: ["记住了：喜欢喝茶，不加糖"], vaultLines: [false], pending: false, unlock: false, full: false, status: "applied" },
     });
     expect(chip.system.changeId).toEqual(expect.any(String));
+    // No merge, so no line is one a merge joined: nothing marks them.
+    expect(chip.system).not.toHaveProperty("sourceLines");
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(1);
     // Nothing waits any more: another quiet stretch asks nothing.
     clock.advance(30 * MIN);
@@ -472,9 +474,13 @@ describe("switching memory off and on again", () => {
     }
   });
 
-  it("on again with catchUp true: the review positions stay where they were, and one review of the own conversation runs at once over what was said meanwhile", async () => {
+  it("switching off forgets what was said before it and not yet reviewed; on again with catchUp true, the one review that runs at once reads exactly what was said while it was off", async () => {
     const w = await owned("sw2");
+    // Said with memory on, then switched off within the quiet time: no review has read it, and none ever will.
+    await exchange(w, "我这个月被裁了");
+    expect(reviewCalls()).toHaveLength(0);
     expect((await patch(w, { memory: false })).status).toBe(200);
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
     await exchange(w, SECRET);
     expect(reviewCalls()).toHaveLength(0);
     gateway.reply(ops());
@@ -483,6 +489,92 @@ describe("switching memory off and on again", () => {
     const calls = reviewCalls();
     expect(calls).toHaveLength(1);
     expect(shown(calls[0]!)).toContain("心理医生");
+    expect(shown(calls[0]!)).not.toContain("被裁了");
+  });
+
+  it("on again with catchUp true, a group's position stays where switching off put it: the next review there reads what the owner said in it while memory was off", async () => {
+    const w = await owned("sw5");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "sw5_mia"), await signUp(app, "sw5_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    const off = await seqOf(g);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(off);
+    await say(w.owner, g, "我最近在学吉他");
+    expect((await patch(w, { memory: true, catchUp: true })).status).toBe(200);
+    await memory().idle();
+    // Nothing new in the own conversation: no look-back review there.
+    expect(reviewCalls()).toHaveLength(0);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(off);
+    // The Agent's next reply in the group, then its quiet time: the group's review.
+    memory().noted(w.agent.id, g);
+    // Its quiet timer is armed once the reply has been looked at.
+    await memory().idle();
+    expect(clock.timers()).toBeGreaterThan(0);
+    await quietThen(ops());
+    expect(reviewCalls()).toHaveLength(1);
+    expect(shown(reviewCalls()[0]!)).toContain("我最近在学吉他");
+  });
+
+  it("switched off and on again while a review's call is under way: what that call read (said before memory was switched off) is never learned", async () => {
+    const w = await owned("sw7");
+    judge.answer(() => ({ sort: 0.95 }));
+    await say(w.owner, w.conv, "记住我这个月被裁了");
+    const hold = gateway.reply("好的。").hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await hold.reached;
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    expect((await patch(w, { memory: true })).status).toBe(200);
+    hold.release(ops(add("这个月被裁了")));
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(1);
+    expect((await roomOf(w.owner)).notes).toEqual([]);
+    expect(await chips(w.owner, w.conv)).toEqual([]);
+  });
+
+  it("the reviewer drops what waits for an Agent whose memory is switched — its quiet timer, its flags' wake-up, its queued jobs (one under way is left to find memory off) — and with a look back queues one review of its own conversation", async () => {
+    const w = await owned("sw6");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "sw6_mia"), await signUp(app, "sw6_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await say(w.owner, w.conv, "我喜欢茶");
+    // Its own reviewer, whose jobs only say they ran: what this test is about is what it keeps waiting.
+    clock.reset();
+    const ran: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const mine = createReviewer({
+      db,
+      config: app.deps.config,
+      log: app.log,
+      setTimer: clock.setTimer,
+      run: async (job) => {
+        ran.push(`${job.kind} ${job.conversationId}`);
+        if (ran.length === 1) await gate;
+      },
+    });
+    try {
+      mine.topicReset(w.agent.id, w.conv);
+      await vi.waitFor(() => expect(ran).toEqual([`review ${w.conv}`]));
+      // A flag's wake-up while that job runs: the flags job waits behind it (one job per Agent at a time).
+      mine.flagged(w.agent.id, g, "hearsay");
+      clock.advance(2 * MIN);
+      // A wake-up armed again, and a quiet timer in the own conversation.
+      mine.flagged(w.agent.id, g, "hearsay");
+      mine.noted(w.agent.id, w.conv);
+      await vi.waitFor(() => expect(clock.timers()).toBe(3));
+      mine.switched(w.agent.id, w.conv, false);
+      expect(clock.timers()).toBe(0);
+      release();
+      await mine.idle();
+      clock.advance(30 * MIN);
+      await mine.idle();
+      expect(ran).toEqual([`review ${w.conv}`]);
+      // Turned on with a look back: one review of the own conversation, at once.
+      mine.switched(w.agent.id, w.conv, true);
+      await mine.idle();
+      expect(ran).toEqual([`review ${w.conv}`, `review ${w.conv}`]);
+    } finally {
+      mine.close();
+    }
   });
 
   it("catchUp is only for switching memory back on: with memory already on, when switching it off, or alone, it is 400 and nothing changes", async () => {
@@ -496,7 +588,7 @@ describe("switching memory off and on again", () => {
     expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(false);
   });
 
-  it("switching off discards its waiting cards and drops its flags not yet acted on, in the same request; the notes stay. On again: every review position of the Agent, its groups' too, is the conversation's current seq", async () => {
+  it("switching off discards its waiting cards and drops its flags not yet acted on, in the same request; the notes stay; every review position of the Agent and its groups' judgement position become the conversation's current seq. On again: so again", async () => {
     const w = await owned("sw4", { memoryAsk: true });
     await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
     await exchange(w, "我喜欢咖啡");
@@ -509,10 +601,16 @@ describe("switching memory off and on again", () => {
     expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ pending: false, status: "discarded" });
     expect((await db.query("select count(*)::int as n from memory_flags where agent_id = $1", [w.agent.id])).rows[0].n).toBe(0);
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["喜欢喝茶"]);
+    const judgedSeq = async () => Number((await db.query("select judged_seq::text as s from agent_group_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g])).rows[0]?.s);
+    // What was said before it was switched off and not yet reviewed (or judged) is never learned.
+    expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+    expect(await judgedSeq()).toBe(await seqOf(g));
     await say(w.owner, g, "我准备辞职了，先别说出去");
     expect((await patch(w, { memory: true })).status).toBe(200);
     expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
+    expect(await judgedSeq()).toBe(await seqOf(g));
   });
 });
 
@@ -1014,6 +1112,20 @@ describe("less of the Agent's own words, and destructive ops need the owner's", 
     expect(await row(theirs.id)).toEqual({ vault: false, vault_by: "owner" });
   });
 
+  it("an automatic lock of a note already in the vault (the sorter's) is no change: not told, not recorded, its updated_at untouched", async () => {
+    const w = await owned("lkv");
+    const locked = await openAuto(w.owner, w.agent.id, "住在上海");
+    await db.query("update owner_notes set vault = true where id = $1", [locked.id]);
+    const row = async () => (await db.query("select vault, vault_by, to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US') as updated from owner_notes where id = $1", [locked.id])).rows[0];
+    const before = await row();
+    judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
+    await sayAndReview(w, "记住我养了只猫，住址那条锁起来", ops({ op: "lock", ref: "n1" }, add("养了一只猫")));
+    expect(await row()).toEqual(before);
+    expect((await chips(w.owner, w.conv)).map((n) => [n.system.pending, n.system.lines])).toEqual([[false, ["记住了：养了一只猫"]]]);
+    const ops_ = (await db.query("select ops from memory_changes where owner_id = $1", [w.owner.id])).rows.flatMap((r) => r.ops.map((o: { op: string }) => o.op));
+    expect(ops_).toEqual(["add"]);
+  });
+
   it("a lock applies at once, with no question, in the notice of what was applied with it; a remove the owner did not ask for (the judgement's no) is ONE pending card of its own", async () => {
     const w = await heldWorld("hal");
     judge.answer(() => ({ sort: 0.05, explicit_forget: 0.1 }));
@@ -1255,6 +1367,8 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
       count: 3,
       lines: ["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的"],
       vaultLines: [false, false, false],
+      // Which lines are the notes it merged, marked in the notice itself (never read off a line's text).
+      sourceLines: [false, true, true],
     });
     const [change] = (await db.query("select status, phase, ops from memory_changes where owner_id = $1", [w.owner.id])).rows;
     expect(change).toMatchObject({ status: "applied", phase: "rest" });
@@ -1447,6 +1561,37 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
     }
   });
 
+  it("the same shape left to a card (the owner did not ask to forget): confirmed, its new text goes into the vault, vault_by auto, whatever the owner's sorting", async () => {
+    app.deps.config.memory.mergeAuto = "observe";
+    judge.answer(() => ({ sort: 0.95, faithful: 0.95, explicit_forget: 0.1 }));
+    const w = await owned("mv4");
+    await setNewNotes(db, w.owner.id, "open");
+    await openAuto(w.owner, w.agent.id, "周末去爬山");
+    await seeded(w.owner, w.agent.id, "和小林一起去", true);
+    await sayAndReview(w, "这两条合成一条，重复的那条删掉", ops({ op: "replace", ref: "n1", text: "周末和小林去爬山，七点出发" }, { op: "remove", ref: "n2" }));
+    const [card] = await chips(w.owner, w.conv);
+    expect([card.system.pending, card.system.lines, card.system.vaultLines]).toEqual([true, ["要改成：周末和小林去爬山，七点出发", "要忘掉：和小林一起去"], [true, true]]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card.system.changeId}/confirm`)).status).toBe(200);
+    expect((await db.query("select text, vault, vault_by from owner_notes where owner_id = $1", [w.owner.id])).rows).toEqual([{ text: "周末和小林去爬山，七点出发", vault: true, vault_by: "auto" }]);
+  });
+
+  it("a review's merge has a bar of its own, MEMORY.reviewMergeAt (0.7), above the dream's faithfulAt (0.6): at 0.65 it is not merged at once (the rule of before: a card); with the bar at 0.6 it is", async () => {
+    expect([app.deps.config.memory.reviewMergeAt, app.deps.config.memory.faithfulAt]).toEqual([0.7, 0.6]);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.65, explicit_forget: 0.1 }));
+    const w = await routers("mgr1");
+    await sayAndReview(w, ASK, MERGE);
+    expect(await texts(w)).toEqual([["路由器在客厅", false], ["路由器是华硕的", false]]);
+    expect((await chips(w.owner, w.conv)).map((c) => [c.system.pending, c.system.lines])).toEqual([[true, ["要改成：路由器在客厅，是华硕的", "要忘掉：路由器是华硕的"]]]);
+    app.deps.config.memory.reviewMergeAt = 0.6;
+    try {
+      const v = await routers("mgr2");
+      await sayAndReview(v, ASK, MERGE);
+      expect(await texts(v)).toEqual([["路由器在客厅，是华硕的", false]]);
+    } finally {
+      app.deps.config.memory.reviewMergeAt = 0.7;
+    }
+  });
+
   it("a merge in the Agent's own room is the same: applied at once as ONE change", async () => {
     const w = await owned("mgs");
     await seeded(w.owner, w.agent.id, "回答要简短", false, "self");
@@ -1475,6 +1620,7 @@ describe("a merge in a review: a room's one replace and its removes, applied at 
     expect(rows).toHaveLength(1);
     expect(rows[0].ops.map((o: { op: string; kind: string }) => [o.op, o.kind])).toEqual([["merge", "owner"], ["merge", "self"]]);
     expect((await chips(w.owner, w.conv))[0].system.lines).toEqual(["合并了 2 条：路由器在客厅，是华硕的", "原来：路由器在客厅", "原来：路由器是华硕的", "合并了 2 条：回答要简短，先说结论", "原来：回答要简短", "原来：先说结论"]);
+    expect((await chips(w.owner, w.conv))[0].system.sourceLines).toEqual([false, true, true, false, true, true]);
     expect(faithfulCalls()).toHaveLength(2);
   });
 
