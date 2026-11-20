@@ -3,6 +3,7 @@
 // is never given to the model in a group. Each row saves itself (as AgentAppellations' rows do): nothing here has a
 // 保存 for the room as a whole.
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { roomCountFullText } from "../data/errorTexts.js";
 import { storedWeight, weight } from "../data/memoryWeight.js";
 import { useStore } from "../data/store.jsx";
 import { formatAt } from "../data/viewmodel.js";
@@ -70,14 +71,19 @@ export function useMemoryRoom(agentId = null) {
  * meanwhile), a note gone elsewhere is read again, and a full room's remaining characters are taken at once.
  */
 export function useNoteWrite(memory) {
-  return useRowWrite({
+  const row = useRef(null);
+  const write = useRowWrite({
     after: memory.reload,
     refused: (refusal) => {
-      const { code, left } = refusal.error ?? {};
+      const { code, left, count } = refusal.error ?? {};
       if (code === "not_found") memory.reload();
       if (code === "room_full" && Number.isFinite(left)) memory.capLeft(left);
+      // The room is out of room for notes, not for weight: say how many it takes (`left` may still be plenty).
+      if (code === "room_full" && count === true) row.current?.(roomCountFullText(memory.room?.maxNotes));
     },
   });
+  row.current = write.setError;
+  return write;
 }
 
 /** Where the focus goes once the room has been read again: `set(find)` where `find()` gives the element; `set(null)` forgets it. */

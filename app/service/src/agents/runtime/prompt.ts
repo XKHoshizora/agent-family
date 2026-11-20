@@ -176,11 +176,12 @@ const UNSAFE_IN_LABELS = /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Cf}|│┃¦∣⎪❘❙�
 export const labelSafe = (text: string): string => oneLine(text.normalize("NFKC").replace(UNSAFE_IN_LABELS, ""));
 
 /**
- * The invisible format characters the stored text loses (`\p{Cf}`): all of them but a zero-width joiner that stands between two emoji
- * (an emoji, perhaps with its variation selector or skin tone, on its left; an emoji on its right), which makes them one: 👨‍👩‍👧‍👦,
- * 🏳️‍🌈, 👩‍💻.
+ * The invisible characters the stored text loses: every format character (`\p{Cf}`), every default-ignorable code point and every
+ * variation selector (they could hide a key, a link or an instruction from the refusals), but a zero-width joiner that stands between
+ * two emoji (an emoji, perhaps with its variation selector or skin tone, on its left; an emoji on its right), which makes them one:
+ * 👨‍👩‍👧‍👦, 🏳️‍🌈, 👩‍💻, and an emoji's own U+FE0F (❤️; after a digit, `#` or `*` only as a keycap, 1️⃣).
  */
-const FORMAT_CHARACTERS = /(?!\u200D)\p{Cf}|(?<!\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D|\u200D(?!\p{Extended_Pictographic})/gu;
+const FORMAT_CHARACTERS = /(?![\u200D\uFE0F])[\p{Default_Ignorable_Code_Point}\p{Cf}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]|(?<!\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D|\u200D(?!\p{Extended_Pictographic})|(?<!\p{Extended_Pictographic})(?:(?<![0-9#*])\uFE0F|\uFE0F(?!\u20E3))/gu;
 const WHITESPACE_RUN = /\s+/g;
 // What the database refuses and no one can read: control characters, and a surrogate with no partner (with `u` a proper
 // pair is one astral character, so what is left in the surrogate range is lone).

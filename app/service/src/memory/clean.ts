@@ -43,7 +43,7 @@ const ADDRESSES_THE_READER = /你必须|你应该|忽略|无视|指令|听我的
  * `is kept with`, `is managed by`…), and only when nothing after it says `:` or `=` (`stored in plain text: hunter2` is a value). A bare
  * mention of having or forgetting one is no secret.
  */
-const STATES_A_PASSWORD = /密码\s*(?:就是|是|为)\s*\S|密码\s*[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
+const STATES_A_PASSWORD = /密[码碼]\s*(?:就是|也是|还是|還是|都是|是|为|為)\s*\S|密[码碼]\s*[:：=]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
 
 /**
  * A bare domain with a path (`example.org/page`), which the list of known endings above does not catch: a dot-separated host of at least two

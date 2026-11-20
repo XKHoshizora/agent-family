@@ -89,7 +89,7 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
 
 /**
  * Whether the answer held an in-place op (`replace`, `remove`, `lock`) naming a note it was shown that `parseOps` drops — for its text
- * (`modelNote` refuses it) or for its shape (a key too many or too few) — among the entries `lookedAt` keeps: since the in-place ops of
+ * (`modelNote` refuses it), for its shape (a key too many or too few), or because it falls past the cap (`lookedAt`): since the in-place ops of
  * an answer stand or fall together (a merge is a replace plus a remove) the caller drops the others too. Pure and total.
  */
 export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boolean {
@@ -98,10 +98,12 @@ export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boole
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
     const list = (parsed as { ops?: unknown }).ops;
     if (!Array.isArray(list)) return false;
-    return lookedAt(list).some((raw) => {
+    const looked = new Set(lookedAt(list));
+    return list.some((raw) => {
       if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
       const o = raw as Record<string, unknown>;
-      return (o.op === "replace" || o.op === "remove" || o.op === "lock") && typeof o.ref === "string" && refs.has(o.ref) && one(raw, refs) === null;
+      // One past the cap is a member of the group that never got looked at: the others must not be applied without it.
+      return (o.op === "replace" || o.op === "remove" || o.op === "lock") && typeof o.ref === "string" && refs.has(o.ref) && (!looked.has(raw) || one(raw, refs) === null);
     });
   } catch {
     return false;

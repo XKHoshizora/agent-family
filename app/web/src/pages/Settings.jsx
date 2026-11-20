@@ -298,7 +298,7 @@ function MemorySettings() {
   };
 
   // Memory the site pays for runs only on its free models: a paid site model is not offered here. The chosen model leads the list when
-  // it is no longer offered (a paid one chosen before included), as it does on the Agent form.
+  // it is no longer offered, as it does on the Agent form.
   const memorySources = { ...sources, choices: { ...sources.choices, site: sources.choices.site.filter((c) => !c.paid) } };
   const options = settings ? choiceList(memorySources, settings.memoryModel) : [];
   const changeModel = async (event) => {

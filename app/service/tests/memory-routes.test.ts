@@ -294,7 +294,9 @@ describe("the owner's room: /api/memory/notes", () => {
     await db.query("insert into owner_notes (owner_id, text) select $1, 'n' || g from generate_series(1, 150) g", [owner.id]);
     const res = await api(app, owner, "POST", "/api/memory/notes", { text: "短" });
     expect(res.status).toBe(409);
-    expect(res.json).toEqual({ error: "room_full", left: 0 });
+    // `left` is the weight really left (the 150 short notes weigh little); `count` says it is the number of notes that refused.
+    const held = Array.from({ length: 150 }, (_, i) => weight(`n${i + 1}`)).reduce((a, b) => a + b, 0);
+    expect(res.json).toEqual({ error: "room_full", left: 2000 - held, count: true });
     expect((await db.query("select 1 from owner_notes")).rowCount).toBe(150);
     const first = (await notes(owner)).json.notes[0].id;
     expect((await api(app, owner, "DELETE", `/api/memory/notes/${first}`)).status).toBe(200);

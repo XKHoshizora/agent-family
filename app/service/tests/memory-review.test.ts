@@ -238,6 +238,34 @@ describe("reviewInput", () => {
       "I cannot  forget",
       "doNOT forget",
       "个别记录有问题",
+      // The reviewer's rows: a negation before 删掉 in the same clause, whatever its form.
+      "不需要删掉",
+      "无需删掉",
+      "勿删掉",
+      "请勿删掉",
+      "甭删掉",
+      "不准删掉",
+      "禁止删掉",
+      "不该删掉",
+      "不应该删掉",
+      "不可以删掉",
+      "用不着删掉",
+      "莫删掉",
+      "未删掉",
+      "我不是说删掉",
+      // 别记 inside a word.
+      "性别记录",
+      "类别记下",
+      "级别记一下",
+      "识别记号",
+      "辨别记住",
+      // Contractions without an apostrophe, and "no need to".
+      "I cant forget",
+      "I wont forget it",
+      "I didnt forget",
+      "shouldnt forget",
+      "don`t forget",
+      "no need to forget",
     ]) {
       expect([t, FORGET.test(t)]).toEqual([t, false]);
     }
@@ -259,6 +287,12 @@ describe("reviewInput", () => {
       "forget it, please",
       "Forget about it",
       "I don't need it, forget it",
+      "这个别记了",
+      "那个别记",
+      "你别记了",
+      "先别记",
+      "不用了。别记这个",
+      "I want to forget it",
     ]) expect([t, FORGET.test(t)]).toEqual([t, true]);
   });
 
@@ -563,6 +597,21 @@ describe("what a review does with an answer", () => {
     await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
     await sayAndReview(w, "把路由器那两条合成一条，多的删掉。另外我喜欢茶", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的", why: "合并" }, { op: "remove", ref: "n2" }, add("喜欢茶")));
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "喜欢茶"]);
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
+  });
+
+  it("an in-place op that falls past the 8-op cap drops every in-place op of the answer (a merge is not cut in two); the adds inside the cap still apply", async () => {
+    const w = await owned("stale4");
+    await seeded(w.owner, w.agent.id, "路由器在客厅", false);
+    await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
+    const adds = ["喜欢茶", "喜欢爬山", "不吃香菜", "住在上海", "养了一只猫", "早上跑步", "周末看电影"].map((t) => add(t));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉。另外记住一些事", ops(...adds, { op: "remove", ref: "n2" }, { op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }));
+    const texts = (await roomOf(w.owner)).notes.map((n: { text: string }) => n.text);
+    expect(texts).toContain("路由器在客厅");
+    expect(texts).toContain("路由器是华硕的");
+    expect(texts).not.toContain("路由器在客厅，是华硕的");
+    for (const a of adds) expect(texts).toContain(a.text);
+    expect(texts).toHaveLength(9);
     expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
   });
 

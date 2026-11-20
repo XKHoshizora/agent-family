@@ -538,6 +538,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     if (err?.resetsAt) error.resetsAt = err.resetsAt;
     if (err?.agents) error.agents = err.agents;
     if (Number.isFinite(err?.left)) error.left = err.left;
+    if (err?.count === true) error.count = true;
     return error;
   };
   const failure = (error, text) => ({ ok: false, error, text });

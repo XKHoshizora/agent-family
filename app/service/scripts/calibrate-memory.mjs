@@ -375,7 +375,7 @@ const oneLine = (text) => text.replace(VERTICAL_RUN, ' ').trim()
 const UNSAFE_IN_LABELS = RX(F.prompt, 'UNSAFE_IN_LABELS', /[\p{Ps}\p{Pe}\p{Pi}\p{Pf}\p{Cf}|│┃¦∣⎪❘❙⏐丨ǀ।׀]/gu)
 SN(F.prompt, 'labelSafe', 'export const labelSafe = (text: string): string => oneLine(text.normalize("NFKC").replace(UNSAFE_IN_LABELS, ""));')
 const labelSafe = (text) => oneLine(text.normalize('NFKC').replace(UNSAFE_IN_LABELS, ''))
-const FORMAT_CHARACTERS = RX(F.prompt, 'FORMAT_CHARACTERS', /(?!\u200D)\p{Cf}|(?<!\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D|\u200D(?!\p{Extended_Pictographic})/gu)
+const FORMAT_CHARACTERS = RX(F.prompt, 'FORMAT_CHARACTERS', /(?![\u200D\uFE0F])[\p{Default_Ignorable_Code_Point}\p{Cf}\uFE00-\uFE0F\u{E0100}-\u{E01EF}]|(?<!\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]?)\u200D|\u200D(?!\p{Extended_Pictographic})|(?<!\p{Extended_Pictographic})(?:(?<![0-9#*])\uFE0F|\uFE0F(?!\u20E3))/gu)
 const WHITESPACE_RUN = RX(F.prompt, 'WHITESPACE_RUN', /\s+/g)
 const CONTROL_OR_LONE_SURROGATE = RX(F.prompt, 'CONTROL_OR_LONE_SURROGATE', /\p{Cc}|[\ud800-\udfff]/gu)
 SN(F.prompt, 'cleanText 1', 'const spaced = oneLine(text.replace(FORMAT_CHARACTERS, "")).replace(WHITESPACE_RUN, " ");')
@@ -424,7 +424,7 @@ const URL_LIKE = [
   RX(F.clean, 'URL_LIKE 3', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|cn|dev|app|co|me|ai|info|xyz|ly|gg|tv|edu|gov|jp|uk|de|fr|ru)\b/i, false),
 ]
 const ADDRESSES_THE_READER = RX(F.clean, 'ADDRESSES_THE_READER', /你必须|你应该|忽略|无视|指令|听我的|無視して|\bignore|\bdisregard|\byou must\b|\bforget (?:all|your)\b|\bsystem\b/i, false)
-const STATES_A_PASSWORD = RX(F.clean, 'STATES_A_PASSWORD', /密码\s*(?:就是|是|为)\s*\S|密码\s*[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i)
+const STATES_A_PASSWORD = RX(F.clean, 'STATES_A_PASSWORD', /密[码碼]\s*(?:就是|也是|还是|還是|都是|是|为|為)\s*\S|密[码碼]\s*[:：=]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i)
 const BARE_DOMAIN_PATH = RX(F.clean, 'BARE_DOMAIN_PATH', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs|json|yml|yaml|toml|lock|css|html)\b)[a-z]{2,6}\/\S{3,}/i)
 SN(F.clean, 'tidy', 'return clean === "" || keyLike(clean) ? null : clean;')
 SN(F.clean, 'modelNote 1', 'if (clean === null || weight(clean) > modelEntryMaxNow) return null;')

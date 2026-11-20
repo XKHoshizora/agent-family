@@ -25,9 +25,9 @@ import { cutToWeight, weightOf } from "./weight.ts";
  */
 export const REMEMBER = /记住|记一下|记下来|别忘了|remember|覚えて/i;
 export const FORGET =
-  /(?<!(?:别|不要|不能|不许|不会|千万别|别再|不要再|不用|不必|不想|没)[^，。！？,.!?\n\r]*)(?:忘掉|忘了它|删掉)|(?<![特区分个])别记(?!错)|不用记|(?<!(?:n't|n’t|\bnot|\bdonot|\bcannot|\bnever|\balways|\bdont)[^，。！？,.!?\n\r]*)\bforget\b|忘れて|消して/i;
+  /(?<!(?:别|不|勿|甭|莫|未|没|无需|禁止|用不着)[^，。！？,.!?\n\r]*)(?:忘掉|忘了它|删掉)|(?<=^|[^\p{Script=Han}]|你|就|先|也|可|还|千万|这个|那个)别记(?!错)|不用记|(?<!(?:\b(?:can|won|didn|doesn|don|couldn|shouldn|wouldn|mustn|needn|isn|aren|wasn|weren|haven|hasn|hadn)['’`]?t|\bnot|\bdonot|\bcannot|\bnever|\balways|\bno need to)[^，。！？,.!?\n\r]*)\bforget\b|忘れて|消して/iu;
 export const LOCK = /锁起来|锁进保险箱|放进保险箱|别告诉别人|不要告诉别人|(?<![a-z])lock (?:it|this|that)\b|秘密にして/i;
-export const EXPLICIT = new RegExp([REMEMBER, FORGET, LOCK].map((r) => r.source).join("|"), "i");
+export const EXPLICIT = new RegExp([REMEMBER, FORGET, LOCK].map((r) => r.source).join("|"), "iu");
 
 /** What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote. */
 export const UNSPOKEN = "coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb";

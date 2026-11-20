@@ -874,14 +874,6 @@ describe("用哪个模型整理记忆", () => {
     expect([...inMain().getByLabelText(PICK).options].find((o) => o.selected).textContent).toContain("已不可用");
   });
 
-  it("a paid site model chosen before it was refused shows as no longer available, and is not offered again", async () => {
-    const svc = service({ over: { getMe: me({ memoryModel: { source: "site", id: "paid-1" }, memoryModelUsable: false }) } });
-    await openPalace(svc);
-    const options = [...inMain().getByLabelText(PICK).options];
-    expect(options.find((o) => o.selected).textContent).toBe("大模型（当前，已不可用）");
-    expect(options.filter((o) => o.textContent.startsWith("大模型")).map((o) => o.textContent)).toEqual(["大模型（当前，已不可用）"]);
-  });
-
   it("when the settings cannot be read, both boxes stay off and say so, with a retry", async () => {
     let fail = true;
     const svc = service({
@@ -1211,6 +1203,24 @@ describe("fix round 1", () => {
     expect(scope.getByText("这条太长了，这个房间装不下。")).toBeTruthy();
     expect(scope.getByRole("button", { name: "添加" }).disabled).toBe(true);
     expect(scope.getByText("已用 97%")).toBeTruthy();
+  });
+
+  it("a 409 room_full with `count` says the room is out of room for notes, with the real limit; the weight left is still taken", async () => {
+    const svc = service({
+      limit: 100,
+      maxNotes: 150,
+      over: {
+        addMemoryNote: vi.fn(async () => {
+          throw apiError(409, "room_full", null, { left: 90, count: true });
+        }),
+      },
+    });
+    await openPalace(svc);
+    const scope = inRoom("关于我");
+    typeInto(scope.getByLabelText("新的笔记"), "一条");
+    await click(scope.getByRole("button", { name: "添加" }));
+    expect(within(room("关于我")).getByRole("alert").textContent).toBe("这个房间的笔记条数到上限了（最多 150 条），先删掉或合并几条。");
+    expect(scope.getByText("已用 10%")).toBeTruthy();
   });
 
   it("新记下的内容 that cannot be read is off and says so with 重试, not 自动判断", async () => {

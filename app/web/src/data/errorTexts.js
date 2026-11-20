@@ -168,6 +168,10 @@ const MEMORY_CHANGE = {
   not_found: "这条记忆变更已经不存在了。",
 };
 
+/** The sentence of a 409 `room_full` that refused for the number of notes (`max`: the room's limit, when the page knows it). */
+export const roomCountFullText = (max) =>
+  Number.isFinite(max) && max > 0 ? `这个房间的笔记条数到上限了（最多 ${max} 条），先删掉或合并几条。` : MEMORY_NOTE.room_full;
+
 // A note of the memory palace (add, edit, lock, delete, confirm what it heard): the room is full, or the text cannot be remembered.
 const MEMORY_NOTE = {
   room_full: "这个房间装不下了，先删掉或合并几条。",
