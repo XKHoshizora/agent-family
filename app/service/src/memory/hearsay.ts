@@ -5,6 +5,7 @@ import { appendSystem } from "../conversations/system.ts";
 import type { Queryable } from "../db.ts";
 import type { Question } from "../judge/client.ts";
 import type { StoredMessage } from "../messages/model.ts";
+import { handleOf } from "../principals/store.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import { applyHearsay, type NewHearsay } from "./apply.ts";
 import { allowanceRefuses, memoryCall, type MemoryCallReport } from "./call.ts";
@@ -163,7 +164,7 @@ export async function hearsayInput(
     const bySeq = new Map<string, SaidRow[]>();
     if (memory.flaggedContext === 0) return bySeq;
     const { rows } = await q.query<SaidRow & { of: string }>(
-      `select c.seq::text as of, m.seq::text, m.sender_id, m.body ->> 'text' as text, p.display_name, p.handle::text as handle
+      `select c.seq::text as of, m.seq::text, m.sender_id, m.body ->> 'text' as text, p.display_name, ${handleOf("p")} as handle
          from unnest($3::bigint[]) as c (seq)
         cross join lateral (
           select m.* from messages m ${VISIBLE_JOIN}
@@ -184,7 +185,7 @@ export async function hearsayInput(
   const lower = (before.get(first.seq) ?? []).at(-1)?.seq ?? first.seq;
   const upper = (after.get(last.seq) ?? []).at(-1)?.seq ?? last.seq;
   const stretch = await q.query<SaidRow>(
-    `select m.seq::text, m.sender_id, m.body ->> 'text' as text, p.display_name, p.handle::text as handle
+    `select m.seq::text, m.sender_id, m.body ->> 'text' as text, p.display_name, ${handleOf("p")} as handle
        from messages m ${VISIBLE_JOIN} join principals p on p.id = m.sender_id
       where m.conversation_id = $2 and m.seq between $3 and $4 and m.kind in ('text', 'file') and ${UNSPOKEN} and m.seq > ${HEARD_FROM}
       order by m.seq limit ${WINDOW_MAX + 1}`,

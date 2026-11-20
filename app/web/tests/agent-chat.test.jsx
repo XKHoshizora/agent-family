@@ -1675,6 +1675,16 @@ describe("mentions", () => {
     fireEvent.click(option);
     expect(input().value).toBe("@helper ");
   });
+
+  it("an Agent's account name is its owner's and its name part (family names): the picker finds it by either and inserts the full one", async () => {
+    await openAgentChat({ agent: { replyMode: "mention", handle: "me_one.helper" } });
+    fireEvent.change(input(), { target: { value: "@me_one.he", selectionStart: 10, selectionEnd: 10 } });
+    const option = screen.getByRole("option", { name: /小助手/ });
+    expect(option.textContent).toContain("@me_one.helper");
+    fireEvent.change(input(), { target: { value: "@help", selectionStart: 5, selectionEnd: 5 } });
+    fireEvent.click(screen.getByRole("option", { name: /小助手/ }));
+    expect(input().value).toBe("@me_one.helper ");
+  });
 });
 
 describe("Agents in a group (batch 2C)", () => {

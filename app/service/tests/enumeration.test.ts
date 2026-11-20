@@ -270,8 +270,8 @@ describe("enumeration: an existing id that is not yours is answered like a rando
 
   it("an Agent's id: its avatar is as a random id's for everyone but its owner and whoever shares a conversation with it now, and blocking or unblocking it is as a random id's for everyone", async () => {
     const [owner, stranger, other] = [await signUp(app, "agentowner"), await signUp(app, "agentstranger"), await signUp(app, "otherowner")];
-    const agent = (await api(app, owner, "POST", "/api/agents", { handle: "enum_bot", name: "Enum" })).json;
-    const otherAgent = (await api(app, other, "POST", "/api/agents", { handle: "enum_other", name: "Other" })).json;
+    const agent = (await api(app, owner, "POST", "/api/agents", { namePart: "enum_bot", name: "Enum" })).json;
+    const otherAgent = (await api(app, other, "POST", "/api/agents", { namePart: "enum_other", name: "Other" })).json;
     expect([agent.id, otherAgent.id].every((id) => typeof id === "string")).toBe(true);
     const png = Buffer.from("89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5d7e2d10000000049454e44ae426082", "hex");
     const put = await app.inject({ method: "PUT", url: `/api/agents/${agent.id}/avatar`, headers: { cookie: owner.cookie, "content-type": "image/png" }, payload: png });
@@ -410,7 +410,7 @@ describe("enumeration: Agent, provider, run and persona-proposal ids", () => {
     ["retry", ({ conv }) => json("POST", `/api/conversations/${conv}/runs/retry`)],
     ["dismiss", ({ conv }) => json("POST", `/api/conversations/${conv}/runs/dismiss`)],
     ["topic", ({ conv }) => json("POST", `/api/conversations/${conv}/topic`)],
-    ["new Agent on the provider", ({ provider }) => json("POST", "/api/agents", { handle: "enum_taker", name: "T", model: { source: "provider", providerId: provider, model: "m" } })],
+    ["new Agent on the provider", ({ provider }) => json("POST", "/api/agents", { namePart: "enum_taker", name: "T", model: { source: "provider", providerId: provider, model: "m" } })],
     ["draft on the provider", ({ provider }) => json("POST", "/api/agents/draft-persona", { name: "T", model: { source: "provider", providerId: provider, model: "m" } })],
   ];
 

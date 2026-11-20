@@ -9,6 +9,7 @@ import type { AttachmentRef } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
+import { handleOf } from "../principals/store.ts";
 import { renderProposalBlock } from "./persona.ts";
 import {
   GROUP_AGENTS_NAMED,
@@ -365,7 +366,7 @@ async function loadPage(
 ): Promise<{ loaded: Loaded[]; oldest: number | null; more: boolean }> {
   const group = run.group !== null;
   const { rows } = await q.query<MessageRow>(
-    `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
+    `select m.seq::text as seq, m.sender_id, sp.display_name as sender_name, ${handleOf("sp")} as sender_handle, sp.kind as sender_kind,
             $8::boolean and exists (select 1 from memberships sm
                                      where sm.conversation_id = m.conversation_id and sm.principal_id = m.sender_id and ${inGroupNow("sm")}) as sender_present,
             m.body ->> 'text' as text, case when m.seq > $3 then m.body -> 'attachment' end as attachment,
@@ -565,7 +566,7 @@ export async function loadGroupScene(
   if (!(await currentMembership(q, conversationId, agent.id))) return null;
   const title = await q.query<{ title: string | null }>("select title from conversations where id = $1", [conversationId]);
   const { rows } = await q.query<{ name: string; handle: string; intro: string }>(
-    `select p.display_name as name, p.handle::text as handle, a.intro
+    `select p.display_name as name, ${handleOf("p")} as handle, a.intro
        from memberships m
        join principals p on p.id = m.principal_id
        join agents a on a.principal_id = p.id
@@ -578,7 +579,7 @@ export async function loadGroupScene(
   // are all read, of the others the first by join order.
   const people = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent"; appellation: string | null; in_group: number }>(
     `select id, name, handle, kind, appellation, in_group
-       from (select p.id, p.display_name as name, p.handle::text as handle, p.kind, aa.appellation, m.joined_seq, k.always,
+       from (select p.id, p.display_name as name, ${handleOf("p")} as handle, p.kind, aa.appellation, m.joined_seq, k.always,
                     (count(*) over ())::int as in_group,
                     row_number() over (partition by k.always order by m.joined_seq, p.id) as nth
                from memberships m

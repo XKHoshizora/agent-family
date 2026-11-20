@@ -24,6 +24,8 @@ export const resetPassword = (body) => request("POST", "/api/auth/reset-password
 // ───────── me and principals
 export const getMe = () => request("GET", "/api/me");
 export const updateMe = (displayName) => request("PATCH", "/api/me", { displayName });
+/** My handle, once a year (409 handle_taken, 429 handle_change_too_soon with availableAt) → {id, handle, displayName, avatarVersion}. */
+export const updateHandle = (handle) => request("PATCH", "/api/me", { handle });
 /** How a new note is sorted for the vault: "auto" (judged), "vault" (all in) or "open" (none in). The answer does not echo it. */
 /** Whether my Agents tidy the day's notes while I rest (入梦). */
 export const updateDream = (dream) => request("PATCH", "/api/me", { dream });
@@ -84,7 +86,7 @@ export function socketUrl(ticket) {
 
 // ───────── Agents (owner only; app/service/README.md "Agents")
 export const listAgents = () => request("GET", "/api/agents"); // → {agents: [Agent]}, oldest first, deleted ones included
-/** body: {handle, name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, othersBudget?, ownerAppellation?, reasoning?, model?} → Agent */
+/** body: {namePart (its handle is `<my handle>.<namePart>`), name, intro?, field?, persona?, replyMode?, groupMentions?, chainBudget?, othersBudget?, ownerAppellation?, reasoning?, model?} → Agent */
 export const createAgent = (body) => request("POST", "/api/agents", body);
 export const getAgent = (agentId) => request("GET", `/api/agents/${seg(agentId)}`);
 /**

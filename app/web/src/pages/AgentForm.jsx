@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { commonErrorText } from "../data/errorTexts.js";
-import { HANDLE_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, handle as handleProblem } from "../auth/validation.js";
+import { NAME_PART_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, namePart as namePartProblem } from "../auth/validation.js";
 import { PROACTIVE_LEVELS, isProactiveLevel } from "../data/viewmodel.js";
 import { Btn, Field, Modal, Notice, Reason, Switch, focusInvalid } from "../ui/primitives.jsx";
 import { Select } from "../ui/Select.jsx";
@@ -97,10 +97,23 @@ export function openAgentChat(state, dispatch, actions, conversationId) {
 const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 const randomPart = () => Array.from({ length: 6 }, () => BASE36[Math.floor(Math.random() * 36)]).join("");
 
-/** The account name suggested for `name`: the name itself when it makes one (spaces as "_"), else agent_ + `random`. */
+/**
+ * The name part suggested for `name` (the account name is `<my handle>.<name part>`): the name itself when it makes one
+ * (spaces as "_"), else agent_ + `random`.
+ */
 export function suggestHandle(name, random) {
   const ascii = name.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  return HANDLE_PATTERN.test(ascii) ? ascii : `agent_${random}`;
+  return NAME_PART_PATTERN.test(ascii) ? ascii : `agent_${random}`;
+}
+
+/** The name part's box, after my handle and the dot shown as a fixed prefix (`id` and `aria-*` come from `Field`). */
+function NamePartInput({ prefix, ...input }) {
+  return (
+    <span className="handle-input">
+      <span className="handle-prefix">{prefix}</span>
+      <input {...input} />
+    </span>
+  );
 }
 
 /** The persona as it is sent: NUL dropped (the service refuses it), trimmed (the service stores it trimmed). */
@@ -251,7 +264,7 @@ export function AgentForm({ agent = null }) {
   const ownerAppellation = f.ownerAppellation.trim();
   const errors = {
     name: agentNameProblem(f.name),
-    handle: agent ? "" : handleProblem(f.handle),
+    handle: agent ? "" : namePartProblem(f.handle),
     intro: chars(intro) > 40 ? "简介不超过 40 个字" : "",
     field: chars(field) > 20 ? "擅长领域不超过 20 个字" : "",
     persona: chars(persona) > PERSONA_MAX ? `人格文档不超过 ${PERSONA_MAX} 个字` : "",
@@ -359,7 +372,7 @@ export function AgentForm({ agent = null }) {
   };
 
   const create = async () => {
-    const body = { handle: f.handle, name };
+    const body = { namePart: f.handle, name };
     if (intro) body.intro = intro;
     if (field) body.field = field;
     if (persona) body.persona = persona;
@@ -529,11 +542,11 @@ export function AgentForm({ agent = null }) {
         {agent ? (
           <div className="field">
             <span className="field-label">账号名</span>
-            <p className="readonly"><Lock size={14} aria-hidden="true" /> {agent.handle}（创建后不可修改）</p>
+            <p className="readonly"><Lock size={14} aria-hidden="true" /> {agent.handle}（名字部分创建后不可修改，前面跟随你的账号名）</p>
           </div>
         ) : (
-          <Field label="账号名" hint="3 到 24 位小写字母、数字或下划线，创建后不可修改" error={handleError}>
-            <input value={f.handle} onChange={setHandle} autoComplete="off" autoCapitalize="none" spellCheck={false} />
+          <Field label="账号名" hint="2 到 24 位小写字母、数字或下划线，接在你的账号名后面，创建后不可修改" error={handleError}>
+            <NamePartInput prefix={`${state.account?.handle ?? ""}.`} value={f.handle} onChange={setHandle} autoComplete="off" autoCapitalize="none" spellCheck={false} />
           </Field>
         )}
         <div className="field">

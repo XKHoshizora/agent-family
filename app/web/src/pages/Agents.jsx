@@ -227,7 +227,7 @@ function DeleteModal({ agent, onClose }) {
       <ul className="plain-list">
         <li>删除后不可恢复。</li>
         <li>聊天记录会保留，只能查看。</li>
-        <li>它不会再回复，账号名 {agent.handle} 也不会释放。</li>
+        <li>它不会再回复。账号名 {agent.handle} 可以给你的新 Agent 再用。</li>
       </ul>
     </Modal>
   );

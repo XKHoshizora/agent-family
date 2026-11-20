@@ -445,13 +445,34 @@ free-plus-balance figure (`via.points`, Wire shapes).
 - Everything in the answer is read in one snapshot (one read-only transaction on one connection): a call settled
   meanwhile is in it whole — its charge, its record and its released hold — or not at all.
 
+### Handles
+
+A handle (账号名) is the name people find and call each other by. A person's is chosen at registration
+(`^[a-z0-9_]{3,24}$`, unique among people, case ignored) and may be changed once every 365 days (`PATCH /api/me`). An
+Agent's hangs under its owner's like a family name: `<owner's handle>.<name part>`, e.g. `xiaolin.jarvis`. Its owner
+chooses the name part when creating it (`namePart`, `^[a-z0-9_]{2,24}$`; it never changes), unique among the owner's
+Agents that are not deleted — a deleted Agent's name part is free at once (the deleted one keeps showing its handle) — and
+in no pool with people's handles nor with other owners' Agents: two owners may each have a `jarvis`, and a person may be
+called `jarvis`. Only the name part is stored (`principals.handle` of an Agent, migration 048); the full handle is put
+together wherever it is read (`handleOf`, `src/principals/store.ts`), so every response, push and system text a model is
+given carries the full one, and it follows the owner's rename at once. Messages keep their text as sent.
+
+A handle a person gave up stays theirs for good (`reserved_handles`, no expiry): nobody else may register it or change
+to it (409 `handle_taken`, exactly as for one held now); it finds nobody (`GET /api/principals/lookup`, friend requests)
+and calls nobody (`@old` or `@old.jarvis`) while it is not their handle; its former holder may take it back once their
+year has passed. (WeChat's rule — a released WeChat ID is never anyone else's — rather than GitHub's, which frees an old
+name at once and so invites impersonation.) How a message calls an Agent by its handle, in full or by the name part
+alone: Agents and runs, In a group. A member whose display name is an Agent's name part (「jarvis」) makes a bare `@jarvis`
+call nobody in the groups they are in — people first; anyone may take that display name — while the full form
+`@owner.jarvis` always calls the Agent.
+
 ### Agents
 
 An Agent is a principal of kind `agent` owned by one person for good, with a dedicated conversation (type `agent`)
 whose members are exactly the owner and the Agent. Everything here is the owner's: for anybody else every
 `/api/agents/:id…` route, and the conversation routes of that conversation, answer the JSON 404 `not_found`
 byte for byte as for an id that does not exist. An Agent's handle is unknown to `GET /api/principals/lookup` and
-`POST /api/friend-requests` (also for its owner). Only its owner puts it into a group, and only one the owner is a member
+`POST /api/friend-requests` (also for its owner: their pattern has no dot). Only its owner puts it into a group, and only one the owner is a member
 of (`POST /api/conversations/:id/members`): for someone who is not a current member of that group the route is 404
 `not_found`, as for a group that does not exist, whatever the id; for a member who is not its owner its id is refused
 exactly as the id of a non-friend or an unknown principal is (403 `forbidden`). Among a new group's `memberIds`
@@ -475,7 +496,7 @@ id that does not exist (old messages then show the generated initial). Nobody bu
 level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, `proactive`, `proactiveLevel`, `proactiveBudget`, `proactiveSpentToday`, `memory`, `memoryAsk`, `sharedNotes`, `ownerAppellation`, `appellations`, provider, pause or persona proposals, whether a reply of it was one nobody called for (Proactive replies), or the reasoning of its replies there (A reply
 there), or which model and reasoning level a reply of it used and what it cost (`via`, Wire shapes), in any response,
 push or error. Fellow members see a changed name, intro or field the next time they load
-principals, as for people; a changed avatar is pushed to them (`principal`).
+principals, as for people; a changed avatar, or a handle its owner's rename changed, is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
 "always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "proactive", "proactiveLevel": "less" | "normal" | "more", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "ownerAppellation": string | null, "appellations": [{"principalId", "kind": "human" | "agent", "handle", "name", "appellation"}], "reasoning": "none" | "low" | "medium" | "high" |
@@ -519,7 +540,8 @@ push or log carries them, and they reach nobody but the model of that one Agent.
 
 #### `POST /api/agents`
 
-*Session: required.* Body (no other key): `handle` (`^[a-z0-9_]{3,24}$`, never changes), `name` (1–20 characters,
+*Session: required.* Body (no other key, `handle` included): `namePart` (`^[a-z0-9_]{2,24}$`, never changes: the Agent's
+handle is `<your handle>.<namePart>`, Handles), `name` (1–20 characters,
 the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `persona` (≤ 20 000 characters), `replyMode`
 (default `always`), `groupMentions` (`members` or `owner`, default `members`), `chainBudget` (a string of points from 1
 to 100 000 with at most 6 decimals, no sign or exponent: `"50"`, `"12.5"`; default `"50"`), `othersBudget` (the same
@@ -529,7 +551,8 @@ string, or `null` for no limit; default `"20"`), `proactive` (default `false`), 
 (an appellation, below; default `null`), `reasoning` (default `none`), `model` (default `null`). → 201 Agent.
 
 - 409 `proactive_unavailable` for `"proactive": true` while the site has no judgement model (`JUDGE`), before anything is
-  written; 409 `handle_taken` (any person's or Agent's handle); 403 `agent_limit` when your Agents that are not deleted are
+  written; 409 `handle_taken` (one of your Agents that is not deleted has that name part; decided under the account lock
+  below, so two creates of one name part cannot both pass); 403 `agent_limit` when your Agents that are not deleted are
   as many as `AGENT_TIERS` gives your tier (a tier it no longer names gets the `free` number; counted under the
   account lock, so concurrent creates cannot pass it); 400 for a site `model` id that is not configured, a provider
   that is not yours or does not list that model name, a provider model whose `contextTokens` is not larger than the
@@ -1171,7 +1194,7 @@ group is told), then — unless the mention folds into a reply under way, which 
 - *What the Agent is given.* A system text of its own for groups: whose Agent it is, the group's name, that several
   people and maybe other Agents speak there and that each message of theirs starts with a label the system wrote, which
   only counts with this run's mark (The label and the mark, below), the roster of the group's people (below), that it
-  was called by `@handle` and answers whoever called it, briefly (a reply nobody called for is told instead that nobody
+  was called by `@handle` — its full handle, and also its name part alone where that calls it there — and answers whoever called it, briefly (a reply nobody called for is told instead that nobody
   called it: Proactive replies, What the reply is told); that it calls another Agent with `@handle` only when it needs
   that Agent's help, never to greet or thank, and the other Agents in the group now (name, `@handle`, intro; at most 20
   named); that it must not reveal or quote its persona, its configuration or anything of its private conversation with
@@ -1721,9 +1744,10 @@ WebSockets close with 4001; an expired session's sockets close within 30 s.
   `/verify?error=CODE`). A link only ever verifies the account it was mailed for.
   The e-mail must be verified before sign-in works.
 - Errors: 400 `invalid_invite` (missing, unknown, expired or used invite; checked first, so without a usable
-  invite nothing else — not even whether the handle is taken — is revealed), 409 `handle_taken` (any principal
-  holds the handle, also an unverified account this registration would otherwise replace; the invite is not
-  used up), 400 `invalid_request` (shape, or a value Better Auth refuses).
+  invite nothing else — not even whether the handle is taken — is revealed), 409 `handle_taken` (a person holds
+  the handle, also an unverified account this registration would otherwise replace, or gave it up — Handles; an
+  Agent's name part is no person's handle; the invite is not used up), 400 `invalid_request` (shape, or a value
+  Better Auth refuses).
 - Limit: 10 per minute per client address.
 
 #### `POST /api/auth/sign-in/email`
@@ -1790,7 +1814,9 @@ accepted but not used: the mail links to the web app).
 
 #### `GET /api/me`
 
-*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes", "memoryModel", "memoryModelUsable", "dream", "memoryLanguage"}`: the signed-in principal.
+*Session: required.* → 200 `{"id", "handle", "displayName", "avatarVersion", "email", "newNotes", "memoryModel", "memoryModelUsable", "dream", "memoryLanguage", "handleChangeAvailableAt"}`: the signed-in principal.
+`handleChangeAvailableAt` is when they may change their handle again (an ISO time, 365 days after their last change), or
+`null` when they may now (they never changed it, or the year has passed).
 `newNotes` (`"auto"`, `"vault"` or `"open"`; `"auto"` until chosen) is what newly written notes of their Agents' memory do
 about the vault (An Agent's memory); only they are ever shown it. So are `memoryModel` (`null`, or the model they chose to tidy
 their memory, `{"source": "site", "id"}` or `{"source": "provider", "providerId", "model"}` as an Agent's model is written;
@@ -1804,13 +1830,20 @@ cannot be opened, the model is off the provider's list or no longer on the site;
 
 #### `PATCH /api/me`
 
-*Session: required.* Changes your display name and your memory setting (only yours: no route takes a target id).
+*Session: required.* Changes your display name, your handle and your memory setting (only yours: no route takes a target id).
 
+- `handle` (`^[a-z0-9_]{3,24}$`), once every 365 days (Handles): your current one changes nothing (and starts no year);
+  within a year of your last change 429 `handle_change_too_soon` with `availableAt` (the ISO time you may again, as
+  `GET /api/me` says), said before anything about the handle itself; then 409 `handle_taken` when a person holds it or
+  gave it up (one you gave up is yours to take back). The handle you leave is yours for good. Everything that shows
+  handles follows at once — yours, and your Agents' full ones (`<handle>.<name part>`) — and is pushed (`principal`, with
+  the new `handle`) to whoever can see you or each of your Agents, as an avatar change is; your own clients also get an
+  `agent` push per Agent. A mention by an old handle calls nobody; messages keep their text.
 - Body: `displayName`, `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
   existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
   Agent creation checks it: a site model that is configured and of the free tier (memory the site pays for runs only on its free
   models), or a model on the list of one of your own providers whose context is larger than the default output limit — anything
-  else, a paid site model and another person's provider included, 400 `invalid_request`), `dream` (a boolean: whether your notes are consolidated while you are away) and `memoryLanguage` (`null` clears it; else one of the codes `GET /api/me` lists, anything else 400 `invalid_request`: the one language your notes are written in; existing notes do not change until `POST /api/memory/language/convert`), each optional but at least one; `newNotes`, `memoryModel`, `dream` and `memoryLanguage` are read back with `GET /api/me`. The fields are written together or not at all: a refused `memoryModel` or `memoryLanguage` leaves the name and `newNotes` as they were. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
+  else, a paid site model and another person's provider included, 400 `invalid_request`), `dream` (a boolean: whether your notes are consolidated while you are away), `memoryLanguage` (`null` clears it; else one of the codes `GET /api/me` lists, anything else 400 `invalid_request`: the one language your notes are written in; existing notes do not change until `POST /api/memory/language/convert`) and `handle` (above), each optional but at least one; `newNotes`, `memoryModel`, `dream` and `memoryLanguage` are read back with `GET /api/me`. The fields are written together or not at all: a refused `memoryModel`, `memoryLanguage` or `handle` leaves the name and `newNotes` as they were. `displayName`: format characters (`\p{Cf}`: bidi overrides and isolates U+202A–202E, U+2066–2069,
   U+200E, U+200F, U+061C; zero-width space U+200B; word joiner U+2060; BOM U+FEFF; soft hyphen U+00AD; …)
   are removed, except the zero-width non-joiner and joiner (U+200C, U+200D: emoji sequences like 👩‍💻,
   Persian and Indic text) and the emoji tag characters (U+E0020–U+E007F: flags like 🏴󠁧󠁢󠁥󠁮󠁧󠁿), which stay.
@@ -1819,7 +1852,7 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   text (`POST /api/conversations/:id/messages`: not white space, a control, a default-ignorable code point such
   as a joiner, variation selector or Hangul filler, or the Braille blank); otherwise 400 `invalid_request`. The
   same rule applies on registration and, with 1–60 characters, to group titles.
-- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name as stored (the current one when only `newNotes`, `memoryModel`, `dream` or `memoryLanguage` was sent). Other members see it the next time they
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` with the name and handle as stored (the current one when only `newNotes`, `memoryModel`, `dream` or `memoryLanguage` was sent). Other members see a new name the next time they
   load principals (`/api/sync`); system notices keep the name they were written with.
 - Limit: 10 per minute.
 
@@ -1854,7 +1887,8 @@ read (to tell its type), never the whole file. `Content-Length` is only sent for
 *Session: required.* Finds a principal by exact handle — the way to get someone's id to befriend them.
 
 - Query: `handle` (at most 100, lower-cased, then `^[a-z0-9_]{3,24}$`). No prefix or partial matches.
-- 200 `{"id", "handle", "displayName", "avatarVersion"}` (also for yourself); 404 `not_found`.
+- 200 `{"id", "handle", "displayName", "avatarVersion"}` (also for yourself); 404 `not_found` — also for a handle a
+  person gave up (Handles) and an Agent's name part, exactly as for one nobody has.
 - Limit: 30 per minute, found or not (the limit is what stops probing for handles).
 
 ### Friends and blocks
@@ -2161,6 +2195,7 @@ while the session that asked for it lasts. Limit: 30 per minute.
 ## Wire shapes
 
 **Principal** (in `/api/sync`'s `principals`, and the `principals` of message reads and searches): `{"id", "handle", "displayName", "avatarVersion", "kind": "human" | "agent", "ownerId"?, "intro"?, "field"?}`.
+An Agent's `handle` is its full one, `<owner's handle>.<name part>` (Handles), here and in every other shape.
 `ownerId`, `intro` and `field` are an Agent's, and every Agent entry has all three (a person's has none): `ownerId` is
 its owner's principal id, `intro` and `field` its public profile as its owner set it, strings, `""` when not set. They
 come to whoever the entry is listed for (its owner, and the members of a conversation it is in, see Agents); nothing
@@ -2304,9 +2339,10 @@ Clients must ignore fields and events they do not know: later batches add more.
 { "type": "agent", "id": "…" }          // one of your Agents changed (edit, pause, resume, delete, avatar), or one of its
                                         // persona proposals was made, confirmed or discarded: GET /api/agents/:id, and
                                         // the messages you show with a proposal card (Persona proposals)
-{ "type": "principal", "id": "…", "avatarVersion": 3 }   // someone's avatar changed (yours, a friend's, anyone who shares a
-                                        // conversation with you; for your Agent, to you only): show the new version
-                                        // (Principal). Not replayed: /api/sync carries the current one
+{ "type": "principal", "id": "…", "avatarVersion": 3, "handle": "…" }   // someone's avatar or handle changed (yours, a
+                                        // friend's, anyone who shares a conversation with you; for your Agent, to you
+                                        // only; an owner's rename changes each of their Agents' full handles): show the
+                                        // new version and handle (Principal). Not replayed: /api/sync carries the current ones
 { "type": "run", "conversationId": "…", "run": Run }   // your Agent's own conversation: a reply of it was queued,
                                         // started or ended (Replies)
 { "type": "run", "conversationId": "…", "agentId": "…", "run": Run }   // a group: the same, for a reply there of
@@ -2471,8 +2507,8 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
-or when its `replyMode` is `mention` and the text contains neither `@` + its handle nor `@` + its current name (case
-ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
+or when its `replyMode` is `mention` and the text has neither its handle (the full one) nor its name part as a whole
+mention (In a group, below: `@jarvis_2` is not `@jarvis`), nor `@` + its current name anywhere (case ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
 below). Otherwise a `queued` run is inserted in that conversation covering the message (`covers_seq`), unless the owner
 has started `AGENT_RUNS_PER_MINUTE` (20) replies of their own lane in the last minute (a reply in the Agent's own
 conversation is always the owner's own, the owner its caller): then the run is inserted already `failed`, error
@@ -2486,8 +2522,24 @@ the commit.
 **In a group** (`runs.ts` `triggerInGroup`, `triggerFromAgent`; `mentions.ts`). An Agent there replies only when a
 message calls it: `@` + its handle on a token boundary — not preceded or followed by a letter, digit or `_` of
 `[A-Za-z0-9_]`, so `@anna` does not call `anna_2` and `mail@anna` calls nobody — case ignored (its name does not call
-it: names are not unique in a group). At most the first 20 distinct handles of a message count; a file's caption is its
-text. `replyMode` plays no part. A message that names no handle costs nothing, not even a query.
+it: names are not unique in a group). Its handle in full, `@owner.name` (Handles), always calls it; the name part alone,
+`@name`, calls the one Agent member of the group with that name part — nobody when a person member has that handle or
+that display name (trimmed, case ignored, the whole name: people first — `@anna` is the person anna when she is a member,
+and so is `@Jarvis` when a member is called 「Jarvis」), and nobody when two or more Agent members have it, exactly as a handle nobody there has (no run, no notice). A full handle two live
+Agents would share (only a writer that skipped the owner's account lock could make one) calls nobody too. An Agent's
+message is read the same way (one of two `jarvis` may be itself). The @ picker writes a person as `@` and their display
+name: that is safe only for a display name of one word (made of `A-Za-z0-9_`, as 「Jarvis」). A display name of more than
+one word picked there — 「Jarvis Lee」 written `@Jarvis Lee` — reads as `@jarvis`, and still calls `*.jarvis` where it is
+the only one, until a mention carries its target rather than its text (planned next); the same for a name with a dot
+(「Anna.Lee」 → the full form `anna.lee`). The proactive judgement's "someone was named" reads
+bare names the same way (`namesAgentMember`). A mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
+name part of 2–24 after it: a `.` not followed by one of them is punctuation (`ask @xiaolin.jarvis.` calls
+`xiaolin.jarvis`), `@a.b.c` is `a.b` and then text, and a part out of those lengths calls nobody. A dot followed by a
+word is part of the mention, not punctuation: `@anna.Thanks` and `cc @jarvis.see above` (no space after the period) are
+the full handles `anna.thanks` and `jarvis.see`, which call nobody — write a space after the period to call `anna`. A handle a person gave
+up calls nobody, in full or under an Agent. At most the first 20 distinct handles of a message count (`xiaolin.jarvis`
+and `jarvis` are two); a file's caption is its text. `replyMode` plays no part. A message that names no handle costs
+nothing, not even a query; one that does, one query over the group's current members (`resolveMentions`).
 - *A person's message* (the send's transaction): the group's current Agent members it names, each in id order under its
   `agents` row lock (the group's row is the send's): nothing for one that is paused, deleted or has no model, nor for
   one whose `groupMentions` is `owner` unless its owner wrote the message, nor for one with a block between its owner
@@ -2573,7 +2625,9 @@ the run itself ended, except `cancelled` `agent_removed`, which is followed by n
 dropped) — and, at start-up recovery or a release, except a run that ends `failed` (its retry answers what was noted
 too). (A pause or delete drops what was noted, below, so what an interrupted run has noted came after a resume.) In
 the Agent's own conversation the follow-up is its owner's and is queued whatever the owner's replies a minute (it
-answers what they wrote meanwhile). In a group it is decided as In a group (above) says: whose it is, the halt and the
+answers what they wrote meanwhile). In a group the messages it answers as calls are those the run noted as calls when
+they were sent (`call_seqs`), never its mentions read again: a rename, or a member joining or leaving, between the call
+and the end of the reply changes nothing of it (task N fix round 1). In a group it is decided as In a group (above) says: whose it is, the halt and the
 chain budget, the others' daily budget, and the owner's replies a minute in its lane — over it, the Agent's reusable
 `rate_limited` run there records it. A mention folded into a queued run turns it the owner's own (the owner its caller)
 when it is the owner's call (their message, or an Agent's message they are behind); another person's — also one relayed
@@ -3163,7 +3217,9 @@ nothing more is judged, and what a decision still in flight decides is dropped (
 
 1. *Read, without locks* (`candidates.ts`). The message must still be one to judge (`judgeable`): the conversation is an
    open group, the message is its latest that is not a notice and a person sent it, Agents were not halted at or after
-   it (`agents_halted_seq`), and its text (a file's caption) names no Agent by `@handle` — any Agent, in the group or not.
+   it (`agents_halted_seq`), and its text (a file's caption) names no Agent by `@handle` — by its full handle any Agent,
+   in the group or not; by a bare name part any Agent member of the group with it (two of them included), unless a
+   person member has that handle (`namesAnAgent`).
    And it has led to no proactive reply yet (no `agent_group_state` row of the group has `surcharge_seq` at or after it).
    The options (`optionsFor`, `mayAnswerUnasked`): the group's current Agent members that joined before the message (an
    Agent answers nothing from before its stay began), with `proactive` on, not paused or deleted, with a model that is
@@ -3317,7 +3373,8 @@ the fuse and the owner's minute do. `GET /api/models` answers `proactiveAvailabl
 
 **What the reply is told.** A run whose lane is still `proactive` when it begins (read in `begin`'s first step) is given
 the group's system text (Agents and runs, What the model is shown) without the scene's sentence
-`有人在消息里写了 @{handle} 叫你，你才回复。回答叫你的人，简短、切题；不要替别人回答。` and with this passage, a paragraph of
+`有人在消息里写了 @{handle}（或 @{name part}）叫你，你才回复。回答叫你的人，简短、切题；不要替别人回答。` (the part in
+brackets only where its name part alone calls it there) and with this passage, a paragraph of
 its own right after the scene, before the roster (`runtime/prompt.ts` `UNASKED_PASSAGE`; the product owner may change
 its wording): `这次没有人点你的名。你就是这个群里的一员，刚好懂这个，像平时聊天那样自然地接一句话就行：一两句，口语，不用客套，也别像客服或者写报告。别人没问的不用展开。`
 Everything else — what it is shown of the group, the context cap, what it stores, who reads its thinking, who pays — is

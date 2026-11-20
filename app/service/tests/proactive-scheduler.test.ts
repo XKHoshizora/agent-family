@@ -882,7 +882,8 @@ describe("what comes of it, with the reply worker running", () => {
     await agentIn(app, w.third, "bobbot", null, { proactive: false });
     judge.answer(byName({ anna: 0.9 }));
     const noted = vi.spyOn(app.deps.proactive!, "noted");
-    const asked = await say(app, w.member, w.g, "@bobbot 今晚做什么菜好？");
+    // An Agent outside the group is named by its full handle (family names).
+    const asked = await say(app, w.member, w.g, "@third.bobbot 今晚做什么菜好？");
     expect(noted.mock.calls).toEqual([[w.g, asked, w.member.id, false]]);
     expect(await idleNow(app.deps.proactive!)).toBe(false);
     await sleep(SHORT * 4);

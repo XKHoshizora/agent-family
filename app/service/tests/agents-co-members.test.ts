@@ -48,6 +48,8 @@ const HIDDEN = {
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
+  // When a person may change their handle again: `GET /api/me` alone (family names).
+  "handleChangeAvailableAt",
   "persona",
   "personaVersion",
   "model",
@@ -243,7 +245,7 @@ async function world() {
   const privateChat = JSON.stringify((await api(app, owner, "GET", `/api/conversations/${dedicated}/messages`)).json);
   for (const value of [HIDDEN.privateAsk, HIDDEN.privateReply, HIDDEN.proposed, HIDDEN.reasoning]) expect(privateChat).toContain(value);
 
-  const expected = { id: agent.id, handle: "team_bot", displayName: "Team Bot", avatarVersion: 1, kind: "agent", ownerId: owner.id, intro: INTRO, field: FIELD };
+  const expected = { id: agent.id, handle: "olive.team_bot", displayName: "Team Bot", avatarVersion: 1, kind: "agent", ownerId: owner.id, intro: INTRO, field: FIELD };
   return { owner, mia, ned, sam, agent, dedicated, provider, g, agentSeq, quoteSeq, lookedSeq, looked, expected };
 }
 
@@ -353,7 +355,8 @@ describe("an Agent's fellow group members see its name, avatar, handle, intro, f
       await db.query<{ id: string }>(`insert into principals (kind, handle, display_name, owner_id) values ('agent', 'bare_bot', 'Bare', $1) returning id`, [owner.id])
     ).rows[0]!.id;
     await seat(g, bare);
-    const shape = { id: bare, handle: "bare_bot", displayName: "Bare", avatarVersion: 0, kind: "agent", ownerId: owner.id, intro: "", field: "" };
+    // Its handle is its owner's and its name part (family names), whether or not it has an agents row.
+    const shape = { id: bare, handle: "olive.bare_bot", displayName: "Bare", avatarVersion: 0, kind: "agent", ownerId: owner.id, intro: "", field: "" };
     const members = (await api(app, mia, "GET", `/api/conversations/${g}/members`)).json.members as any[];
     expect(members.find((m) => m.id === bare)).toEqual({ ...shape, role: "speaker", isCreator: false });
     expect((await api(app, mia, "GET", "/api/sync")).json.principals.find((p: any) => p.id === bare)).toEqual(shape);

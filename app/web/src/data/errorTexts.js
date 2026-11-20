@@ -117,17 +117,41 @@ const SEARCH = {
 /** Why a message search did not answer: a quiet one-line note beside a retry button. */
 export const searchErrorText = (error) => pick(SEARCH, "search", error);
 
+/**
+ * The first local day on which instant `iso` has passed, as the settings page shows it ("2027年11月21日"): the day itself
+ * when it is that day's midnight, else the next one — so a change tried on the day shown is never refused for the hour.
+ * The one helper for when the account name may change again (the hint and the refusal). Null for what is not a time.
+ */
+export function dayText(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  const at = new Date(ms);
+  const midnight = new Date(at.getFullYear(), at.getMonth(), at.getDate());
+  const day = midnight.getTime() === ms ? midnight : new Date(at.getFullYear(), at.getMonth(), at.getDate() + 1);
+  return `${day.getFullYear()}年${day.getMonth() + 1}月${day.getDate()}日`;
+}
+
 const PROFILE = {
   name: {
     invalid_request: "昵称需要 1–40 个字，且只能一行。",
+  },
+  handle: {
+    handle_taken: "这个名字已经有人用了",
+    invalid_request: "账号名为 3 到 24 位小写字母、数字或下划线",
   },
   avatar: {
     invalid_request: "头像需要是 PNG、JPEG 或 WebP 格式的图片。",
     too_large: "头像不能超过 2 MB。",
   },
 };
-/** action: name | avatar */
-export const profileErrorText = (action, error) => pick(PROFILE, action, error);
+/** action: name | handle | avatar */
+export function profileErrorText(action, error) {
+  if (action === "handle" && error?.code === "handle_change_too_soon") {
+    const day = dayText(error.availableAt);
+    return day ? `离上次改名还不到一年，${day}起可以再改` : "离上次改名还不到一年，暂时不能再改";
+  }
+  return pick(PROFILE, action, error);
+}
 
 // ───────── Agents, replies, providers (batch 2A)
 
@@ -191,10 +215,10 @@ const MEMORY_NOTE = {
 
 const AGENT = {
   create: {
-    handle_taken: "这个账号名已被占用，请换一个。",
+    handle_taken: "你已经有一个用这个账号名的 Agent 了，请换一个。",
     agent_limit: "你的 Agent 数量已达到当前档位的上限。",
     proactive_unavailable: PROACTIVE_UNAVAILABLE,
-    invalid_request: "填写的内容有误：账号名需 3–24 位小写字母、数字或下划线，名称 1–20 个字；所选模型或思考程度也可能不可用。",
+    invalid_request: "填写的内容有误：账号名需 2–24 位小写字母、数字或下划线，名称 1–20 个字；所选模型或思考程度也可能不可用。",
   },
   edit: {
     agent_deleted: AGENT_DELETED,

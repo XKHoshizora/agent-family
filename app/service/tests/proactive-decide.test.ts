@@ -640,7 +640,8 @@ describe.each([false, true])("when the judgement model is not asked (memory %s)"
 
     await say(w.member, w.g, "问个问题");
     expect(await decide(w.g, await agentSays(anna.id, w.g, "我在"))).toEqual(noneTriggered());
-    for (const text of ["@anna 在吗", "@loner_bot 你在哪", "@ANNA"]) expect(await decide(w.g, await say(w.member, w.g, text))).toEqual(noneTriggered());
+    // An Agent outside the group is named by its full handle (family names); one in it by its name part too.
+    for (const text of ["@anna 在吗", "@member.loner_bot 你在哪", "@ANNA", "@Owner.Anna"]) expect(await decide(w.g, await say(w.member, w.g, text))).toEqual(noneTriggered());
     await settleAndAge();
     const stale = await say(w.member, w.g, "第一句");
     await say(w.third, w.g, "第二句");
@@ -1146,7 +1147,7 @@ describe("what reaches anyone", () => {
       }
     return into;
   };
-  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "modelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools", "askerIds", "asker_ids", "askers", "callSeqs", "call_seqs", "sourceLines"];
+  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "modelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools", "askerIds", "asker_ids", "askers", "callSeqs", "call_seqs", "sourceLines", "handleChangeAvailableAt"];
 
   it("no frame and no view of another member names proactive replies, lanes, callers, thresholds or probabilities; the log only ids and reasons", async () => {
     const w = await world();

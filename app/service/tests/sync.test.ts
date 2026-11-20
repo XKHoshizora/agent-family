@@ -796,7 +796,7 @@ describe("avatar changes are announced with a version", () => {
     expect(((await sync(b)).json.principals as any[]).find((p) => p.id === a.id)).toMatchObject({ avatarVersion: 0 });
     expect((await putMine(a)).statusCode).toBe(200);
     for (const who of [a, b, e, f]) {
-      expect(await sockets.get(who)!.next(isPrincipal(a.id))).toEqual({ type: "principal", id: a.id, avatarVersion: 1 });
+      expect(await sockets.get(who)!.next(isPrincipal(a.id))).toEqual({ type: "principal", id: a.id, avatarVersion: 1, handle: a.handle });
     }
     // A sentinel for the ones that must hear nothing: they receive something later, and by then the push would have come.
     await api(app, c, "POST", "/api/friend-requests", { handle: d.handle });
@@ -834,7 +834,7 @@ describe("avatar changes are announced with a version", () => {
     // A sentinel: fay receives something sent after the change, and by then its push would have come.
     expect((await api(app, c, "POST", "/api/friend-requests", { handle: f.handle })).status).toBe(201);
     await sf.next((e) => e.type === "social");
-    expect(sf.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1 }]);
+    expect(sf.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1, handle: a.handle }]);
   });
 
   it("a refused upload announces nothing", async () => {
@@ -845,6 +845,6 @@ describe("avatar changes are announced with a version", () => {
     await api(app, a, "PATCH", "/api/me", { displayName: "Alice B" }); // no push of its own; sentinel below instead
     expect((await putMine(a)).statusCode).toBe(200);
     await sb.next(isPrincipal(a.id));
-    expect(sb.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1 }]);
+    expect(sb.events.filter(isPrincipal(a.id))).toEqual([{ type: "principal", id: a.id, avatarVersion: 1, handle: a.handle }]);
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import * as M from "../src/data/model.js";
-import { toView, formatAt, formatMessageAt, formatMessageTitle, expiryText, formatPoints, replyPoints } from "../src/data/viewmodel.js";
+import { toView, formatAt, formatMessageAt, formatMessageTitle, expiryText, formatPoints, replyPoints, mentionedHandles, calledAgentIds, namesAgent } from "../src/data/viewmodel.js";
 import { ME } from "../src/data/identities.js";
 import { convSubtitle, convTitle, entity, isAgent, lastPreview, myAgents, nameOf, ownerOf, publishBlock, senderName } from "../src/state/selectors.js";
 import {
@@ -757,5 +757,64 @@ describe("the notice that an Agent was asked to be quiet (agent_quieted)", () =>
       ["「安的助手」暂时不主动发言，需要时可以 @ 它", false],
       ["不认识的 Agent", false],
     ]);
+  });
+});
+
+describe("family names: what a mention calls, as the service reads it (Task N)", () => {
+  it("reads `@owner.name` and a bare `@name`; a trailing dot is punctuation, one dot only, lengths as the service's", () => {
+    const cases = [
+      ["问问 @xiaolin.jarvis.", ["xiaolin.jarvis"]],
+      ["@XiaoLin.Jarvis @jarvis @ai", ["xiaolin.jarvis", "jarvis", "ai"]],
+      ["@abc.def.ghi", ["abc.def"]],
+      ["@a @xiaolin.j @ab.jarvis mail@xiaolin.jarvis", []],
+      ["@anna. 你好", ["anna"]],
+    ];
+    for (const [text, expected] of cases) expect([text, mentionedHandles(text)]).toEqual([text, expected]);
+  });
+
+  it("calls the Agent member by its full handle; by the name part only when it is the one Agent member with it and no person member has that handle", () => {
+    const people = {
+      x: { kind: "human", handle: "xiaolin" },
+      b: { kind: "human", handle: "bobby" },
+      anna: { kind: "human", handle: "anna" },
+      xj: { kind: "agent", handle: "xiaolin.jarvis" },
+      bj: { kind: "agent", handle: "@bobby.jarvis" },
+      bh: { kind: "agent", handle: "bobby.helper" },
+      xa: { kind: "agent", handle: "xiaolin.anna" },
+    };
+    const of = (id) => people[id];
+    const all = Object.keys(people);
+    expect(calledAgentIds("@xiaolin.jarvis 你好", all, of)).toEqual(["xj"]);
+    expect(calledAgentIds("@Bobby.Jarvis.", all, of)).toEqual(["bj"]);
+    expect(calledAgentIds("@jarvis 你好", all, of)).toEqual([]);
+    expect(calledAgentIds("@jarvis 你好", ["x", "xj", "bh"], of)).toEqual(["xj"]);
+    expect(calledAgentIds("@helper", all, of)).toEqual(["bh"]);
+    expect(calledAgentIds("@anna", all, of)).toEqual([]);
+    expect(calledAgentIds("@anna", ["x", "xa"], of)).toEqual(["xa"]);
+    expect(calledAgentIds("@xiaolin.anna @nobody", all, of)).toEqual(["xa"]);
+  });
+
+  it("a person member's display name is a person first too: a bare `@Jarvis` naming the person 「Jarvis」 calls no Agent; the full form still does", () => {
+    const people = {
+      tony: { kind: "human", handle: "tony", displayName: "Jarvis" },
+      x: { kind: "human", handle: "xiaolin", displayName: "小林" },
+      xj: { kind: "agent", handle: "xiaolin.jarvis", displayName: "贾维斯" },
+    };
+    const of = (id) => people[id];
+    expect(calledAgentIds("@Jarvis 你好", ["tony", "x", "xj"], of)).toEqual([]);
+    expect(calledAgentIds("@xiaolin.jarvis 你好", ["tony", "x", "xj"], of)).toEqual(["xj"]);
+    expect(calledAgentIds("@jarvis 你好", ["x", "xj"], of)).toEqual(["xj"]);
+    // Whole token only: 「Jarvis Lee」 is no `@jarvis`.
+    expect(calledAgentIds("@jarvis", ["x", "xj", "lee"], (id) => (id === "lee" ? { kind: "human", handle: "lee", displayName: "Jarvis Lee" } : of(id)))).toEqual(["xj"]);
+  });
+
+  it("an Agent that answers only when called, in its own conversation, answers to its full handle, its name part and its name", () => {
+    const agent = { handle: "@xiaolin.jarvis", name: "贾维斯" };
+    for (const text of ["@xiaolin.jarvis 在吗", "@jarvis 在吗", "@贾维斯 在吗"]) expect([text, namesAgent(text, agent)]).toEqual([text, true]);
+    expect(namesAgent("随便聊聊 @xiaolin", agent)).toBe(false);
+    // The handle and the name part as whole mentions, not inside a longer one.
+    for (const text of ["@jarvis_2 在吗", "@xiaolin.jarvis2", "@ai"]) expect([text, namesAgent(text, agent)]).toEqual([text, false]);
+    expect(namesAgent("@aiden 你好", { handle: "xiaolin.ai", name: "小爱" })).toBe(false);
+    expect(namesAgent("@ai 你好", { handle: "xiaolin.ai", name: "小爱" })).toBe(true);
   });
 });

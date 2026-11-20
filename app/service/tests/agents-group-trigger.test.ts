@@ -129,8 +129,8 @@ describe("mentionedHandles", () => {
     expect(mentionedHandles("mail@anna x_@bob 9@carl Z@dave")).toEqual([]);
     // The whole run of word characters is the handle: `@anna_2` is not `@anna`.
     expect(mentionedHandles("@anna_2 @anna2")).toEqual(["anna_2", "anna2"]);
-    // 3 to 24 characters, or nothing.
-    expect(mentionedHandles(`@an @ab_ @${"a".repeat(24)} @${"b".repeat(25)}`)).toEqual(["ab_", "a".repeat(24)]);
+    // 2 to 24 characters (an Agent's name part may be 2: family names), or nothing.
+    expect(mentionedHandles(`@a @an @ab_ @${"a".repeat(24)} @${"b".repeat(25)}`)).toEqual(["an", "ab_", "a".repeat(24)]);
     expect(mentionedHandles("")).toEqual([]);
     expect(mentionedHandles("@")).toEqual([]);
     expect(mentionedHandles("@ anna")).toEqual([]);
@@ -188,7 +188,7 @@ describe("a person's message in a group", () => {
       createdAt: new Date(),
     });
     const nothing = noneTriggered();
-    for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@an @ 安娜" }, {}]) {
+    for (const body of [{ text: "大家好，今天开会" }, { text: "write to anna@example.test" }, { text: "@a @ 安娜 @x.y" }, {}]) {
       expect(await maybeTrigger(fake, lock, message(body), app.deps.config)).toEqual(nothing);
     }
     expect(await maybeTrigger(fake, lock, message({ text: "@anna" }, "system"), app.deps.config)).toEqual(nothing);
@@ -1026,7 +1026,7 @@ describe("chainBudget", () => {
     expect((await api(app, w.owner, "PATCH", `/api/agents/${set.id}`, { intro: "简介" })).json.chainBudget).toBe("2.000001");
     for (const bad of ["0", "0.999999", "100000.000001", "100001", "-1", "+5", "1e3", "", " 5", "5.", ".5", "1.0000001", "五", 5, null, [], {}]) {
       expect([bad, await api(app, w.owner, "PATCH", `/api/agents/${set.id}`, { chainBudget: bad })]).toEqual([bad, { status: 400, json: { error: "invalid_request" } }]);
-      expect([bad, (await api(app, w.owner, "POST", "/api/agents", { handle: `cb_${txn++}`, name: "CB", chainBudget: bad })).status]).toEqual([bad, 400]);
+      expect([bad, (await api(app, w.owner, "POST", "/api/agents", { namePart: `cb_${txn++}`, name: "CB", chainBudget: bad })).status]).toEqual([bad, 400]);
     }
     expect((await api(app, w.owner, "GET", `/api/agents/${set.id}`)).json.chainBudget).toBe("2.000001");
     // Anybody else: as for an id that does not exist, and changed nothing.

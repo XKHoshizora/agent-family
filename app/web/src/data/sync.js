@@ -46,6 +46,7 @@ import {
   positionsOf,
   setAvatarVersion,
   setPeerRead,
+  setPrincipalHandle,
   setRead,
   unknownMembers,
 } from "./model.js";
@@ -610,7 +611,8 @@ export function start(
         agentNeed.cards.add(event.id);
         return;
       case "principal":
-        setModel(setAvatarVersion(model, event.id, event.avatarVersion));
+        // Its avatar or its handle changed (a rename: an owner's also changes their Agents' full handles).
+        setModel(setPrincipalHandle(setAvatarVersion(model, event.id, event.avatarVersion), event.id, event.handle));
         return;
       case "run": {
         if (typeof event.conversationId !== "string") return;
