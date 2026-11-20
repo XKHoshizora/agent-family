@@ -1,0 +1,1 @@
+Brand marks copied unchanged on 2026-11-20 from https://github.com/lobehub/lobe-icons (packages/static-svg/icons/<name>.svg, the single-colour variants; MIT, see LICENSE-lobe-icons.txt); the marks are their owners' trademarks, used only to show which brand a model is.
