@@ -35,6 +35,7 @@ import {
   wire,
 } from "./fixtures.js";
 import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, push, rowNames, toastText } from "./harness.jsx";
+import { optionsOf, pickOption } from "./select-helpers.js";
 import { othersBudgetSent } from "../src/pages/AgentForm.jsx";
 
 beforeEach(() => {
@@ -106,7 +107,7 @@ const chooseModel = async (name) => {
   });
   await click(option);
 };
-const levels = () => within(inMain().getByLabelText("思考程度")).getAllByRole("option").map((o) => o.textContent);
+const levels = () => optionsOf(inMain().getByLabelText("思考程度")).map(([, text]) => text);
 const createButton = () => inMain().getByRole("button", { name: /^创建 Agent$|^创建中…$/ });
 const personaBox = () => inMain().getByLabelText("人格文档");
 const sectionShown = () => document.querySelector(".rail-item.active").textContent;
@@ -249,9 +250,9 @@ describe("creating an Agent", () => {
     type("简介", " 陪你规划旅行 ");
     type("擅长领域", "旅行");
     await chooseModel("gpt-x");
-    fireEvent.change(inMain().getByLabelText("思考程度"), { target: { value: "high" } });
+    pickOption(inMain().getByLabelText("思考程度"), "high");
     fireEvent.change(personaBox(), { target: { value: "\n你是一位旅行家。\n" } });
-    fireEvent.change(inMain().getByLabelText("私聊回复方式"), { target: { value: "mention" } });
+    pickOption(inMain().getByLabelText("私聊回复方式"), "mention");
     await click(createButton());
     expect(createAgent.mock.calls[0][0]).toEqual({
       handle: "traveller",
@@ -471,7 +472,7 @@ describe("思考程度", () => {
     expect(levels()).toEqual(["不思考", "低", "高"]);
     await chooseModel("gpt-x");
     expect(levels()).toEqual(["不思考", "低", "中", "高", "很高", "最高"]);
-    fireEvent.change(inMain().getByLabelText("思考程度"), { target: { value: "max" } });
+    pickOption(inMain().getByLabelText("思考程度"), "max");
     await chooseModel("大模型 · 需余额");
     expect(inMain().getByLabelText("思考程度").value).toBe("none");
     await chooseModel("plain");
@@ -489,7 +490,7 @@ describe("思考程度", () => {
     await openCreate();
     await chooseModel("some-levels");
     expect(levels()).toEqual(["不思考", "低", "高", "最高"]);
-    fireEvent.change(inMain().getByLabelText("思考程度"), { target: { value: "max" } });
+    pickOption(inMain().getByLabelText("思考程度"), "max");
     await chooseModel("all-levels");
     expect(levels()).toEqual(["不思考", "低", "中", "高", "很高", "最高"]);
     expect(inMain().getByLabelText("思考程度").value).toBe("max");
@@ -714,10 +715,10 @@ describe("群里谁可以叫它 (groupMentions)", () => {
     await openAgents({ api: { createAgent } });
     await openCreate();
     expect(box().value).toBe("members");
-    expect(within(box()).getAllByRole("option").map((o) => o.textContent)).toEqual(["所有群成员", "仅我"]);
+    expect(optionsOf(box()).map(([, text]) => text)).toEqual(["所有群成员", "仅我"]);
     expect(box().closest(".field").textContent).toContain("被叫到时它会在群里回复，费用算你的。");
     type("名称", "MyBot");
-    fireEvent.change(box(), { target: { value: "owner" } });
+    pickOption(box(), "owner");
     await chooseModel("小模型 · 免费");
     await click(createButton());
     expect(createAgent.mock.calls[0][0]).toMatchObject({ groupMentions: "owner" });
@@ -735,7 +736,7 @@ describe("群里谁可以叫它 (groupMentions)", () => {
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
     await click(inMain().getByRole("button", { name: /编辑/ }));
-    fireEvent.change(box(), { target: { value: "members" } });
+    pickOption(box(), "members");
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[1][1]).toEqual({ groupMentions: "members" });
     expect(document.querySelector(".main-col .kv").textContent).toContain("群里谁可以叫它所有群成员");
@@ -751,7 +752,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
   const HINT = "群里别人 @ 它所花的点数，每天到了这个数就不再回复他们。你自己 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。";
   const WRONG = "请填写 1 到 100000 之间的点数（最多 6 位小数）";
   const kv = () => document.querySelector(".main-col .kv").textContent;
-  const mentions = (value) => fireEvent.change(inMain().getByLabelText("群里谁可以叫它"), { target: { value } });
+  const mentions = (value) => pickOption(inMain().getByLabelText("群里谁可以叫它"), value);
 
   it("the value sent: the default, the amount typed, null for 不限 — and none at all for an amount that is not one", () => {
     expect(othersBudgetSent({ othersChoice: "default", othersAmount: "abc" })).toBe("20");
@@ -765,14 +766,14 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
     const createAgent = vi.fn(async () => agentOf(AG1));
     await openAgents({ api: { createAgent } });
     await openCreate();
-    expect(within(box()).getAllByRole("option").map((o) => o.textContent)).toEqual(["20 点（默认）", "自己填", "不限"]);
+    expect(optionsOf(box()).map(([, text]) => text)).toEqual(["20 点（默认）", "自己填", "不限"]);
     expect(box().value).toBe("default");
     expect(document.getElementById(box().getAttribute("aria-describedby"))?.textContent).toBe(HINT);
     // The warning for 不限 comes with the hint, which stays.
-    fireEvent.change(box(), { target: { value: "unlimited" } });
+    pickOption(box(), "unlimited");
     expect(mainText()).toContain(WARNING);
     expect(box().closest(".field").textContent).toContain(HINT);
-    fireEvent.change(box(), { target: { value: "default" } });
+    pickOption(box(), "default");
     expect(screen.queryByLabelText(AMOUNT)).toBeNull();
     mentions("owner");
     expect(screen.queryByLabelText(LABEL)).toBeNull();
@@ -799,7 +800,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
 
   it("creating: 自己填 sends what I typed as a decimal string", async () => {
     const body = await createWith(() => {
-      fireEvent.change(box(), { target: { value: "custom" } });
+      pickOption(box(), "custom");
       type(AMOUNT, " 035.50 ");
       expect(mainText()).not.toContain(WARNING);
     });
@@ -808,7 +809,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
 
   it("creating: 不限 shows the warning and sends null", async () => {
     const body = await createWith(() => {
-      fireEvent.change(box(), { target: { value: "unlimited" } });
+      pickOption(box(), "unlimited");
       expect(mainText()).toContain(WARNING);
       expect(screen.queryByLabelText(AMOUNT)).toBeNull();
     });
@@ -821,7 +822,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
     await openCreate();
     type("名称", "MyBot");
     await chooseModel("小模型 · 免费");
-    fireEvent.change(box(), { target: { value: "custom" } });
+    pickOption(box(), "custom");
     for (const value of ["0", "100001", "abc", "", "1.1234567"]) {
       type(AMOUNT, value);
       await click(createButton());
@@ -867,11 +868,11 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[0][1]).toEqual({ intro: "新简介" });
     await click(inMain().getByRole("button", { name: /编辑/ }));
-    fireEvent.change(box(), { target: { value: "unlimited" } });
+    pickOption(box(), "unlimited");
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[1][1]).toEqual({ othersBudget: null });
     await click(inMain().getByRole("button", { name: /编辑/ }));
-    fireEvent.change(box(), { target: { value: "default" } });
+    pickOption(box(), "default");
     mentions("owner");
     await click(inMain().getByRole("button", { name: "保存" }));
     expect(patchAgent.mock.calls[2][1]).toEqual({ groupMentions: "owner" });
@@ -908,7 +909,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
 
     it("the choice I made stays when the amount changes elsewhere: the notice says so, and saving sends mine", async () => {
       const { app, patchAgent } = await openEdit();
-      fireEvent.change(box(), { target: { value: "unlimited" } });
+      pickOption(box(), "unlimited");
       await changeElsewhere(app, { othersBudget: "50" });
       expect(box().value).toBe("unlimited");
       expect(mainText()).toContain(CHANGED_ELSEWHERE);
@@ -928,7 +929,7 @@ describe("别人 @ 每天最多花 (othersBudget)", () => {
 
     it("my own save coming back says nothing", async () => {
       const { app } = await openEdit();
-      fireEvent.change(box(), { target: { value: "unlimited" } });
+      pickOption(box(), "unlimited");
       await changeElsewhere(app, { othersBudget: null });
       expect(mainText()).not.toContain(CHANGED_ELSEWHERE);
     });
@@ -1416,10 +1417,10 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       expect(inMain().queryByLabelText("选择好友或群成员")).toBeNull();
       await click(inMain().getByRole("button", { name: "添加称呼" }));
       const picker = inMain().getByLabelText("选择好友或群成员");
-      const options = within(picker).getAllByRole("option").map((o) => o.textContent);
-      expect(options[0]).toBe("选择好友或群成员");
+      // Nothing chosen: the button says what to do; the list holds the people only.
+      expect(picker.textContent).toBe("选择好友或群成员");
       // 小安 is both a friend and a member: once. 安的助手 is listed already; 小助手 is the Agent; Mei is me.
-      const names = options.slice(1);
+      const names = optionsOf(picker).map(([, text]) => text);
       expect(names.slice().sort()).toEqual(["小安 @ann", "朵拉 @dora", "阿波 @bo"].sort());
       expect(names).toEqual(names.slice().sort((a, b) => a.localeCompare(b, "zh")));
       expect(inMain().getByPlaceholderText("称呼")).toBeTruthy();
@@ -1428,7 +1429,7 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
     it("an Agent not yet listed shows its badge in the picker", async () => {
       await openEdit(record());
       await click(inMain().getByRole("button", { name: "添加称呼" }));
-      expect(within(inMain().getByLabelText("选择好友或群成员")).getByRole("option", { name: "安的助手 @annbot · Agent" })).toBeTruthy();
+      expect(optionsOf(inMain().getByLabelText("选择好友或群成员")).map(([, text]) => text)).toContain("安的助手 @annbot · Agent");
     });
 
     it("chosen and named, it is saved by PUT and the list is the view the service answers with", async () => {
@@ -1436,7 +1437,7 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       const putAppellation = vi.fn(async () => ({ ...rec, appellations: [ANN_ENTRY] }));
       await openEdit(rec, { putAppellation });
       await click(inMain().getByRole("button", { name: "添加称呼" }));
-      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      pickOption(inMain().getByLabelText("选择好友或群成员"), ANN);
       fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "  安姐  " } });
       await click(inMain().getByRole("button", { name: "保存称呼" }));
       expect(putAppellation).toHaveBeenCalledWith(AG1, ANN, { appellation: "安姐" });
@@ -1449,7 +1450,7 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       const putAppellation = vi.fn(async () => record());
       await openEdit(record(), { putAppellation });
       await click(inMain().getByRole("button", { name: "添加称呼" }));
-      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      pickOption(inMain().getByLabelText("选择好友或群成员"), ANN);
       fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "字".repeat(21) } });
       await click(inMain().getByRole("button", { name: "保存称呼" }));
       expect(section().textContent).toContain("称呼最多 20 个字，不能换行。");
@@ -1546,7 +1547,7 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
       });
       await openEdit(record(), { putAppellation });
       await click(inMain().getByRole("button", { name: "添加称呼" }));
-      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      pickOption(inMain().getByLabelText("选择好友或群成员"), ANN);
       fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "安姐" } });
       await click(inMain().getByRole("button", { name: "保存称呼" }));
       expect(section().textContent).toContain("一个 Agent 最多设 100 个称呼。");
@@ -1558,7 +1559,7 @@ describe("称呼 (how an Agent addresses its owner and others)", () => {
     const add = async (api) => {
       await openEdit(record(), api);
       await click(inMain().getByRole("button", { name: "添加称呼" }));
-      fireEvent.change(inMain().getByLabelText("选择好友或群成员"), { target: { value: ANN } });
+      pickOption(inMain().getByLabelText("选择好友或群成员"), ANN);
       fireEvent.change(inMain().getByPlaceholderText("称呼"), { target: { value: "安姐" } });
     };
 
@@ -1712,7 +1713,7 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(screen.queryByLabelText(LEVEL)).toBeNull();
     expect(screen.queryByLabelText(AMOUNT)).toBeNull();
     fireEvent.click(box());
-    expect(within(inMain().getByLabelText(LEVEL)).getAllByRole("option").map((o) => [o.value, o.textContent])).toEqual([
+    expect(optionsOf(inMain().getByLabelText(LEVEL))).toEqual([
       ["less", "少说"],
       ["normal", "适中"],
       ["more", "多说"],
@@ -1731,7 +1732,7 @@ describe("主动参与群聊 (proactive replies)", () => {
   it("creating: off sends nothing about it, even after the level or amount was changed and the switch turned off again", async () => {
     const createAgent = await createOn(ON_SITE, () => {
       fireEvent.click(box());
-      fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "more" } });
+      pickOption(inMain().getByLabelText(LEVEL), "more");
       type(AMOUNT, "abc");
       fireEvent.click(box());
     });
@@ -1747,7 +1748,7 @@ describe("主动参与群聊 (proactive replies)", () => {
   it("creating: the level and the amount typed are sent", async () => {
     const createAgent = await createOn(ON_SITE, () => {
       fireEvent.click(box());
-      fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+      pickOption(inMain().getByLabelText(LEVEL), "less");
       type(AMOUNT, " 035.50 ");
     });
     expect(createAgent.mock.calls[0][0]).toMatchObject({ proactive: true, proactiveLevel: "less", proactiveBudget: "35.5" });
@@ -1805,7 +1806,7 @@ describe("主动参与群聊 (proactive replies)", () => {
 
   it("editing: only the level, only the level; only the amount, only the amount", async () => {
     const { patchAgent } = await openEditOf(proactive({ proactiveBudget: "35" }));
-    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+    pickOption(inMain().getByLabelText(LEVEL), "less");
     await save();
     expect(patchAgent.mock.calls[0][1]).toEqual({ proactiveLevel: "less" });
     await click(inMain().getByRole("button", { name: /编辑/ }));
@@ -1839,7 +1840,7 @@ describe("主动参与群聊 (proactive replies)", () => {
     await openRow("小助手");
     await click(inMain().getByRole("button", { name: /编辑/ }));
     fireEvent.click(box());
-    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "more" } });
+    pickOption(inMain().getByLabelText(LEVEL), "more");
     answer = OFF_SITE;
     await act(async () => {
       await app.layer.actions.loadModels();
@@ -1874,7 +1875,7 @@ describe("主动参与群聊 (proactive replies)", () => {
     expect(box().checked).toBe(true);
     expect(inMain().getByLabelText(LEVEL).value).toBe("more");
     expect(mainText()).not.toContain(CHANGED);
-    fireEvent.change(inMain().getByLabelText(LEVEL), { target: { value: "less" } });
+    pickOption(inMain().getByLabelText(LEVEL), "less");
     await elsewhere(proactive({ proactiveLevel: "normal" }));
     expect(inMain().getByLabelText(LEVEL).value).toBe("less");
     expect(mainText()).toContain(CHANGED);

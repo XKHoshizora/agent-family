@@ -127,5 +127,6 @@ export const APP_CLASSES = new Set(
   msg-whisper whisper whisper-head whisper-text whisper-actions whisper-done whisper-dot
   memory-room memory-head memory-add memory-add-line memory-rows memory-row memory-body memory-text memory-source memory-actions memory-open memory-stale memory-switches memory-vault
   model-brand model-trigger model-name model-chevron model-pop model-scrim model-search model-list model-group-label model-option
-  model-note model-check model-reason model-marks model-mark model-mark-free model-mark-paid model-empty model-foot`.split(/\s+/),
+  model-note model-check model-reason model-marks model-mark model-mark-free model-mark-paid model-empty model-foot model-scope side-model
+  select-trigger select-label select-pop select-list select-option`.split(/\s+/),
 );

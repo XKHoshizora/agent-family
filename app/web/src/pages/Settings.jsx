@@ -16,6 +16,7 @@ import { MemoryRoom, useMemoryRoom } from "./MemoryRoom.jsx";
 import { MEMORY_LANGUAGES, languageName } from "../data/memoryLanguages.js";
 import { PROVIDERS_PAGE, choiceList, modelKey, pickerGroups, staleRows, useModelSources } from "./ModelPicker.jsx";
 import { ModelSelect } from "./ModelSelect.jsx";
+import { Select } from "../ui/Select.jsx";
 import { refusalText, settled, useAction } from "./useAction.js";
 
 export function SettingsList() {
@@ -253,15 +254,16 @@ function MemorySettings() {
     setAttempt((n) => n + 1);
   };
   const off = !settings || busy !== null;
-  const unread = <option value="" hidden>{settings === null ? "正在读取…" : "读取失败"}</option>;
+  /** What a box says before the settings are read (or when they could not be). */
+  const unread = settings === null ? "正在读取…" : "读取失败";
 
   const changeDream = async (event) => {
     const res = await run("dream", () => settled(actions.setDream(event.target.checked)), refusalText);
     if (res.ok) setSettings((cur) => ({ ...cur, dream: res.value }));
   };
 
-  const changeLanguage = async (event) => {
-    const next = event.target.value === "auto" ? null : event.target.value;
+  const changeLanguage = async (value) => {
+    const next = value === "auto" ? null : value;
     const res = await run("memoryLanguage", () => settled(actions.setMemoryLanguage(next)), refusalText);
     if (!res.ok) return;
     setSettings((cur) => ({ ...cur, memoryLanguage: res.value }));
@@ -299,8 +301,8 @@ function MemorySettings() {
     setAsked(null);
   };
 
-  const changeNewNotes = async (event) => {
-    const res = await run("newNotes", () => settled(actions.setNewNotes(event.target.value)), refusalText);
+  const changeNewNotes = async (value) => {
+    const res = await run("newNotes", () => settled(actions.setNewNotes(value)), refusalText);
     if (res.ok) setSettings((cur) => ({ ...cur, newNotes: res.value }));
   };
 
@@ -340,13 +342,14 @@ function MemorySettings() {
           />
         </fieldset>
         <Field label="记忆用的语言" hint="它记下的笔记统一用这种语言写；名字和原话保留原文。">
-          <select value={settings ? (settings.memoryLanguage ?? "auto") : ""} disabled={off} onChange={changeLanguage}>
-            {!settings && unread}
-            <option value="auto">自动</option>
-            {MEMORY_LANGUAGES.map(([code, name]) => (
-              <option key={code} value={code}>{name}</option>
-            ))}
-          </select>
+          <Select
+            value={settings ? (settings.memoryLanguage ?? "auto") : null}
+            placeholder={unread}
+            disabled={off}
+            onChange={changeLanguage}
+            listLabel="记忆用的语言"
+            options={[{ value: "auto", label: "自动" }, ...MEMORY_LANGUAGES.map(([code, name]) => ({ value: code, label: name }))]}
+          />
         </Field>
         {busy === "convert" ? (
           <p className="field-hint" role="status">正在转换…</p>
@@ -360,12 +363,14 @@ function MemorySettings() {
         ) : null}
       </section>
       <Field label="新记下的内容" hint="只管以后新记下的；已经记下的不会因此移动。">
-        <select value={settings?.newNotes ?? ""} disabled={off} onChange={changeNewNotes}>
-          {!settings && unread}
-          {NEW_NOTES.map(([id, label]) => (
-            <option key={id} value={id}>{label}</option>
-          ))}
-        </select>
+        <Select
+          value={settings?.newNotes ?? null}
+          placeholder={unread}
+          disabled={off}
+          onChange={changeNewNotes}
+          listLabel="新记下的内容"
+          options={NEW_NOTES.map(([id, label]) => ({ value: id, label }))}
+        />
       </Field>
       <div className="field">
         <label id={`${pickId}-label`} htmlFor={pickId}>用哪个模型整理记忆</label>
@@ -375,7 +380,7 @@ function MemorySettings() {
           describedBy={`${pickId}-hint`}
           value={modelValue}
           current={shownModel && { name: shownModel.name, brand: shownModel.brand }}
-          placeholder={settings === null ? "正在读取…" : "读取失败"}
+          placeholder={unread}
           lead={lead}
           groups={groups}
           disabled={off || sources.status !== "ready"}

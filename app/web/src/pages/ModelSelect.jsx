@@ -1,8 +1,9 @@
-import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import React, { useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Search } from "../icons.js";
 import { composing } from "../ui/primitives.jsx";
 import { ModelBrand } from "../ui/ModelBrand.jsx";
+import { usePopover } from "../ui/popover.js";
 
 /** What a row's marks say, and — where the short word needs it — what they mean (the provider form's own words). */
 export const MARK_TEXT = { free: "免费", paid: "需余额", thinking: "思考", tools: "工具" };
@@ -35,24 +36,6 @@ function visible(lead, groups, words) {
 }
 const rowsOf = (shown) => [...shown.lead, ...shown.groups.flatMap((g) => g.options)];
 
-/** Room kept between the popover and the window's edges, and between it and its button (px). */
-const EDGE = 12;
-const GAP = 6;
-const TALLEST = 420;
-/** Below this much room under its button (about six rows) the list may open above it instead (px). */
-const ENOUGH_BELOW = 240;
-
-/** The nearest box around `node` that scrolls up and down and has more than it shows (a page's body), or null. */
-function scrollerOf(node) {
-  for (let el = node.parentElement; el && el !== document.body; el = el.parentElement) {
-    const { overflowY } = getComputedStyle(el);
-    if ((overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight) return el;
-  }
-  return null;
-}
-/** The list is a sheet at the bottom of the screen (styles.css, under 480 px). */
-const onPhone = () => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 480px)").matches;
-
 /**
  * A model picker: a button showing the current model (its brand mark and name) that opens a searchable list of models
  * grouped by where they come from, each row with its brand mark, its name and its marks at the right (免费 / 需余额, 思考,
@@ -65,7 +48,8 @@ const onPhone = () => typeof window.matchMedia === "function" && window.matchMed
  * - `lead`: rows before the groups; `groups`: [{id, label, options, empty}] — `empty` is what a group without rows says.
  *   A row: {key, name, brand, marks, terms (lower-case words it is found by), disabled, reason (why it cannot be chosen)}.
  * - `id`, `labelledBy` (the field's label: the button reads "label value"), `label` (its own name instead), `describedBy`.
- * - `status`: a line shown instead of the list (it is being read); `footer`: what stands under the list.
+ * - `status`: a line shown instead of the list (it is being read); `footer`: what stands under the list; `note`: one quiet
+ *   line at its top (what choosing here means beyond this place).
  * - `onOpen()` when it opens; `onChange(key, row)` when another row is chosen.
  */
 export function ModelSelect({
@@ -80,6 +64,7 @@ export function ModelSelect({
   groups = [],
   status = null,
   footer = null,
+  note = null,
   disabled = false,
   busy = false,
   compact = false,
@@ -89,13 +74,17 @@ export function ModelSelect({
   const base = useId();
   const listId = `${base}-list`;
   const valueId = `${base}-value`;
-  const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(null);
-  const [place, setPlace] = useState(null);
-  const triggerRef = useRef(null);
-  const popRef = useRef(null);
   const searchRef = useRef(null);
+  const { open, show: openList, close, triggerRef, popRef, popStyle, up } = usePopover({
+    disabled,
+    busy,
+    onOpen,
+    // The search field takes the focus.
+    focus: () => searchRef.current?.focus(),
+    widthOf: (box) => (compact ? 380 : Math.max(box.width, 320)),
+  });
 
   // Every row's id (by its place among all rows, never by its key, which may hold anything a name may).
   const all = [...lead, ...groups.flatMap((g) => g.options)];
@@ -109,16 +98,9 @@ export function ModelSelect({
   const activeKey = choosable.some((o) => o.key === active) ? active : (choosable.find((o) => o.key === value) ?? choosable[0])?.key ?? null;
 
   const show = (typed = "") => {
-    if (disabled || busy || open) return;
+    if (!openList()) return;
     setQuery(typed);
     setActive(null);
-    setOpen(true);
-    onOpen?.();
-  };
-  const close = (focusButton) => {
-    setOpen(false);
-    setQuery("");
-    if (focusButton) triggerRef.current?.focus();
   };
   const choose = (key) => {
     const row = rows.find((o) => o.key === key);
@@ -127,78 +109,10 @@ export function ModelSelect({
     if (key !== value) onChange?.(key, row);
   };
 
-  // Opened: the search field takes the focus; the popover opens under its button — its page first scrolled, as far as it
-  // can with the button still in sight, so that the list has room there — and above it only when there is still not
-  // enough room below and more above (laid out before it is painted, and again when the window scrolls or changes size).
-  // A phone's sheet needs none of it.
-  useLayoutEffect(() => {
-    if (!open) return undefined;
-    searchRef.current?.focus();
-    const placeIt = () => {
-      const button = triggerRef.current;
-      if (!button) return;
-      const r = button.getBoundingClientRect();
-      const width = Math.min(compact ? 380 : Math.max(r.width, 320), window.innerWidth - 2 * EDGE);
-      const left = Math.max(EDGE, Math.min(r.left, window.innerWidth - EDGE - width));
-      const below = window.innerHeight - r.bottom - GAP - EDGE;
-      const above = r.top - GAP - EDGE;
-      const up = below < ENOUGH_BELOW && above > below;
-      const height = Math.max(160, Math.min(TALLEST, up ? above : below));
-      setPlace(up ? { up, left, width, height, bottom: window.innerHeight - r.top + GAP } : { up, left, width, height, top: r.bottom + GAP });
-    };
-    const button = triggerRef.current;
-    if (button && !onPhone()) {
-      button.scrollIntoView?.({ block: "nearest" });
-      // As tall as the list is now (at most TALLEST), and never less than ENOUGH_BELOW.
-      const want = Math.min(TALLEST, Math.max(popRef.current?.offsetHeight ?? 0, ENOUGH_BELOW));
-      const r = button.getBoundingClientRect();
-      const below = window.innerHeight - r.bottom - GAP - EDGE;
-      const scroller = below < want ? scrollerOf(button) : null;
-      if (scroller) {
-        const shown = Math.max(scroller.getBoundingClientRect().top, 0);
-        const by = Math.min(want - below, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop, r.top - shown - EDGE);
-        if (by > 0) scroller.scrollTop += by;
-      }
-    }
-    placeIt();
-    const onScroll = (event) => {
-      if (!popRef.current?.contains(event.target)) placeIt();
-    };
-    window.addEventListener("resize", placeIt);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      window.removeEventListener("resize", placeIt);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [open, compact]);
-
-  // A press anywhere else closes it (the focus goes where the press put it); Esc closes it wherever the focus is.
-  useEffect(() => {
-    if (!open) return undefined;
-    const outside = (event) => {
-      if (popRef.current?.contains(event.target) || triggerRef.current?.contains(event.target)) return;
-      close(false);
-    };
-    const escape = (event) => {
-      if (event.key === "Escape") close(true);
-    };
-    document.addEventListener("pointerdown", outside);
-    document.addEventListener("keydown", escape);
-    return () => {
-      document.removeEventListener("pointerdown", outside);
-      document.removeEventListener("keydown", escape);
-    };
-  }, [open]);
-
   // The row the keyboard is on stays in view.
   useLayoutEffect(() => {
     if (open && activeKey !== null) document.getElementById(optionId.get(activeKey))?.scrollIntoView?.({ block: "nearest" });
   }, [open, activeKey]);
-
-  // Closed while saving (the button turns off): nothing stays open over it.
-  useEffect(() => {
-    if (disabled && open) close(false);
-  }, [disabled]);
 
   const move = (step) => {
     const at = choosable.findIndex((o) => o.key === activeKey);
@@ -281,13 +195,13 @@ export function ModelSelect({
     );
   };
 
-  const popStyle = place && { "--pop-left": `${place.left}px`, "--pop-w": `${place.width}px`, "--pop-h": `${place.height}px`, ...(place.up ? { "--pop-bottom": `${place.bottom}px` } : { "--pop-top": `${place.top}px` }) };
   const popover =
     open &&
     createPortal(
       <>
         <div className="model-scrim" aria-hidden="true" />
-        <div ref={popRef} className={`model-pop${place?.up ? " up" : ""}`} style={popStyle ?? undefined}>
+        <div ref={popRef} className={`model-pop${up ? " up" : ""}`} style={popStyle}>
+          {note && <p className="model-scope">{note}</p>}
           <div className="model-search">
             <Search size={15} aria-hidden="true" />
             <input

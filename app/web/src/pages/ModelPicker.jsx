@@ -263,15 +263,21 @@ export function ModelPicker({ sources, options, value, onChange }) {
   );
 }
 
+/** Under the picker's search where it is opened from a group: the model is the Agent's, wherever it talks. */
+export const EVERYWHERE_NOTE = "换了以后，它在所有会话里都用这个模型";
+
 /**
- * The model of one of my Agents, switched where I am (its own conversation's header, the conversation's details panel):
- * the compact picker, which reads what can be chosen only once it is first opened (and again when that failed), and saves
- * a choice with the Agent's one update — the model with its thinking level, kept when the new model takes it, else
- * 不思考, as the Agent form sends them. While that is saved the button shows the choice and does nothing; a refusal is
- * toasted in the update's own words and the button shows the stored model again. Nothing for an Agent not mine or not
- * loaded; a deleted one's model is a plain label.
+ * The model of one of my Agents, switched where I am (its own conversation's header and details panel; in a group, its row
+ * of the details panel and the line under its reply): the compact picker, which reads what can be chosen only once it is
+ * first opened (and again when that failed), and saves a choice with the Agent's one update — the model with its
+ * thinking level, kept when the new model takes it, else 不思考, as the Agent form sends them. While that is saved the
+ * button shows the choice (unless it says something else: `shown`) and does nothing; a refusal is toasted in the update's
+ * own words and the button shows the stored model again. Nothing for an Agent not mine or not loaded; a deleted one's
+ * model is a plain label.
+ * `shown`: {name, brand} the button always says (a reply's line: the model that reply used), not the Agent's model;
+ * `note`: the quiet line at the top of its list (`EVERYWHERE_NOTE` in a group).
  */
-export function AgentModelSwitch({ agentId }) {
+export function AgentModelSwitch({ agentId, shown = null, note = null }) {
   const { state, dispatch, actions } = useStore();
   const agent = state.agents[agentId];
   const [opened, setOpened] = useState(false);
@@ -281,8 +287,8 @@ export function AgentModelSwitch({ agentId }) {
   if (!agent?.mine || !agent.loaded) return null;
 
   const model = saving ?? agent.model;
-  const name = modelName(state, model);
-  const current = model ? { name, brand: modelLab(state, model) } : null;
+  const name = shown ? shown.name : modelName(state, model);
+  const current = shown ?? (model ? { name, brand: modelLab(state, model) } : null);
   if (agent.deleted) {
     return (
       <span className="head-model">
@@ -315,6 +321,7 @@ export function AgentModelSwitch({ agentId }) {
       lead={staleRows(options)}
       groups={pickerGroups(sources)}
       status={opened && sources.status === "loading" ? "正在读取可用的模型…" : null}
+      note={note}
       busy={busy !== null}
       footer={<Btn small variant="text" onClick={() => dispatch({ type: "nav", patch: PROVIDERS_PAGE })}>管理供应商</Btn>}
       onOpen={open}

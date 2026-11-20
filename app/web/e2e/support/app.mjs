@@ -160,6 +160,15 @@ export async function chooseModelUi(page, form, label) {
 }
 
 /**
+ * Picks an option of a form's plain choice (src/ui/Select.jsx, where a native <select> was): its button, labelled `label`,
+ * opens a list of that name (outside the form, at the page's end); the option whose text is `option` is chosen.
+ */
+export async function chooseOptionUi(page, form, label, option) {
+  await form.getByLabel(label, { exact: true }).click();
+  await page.getByRole("listbox", { name: label, exact: true }).getByRole("option", { name: option, exact: true }).click();
+}
+
+/**
  * Agent → 创建 Agent → the form (名称, the model picked by its label, optionally 简介, 擅长领域, 思考程度, 人格文档) →
  * 创建 Agent. `onFilled(form)` runs just before that click. Resolves with the Agent's conversation, which opens by itself.
  */
@@ -171,7 +180,7 @@ export async function createAgentUi(page, { name, model = FREE_MODEL, intro, fie
   if (intro) await form.getByLabel("简介", { exact: true }).fill(intro);
   if (field) await form.getByLabel("擅长领域", { exact: true }).fill(field);
   await chooseModelUi(page, form, model);
-  if (reasoning) await form.getByLabel("思考程度", { exact: true }).selectOption({ label: reasoning });
+  if (reasoning) await chooseOptionUi(page, form, "思考程度", reasoning);
   if (persona) await form.getByLabel("人格文档", { exact: true }).fill(persona);
   if (onFilled) await onFilled(form);
   await form.getByRole("button", { name: "创建 Agent", exact: true }).click();

@@ -199,7 +199,8 @@ button:disabled { cursor: not-allowed; }
 }
 .menu button:hover { background: var(--purple-tint); }
 
-/* ───────── model picker: a button (a form field's, or a compact one in a line of text) and its searchable list */
+/* ───────── model picker: a button (a form field's, or a compact one in a line of text) and its searchable list; the plain
+   Select (src/ui/Select.jsx) is the same button, popover and rows, without the search and the marks */
 /* A brand mark (its size is set where it is drawn): a brand's own colours, a single-colour one in the text's colour, or the generic chip. */
 .model-brand { flex: none; display: inline-block; }
 img.model-brand { object-fit: contain; }
@@ -208,19 +209,19 @@ span.model-brand {
   -webkit-mask-position: center; mask-position: center;
 }
 svg.model-brand { color: var(--ink-3); }
-.model-trigger {
+.model-trigger, .select-trigger {
   display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 9px 12px; border-radius: 9px; text-align: left;
   border: 1px solid var(--line-strong); background: rgba(255, 255, 255, 0.8); font-size: 15px; color: var(--ink);
 }
-.model-trigger .model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-trigger .model-name, .select-trigger .select-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Nothing chosen: the button reads its placeholder, muted (no brand mark before it). */
-.model-trigger > .model-name:first-child { color: var(--ink-3); }
+.model-trigger > .model-name:first-child, .select-trigger[value=""] .select-label { color: var(--ink-3); }
 .model-chevron { flex: none; color: var(--ink-3); transition: transform 0.15s ease; }
-.model-trigger[aria-expanded="true"] .model-chevron { transform: rotate(180deg); }
-.model-trigger:hover:not(:disabled) { background: #fff; }
-.model-trigger:focus, .model-trigger[aria-expanded="true"] { outline: none; border-color: var(--purple); background: #fff; }
-.model-trigger:focus-visible { box-shadow: 0 0 0 2px var(--purple-soft); }
-.model-trigger:disabled { opacity: 0.55; }
+.model-trigger[aria-expanded="true"] .model-chevron, .select-trigger[aria-expanded="true"] .model-chevron { transform: rotate(180deg); }
+.model-trigger:hover:not(:disabled), .select-trigger:hover:not(:disabled) { background: #fff; }
+.model-trigger:focus, .model-trigger[aria-expanded="true"], .select-trigger:focus, .select-trigger[aria-expanded="true"] { outline: none; border-color: var(--purple); background: #fff; }
+.model-trigger:focus-visible, .select-trigger:focus-visible { box-shadow: 0 0 0 2px var(--purple-soft); }
+.model-trigger:disabled, .select-trigger:disabled { opacity: 0.55; }
 .model-trigger[aria-disabled="true"] { cursor: progress; opacity: 0.6; }
 /* Compact: the model in a line of text (a conversation's header, its details panel), a quiet pill on hover. */
 .model-trigger.compact {
@@ -235,12 +236,12 @@ svg.model-brand { color: var(--ink-3); }
 .model-trigger.compact .model-chevron { color: currentColor; opacity: 0.6; }
 /* The header line that ends with the model: one line, the model's name cut short first. */
 .chat-title p:has(> .model-trigger, > .head-model) { display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; padding: 3px; margin: -3px; }
-.model-pop {
+.model-pop, .select-pop {
   position: fixed; z-index: 56; left: var(--pop-left, 12px); width: var(--pop-w, 340px); top: var(--pop-top, auto); bottom: var(--pop-bottom, auto);
   max-height: var(--pop-h, 420px); display: flex; flex-direction: column; padding: 6px; border-radius: 12px;
   background: #fff; border: 1px solid var(--line); box-shadow: 0 12px 32px rgba(50, 40, 110, 0.18); animation: model-pop-in 0.12s ease-out;
 }
-.model-pop.up { animation-name: model-pop-up; }
+.model-pop.up, .select-pop.up { animation-name: model-pop-up; }
 .model-scrim { display: none; }
 .model-search {
   flex: none; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; margin-bottom: 4px; border-radius: 8px;
@@ -249,17 +250,19 @@ svg.model-brand { color: var(--ink-3); }
 .model-search:focus-within { border-color: var(--purple); background: #fff; }
 .model-search input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; background: none; outline: none; font-size: 14px; color: var(--ink); }
 .model-search input::placeholder { color: var(--ink-3); }
-.model-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.model-list, .select-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .model-group-label { position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; background: #fff; font-size: 12px; color: var(--ink-3); }
-.model-option { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 5px 8px; border-radius: 8px; font-size: 14px; cursor: pointer; }
-.model-option.active { background: var(--purple-tint); }
-.model-option .model-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.model-option[aria-selected="true"] .model-name { color: var(--purple-dark); font-weight: 600; }
-.model-option[aria-disabled="true"] { cursor: not-allowed; color: var(--ink-3); }
+.model-option, .select-option { display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 5px 8px; border-radius: 8px; font-size: 14px; cursor: pointer; }
+.model-option.active, .select-option.active { background: var(--purple-tint); }
+.model-option .model-name, .select-option .select-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-option[aria-selected="true"] .model-name, .select-option[aria-selected="true"] .select-label { color: var(--purple-dark); font-weight: 600; }
+.model-option[aria-disabled="true"], .select-option[aria-disabled="true"] { cursor: not-allowed; color: var(--ink-3); }
 .model-option[aria-disabled="true"] .model-brand { opacity: 0.5; }
 .model-option.model-note { padding-left: 30px; font-size: 13px; cursor: default; }
 .model-check { flex: none; display: grid; place-items: center; width: 14px; color: var(--purple); }
 .model-reason { flex: none; font-size: 12px; }
+/* Where a model is switched for an Agent from a group: a quiet line at the list's top says the change is everywhere. */
+.model-scope { flex: none; margin: 0 0 6px; padding: 2px 4px 0; font-size: 12px; color: var(--ink-3); }
 /* The marks: each kind in a column of its own width, so they line up from row to row (an empty one keeps its room). */
 .model-marks { flex: none; display: flex; gap: 4px; }
 .model-mark {
@@ -279,18 +282,20 @@ svg.model-brand { color: var(--ink-3); }
 /* A phone: the list is a sheet at the bottom of the screen over the page dimmed as under a dialog, its rows a finger's height. */
 @media (max-width: 480px) {
   .model-scrim { display: block; position: fixed; inset: 0; z-index: 55; background: rgba(40, 32, 80, 0.32); animation: model-fade 0.16s ease-out; }
-  .model-pop, .model-pop.up {
+  .model-pop, .model-pop.up, .select-pop, .select-pop.up {
     left: 0; right: 0; top: auto; bottom: 0; width: auto; max-height: none; height: min(72dvh, 560px);
     padding: 10px 10px calc(10px + env(safe-area-inset-bottom)); border: 0; border-radius: 16px 16px 0 0;
     box-shadow: 0 -12px 40px rgba(40, 32, 80, 0.22); animation: model-sheet-in 0.18s ease-out;
   }
+  /* (A plain choice has no search field to keep in place: its sheet is only as tall as its options.) */
+  .select-pop, .select-pop.up { height: auto; max-height: min(72dvh, 560px); }
   .model-search { height: 40px; }
   .model-search input { font-size: 16px; }
-  .model-option { min-height: 44px; font-size: 15px; }
+  .model-option, .select-option { min-height: 44px; font-size: 15px; }
   .model-foot { margin: 8px -10px 0; padding: 6px 10px 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .model-pop, .model-pop.up, .model-scrim { animation: none; }
+  .model-pop, .model-pop.up, .select-pop, .select-pop.up, .model-scrim { animation: none; }
   .model-chevron { transition: none; }
 }
 
@@ -426,6 +431,9 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 /* Under a reply of my own Agent: which model and thinking level it used (and what it cost, when that is shown). */
 .msg-via { display: flex; align-items: center; font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
 .msg-via .lab-logo { margin-right: 4px; }
+/* In a group, the model under my Agent's reply is a quiet button to its picker. */
+.msg-via .model-trigger.compact { margin: -2px 0 -2px -5px; padding: 2px 4px 2px 5px; }
+.msg-via .model-chevron { width: 11px; height: 11px; }
 /* Under a reply that looked things up: one quiet line, which opens the words and the messages found when there are any. */
 .msg-lookups { font-size: 12px; color: var(--ink-3); overflow-wrap: anywhere; }
 .msg-lookups > button {
@@ -655,7 +663,7 @@ form.page-body .notice { max-width: var(--field-w); box-sizing: border-box; }
 /* A titled group of a form's fields (称呼). */
 .form-section { border: 0; padding: 0; margin: 18px 0 0; min-width: 0; }
 .form-section > legend { font-size: 17px; font-weight: 700; padding: 0; margin-bottom: 4px; }
-.appellation-rows .member-body > input, .appellation-rows .member-body > select { margin-top: 6px; }
+.appellation-rows .member-body > input, .appellation-rows .member-body > .select-trigger { margin-top: 6px; }
 .field label, .field-label { font-weight: 600; font-size: 14px; }
 .field input, .field select, .field textarea, .human-input input {
   padding: 9px 12px; border-radius: 9px; border: 1px solid var(--line-strong); background: rgba(255, 255, 255, 0.8); outline: none; font-size: 15px;
@@ -701,6 +709,8 @@ form.page-body .notice { max-width: var(--field-w); box-sizing: border-box; }
 .side-hero { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0 12px; font-size: 17px; }
 .side-list li { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
 .side-list .identity-line { font-size: 14.5px; gap: 6px; }
+/* A group's details panel: an Agent of mine has its model at the row's right, cut short before its name is. */
+.side-list .side-model { flex: none; min-width: 0; max-width: 50%; margin-left: auto; display: flex; justify-content: flex-end; font-size: 13px; color: var(--ink-2); }
 .side .kv-row { flex-direction: column; gap: 2px; font-size: 14px; }
 .side .kv-row dt { width: auto; color: var(--ink-3); font-weight: 500; font-size: 13px; }
 .tag-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }

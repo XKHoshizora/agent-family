@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { A1, AG1, MODELS, P1, PRINCIPALS, ME, agentConv, agentOf, agentPrincipal, apiError, deferred, providerOf, syncOf } from "./fixtures.js";
 import { click, elapse, flush, inMain, installBrowser, mainText, openApp } from "./harness.jsx";
+import { optionsOf, pickOption } from "./select-helpers.js";
 import { weightOf } from "../src/data/memoryWeight.js";
 
 beforeEach(() => installBrowser());
@@ -403,7 +404,7 @@ describe("新记下的内容", () => {
     svc.api.getMe = vi.fn(async () => ({ ...ME, newNotes: "vault" }));
     await openPalace(svc);
     const select = inMain().getByLabelText(SETTING);
-    expect([...select.options].map((o) => o.textContent)).toEqual(["自动判断要不要进保险箱", "全部进保险箱", "全部不进保险箱"]);
+    expect(optionsOf(select).map(([, text]) => text)).toEqual(["自动判断要不要进保险箱", "全部进保险箱", "全部不进保险箱"]);
     expect(select.value).toBe("vault");
     expect(select.compareDocumentPosition(room("关于我")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -412,7 +413,7 @@ describe("新记下的内容", () => {
     const svc = service();
     await openPalace(svc);
     expect(inMain().getByLabelText(SETTING).value).toBe("auto");
-    fireEvent.change(inMain().getByLabelText(SETTING), { target: { value: "open" } });
+    pickOption(inMain().getByLabelText(SETTING), "open");
     await flush();
     expect(svc.api.updateNewNotes).toHaveBeenCalledWith("open");
     expect(inMain().getByLabelText(SETTING).value).toBe("open");
@@ -427,7 +428,7 @@ describe("新记下的内容", () => {
       },
     });
     await openPalace(svc);
-    fireEvent.change(inMain().getByLabelText(SETTING), { target: { value: "open" } });
+    pickOption(inMain().getByLabelText(SETTING), "open");
     await flush();
     expect(inMain().getByLabelText(SETTING).value).toBe("auto");
     expect(document.querySelector(".toast")).toBeTruthy();
@@ -514,7 +515,7 @@ describe("记忆用的语言", () => {
   const meWith = (extra) => vi.fn(async () => ({ ...ME, newNotes: "auto", memoryModel: null, memoryModelUsable: true, ...extra }));
   const pick = () => inMain().getByLabelText("记忆用的语言");
   const choose = async (value) => {
-    fireEvent.change(pick(), { target: { value } });
+    pickOption(pick(), value);
     await flush();
   };
   const NAMES = ["简体中文", "繁體中文", "日本語", "English", "한국어", "Français", "Deutsch", "Español", "Português", "Русский", "Italiano", "Tiếng Việt", "ไทย", "Bahasa Indonesia"];
@@ -525,7 +526,7 @@ describe("记忆用的语言", () => {
     const section = inMain().getByRole("region", { name: "作息" });
     expect(within(section).getByLabelText("记忆用的语言")).toBe(pick());
     expect(inMain().getByRole("switch", { name: "入梦" }).compareDocumentPosition(pick()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect([...pick().options].map((o) => o.textContent)).toEqual(["自动", ...NAMES]);
+    expect(optionsOf(pick()).map(([, text]) => text)).toEqual(["自动", ...NAMES]);
     expect(within(section).getByText("它记下的笔记统一用这种语言写；名字和原话保留原文。")).toBeTruthy();
     expect(pick().value).toBe("auto");
   });
@@ -1270,7 +1271,7 @@ describe("fix round 1", () => {
     await openPalace(svc);
     const select = inMain().getByLabelText("新记下的内容");
     expect(select.disabled).toBe(true);
-    expect(select.selectedOptions[0]?.textContent ?? "").not.toBe("自动判断要不要进保险箱");
+    expect(select.textContent).toBe("读取失败");
     expect(inMain().getByText(/没能读取这项设置，请重试。/)).toBeTruthy();
     svc.api.getMe.mockImplementation(async () => ({ ...ME, newNotes: "open" }));
     await click(inMain().getByRole("button", { name: "重试" }));

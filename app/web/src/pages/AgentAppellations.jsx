@@ -5,6 +5,7 @@ import { appellation as appellationProblem } from "../auth/validation.js";
 import { entity } from "../state/selectors.js";
 import { friendIds } from "../state/social.js";
 import { Btn, Tag, composing } from "../ui/primitives.jsx";
+import { Select } from "../ui/Select.jsx";
 import { useRowWrite } from "./useAction.js";
 
 /**
@@ -114,14 +115,14 @@ function AddRow({ agentId, candidates, onDone }) {
   return (
     <li>
       <div className="member-body">
-        <select aria-label="选择好友或群成员" value={target} onChange={(e) => setTarget(e.target.value)}>
-          <option value="">选择好友或群成员</option>
-          {candidates.map((c) => (
-            <option key={c.principalId} value={c.principalId}>
-              {`${c.name} @${c.handle}${c.kind === "agent" ? " · Agent" : ""}`}
-            </option>
-          ))}
-        </select>
+        <Select
+          aria-label="选择好友或群成员"
+          listLabel="选择好友或群成员"
+          placeholder="选择好友或群成员"
+          value={target || null}
+          onChange={setTarget}
+          options={candidates.map((c) => ({ value: c.principalId, label: `${c.name} @${c.handle}${c.kind === "agent" ? " · Agent" : ""}` }))}
+        />
         <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={enterSaves(save)} autoComplete="off" placeholder="称呼" />
         {error && <p className="field-msg" role="alert">{error}</p>}
       </div>

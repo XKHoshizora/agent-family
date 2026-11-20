@@ -211,6 +211,8 @@ describe("which model and level a reply of mine used (via)", () => {
     expect(viaLine(3).querySelector(".lab-logo").dataset.brand).toBe("openai");
     expect(viaLine(4).textContent).toBe("claude-x · 不思考");
     expect(viaLine(4).querySelector(".lab-logo").dataset.brand).toBe("claude");
+    // In its own conversation the header switches the model: the line under a reply is only a line.
+    expect(viaLine(3).querySelector("button")).toBeNull();
     // Below the answer, not in it.
     const parts = [...storedLi(3).querySelector(".msg-main").children];
     expect(parts.indexOf(viaLine(3))).toBeGreaterThan(parts.indexOf(storedLi(3).querySelector(".bubble")));
@@ -1903,13 +1905,64 @@ describe("Agents in a group (batch 2C)", () => {
     expect(haltButton().disabled).toBe(false);
   });
 
-  it("a group offers no model picker, in its header or in its details panel, though my Agent is in it", async () => {
-    await openGroup();
+  const EVERYWHERE = "换了以后，它在所有会话里都用这个模型";
+  const optionNamed = (name) => [...document.querySelectorAll('.model-pop [role="option"]')].find((o) => o.querySelector(".model-name")?.textContent === name);
+  const keepAgent = async (_id, patch) => agentOf(AG1, { model: SITE_FREE, paused: true, ...patch });
+
+  it("a group's header has no model picker; its details panel has one at the right of each Agent of mine, and of nobody else, saying the change is everywhere", async () => {
+    const patchAgent = vi.fn(keepAgent);
+    await openGroup([], { api: { patchAgent } });
     expect(document.querySelector(".chat-head").querySelector('[aria-haspopup="listbox"]')).toBeNull();
     await click(screen.getByRole("button", { name: "会话资料" }));
     const side = document.querySelector(".side-col");
-    expect(side.querySelector('[aria-haspopup="listbox"]')).toBeNull();
     expect([...side.querySelectorAll(".kv-row dt")].map((dt) => dt.textContent)).not.toContain("模型");
+    const rows = () => [...side.querySelectorAll(".side-list li")];
+    const rowOf = (name) => rows().find((li) => li.querySelector(".identity-line strong").textContent === name);
+    // 安的助手 is 小安's Agent; the people have no model.
+    for (const li of rows().filter((li) => li !== rowOf("小助手"))) expect(li.querySelector('[aria-haspopup="listbox"]')).toBeNull();
+    const button = within(rowOf("小助手")).getByRole("button", { name: "模型：小模型，点击更改" });
+    expect(button.getAttribute("aria-haspopup")).toBe("listbox");
+    await click(button);
+    expect(document.querySelector(".model-pop .model-scope").textContent).toBe(EVERYWHERE);
+    expect(optionNamed("小模型").getAttribute("aria-selected")).toBe("true");
+    await click(optionNamed("大模型"));
+    expect(patchAgent).toHaveBeenCalledTimes(1);
+    expect(patchAgent).toHaveBeenCalledWith(AG1, { model: SITE_PAID, reasoning: "none" });
+    expect(within(rowOf("小助手")).getByRole("button").textContent).toBe("大模型");
+  });
+
+  it("under my Agent's reply in a group its model is a quiet button to the same picker; the line keeps saying what that reply used; someone else's Agent's reply has none", async () => {
+    const patchAgent = vi.fn(keepAgent);
+    const mine = { model: { source: "site", id: "free-1", label: "小模型" }, reasoning: "none", points: "0.1" };
+    const theirs = { model: { source: "provider", model: "secret-claude" }, reasoning: "max", points: "12" };
+    await openGroup([wire(G1, 1, AG1, "周六十点", { via: mine }), wire(G1, 2, OAG, "周日十点", { via: theirs })], { api: { patchAgent } });
+    const via = () => storedLi(1).querySelector(".msg-via");
+    expect(via().textContent).toBe("小模型 · 不思考");
+    const button = within(via()).getByRole("button", { name: "模型：小模型，点击更改" });
+    expect(button.getAttribute("aria-haspopup")).toBe("listbox");
+    expect(storedLi(2).querySelector(".msg-via")).toBeNull();
+    expect(storedLi(2).querySelector('[aria-haspopup="listbox"]')).toBeNull();
+    await click(button);
+    expect(document.querySelector(".model-pop .model-scope").textContent).toBe(EVERYWHERE);
+    await click(optionNamed("大模型"));
+    expect(patchAgent).toHaveBeenCalledTimes(1);
+    expect(patchAgent).toHaveBeenCalledWith(AG1, { model: SITE_PAID, reasoning: "none" });
+    expect(via().textContent).toBe("小模型 · 不思考");
+  });
+
+  it("a refused switch from a reply's line says why in the update's words; the line stays as it was", async () => {
+    const patchAgent = vi.fn(async () => {
+      throw apiError(400, "invalid_request");
+    });
+    const mine = { model: { source: "site", id: "free-1", label: "小模型" }, reasoning: "none", points: "0.1" };
+    // (The refusal makes the client read the Agent again: the service still holds it as it was.)
+    const handlers = { agent: () => agentOf(AG1, { model: SITE_FREE, paused: true }) };
+    await openGroup([wire(G1, 1, AG1, "周六十点", { via: mine })], { api: { patchAgent }, handlers });
+    await click(within(storedLi(1).querySelector(".msg-via")).getByRole("button"));
+    await click(optionNamed("大模型"));
+    expect(toastText()).toBe("填写的内容有误，或所选模型、思考程度不可用。");
+    expect(storedLi(1).querySelector(".msg-via").textContent).toBe("小模型 · 不思考");
+    expect(within(storedLi(1).querySelector(".msg-via")).getByRole("button").getAttribute("aria-disabled")).toBeNull();
   });
 });
 

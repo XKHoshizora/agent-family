@@ -7,7 +7,7 @@ import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
 import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
-import { levelLabel } from "./ModelPicker.jsx";
+import { AgentModelSwitch, EVERYWHERE_NOTE, levelLabel } from "./ModelPicker.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { MemoryNotice } from "./MemoryChip.jsx";
 import { ReplyLookups } from "./ReplyLookups.jsx";
@@ -107,8 +107,10 @@ const levelWords = (level) => (level === "none" ? "不思考" : `思考：${leve
  * The muted line under a reply of my own Agent: which model and thinking level its run used (`via`, sent to its owner
  * only), and — when 在每条回复下显示消耗的点数 is on in this browser — what it cost: “GPT-6 Sol · 思考：中 · 6.9 点”;
  * a reply on my own provider's model costs no points: “ · 不扣点”. A reply the Agent gave unasked ends “ · 主动回复”.
+ * In a group (`agentId`: the Agent, mine) the model's name is a quiet button opening the model picker for the Agent —
+ * whose model it is everywhere; the line goes on saying what that reply used.
  */
-function ReplyVia({ via }) {
+function ReplyVia({ via, agentId = null }) {
   const withPoints = useShowReplyPoints();
   const { model } = via;
   const name = model.source === "site" ? model.label : model.model;
@@ -118,10 +120,19 @@ function ReplyVia({ via }) {
     if (model.source === "provider" && via.points === "0") points = " · 不扣点";
     else if (replyPoints(via.points)) points = ` · ${replyPoints(via.points)} 点`;
   }
+  const rest = ` · ${levelWords(via.reasoning)}${points}${via.proactive ? " · 主动回复" : ""}`;
+  if (agentId) {
+    return (
+      <p className="msg-via">
+        <AgentModelSwitch agentId={agentId} shown={{ name, brand: lab }} note={EVERYWHERE_NOTE} />
+        {rest}
+      </p>
+    );
+  }
   return (
     <p className="msg-via">
       <LabLogo lab={lab} size={14} />
-      {`${name} · ${levelWords(via.reasoning)}${points}${via.proactive ? " · 主动回复" : ""}`}
+      {`${name}${rest}`}
     </p>
   );
 }
@@ -187,7 +198,7 @@ export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
         {/* What the reply looked up with its tools: one quiet line, for whoever reads the reply (its own per conversation). */}
         {agent && <ReplyLookups key={`${conv.id}:${msg.id}`} msg={msg} conv={conv} onJump={onJump} />}
         {ownChat && msg.proposal && <ProposalCard msg={msg} conv={conv} />}
-        {thinking && msg.via && <ReplyVia via={msg.via} />}
+        {thinking && msg.via && <ReplyVia via={msg.via} agentId={!ownChat && state.agents[msg.from]?.loaded ? msg.from : null} />}
         <div className="msg-foot">
           {agent && msg.stopped && <Tag tone="muted">已停止</Tag>}
           {agent && msg.truncated && <Tag tone="muted">已截断</Tag>}

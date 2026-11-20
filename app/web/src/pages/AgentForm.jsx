@@ -4,6 +4,7 @@ import { commonErrorText } from "../data/errorTexts.js";
 import { HANDLE_PATTERN, agentName as agentNameProblem, appellation as appellationProblem, handle as handleProblem } from "../auth/validation.js";
 import { PROACTIVE_LEVELS, isProactiveLevel } from "../data/viewmodel.js";
 import { Btn, Field, Modal, Notice, Reason, Switch, focusInvalid } from "../ui/primitives.jsx";
+import { Select } from "../ui/Select.jsx";
 import { ChevronLeft, Lock } from "../icons.js";
 import { AgentAppellations } from "./AgentAppellations.jsx";
 import { AvatarEditor } from "./AvatarEditor.jsx";
@@ -246,11 +247,12 @@ export function AgentForm({ agent = null }) {
           : "请先选择一个模型，否则它不会回复";
   const canDraft = !errors.name && !errors.intro && !errors.field && Boolean(choice) && !choice.stale;
 
-  const set = (key) => (event) => {
-    const value = event.target.value;
+  /** A setting chosen (a Select's value) or typed (`set`: an input's change). */
+  const setValue = (key) => (value) => {
     edited.current.add(settingOf(key));
     setF((cur) => ({ ...cur, [key]: value }));
   };
+  const set = (key) => (event) => setValue(key)(event.target.value);
   /** The box a budget's amount is typed in (`budgetOf`). */
   const budgetBox = (key) => <input value={f[key]} onChange={set(key)} inputMode="decimal" autoComplete="off" />;
   const setProactive = (event) => {
@@ -498,11 +500,12 @@ export function AgentForm({ agent = null }) {
         <ModelPicker sources={sources} options={options} value={f.model} onChange={setModel} />
         {choice && levels.length > 1 && (
           <Field label="思考程度" hint="思考越多，回复越慢，用量也越多。">
-            <select value={reasoning} onChange={set("reasoning")}>
-              {LEVELS.filter(([id]) => levels.includes(id)).map(([id, label]) => (
-                <option key={id} value={id}>{label}</option>
-              ))}
-            </select>
+            <Select
+              value={reasoning}
+              onChange={setValue("reasoning")}
+              listLabel="思考程度"
+              options={LEVELS.filter(([id]) => levels.includes(id)).map(([id, label]) => ({ value: id, label }))}
+            />
           </Field>
         )}
         <div className={`field ${personaError ? "field-error" : ""}`}>
@@ -530,18 +533,10 @@ export function AgentForm({ agent = null }) {
           </p>
         </div>
         <Field label="私聊回复方式" hint="“点名”就是在消息里 @ 它。">
-          <select value={f.replyMode} onChange={set("replyMode")}>
-            {REPLY_MODES.map(([id, label]) => (
-              <option key={id} value={id}>{label}</option>
-            ))}
-          </select>
+          <Select value={f.replyMode} onChange={setValue("replyMode")} listLabel="私聊回复方式" options={REPLY_MODES.map(([id, label]) => ({ value: id, label }))} />
         </Field>
         <Field label="群里谁可以叫它" hint="被叫到时它会在群里回复，费用算你的。">
-          <select value={f.groupMentions} onChange={set("groupMentions")}>
-            {GROUP_MENTIONS.map(([id, label]) => (
-              <option key={id} value={id}>{label}</option>
-            ))}
-          </select>
+          <Select value={f.groupMentions} onChange={setValue("groupMentions")} listLabel="群里谁可以叫它" options={GROUP_MENTIONS.map(([id, label]) => ({ value: id, label }))} />
         </Field>
         <Field
           label="一次接话最多花费（点）"
@@ -556,11 +551,16 @@ export function AgentForm({ agent = null }) {
               label="别人 @ 每天最多花"
               hint="群里别人 @ 它所花的点数，每天到了这个数就不再回复他们。你自己 @ 它不受限制。用你自己供应商模型的 Agent 不扣点，这个上限对它不起作用。"
             >
-              <select value={f.othersChoice} onChange={set("othersChoice")}>
-                <option value="default">{OTHERS_BUDGET_DEFAULT} 点（默认）</option>
-                <option value="custom">自己填</option>
-                <option value="unlimited">不限</option>
-              </select>
+              <Select
+                value={f.othersChoice}
+                onChange={setValue("othersChoice")}
+                listLabel="别人 @ 每天最多花"
+                options={[
+                  { value: "default", label: `${OTHERS_BUDGET_DEFAULT} 点（默认）` },
+                  { value: "custom", label: "自己填" },
+                  { value: "unlimited", label: "不限" },
+                ]}
+              />
             </Field>
             {f.othersChoice === "custom" && (
               <Field label="每天最多花（点）" error={shown("othersAmount")}>
@@ -578,11 +578,7 @@ export function AgentForm({ agent = null }) {
             {proactiveAsked && (
               <>
                 <Field label="话多话少">
-                  <select value={f.proactiveLevel} onChange={set("proactiveLevel")}>
-                    {PROACTIVE_LEVELS.map(([id, label]) => (
-                      <option key={id} value={id}>{label}</option>
-                    ))}
-                  </select>
+                  <Select value={f.proactiveLevel} onChange={setValue("proactiveLevel")} listLabel="话多话少" options={PROACTIVE_LEVELS.map(([id, label]) => ({ value: id, label }))} />
                 </Field>
                 <Field
                   label="主动回复每天最多花"
