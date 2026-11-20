@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { cleanText, modelNote, ownerNote } from "../src/memory/clean.ts";
+import { loadNotes } from "../src/memory/passage.ts";
 import { setNewNotes } from "../src/memory/store.ts";
 import { weight } from "../src/memory/weight.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -630,6 +631,54 @@ describe("races under the room's lock", () => {
       expect(await rowOf(id)).toMatchObject({ vault: false, vault_by: "owner", text: "改了一句" });
     }
     judge.answer(() => ({}));
+  });
+});
+
+describe("a group the owner has left", () => {
+  /** A group of mia's the owner (and the Agent) is in, a note of each room and a heard thing learned there; then the owner leaves and mia renames it. */
+  async function leftGroup() {
+    const w = await world();
+    const club = await group(app, w.mia, "OLD-TITLE-g3", [w.owner, w.ned]);
+    await db.query(
+      `insert into memberships (conversation_id, principal_id, role, joined_seq) select id, $2, 'speaker', seq from conversations where id = $1`,
+      [club, w.agent.id],
+    );
+    await insertOwnerNote(w.owner.id, "周五打球", false, "auto", "review", club);
+    await db.query("insert into agent_notes (agent_id, text, vault, origin, origin_conversation_id) values ($1, '球场在东门', false, 'review', $2)", [w.agent.id, club]);
+    await insertHearsay(w.agent.id, club, "下周换场地", w.mia.id);
+    const leave = async () => {
+      expect((await api(app, w.owner, "DELETE", `/api/conversations/${club}/members/${w.owner.id}`)).status).toBe(200);
+      expect((await api(app, w.mia, "PATCH", `/api/conversations/${club}`, { title: "NEW-TITLE-g3" })).status).toBe(200);
+    };
+    return { ...w, club, leave };
+  }
+  const agentRow = async (agentId: string) =>
+    (await db.query<{ id: string; ownerId: string }>("select id, owner_id as \"ownerId\" from principals where id = $1", [agentId])).rows.map((r) => ({ ...r, memory: true, sharedNotes: true }))[0]!;
+
+  it("the notes page names it by no title once the owner has left — not the title it had, nor a rename made after", async () => {
+    const w = await leftGroup();
+    const page = async () => ({ mine: (await notes(w.owner)).json, agent: (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json });
+    const before = await page();
+    expect(before.mine.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: "OLD-TITLE-g3" }]);
+    expect(before.agent.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: "OLD-TITLE-g3" }]);
+    expect(before.agent.hearsay.map((h: { group: unknown }) => h.group)).toEqual([{ id: w.club, title: "OLD-TITLE-g3" }]);
+
+    await w.leave();
+    const after = await page();
+    expect(after.mine.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: null }]);
+    expect(after.agent.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: null }]);
+    expect(after.agent.hearsay.map((h: { group: unknown }) => h.group)).toEqual([null]);
+    expect(JSON.stringify(after)).not.toMatch(/TITLE-g3/);
+  });
+
+  it("the notes passage calls it 一个已离开的群 once the owner has left — not the title it had, nor a rename made after", async () => {
+    const w = await leftGroup();
+    const own = { conversationId: w.agent.conversationId, group: false };
+    expect((await loadNotes(db, await agentRow(w.agent.id), own)).hearsay.map((h) => h.group)).toEqual(["OLD-TITLE-g3"]);
+    await w.leave();
+    const passage = await loadNotes(db, await agentRow(w.agent.id), own);
+    expect(passage.hearsay.map((h) => [h.text, h.group])).toEqual([["下周换场地", "一个已离开的群"]]);
+    expect(JSON.stringify(passage)).not.toMatch(/TITLE-g3/);
   });
 });
 

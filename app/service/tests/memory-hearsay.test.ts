@@ -1099,6 +1099,7 @@ describe("undoing hearsay", () => {
     expect(await hearsayRows(w.agent.id)).toEqual([]);
   });
 
+  // A state no product path reaches (see below): kept for the day conversations can be removed.
   it("does not count a dropped entry whose group is gone toward the room: the rest still fits", async () => {
     const w = await world("tb");
     const other = await group(app, w.mia, "会散的群", [w.owner, w.third]);
@@ -1117,7 +1118,9 @@ describe("undoing hearsay", () => {
     const [chip] = await chips(w.owner, w.agent.conversationId);
     // The room trimmed the oldest entry, the other group's; then that group is gone and the owner fills the room by hand.
     expect((await hearsayRows(w.agent.id)).map((r) => r.id)).not.toContain(ids[0]);
-    // No route deletes a conversation (the references restrict it): the change is made to say its dropped entry was of one that is gone.
+    // No product path does this: no route deletes a conversation (the references restrict it), so a group cannot vanish
+    // today. The test writes the stored change by hand to say its dropped entry was of one that is gone, and pins only
+    // what the undo would do then.
     const row = (await db.query<{ ops: Array<{ op: string; conversationId: string }> }>("select ops from memory_changes where id = $1", [chip.system.changeId])).rows[0]!;
     const gone = row.ops.map((o) => (o.op === "hearsay_drop" && o.conversationId === other ? { ...o, conversationId: "00000000-0000-4000-8000-000000000000" } : o));
     expect(gone).not.toEqual(row.ops);

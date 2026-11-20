@@ -85,7 +85,8 @@ describe("tables", () => {
 
   it("deleting a conversation takes its hearsay with it; a note's origin only goes null", async () => {
     const { owner, agent } = await world();
-    // A bare conversation (one with messages and members is never deleted by hand).
+    // No product path deletes a conversation: this pins only what the schema's rules would do. A bare conversation (one
+    // with messages and members is never deleted by hand).
     const c = (await db.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [owner.id])).rows[0]!.id;
     await insertNote("owner_notes", owner.id, "n", false, c);
     await db.query("insert into agent_hearsay (agent_id, conversation_id, speaker_name, text, said_at) values ($1, $2, 'Mia', 'h', now())", [agent.id, c]);

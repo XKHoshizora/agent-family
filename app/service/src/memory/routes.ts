@@ -75,17 +75,23 @@ const conversionView = z.object({
 
 type Source = { kind: "agent" | "group" | "manual" | "mixed"; title: string | null };
 
-/** Where each conversation a note was learned in stands: the Agent's own chat (named after the Agent) or a group (its title). */
-async function sourcesOf(q: Queryable, notes: ReadonlyArray<Note>): Promise<Map<string, Source>> {
+/**
+ * Where each conversation a note of `room` was learned in stands: the Agent's own chat (named after the Agent) or a group
+ * (its title, only while the room's owner — the owner, or the Agent's — is a current member there; null once they have
+ * left it, so neither the title it had nor a rename made after reaches them).
+ */
+async function sourcesOf(q: Queryable, notes: ReadonlyArray<Note>, room: Room): Promise<Map<string, Source>> {
   const ids = [...new Set(notes.flatMap((n) => (n.originConversationId ? [n.originConversationId] : [])))];
   if (ids.length === 0) return new Map();
   const { rows } = await q.query<{ id: string; type: string; title: string | null; agent_name: string | null }>(
-    `select c.id, c.type, c.title, p.display_name as agent_name
+    `select c.id, c.type, case when om.principal_id is null then null else c.title end as title, p.display_name as agent_name
        from conversations c
        left join agent_conversations ac on ac.conversation_id = c.id
        left join principals p on p.id = ac.agent_id
+       left join memberships om on om.conversation_id = c.id and om.left_seq is null
+        and om.principal_id = coalesce($2::uuid, (select a.owner_id from principals a where a.id = $3::uuid))
       where c.id = any($1::uuid[])`,
-    [ids],
+    [ids, room.kind === "owner" ? room.ownerId : null, room.kind === "self" ? room.agentId : null],
   );
   return new Map(rows.map((r) => [r.id, r.type === "agent" ? { kind: "agent", title: r.agent_name } : { kind: "group", title: r.title }]));
 }
@@ -125,14 +131,14 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   /** What the room holds, with the notes as the owner sees them. */
   async function view(room: Room): Promise<z.infer<typeof roomView>> {
     const notes = await listRoom(db, room);
-    const sources = await sourcesOf(db, notes);
+    const sources = await sourcesOf(db, notes, room);
     return { notes: notes.map((n) => toNoteView(n, sources)), used: weightOf(notes), limit: limitOf(room), maxNotes: limits.notes! };
   }
 
   async function noteOf(q: Queryable, room: Room, id: string): Promise<z.infer<typeof noteView>> {
     const note = await readNote(q, room, id);
     if (!note) throw notFound();
-    return toNoteView(note, await sourcesOf(q, [note]));
+    return toNoteView(note, await sourcesOf(q, [note], room));
   }
 
   /** Room left for text of `room` once `without` is not counted (a note being replaced). */
