@@ -189,6 +189,25 @@ describe("the Agent list", () => {
     expect(inMain().queryByRole("button", { name: /模型不可用/ })).toBeNull();
   });
 
+  it("a focus on the model field asked for by the tag does not outlive the form it was asked for: no model to choose there, leave, edit again — nothing is focused", async () => {
+    const now = { models: { siteModels: [], providerDefaults: MODELS.providerDefaults }, providers: [] };
+    await openAgents({
+      agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: false })],
+      api: { getModels: vi.fn(async () => now.models), listProviders: vi.fn(async () => ({ providers: now.providers })) },
+    });
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: "模型不可用，换一个模型" }));
+    // Nothing can be chosen here: the form says so, and no picker is shown to focus.
+    expect(mainText()).toContain("还没有可用的模型");
+    await click(inMain().getByRole("button", { name: "取消" }));
+
+    now.models = MODELS;
+    now.providers = [PROVIDER];
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    expect(modelBox()).toBeTruthy();
+    expect(document.activeElement).not.toBe(modelBox());
+  });
+
   it("the 模型不可用 tag is the Agent's owner's only: for anyone else nothing of it is rendered — no text, no element", () => {
     const agent = agentOf(AG1, { model: SITE_MODEL, modelUsable: false });
     render(

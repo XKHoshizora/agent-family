@@ -213,7 +213,8 @@ export const PROVIDERS_PAGE = { section: "settings", settingsPage: "providers", 
  * and 我的供应商 (provider → its models); a notice leading to Settings › 模型供应商 when nothing at all can be chosen; the
  * privacy notice beside it. `options`: `choiceList(sources, …)`; `value`: the chosen key; `onChange(key)`. (No
  * 管理供应商 under its list: leaving for it would drop what the form holds.) `focus`: the picker takes the focus once it
- * is shown (`openModelChoice` sent me here), then `onFocused()`.
+ * is shown (`openModelChoice` sent me here), then `onFocused()` — called too when what can be chosen is read and no picker
+ * is shown (nothing to choose), so the asked focus never waits for a later form.
  */
 export function ModelPicker({ sources, options, value, onChange, focus = false, onFocused }) {
   const { dispatch } = useStore();
@@ -221,10 +222,11 @@ export function ModelPicker({ sources, options, value, onChange, focus = false, 
   const chosen = options.find((o) => o.key === value) ?? null;
   const showSelect = sources.status === "ready" && !sources.nothing;
   useEffect(() => {
-    if (!focus || !showSelect) return;
-    document.getElementById(id)?.focus();
+    if (!focus || sources.status !== "ready") return;
+    // Once what can be chosen is read: the picker takes the focus — or, with none shown, the asked focus is dropped.
+    if (showSelect) document.getElementById(id)?.focus();
     onFocused?.();
-  }, [focus, showSelect]);
+  }, [focus, showSelect, sources.status]);
   const addProvider = () => dispatch({ type: "nav", patch: PROVIDERS_PAGE });
 
   let control;
