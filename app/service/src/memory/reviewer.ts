@@ -325,11 +325,14 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     timers.delete(key);
   };
 
-  /** Queues a `catchup` job for every unfinished catch-up of the Agent (`agentId`), or of every Agent with memory on (none given); how many. */
+  /**
+   * Queues a `catchup` job for every unfinished catch-up of the Agent (`agentId`), or of every Agent with memory on (none given); how
+   * many. A paused or deleted Agent's too: its job ends it (catchup.ts), so a pause is handled one way wherever it falls.
+   */
   async function queueCatchUps(agentId?: string): Promise<number> {
     const { rows } = await db.query<{ agent_id: string; conversation_id: string }>(
       `select c.agent_id, c.conversation_id from memory_catchups c
-         join agents a on a.principal_id = c.agent_id and a.memory and not a.paused and a.deleted_at is null
+         join agents a on a.principal_id = c.agent_id and a.memory
         where c.next_seq <= c.to_seq and ($1::uuid is null or c.agent_id = $1)
         order by c.created_at, c.conversation_id`,
       [agentId ?? null],
