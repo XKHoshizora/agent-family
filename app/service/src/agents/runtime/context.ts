@@ -198,6 +198,14 @@ interface Kept {
   entry: ContextEntry;
   /** What its attachment is shown as; null: its name. */
   content: AttachmentContent | null;
+  /** Where it is in the entries the plan was made of (`shownAt`). */
+  at: number;
+}
+
+/** An entry with where it is in the entries the plan was made of. */
+interface Placed {
+  entry: ContextEntry;
+  at: number;
 }
 
 /**
@@ -224,7 +232,7 @@ export class ContextPlan {
   /** Newest first: the current turn's (`current` of them), then older ones. */
   private readonly kept: Kept[] = [];
   private readonly current: number;
-  private readonly older: ContextEntry[];
+  private readonly older: Placed[];
   private left: number;
   private imagesLeft = IMAGES_PER_CALL;
   /** Characters of files a text may still take in this call. */
@@ -238,42 +246,54 @@ export class ContextPlan {
     private readonly ratio = 1,
   ) {
     this.left = budget;
-    const newestFirst = entries.filter((e) => e.text !== "" || e.attachment !== null).reverse();
-    const newestOwn = newestFirst.findIndex((e) => e.role === "user");
+    const newestFirst = entries.flatMap((entry, at): Placed[] => (entry.text !== "" || entry.attachment !== null ? [{ entry, at }] : [])).reverse();
+    const newestOwn = newestFirst.findIndex((p) => p.entry.role === "user");
     const shown = newestOwn < 0 ? [] : newestFirst.slice(newestOwn);
-    const agentAt = shown.findIndex((e) => e.role === "assistant");
+    const agentAt = shown.findIndex((p) => p.entry.role === "assistant");
     const turn = agentAt < 0 ? shown : shown.slice(0, agentAt);
     let fits = true;
-    for (const [i, e] of turn.entries()) {
-      if (i === 0) this.keepNewest(e);
-      else if (!(fits = this.keep(e))) break;
+    for (const [i, p] of turn.entries()) {
+      if (i === 0) this.keepNewest(p);
+      else if (!(fits = this.keep(p))) break;
     }
     this.current = this.kept.length;
     this.older = fits ? shown.slice(turn.length) : [];
   }
 
   /** The owner's newest message: as it is when it fits, else cut from the front to what the budget holds (its end, in weight). */
-  private keepNewest(e: ContextEntry): void {
-    if (this.keep(e)) return;
+  private keepNewest(p: Placed): void {
+    if (this.keep(p)) return;
+    const e = p.entry;
     const whole = [e.text, e.attachment ? attachmentLabel(e.attachment) : ""].filter((s) => s !== "").join("\n");
     const text = CUT_FRONT + lastToWeight(whole, weightWithin(this.left, this.ratio) - weight(CUT_FRONT));
-    this.kept.push({ entry: { ...e, text, attachment: null }, content: null });
+    this.kept.push({ entry: { ...e, text, attachment: null }, content: null, at: p.at });
     this.left -= estimateTokens(text, this.ratio);
   }
 
-  /** Keeps `e` by name when it fits. */
-  private keep(e: ContextEntry): boolean {
-    const cost = minimalTokens(e, this.ratio);
+  /** Keeps the entry by name when it fits. */
+  private keep(p: Placed): boolean {
+    const cost = minimalTokens(p.entry, this.ratio);
     if (cost > this.left) return false;
-    this.kept.push({ entry: e, content: null });
+    this.kept.push({ entry: p.entry, content: null, at: p.at });
     this.left -= cost;
     return true;
   }
 
   /** Step 3: older messages by name, newest first, while they fit. */
   keepOlder(): void {
-    for (const e of this.older) if (!this.keep(e)) break;
+    for (const p of this.older) if (!this.keep(p)) break;
     this.older.length = 0;
+  }
+
+  /**
+   * Where, in the entries the plan was made of, the messages `build` shows are, oldest first: those kept, but the Agent's a
+   * call does not start with — so the first is always one of the owner's (in a group, anyone else's). Everything before them
+   * in that order was left out (agents/context.ts `LoadedContext.leftOut`).
+   */
+  shownAt(): number[] {
+    const oldestFirst = [...this.kept].reverse();
+    const from = oldestFirst.findIndex((k) => k.entry.role === "user");
+    return from < 0 ? [] : oldestFirst.slice(from).map((k) => k.at);
   }
 
   /**

@@ -17,6 +17,7 @@ import {
 } from "./store.ts";
 import { appendSystem } from "./system.ts";
 import { expireOnLeave, type Whisper } from "../whispers/store.ts";
+import { forgetSummaries } from "../agents/summary/store.ts";
 
 const forbidden = () => new AppError(403, "forbidden");
 
@@ -192,6 +193,8 @@ export async function removeMember(
   const ended = await endRunsInGroup(t, conversationId, agent ? [targetId] : along.map((m) => m.principalId));
   // The whispers there of whoever left, and about the Agents that left, expire (src/whispers/): pushed to their owners after commit.
   const whispers = await expireOnLeave(t, conversationId, [...out]);
+  // An Agent that left loses its rolling summary of the group (agents/summary/), here, with its membership.
+  await forgetSummaries(t, conversationId, [...out]);
   return { change: { messages, conversations: [{ conversationId, principalIds: members.map((m) => m.principalId) }] }, ended, whispers };
 }
 

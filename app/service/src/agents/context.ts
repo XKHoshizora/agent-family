@@ -19,12 +19,14 @@ import {
   speakerLabel,
   systemTokens,
   withoutMark,
+  withSummary,
   type GroupPerson,
   type GroupScene,
   type SpeakerRole,
   type SystemText,
 } from "./runtime/prompt.ts";
 import type { AgentRow } from "./store.ts";
+import { countPlaced, readSummary, type Summary } from "./summary/store.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -33,6 +35,7 @@ import {
   FILE_MAX_CHARS,
   fileText,
   IMAGE_MAX_BYTES,
+  minimalTokens,
   MODEL_IMAGE_MIMES,
   pastBudget,
   PDF_MAX_BYTES,
@@ -121,6 +124,24 @@ export interface LoadedContext {
   attachments: Map<string, Downloadable>;
   /** The seq of the latest `topic_reset` notice the Agent can see; 0 when there is none. */
   topicStart: number;
+  /**
+   * What the conversation part left out (README "The rolling summary"): the messages the Agent could see placed (agents/
+   * summary/store.ts: a message's seq, an Agent's reply the seq its run covered) from `from` to `to`, both included — after
+   * where the part starts (the topic start; in a group the asker's line too; the summary shown, `summary`, what it covers) and
+   * before the oldest message the plan shows (by name: `ContextPlan.shownAt`) — in its own conversation because they did not
+   * fit, in a group also because they fell before the latest `maxMessages`; `messages` how many (`countPlaced`). Null when
+   * none was left out.
+   */
+  leftOut: LeftOut | null;
+  /** The pair's summary as the system text carries it (`withSummary`); null when it carries none. */
+  summary: Summary | null;
+}
+
+/** What a conversation part left out (`LoadedContext.leftOut`). */
+export interface LeftOut {
+  from: number;
+  to: number;
+  messages: number;
 }
 
 export interface BuiltContext {
@@ -450,12 +471,11 @@ function speakersOf(list: readonly Loaded[]): Speaker[] {
   return [...found.values()];
 }
 
-/**
- * In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq; each as
- * `shown` with `mark` (none: without labels).
- */
-const answeredOrder = (list: readonly Loaded[], mark: string | null = null): ContextEntry[] =>
-  [...list].sort((a, b) => a.answers - b.answers || Number(a.reply) - Number(b.reply) || a.seq - b.seq).map((l) => shown(l, mark));
+/** In the order things were answered: by `answers`, a reply after the owner's message it answers, then by seq. */
+const inAnsweredOrder = (list: readonly Loaded[]): Loaded[] => [...list].sort((a, b) => a.answers - b.answers || Number(a.reply) - Number(b.reply) || a.seq - b.seq);
+
+/** `inAnsweredOrder`, each as `shown` with `mark` (none: without labels). */
+const answeredOrder = (list: readonly Loaded[], mark: string | null = null): ContextEntry[] => inAnsweredOrder(list).map((l) => shown(l, mark));
 
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
@@ -478,6 +498,13 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
  * Agent's own conversation that is the budget the system text leaves; a group's latest `maxMessages` are read as one
  * page, whatever the budget, so no budget cuts its reading short. Either way nothing that could be shown is
  * left unread; the budget used after reading (`budget`) is the one the final system text leaves.
+ *
+ * The pair's rolling summary (agents/summary/; README "The rolling summary"), when it may be shown — everything it covers
+ * after the topic start and, in a group, after the asker's line, and something left to answer — is the system text's last
+ * passage (`withSummary`, so in every `system(…)` above, the mark's drawing included), and the conversation part then starts
+ * after what it covers; dropped first (the part still starting there) when, with it, the newest message would not fit
+ * whole. What the plan left out — by place, after where the part starts and before the oldest message it shows by name —
+ * is reported as `leftOut` (one count of what the Agent can see there), for `begin` to keep and `finish` to act on.
  */
 export async function loadContext(
   q: Queryable,
@@ -491,10 +518,19 @@ export async function loadContext(
     const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text, ratio, run.reserved ?? 0);
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
-  const reading = budgetWith(system("", []));
   const start = await topicStart(q, run.agentId, run.conversationId);
-  // In a group, nothing at or before the asker's line either (`askerLine`): what is read starts after the later of the two.
-  const from = Math.max(start, run.group?.after ?? 0);
+  const line = run.group?.after ?? 0;
+  // The pair's rolling summary, shown only when everything it covers is after the topic start and, in a group, after the
+  // asker's line (it is text about those messages: a reply is shown nothing derived from what is at or before its line),
+  // and it leaves the run something to answer. Not shown, the conversation part is read as if there were none.
+  const stored = await readSummary(q, run.conversationId, run.agentId);
+  const summary = stored !== null && stored.fromSeq > Math.max(start, line) && stored.uptoSeq < run.coversSeq ? stored : null;
+  const carrying = (text: string | null) => (mark: string, speakers: readonly Speaker[]): SystemText => withSummary(system(mark, speakers), text);
+  const withPassage = carrying(summary?.text ?? null);
+  const reading = budgetWith(withPassage("", []));
+  // In a group, nothing at or before the asker's line either (`askerLine`): what is read starts after the later of the two;
+  // with a summary shown, after what it covers.
+  const from = Math.max(start, line, summary?.uptoSeq ?? 0);
   const loaded: Loaded[] = [];
   // Read by seq, but shown in answered order: everything that belongs at or after the oldest seq read is known, and
   // only that is used while more is left unread (a reply may belong before messages not read yet).
@@ -513,22 +549,38 @@ export async function loadContext(
   }
   const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
   const speakers = speakersOf(kept);
-  const unmarked = system("", speakers);
+  const unmarked = withPassage("", speakers);
   const mark = run.group === null ? null : newMark((m) => unmarked.text.includes(m) || kept.some((l) => shows(l, m)), draw);
-  const text = mark === null ? unmarked : system(mark, speakers);
-  const budget = budgetWith(text);
-  const entries = answeredOrder(kept, mark);
+  let text = mark === null ? unmarked : withPassage(mark, speakers);
+  let budget = budgetWith(text);
+  const ordered = inAnsweredOrder(kept);
+  const entries = ordered.map((l) => shown(l, mark));
+  // The summary's passage goes first when, with it, the newest message would not fit whole (the mark, drawn with it there,
+  // is in no part of what is left).
+  let carried = summary;
+  const newest = [...entries].reverse().find((e) => e.role === "user");
+  if (summary !== null && newest !== undefined && minimalTokens(newest, ratio) > budget) {
+    carried = null;
+    text = carrying(null)(mark ?? "", speakers);
+    budget = budgetWith(text);
+  }
 
   // The attachments of every message the plan could keep (those it keeps with no attachment contents at all).
   const could = new ContextPlan(entries, budget, ratio);
   could.keepOlder();
+  // What it left out, by place: from where the conversation part starts to the oldest message it shows (after `from`).
+  const shownPlaces = could.shownAt().flatMap((at) => (ordered[at]!.answers > from ? [ordered[at]!.answers] : []));
+  const to = shownPlaces.length === 0 ? null : Math.min(...shownPlaces) - 1;
+  const left =
+    to === null || to <= from ? 0 : await countPlaced(q, { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null }, from, to);
+  const leftOut = left > 0 && to !== null ? { from: from + 1, to, messages: left } : null;
   const attachments = new Map<string, Downloadable>();
   for (const [, a] of [...could.attachments(false), ...could.attachments(true)]) {
     if (a.image && !resolved.vision) continue;
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start };
+  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start, leftOut, summary: carried };
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */

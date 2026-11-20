@@ -30,6 +30,7 @@ import {
   loadGroupScene,
   withRoster,
   type BuiltContext,
+  type LeftOut,
   type LoadedContext,
   type Speaker,
 } from "./context.ts";
@@ -88,8 +89,12 @@ export interface AgentPortDeps {
   drawMark?: () => string;
   /** The proactive scheduler (proactive/scheduler.ts), when there is one: an Agent's post drops the judgement waiting there. */
   proactive?: Pick<ProactiveScheduler, "cancelled"> | null;
-  /** The reviewer (memory/reviewer.ts), when there is one: told after a reply was posted, so it can look at the conversation once it is quiet. */
-  memory?: Pick<Reviewer, "noted"> | null;
+  /**
+   * The reviewer (memory/reviewer.ts), when there is one: told after a reply was posted, so it can look at the conversation once
+   * it is quiet, and — when the reply's context left out at least `MEMORY.summaryMinMessages` messages — asked for the pair's
+   * rolling summary to take them in (`summarise`).
+   */
+  memory?: Pick<Reviewer, "noted" | "summarise"> | null;
   /** The tools a reply may be offered and how they run; none (the default): no reply is offered any. */
   toolbox?: Toolbox | null;
 }
@@ -218,6 +223,8 @@ interface RunFlags {
   money: RunMoney | null;
   /** The model the reply calls, from `begin` once the call is admitted (with `money`); null until then. */
   model: RunModel | null;
+  /** What its context left out (context.ts `LoadedContext.leftOut`), from `begin` once the call is admitted; null until then, or none. */
+  leftOut: LeftOut | null;
 }
 
 /**
@@ -258,7 +265,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null };
+      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null, leftOut: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -361,7 +368,8 @@ export class DbAgentPort implements AgentPort {
    *    shown is read: the
    *    system text — its own conversation's (`systemPrompt`, with what the Agent calls its owner), or the group's
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
-   *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
+   *    are those of what `loadContext` read, `withRoster`; and, last, the pair's rolling summary when it may be shown,
+   *    context.ts `loadContext`) — and the conversation (`loadContext`, SQL only; in a group at
    *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, nothing at or before the
    *    run's asker's line (context.ts `askerLine`: the latest joining of its askers — those whose questions it answers,
    *    and everyone who wrote since what it covered before, recorded first, runs.ts `hearFrom`) but the calls it answers
@@ -625,6 +633,7 @@ export class DbAgentPort implements AgentPort {
     const flags = this.flagsOf(run.id);
     flags.mark = first.loaded.mark;
     flags.money = result.money;
+    flags.leftOut = first.loaded.leftOut;
     const { resolved } = first;
     flags.model = resolved.source === "site" ? { source: "site", id: resolved.name } : { source: "provider", providerId: resolved.providerId!, name: resolved.name };
     return result.prepared;
@@ -783,10 +792,13 @@ export class DbAgentPort implements AgentPort {
    * ended elsewhere meanwhile (another instance's recovery, the stale-run sweep, a stop of a run this
    * process was not seen working on) is left as that recorded it, and its owner is told how it stands now, so no
    * "replying" stays shown. A run whose reply was posted is pushed that reply once more, to its owner only, before its
-   * end (`Hub.pushChargedReply`): now that the run is charged, the reply carries its `via`. The run's flags are forgotten
-   * in any case, also when this throws (a delta still waiting keeps its own).
+   * end (`Hub.pushChargedReply`): now that the run is charged, the reply carries its `via`. A reply that was posted is
+   * told to the reviewer (`noted`), and when its context left out at least `MEMORY.summaryMinMessages` messages (context.ts
+   * `leftOut`, kept from `begin` in `RunFlags.leftOut`) the pair's rolling summary is asked to take them in (`summarise`).
+   * The run's flags are forgotten in any case, also when this throws (a delta still waiting keeps its own).
    */
   async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: Estimated): Promise<void> {
+    const leftOut = this.flags.get(run.id)?.leftOut ?? null;
     let result: Recorded | null | undefined;
     try {
       result = await this.record(run, end, usage, fallback, new Date());
@@ -800,8 +812,12 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
-    // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself).
-    if (result.reply !== null) this.deps.memory?.noted(run.agentId, run.conversationId);
+    // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself), and
+    // what its context left out may be folded into the pair's rolling summary.
+    if (result.reply !== null) {
+      this.deps.memory?.noted(run.agentId, run.conversationId);
+      if (leftOut !== null && leftOut.messages >= this.deps.config.memory.summaryMinMessages) this.deps.memory?.summarise(run.agentId, run.conversationId, leftOut.to);
+    }
     if (result.followed.run) this.announce(result.followed.run);
     // A notice its follow-up appended (a chain budget or the others' daily budget spent): the group is told after the
     // run's end.

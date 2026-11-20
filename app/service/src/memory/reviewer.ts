@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from "fastify";
+import type { SummaryContext, SummaryJob } from "../agents/summary/job.ts";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { liveAgents, newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
@@ -33,6 +34,11 @@ import { EXPLICIT } from "./review.ts";
  * rooms, one after another: two dream jobs of one owner never run together). After a change was applied (`changed`) a `nap`
  * job looks at whether a room is nearly full. The sweep's jobs run through the same runner, so they have the clock the
  * pipeline has; what they remember between runs is `DreamState`, here.
+ *
+ * The rolling summary (agents/summary/job.ts) runs here too: after a reply whose context left out enough (`summarise`), a
+ * `summary` job — one per pair at a time (one job per Agent at a time, as every job), within `MAX_REVIEWS_AT_ONCE`; a second
+ * request while one waits only moves what it is to cover up to. Where a pair's last attempt that wrote nothing was to cover
+ * up to is remembered here (in this process: a restart forgets it, which costs at most one more attempt).
  */
 
 export const MAX_REVIEWS_AT_ONCE = 4;
@@ -46,10 +52,10 @@ export const realTimer: SetTimer = (fn, ms) => {
   return { clear: () => clearTimeout(timer) };
 };
 
-export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob | ConvertJob;
+export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob | ConvertJob | SummaryJob;
 
 /** What a job is handed: the context of every kind (each job uses what its kind needs). */
-export type JobContext = FlagsContext & DreamContext;
+export type JobContext = FlagsContext & DreamContext & SummaryContext;
 
 export interface ReviewerDeps {
   db: Db;
@@ -58,7 +64,7 @@ export interface ReviewerDeps {
   /** The service is stopping: a job under way is told (its `closing`). `close()` ends them too. */
   closing?: AbortSignal;
   setTimer: SetTimer;
-  /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`, dream.ts `runDreamJob`, by `kind`); may reject: it is logged. */
+  /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`, dream.ts `runDreamJob`, agents/summary/job.ts `runSummary`, by `kind`); may reject: it is logged. */
   run(job: Job, ctx: JobContext): Promise<unknown>;
 }
 
@@ -67,6 +73,11 @@ export interface Reviewer {
   noted(agentId: string, conversationId: string): void;
   /** After commit: the owner started a new topic in the Agent's own conversation. */
   topicReset(agentId: string, conversationId: string): void;
+  /**
+   * After a reply of Agent `agentId` in `conversationId` was posted, whose context left out at least `MEMORY.summaryMinMessages`
+   * messages, the last of them placed at `upTo` (agents/port-impl.ts `finish`): a `summary` job is queued for the pair.
+   */
+  summarise(agentId: string, conversationId: string, upTo: number): void;
   /** After the row is written: a message of `conversationId` was flagged for the Agent (hearsay, or the owner's own remark). */
   flagged(agentId: string, conversationId: string, kind: "hearsay" | "own"): void;
   /** After commit: a change was applied (or confirmed) in the notes of this Agent's owner, which may have left a room nearly full. */
@@ -129,6 +140,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   const dreaming = new Set<string>();
   /** Each owner's latest conversion: under way, or what it did (until the next one; a restart forgets them all). */
   const conversions = new Map<string, { state: "running" } | { state: "done"; result: ConvertResult }>();
+  /** Each pair's last summary attempt that wrote nothing: what it was to cover up to (`SummaryContext.summaryTried`). */
+  const summaryTried = new Map<string, number>();
   let waiting: Job[] = [];
   const running = new Set<string>();
   /** Evaluations of a trigger under way (they read the database before deciding). */
@@ -172,6 +185,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         changed: (agentId) => api.changed(agentId),
         dream,
         enqueue: (next) => enqueue(next),
+        summaryTried: summaryTried.get(key) ?? null,
+        summaryAttempted: (upTo) => void (upTo === null ? summaryTried.delete(key) : summaryTried.set(key, upTo)),
       };
       if (job.kind === "flags") hearsayCalls.set(key, ctx.hearsayCalls);
       void Promise.resolve()
@@ -200,7 +215,10 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
 
   const enqueue = (job: Job): void => {
     if (closed) return;
-    if (!waiting.some((j) => sameJob(j, job))) waiting.push(job);
+    const queued = waiting.find((j) => sameJob(j, job));
+    // A summary waiting already covers up to the later of the two places.
+    if (queued === undefined) waiting.push(job);
+    else if (queued.kind === "summary" && job.kind === "summary") queued.upTo = Math.max(queued.upTo, job.upTo);
     pump();
   };
 
@@ -338,6 +356,9 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       disarm(job);
       void enqueueIfNew(job);
     },
+    summarise(agentId, conversationId, upTo) {
+      enqueue({ kind: "summary", agentId, conversationId, upTo });
+    },
     flagged(agentId, conversationId) {
       armFlags({ kind: "flags", agentId, conversationId });
     },
@@ -430,6 +451,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       retries.clear();
       hearsayCalls.clear();
       attempted.clear();
+      summaryTried.clear();
       for (const job of waiting) if (job.kind === "convert") job.settle(null);
       waiting = [];
       stop.abort();

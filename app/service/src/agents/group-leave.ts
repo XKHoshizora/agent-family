@@ -6,6 +6,7 @@ import type { Db, Tx } from "../db.ts";
 import type { Hub } from "../sync/hub.ts";
 import { pushWhispers } from "../whispers/routes.ts";
 import { expireOnLeave, type Whisper } from "../whispers/store.ts";
+import { forgetSummaries } from "./summary/store.ts";
 import type { DbAgentPort } from "./port-impl.ts";
 import { RUN_COLUMNS, toWireRun, type Announced, type RunRow } from "./runs.ts";
 
@@ -127,5 +128,7 @@ async function leaveAfterDelete(t: Tx, conversationId: string, agentId: string, 
   // Its whispers there expire with it: the delete expired its open ones already, so this is whatever is left open (none, as
   // `createWhisper` waits for a delete in flight), pushed to its owner all the same — whisper rows last.
   const whispers = await expireOnLeave(t, conversationId, [agentId]);
+  // Its rolling summary of the group goes with its membership (agents/summary/).
+  await forgetSummaries(t, conversationId, [agentId]);
   return { change: { messages: [notice], conversations: [{ conversationId, principalIds: before }] }, whispers };
 }

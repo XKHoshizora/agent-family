@@ -23,6 +23,7 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls } from "./memory/call.ts";
+import { runSummary } from "./agents/summary/job.ts";
 import { runDreamJob } from "./memory/dream.ts";
 import { runFlags } from "./memory/hearsay.ts";
 import { runReview } from "./memory/pipeline.ts";
@@ -389,6 +390,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
                   return runReview(pipeline, job, ctx);
                 case "flags":
                   return runFlags(pipeline, job, ctx);
+                case "summary":
+                  return runSummary(pipeline, job, ctx);
                 default:
                   return runDreamJob(pipeline, job, ctx);
               }
