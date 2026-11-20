@@ -61,7 +61,7 @@ const hearsayView = z.object({
   id: z.string(),
   text: z.string(),
   speakerName: z.string(),
-  /** The speaker's account name now (read at request time); null when the account is gone. For the owner only, never shown to a model. */
+  /** The speaker's account name now (read at request time); null only for an entry with no speaker id. For the owner only, never shown to a model. */
   speakerHandle: z.string().nullable(),
   group: z.object({ id: z.string(), title: z.string().nullable() }).nullable(),
   saidAt: z.string(),
@@ -77,8 +77,8 @@ type Source = { kind: "agent" | "group" | "manual" | "mixed"; title: string | nu
 
 /**
  * Where each conversation a note of `room` was learned in stands: the Agent's own chat (named after the Agent) or a group
- * (its title, only while the room's owner — the owner, or the Agent's — is a current member there; null once they have
- * left it, so neither the title it had nor a rename made after reaches them).
+ * (its title, read only while the room's owner — the owner, or the Agent's — is a current member there: after leaving,
+ * the group's title is not read again, null).
  */
 async function sourcesOf(q: Queryable, notes: ReadonlyArray<Note>, room: Room): Promise<Map<string, Source>> {
   const ids = [...new Set(notes.flatMap((n) => (n.originConversationId ? [n.originConversationId] : [])))];
@@ -339,6 +339,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         view({ kind: "self", agentId: agent.id }),
         listHearsay(db, agent.id),
         // The groups the Agent is in now: once it has left one, what it heard there no longer says which.
+        // (Note for the controller: the notes page and the passage go by the owner's membership, as Task R asks; this, by the Agent's.)
         db.query<{ id: string; title: string | null }>(
           `select c.id, c.title from memberships m join conversations c on c.id = m.conversation_id
             where m.principal_id = $1 and m.left_seq is null`,

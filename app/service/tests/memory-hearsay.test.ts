@@ -1138,6 +1138,29 @@ describe("undoing hearsay", () => {
   });
 });
 
+describe("a group the owner has left (Task R fix round 1, I3: the controller's ruling)", () => {
+  it("a change line written while the owner was a member keeps the title it was written with, in the notice and the stored change, after they leave and the group is renamed", async () => {
+    const w = await world("gl", "OLD-TITLE-gl");
+    await heard(w);
+    const before = await chips(w.owner, w.agent.conversationId);
+    expect(before.map((c) => c.system.lines)).toEqual([[`听说：「miagl」在「OLD-TITLE-gl」里说：${SAID}`]]);
+    // The notice as stored (its lines are written into its body once).
+    const stored = async () =>
+      (await db.query<{ lines: unknown }>("select body -> 'lines' as lines from messages where conversation_id = $1 and body ->> 'event' = 'memory_changed' order by seq", [w.agent.conversationId]))
+        .rows;
+    const linesBefore = await stored();
+    expect(linesBefore).toEqual([{ lines: [`听说：「miagl」在「OLD-TITLE-gl」里说：${SAID}`] }]);
+
+    expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.g}/members/${w.owner.id}`)).status).toBe(200);
+    expect((await api(app, w.mia, "PATCH", `/api/conversations/${w.g}`, { title: "NEW-TITLE-gl" })).status).toBe(200);
+    // The title is not read again after the leaving: the line keeps the one it was written with, and never the new one.
+    const after = await chips(w.owner, w.agent.conversationId);
+    expect(after.map((c) => c.system.lines)).toEqual(before.map((c) => c.system.lines));
+    expect(await stored()).toEqual(linesBefore);
+    expect(JSON.stringify(after)).not.toContain("NEW-TITLE-gl");
+  });
+});
+
 describe("only the owner", () => {
   it("a co-member connected to the group and reading it gets no notice, push or trace; nobody but the owner reads the entry", async () => {
     const w = await world("w");

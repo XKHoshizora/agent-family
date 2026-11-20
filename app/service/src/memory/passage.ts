@@ -3,8 +3,9 @@ import { NO_GROUP_TITLE, type PromptNotes } from "../agents/runtime/prompt.ts";
 import { notesFor } from "./store.ts";
 
 /**
- * What a group the Agent's owner is no longer a member of is called in the passage: neither the title it had (it is not
- * kept) nor its title now (renames after the owner left are not theirs to learn).
+ * What a group the Agent's owner is no longer a member of is called in the passage: after leaving, the group's title is
+ * not read again (renames after the owner left are not theirs to learn). Lines written while they were a member — a memory
+ * notice's — keep the title they were written with (the controller's ruling, Task R fix round 1).
  */
 export const LEFT_GROUP_TITLE = "一个已离开的群";
 

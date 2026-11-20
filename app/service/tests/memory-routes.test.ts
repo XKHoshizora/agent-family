@@ -694,6 +694,19 @@ describe("a group the owner has left", () => {
     expect(passage.hearsay.map((h) => [h.text, h.group])).toEqual([["下周换场地", "一个已离开的群"]]);
     expect(JSON.stringify(passage)).not.toMatch(/TITLE-g3/);
   });
+
+  it("back in the group (added again), the owner's notes page and passage name it by its title now", async () => {
+    const w = await leftGroup();
+    await w.leave();
+    expect((await api(app, w.mia, "POST", `/api/conversations/${w.club}/members`, { principalId: w.owner.id })).status).toBe(201);
+    expect((await notes(w.owner)).json.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: "NEW-TITLE-g3" }]);
+    const agentPage = (await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`)).json;
+    expect(agentPage.notes.map((n: { source: unknown }) => n.source)).toEqual([{ kind: "group", title: "NEW-TITLE-g3" }]);
+    const passage = await loadNotes(db, await agentRow(w.agent.id), { conversationId: w.agent.conversationId, group: false });
+    expect(passage.hearsay.map((h) => h.group)).toEqual(["NEW-TITLE-g3"]);
+    // The hearsay page goes by the Agent's own membership: until the Agent is added back it says no group.
+    expect(agentPage.hearsay.map((h: { group: unknown }) => h.group)).toEqual([null]);
+  });
 });
 
 describe("README", () => {
