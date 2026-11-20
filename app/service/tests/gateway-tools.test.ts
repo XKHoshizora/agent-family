@@ -578,6 +578,52 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     }
   });
 
+  describe("toolChoice", () => {
+    /** How each protocol's request says the model may call no tool. */
+    const NONE: Record<Protocol, Record<string, unknown>> = {
+      openai_chat: { tool_choice: "none" },
+      openai_responses: { tool_choice: "none" },
+      anthropic: { tool_choice: { type: "none" } },
+      gemini: { toolConfig: { functionCallingConfig: { mode: "NONE" } } },
+    };
+
+    it("none, on a last round: the same tools and the same steps, and the protocol's way of saying no tool may be called", async () => {
+      const step = await aStep(protocol);
+      stub.reset();
+      stub.answer(answering("text"));
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, steps: [step] })));
+      const auto = stub.requests[0]!.body;
+      stub.reset();
+      stub.answer(answering("text"));
+      const events = await collect(gateway.stream(call(protocol, { tools: TOOLS, steps: [step], toolChoice: "none" })));
+      expect(deltas(events, "text")).toBe(CANNED_TEXT);
+      const none = stub.requests[0]!.body;
+      expect(toolFields(protocol, none)).toEqual({ ...toolFields(protocol, auto), ...NONE[protocol] });
+      expect(toolFields(protocol, none).tools).toEqual(toolFields(protocol, auto).tools);
+      expect(turns(protocol, none)).toEqual(turns(protocol, auto));
+      const { tools: _a, tool_choice: _b, toolConfig: _c, ...rest } = none;
+      const { tools: _d, tool_choice: _e, toolConfig: _f, ...restAuto } = auto;
+      expect(rest).toEqual(restAuto); // nothing else differs
+    });
+
+    it("none on a first round sends the tools with it too", async () => {
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, toolChoice: "none" })));
+      expect(toolFields(protocol, stub.requests[0]!.body)).toMatchObject(NONE[protocol]);
+      expect(toolFields(protocol, stub.requests[0]!.body).tools).toBeDefined();
+    });
+
+    it("auto, or absent, is the request as it was, byte for byte; without tools, a choice changes nothing", async () => {
+      await collect(gateway.stream(call(protocol, { tools: TOOLS })));
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, toolChoice: "auto" })));
+      expect(stub.requests[1]!.raw).toBe(stub.requests[0]!.raw);
+      stub.reset();
+      await collect(gateway.stream(call(protocol)));
+      await collect(gateway.stream(call(protocol, { toolChoice: "none" })));
+      await collect(gateway.stream(call(protocol, { tools: [], toolChoice: "none" })));
+      expect(stub.requests.map((r) => r.raw)).toEqual([stub.requests[0]!.raw, stub.requests[0]!.raw, stub.requests[0]!.raw]);
+    });
+  });
+
   describe("an upstream that refuses tools", () => {
     const withoutTools = (body: any) => {
       const { tools: _tools, tool_choice: _choice, toolConfig: _config, ...rest } = body;

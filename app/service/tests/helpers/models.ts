@@ -181,6 +181,9 @@ function unanswered(calls: readonly ToolCall[], results: readonly ToolResult[]):
  *   and a truncated `callTools` round whose inputs are all null finishes truncated where the real one is
  *   `thinking_exhausted` after reasoning.
  * - `calls[n].steps` is a copy of the array, but the step objects in it are the caller's.
+ * - `toolChoice` is recorded (`calls[n].toolChoice`), never enforced: a `callTools` round on a call with `toolChoice:
+ *   "none"` is honoured, as a model that calls a tool anyway; the real upstream is told it may call none. The step
+ *   checks hold for such a call as for any other.
  */
 export function scriptedGateway(): ScriptedGateway {
   const queue: Step[] = [];

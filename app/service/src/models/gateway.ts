@@ -101,6 +101,12 @@ export interface ModelCall {
    */
   tools?: ToolSpec[];
   /**
+   * With `tools`: whether the model may call one (`auto`) or must answer without (`none`: the tools are still sent, in
+   * the protocol's way of saying none may be called — a last round, whose `steps` an upstream may refuse without the
+   * tools' definitions). Absent: as `auto`, the request exactly as without this field. Without tools: nothing is sent.
+   */
+  toolChoice?: "auto" | "none";
+  /**
    * The rounds of this answer so far, oldest first, sent after `messages`: each round's assistant turn as its finish
    * gave it (`assistant`, passed back untouched), then its tool calls' results.
    */
@@ -683,7 +689,8 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
       model: languageModel(call, tap ? chatFetch(fetch, tap, thinking, chatRounds(call.steps)) : fetch),
       ...(call.system === "" ? {} : { instructions: call.system }),
       messages: [...toModelMessages(call.messages), ...stepMessages(call.steps ?? [])],
-      ...(tools === undefined ? {} : { tools }),
+      // A choice only with tools, and `none` only: `auto` is what the SDK sends when none is given.
+      ...(tools === undefined ? {} : { tools, ...(call.toolChoice === "none" ? { toolChoice: "none" as const } : {}) }),
       maxOutputTokens: call.maxOutputTokens,
       providerOptions: providerOptionsFor(call, left),
       abortSignal: AbortSignal.any([call.signal, own.signal]),

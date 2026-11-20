@@ -1398,7 +1398,11 @@ gateway, and each call is one round. They go in the protocol's own shape, the mo
 `tools: [{name, description, input_schema}]`, `tool_choice: {type: "auto"}`, each input asked for whole, no
 `eager_input_streaming`; `gemini`: `tools: [{functionDeclarations: [{name, description, parametersJsonSchema}]}]`,
 `toolConfig: {functionCallingConfig: {mode: "AUTO"}}`). A call offering none sends exactly what it sent before tools
-existed. The rounds of the answer so far (`steps`) follow the conversation: each round's assistant turn as its finish
+existed. A call with tools may say the model must answer without calling one (`toolChoice: "none"`, the last round of
+an answer: Agents and runs, Tools in a reply): the same tools go with it, and the choice field becomes `tool_choice:
+"none"` (both OpenAI protocols), `tool_choice: {type: "none"}` (`anthropic`) or `toolConfig: {functionCallingConfig:
+{mode: "NONE"}}` (`gemini`); `toolChoice` absent or `auto` is the request as above, byte for byte, and without tools it
+sends nothing. The rounds of the answer so far (`steps`) follow the conversation: each round's assistant turn as its finish
 gave it, then one tool message with its calls' results (a string as it is, anything else as its JSON) — so the next
 request carries what the protocol needs back: Anthropic's signed thinking before its `tool_use`, the Responses
 reasoning item with its encrypted content (nothing is kept at OpenAI, so nothing is referred to by id), Gemini's thought
