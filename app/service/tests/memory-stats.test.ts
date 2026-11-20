@@ -142,30 +142,42 @@ describe("a review", () => {
     expect(await stats()).toEqual({ review_run: 1, strength_bump: 1 });
   });
 
-  it("with an explicit request replaces, removes and locks: one count each, and the question whether the owner asked: once per statement, one request", async () => {
+  it("with an explicit request replaces, removes and locks: one count each, the lock as applied at once (lock_auto), and the question whether the owner asked to forget: one request, one statement", async () => {
     const w = await owned("st3");
     await seeded(w.owner, "喜欢鱼香肉丝", false);
     await seeded(w.owner, "住在东门", false);
     await seeded(w.owner, "不吃辣", false);
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9, explicit_lock: 0.9 }));
     await sayAndReview(w, "我现在喜欢麻婆豆腐了，住址忘掉吧，不吃辣那条锁起来", ops({ op: "replace", ref: "n1", text: "喜欢麻婆豆腐" }, { op: "remove", ref: "n2" }, { op: "lock", ref: "n3" }));
-    expect(await stats()).toMatchObject({ review_run: 1, note_replaced: 1, note_removed: 1, note_locked: 1, explicit_asked: 2, explicit_yes: 2, judge_memory_call_explicit: 1 });
+    // The replace and the remove have a merge's shape: the faithful question came first (no answer here: not faithful).
+    expect(await stats()).toMatchObject({ review_run: 1, note_replaced: 1, note_removed: 1, note_locked: 1, lock_auto: 1, explicit_asked: 1, explicit_yes: 1, judge_memory_call_explicit: 1, judge_memory_call_faithful: 1 });
     expect(await stats()).not.toHaveProperty("explicit_no");
+    expect(await stats()).not.toHaveProperty("merge_auto");
   });
 
-  it("the judgement's no and no answer at all are counted apart; nothing is counted when it is not asked", async () => {
+  it("the judgement's no and no answer at all are counted apart, and it is asked whatever the words", async () => {
     const w = await owned("st3b");
     await seeded(w.owner, "住在东门", false);
     await seeded(w.owner, "不吃辣", false);
-    // A no for the forget statement; nothing for the lock one.
+    // A no for the forget statement; the lock is applied without a question.
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.2 }));
     await sayAndReview(w, "住址忘掉吧，不吃辣那条锁起来", ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
-    expect(await stats()).toEqual({ review_run: 1, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 1 });
-    // No word of forgetting: not asked, nothing counted.
+    expect(await stats()).toEqual({ review_run: 1, explicit_asked: 1, explicit_no: 1, judge_memory_call_explicit: 1, note_locked: 1, lock_auto: 1, card_shown_remove: 1 });
+    // No word of forgetting at all, and no answer: asked all the same, counted as no answer, a card.
+    judge.answer(() => ({ sort: 0.95 }));
     const v = await owned("st3c");
     await seeded(v.owner, "住在东门", false);
     await sayAndReview(v, "记住我养了猫", ops({ op: "remove", ref: "n1" }));
-    expect(await stats()).toEqual({ review_run: 2, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 1 });
+    expect(await stats()).toEqual({ review_run: 2, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 2, note_locked: 1, lock_auto: 1, card_shown_remove: 2 });
+  });
+
+  it("a faithful merge applied at once counts merge_auto (no note_replaced, no note_removed) and the faithful question it needed", async () => {
+    const w = await owned("st3d");
+    await seeded(w.owner, "路由器在客厅", false);
+    await seeded(w.owner, "路由器是华硕的", false);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.9 }));
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }));
+    expect(await stats()).toEqual({ review_run: 1, merge_auto: 1, judge_memory_call_faithful: 1, judge_memory_call_sort: 1 });
   });
 
   it("whose call fails counts the run and the failure; one that answers garbage is no failure", async () => {
@@ -249,7 +261,7 @@ describe("what the owner does about what a review made", () => {
     expect([found.owner_unlocked, found.owner_locked]).toEqual([1, 1]);
   });
 
-  it("with 先问我再记 a pending card confirmed or discarded counts once each", async () => {
+  it("with 先问我再记 each card is counted as shown (ask_first), and confirmed or discarded once each", async () => {
     const w = await owned("st9", { memoryAsk: true });
     await exchange(w, "我不吃香菜");
     judging(0.95);
@@ -263,7 +275,56 @@ describe("what the owner does about what a review made", () => {
     expect((await decide("confirm", cards[0]!.system.changeId)).status).toBe(200);
     expect((await decide("discard", cards[1]!.system.changeId)).status).toBe(200);
     const found = await stats();
-    expect([found.pending_confirmed, found.pending_discarded]).toEqual([1, 1]);
+    expect([found.card_shown_ask_first, found.card_confirmed, found.card_discarded]).toEqual([2, 1, 1]);
+    expect(found).not.toHaveProperty("pending_confirmed");
+    expect(found).not.toHaveProperty("pending_discarded");
+  });
+
+  it("a card is counted by why it waits — a remove not asked for, a merge not found faithful, anything else (a replace before the owner's word, an unlock) — and a card nobody answered is counted when the sweep discards it", async () => {
+    // A remove the owner did not ask for.
+    const a = await owned("cs1");
+    await seeded(a.owner, "住在东门", false);
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.1 }));
+    await sayAndReview(a, "住址那条处理一下，记住", ops({ op: "remove", ref: "n1" }));
+    // A merge that is not faithful, with the owner not asking for its remove.
+    const b = await owned("cs2");
+    await seeded(b.owner, "路由器在客厅", false);
+    await seeded(b.owner, "路由器是华硕的", false);
+    judge.answer(() => ({ sort: 0.95, faithful: 0.2, explicit_forget: 0.1 }));
+    await sayAndReview(b, "把路由器那两条合成一条，多的删掉", ops({ op: "replace", ref: "n1", text: "路由器在客厅，是小米的" }, { op: "remove", ref: "n2" }));
+    // A replace of a note changed after the owner's last line, and a request to take a note out of the vault.
+    const c = await owned("cs3");
+    await exchange(c, "其实我不喝茶了");
+    await seeded(c.owner, "喜欢喝茶", false);
+    await seeded(c.owner, "对花生过敏", true);
+    judge.answer(() => ({ sort: 0.95 }));
+    await quietThen(ops({ op: "replace", ref: "n1", text: "不喝茶了" }, { op: "unlock", ref: "n2" }));
+    const found = await stats();
+    expect(found).toMatchObject({ card_shown_remove: 1, card_shown_unfaithful_merge: 1, card_shown_other: 2 });
+    expect(found).not.toHaveProperty("card_shown_ask_first");
+    expect((await chips(c.owner, c.conv)).map((n) => n.system.pending)).toEqual([true, true]);
+    // A month later nobody has answered them: the sweep discards each, counted once.
+    const { sweepMemoryChanges } = await import("../src/memory/sweep.ts");
+    expect((await sweepMemoryChanges(db, new Date(Date.now() + 31 * 24 * HOUR))).discarded).toBe(4);
+    expect((await stats()).card_expired).toBe(4);
+  });
+
+  it("with 先问我再记 a dream's card counts as ask_first; a pending change with nothing in it (a full room) is no card and is not counted", async () => {
+    const w = await owned("cs4", { memoryAsk: true });
+    await seeded(w.owner, "喜欢喝茶", false);
+    await seeded(w.owner, "爱喝茶", false);
+    judge.answer((_s, qs): ScriptedAnswers => (qs[0]!.key === "faithful" ? { faithful: 0.9 } : { sort: 0.95 }));
+    gateway.reply(JSON.stringify({ ops: [{ op: "merge", into: "n1", from: ["n2"], text: "爱喝茶" }] }));
+    clock.advance(3 * HOUR + MIN);
+    await memory().idle();
+    expect((await chips(w.owner, w.conv)).map((n) => [n.system.phase, n.system.pending])).toEqual([["dream", true]]);
+    expect((await stats()).card_shown_ask_first).toBe(1);
+    const v = await owned("cs5", { memoryAsk: true });
+    for (let i = 0; i < 10; i++) await seeded(v.owner, `${"字".repeat(199)}${i}`, true);
+    await exchange(v, "我喜欢茶");
+    await quietThen(ops(add("喜欢茶")));
+    expect((await chips(v.owner, v.conv)).map((n) => [n.system.pending, n.system.full])).toEqual([[false, true]]);
+    expect((await stats()).card_shown_ask_first).toBe(1);
   });
 });
 

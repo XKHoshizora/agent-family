@@ -297,9 +297,9 @@ export interface MemoryConfig {
    */
   judgeShare: number;
   /**
-   * In the owner's own conversation a review's `remove` or `lock` is applied at once only when the judgement model is at least this sure
-   * that the owner's words in the review's window asked for it (to forget or delete something, to keep something secret); otherwise,
-   * or with no answer, it waits for the owner's yes. Above 0, at most 1.
+   * In the owner's own conversation a review's `remove` (one that is not part of a faithful merge) is applied at once only when the
+   * judgement model is at least this sure that the owner's words in the review's window asked to forget or delete something; otherwise,
+   * or with no answer, it waits for the owner's yes. (A `lock` is applied at once without asking.) Above 0, at most 1.
    */
   explicitAt: number;
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */

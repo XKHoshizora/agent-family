@@ -10,11 +10,19 @@ import type { StoredOp } from "./apply.ts";
  * the reader of notices (messages/read.ts) may render a notice again once its card has been decided.
  */
 
+/** A merge's line, a dream's or a review's alike: `合并了 {k} 条：…` once done (k the notes it joined), `要合并成：…` while it waits. */
+const mergeLine = (s: StoredOp, pending: boolean): string => (pending ? `要合并成：${s.after}` : `合并了 ${1 + s.removed!.length} 条：${s.after}`);
+
 export function linesOf(ops: ReadonlyArray<StoredOp>, pending = false): { lines: string[]; vaultLines: boolean[] } {
   const lines: string[] = [];
   const vaultLines: boolean[] = [];
   for (const s of ops) {
     switch (s.op) {
+      // A review's merge (one found faithful, applied at once: pipeline.ts) is told as a dream's is.
+      case "merge":
+        lines.push(mergeLine(s, pending));
+        vaultLines.push(s.vaultAfter === true);
+        break;
       case "add":
         lines.push(`${pending ? "要记住：" : "记住了："}${s.after}`);
         vaultLines.push(s.vaultAfter === true);
@@ -46,7 +54,7 @@ export function dreamLines(ops: ReadonlyArray<StoredOp>, pending = false): { lin
   const vaultLines: boolean[] = [];
   for (const s of ops) {
     if (s.op === "merge") {
-      lines.push(pending ? `要合并成：${s.after}` : `合并了 ${1 + s.removed!.length} 条：${s.after}`);
+      lines.push(mergeLine(s, pending));
       vaultLines.push(s.vaultAfter === true);
     } else if (s.op === "replace") {
       lines.push(`${pending ? "要改成：" : "改成了："}${s.after}`);

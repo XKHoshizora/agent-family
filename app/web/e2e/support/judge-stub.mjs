@@ -29,18 +29,18 @@ export const LISTEN_MARK = "报告";
  * by a distinctive phrase of its instructions and answered by its own fixed rule; null for any other question. Answers are
  * a `noul` probability.
  * - sort (a note about the owner, or an Agent's own): 0.05 when the note holds `VAULT_MARK`, else 0.95;
- * - duplicate of an existing note: 0.05; the faithful check of a dream's change: 0.95;
+ * - duplicate of an existing note: 0.05; the faithful check of a dream's change or of a review's merge: 0.95;
  * - listener "someone else said something about the owner": 0.95 when a new (【新】) line holds `LISTEN_MARK`, else 0.05;
  * - listener "the owner said something about themselves": 0.05;
  * - hearsay "something new in this batch": 0.95; hearsay "abuse": 0.05;
- * - "the owner asked, in these words, to forget or delete something" and "… to keep something secret or lock it away" (memory/sort.ts
- *   `ownerAsked`, asked only when a review's remove or lock meets the owner's words of forgetting or locking): 0.95 — the owner asked.
+ * - "the owner asked, in these words, to forget or delete something" (memory/sort.ts `ownerAsked`, asked when a review's remove would
+ *   otherwise wait, whatever the words; a lock is never asked about): 0.95 — the owner asked.
  */
 function memoryAnswer(state, question) {
   if (question?.type !== "noul") return null;
   const text = String(question.instructions ?? "");
   const has = (phrase) => text.includes(phrase);
-  if (has("他是在叫助手删掉、忘掉或不要记下某件关于他的事") || has("他是在叫助手把某件事保密")) return SURE;
+  if (has("他是在叫助手删掉、忘掉或不要记下某件关于他的事")) return SURE;
   if (has("这是一个人的 AI 助手记下的一条关于主人的笔记") || has("这是一个 AI 助手给自己记的一条笔记")) return String(state ?? "").includes(VAULT_MARK) ? 0.05 : SURE;
   if (has("这是一个 AI 助手关于主人的笔记。state 是一个 JSON：new 是一条新的笔记")) return 0.05;
   if (has("新的这些说的全都是原来的笔记里已经有的事")) return SURE;

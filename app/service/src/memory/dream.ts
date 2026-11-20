@@ -638,7 +638,11 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     conversion.tally.noRoom += noRoom;
   }
   announce(deps, notices, by.id);
-  if (notices !== null) countDreamOps(db, made, new Set(ops.flatMap((o) => (o.op === "lock" ? [refs.get(o.ref)!.id] : []))));
+  if (notices !== null) {
+    countDreamOps(db, made, new Set(ops.flatMap((o) => (o.op === "lock" ? [refs.get(o.ref)!.id] : []))));
+    // A dream's card: only with 先问我再记.
+    for (const n of notices) if (n.body.pending === true) count(db, "card_shown_ask_first");
+  }
   log.info({ metric: "memory_dream", agentId: by.id, room: room.kind, ops: ops.length, notices: notices?.length ?? 0 }, "a memory dream ended");
   return "done";
 }

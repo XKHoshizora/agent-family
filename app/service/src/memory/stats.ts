@@ -79,12 +79,12 @@ export function countDroppedFlags(db: Queryable, dropped: ReadonlyArray<{ tries:
   count(db, "flags_dropped_age", dropped.length - tried);
 }
 
-/** The owner's decision on a change, counted when it took effect: `kind` is `changeKind` of the change (read before the decision). */
+/** The owner's decision on a change, counted when it took effect: `kind` is `changeKind` of the change (read before the decision). A card shown is counted where it is made (`card_shown_<reason>`), one nobody answered where the sweep discards it (`card_expired`). */
 export function countDecision(db: Queryable, verb: "undo" | "confirm" | "discard", kind: Awaited<ReturnType<typeof changeKind>> | null): void {
   if (verb === "undo") count(db, kind === "hearsay" ? "undo_hearsay" : kind === "dream" ? "undo_dream" : "undo_rest");
-  else if (verb === "discard") count(db, "pending_discarded");
+  else if (verb === "discard") count(db, "card_discarded");
   else {
-    count(db, "pending_confirmed");
+    count(db, "card_confirmed");
     // Confirming a request to take notes out of the vault takes them out.
     if (kind === "unlock") count(db, "owner_unlocked");
   }

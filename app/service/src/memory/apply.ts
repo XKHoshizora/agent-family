@@ -547,6 +547,8 @@ export interface DreamApplyOpts {
   /** The sorting verdict (sort.ts `resortNote`) of each open note that is new since the last dream: one that no op touched, that is not the owner's choice and has not changed since it was read is locked when its verdict says so. A note with no entry has no verdict and stays. */
   resorted: ReadonlyMap<string, { vault: boolean; unsure: boolean }>;
   rooms: Rooms;
+  /** Whose change it is (`memory_changes.phase`): a dream's (the default), or a review's — a merge a review found faithful (pipeline.ts) is applied here as a dream's is, but it is the review's doing. */
+  phase?: "rest" | "dream";
 }
 
 /**
@@ -672,7 +674,8 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
  * Applies a dream's operations (or, with status `pending`, only records them as one change for the owner to confirm), in the
  * caller's transaction, under the account lock. `who.agentId` is the Agent carrying the dream out, `who.kinds` the room it
  * consolidates. The change is judged by its net effect on the room (`planDream`). Null when no op took effect; also when the
- * Agent is not the owner's.
+ * Agent is not the owner's. A review's merge the judgement found faithful is applied here too (pipeline.ts), the very same way, as a
+ * change of phase `rest`.
  */
 export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<string, { kind: NoteKind; id: string }>, opts: DreamApplyOpts): Promise<ApplyResult | null> {
   await lockAccount(t, who.ownerId);
@@ -683,7 +686,7 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   if (opts.status === "applied") await stamp(t, who, stored);
   // A room too full to take a longer text is nothing a dream has to say (a conversion is told how many it left for that: `noRoom`).
   if (stored.length === 0) return planned.noRoom > 0 ? { changeId: null, applied: [], full: planned.full, unlocks: [], noRoom: planned.noRoom } : null;
-  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, "dream");
+  const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, opts.phase ?? "dream");
   return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [], noRoom: planned.noRoom };
 }
 
