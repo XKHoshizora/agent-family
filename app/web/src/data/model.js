@@ -71,6 +71,11 @@ export function initial() {
     pending: {},
     /** conversation id → composer text not sent yet. */
     drafts: {},
+    /**
+     * conversation id → a refused message's text and mentions to put back in its composer (`{n, text, mentions}`,
+     * `refillComposer`), until the composer takes it (`takeRefill`).
+     */
+    refills: {},
     /** The last /api/social answer. */
     social: null,
     /** conversation id → how many times I left it (see `stayOf`). */
@@ -762,6 +767,26 @@ export function setUploaded(state, clientTxn, attachment) {
 /** Removes an unsent entry (a cancelled upload). */
 export function discardPending(state, clientTxn) {
   return clientTxn in state.pending ? { ...state, pending: without(state.pending, clientTxn) } : state;
+}
+
+/**
+ * A failed text message goes back to its composer: its text and mentions are put there (`refills`, which the composer
+ * takes, Composer.jsx) and the unsent entry goes. Fix round 1, I-2: a message the service refused for a stale mention
+ * is never sent again as it is, nor without its mentions.
+ */
+export function refillComposer(state, clientTxn) {
+  const p = state.pending[clientTxn];
+  if (!p || p.status !== "failed" || p.file || p.attachment) return state;
+  const n = (state.refills?.[p.conversationId]?.n ?? 0) + 1;
+  return {
+    ...discardPending(state, clientTxn),
+    refills: { ...(state.refills ?? {}), [p.conversationId]: { n, text: p.text ?? "", mentions: Array.isArray(p.mentions) ? p.mentions : [] } },
+  };
+}
+
+/** The composer of `conversationId` took what was put back for it (`refillComposer`). */
+export function takeRefill(state, conversationId) {
+  return state.refills?.[conversationId] ? { ...state, refills: without(state.refills, conversationId) } : state;
 }
 
 /** The service's verdict on sending here, e.g. from a `cannot_send` refusal. */

@@ -32,6 +32,8 @@ import {
   bumpAvatar,
   closeWindow,
   discardPending,
+  refillComposer,
+  takeRefill,
   dismissGroupRunOf,
   dismissRunOf,
   dropWhisper,
@@ -305,11 +307,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
 
   /**
    * Sends a failed message again with the same clientTxn. A file whose upload failed is uploaded again (queued like
-   * any other); one that was uploaded is only sent again, never uploaded twice.
+   * any other); one that was uploaded is only sent again, never uploaded twice. A message refused for a stale mention
+   * (`bad_mentions`) is not sent again as it is: it goes back to its composer instead (`reviseFailed`).
    */
   function retrySend(clientTxn) {
     const p = getModel().pending[clientTxn];
     if (!p || p.status !== "failed") return refused("not_found", clientTxn);
+    if (p.error?.code === "bad_mentions") return refused("bad_mentions", clientTxn);
     // (An upload of an earlier stay is not reused either: it is uploaded again into this one.)
     if (p.file && (!p.attachment || p.error?.code === "stale")) {
       if (!files.has(clientTxn)) return refused("not_found", clientTxn);
@@ -1030,6 +1034,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     /** `before`: the previous page's `nextBefore` (an opaque cursor). */
     searchAll: ({ q, before } = {}) => runSearch(() => api.searchAll({ q, before, limit: SEARCH_PAGE })),
     setDraft: saveDraft,
+    /** A failed text message back into its composer, text and mentions (model.js `refillComposer`; 改一下). */
+    reviseFailed: (clientTxn) => setModel(refillComposer(getModel(), clientTxn)),
+    /** The composer of `conversationId` took what was put back for it. */
+    takeRefill: (conversationId) => setModel(takeRefill(getModel(), conversationId)),
     // my profile
     /** Resolves the name as stored; throws the route's error (a 401 signs out). */
     updateDisplayName: (displayName) =>

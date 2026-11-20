@@ -5,8 +5,21 @@
 // ranges of the mentions picked from the @ list right while the text around them is edited, and maps them onto the text
 // as it is sent.
 
+import { MESSAGE_DROPPED } from "../auth/validation.js";
+
 /** The most mentions one message carries (the service's `MENTION_LIMIT`). */
 export const MENTION_LIMIT = 20;
+
+/**
+ * The addresses of `text` — a URL (a scheme and `://`, or `www.`, up to white space or `<` `>`) and a Markdown link's
+ * target (`](` up to `)` or white space) — as `[start, end)`: a name inside one is not someone addressed (the service's
+ * `addressRanges`, agents/mentions.ts; fix round 1, I-3).
+ */
+const ADDRESS = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
+export const addressRanges = (text) => [...String(text ?? "").matchAll(ADDRESS)].map((m) => [m.index, m.index + m[0].length]);
+
+/** Whether `[start, start + length)` of `text` is part of an address: right after a `/`, or inside an `addressRanges` one. */
+export const inAddress = (text, start, length) => text[start - 1] === "/" || addressRanges(text).some(([a, b]) => start < b && start + length > a);
 
 const isIndex = (n) => Number.isSafeInteger(n) && n >= 0;
 
@@ -98,10 +111,9 @@ export function editOf(before, after, hint = null) {
 
 /**
  * The composer's tags (`{id, start, length}` in the box's text) after an edit (`editOf`): those before it stay, those
- * after it move with it, one it covers wholly is gone (`removed`, with where it was), and one it only partly covers is
- * no tag any more (`broken`: typing inside a tag turns it back into plain text; a deletion that takes part of a tag is
- * the caller's to widen, `widenDeletion`). An edit touching a tag only at its edge — text typed right before or after
- * it — leaves it whole.
+ * after it move with it, one it covers wholly is gone (`removed`), and one it lands inside of — a part of it, or an
+ * insertion between its first and last character — is `broken` (`afterEdit` takes all of it). An edit touching a tag
+ * only at its edge — text typed right before or after it — leaves it whole.
  */
 export function retag(tags, edit) {
   const delta = edit.inserted.length - (edit.end - edit.start);
@@ -118,41 +130,154 @@ export function retag(tags, edit) {
   return { kept, removed, broken };
 }
 
+/** Deletions that took tags, kept so undo can bring them back: the newest this many. */
+const REMOVALS_KEPT = 20;
+
 /**
- * A deletion (nothing inserted) that takes part of a tag takes all of it: the code units to delete instead, `[start,
- * end)` of the text before the edit, covering every tag it touched. Null when it touched none partly.
+ * The composer's state (`{ text, tags, removals }`) once its box's text became `value` (by the browser, or by the
+ * composer itself), as one pure step (fix round 1, M-8):
+ * - the edit is found (`editOf`, the caret or selection before it, `hint`, deciding between equally small ones);
+ * - **tags are atomic** (M-3): an edit that lands inside a tag — part of it, or text put between its characters by a
+ *   paste or any other change — takes the whole tag, keeping what it put in (`caret`: where the caret goes, as the text
+ *   is then the composer's, not the browser's). While an IME composes (`composing`) the text is never rewritten: such a
+ *   tag is kept as a `broken` range of what is left of it, moved with the edits, and cut when the composition ends
+ *   (`settleEdits`), so no half of a tag is ever left as plain text to be read at send;
+ * - the other tags move with the edit or go with what it took (`retag`);
+ * - undo or redo putting back exactly a text that a deletion took, where it took it, brings back the tags it held
+ *   (`removals`, moved with every later edit);
+ * - a tag being picked (`picking`: `{id, start, length, text}`) is added once the text holds it at its place.
+ * Returns `{ text, tags, removals, caret, picked, added, removed }`: `caret` null unless the text was rewritten,
+ * `picked` whether `picking` was added, `added` and `removed` the tags' texts for the screen reader.
  */
-export function widenDeletion(tags, edit) {
-  if (edit.inserted !== "" || edit.end <= edit.start) return null;
-  let start = edit.start;
-  let end = edit.end;
-  let widened = false;
-  for (const tag of tags) {
-    const tagEnd = tag.start + tag.length;
-    const overlaps = tag.start < edit.end && tagEnd > edit.start;
-    const whole = edit.start <= tag.start && tagEnd <= edit.end;
-    if (!overlaps || whole) continue;
-    start = Math.min(start, tag.start);
-    end = Math.max(end, tagEnd);
-    widened = true;
+export function afterEdit(state, value, { hint = null, composing = false, picking = null } = {}) {
+  const before = state;
+  let edit = editOf(before.text, value, hint);
+  let text = value;
+  let caret = null;
+  const inside = (tag) => {
+    const end = tag.start + tag.length;
+    return edit.start < end && edit.end > tag.start && !(edit.start <= tag.start && end <= edit.end);
+  };
+  const touched = before.tags.filter(inside);
+  const broken = [];
+  if (touched.length > 0 && !composing) {
+    const start = Math.min(edit.start, ...touched.map((t) => t.start));
+    const end = Math.max(edit.end, ...touched.map((t) => t.start + t.length));
+    text = before.text.slice(0, start) + edit.inserted + before.text.slice(end);
+    edit = { start, end, inserted: edit.inserted };
+    caret = start + edit.inserted.length;
+  } else if (touched.length > 0) {
+    const delta = edit.inserted.length - (edit.end - edit.start);
+    for (const t of touched) {
+      const start = Math.min(t.start, edit.start);
+      broken.push({ id: t.id, start, length: Math.max(t.start + t.length, edit.end) + delta - start, broken: true });
+    }
   }
-  return widened ? { start, end } : null;
+  const { kept, removed } = retag(
+    before.tags.filter((t) => !touched.includes(t)),
+    edit,
+  );
+  const delta = edit.inserted.length - (edit.end - edit.start);
+  let removals = [];
+  for (const r of before.removals ?? []) {
+    if (r.at <= edit.start) removals.push(r);
+    else if (r.at >= edit.end) removals.push({ ...r, at: r.at + delta });
+  }
+  const back = [];
+  if (edit.inserted !== "" && edit.end === edit.start) {
+    const undone = removals.findLast((r) => r.at === edit.start && r.text === edit.inserted);
+    if (undone) {
+      removals = removals.filter((r) => r !== undone);
+      back.push(...undone.tags.map((t) => ({ id: t.id, start: undone.at + t.offset, length: t.length })));
+    }
+  }
+  const taken = [...removed, ...(caret === null ? [] : touched)].filter((t) => !t.broken);
+  if (taken.length > 0) {
+    removals.push({
+      at: edit.start,
+      text: before.text.slice(edit.start, edit.end),
+      tags: taken.map((t) => ({ id: t.id, offset: t.start - edit.start, length: t.length })),
+    });
+  }
+  removals = removals.slice(-REMOVALS_KEPT);
+  let picked = false;
+  if (picking && text.slice(picking.start, picking.start + picking.length) === picking.text) {
+    picked = true;
+    back.push({ id: picking.id, start: picking.start, length: picking.length });
+  }
+  const whole = mentionsIn(text, [...kept.filter((t) => !t.broken), ...back].sort((a, b) => a.start - b.start));
+  const tags = [...whole, ...kept.filter((t) => t.broken), ...broken].sort((a, b) => a.start - b.start);
+  const named = (t, from) => mentionName(from.slice(t.start, t.start + t.length));
+  return {
+    text,
+    tags,
+    removals,
+    caret,
+    picked,
+    added: back.map((t) => named(t, text)),
+    removed: [...taken, ...broken].map((t) => named(t, before.text)),
+  };
+}
+
+/**
+ * Once an IME composition ends: what is left of each tag an edit landed inside while it composed (`broken`) is cut
+ * (`afterEdit`). Returns the state as `afterEdit` does (`caret` null when nothing was cut).
+ */
+export function settleEdits(state) {
+  const cut = state.tags.filter((t) => t.broken).sort((a, b) => b.start - a.start);
+  if (cut.length === 0) return { ...state, caret: null };
+  let text = state.text;
+  let tags = state.tags.filter((t) => !t.broken);
+  for (const c of cut) {
+    text = text.slice(0, c.start) + text.slice(c.start + c.length);
+    tags = tags.map((t) => (t.start >= c.start + c.length ? { ...t, start: t.start - c.length } : t));
+  }
+  return { ...state, text, tags, removals: [], caret: cut.at(-1).start };
+}
+
+/**
+ * The composer's state without the tags whose principal is no longer one to mention here (`isMember(id)` false: a
+ * person who left, an Agent taken out): each turns into plain text without its "@" — so nothing reads it as a typed
+ * mention at send (fix round 1, I-2) — and the tags after it move. `stale`: their texts as they were (`@阿波`), for the
+ * line that says so. The same state when none went stale.
+ */
+export function withoutStale(state, isMember) {
+  const stale = state.tags.filter((t) => !t.broken && !isMember(t.id));
+  if (stale.length === 0) return state;
+  let text = state.text;
+  let tags = state.tags.filter((t) => !stale.includes(t));
+  for (const t of [...stale].sort((a, b) => b.start - a.start)) {
+    text = text.slice(0, t.start) + text.slice(t.start + 1);
+    tags = tags.map((o) => (o.start > t.start ? { ...o, start: o.start - 1 } : o));
+  }
+  return { ...state, text, tags, removals: [], stale: stale.map((t) => state.text.slice(t.start, t.start + t.length)) };
 }
 
 /** The tag whose end is at `caret` (Backspace there takes it), or whose start is (Delete there takes it). */
-export const tagEndingAt = (tags, caret) => tags.find((t) => t.start + t.length === caret) ?? null;
-export const tagStartingAt = (tags, caret) => tags.find((t) => t.start === caret) ?? null;
+export const tagEndingAt = (tags, caret) => tags.find((t) => !t.broken && t.start + t.length === caret) ?? null;
+export const tagStartingAt = (tags, caret) => tags.find((t) => !t.broken && t.start === caret) ?? null;
+
+/**
+ * Where a caret that came to rest inside a tag goes instead (M-3: the caret never rests inside one): the tag's end when
+ * it came from before the tag, its start when it came from after it, else (a click) the nearer edge. Null when `at` is
+ * inside no tag.
+ */
+export function caretOutside(tags, at, from = null) {
+  const tag = tags.find((t) => !t.broken && t.start < at && at < t.start + t.length);
+  if (!tag) return null;
+  const end = tag.start + tag.length;
+  if (from !== null && from <= tag.start) return end;
+  if (from !== null && from >= end) return tag.start;
+  return at - tag.start <= end - at ? tag.start : end;
+}
 
 // ───────── the text as it is sent
 
-/** What the service removes from a message's text: bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069). */
-const isBidi = (unit) => (unit >= 0x202a && unit <= 0x202e) || (unit >= 0x2066 && unit <= 0x2069);
-/** What the web drops before sending (the service refuses it): NUL and every other control character but tab and line breaks. */
-const isStrayControl = (unit) => (unit < 0x20 && unit !== 0x09 && unit !== 0x0a && unit !== 0x0d) || (unit >= 0x7f && unit <= 0x9f);
 
 /**
- * The text as it is sent — NUL, stray controls and bidi controls removed, lone surrogates replaced (U+FFFD), trimmed:
- * actions.js `sendText`'s rules, which are the service's — and `tags` (`{id, start, length}` in `value`) as ranges of
+ * The text as it is sent — what validation.js `messageText` removes (its one pattern, `MESSAGE_DROPPED`: bidi overrides
+ * and isolates, NUL and the other control characters but tab and line breaks), lone surrogates replaced (U+FFFD),
+ * trimmed: actions.js `sendText`'s rules, which are the service's — and `tags` (`{id, start, length}` in `value`) as ranges of
  * that text: `{ text, mentions }`, the mentions sorted, not overlapping, each beginning with "@", at most MENTION_LIMIT.
  * A tag whose text does not survive as it was (emptied, or no longer at an "@") is left out: it is sent as plain text.
  */
@@ -164,7 +289,7 @@ export function cleanWithMentions(value, tags = []) {
   for (let i = 0; i < source.length; i += 1) {
     at[i] = cleaned.length;
     const unit = source.charCodeAt(i);
-    if (isBidi(unit) || isStrayControl(unit)) continue;
+    if (MESSAGE_DROPPED.test(source[i])) continue;
     if (unit >= 0xd800 && unit <= 0xdbff) {
       const next = source.charCodeAt(i + 1);
       if (next >= 0xdc00 && next <= 0xdfff) {

@@ -789,6 +789,7 @@ export function toView(model, { now = Date.now() } = {}) {
     relations,
     blocks,
     drafts: model.drafts,
+    refills: model.refills ?? {},
     account: model.me,
     loaded: model.synced,
     providers: model.providers ?? {},

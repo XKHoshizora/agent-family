@@ -101,17 +101,21 @@ export function groupTitle(value) {
   return "";
 }
 
-/** Bidi overrides and isolates (U+202A–U+202E, U+2066–U+2069): the service removes them from messages and captions. */
-const BIDI_CONTROLS = /[\u{202A}-\u{202E}\u{2066}-\u{2069}]/gu;
-/** Control characters other than tab, line feed and carriage return: the service refuses them in messages and captions. */
-const STRAY_CONTROLS = /(?![\t\n\r])\p{Cc}/gu;
+/**
+ * What a message's text, or a caption, never keeps, one character at a time — the one set of these rules on the web
+ * (`messageText`, and the composer's mentions, data/mentions.js `cleanWithMentions`): bidi overrides and isolates
+ * (U+202A–U+202E, U+2066–U+2069), which the service removes; control characters other than tab, line feed and carriage
+ * return, which the service refuses.
+ */
+export const MESSAGE_DROPPED = /[\u{202A}-\u{202E}\u{2066}-\u{2069}]|(?![\t\n\r])\p{Cc}/u;
+const MESSAGE_DROPPED_ALL = new RegExp(MESSAGE_DROPPED.source, "gu");
 
 /**
  * A message's text, or a caption, as the service would take it: bidi overrides and isolates removed (the service
  * does the same), stray control characters dropped (the service would refuse them), then trimmed.
  */
 export function messageText(value) {
-  return value.replace(BIDI_CONTROLS, "").replace(STRAY_CONTROLS, "").trim();
+  return value.replace(MESSAGE_DROPPED_ALL, "").trim();
 }
 
 /** Whether text shows anything: the service refuses a text message without a VISIBLE_CHARACTER. */

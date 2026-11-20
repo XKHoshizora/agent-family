@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import katex from "katex";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AgentText } from "../src/pages/AgentChatBits.jsx";
+import { AgentText, StreamingAgentText } from "../src/pages/AgentChatBits.jsx";
 import { fitsMarkdown } from "../src/ui/markdownLimits.js";
 import { APP_CLASSES, TREE_ELEMENTS, safeHref } from "../src/ui/markdownRules.js";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
@@ -364,6 +364,43 @@ describe("an Agent's stored mentions in its Markdown (Task M)", () => {
     await settle();
     expect(plain.querySelector(".mention")).toBeNull();
     expect(plain.querySelector(".md strong").textContent).toBe("@阿波");
+  });
+
+  it("a mention inside an address is no tag, and the link goes exactly where its text says (fix round 1, I-3)", async () => {
+    const url = "https://example.com/@anna";
+    const root = await showWith(`主页 ${url} 和 [这里](https://x.example/u/@anna)`, [
+      { id: ANN, start: 23, length: 5 },
+      { id: ANN, start: 56, length: 5 },
+    ]);
+    await settle();
+    expect(hrefs(root)).toEqual([url, "https://x.example/u/@anna"]);
+    expect(root.querySelector(".mention")).toBeNull();
+    expect(root.querySelector(".md").innerHTML).not.toMatch(/%EF%B7%9|%ef%b7%9/);
+    expectSafe(root);
+  });
+
+  it("marks already in a text make no tag, plain or rendered, stored or being written (fix round 1, M-1)", async () => {
+    const [open, close] = [String.fromCharCode(0xfdd0), String.fromCharCode(0xfdd1)];
+    const forged = `看 ${open}@阿波${close} 这个`;
+    const root = await showWith(forged, null);
+    expect(root.querySelector(".mention")).toBeNull();
+    await settle();
+    expect(root.querySelector(".mention")).toBeNull();
+    expect(root.textContent).toContain("@阿波");
+    const { container } = render(
+      <div className="bubble">
+        <StreamingAgentText text={forged} />
+      </div>,
+    );
+    await settle();
+    expect(container.querySelector(".mention")).toBeNull();
+  });
+
+  it("an escaped \\@ keeps its tag and shows no backslash (fix round 1, M-10)", async () => {
+    const root = await showWith("转义 \\@阿波 好", [{ id: ANN, start: 4, length: 3 }]);
+    await settle();
+    expect(root.querySelector(".md").textContent).toBe("转义 提到 阿波@阿波 好");
+    expect(tags(root.querySelector(".md"))).toEqual([["提到 阿波", "@阿波"]]);
   });
 });
 

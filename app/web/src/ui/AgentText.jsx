@@ -11,7 +11,7 @@
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
 import { mentionsIn } from "../data/mentions.js";
-import { markMentions } from "./mentionMarks.js";
+import { markMentions, withoutMarks } from "./mentionMarks.js";
 import { MentionText } from "./MentionText.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
@@ -48,23 +48,27 @@ export function loadMarkdown(load = () => import("./Markdown.jsx")) {
 }
 
 /** The tree, once its chunk is here (suspends until then); says when it is shown (its height changed). */
-function LoadedTree({ tree, view }) {
+function LoadedTree({ tree, view, mentionIds }) {
   const { RichTree } = use(loadMarkdown());
   useLayoutEffect(() => view.changed(), [view, tree]);
-  return <RichTree tree={tree} />;
+  return <RichTree tree={tree} mentionIds={mentionIds} />;
 }
 
-/** A checked tree shown, or `plain` while its chunk loads, if it cannot be loaded, or if showing it fails. */
-function Rich({ tree, plain, view }) {
+/**
+ * A checked tree shown, or `plain` while its chunk loads, if it cannot be loaded, or if showing it fails. `mentionIds`:
+ * who each marked mention means, by its index (mentionMarks.js).
+ */
+function Rich({ tree, plain, view, mentionIds = NO_IDS }) {
   if (markdownChunk?.status === "rejected") return plain;
   return (
     <ChunkBoundary fallback={plain} resetKey={tree}>
       <Suspense fallback={plain}>
-        <LoadedTree tree={tree} view={view} />
+        <LoadedTree tree={tree} view={view} mentionIds={mentionIds} />
       </Suspense>
     </ChunkBoundary>
   );
 }
+const NO_IDS = Object.freeze([]);
 
 /** Tells the view when what a text shows changes kind (plain, with the note, rich): its height may have changed. */
 function useShownKind(view, kind) {
@@ -137,11 +141,14 @@ const plainKnown = (client, text) => {
  * (mentionMarks.js; Markdown.jsx turns them into tags, and inside code into nothing: plain text there).
  */
 export const AgentText = memo(function AgentText({ text, id = null, mentions = null }) {
-  const shown = useMemo(() => withoutBidiControls(text), [text]);
-  const marks = JSON.stringify(mentions ?? []);
+  // Bidirectional controls, and any mark of mentionMarks.js the text holds itself (only marks put in here make a tag, M-1).
+  const shown = useMemo(() => withoutMarks(withoutBidiControls(text)), [text]);
+  // The mentions, as a key that stays the same while they do (the message's view is made again at every change).
+  const key = Array.isArray(mentions) ? mentions.map((m) => `${m?.id}:${m?.start}:${m?.length}`).join(",") : "";
   // (Only over the text as stored: the service keeps no bidi controls in a reply, so `shown` is `text` whenever it has any.)
-  const tags = useMemo(() => (shown === text ? mentionsIn(shown, JSON.parse(marks)) : []), [shown, text, marks]);
+  const tags = useMemo(() => (shown === text ? mentionsIn(shown, mentions) : []), [shown, text, key]);
   const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
+  const mentionIds = useMemo(() => tags.map((t) => t.id), [tags]);
   const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;
   const client = markdownClient();
   const view = useMarkdownView();
@@ -175,7 +182,7 @@ export const AgentText = memo(function AgentText({ text, id = null, mentions = n
     body = plainOf(plain, result);
     kind = withNote(result) ? "note" : "plain";
   } else if (result?.tree && granted) {
-    body = <Rich tree={result.tree} plain={plain} view={view} />;
+    body = <Rich tree={result.tree} plain={plain} view={view} mentionIds={mentionIds} />;
     kind = "rich";
   }
   useShownKind(view, kind);
@@ -249,7 +256,8 @@ const StreamRich = memo(Rich);
  * The stored message that replaces this is rendered on its own.
  */
 export function StreamingAgentText({ text, paced = false, ended = false, endWithin = undefined, all = false, resumeAt = 0, placeholder = null, onShown = null }) {
-  const received = useMemo(() => withoutBidiControls(text), [text]);
+  // (Any mark of mentionMarks.js the text holds itself is taken out: a reply being written has no stored mention, M-1.)
+  const received = useMemo(() => withoutMarks(withoutBidiControls(text)), [text]);
   const epoch = useEpoch(received);
   const upTo = useReveal(received, epoch, { paced, ended, endWithin, all, resumeAt });
   const shown = upTo === received.length ? received : received.slice(0, upTo);

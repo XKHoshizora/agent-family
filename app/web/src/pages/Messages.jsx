@@ -101,6 +101,9 @@ function Body({ msg, agent }) {
   );
 }
 
+/** A text the service refused because one of its picked mentions is no longer here (`bad_mentions`): 改一下 puts it back. */
+export const STALE_MENTION_TEXT = "有一个 @ 的对象已经不在这里了，改一下再发。";
+
 /** How the line under a reply says the thinking level its run was sent: the Agent form's words. */
 const levelWords = (level) => (level === "none" ? "不思考" : `思考：${levelLabel(level)}`);
 
@@ -209,7 +212,15 @@ export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
                 <CircleAlert size={14} aria-hidden="true" /> 发送失败，未发布
               </span>
               {msg.kind === "file" && <span className="muted">{failureText(msg.error)}</span>}
-              {!(msg.kind === "file" && retryHopeless(msg.error)) && (
+              {msg.error?.code === "bad_mentions" && (
+                <>
+                  <span className="muted">{STALE_MENTION_TEXT}</span>
+                  <Btn small onClick={() => actions.reviseFailed(msg.clientTxn)}>
+                    改一下
+                  </Btn>
+                </>
+              )}
+              {!(msg.kind === "file" && retryHopeless(msg.error)) && msg.error?.code !== "bad_mentions" && (
                 <Btn small onClick={retry}>
                   <RotateCw size={14} aria-hidden="true" /> 重试
                 </Btn>
