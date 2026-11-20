@@ -22,6 +22,7 @@ import { api, group, seatPerson, signUp, type Actor } from "./helpers/actors.ts"
 import { markOf, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
+import { expectLinear } from "./helpers/linear.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect, type Push, type TestSocket } from "./helpers/ws.ts";
@@ -242,24 +243,19 @@ describe("withoutMark", () => {
 
   /**
    * `withoutMark(shape(n), "k7f2ab")` is `expected(n)`, for `n` and for four times `n`, and the larger takes less than
-   * eight times as long, the faster of three runs each (in proportion to the text, about four times; a pass gone
-   * quadratic, about sixteen). The sizes keep even a quadratic pass to seconds, so a regression fails rather than hangs.
+   * eight times as long as the smaller (in proportion to the text, about four times; a pass gone quadratic, about
+   * sixteen): `expectLinear` (helpers/linear.ts) measures samples long enough for no timer's grain or pause of the
+   * collector to decide, takes the fastest of several, and compares the two sizes with each other, never with a
+   * number of milliseconds. The sizes keep even a quadratic pass to seconds, so a regression fails rather than hangs.
    */
   const inProportion = (n: number, shape: (n: number) => string, expected: (n: number) => string): void => {
-    const fastest = (size: number): number => {
-      const text = shape(size);
-      let best = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < 3; i++) {
-        const started = performance.now();
-        const out = withoutMark(text, "k7f2ab");
-        best = Math.min(best, performance.now() - started);
-        expect(out === expected(size)).toBe(true);
-      }
-      return best;
-    };
-    const [small, large] = [fastest(n), fastest(4 * n)];
-    // A few milliseconds more, so that a timer's grain or a pause of the collector does not decide it.
-    expect(large).toBeLessThan(8 * small + 5);
+    expectLinear({
+      n,
+      make: (size) => ({ text: shape(size), want: expected(size) }),
+      run: ({ text, want }) => {
+        if (withoutMark(text, "k7f2ab") !== want) throw new Error("withoutMark gave another text than expected");
+      },
+    });
   };
 
   it("takes time in proportion to the text: separators after an open bracket, then the mark", () => {
