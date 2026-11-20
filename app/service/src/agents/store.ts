@@ -5,6 +5,7 @@ import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { handleOf } from "../principals/store.ts";
 import { lockProviderModels } from "../providers/store.ts";
+import { forgetSummaries } from "./summary/store.ts";
 
 export type ReplyMode = "always" | "mention";
 
@@ -192,6 +193,14 @@ export async function lockOwnedAgent(t: Tx, ownerId: string, agentId: string): P
   return lockAgent(t, agentId);
 }
 
+/** Agent `agentId` when it is neither paused nor deleted (whoever owns it: background work reads it so); else null. */
+export async function liveAgent(q: Queryable, agentId: string): Promise<AgentRow | null> {
+  const owner = await q.query<{ owner_id: string }>("select owner_id from principals where id = $1", [agentId]);
+  if (!owner.rows[0]) return null;
+  const agent = await readOwnedAgent(q, owner.rows[0].owner_id, agentId);
+  return agent && !agent.paused && !agent.deleted ? agent : null;
+}
+
 export async function readOwnedAgent(q: Queryable, ownerId: string, agentId: string): Promise<AgentRow | null> {
   const { rows } = await q.query<AgentDbRow>(`${SELECT} where a.principal_id = $2 and p.owner_id = $1`, [ownerId, agentId]);
   return rows[0] ? toAgent(rows[0]) : null;
@@ -311,11 +320,15 @@ export async function updateAgent(t: Tx, current: AgentRow, patch: AgentPatch): 
   return { ...next, personaVersion };
 }
 
-/** Sets `paused` or deletes (`deleted_at`, irreversible) on a locked Agent; true when something changed. */
+/**
+ * Sets `paused` or deletes (`deleted_at`, irreversible) on a locked Agent; true when something changed. A delete also deletes
+ * its rolling summary of its own conversation (agents/summary/; its groups' go as it leaves them, group-leave.ts).
+ */
 export async function setAgentState(t: Tx, agent: AgentRow, change: { paused: boolean } | { deleted: true }): Promise<boolean> {
   if ("deleted" in change) {
     if (agent.deleted) return false;
     await t.query("update agents set deleted_at = now() where principal_id = $1", [agent.id]);
+    await forgetSummaries(t, agent.conversationId, [agent.id]);
     return true;
   }
   if (agent.paused === change.paused) return false;

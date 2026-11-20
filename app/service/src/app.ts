@@ -23,6 +23,7 @@ import { createUploadSlots, type UploadSlots } from "./attachments/slots.ts";
 import { registerAccountRoutes } from "./accounts/routes.ts";
 import { leaveGroupsOfDeleted } from "./agents/group-leave.ts";
 import { endMemoryCalls } from "./memory/call.ts";
+import { runSummary } from "./agents/summary/job.ts";
 import { runDreamJob } from "./memory/dream.ts";
 import { runCatchUp } from "./memory/catchup.ts";
 import { runFlags } from "./memory/hearsay.ts";
@@ -400,6 +401,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
                   return runFlags(pipeline, job, ctx);
                 case "catchup":
                   return runCatchUp(pipeline, job, ctx);
+                case "summary":
+                  return runSummary(pipeline, job, ctx);
                 default:
                   return runDreamJob(pipeline, job, ctx);
               }

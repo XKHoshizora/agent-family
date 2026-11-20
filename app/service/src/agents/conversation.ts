@@ -14,6 +14,7 @@ import { parseProposalBlock, PROPOSAL_PLACEHOLDER, storeProposal, withoutUnfinis
 import { RunNotRunning } from "./runtime/port.ts";
 import { withoutMark, withoutMarkAtCut } from "./runtime/prompt.ts";
 import { hearFrom, noneTriggered, ownedAgentOf, triggerFromAgent, type Lane, type RunLimits, type Triggered } from "./runs.ts";
+import { forgetSummaries } from "./summary/store.ts";
 import {
   agentLimit,
   assertModelChoice,
@@ -304,12 +305,15 @@ export async function postAsAgent(
  * Agent's conversation (answered with the notice and the Agent's id, for the route to tell the reviewer after commit), under `lockAgent` (the conversation row, then the `agents` row) like every write there. What the
  * model is shown starts after the latest one (`buildContext`); history and search keep everything. 404 unless it is
  * `ownerId`'s Agent conversation; 403 `cannot_send` (`agent_deleted`) once the Agent is deleted, as a send; allowed
- * while it is paused. It neither starts a reply nor ends one under way (which was given the old topic).
+ * while it is paused. It neither starts a reply nor ends one under way (which was given the old topic). The Agent's rolling
+ * summary of the conversation (agents/summary/) is deleted with it: it was of the old topic.
  */
 export async function resetTopic(t: Tx, ownerId: string, conversationId: string): Promise<{ notice: StoredMessage; agentId: string }> {
   const agentId = await ownedAgentOf(t, ownerId, conversationId);
   if (!agentId) throw notFound();
   const agent = await lockAgent(t, agentId, conversationId);
   if (agent.deleted) throw new AppError(403, "cannot_send", { reason: "agent_deleted" });
-  return { notice: await appendSystem(t, conversationId, { event: "topic_reset", actorId: ownerId }), agentId };
+  const notice = await appendSystem(t, conversationId, { event: "topic_reset", actorId: ownerId });
+  await forgetSummaries(t, conversationId, [agentId]);
+  return { notice, agentId };
 }
