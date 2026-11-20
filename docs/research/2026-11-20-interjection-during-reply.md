@@ -155,3 +155,7 @@ Facts that follow from the sources, not recommendations:
 ## Gaps (not found in this pass)
 
 OpenAI help-centre text on ChatGPT group chats (403), Meta/WhatsApp official help text, Character.AI / Kindroid / Nomi rules, Snapchat, Line/Kakao, 钉钉 / 企业微信 / 豆包 / 扣子, CrewAI/LangGraph/Letta docs, Devin/Manus/ChatGPT agent, Gemini Live/Alexa, Rocket.Chat, and the Slack "Agent sessions" page which may describe mid-response behaviour.
+
+## Addendum (controller, read in a real browser on 2026-11-20)
+
+OpenAI's help-centre pages refuse automated readers (HTTP 403) but open normally in a browser. The article at `https://help.openai.com/en/articles/12703475` is now titled "Retiring group chats in ChatGPT": group chats "launched as a pilot"; since 9 July 2026 nobody can create or join one; existing ones stay readable (read-only in the UK; elsewhere messaging continues "while messaging is enabled"); OpenAI says it is "winding down group chats" to simplify the product and will keep exploring collaboration. So the most prominent first-party "AI inside a group chat" was withdrawn after about eight months. The page gives no reason beyond simplification, and says nothing about how replies overtaken by the conversation were handled. For this note: ChatGPT group chats are no longer a live reference, only a past one.
