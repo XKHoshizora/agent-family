@@ -204,9 +204,9 @@ describe("agent and metering configuration", () => {
   test("SITE_MODELS: an apiKeyEnv may not name one of the service's own variables: start-up fails naming the model", () => {
     const s3 = { S3_ENDPOINT: "https://s3.example.test", S3_REGION: "r", S3_BUCKET: "b", S3_ACCESS_KEY_ID: "access-id", S3_SECRET_ACCESS_KEY: "s3-secret" };
     expect(loadConfig(withModels([model], { TEST_UPSTREAM_KEY: "upstream-key-value", ...s3 })).siteModels).toHaveLength(1);
-    for (const own of ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID", "auth_secret"]) {
+    for (const own of ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID", "RESEND_API_KEY", "auth_secret"]) {
       // Each of them is set (base, s3, and the lower-case name too), so only the rule can refuse it.
-      expect(() => loadConfig(withModels([{ ...model, apiKeyEnv: own }], { ...s3, auth_secret: "a-lower-case-variable" })), own).toThrow(
+      expect(() => loadConfig(withModels([{ ...model, apiKeyEnv: own }], { ...s3, RESEND_API_KEY: "a-mail-key", auth_secret: "a-lower-case-variable" })), own).toThrow(
         new RegExp(`SITE_MODELS: model "fast".*${own}`),
       );
     }

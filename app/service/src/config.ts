@@ -53,7 +53,7 @@ export type ReasoningAllowance = Readonly<Record<ThinkingLevel, number>>;
 export const DEFAULT_REASONING_ALLOWANCE: ReasoningAllowance = { low: 2000, medium: 6000, high: 12000, xhigh: 24000, max: 48000 };
 
 /** The service's own secrets: a site model's `apiKeyEnv` may not name one (its value would be sent upstream as a key). */
-export const SERVICE_SECRET_VARIABLES = ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID"] as const;
+export const SERVICE_SECRET_VARIABLES = ["DATABASE_URL", "AUTH_SECRET", "PROVIDER_KEY_SECRET", "S3_SECRET_ACCESS_KEY", "S3_ACCESS_KEY_ID", "RESEND_API_KEY"] as const;
 
 /** A model the site itself offers. `apiKeyEnv` names the environment variable holding the upstream key. */
 export interface SiteModel {
@@ -525,8 +525,14 @@ const envSchema = z.object({
   S3_ACCESS_KEY_ID: optionalString,
   S3_SECRET_ACCESS_KEY: optionalString,
   REGISTRATION_MODE: z.enum(["invite", "open"]).default("invite"),
-  /** Only `outbox` exists in this plan; real delivery is added later. */
-  MAIL_MODE: z.enum(["outbox"]).default("outbox"),
+  /** `outbox`: mail is only written to `mail_outbox`. `resend`: it is also delivered through Resend's HTTP API (needs the three below). */
+  MAIL_MODE: z.enum(["outbox", "resend"]).default("outbox"),
+  /** A secret (one of `SERVICE_SECRET_VARIABLES`): never logged, never in a payload or an error. Needed by `resend`. */
+  RESEND_API_KEY: optionalString,
+  /** The sender of every mail, e.g. `Name <address@your-domain>`. Needed by `resend`; no address is built in. */
+  MAIL_FROM: optionalString,
+  /** Where a reply to a mail goes; unset: none is asked for. */
+  MAIL_REPLY_TO: optionalString,
   /** A header your proxy sets to the client's address, replacing any client value (Railway: `x-real-ip`). */
   CLIENT_IP_HEADER: optionalString.pipe(
     z
@@ -651,7 +657,9 @@ export interface Config {
     secretAccessKey: string;
   };
   registrationMode: "invite" | "open";
-  mailMode: "outbox";
+  mailMode: "outbox" | "resend";
+  /** What `resend` sends with; undefined in `outbox` mode. The key is a secret: never print this object. */
+  mail: { apiKey: string; from: string; replyTo?: string } | undefined;
   rateLimitScale: number;
   /** Lower-case header name holding the client's address (src/limits.ts `clientIp`); unset: not consulted. */
   clientIpHeader: string | undefined;
@@ -691,6 +699,18 @@ export const MIN_DRAFT_DEADLINE_MS = 10_000;
  */
 export function draftDeadlineMs(config: Pick<Config, "agentRunTimeoutMs" | "httpConnectionTimeoutMs">): number {
   return Math.min(config.agentRunTimeoutMs, config.httpConnectionTimeoutMs - DRAFT_SOCKET_MARGIN_MS);
+}
+
+/** The delivery settings of `resend` mode (start-up fails naming the variable that is missing or unusable); none in `outbox` mode. */
+function mailSettings(e: { MAIL_MODE: string; RESEND_API_KEY?: string | undefined; MAIL_FROM?: string | undefined; MAIL_REPLY_TO?: string | undefined }): Config["mail"] {
+  if (e.MAIL_MODE !== "resend") return undefined;
+  if (e.RESEND_API_KEY === undefined) throw new Error("Invalid configuration: MAIL_MODE is resend, so RESEND_API_KEY must be set");
+  if (e.MAIL_FROM === undefined) throw new Error("Invalid configuration: MAIL_MODE is resend, so MAIL_FROM must be set (for example Name <address@your-domain>)");
+  // Both go into the provider's JSON, never a raw header, but a line break in an address is never meant.
+  for (const [name, value] of [["MAIL_FROM", e.MAIL_FROM], ["MAIL_REPLY_TO", e.MAIL_REPLY_TO]] as const) {
+    if (value !== undefined && /[\u0000-\u001f\u007f]/.test(value)) throw new Error(`Invalid configuration: ${name} must be one line`);
+  }
+  return { apiKey: e.RESEND_API_KEY, from: e.MAIL_FROM, ...(e.MAIL_REPLY_TO === undefined ? {} : { replyTo: e.MAIL_REPLY_TO }) };
 }
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
@@ -806,6 +826,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       : {}),
     registrationMode: e.REGISTRATION_MODE,
     mailMode: e.MAIL_MODE,
+    mail: mailSettings(e),
     rateLimitScale: e.RATE_LIMIT_SCALE,
     clientIpHeader: e.CLIENT_IP_HEADER,
     trustProxy: e.TRUST_PROXY,
