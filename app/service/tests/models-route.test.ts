@@ -19,8 +19,8 @@ describe("GET /api/models", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({
       siteModels: [
-        { id: "fast", label: "Fast", tier: "free", vision: false, pdf: false, reasoning: [], contextTokens: 100000 },
-        { id: "thinker", label: "Thinker", tier: "paid", vision: true, pdf: true, reasoning: ["low", "medium"], contextTokens: 200000 },
+        { id: "fast", label: "Fast", tier: "free", vision: false, pdf: false, reasoning: [], contextTokens: 100000, tools: true },
+        { id: "thinker", label: "Thinker", tier: "paid", vision: true, pdf: true, reasoning: ["low", "medium"], contextTokens: 200000, tools: true },
       ],
       providerDefaults: { contextTokens: 16000, maxOutputTokens: 2048 },
       proactiveAvailable: false,

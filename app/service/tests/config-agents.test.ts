@@ -148,7 +148,7 @@ describe("agent and metering configuration", () => {
 
   test("SITE_MODELS: a valid list is parsed, the key variable is only named", () => {
     const config = loadConfig(withModels([model]));
-    expect(config.siteModels).toEqual([model]);
+    expect(config.siteModels).toEqual([{ ...model, tools: true }]);
     expect(JSON.stringify(config.siteModels)).not.toContain("upstream-key-value");
     expect(loadConfig({ ...base, SITE_MODELS: "" }).siteModels).toEqual([]);
   });
@@ -257,6 +257,13 @@ describe("agent and metering configuration", () => {
     expect(loadConfig(withModels([model])).siteModels[0]).not.toHaveProperty("thinkingSwitch");
     expect(loadConfig(withModels([{ ...model, thinkingSwitch: true }])).siteModels[0]!.thinkingSwitch).toBe(true);
     expect(() => loadConfig(withModels([{ ...model, thinkingSwitch: "yes" }]))).toThrow(/SITE_MODELS/);
+  });
+
+  test("SITE_MODELS: tools is a boolean, true when absent (its replies may be offered tools); false is the operator's word that it cannot use them", () => {
+    expect(loadConfig(withModels([model])).siteModels[0]!.tools).toBe(true);
+    expect(loadConfig(withModels([{ ...model, tools: true }])).siteModels[0]!.tools).toBe(true);
+    expect(loadConfig(withModels([{ ...model, tools: false }])).siteModels[0]!.tools).toBe(false);
+    for (const bad of ["no", 0, null]) expect(() => loadConfig(withModels([{ ...model, tools: bad }])), String(bad)).toThrow(/SITE_MODELS/);
   });
 });
 

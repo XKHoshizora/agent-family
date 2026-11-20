@@ -69,6 +69,7 @@ const modelInput = z
     reasoning: z.boolean().optional(),
     contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max).optional(),
     reasoningLevels: modelLevels.optional(),
+    tools: z.boolean().optional(),
   })
   .refine((m) => m.reasoningLevels === undefined || m.reasoning === true, "reasoningLevels only for a model that reasons");
 const modelList = z
@@ -84,6 +85,7 @@ const modelView = z.object({
   reasoning: z.boolean(),
   contextTokens: z.number(),
   reasoningLevels: levelsView.optional(),
+  tools: z.boolean().optional(),
 });
 const providerView = z.object({
   id: z.string(),
@@ -147,7 +149,7 @@ const listedModel = z.object({
   added: z.boolean(),
 });
 
-/** A provider as its owner sees it. */
+/** A provider as its owner sees it (a model's `tools` only when its entry says it). */
 const toView = (p: ProviderRow): z.infer<typeof providerView> => ({
   id: p.id,
   name: p.name,
@@ -161,6 +163,7 @@ const toView = (p: ProviderRow): z.infer<typeof providerView> => ({
     reasoning: m.reasoning,
     contextTokens: m.contextTokens,
     ...(m.reasoningLevels === undefined ? {} : { reasoningLevels: m.reasoningLevels }),
+    ...(m.tools === undefined ? {} : { tools: m.tools }),
   })),
 });
 
@@ -190,7 +193,7 @@ export function registerProviderRoutes(
     .max(1000)
     .refine((typed) => providerBaseUrl("openai_chat", typed, allowInsecureLocal) !== null, "not an https URL a provider can have");
   const storedBaseUrl = (protocol: Protocol, typed: string): string => providerBaseUrl(protocol, typed, allowInsecureLocal)!;
-  /** Models as given, with the conservative defaults filled in. */
+  /** Models as given, with the conservative defaults filled in (`tools` only when given: an edit keeps the stored one's). */
   const withDefaults = (list: z.infer<typeof modelList>): ProviderModel[] =>
     list.map((m) => ({
       name: m.name,
@@ -199,6 +202,7 @@ export function registerProviderRoutes(
       reasoning: m.reasoning ?? false,
       contextTokens: m.contextTokens ?? config.providerDefaultContextTokens,
       ...(m.reasoningLevels === undefined ? {} : { reasoningLevels: m.reasoningLevels }),
+      ...(m.tools === undefined ? {} : { tools: m.tools }),
     }));
 
   /** Logs a failed provider call with what may be logged: never the key, the upstream's body or its headers. */

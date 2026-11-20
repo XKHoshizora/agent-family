@@ -93,6 +93,8 @@ const HIDDEN_KEYS = [
   "afterSeq",
   // What a reply searched for (its owner's, in its own conversation only).
   "queries",
+  // Whether a provider's model may be offered tools (its owner's provider list only).
+  "tools",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 

@@ -77,7 +77,10 @@ one), `model`, `inputMicroPerToken`, `outputMicroPerToken` (whole micro-points),
 `maxOutputTokens`, else start-up fails naming the model),
 `vision`, `pdf`, `reasoning` (levels from `low`..`max`), and optionally `thinkingSwitch` (`true` for an `openai_chat`
 upstream that thinks unless told not to, such as DeepSeek: it is then sent `thinking: {"type": ...}`, see Calling a
-model; default false)), `FREE_DAILY_POINTS` (free daily allowance of site-model use, whole points, default 200),
+model; default false) and `tools` (whether its replies may be offered tools, Agents and runs, Tools in a reply; default
+true: every model is given them until it is known not to cope — set `false` for one measured unable; the service never
+changes it, a site model whose upstream refuses tools is only logged, Metrics in the log)), `FREE_DAILY_POINTS` (free
+daily allowance of site-model use, whole points, default 200),
 `SITE_TIMEZONE` (IANA name whose midnight starts a new allowance day, default `Asia/Shanghai`), `AGENT_TIERS` (JSON, Agents allowed per account tier, must
 contain `free`, default `{"free":20}`),
 the protective limits on replies and model calls (spec 6.4; each a whole number in its range, empty for the default):
@@ -381,8 +384,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 
 Everything else is not rate limited.
 
-**Metrics in the log.** The service writes three kinds of line at `info`, each a JSON log object with a `metric` field,
-for an operator to tune the numbers above from (nothing else about them is recorded or exposed):
+**Metrics in the log.** The service writes four kinds of line at `info`, each a JSON log object with a `metric` field,
+for an operator to tune the numbers above (and the site's models) from (nothing else about them is recorded or exposed):
 
 - `{ "metric": "run_wait_ms", "lane", "ms" }`, once for each reply the worker claims: how long it sat queued, in the lane
   (`own`, `others`, `proactive`) it ran in. Waits that grow mean the concurrency numbers (`AGENT_MAX_CONCURRENT_RUNS`,
@@ -392,6 +395,10 @@ for an operator to tune the numbers above from (nothing else about them is recor
 - `{ "metric": "upstream_refused", "status" }`, once for each reply that ended failed because the model's upstream
   answered 429 or 5xx: how often the upstream refuses, and which way. Other failures (a refused key, a timeout) are not
   counted here.
+- `{ "metric": "tools_refused_site", "model" }` (the site model's `id`, nothing else), once for each reply that found a
+  site model unable to use tools (its upstream refused them, or it called them garbled twice: Agents and runs, Tools in a
+  reply): the site model's configuration is the operator's, so nothing else is done — such a model may want `tools: false`
+  in `SITE_MODELS`.
 
 Proactive replies write four more (`proactive_skipped`, `judge_failed`, `judge_partial`, `judge_daily_limit`): Proactive
 replies, Log.
@@ -1174,8 +1181,9 @@ of one of its Agents ever sees, with the buttons it offers: `告诉他们` (`"te
 it takes no seq (seqs stay gapless for everyone), and sits after the message that was the conversation's last when it was
 made (`afterSeq`; several there: by `createdAt`). So it is in no history, search, unread count, `lastSeq`, quote or
 catch-up `messages`, and never in what an Agent's model is shown. Its owner gets it in the `whisper` push, in
-`GET /api/sync` and catch-up (`whispers`), in the conversation entry's count of open ones (`whispers: n`, only when
-n > 0), and from the list route below; **nobody else gets anything of it — no frame, no key, no count**: a fellow member's
+`GET /api/sync` and catch-up (`whispers`), in the conversation entry's count of open ones that wait for an answer
+(`whispers: n`, only when n > 0; one that offers no button only tells, and is not counted), and from the list route
+below; **nobody else gets anything of it — no frame, no key, no count**: a fellow member's
 answers are byte for byte what they were before it existed. Its owner gets only the whispers of their current stay in the
 conversation (made at or after the seq their membership began): after leaving and coming back, the earlier ones are not
 sent again.
@@ -1191,6 +1199,12 @@ deleted (everywhere at once). An answered or expired one is deleted 30 days afte
 periodic sweep of memory changes, on its schedule (`MEMORY.changesSweepMs`; `0` stops them too; `attachments:sweep` runs
 them by hand), in bounded batches that never wait for a row in use. Its row goes with the conversation's, the owner's or
 the Agent's.
+
+The kinds made so far: `tools_off` — a reply found its provider model unable to use tools and the model was marked so
+(Model providers, Models: `tools`): `这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。`, in that reply's
+conversation after the message it was answering, no button (nothing to answer: it stays open until it expires), once per
+model each time it is turned off; not made when its owner or the Agent is no longer a member there (the model is marked
+all the same).
 
 #### `GET /api/conversations/:id/whispers`
 
@@ -1224,7 +1238,7 @@ A provider is a person's own account at a model service, which their Agents can 
 Agent cannot be pointed at their provider (400).
 
 **Provider** (owner only): `{"id", "name", "protocol": "openai_chat" | "openai_responses" | "anthropic" | "gemini",
-"baseUrl", "keyLast4", "models": [{"name", "vision", "pdf", "reasoning", "contextTokens", "reasoningLevels"?}]}`.
+"baseUrl", "keyLast4", "models": [{"name", "vision", "pdf", "reasoning", "contextTokens", "reasoningLevels"?, "tools"?}]}`.
 
 - **The API key** is sealed when saved (AES-256-GCM, a key derived from `PROVIDER_KEY_SECRET` with HKDF-SHA-256,
   `src/providers/crypto.ts`) and never shown again: no answer, push, error or log line carries it; `keyLast4` is its
@@ -1253,6 +1267,14 @@ Agent cannot be pointed at their provider (400).
   reasoning level other than `none` only on a model flagged `reasoning`, and one of its `reasoningLevels` when it lists
   them (checked when the Agent is created or edited; a run sends the saved level, see Replies). Removing a model from the
   list, or narrowing its levels, does not change the Agents that use it.
+  `tools` (optional, a boolean): whether its replies may be offered tools (Agents and runs, Tools in a reply). Absent: not
+  known yet, so they are — every model is given them until it is found unable. The service writes `false` itself the first
+  time a reply finds the model cannot use them (its upstream refused them, or it called them garbled twice), on that model
+  only, and tells you once with a whisper in that reply's conversation (Whispers: kind `tools_off`, the text
+  `这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。`, no button); from the next reply on it is
+  offered none and replies as a model without tools always did. You can turn it on again (`true`); if it is again found
+  unable, it is turned off again and you are told again. Shown only when the entry says it. An edit whose model does not
+  name `tools` keeps what is stored for that name, and a refresh (`…/models/refresh`) never changes it.
 
 **The address guard** (`src/providers/guard.ts`), at every call to a provider, before any connection: the URL must pass
 the `baseUrl` rules; the host name is looked up once, and the call is refused with `address_not_allowed` if any address
@@ -1276,7 +1298,7 @@ call stopped by its caller closes its connection at once.
 
 *Session: required.* Body (no other key): `name` (1–40 characters, one line, trimmed), `protocol`, `baseUrl` (at most
 1000 characters), `apiKey` (trimmed, then 8–1000 printable ASCII characters without spaces), and optionally `models`
-(`[{"name", "vision"?, "pdf"?, "reasoning"?, "contextTokens"?, "reasoningLevels"?}]`). → 201 Provider.
+(`[{"name", "vision"?, "pdf"?, "reasoning"?, "contextTokens"?, "reasoningLevels"?, "tools"?}]`). → 201 Provider.
 
 - 400 `provider_limit` when you already have 10 providers (counted under the account lock, so concurrent creates
   cannot pass it); 409 `name_taken` when one of yours has that name.
@@ -1289,7 +1311,8 @@ call stopped by its caller closes its connection at once.
 #### `PATCH /api/providers/:id`
 
 *Session: required.* Body (no other key; `protocol` cannot change and is 400 too): any of `name`, `baseUrl`, `apiKey` (sealed
-anew; without it the stored key stays), `models` (replaces the list), under the rules of creation (a new `baseUrl` is
+anew; without it the stored key stays), `models` (replaces the list; a model given without `tools` keeps the stored one
+of that name's), under the rules of creation (a new `baseUrl` is
 stored for the provider's own protocol). → 200 Provider;
 409 `name_taken`; 400 `invalid_request` for a `baseUrl` on another origin — scheme, host or port — than the stored one
 without `apiKey` in the same request: the stored key is never sent to an address it was not saved for (another path on
@@ -1384,7 +1407,7 @@ speech, image or video model…).
 
 *Session: required.* Body: none or `{}`. The same request; the model names in its answer (`data[].id`, or `models[].name` without the
 `models/` prefix for Gemini; the one page the endpoint returns) are merged into `models`: models already there keep
-their flags and levels, new names get the defaults, up to 100 in all. Only the first 1 000 entries of the list are looked at, so
+their flags (`tools` too) and levels, new names get the defaults (nothing said of tools), up to 100 in all. Only the first 1 000 entries of the list are looked at, so
 `listed` holds at most 1 000 names; among them, names that would not be accepted as a model name, any containing the
 key, and repeats are skipped. → 200 `{"listed": [the names it gave], "provider": Provider}`; 502 `provider_rejected`
 or `provider_unavailable`, 400 `address_not_allowed` (then nothing changes).
@@ -1525,11 +1548,12 @@ Stopping a call (its abort signal) ends it at once and closes the upstream conne
 
 *Session: required.* What a client's model picker reads: the models the site offers and the defaults a provider model
 gets. → 200 `{"siteModels": [{"id", "label", "tier": "free" | "paid", "vision", "pdf", "reasoning": [levels],
-"contextTokens"}], "providerDefaults": {"contextTokens", "maxOutputTokens"}, "proactiveAvailable": boolean}`.
+"contextTokens", "tools": boolean}], "providerDefaults": {"contextTokens", "maxOutputTokens"}, "proactiveAvailable": boolean}`.
 
 - `siteModels`: `SITE_MODELS` in configuration order (`[]` when none is configured). `id` is what an Agent's
   `{"source": "site", "id"}` names; `reasoning` the levels the model takes besides `none`, which every model takes (an
-  empty list: `none` only). Nothing else of a site model is shown: never where it is called (`baseUrl`, `protocol`), the
+  empty list: `none` only); `tools` whether its replies may be offered tools (its configuration's `tools`, true unless
+  the operator said false). Nothing else of a site model is shown: never where it is called (`baseUrl`, `protocol`), the
   upstream model name, its key or the name of the variable holding it, or its prices.
 - `proactiveAvailable`: whether the judgement model is configured (`JUDGE`); turning an Agent's `proactive` on is refused (409 `proactive_unavailable`) when it is not.
 - `providerDefaults`: `PROVIDER_DEFAULT_CONTEXT_TOKENS` (a provider model's context when its owner gives none) and
@@ -2067,7 +2091,7 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
   "unread": 2,         // visible messages from others, not system notices, after readSeq
   "peerReadSeq": 41,   // direct chats: how far the other side has read; Agent conversations: how far the Agent has
                        // (it reads up to what a reply covers when the reply starts); absent in groups
-  "whispers": 1        // how many of your own whispers there are open (Whispers); absent at 0, and nobody else's are counted
+  "whispers": 1        // how many of your own whispers there wait for your answer (Whispers: open, offering a button); absent at 0, and nobody else's are counted
 }
 ```
 
@@ -2584,7 +2608,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
 `runtime/context.ts`; spec 6.5):
 
 - The system text (`runtime/prompt.ts`), the site's fixed part always first: who the Agent is and whose, the owner's
-  name, today's date in `SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do; then how to write a
+  name, today's date in `SITE_TIMEZONE`, that it has no tools and must not claim what it cannot do (a reply offered tools,
+  Tools in a reply, is told nothing of tools: that sentence is left out, the tools' definitions speak for themselves; a
+  reply offered none has it, word for word as always); then how to write a
   persona proposal (the block, Persona proposals) and that it takes effect only once the owner confirms it, so the Agent
   must not say its persona has changed before; then, when the Agent's memory is on, one fixed sentence saying it has memory
   (`你有记忆：每次聊完，系统会把值得长期记住的事整理成笔记，以后的对话里会交给你。主人让你记住或忘掉什么时，自然地答应就行，不要说自己没有记忆、记不住或没法保存，也不要逐条复述你的笔记来证明。`:
@@ -2710,9 +2736,13 @@ holds for is no estimate but the most the input can cost: the system text and ev
 most what the context leaves beside the output limit, attachments at their estimate (Metering, Admission).
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
-`tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox;
-none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). The tools are part of the
-context plan, and so is room for what they bring back:
+`tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox
+— and, for now, none at all: no toolbox is wired yet), in this order: none while `TOOLS.enabled` is false; none for a
+model that cannot use them (`Resolved.tools`, `tests/tools-capability.test.ts`: a site model whose `SITE_MODELS` entry says
+`tools: false`, a provider's model whose entry says `tools: false`; every other model is given them); none when the
+toolbox offers none; and none when the plan has no room for them (below). A reply offered none is the one call it always
+was, its system text saying it has no tools. The tools are part of the context plan, and so is room for what they bring
+back:
 
 **What a reply offered tools reserves in its plan** (`port-impl.ts` `begin`; `tests/tool-loop-money.test.ts`). Kept out
 of the conversation's budget as the system text is: the tools' definitions, their weight at the plan's ratio; 400 tokens
@@ -2759,7 +2789,13 @@ for what providers add around the definitions: at least the room kept for result
 call in the last round is not run and no call follows: its text is the reply (with none, the run fails as an empty
 answer). An upstream that refused the tools
 (the first round: Calling a model) marks them unusable (`toolsUnusable`, `refused`); that round's text is the reply, and
-nothing more is called. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
+nothing more is called. What marking the model does (`port-impl.ts` `toolsUnusable`, `tests/tools-capability.test.ts`):
+a provider's model gets `tools: false` on its owner's entry — only when it does not say so already, and only then, in the
+same transaction, its owner is told by a whisper in the reply's conversation (Whispers: `tools_off`), so once per model
+however many replies find it out at once; where the whisper cannot be made (its owner or the Agent has left) the model is
+marked all the same. A site model's configuration is never changed: one metric line (Metrics in the log,
+`tools_refused_site`). Either way the reply goes on as described here, and from the next reply on a marked model is offered
+none. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
 nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call
 — no tools, no rounds, the conversation alone, its cost held first (not made when nothing more can be held) — and its
 answer follows what the reply wrote; nothing is marked. `extend` answering that nothing more can be held ends the reply
@@ -2904,7 +2940,10 @@ the Agent itself (edit, pause, resume, delete, avatar, proposals) lock its dedic
 id order, the `accounts` rows after every run row; a run's end (`finish`, recovery) takes its owner's `accounts` row
 to settle and, for a follow-up in a group, to count the owner's replies a minute — the same row, last; an Agent's
 message in a group holds only its own `agents` row and reads the others' (In a group, above); a halt locks the group's
-row and run rows only; a resume, the dedicated conversation's row, the `agents` row and the Agent's run rows. Like the hub, the worker and its
+row and run rows only; a resume, the dedicated conversation's row, the `agents` row and the Agent's run rows. Marking a
+provider's model unable to use tools (`toolsUnusable`) takes the `providers` row first — nothing holding a conversation's
+or an Agent's row takes a provider's other than `for key share` (an Agent pointed at it), which it does not wait for —
+and then, to tell its owner, the run's conversation row and the Agent's (for share) and the whisper's (Whispers). Like the hub, the worker and its
 stop flags live in this process: run one instance. Two overlap only during a deploy, which is safe (Recovery, above).
 
 A group's membership changes keep to the same order (`conversations/groups.ts`): adding an Agent locks the group's row,

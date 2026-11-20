@@ -36,6 +36,11 @@ export interface ProviderModel {
   contextTokens: number;
   /** The thinking levels it supports (only with `reasoning`); absent: every level. */
   reasoningLevels?: ModelLevel[];
+  /**
+   * Whether its replies may be offered tools: `false` once it was found unable to use them (`markToolsOff`) or its owner
+   * said so; `true` when its owner turned them on; absent: not known yet, so offered (README "Model providers").
+   */
+  tools?: boolean;
 }
 
 const storedModel = z
@@ -46,6 +51,7 @@ const storedModel = z
     reasoning: z.boolean(),
     contextTokens: z.number().int().min(CONTEXT_TOKENS.min).max(CONTEXT_TOKENS.max),
     reasoningLevels: modelLevels.optional(),
+    tools: z.boolean().optional(),
   })
   .refine((m) => m.reasoning || m.reasoningLevels === undefined);
 
@@ -165,7 +171,10 @@ export interface ProviderPatch {
   baseUrl?: (protocol: Protocol) => string;
   /** A new key, sealed again; absent: the stored one stays. */
   apiKey?: string;
-  /** Replaces the list. */
+  /**
+   * Replaces the list. A model given without `tools` keeps what is stored for its name: whether it can use tools is
+   * found out by the service (`markToolsOff`) and changed by its owner only by saying so.
+   */
   models?: ProviderModel[];
 }
 
@@ -192,7 +201,11 @@ export async function updateProvider(t: Tx, ownerId: string, id: string, patch: 
   }
   const name = patch.name ?? current.name;
   const baseUrl = nextBaseUrl ?? current.baseUrl;
-  const models = patch.models ?? current.models;
+  const models =
+    patch.models?.map((m) => {
+      const stored = m.tools === undefined ? current.models.find((c) => c.name === m.name)?.tools : undefined;
+      return stored === undefined ? m : { ...m, tools: stored };
+    }) ?? current.models;
   const { rows } = await uniqueName(() =>
     patch.apiKey === undefined
       ? t.query<ProviderDbRow>(`update providers set name = $2, base_url = $3, models = $4::jsonb where id = $1 returning ${COLUMNS}`, [
@@ -211,7 +224,8 @@ export async function updateProvider(t: Tx, ownerId: string, id: string, patch: 
 
 /**
  * Adds the names a provider listed to its models (new ones with conservative defaults: no vision, no PDF, no
- * reasoning, `defaultContextTokens`), keeping every model already there with its flags, up to `MAX_MODELS`.
+ * reasoning, `defaultContextTokens`, nothing said of tools), keeping every model already there with its flags — `tools`
+ * too —, up to `MAX_MODELS`.
  */
 export async function mergeListedModels(t: Tx, ownerId: string, id: string, names: string[], defaultContextTokens: number): Promise<ProviderRow> {
   const current = await lockOwnedProvider(t, ownerId, id);
@@ -225,6 +239,31 @@ export async function mergeListedModels(t: Tx, ownerId: string, id: string, name
   }
   const { rows } = await t.query<ProviderDbRow>(`update providers set models = $2::jsonb where id = $1 returning ${COLUMNS}`, [id, JSON.stringify(models)]);
   return toRow(rows[0]!);
+}
+
+/**
+ * Marks the owner's provider model `model` as one its replies are offered no tools (`tools: false`; agents/port-impl.ts
+ * `toolsUnusable`, once a reply found it unable to use them): only when the provider is theirs, the model is on its list,
+ * and its entry does not say `false` already (absent or `true`). True when this wrote it — then only that entry changed,
+ * as stored —, false when there was nothing to write. Under the provider's row (`for no key update`, the lock an edit of
+ * it takes), so of two replies finding it out at the same moment one writes and the other, waiting for it, finds it
+ * written. Nothing that holds a conversation's or an Agent's row then takes a provider's other than `for key share`
+ * (`lockProviderModels`), which this does not wait for: it may come first in a transaction.
+ */
+export async function markToolsOff(t: Tx, ownerId: string, providerId: string, model: string): Promise<boolean> {
+  const { rows } = await t.query<{ models: unknown }>("select models from providers where id = $1 and owner_id = $2 for no key update", [providerId, ownerId]);
+  const stored = rows[0]?.models;
+  if (!Array.isArray(stored)) return false;
+  // The entry `parseModels` reads for that name: the first whole, valid one.
+  for (const [i, entry] of stored.entries()) {
+    const parsed = storedModel.safeParse(entry);
+    if (!parsed.success || parsed.data.name !== model) continue;
+    if (parsed.data.tools === false) return false;
+    const models = stored.map((e, j) => (j === i ? { ...(e as Record<string, unknown>), tools: false } : e));
+    await t.query("update providers set models = $2::jsonb where id = $1", [providerId, JSON.stringify(models)]);
+    return true;
+  }
+  return false;
 }
 
 /**

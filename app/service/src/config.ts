@@ -77,6 +77,12 @@ export interface SiteModel {
    * {type: "enabled" | "disabled"}`, src/models/gateway.ts). Absent: false, nothing of it is sent.
    */
   thinkingSwitch?: boolean;
+  /**
+   * Whether its replies may be offered tools (README "Agents and runs", Tools in a reply). Absent from the JSON: true —
+   * every model is given them until it is known not to cope; `false` is the operator's word, for a model measured unable
+   * (the acceptance run decides). The service never changes it: a site model that refuses tools is only logged.
+   */
+  tools: boolean;
 }
 
 /** What names the environment variable holding an upstream's key (`apiKeyEnv`). */
@@ -98,6 +104,7 @@ const siteModelSchema = z.strictObject({
   pdf: z.boolean(),
   reasoning: z.array(z.enum(REASONING_LEVELS)),
   thinkingSwitch: z.boolean().optional(),
+  tools: z.boolean().default(true),
 });
 
 /** The judgement model's configuration (`JUDGE`): where to ask, with which keys, and how long and how often. */

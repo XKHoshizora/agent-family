@@ -202,6 +202,7 @@ describe("memoryModel", () => {
     vision: false,
     pdf: false,
     reasoning: [],
+    tools: true,
   });
   const models = [site("b_mid", "free", 1, 4), site("c_cheap", "free", 1, 1), site("a_cheap", "free", 2, 1), site("d_cheaper_paid", "paid", 0, 0)];
   const memory = (model: string | null) => ({ ...app.deps.config.memory, model });

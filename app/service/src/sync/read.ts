@@ -41,7 +41,10 @@ export interface SyncConversation {
   unread: number;
   /** Direct chats: how far the other party has read; Agent conversations: how far the Agent has (it reads when it starts a reply). */
   peerReadSeq?: number;
-  /** How many of the caller's own whispers there are open (src/whispers/); only when there are any. Nobody else's are counted. */
+  /**
+   * How many of the caller's own whispers there wait for their answer (src/whispers/: open, and offering a button — one
+   * that offers none only tells); only when there are any. Nobody else's are counted.
+   */
   whispers?: number;
 }
 
@@ -113,8 +116,9 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
             ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted, agm.read_seq as agent_read_seq,
             (select count(*) from messages m ${VISIBLE_JOIN}
               where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread,
-            -- The caller's own open whispers there, and nobody else's (owner_id is the reader).
-            (select count(*) from whispers w where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open') as whispers
+            -- The caller's own open whispers there that wait for an answer (offer a button), and nobody else's (owner_id is the reader).
+            (select count(*) from whispers w
+              where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open' and jsonb_array_length(w.body -> 'actions') > 0) as whispers
        from memberships me
        join conversations c on c.id = me.conversation_id
        left join lateral (

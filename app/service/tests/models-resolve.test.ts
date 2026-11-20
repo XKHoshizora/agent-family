@@ -59,6 +59,7 @@ describe("resolveModel", () => {
       reasoning: "medium",
       price: { inputMicroPerToken: 3, outputMicroPerToken: 6 },
       tier: "paid",
+      tools: true,
     });
 
     const fast = await resolveModel(db, config(), await agentWith(owner, { model: { source: "site", id: "fast" } }));
@@ -111,6 +112,8 @@ describe("resolveModel", () => {
       reasoning: "xhigh",
       // The provider's row: what the model's learned token ratio is kept under (metering/tokens.ts `ratioKey`).
       providerId: provider.id,
+      // Its entry says nothing of tools: not known yet, so its replies may be offered them.
+      tools: true,
     });
     const plain = await agentWith(owner, { model: { source: "provider", providerId: provider.id, model: "plain" } });
     // Not marked as one that reasons: none only, the default output limit, no thinking switch.
@@ -179,6 +182,17 @@ describe("resolveModel", () => {
     const switched = { ...config(), siteModels: config().siteModels.map((m) => (m.id === "fast" ? { ...m, thinkingSwitch: true } : m)) };
     expect((await resolveModel(db, switched, { model: { source: "site", id: "fast" }, ownerId: owner.id }))?.call.thinkingSwitch).toBe(true);
     expect((await resolveModel(db, config(), { model: { source: "site", id: "fast" }, ownerId: owner.id }))?.call.thinkingSwitch).toBe(false);
+  });
+
+  it("whether its replies may be offered tools: a site model's configuration; a provider model's entry unless it says false", async () => {
+    const owner = await signUp(app, "zoe");
+    const off = { ...config(), siteModels: config().siteModels.map((m) => (m.id === "fast" ? { ...m, tools: false } : m)) };
+    expect((await resolveModel(db, off, { model: { source: "site", id: "fast" }, ownerId: owner.id }))?.tools).toBe(false);
+    expect((await resolveModel(db, off, { model: { source: "site", id: "thinker" }, ownerId: owner.id }))?.tools).toBe(true);
+    const models = [{ name: "unsaid" }, { name: "able", tools: true }, { name: "unable", tools: false }];
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models }))).json;
+    const tools = async (model: string) => (await resolveModel(db, config(), { model: { source: "provider", providerId: provider.id, model }, ownerId: owner.id }))?.tools;
+    expect([await tools("unsaid"), await tools("able"), await tools("unable")]).toEqual([true, true, false]);
   });
 
   it("outputLimit: the allowance is at most half of what the context leaves beside the reply's limit, never below the reply's limit", () => {

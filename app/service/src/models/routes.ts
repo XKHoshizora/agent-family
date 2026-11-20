@@ -15,6 +15,7 @@ const modelsResponse = z.object({
       pdf: z.boolean(),
       reasoning: z.array(z.enum(REASONING_LEVELS)),
       contextTokens: z.number(),
+      tools: z.boolean(),
     }),
   ),
   providerDefaults: z.object({ contextTokens: z.number(), maxOutputTokens: z.number() }),
@@ -23,9 +24,10 @@ const modelsResponse = z.object({
 
 /**
  * `GET /api/models` (README "Calling a model"): what a client's model picker reads. The site models in configuration
- * order, each with what its owner chooses by — never where it is called (`baseUrl`, `protocol`), by what upstream name,
- * with which key (`apiKeyEnv`, the key) or at what price — the defaults a provider model gets, and whether proactive
- * replies can be turned on (`proactiveAvailable`: the judgement model is configured).
+ * order, each with what its owner chooses by and whether its replies may be offered tools (`tools`) — never where it is
+ * called (`baseUrl`, `protocol`), by what upstream name, with which key (`apiKeyEnv`, the key) or at what price — the
+ * defaults a provider model gets, and whether proactive replies can be turned on (`proactiveAvailable`: the judgement
+ * model is configured).
  */
 export function registerModelRoutes(app: FastifyInstance): void {
   const { config } = app.deps;
@@ -48,6 +50,7 @@ export function registerModelRoutes(app: FastifyInstance): void {
           pdf: m.pdf,
           reasoning: m.reasoning,
           contextTokens: m.contextTokens,
+          tools: m.tools,
         })),
         providerDefaults: { contextTokens: config.providerDefaultContextTokens, maxOutputTokens: config.providerDefaultMaxOutputTokens },
         proactiveAvailable: config.judge !== null,

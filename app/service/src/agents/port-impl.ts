@@ -15,7 +15,10 @@ import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
+import { markToolsOff } from "../providers/store.ts";
 import type { Hub } from "../sync/hub.ts";
+import { createWhisper, type WhisperBody } from "../whispers/store.ts";
+import { toWireWhisper } from "../whispers/wire.ts";
 import {
   BlobStoreDown,
   buildContext,
@@ -74,7 +77,7 @@ export interface AgentPortDeps {
   config: Config;
   /** Where attachments are read from for what the model is shown (`buildContext`). */
   blobs: BlobStore;
-  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushActivity" | "pushAgentChanged" | "pushChargedReply">;
+  realtime: Pick<Hub, "pushRun" | "pushDelta" | "pushActivity" | "pushAgentChanged" | "pushChargedReply" | "pushWhisper">;
   conversations: ConversationEvents;
   reads: ReadEvents;
   log: Pick<FastifyBaseLogger, "error" | "warn" | "info">;
@@ -111,6 +114,15 @@ type Offer = ReturnType<Toolbox["offer"]>;
  */
 const resultReserve = (resultMaxWeight: number, ratio: number, conversation: number): number =>
   Math.min(Math.ceil(2 * resultMaxWeight * ratio), Math.floor(conversation / 3));
+
+/**
+ * What a provider model's owner is told, once, when a reply finds it cannot use tools (`toolsUnusable`): a whisper in
+ * that reply's conversation, offering no button (nothing to answer).
+ */
+export const TOOLS_OFF: WhisperBody = { text: "这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。", actions: [] };
+
+/** The model a run's call went to, kept from `begin` in this process (`RunFlags.model`): what `toolsUnusable` marks. */
+type RunModel = { source: "site"; id: string } | { source: "provider"; providerId: string; name: string };
 
 /** What `extend` prices a reply's later calls by, kept from `begin` in this process (`RunFlags.money`). */
 interface RunMoney {
@@ -196,6 +208,8 @@ interface RunFlags {
   mark: string | null;
   /** What `extend` prices the reply's later calls by, from `begin` once the call is admitted; null until then. */
   money: RunMoney | null;
+  /** The model the reply calls, from `begin` once the call is admitted (with `money`); null until then. */
+  model: RunModel | null;
 }
 
 /**
@@ -236,7 +250,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false, mark: null, money: null };
+      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -348,7 +362,9 @@ export class DbAgentPort implements AgentPort {
    *    beside the system text, roster and all (`failed`, `context_too_small`). Everything here is planned at the model's
    *    learned ratio when it is above 1 (metering/tokens.ts `planRatio`; read once, here, for the whole run), with a tenth
    *    of the room kept free (`contextBudget`). The tools the reply is offered are decided here, before the plan: its
-   *    toolbox's (`AgentPortDeps.toolbox`; none without one, and none while `TOOLS.enabled` is false), their definitions
+   *    toolbox's (`AgentPortDeps.toolbox`; none while `TOOLS.enabled` is false, none for a model that cannot use them —
+   *    `Resolved.tools` —, none without a toolbox; a reply offered none is told so in its system text, one offered some
+   *    is not), their definitions
    *    (at the plan's ratio) and what providers add around them (`TOOL_PREAMBLE_TOKENS`) reserved in the plan as the
    *    system text is — and, from what that plan gives the conversation, room for what the tools bring back
    *    (`resultReserve`) and the last call's line (`FINAL_LINE`), reserved with them, so that the conversation is planned
@@ -442,33 +458,38 @@ export class DbAgentPort implements AgentPort {
             ).notes;
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
-      // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
-      const system = (mark: string, speakers: readonly Speaker[]): SystemText =>
-        scene
-          ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes)
-          : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes);
+      // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that). A reply
+      // offered tools (`tools`) is not told it has none; one offered none is, as always.
+      const system =
+        (tools: boolean) =>
+        (mark: string, speakers: readonly Speaker[]): SystemText =>
+          scene
+            ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
+            : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
-      // The tools the reply is offered (none while `TOOLS.enabled` is false, or with no toolbox), and what they take of the
-      // context: their definitions at the plan's ratio and what providers add around them, reserved as the system text is.
-      let offer: Offer | null = config.tools.enabled && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
+      // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it
+      // offers none; then what they take of the context — their definitions at the plan's ratio and what providers add
+      // around them, reserved as the system text is — and room for what they bring back (below).
+      let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
       const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
       let reserved = definitions;
-      let loaded = await loadContext(t, { ...plan, reserved }, resolved, system, this.deps.drawMark);
+      let loaded = await loadContext(t, { ...plan, reserved }, resolved, system(offer !== null), this.deps.drawMark);
       if (offer !== null && holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // And room for what the tools bring back, from what that plan gives the conversation (`resultReserve`), with
         // the last call's line: reserved as the definitions are.
         reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`, planned) + resultReserve(config.tools.resultMaxWeight, planned, loaded.budget);
-        loaded = await loadContext(t, { ...plan, reserved }, resolved, system, this.deps.drawMark);
+        loaded = await loadContext(t, { ...plan, reserved }, resolved, system(true), this.deps.drawMark);
       }
       if (offer !== null && !holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // With the tools reserved the conversation would not get the room a call needs at least: none are offered, and
-        // the reply is planned, and made, as one that offers none.
+        // the reply is planned, and made, as one that offers none (its system text saying so).
         offer = null;
         reserved = 0;
-        loaded = await loadContext(t, plan, resolved, system, this.deps.drawMark);
+        loaded = await loadContext(t, plan, resolved, system(false), this.deps.drawMark);
       }
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
@@ -584,6 +605,8 @@ export class DbAgentPort implements AgentPort {
     const flags = this.flagsOf(run.id);
     flags.mark = first.loaded.mark;
     flags.money = result.money;
+    const { resolved } = first;
+    flags.model = resolved.source === "site" ? { source: "site", id: resolved.name } : { source: "provider", providerId: resolved.providerId!, name: resolved.name };
     return result.prepared;
   }
 
@@ -658,8 +681,32 @@ export class DbAgentPort implements AgentPort {
     this.deps.realtime.pushActivity(run.conversationId, run.id, activity, () => !flags.silenced);
   }
 
-  /** `AgentPort.toolsUnusable`: nothing is recorded of it yet. */
-  async toolsUnusable(_run: RunTicket, _why: "refused" | "garbled"): Promise<void> {}
+  /**
+   * `AgentPort.toolsUnusable`: the reply found its model unable to use tools (its upstream refused them, or it called them
+   * garbled twice). A site model's configuration is the operator's and is never changed: one metric line names the model,
+   * and nothing else is done. A provider's model is marked, in one transaction: `tools: false` on its owner's entry
+   * (`markToolsOff`, the provider's row first: see there why it may come first), only when the entry does not say so
+   * already — and only then a whisper (`TOOLS_OFF`, kind `tools_off`, no button) to its owner in the reply's
+   * conversation (`createWhisper`, taking the conversation's row and then the Agent's for share, the whisper's row last),
+   * pushed to them after commit; so its owner is told once per model, however many replies find it out at the same
+   * moment. Where the whisper cannot be made (its owner or the Agent is no longer a member there, the Agent deleted) the
+   * model is still marked, and nobody is told. Nothing for a run this process did not begin. Whatever turns tools off, the
+   * next reply is offered none (`begin`), and is the reply it always was.
+   */
+  async toolsUnusable(run: RunTicket, _why: "refused" | "garbled"): Promise<void> {
+    const model = this.flags.get(run.id)?.model;
+    if (!model) return;
+    const { db, log, realtime } = this.deps;
+    if (model.source === "site") {
+      log.info({ metric: "tools_refused_site", model: model.id }, "agent run: a site model could not use the tools");
+      return;
+    }
+    const told = await db.tx(async (t) => {
+      if (!(await markToolsOff(t, run.ownerId, model.providerId, model.name))) return null;
+      return createWhisper(t, { conversationId: run.conversationId, ownerId: run.ownerId, agentId: run.agentId, kind: "tools_off", body: TOOLS_OFF }, log);
+    });
+    if (told) realtime.pushWhisper(told.ownerId, toWireWhisper(told));
+  }
 
   /**
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded

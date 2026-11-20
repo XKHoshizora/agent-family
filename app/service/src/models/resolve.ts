@@ -26,6 +26,12 @@ export interface Resolved {
   tier?: "free" | "paid";
   /** Provider models only (always set for them): the `providers` row the model is on — what its learned ratio is kept under (metering/tokens.ts `ratioKey`). */
   providerId?: string;
+  /**
+   * Whether its replies may be offered tools (agents/port-impl.ts `begin`): a site model's `tools` (configuration, the
+   * operator's); a provider model's unless its entry says `tools: false` (absent: not known yet — offered until a reply
+   * finds it unable, `markToolsOff`).
+   */
+  tools: boolean;
 }
 
 /** The level a call is made at: `wanted` when the model takes it, else `none`. */
@@ -95,6 +101,7 @@ export async function resolveModel(
       reasoning,
       price: { inputMicroPerToken: site.inputMicroPerToken, outputMicroPerToken: site.outputMicroPerToken },
       tier: site.tier,
+      tools: site.tools,
     };
   }
 
@@ -122,5 +129,6 @@ export async function resolveModel(
     reasoningAllowed,
     reasoning,
     providerId: choice.providerId,
+    tools: listed.tools !== false,
   };
 }
