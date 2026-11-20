@@ -130,7 +130,8 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
 /**
  * The flags the answers raise: a hearsay question answered at `hearsayAt` or more flags each message it was asked of for
  * every Agent of that owner that listens; an own question at `ownAt` or more, for the owner's reviewing Agent alone. A
- * question left unanswered, or answered with a choice, raises nothing.
+ * question left unanswered, or answered with a choice, raises nothing. Of these, `writeFlags` writes only what each Agent may
+ * hear (above its `heard_from_seq`).
  */
 function flagged(flaggable: readonly Flaggable[], answers: ReadonlyMap<string, Answer>, M: Pick<Config["memory"], "hearsayAt" | "ownAt">, conversationId: string): MemoryFlag[] {
   const out: MemoryFlag[] = [];

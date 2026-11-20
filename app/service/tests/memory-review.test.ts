@@ -676,7 +676,7 @@ describe("switching memory off and on again", () => {
     expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(false);
   });
 
-  it("switching off discards its waiting cards and drops its flags not yet acted on, in the same request; the notes stay; every review position of the Agent and its groups' judgement position become the conversation's current seq. On again: so again", async () => {
+  it("switching off discards its waiting cards and drops its flags not yet acted on, in the same request; the notes stay; every review position of the Agent and where it hears from in its groups become the conversation's current seq, and the group's judgement position is left. On again: so again", async () => {
     const w = await owned("sw4", { memoryAsk: true });
     await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
     await exchange(w, "我喜欢咖啡");
@@ -685,20 +685,23 @@ describe("switching memory off and on again", () => {
     const g = await group(app, w.owner, "读书会", [await signUp(app, "sw4_mia"), await signUp(app, "sw4_ned")]);
     expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
     await db.query("insert into memory_flags (agent_id, conversation_id, seq, kind) values ($1, $2, 1, 'hearsay'), ($1, $2, 1, 'own')", [w.agent.id, g]);
+    // The group's judgement has judged up to its first line for this Agent: the switch leaves that as it is.
+    await db.query("insert into agent_group_state (agent_id, conversation_id, judged_seq) values ($1, $2, 1)", [w.agent.id, g]);
     expect((await patch(w, { memory: false })).status).toBe(200);
     expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ pending: false, status: "discarded" });
     expect((await db.query("select count(*)::int as n from memory_flags where agent_id = $1", [w.agent.id])).rows[0].n).toBe(0);
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["喜欢喝茶"]);
-    const judgedSeq = async () => Number((await db.query("select judged_seq::text as s from agent_group_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g])).rows[0]?.s);
-    // What was said before it was switched off and not yet reviewed (or judged) is never learned.
+    const groupState = async () =>
+      (await db.query<{ judged: string | null; heard: string }>("select judged_seq::text as judged, heard_from_seq::text as heard from agent_group_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g])).rows[0];
+    // What was said before it was switched off and not yet reviewed (or heard) is never learned; the group's judgement is not moved.
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
     expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
-    expect(await judgedSeq()).toBe(await seqOf(g));
+    expect(await groupState()).toEqual({ judged: "1", heard: String(await seqOf(g)) });
     await say(w.owner, g, "我准备辞职了，先别说出去");
     expect((await patch(w, { memory: true })).status).toBe(200);
     expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(await seqOf(w.conv));
-    expect(await judgedSeq()).toBe(await seqOf(g));
+    expect(await groupState()).toEqual({ judged: "1", heard: String(await seqOf(g)) });
   });
 });
 

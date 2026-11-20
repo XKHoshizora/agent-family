@@ -25,7 +25,17 @@ export interface Listener {
   joinedSeq: number;
   /** The Agent that reviews the owner's own remarks here: memory on, shared notes on, the lowest id; null: none. */
   reviewerId: string | null;
+  /**
+   * Where each of `agentIds` hears from in the group, by Agent id (`agent_group_state.heard_from_seq`, 0 without a row): a line is
+   * heard for an Agent — flagged for it — only when its seq is above this, besides being new to the judgement. The memory switch
+   * moves it for the switching Agent alone (memory/pipeline.ts `memorySwitched`), so that no owner's switch changes what another
+   * owner's Agents hear.
+   */
+  heardFrom: Record<string, number>;
 }
+
+/** Where Agent `agentId` of listener `l` hears from (0: no row, from its joining). */
+export const heardFromOf = (l: Pick<Listener, "heardFrom">, agentId: string): number => l.heardFrom[agentId] ?? 0;
 
 /** A flagged message, as `memory_flags` stores it. */
 export interface MemoryFlag {
@@ -41,11 +51,12 @@ export interface MemoryFlag {
  * first: `agent_group_state.judged_at`), keyed and returned in owner id order.
  */
 export async function listenersFor(q: Queryable, conversationId: string, seq: number): Promise<Listener[]> {
-  const { rows } = await q.query<{ owner_id: string; name: string; handle: string; agent_ids: string[]; joined_seq: string; reviewer_id: string | null }>(
+  const { rows } = await q.query<{ owner_id: string; name: string; handle: string; agent_ids: string[]; joined_seq: string; reviewer_id: string | null; heard_from: string[] }>(
     `select x.* from (
        select o.id as owner_id, o.display_name as name, o.handle::text as handle,
               array_agg(p.id order by p.id) as agent_ids, max(m.joined_seq)::text as joined_seq,
-              (array_agg(p.id order by p.id) filter (where a.shared_notes))[1] as reviewer_id
+              (array_agg(p.id order by p.id) filter (where a.shared_notes))[1] as reviewer_id,
+              array_agg(coalesce(s.heard_from_seq, 0)::text order by p.id) as heard_from
          from memberships m
          join principals p on p.id = m.principal_id
          join agents a on a.principal_id = p.id
@@ -67,13 +78,16 @@ export async function listenersFor(q: Queryable, conversationId: string, seq: nu
     agentIds: r.agent_ids,
     joinedSeq: Number(r.joined_seq),
     reviewerId: r.reviewer_id,
+    heardFrom: Object.fromEntries(r.agent_ids.map((id, j) => [id, Number(r.heard_from[j] ?? 0)])),
   }));
 }
 
 /**
  * Writes `flags` (rows already there are left as they are) and returns those it wrote. A flag for an Agent that no longer
  * listens (left, memory off, deleted) or a conversation that is gone is not written: the flag would be read by nobody. Nor is
- * a hearsay flag of a message whose sender the Agent's owner has muted (`hearsay_mutes`, memory/hearsay.ts) for now.
+ * a hearsay flag of a message whose sender the Agent's owner has muted (`hearsay_mutes`, memory/hearsay.ts) for now, nor a flag
+ * of a line at or before where the Agent hears from (`heard_from_seq`, read here as it is now: a switch of its memory between the
+ * judgement's question and this write counts).
  */
 export async function writeFlags(q: Queryable, flags: readonly MemoryFlag[]): Promise<MemoryFlag[]> {
   if (flags.length === 0) return [];
@@ -83,7 +97,9 @@ export async function writeFlags(q: Queryable, flags: readonly MemoryFlag[]): Pr
        from unnest($1::uuid[], $2::uuid[], $3::bigint[], $4::text[]) as f (agent_id, conversation_id, seq, kind)
        join agents a on a.principal_id = f.agent_id and a.memory and a.deleted_at is null
        join memberships m on m.principal_id = f.agent_id and m.conversation_id = f.conversation_id and m.left_seq is null
-      where not (f.kind = 'hearsay' and exists (
+       left join agent_group_state s on s.agent_id = f.agent_id and s.conversation_id = f.conversation_id
+      where f.seq > coalesce(s.heard_from_seq, 0)
+        and not (f.kind = 'hearsay' and exists (
               select 1 from messages x
                 join principals ap on ap.id = f.agent_id
                 join hearsay_mutes hm on hm.owner_id = ap.owner_id and hm.speaker_id = x.sender_id and hm.until > now()

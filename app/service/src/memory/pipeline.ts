@@ -103,15 +103,14 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
  * its waiting cards are discarded (as when it is deleted), its flags not yet acted on (hearsay, the owner's own remarks) dropped, and
  * its positions moved to now (below): what was said before it was switched off and not yet reviewed is never learned — the owner
  * switched it off, that is the point; its notes stay. On: the positions are moved to now again and any flag is dropped, so nothing said
- * while memory was off is ever reviewed, nor new to a group's judgement; unless the owner asked it to look back (`catchUp`): then the
+ * while memory was off is ever reviewed, nor heard in a group; unless the owner asked it to look back (`catchUp`): then the
  * positions stay where switching off put them, and the next review reads exactly what was said while it was off within its usual
- * window (`reviewMessages`, the topic, in a group what came after it joined). The positions: every review position of the Agent — its
- * own conversation, every conversation it is a member of, any it was reviewed in — and, in every group it is in, what the group's
- * judgement counts as judged for it (`agent_group_state.judged_seq`: what came after it is 【新】, asked about and flagged), each the
- * conversation's current seq, never moved back. A group's judgement reads one position for all its Agents, the latest of theirs
- * (candidates.ts `requestFor`, state.ts `judgedUpTo`): moving this Agent's to now also counts every line of the group up to now as
- * judged for every other Agent there, any owner's — a line that had not been judged yet at that instant (normally a matter of seconds,
- * or one a skipped judgement left) is then not asked about for them either. It cannot be otherwise without a position per Agent.
+ * window (`reviewMessages`, the topic, in a group what came after it joined), and in a group the next judgement may flag for it what
+ * it says of the off period that is still new to the judgement (within `transcriptMessages`). The positions: every review position of the Agent — its
+ * own conversation, every conversation it is a member of, any it was reviewed in — and, in every group it is in, where it hears from
+ * (`agent_group_state.heard_from_seq`: a line there raises a flag for it only above this, listeners.ts), each the conversation's
+ * current seq, never moved back. They are this Agent's alone: the group's judgement keeps its own position (`judged_seq`, what is
+ * new to judge, read across the group's Agents) and the switch leaves it, so no other Agent there hears any less or more.
  * The caller has taken the rows of the groups written here first (`lockSwitchGroups`), before the Agent's.
  */
 export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">, on: boolean, catchUp: boolean): Promise<void> {
@@ -128,18 +127,18 @@ export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerI
     [agent.id, agent.conversationId],
   );
   await t.query(
-    `insert into agent_group_state (agent_id, conversation_id, judged_seq)
+    `insert into agent_group_state (agent_id, conversation_id, heard_from_seq)
        select $1, c.id, c.seq from memberships m join conversations c on c.id = m.conversation_id
         where m.principal_id = $1 and m.left_seq is null and c.id <> $2
-     on conflict (agent_id, conversation_id) do update set judged_seq = greatest(coalesce(agent_group_state.judged_seq, 0), excluded.judged_seq)`,
+     on conflict (agent_id, conversation_id) do update set heard_from_seq = greatest(agent_group_state.heard_from_seq, excluded.heard_from_seq)`,
     [agent.id, agent.conversationId],
   );
 }
 
 /**
  * Before the switch's transaction takes the Agent's row (agents/routes.ts, before `lockOwnedAgent`, when the update names `memory`):
- * the rows of the groups `memorySwitched` writes state rows for — every group the Agent is a current member of, or has a review or a
- * judgement position in — `for key share` (the lock those rows' foreign keys take), in id order, one statement. A send in a group takes
+ * the rows of the groups `memorySwitched` writes state rows for — every group the Agent is a current member of, or has a review
+ * position or a group state row (`agent_group_state`) in — `for key share` (the lock those rows' foreign keys take), in id order, one statement. A send in a group takes
  * the group's row and then the Agent's (agents/store.ts's lock order): taken first, while nothing else is held, no switch ever holds the
  * Agent while it waits for a group. The Agent's own conversation is not among them: `lockAgent` takes it `for update` next (a shared lock
  * of it taken first would leave two switches of one Agent each waiting to strengthen theirs). Nothing is taken for anyone else's Agent.

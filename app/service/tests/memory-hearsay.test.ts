@@ -1205,7 +1205,7 @@ describe("memory switched off and on again", () => {
     }
   });
 
-  it("on again without looking back, nothing a member said while it was off is new to the group's judgement: no flag, no hearsay call, no entry", async () => {
+  it("on again without looking back, nothing a member said while it was off is heard for the Agent: no question about it, no flag, no hearsay call, no entry", async () => {
     const w = await world("swo");
     // Judged once while memory was on: the Agent is judged up to this message.
     judge.answer(() => ({ h1: 0.1 }));
@@ -1217,8 +1217,10 @@ describe("memory switched off and on again", () => {
     judge.calls.splice(0);
     judge.answer(() => ({ h1: 0.9 }));
     await decide(w, await say(w.owner, w.g, "今天好热"));
-    // The line may be shown as context, never as new; only the owner's own line is new, so no hearsay question is asked.
-    expect(judge.calls.some((c) => /【新】[^\n]*小李下个月要做手术/.test(c.state))).toBe(false);
+    // The group's judgement never judged the line (nobody listened), so it is new to it; but it came before the Agent's heard
+    // position (agent_group_state.heard_from_seq, moved to the switch-on), so for this Agent only the owner's own line may be
+    // heard, and no hearsay question is asked.
+    expect(judge.calls.some((c) => /【新】[^\n]*小李下个月要做手术/.test(c.state))).toBe(true);
     expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key))).not.toContain("h1");
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
     await wake();

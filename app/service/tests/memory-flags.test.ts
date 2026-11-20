@@ -407,3 +407,116 @@ describe("listeners", () => {
     expect(await flagsOf(w.g)).toEqual([]);
   });
 });
+
+describe("one heard position per Agent in a group (agent_group_state.heard_from_seq)", () => {
+  const switched = async (owner: Actor, agentId: string, body: Record<string, unknown>) =>
+    expect([body, (await api(app, owner, "PATCH", `/api/agents/${agentId}`, body)).status]).toEqual([body, 200]);
+  /** Every listener question answered 0.9 (there is no pick: no Agent is proactive): each line asked about is flagged. */
+  const everything = (_state: string, questions: readonly Question[]): ScriptedAnswers => Object.fromEntries(questions.map((q) => [q.key, 0.9]));
+  const positions = async (agentId: string, conv: string) =>
+    (await db.query<{ judged: number | null; heard: number }>("select judged_seq::int as judged, heard_from_seq::int as heard from agent_group_state where agent_id = $1 and conversation_id = $2", [agentId, conv])).rows[0];
+
+  it("owner A switching memory — off and on, in any order, repeatedly, with catchUp or without — never changes what owner B's Agent in the same group hears, nor B's positions", async () => {
+    // One conversation in four groups: A leaves memory alone in the first and switches it at different points in the others
+    // (before line i is said: plan[i]). Some lines are not judged when said (a skipped judgement: the hour's caps, the day's
+    // limit, a failure), so several are new at once when the next judgement comes.
+    const plans: Array<Record<number, Array<Record<string, unknown>>>> = [
+      {},
+      { 1: [{ memory: false }], 2: [{ memory: true }] },
+      { 1: [{ memory: false }, { memory: true, catchUp: true }, { memory: false }], 3: [{ memory: true }] },
+      { 0: [{ memory: false }], 2: [{ memory: true, catchUp: true }], 3: [{ memory: false }, { memory: true }], 5: [{ memory: false }] },
+    ];
+    const heardByB: unknown[] = [];
+    for (const [n, plan] of plans.entries()) {
+      const w = await world(`hp${n}`);
+      const a = await agentOf(w.owner, `hpa${n}`, w.g);
+      const b = await agentOf(w.member, `hpb${n}`, w.g);
+      judge.answer(everything);
+      const lines: number[] = [];
+      const line = async (i: number, who: Actor, text: string, judged: boolean) => {
+        for (const body of plan[i] ?? []) await switched(w.owner, a.id, body);
+        lines.push(await say(who, w.g, text));
+        if (judged) await decide(w.g, lines.at(-1)!);
+      };
+      await line(0, w.third, "早", true);
+      await line(1, w.third, "member 下周去成都", false);
+      await line(2, w.member, "我在学吉他", false);
+      await line(3, w.third, "member 换了新手机", true);
+      await line(4, w.third, "member 周末搬家", false);
+      await line(5, w.member, "对，周六", true);
+      const flags = (await flagsOf(w.g)).filter((f) => f.agent_id === b.id).map((f) => [lines.indexOf(f.seq), f.kind]);
+      const at = await positions(b.id, w.g);
+      heardByB.push({ flags, judged: lines.indexOf(at!.judged!), heard: at!.heard });
+    }
+    expect(heardByB[0]).toEqual({
+      flags: [
+        [0, "hearsay"],
+        [1, "hearsay"],
+        [2, "own"],
+        [3, "hearsay"],
+        [4, "hearsay"],
+        [5, "own"],
+      ],
+      judged: 5,
+      heard: 0,
+    });
+    for (const [n, heard] of heardByB.entries()) expect([n, heard]).toEqual([n, heardByB[0]]);
+  });
+
+  it("A's Agent hears nothing from the off period without catchUp, and exactly the off period — what the judgement's window shows of it — with it; never what was said before it was switched off", async () => {
+    for (const catchUp of [false, true]) {
+      const tag = catchUp ? "1" : "0";
+      const w = await world(`hq${tag}`);
+      const a = await agentOf(w.owner, `hqa${tag}`, w.g);
+      judge.answer(everything);
+      const morning = await say(w.third, w.g, "早");
+      await judgedUpTo(w.g, morning);
+      // Said before the switch and never judged (a skipped judgement): new to the judgement, never heard for A.
+      const before = await say(w.member, w.g, "owner 去年在上海");
+      await switched(w.owner, a.id, { memory: false });
+      // Said while it is off: nobody listens and no other Agent is there, so nothing is judged meanwhile.
+      const off = [await say(w.member, w.g, "owner 下个月搬家"), await say(w.third, w.g, "owner 换了新工作"), await say(w.member, w.g, "owner 养了一只猫")];
+      await switched(w.owner, a.id, catchUp ? { memory: true, catchUp: true } : { memory: true });
+      // The switch moved A's heard position (to the switch-off with catchUp, to the switch-on without) and left the judgement's.
+      expect([catchUp, await positions(a.id, w.g)]).toEqual([catchUp, { judged: morning, heard: catchUp ? before : off[2] }]);
+      const after = await say(w.third, w.g, "owner 周末去爬山");
+      judge.calls.splice(0);
+      await decide(w.g, after, { proactive: { ...app.deps.config.proactive, transcriptMessages: 3 } });
+      // The judgement's window (3 lines here): every line in it is new to the judgement, which last judged 早.
+      const [third, member] = [`thirdhq${tag}`, `memberhq${tag}`];
+      expect(judge.calls[0]!.state).toBe(`群聊记录：\n【新】${third}：owner 换了新工作\n【新】${member}：owner 养了一只猫\n【新】${third}：owner 周末去爬山`);
+      const heard = (await flagsOf(w.g)).map((f) => f.seq);
+      expect([catchUp, heard]).toEqual([catchUp, catchUp ? [off[1], off[2], after] : [after]]);
+      expect(heard).not.toContain(before);
+    }
+  });
+
+  it("switched off and on again repeatedly, the last switch decides: with catchUp A hears from its last switch-off, without it from its last switch-on; a line no Agent of A's may hear asks A nothing", async () => {
+    const w = await world();
+    const a = await agentOf(w.owner, "memo", w.g);
+    judge.answer(everything);
+    await judgedUpTo(w.g, await say(w.third, w.g, "早"));
+    await switched(w.owner, a.id, { memory: false });
+    await say(w.member, w.g, "owner 第一次关掉时说的");
+    await switched(w.owner, a.id, { memory: true, catchUp: true });
+    await say(w.member, w.g, "owner 开着时说的");
+    await switched(w.owner, a.id, { memory: false });
+    const lastOff = await say(w.member, w.g, "owner 第二次关掉时说的");
+    await switched(w.owner, a.id, { memory: true, catchUp: true });
+    const after = await say(w.third, w.g, "owner 周末去爬山");
+    await decide(w.g, after);
+    expect(await flagsOf(w.g)).toEqual([lastOff, after].map((seq) => ({ agent_id: a.id, seq, kind: "hearsay" })));
+
+    // Off and on without catchUp: what came before the switch-on is new to the judgement but not heard for A — its question is
+    // not even asked when only such lines are by others (the owner's own line asks the owner's question alone).
+    await switched(w.owner, a.id, { memory: false });
+    await say(w.member, w.g, "owner 下个月要做手术");
+    await switched(w.owner, a.id, { memory: true });
+    judge.calls.splice(0);
+    const own = await say(w.owner, w.g, "今天好热");
+    await decide(w.g, own);
+    expect(judge.calls[0]!.state).toContain("【新】member：owner 下个月要做手术");
+    expect(keys(judge.calls[0]!.questions)).toEqual(["h1o"]);
+    expect((await flagsOf(w.g)).filter((f) => f.seq > after)).toEqual([{ agent_id: a.id, seq: own, kind: "own" }]);
+  });
+});

@@ -4,7 +4,7 @@ import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
 import { mentionedHandles } from "../mentions.ts";
 import { labelName, oneLine } from "../runtime/prompt.ts";
-import type { Listener } from "./listeners.ts";
+import { heardFromOf, type Listener } from "./listeners.ts";
 import { judgedUpTo } from "./state.ts";
 
 /**
@@ -225,7 +225,10 @@ export async function requestFor(
 /**
  * The listener questions worth asking of the transcript `rows` (`judged`: the last seq judged already): per listener,
  * hearsay when a new message came from a person other than the owner who has no block with the owner either way, and
- * the owner's own when the owner sent a new message and an Agent of theirs reviews it.
+ * the owner's own when the owner sent a new message and an Agent of theirs reviews it — counting only messages one of the
+ * Agents it would flag may hear (above its `heardFrom`: any of the owner's Agents for hearsay, the reviewer for the owner's
+ * own). What is new is the judgement's, shared by the group; what is heard is each Agent's (listeners.ts `writeFlags` writes
+ * a flag only above it).
  */
 async function listenerQuestions(
   q: Queryable,
@@ -246,10 +249,13 @@ async function listenerQuestions(
   for (const l of listeners) {
     // Nothing from before the listener's own (latest) join is asked about or flagged: the window may reach further back.
     const fresh = all.filter((r) => Number(r.seq) > l.joinedSeq);
-    const others = fresh.filter((r) => r.sender_id !== l.ownerId && !blocked.has(`${l.ownerId}|${r.sender_id}`)).map((r) => Number(r.seq));
+    const anyHears = Math.min(...l.agentIds.map((id) => heardFromOf(l, id)));
+    const others = fresh.filter((r) => Number(r.seq) > anyHears && r.sender_id !== l.ownerId && !blocked.has(`${l.ownerId}|${r.sender_id}`)).map((r) => Number(r.seq));
     if (others.length > 0) out.push({ key: hearsayKey(l), kind: "hearsay", listener: l, seqs: others });
-    const own = fresh.filter((r) => r.sender_id === l.ownerId).map((r) => Number(r.seq));
-    if (own.length > 0 && l.reviewerId !== null) out.push({ key: ownKey(l), kind: "own", listener: l, seqs: own });
+    if (l.reviewerId === null) continue;
+    const reviewerHears = heardFromOf(l, l.reviewerId);
+    const own = fresh.filter((r) => Number(r.seq) > reviewerHears && r.sender_id === l.ownerId).map((r) => Number(r.seq));
+    if (own.length > 0) out.push({ key: ownKey(l), kind: "own", listener: l, seqs: own });
   }
   return out;
 }
