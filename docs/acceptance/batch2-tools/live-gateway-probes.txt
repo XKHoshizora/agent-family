@@ -1,0 +1,92 @@
+# 网关工具调用：真实上游实测（2026-11-20，提交 25706d3 的网关代码，脚本 .claude/probe-tools.mts 直接调用 createModelGateway）
+# 上游：DeepSeek 官方接口；验收环境使用的中转（<base>）。密钥和地址不在本文件里。
+
+=== ds-reasoner
+probe-tools: protocol openai_chat, model deepseek-reasoner, thinking high, max output 4096
+PASS  plain  — text "pong"; usage {"inputTokens":54,"outputTokens":3}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 35, alnum_-, provider-like prefix "call_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":392,"outputTokens":22}
+PASS  round2  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":451,"outputTokens":23}
+PASS  round2_string_result  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":451,"outputTokens":23}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 35, alnum_-, provider-like prefix "call_" | len 35, alnum_-, provider-like prefix "call_"; distinct ids 2; round 2 text "It's Friday, 2026-11-20 at 10:00 (+08:00). One match for "Osaka": a message from"
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "I'll fetch the current date and time for you now."); round 2 text "It's Friday, November 20, 2026, at 10:00 AM (+08:00)."
+PASS  thinking_round_trip  — level high; round 1 reasoning chars 0, assistant JSON 143 chars; round 2 text "It's 10:00 AM (UTC+8) on Friday, November 20, 2026."
+INFO  history_without_tools  — accepted; text "It's 10:00 AM (CST) on Friday, November 20, 2026."; usage {"inputTokens":115,"outputTokens":33}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)." | B (only search_messages offered in round 2): accepted, text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+7 passed, 0 failed, 4 info
+
+=== ds-chat-switch
+probe-tools: protocol openai_chat, model deepseek-chat, thinking high, max output 4096
+PASS  plain  — text "pong"; usage {"inputTokens":29,"outputTokens":2}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 32, alnum_-, provider-like prefix "call_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":367,"outputTokens":21}
+PASS  round2  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":425,"outputTokens":22}
+PASS  round2_string_result  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":425,"outputTokens":22}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 32, alnum_-, provider-like prefix "call_" | len 32, alnum_-, provider-like prefix "call_"; distinct ids 2; round 2 text "It's Friday, 2026-11-20, 10:00 (+08:00). One match for "Osaka": a message from A"
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "I'll check the current date and time for you."); round 2 text "It's Friday, November 20, 2026, at 10:00 AM (UTC+8)."
+PASS  thinking_round_trip  — level high; round 1 reasoning chars 0, assistant JSON 143 chars; round 2 text "It's 10:00 AM (UTC+8) on Friday, November 20, 2026."
+INFO  history_without_tools  — accepted; text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":89,"outputTokens":22}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)." | B (only search_messages offered in round 2): accepted, text "It's 10:00 AM on Friday, November 20, 2026."
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+7 passed, 0 failed, 4 info
+
+=== canal-chat-luna
+probe-tools: protocol openai_chat, model gpt-6-luna, thinking none, max output 1024
+PASS  plain  — text "pong"; usage {"inputTokens":32,"outputTokens":5}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 37, alnum_-, provider-like prefix "call_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":106,"outputTokens":14}
+PASS  round2  — text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":155,"outputTokens":26}
+PASS  round2_string_result  — text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":155,"outputTokens":26}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 37, alnum_-, provider-like prefix "call_" | len 37, alnum_-, provider-like prefix "call_"; distinct ids 2; round 2 text "It’s Friday, November 20, 2026, 10:00 AM (UTC+8). Your messages include: “Osaka "
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "I’ll check the current date and time."); round 2 text "It’s Friday, November 20, 2026, at 10:00 AM (UTC+8)."
+INFO  thinking_round_trip  — skipped: PROBE_THINKING not set
+INFO  history_without_tools  — accepted; text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":84,"outputTokens":26}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)." | B (only search_messages offered in round 2): accepted, text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+6 passed, 0 failed, 5 info
+
+=== canal-responses-luna
+probe-tools: protocol openai_responses, model gpt-6-luna, thinking none, max output 1024
+PASS  plain  — text "pong"; usage {"inputTokens":4412,"outputTokens":5}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 37, alnum_-, provider-like prefix "call_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":4486,"outputTokens":14}
+PASS  round2  — text "It’s Friday, November 20, 2026, 10:00 AM (UTC+8)."; usage {"inputTokens":4535,"outputTokens":26}
+PASS  round2_string_result  — text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":4535,"outputTokens":26}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 37, alnum_-, provider-like prefix "call_" | len 37, alnum_-, provider-like prefix "call_"; distinct ids 2; round 2 text "It’s Friday, November 20, 2026, 10:00 AM (+08:00). Your messages contain: “Osaka"
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "I’ll check the current date and time now."); round 2 text "It’s Friday, November 20, 2026, 10:00 AM (UTC+8)."
+INFO  thinking_round_trip  — skipped: PROBE_THINKING not set
+INFO  history_without_tools  — accepted; text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+08:00)."; usage {"inputTokens":4464,"outputTokens":28}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)." | B (only search_messages offered in round 2): accepted, text "It’s 10:00 AM on Friday, November 20, 2026 (UTC+8)."
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+6 passed, 0 failed, 5 info
+
+=== canal-anthropic-haiku
+probe-tools: protocol anthropic, model claude-haiku-5-5, thinking none, max output 1024
+PASS  plain  — text "pong"; usage {"inputTokens":574,"outputTokens":4}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 30, alnum_-, provider-like prefix "toolu_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":1047,"outputTokens":26}
+PASS  round2  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+08:00)."; usage {"inputTokens":1110,"outputTokens":33}
+PASS  round2_string_result  — text "It's 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":1110,"outputTokens":31}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 30, alnum_-, provider-like prefix "toolu_" | len 30, alnum_-, provider-like prefix "toolu_"; distinct ids 2; round 2 text "The current time is 10:00 AM (+08:00) on Friday, November 20, 2026. Your message"
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "I'm checking the current time now."); round 2 text "It is currently 10:00 AM on Friday, November 20, 2026 (UTC+8)."
+INFO  thinking_round_trip  — skipped: PROBE_THINKING not set
+INFO  history_without_tools  — accepted; text "It is 10:00 AM on Friday, November 20, 2026 (UTC+8)."; usage {"inputTokens":639,"outputTokens":31}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It's currently 10:00 AM on Friday, November 20, 2026 (UTC+8)" | B (only search_messages offered in round 2): accepted, text "It is currently 10:00 AM (UTC+8) on Friday, November 20, 202"
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+6 passed, 0 failed, 5 info
+
+=== canal-chat-haiku
+probe-tools: protocol openai_chat, model claude-haiku-5-5, thinking none, max output 1024
+PASS  plain  — text "pong"; usage {"inputTokens":573,"outputTokens":4}
+PASS  round1  — calls 1 (events) / 1 (finish); first current_time id len 30, alnum_-, provider-like prefix "toolu_" input {}; truncated false; toolsRefused false; order tool_call>finish; usage {"inputTokens":135,"outputTokens":26}
+PASS  round2  — text "It's 10:00 AM on Friday, November 20, 2026, at UTC+08:00."; usage {"inputTokens":198,"outputTokens":33}
+PASS  round2_string_result  — text "It is 10:00 AM on Friday, November 20, 2026, in UTC+08:00."; usage {"inputTokens":198,"outputTokens":33}
+PASS  two_calls  — 2 call(s) in one round [current_time, search_messages]; ids len 30, alnum_-, provider-like prefix "toolu_" | len 30, alnum_-, provider-like prefix "toolu_"; distinct ids 2; round 2 text "It is currently 10:00 AM on Friday, November 20, 2026 (UTC+8). Your messages con"
+PASS  text_and_call  — text and call in the same round: yes (order text>tool_call>finish, text "Checking the current time now."); round 2 text "The current time is 10:00 AM on Friday, November 20, 2026 (UTC+8)."
+INFO  thinking_round_trip  — skipped: PROBE_THINKING not set
+INFO  history_without_tools  — accepted; text "It is currently 10:00 AM (+08:00) on Friday, November 20, 2026."; usage {"inputTokens":638,"outputTokens":32}
+INFO  unknown_tool_in_history  — A (result name not offered, right id): accepted, text "It is 10:00 AM on Friday, November 20, 2026, at UTC+8." | B (only search_messages offered in round 2): accepted, text "It's currently 10:00 AM on Friday, November 20, 2026, in UTC"
+INFO  refusal_shape  — no probe got a 400/422 (nothing to show)
+INFO  context_error_shape  — skipped: PROBE_CONTEXT_OVERFLOW not 1
+6 passed, 0 failed, 5 info
