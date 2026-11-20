@@ -458,8 +458,9 @@ describe("the money of a reply that offers tools", () => {
     expect(await recordsOf(run.id)).toMatchObject([{ cost: cost.toString(), free: cost.toString(), balance: "0", forgiven: "0" }]);
     expect(await freeUsed(w.owner.id)).toBe((3n * POINT - leave + cost).toString());
 
-    // Nothing left: what the reply has spent is not covered — no call; what it wrote stands, cut. The balance it also
-    // has is never moved to.
+    // Nothing left: what the reply has spent is not covered — no call. What it wrote before its tool was its
+    // acknowledgement, posted then; after it, it wrote nothing: no_quota, the acknowledgement standing. The balance it
+    // also has is never moved to.
     const dear = await owned("headstop");
     await grant(db, dear.owner.id, 20n * POINT);
     const stopGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 500), text: "我先查一下。" });
@@ -467,9 +468,9 @@ describe("the money of a reply that offers tools", () => {
     expect(await toolWorker(stopGateway, toolbox(leaving(dear.owner.id, 0n))).worker.runOnce()).toBe(true);
     expect(stopGateway.calls).toHaveLength(1);
     const dearRun = await runOf(dear.owner.id);
-    expect(dearRun).toMatchObject({ status: "done", hold: "0" });
+    expect(dearRun).toMatchObject({ status: "failed", error: "no_quota", hold: "0" });
     const replies = (await api(app, dear.owner, "GET", `/api/conversations/${dear.conv}/messages`)).json.messages.filter((m: any) => m.senderId === dear.agent.id);
-    expect(replies).toMatchObject([{ text: "我先查一下。", truncated: true }]);
+    expect(replies).toMatchObject([{ text: "我先查一下。", ack: true }]);
     const dearCost = costOf(U(1000, 500)).toString();
     expect(await recordsOf(dearRun.id)).toMatchObject([{ cost: dearCost, free: "0", balance: "0", forgiven: dearCost }]);
     expect(await freeUsed(dear.owner.id)).toBe("3000000");
@@ -568,8 +569,9 @@ describe("the money of a reply that offers tools", () => {
     const failedCost = costOf(U(1000, 50)).toString();
     expect(await recordsOf(failedRun.id)).toMatchObject([{ input: 1000, output: 50, estimated: false, outcome: "failed", cost: failedCost, balance: failedCost }]);
 
-    // The reply's time (TOOLS.runTimeoutMs) runs out in its second round: what it wrote is posted, cut; settled on the
-    // first round's usage and the second's estimate.
+    // The reply's time (TOOLS.runTimeoutMs) runs out in its second round: what it wrote before its tool was its
+    // acknowledgement, posted then, and it wrote nothing after it — failed as a reply that timed out having said nothing;
+    // settled on the first round's usage and the second's estimate.
     const slow = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50), text: "我先查一下。" });
     const hung = slow.hang();
     const b = await owned("endtimeout", PAID);
@@ -581,9 +583,11 @@ describe("the money of a reply that offers tools", () => {
     expect(raised).toBeGreaterThan(costOf(U(1000, 50)));
     await timing;
     const timedOut = await runOf(b.owner.id);
-    expect(timedOut).toMatchObject({ status: "done", hold: "0" });
+    expect(timedOut).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    const said = (await api(app, b.owner, "GET", `/api/conversations/${b.conv}/messages`)).json.messages.filter((m: any) => m.senderId === b.agent.id);
+    expect(said).toMatchObject([{ text: "我先查一下。", ack: true }]);
     const [timedRecord] = await recordsOf(timedOut.id);
-    expect(timedRecord).toMatchObject({ estimated: true, outcome: "done", forgiven: "0" });
+    expect(timedRecord).toMatchObject({ estimated: true, outcome: "failed", forgiven: "0" });
     expect(timedRecord.input).toBeGreaterThan(1000);
     expect(timedRecord.output).toBe(50);
 
