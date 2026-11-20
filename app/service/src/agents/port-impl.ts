@@ -437,9 +437,12 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
-      // A block made since the call, either way, between the Agent's owner and its caller: the call is refused now.
-      const blocked = await t.query(`select 1 from agent_runs r where r.id = $1 and ${blockedEitherWay("$2::uuid", "r.caller_id")}`, [run.id, agent.ownerId]);
-      if (blocked.rowCount !== 0) return { end: BLOCKED_SINCE };
+      // A block made since the call, either way, between the Agent's owner and its caller: the call is refused now. Only
+      // someone else's call (lane `others`) has a caller who is not the owner.
+      if (state.lane === "others") {
+        const blocked = await t.query(`select 1 from agent_runs r where r.id = $1 and ${blockedEitherWay("$2::uuid", "r.caller_id")}`, [run.id, agent.ownerId]);
+        if (blocked.rowCount !== 0) return { end: BLOCKED_SINCE };
+      }
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
