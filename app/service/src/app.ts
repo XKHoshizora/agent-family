@@ -38,6 +38,7 @@ import { registerMemoryRoutes } from "./memory/routes.ts";
 import { createAgentWorker, SHUTDOWN_GRACE_MS, within, type AgentWorker } from "./agents/runtime/worker.ts";
 import { registerPrincipalRoutes } from "./principals/routes.ts";
 import { createJudge, type Judge } from "./judge/client.ts";
+import { createMailSender, type MailSender } from "./auth/mail-sender.ts";
 import { createModelGateway, type ModelGateway } from "./models/gateway.ts";
 import { registerModelRoutes } from "./models/routes.ts";
 import { guardedFetch } from "./providers/guard.ts";
@@ -119,6 +120,8 @@ declare module "fastify" {
     agentWorker: AgentWorker;
     /** The stale-run sweep (src/agents/port-impl.ts `sweepStaleRuns`): `run()` sweeps now; the timer does it every minute. */
     staleRunSweep: { run(): Promise<number> };
+    /** Delivers queued mail in `resend` mode (src/auth/mail-sender.ts); in `outbox` mode `runOnce()` does nothing. */
+    mailSender: MailSender;
   }
 }
 
@@ -157,6 +160,11 @@ export interface BuildOptions {
    * `{ now, setTimer }` run its quiet timers on their own clock (tests/helpers/harness.ts `testClock`).
    */
   memory?: false | { now?: () => number; setTimer?: SetTimer };
+  /**
+   * Tests only: `apiUrl` points the mail sender at a local stand-in for the provider (no variable can set it), `sender: false` turns its
+   * timer off (`app.mailSender.runOnce()` delivers by hand), `{ intervalMs }` shortens it. Used only in `MAIL_MODE=resend`.
+   */
+  mail?: { apiUrl?: string; sender?: false | { intervalMs?: number } };
 }
 
 /**
@@ -439,6 +447,19 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     if (options.staleRunSweep !== false) staleTimer = startStaleRunSweep(() => staleRunSweep.run(), app.log, options.staleRunSweep ?? {});
   });
   app.addHook("onClose", async () => staleTimer?.stop());
+
+  // Mail in `resend` mode: the rows are written with the work that causes them; this delivers them afterwards, outside every request.
+  const mailSender = createMailSender({
+    db: deps.db,
+    settings: config.mailMode === "resend" ? config.mail : undefined,
+    ...(options.mail?.apiUrl === undefined ? {} : { apiUrl: options.mail.apiUrl }),
+    log: app.log,
+  });
+  app.decorate("mailSender", mailSender);
+  app.addHook("onReady", async () => {
+    if (options.mail?.sender !== false) mailSender.start(options.mail?.sender?.intervalMs);
+  });
+  app.addHook("onClose", async () => mailSender.stop());
 
   const answerFloor = options.answerFloor ?? ANSWER_FLOOR;
   registerRegistrationRoutes(app, perMinute, answerFloor);

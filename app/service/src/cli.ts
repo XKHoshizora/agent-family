@@ -2,6 +2,7 @@ import { config as loadDotenv } from "dotenv";
 import { createBlobStore } from "./attachments/blob.ts";
 import { DEFAULT_UNSENT_AFTER_MINUTES, runSweep } from "./attachments/sweeper.ts";
 import { applyLedger, ensureAccount, formatPoints, lockAccount, parsePoints } from "./accounts/store.ts";
+import { mailCounts } from "./auth/mail-sender.ts";
 import { createInvite } from "./auth/invites.ts";
 import { loadConfig } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
@@ -13,7 +14,7 @@ import { runMigrations } from "./migrate.ts";
 loadDotenv({ quiet: true });
 
 const USAGE =
-  "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | attachments:sweep [--older-than <minutes>] | " +
+  "usage: cli.ts migrate | invite:create [--ttl-hours <n>] | inbox:list [--to <email>] | mail:status | attachments:sweep [--older-than <minutes>] | " +
   "credits:grant --handle <h> --points <n> [--note <text>] | credits:show --handle <h> | tier:set --handle <h> --tier <name> | models:list | memory:stats [--days <n>]";
 
 function databaseUrl(): string {
@@ -73,6 +74,15 @@ if (command === "migrate") {
     for (const m of rows) {
       console.log(`#${m.id} ${m.created_at.toISOString()} to=${m.recipient} kind=${m.kind}\n  ${m.subject}\n${m.body.split("\n").map((line) => `  ${line}`).join("\n")}\n`);
     }
+  } finally {
+    await db.close();
+  }
+} else if (command === "mail:status") {
+  // Counts only (no address, no text): how many mails wait for the sender, were sent, or failed (README "Mail").
+  const db = createDb(databaseUrl());
+  try {
+    const c = await mailCounts(db);
+    console.log(`queued ${c.queued}  sent ${c.sent}  failed ${c.failed}`);
   } finally {
     await db.close();
   }
