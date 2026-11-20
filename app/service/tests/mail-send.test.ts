@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, test } from "vitest";
 import { buildApp } from "../src/app.ts";
 import { createInvite } from "../src/auth/invites.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS } from "../src/auth/mail-copy.ts";
-import { BACKOFF_SECONDS, mailCounts } from "../src/auth/mail-sender.ts";
+import { BACKOFF_SECONDS, REFUSED_PAUSE_MS, createMailSender, mailCounts } from "../src/auth/mail-sender.ts";
 import { mailPolicy, sendMail, type MailKind, type MailPolicy } from "../src/auth/mailer.ts";
 import { api, signUp } from "./helpers/actors.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
@@ -225,14 +225,78 @@ describe("mail is really sent", () => {
     }
   });
 
-  test("a refused key (401) is retried too, and logged as an error without the key", async () => {
+  test("a refused key or domain (401/403) pauses the whole sender: one error line, no more calls, rows stay queued; mail:status says so", async () => {
+    const paused = await buildApp({ config: app.deps.config, db: app.deps.db }, { ...quiet, logStream: { write: (l) => void logs.push(l) }, mail: { apiUrl, sender: false } });
+    await paused.ready();
     script = [{ status: 401, body: { message: KEY } }];
-    const id = await queue();
-    await app.mailSender.runOnce();
-    expect(await row(id)).toMatchObject({ status: "queued", last_error: "http_401" });
-    const lines = logs.map((l) => JSON.parse(l) as { level: number; msg: string });
-    expect(lines.some((l) => l.level >= 50 && /mail/.test(l.msg))).toBe(true);
+    const ids: string[] = [];
+    for (let i = 0; i < 20; i++) ids.push(await queue(`body ${i}`));
+    await paused.mailSender.runOnce();
+    expect(seen).toHaveLength(1); // the first call was refused, nothing else was tried
+    for (let i = 0; i < 3; i++) expect(await paused.mailSender.runOnce()).toBe(0);
+    expect(seen).toHaveLength(1);
+    expect(await row(ids[0]!)).toMatchObject({ status: "queued", last_error: "http_401" });
+    expect((await db.query("select count(*)::int n from mail_outbox where status = 'queued'")).rows[0].n).toBe(20);
+    const errors = logs.map((l) => JSON.parse(l) as { level: number; msg: string }).filter((l) => l.level >= 50);
+    expect(errors).toHaveLength(1);
     expect(logs.join("")).not.toContain(KEY);
+    expect(logs.join("")).not.toContain(TO);
+    expect((await mailCounts(db)).refused).toBe(1);
+    // the rows still expire at their own time while the sender is paused
+    await db.query("update mail_outbox set expires_at = now() - interval '1 second' where id = $1", [ids[5]]);
+    await paused.mailSender.runOnce();
+    expect(await row(ids[5]!)).toMatchObject({ status: "expired" });
+    expect(REFUSED_PAUSE_MS).toBe(5 * 60_000);
+    await paused.close();
+  });
+
+  test("after the pause one probe goes out with the oldest due row; the first success ends the pause", async () => {
+    const probing = await buildApp({ config: app.deps.config, db: app.deps.db }, { ...quiet, logStream: { write: (l) => void logs.push(l) }, mail: { apiUrl, sender: false, refusedPauseMs: 150 } });
+    await probing.ready();
+    try {
+      script = [{ status: 403 }];
+      const first = await queue("first");
+      await queue("second");
+      await queue("third");
+      await probing.mailSender.runOnce();
+      expect(seen).toHaveLength(1);
+      expect(await probing.mailSender.runOnce()).toBe(0);
+      await new Promise((r) => setTimeout(r, 200));
+      await probing.mailSender.runOnce(); // the probe succeeds and the pause is over: the others follow in the same pass
+      expect(seen).toHaveLength(4);
+      expect(seen[1]!.json.text).toBe("first");
+      expect((await row(first)).status).toBe("sent");
+      expect((await db.query("select count(*)::int n from mail_outbox where status = 'sent'")).rows[0].n).toBe(3);
+      const lines = logs.map((l) => JSON.parse(l) as { level: number });
+      expect(lines.filter((l) => l.level >= 50)).toHaveLength(1);
+    } finally {
+      await probing.close();
+    }
+  });
+
+  test("stopping does not discard a success that has just arrived", async () => {
+    const id = await queue();
+    let release: (r: Response) => void = () => {};
+    const slow = new Promise<Response>((r) => (release = r));
+    const quietLog = { info() {}, warn() {}, error() {} };
+    const own = createMailSender({ db: app.deps.db, settings: app.deps.config.mail, apiUrl, fetch: () => slow, log: quietLog });
+    const pass = own.runOnce();
+    await new Promise((r) => setTimeout(r, 50));
+    const stopping = own.stop();
+    release(new Response(JSON.stringify({ id: "late-ok" }), { status: 200 }));
+    await pass;
+    await stopping;
+    expect(await row(id)).toMatchObject({ status: "sent", provider_id: "late-ok" });
+  });
+
+  test("a retry never falls due after the mail's expiry, so the row is closed on time", async () => {
+    script = [{ status: 500 }];
+    const id = await queue();
+    await db.query("update mail_outbox set expires_at = now() + interval '20 seconds' where id = $1", [id]);
+    await app.mailSender.runOnce();
+    const r = await row(id);
+    expect(r.status).toBe("queued");
+    expect(r.next_attempt_at.getTime()).toBeLessThanOrEqual(r.expires_at.getTime());
   });
 
   test("a late answer never revives a row that was closed meanwhile", async () => {
@@ -315,11 +379,12 @@ describe("mail is really sent", () => {
     const old = await queue("d");
     await db.query("update mail_outbox set expires_at = now() - interval '1 second' where id = $1", [old]);
     await queue("e", "verify_email", { deliver: false, perAddressHour: 1000 });
+    await sendMail(db, "verify_email", "other@example.test", "s", "b", { deliver: true, perAddressHour: 0 });
     await app.mailSender.runOnce();
     const c = await mailCounts(db);
     expect(c.outboxOnly).toBe(1);
     expect(c.days).toHaveLength(1);
-    expect(c.days[0]).toMatchObject({ queued: 1, sent: 1, failed: 1, expired: 1, retries: 0 });
+    expect(c.days[0]).toMatchObject({ queued: 1, sent: 1, failed: 1, expired: 1, capped: 1, retries: 0 });
     await due((await db.query<{ id: string }>("select id::text from mail_outbox where status = 'queued' and deliver")).rows[0]!.id);
     script = [{ status: 500 }];
     await app.mailSender.runOnce();
@@ -375,11 +440,24 @@ describe("a per-address cap on mail", () => {
     const rows = await counts(a.email, "reset_password");
     expect(rows).toHaveLength(6); // the same work for every request
     expect(rows.map((r) => r.deliver)).toEqual([true, true, true, false, false, false]);
-    expect(rows.slice(3).every((r) => r.status === "failed" && r.last_error === "capped")).toBe(true);
+    expect(rows.slice(3).every((r) => r.status === "capped" && !r.deliver)).toBe(true);
     await app.mailSender.runOnce();
     expect((await db.query("select count(*)::int n from mail_outbox where kind = $1 and status = $2", ["reset_password", "sent"])).rows[0].n).toBe(3);
     // another kind and another address have their own allowance
     expect((await counts(a.email, "verify_email")).every((r) => r.deliver)).toBe(true);
+  });
+
+  test("twelve resets for one address at once with a cap of 3: exactly three are deliverable", async () => {
+    const a = await signUp(app, "burst");
+    const all = await Promise.all(Array.from({ length: 12 }, () => api(app, null, "POST", "/api/auth/request-password-reset", { email: a.email })));
+    for (const r of all) expect(r).toEqual(all[0]);
+    const rows = await counts(a.email, "reset_password");
+    expect(rows).toHaveLength(12);
+    expect(rows.filter((r) => r.deliver)).toHaveLength(3);
+    expect(rows.filter((r) => r.status === "capped")).toHaveLength(9);
+    // a capital letter in the address does not open another allowance
+    await sendMail(db, "reset_password", a.email.toUpperCase(), "s", "b", mailPolicy(app.deps.config));
+    expect((await db.query<{ deliver: boolean }>("select deliver from mail_outbox where kind = 'reset_password' order by id desc limit 1")).rows[0]!.deliver).toBe(false);
   });
 
   test("open registration of one address over and over: the cap holds, every answer is the same", async () => {

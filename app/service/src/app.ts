@@ -164,7 +164,7 @@ export interface BuildOptions {
    * Tests only: `apiUrl` points the mail sender at a local stand-in for the provider (no variable can set it), `sender: false` turns its
    * timer off (`app.mailSender.runOnce()` delivers by hand), `{ intervalMs }` shortens it. Used only in `MAIL_MODE=resend`.
    */
-  mail?: { apiUrl?: string; callTimeoutMs?: number; sender?: false | { intervalMs?: number } };
+  mail?: { apiUrl?: string; callTimeoutMs?: number; refusedPauseMs?: number; sender?: false | { intervalMs?: number } };
 }
 
 /**
@@ -454,6 +454,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     settings: config.mailMode === "resend" ? config.mail : undefined,
     ...(options.mail?.apiUrl === undefined ? {} : { apiUrl: options.mail.apiUrl }),
     ...(options.mail?.callTimeoutMs === undefined ? {} : { callTimeoutMs: options.mail.callTimeoutMs }),
+    ...(options.mail?.refusedPauseMs === undefined ? {} : { refusedPauseMs: options.mail.refusedPauseMs }),
     log: app.log,
   });
   app.decorate("mailSender", mailSender);

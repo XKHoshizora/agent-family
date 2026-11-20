@@ -1,5 +1,5 @@
 import type { Config } from "../config.ts";
-import type { Queryable } from "../db.ts";
+import type { Db, Queryable } from "../db.ts";
 import { RESET_PASSWORD_TTL_SECONDS, VERIFY_EMAIL_TTL_SECONDS } from "./mail-copy.ts";
 
 export type MailKind = "verify_email" | "reset_password" | "registration_attempt";
@@ -24,11 +24,13 @@ export const mailPolicy = (config: Pick<Config, "mailMode" | "mailPerAddressHour
 
 /**
  * Queues mail by writing it to `mail_outbox` (the sender, src/auth/mail-sender.ts, delivers it in `resend` mode). Pass `q` to
- * write through a transaction client so the mail commits or rolls back together with the work that caused it.
+ * write through a transaction client so the mail commits or rolls back together with the work that caused it; given the pool
+ * (a `Db`), the lock, the count and the insert run in one transaction of their own.
  *
- * The cap: when this address already has `perAddressHour` mails of this kind from the last hour, the row is still written, by the
- * same two statements as any other, but is marked not to be delivered (`failed`/`capped` in `resend` mode; untouched in `outbox`
- * mode, where nothing is delivered anyway). Whoever asked sees no difference.
+ * The cap: when this address already has `perAddressHour` mails of this kind from the last hour (capped ones included), the row
+ * is still written, by the same statements as any other, but with status `capped` and not to be delivered (`resend` mode; in
+ * `outbox` mode nothing is delivered anyway and the row is as any other). Whoever asked sees no difference. Counting and writing
+ * happen under one advisory lock per (address, kind), so a burst of requests at once cannot all see room.
  */
 export async function sendMail(
   q: Queryable,
@@ -38,24 +40,21 @@ export async function sendMail(
   body: string,
   policy: MailPolicy,
 ): Promise<void> {
-  const recent = await q.query<{ n: number }>(
-    "select count(*)::int as n from mail_outbox where recipient = $1 and kind = $2 and created_at > now() - interval '1 hour'",
-    [recipient, kind],
-  );
-  const capped = (recent.rows[0]?.n ?? 0) >= policy.perAddressHour;
-  const deliver = policy.deliver && !capped;
-  await q.query(
-    `insert into mail_outbox (recipient, kind, subject, body, deliver, status, last_error, expires_at)
-     values ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8))`,
-    [
-      recipient,
-      kind,
-      subject,
-      body,
-      deliver,
-      policy.deliver && capped ? "failed" : "queued",
-      policy.deliver && capped ? "capped" : null,
-      EXPIRES_AFTER_SECONDS[kind],
-    ],
-  );
+  const write = async (t: Queryable): Promise<void> => {
+    // After any lock of the registration path (the address's account lock is always taken first), never before.
+    await t.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`mail-cap:${recipient.toLowerCase()}:${kind}`]);
+    const recent = await t.query<{ n: number }>(
+      "select count(*)::int as n from mail_outbox where lower(recipient) = lower($1) and kind = $2 and created_at > now() - interval '1 hour'",
+      [recipient, kind],
+    );
+    const capped = policy.deliver && (recent.rows[0]?.n ?? 0) >= policy.perAddressHour;
+    await t.query(
+      `insert into mail_outbox (recipient, kind, subject, body, deliver, status, expires_at)
+       values ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))`,
+      [recipient, kind, subject, body, policy.deliver && !capped, capped ? "capped" : "queued", EXPIRES_AFTER_SECONDS[kind]],
+    );
+  };
+  const pool = q as Partial<Db>;
+  if (typeof pool.tx === "function") await pool.tx(write);
+  else await write(q);
 }
