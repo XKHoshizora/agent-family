@@ -35,6 +35,7 @@ npm test             # vitest, against TEST_DATABASE_URL
 npm run typecheck    # tsc --noEmit (src and tests)
 npm run invite:create -- [--ttl-hours <n>]          # prints a new invite code (default 72 h)
 npm run inbox:list -- [--to <email>]                # the mail outbox
+npm run mail:status                                 # how many mails are queued, sent, failed (counts only)
 npm run attachments:sweep -- [--older-than <min>]   # unsent uploads and abandoned blobs (by hand; the server does it itself)
 npm run credits:grant -- --handle <h> --points <n> [--note <text>]   # n: decimal, up to 6 fraction digits, may be negative (an adjustment); prints the new balance
 npm run credits:show -- --handle <h>                # a person's tier and points balance (an Agent's handle is refused)
@@ -133,7 +134,7 @@ to `AGENT_RUN_TIMEOUT_MS` alone)),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
-`MAIL_MODE` (`outbox`), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
+`MAIL_MODE` (`outbox` | `resend`, default `outbox`; `resend` needs `RESEND_API_KEY` — a secret — and `MAIL_FROM`, optional `MAIL_REPLY_TO`; see Mail delivery below), `RATE_LIMIT_SCALE` (multiplier for every rate limit, default 1),
 `CLIENT_IP_HEADER` / `TRUST_PROXY` (where the client's address comes from; see Deployment),
 `ATTACHMENT_MAX_BYTES` (the largest file one upload may carry, default 1 GiB; 1 MiB to 5 GiB, and never more than
 `ATTACHMENT_QUOTA_BYTES`, else start-up fails naming both), `ATTACHMENT_QUOTA_BYTES` (attachment bytes one principal
@@ -1649,12 +1650,14 @@ would bypass invites) is 404 `not_found`. Each declares its query and body; anyt
 response body carries the session token (sign-in's `token` field is removed): the cookie is the session.
 Better Auth's own error codes reach the client lower-cased (`INVALID_TOKEN` → `invalid_token`), never its
 message text; a failure inside it is 500 `internal`, a busy database 503 `busy`. Mail goes to the
-`mail_outbox` table (read it with `npm run inbox:list`). The mails are plain text in Simplified Chinese
+`mail_outbox` table (read it with `npm run inbox:list`); in `MAIL_MODE=resend` a sender delivers them afterwards (Mail delivery, below). The mails are plain text in Simplified Chinese
 (`src/auth/mail-copy.ts`): subject, a short body, the link on its own line, how long it is valid (24 hours for
 verification, 1 hour for reset: the configured lifetimes) and a closing line — the verification mail asks a
 reader who did not register not to click the link and to ignore the mail (someone else may have registered
 their address), the reset mail to ignore it if it was not the reader's own doing. A third kind,
 `registration_attempt`, is described under `POST /api/register`.
+
+**Mail delivery** (`src/auth/mail-sender.ts`; migration `050_mail_delivery.sql`; `tests/mail-send.test.ts`, `tests/config-mail.test.ts`). `mail_outbox` stays the source of truth: a mail is a row first (written in the transaction of the work that causes it, as ever), with `status` `queued` | `sent` | `failed`, `attempts`, `next_attempt_at`, `sent_at`, `last_error` (a short code such as `http_500`, `network`, `timeout`, `expired`, `gave_up` — never the provider's words or the address) and `provider_id`. In `outbox` mode nothing more happens and rows stay `queued`. In `resend` mode an in-process sender looks every 3 seconds for due rows, claims them (`for update skip locked`, adding the try and leasing the row for a minute, so two passes or a process that dies mid-call never send one twice), and calls `POST https://api.resend.com/emails` with `Authorization: Bearer <RESEND_API_KEY>`, `Idempotency-Key: mail-<row id>` and the JSON `{from, to:[address], subject, text, reply_to?}` (https://resend.com/docs/api-reference/emails/send-email; the provider keeps the key 24 hours). 2xx: `sent`, with the provider's id. Network error, timeout, 409 (same key still in progress), 429 and 5xx: tried again after 1, 4, 10 and 15 minutes, five tries at most, then `failed`. Any other 4xx: `failed` at once. A queued row more than an hour old is closed as `failed`/`expired` instead of sent, so an outbox written before `resend` was switched on never goes out as stale links. Requests never wait for any of this and answer the same whatever the provider does. Counters (`memory_stats`, counts only): `mail_sent`, `mail_retry`, `mail_failed`; `npm run mail:status` prints the queued, sent and failed numbers. The mails stay plain text.
 
 Sessions last 7 days from sign-in (the cookie's `Max-Age`; with `rememberMe: false` the cookie ends with the
 browser session and the session after a day). Sign-out and a password reset end sessions at once: their
