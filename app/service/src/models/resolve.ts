@@ -24,6 +24,8 @@ export interface Resolved {
   /** Site models only. */
   price?: { inputMicroPerToken: number; outputMicroPerToken: number };
   tier?: "free" | "paid";
+  /** Provider models only (always set for them): the `providers` row the model is on — what its learned ratio is kept under (metering/tokens.ts `ratioKey`). */
+  providerId?: string;
 }
 
 /** The level a call is made at: `wanted` when the model takes it, else `none`. */
@@ -119,5 +121,6 @@ export async function resolveModel(
     pdf: listed.pdf,
     reasoningAllowed,
     reasoning,
+    providerId: choice.providerId,
   };
 }

@@ -4,6 +4,7 @@ import { readPrefix } from "../src/agents/context.ts";
 import { CALL_ATTACHMENT_MAX_BYTES, ContextPlan, CUT_MARK, fileText, type ContextEntry } from "../src/agents/runtime/context.ts";
 import type { BlobStore } from "../src/attachments/blob.ts";
 import { estimateTokens, IMAGE_TOKENS } from "../src/metering/prices.ts";
+import { CONTEXT_HEADROOM } from "../src/metering/tokens.ts";
 import { isRunEnd, NOTHING, type RunEnd } from "../src/agents/runtime/port.ts";
 import { systemPrompt } from "../src/agents/runtime/prompt.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
@@ -581,7 +582,8 @@ describe("the context budget", () => {
     expect(text!.startsWith("…")).toBe(true);
     expect(text!.endsWith("TAIL")).toBe(true);
     expect(text).not.toContain("HEAD");
-    expect(estimateTokens(call.system) + estimateTokens(text!)).toBe(2000 - 200);
+    // It fills the budget: what the context leaves beside the output limit and the system text, less the tenth kept free.
+    expect(estimateTokens(text!)).toBe(Math.floor((2000 - 200 - estimateTokens(call.system)) * (1 - CONTEXT_HEADROOM)));
   });
 
   // An 8 000-token context with 500 for the output: about 7 300 tokens for the conversation; an image counts 1 500.

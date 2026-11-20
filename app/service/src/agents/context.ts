@@ -4,7 +4,7 @@ import { isMissingBlob, type BlobStore } from "../attachments/blob.ts";
 import { findDownloadable, type Downloadable } from "../attachments/store.ts";
 import { currentMembership, VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
-import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
+import { IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
 import type { AttachmentRef } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
@@ -86,6 +86,11 @@ export interface ContextRun {
    * messages only. The Agent's own conversation is limited by the model's context alone.
    */
   group: { maxTokens: number; maxMessages: number } | null;
+  /**
+   * The ratio the context is planned at (metering/tokens.ts `planRatio` of the model's learned ratio, read once by the
+   * run): every text of the plan — the system text, the messages, the cut of the newest — counts its weight times this.
+   */
+  planRatio: number;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
@@ -97,8 +102,10 @@ export interface LoadedContext {
    * does; null in the Agent's own conversation.
    */
   mark: string | null;
-  /** Tokens the conversation may take (`contextBudget`; in a group at most its `maxTokens`). */
+  /** Tokens the conversation may take (`contextBudget`; in a group at most its `maxTokens`), at `planRatio`. */
   budget: number;
+  /** The ratio the context is planned at (`ContextRun.planRatio`): `buildContext` plans with it too. */
+  planRatio: number;
   /** The messages that may be shown, in the order they were answered, oldest first. */
   entries: ContextEntry[];
   /** The records of the attachments that may be shown, by id, as the download's permission gave them to the Agent. */
@@ -409,8 +416,9 @@ export async function loadContext(
   system: (mark: string, speakers: readonly Speaker[]) => SystemText,
   draw?: () => string,
 ): Promise<LoadedContext> {
+  const ratio = run.planRatio;
   const budgetWith = (text: SystemText): number => {
-    const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text);
+    const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text, ratio);
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
   const reading = budgetWith(system("", []));
@@ -428,7 +436,7 @@ export async function loadContext(
     loaded.push(...page.loaded);
     more = page.more;
     if (page.oldest !== null) oldest = page.oldest;
-    if (more && (run.group !== null || pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), reading))) break;
+    if (more && (run.group !== null || pastBudget(answeredOrder(loaded.filter((l) => l.answers >= oldest)).reverse(), reading, ratio))) break;
     before = page.oldest;
   }
   const kept = more ? loaded.filter((l) => l.answers >= oldest) : loaded;
@@ -440,7 +448,7 @@ export async function loadContext(
   const entries = answeredOrder(kept, mark);
 
   // The attachments of every message the plan could keep (those it keeps with no attachment contents at all).
-  const could = new ContextPlan(entries, budget);
+  const could = new ContextPlan(entries, budget, ratio);
   could.keepOlder();
   const attachments = new Map<string, Downloadable>();
   for (const [, a] of [...could.attachments(false), ...could.attachments(true)]) {
@@ -448,7 +456,7 @@ export async function loadContext(
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system: text, mark, budget, entries, attachments, topicStart: from };
+  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: from };
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */
@@ -567,7 +575,7 @@ export async function buildContext(
   log: Pick<FastifyBaseLogger, "error">,
   { signal, stop = () => false }: { signal?: AbortSignal; stop?: () => boolean } = {},
 ): Promise<BuiltContext> {
-  const plan = new ContextPlan(loaded.entries, loaded.budget);
+  const plan = new ContextPlan(loaded.entries, loaded.budget, loaded.planRatio);
   /** Whether a read of this build has succeeded (the store answered), and how many have failed. */
   let served = false;
   let failed = 0;
@@ -591,7 +599,7 @@ export async function buildContext(
     if (stop()) return;
     const room = plan.room(slot);
     // Nothing could take its name's place: the budget is used up.
-    if (room <= estimateTokens(attachmentLabel(attachment))) return;
+    if (room <= plan.textTokens(attachmentLabel(attachment))) return;
     const found = loaded.attachments.get(attachment.id);
     if (!found) return;
     if (found.inline) {
@@ -606,7 +614,7 @@ export async function buildContext(
     } else {
       const maxChars = Math.min(FILE_MAX_CHARS, plan.fileCharsLeft);
       // A text costs at least its name, a line break and one character.
-      if (maxChars === 0 || plan.bytesLeft === 0 || room < estimateTokens(attachmentLabel(attachment)) + 2) return;
+      if (maxChars === 0 || plan.bytesLeft === 0 || room < plan.textTokens(attachmentLabel(attachment)) + 2) return;
       const max = Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR, plan.bytesLeft);
       const got = await read(attachment, found.blobKey, max, startsLikeText);
       const text = got ? fileText(got.data, got.complete, maxChars) : null;

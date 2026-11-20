@@ -1,7 +1,7 @@
 -- Up Migration
 -- How many tokens a model really counts for a unit of the service's estimate (src/metering/tokens.ts): learned from the input
--- tokens upstreams report for replies, one row per model (`site:<id>`, `provider:<protocol>:<model name>`), never per owner.
--- Nothing in it names an owner, a conversation or a text.
+-- tokens upstreams report for replies, one row per model: `site:<id>` (shared by every owner), `provider:<provider row
+-- id>:<model name>` (that provider's own; deleted with it). Nothing in it names an owner, a conversation or a text.
 create table token_ratios (
   key text primary key,
   ratio double precision not null,

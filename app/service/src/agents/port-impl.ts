@@ -7,7 +7,7 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
-import { correctedEstimate, ratioKey, readRatio } from "../metering/tokens.ts";
+import { correctedEstimate, planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
@@ -289,7 +289,9 @@ export class DbAgentPort implements AgentPort {
    *    port keeps it for `post` once the call is handed over, `RunFlags.mark`). With no owner's message in it (in a group: nobody else's) the run ends without a call:
    *    `cancelled` with no error when everything it was to answer is before a new topic (its owner started over), else
    *    `failed` `busy`; and so does one whose model's context cannot hold the newest such message, or 200 tokens of it,
-   *    beside the system text, roster and all (`failed`, `context_too_small`).
+   *    beside the system text, roster and all (`failed`, `context_too_small`). Everything here is planned at the model's
+   *    learned ratio when it is above 1 (metering/tokens.ts `planRatio`; read once, here, for the whole run), with a tenth
+   *    of the room kept free (`contextBudget`).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
@@ -309,15 +311,17 @@ export class DbAgentPort implements AgentPort {
    *    owner's calls are never refused by these), someone else's meets the others' budget again and is not queued once
    *    it is spent.
    *    Otherwise
-   *    the call is admitted on its input estimate, its text corrected by its model's learned ratio (metering/tokens.ts;
-   *    402 `no_quota` ends the run failed), the estimate itself (a call of text only) and the ratio's key are recorded on
+   *    the call is admitted on its input estimate, its text corrected by its model's learned ratio (the one step 1 read;
+   *    metering/tokens.ts; 402 `no_quota` ends the run failed), the estimate itself (a call of text only) and the ratio's key are recorded on
    *    the run for settlement to learn from, and the Agent's read marker moves to what the run covers (announced after
    *    commit). The reasoning level is the Agent's when the model allows it, else `none`.
    */
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
     const now = new Date();
-    const first = await db.tx(async (t): Promise<{ end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number }> => {
+    const first = await db.tx(async (t): Promise<
+      { end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number }
+    > => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
       const group = run.conversationId !== agent.conversationId;
@@ -341,6 +345,11 @@ export class DbAgentPort implements AgentPort {
         return { end: KEY_UNREADABLE };
       }
       if (!resolved) return { end: UNAVAILABLE };
+      // The model's learned ratio, read once for the run: the context is planned at it when it is above 1 (`planRatio`),
+      // and admission (step 3) corrects the input estimate by it.
+      const key = ratioKey(resolved);
+      const ratio = await readRatio(t, key);
+      const planned = planRatio(ratio);
 
       // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back).
       const coveredBefore = Number(state.covers_seq ?? 0);
@@ -354,7 +363,14 @@ export class DbAgentPort implements AgentPort {
       const notes =
         !group && agent.persona === ""
           ? NO_NOTES
-          : fitNotes(await loadNotes(t, agent, { conversationId: run.conversationId, group }), group, config.siteTimezone, displayName, passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare)).notes;
+          : fitNotes(
+              await loadNotes(t, agent, { conversationId: run.conversationId, group }),
+              group,
+              config.siteTimezone,
+              displayName,
+              passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare),
+              planned,
+            ).notes;
       // A run still proactive when it starts (its stored lane: a mention that took it over changed it) is told nobody called it.
       // The system text with the run's mark and, in a group, its roster of who is there with those who spoke: a group's
       // carries both; the Agent's own conversation has neither (it says what to call the owner, if they set that).
@@ -366,14 +382,14 @@ export class DbAgentPort implements AgentPort {
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
       const loaded = await loadContext(
         t,
-        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap },
+        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned },
         resolved,
         system,
         this.deps.drawMark,
       );
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
-      if (!holdsNewest(loaded.entries, loaded.budget)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers, coveredBefore };
+      if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
+      return { resolved, loaded, covers, coveredBefore, key, ratio };
     });
     if ("end" in first) return first.end;
 
@@ -414,11 +430,10 @@ export class DbAgentPort implements AgentPort {
         }
         return { end: ENDED_QUIETLY, told };
       }
-      const { resolved, loaded, covers } = first;
-      // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned),
-      // images and PDFs at their constants. What admission holds for, and what settlement falls back on.
-      const key = ratioKey(resolved);
-      const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, await readRatio(t, key));
+      const { resolved, loaded, covers, key, ratio } = first;
+      // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned;
+      // read in step 1), images and PDFs at their constants. What admission holds for, and what settlement falls back on.
+      const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, ratio);
       try {
         await admitRun(t, config, run.id, run.ownerId, resolved, input, now);
       } catch (err) {

@@ -10,7 +10,7 @@ import type { Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { admitRun } from "./admit.ts";
 import { settle, type Usage } from "./settle.ts";
-import { correctedEstimate, estimateTokens, ratioKey, readRatio } from "./tokens.ts";
+import { correctedEstimate, estimateTokens, planRatio, ratioKey, readRatio } from "./tokens.ts";
 
 /**
  * A metered owner call: a model call that is not a chat reply, metered to an owner in the owner's own lane (a persona draft, charged to
@@ -19,8 +19,9 @@ import { correctedEstimate, estimateTokens, ratioKey, readRatio } from "./tokens
  * 1. One transaction: the run is inserted `running`; under the owner's account lock the model is chosen and resolved
  *    (`spec.choose`; none to call: 502 `provider_unavailable`; a saved key that cannot be opened: 502
  *    `provider_rejected`), the owner's calls running at once must be fewer than `agentMaxConcurrentRuns` (429
- *    `rate_limited`), the context must hold the input (400 `context_too_small`), then admission (402 `no_quota`) on the
- *    input's estimate in weight, corrected by the model's learned ratio (tokens.ts). Any refusal rolls all of it back:
+ *    `rate_limited`), the context must hold the input (400 `context_too_small`; planned as a reply's context is: at the
+ *    model's ratio when above 1, a tenth of the room free), then admission (402 `no_quota`) on the input's estimate in
+ *    weight, corrected by the model's learned ratio (tokens.ts; one read for both). Any refusal rolls all of it back:
  *    nothing recorded, nothing called.
  * 2. The call, outside any transaction, reasoning `none`, ended after `spec.deadlineMs`.
  * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported; with no usage
@@ -126,11 +127,14 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
         spec.maxOutputTokens === undefined
           ? resolved
           : { ...resolved, call: { ...resolved.call, maxOutputTokens: Math.min(spec.maxOutputTokens, resolved.call.maxOutputTokens) } };
+      // The model's learned ratio, read once: the fit is planned at it when it is above 1, the hold corrected by it.
+      const ratio = await readRatio(t, ratioKey(sized));
+      const planned = planRatio(ratio);
       // A system text of its own (a draft's, a memory call's): no notes passage in it.
-      if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, { rest: system, passage: "" }) < estimateTokens(user)) {
+      if (contextBudget(sized.contextTokens, sized.call.maxOutputTokens, { rest: system, passage: "" }, planned) < estimateTokens(user, planned)) {
         throw new AppError(400, "context_too_small");
       }
-      const input = correctedEstimate(estimateTokens(system) + estimateTokens(user), 0, await readRatio(t, ratioKey(sized)));
+      const input = correctedEstimate(estimateTokens(system) + estimateTokens(user), 0, ratio);
       await admitRun(t, config, runId, ownerId, sized, input, new Date());
       return { runId, call: sized.call, input };
     });

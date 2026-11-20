@@ -1,5 +1,5 @@
 import { estimateTokens, IMAGE_TOKENS, pdfTokens } from "../../metering/prices.ts";
-import { lastToWeight } from "../../metering/tokens.ts";
+import { CONTEXT_HEADROOM, lastToWeight, weight, weightWithin } from "../../metering/tokens.ts";
 import type { ModelCall, Part } from "../../models/gateway.ts";
 import { characters as countCharacters, stripUnsafeText } from "../../schemas.ts";
 import { systemTokens, type SystemText } from "./prompt.ts";
@@ -67,9 +67,13 @@ export type AttachmentContent =
 /** `[图片：name]` or `[文件：name]`: an attachment shown by its name. */
 export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): string => (a.image ? `[图片：${a.name}]` : `[文件：${a.name}]`);
 
-/** Tokens left for the conversation: the model's context less its output limit and the system text (as `systemTokens` counts its parts). */
-export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">): number {
-  return contextTokens - maxOutputTokens - systemTokens(system);
+/**
+ * Tokens the conversation may take: of what the model's context leaves beside its output limit and the system text (as
+ * `systemTokens` counts its parts at `ratio`), all but `CONTEXT_HEADROOM` of it, rounded down — the one place the headroom
+ * is kept. `ratio`: what the context is planned at (metering/tokens.ts `planRatio`), which every count of the plan uses too.
+ */
+export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">, ratio = 1): number {
+  return Math.floor((contextTokens - maxOutputTokens - systemTokens(system, ratio)) * (1 - CONTEXT_HEADROOM));
 }
 
 /** The first `QUOTE_MAX_CHARS` characters of a quoted message, each line as `> line`. */
@@ -89,11 +93,11 @@ export function entryText(own: string, quoted: string | null): string {
 }
 
 /**
- * Tokens a part is counted as (metering/tokens.ts, prices.ts): a text its weight, an image `IMAGE_TOKENS`, a PDF
- * `pdfTokens` — at ratio 1, as a context is planned; admission corrects the text by the model's ratio.
+ * Tokens a part is counted as (metering/tokens.ts, prices.ts): a text its weight times `ratio` (the plan's), an image
+ * `IMAGE_TOKENS`, a PDF `pdfTokens` — constants, at any ratio.
  */
-export function partTokens(p: Part): number {
-  return p.type === "text" ? estimateTokens(p.text) : p.type === "image" ? IMAGE_TOKENS : pdfTokens(p.data.length);
+export function partTokens(p: Part, ratio = 1): number {
+  return p.type === "text" ? estimateTokens(p.text, ratio) : p.type === "image" ? IMAGE_TOKENS : pdfTokens(p.data.length);
 }
 
 /** The attachment's part: its content when there is some, else its name. */
@@ -109,27 +113,30 @@ function attachmentPart(a: ContextAttachment, content: AttachmentContent | null)
   }
 }
 
-/** Tokens the message takes at least: its text and its attachment's name. */
-export function minimalTokens(e: ContextEntry): number {
-  return estimateTokens(e.text) + (e.attachment ? estimateTokens(attachmentLabel(e.attachment)) : 0);
-}
-
-/** Whether `budget` holds what a call needs at least (`MIN_CONVERSATION_TOKENS`); false when there is no owner's message. */
-export function holdsNewest(entries: readonly ContextEntry[], budget: number): boolean {
-  const newest = [...entries].reverse().find((e) => e.role === "user");
-  return newest !== undefined && budget >= Math.min(MIN_CONVERSATION_TOKENS, minimalTokens(newest));
+/** Tokens the message takes at least, planned at `ratio`: its text and its attachment's name. */
+export function minimalTokens(e: ContextEntry, ratio = 1): number {
+  return estimateTokens(e.text, ratio) + (e.attachment ? estimateTokens(attachmentLabel(e.attachment), ratio) : 0);
 }
 
 /**
- * Whether messages loaded newest first already reach past the budget: from the owner's newest message (the Agent's
- * later ones are never shown) their least sizes add up to more than it, so nothing older can be shown.
+ * Whether `budget` holds what a call needs at least (`MIN_CONVERSATION_TOKENS`), planned at `ratio`; false when there is
+ * no owner's message.
  */
-export function pastBudget(newestFirst: readonly ContextEntry[], budget: number): boolean {
+export function holdsNewest(entries: readonly ContextEntry[], budget: number, ratio = 1): boolean {
+  const newest = [...entries].reverse().find((e) => e.role === "user");
+  return newest !== undefined && budget >= Math.min(MIN_CONVERSATION_TOKENS, minimalTokens(newest, ratio));
+}
+
+/**
+ * Whether messages loaded newest first already reach past the budget, planned at `ratio`: from the owner's newest message
+ * (the Agent's later ones are never shown) their least sizes add up to more than it, so nothing older can be shown.
+ */
+export function pastBudget(newestFirst: readonly ContextEntry[], budget: number, ratio = 1): boolean {
   const from = newestFirst.findIndex((e) => e.role === "user");
   if (from < 0) return false;
   let total = 0;
   for (const e of newestFirst.slice(from)) {
-    total += minimalTokens(e);
+    total += minimalTokens(e, ratio);
     if (total > budget) return true;
   }
   return false;
@@ -192,7 +199,8 @@ interface Kept {
 }
 
 /**
- * Which messages a call shows and which attachment contents, within `budget` tokens (`contextBudget`). Built from the
+ * Which messages a call shows and which attachment contents, within `budget` tokens (`contextBudget`), every text counted
+ * at `ratio` (the plan's: metering/tokens.ts `planRatio`). Built from the
  * messages after the latest new topic in the order they were answered, oldest first; Agent messages after the owner's
  * newest are left out (a call ends on the owner's turn; answered order leaves none there but after a manual retry), and
  * so are messages with nothing to show. What fits, in this order:
@@ -222,7 +230,11 @@ export class ContextPlan {
   /** Bytes attachments may still take in this call. */
   bytesLeft = CALL_ATTACHMENT_MAX_BYTES;
 
-  constructor(entries: readonly ContextEntry[], budget: number) {
+  constructor(
+    entries: readonly ContextEntry[],
+    budget: number,
+    private readonly ratio = 1,
+  ) {
     this.left = budget;
     const newestFirst = entries.filter((e) => e.text !== "" || e.attachment !== null).reverse();
     const newestOwn = newestFirst.findIndex((e) => e.role === "user");
@@ -242,14 +254,14 @@ export class ContextPlan {
   private keepNewest(e: ContextEntry): void {
     if (this.keep(e)) return;
     const whole = [e.text, e.attachment ? attachmentLabel(e.attachment) : ""].filter((s) => s !== "").join("\n");
-    const text = CUT_FRONT + lastToWeight(whole, this.left - estimateTokens(CUT_FRONT));
+    const text = CUT_FRONT + lastToWeight(whole, weightWithin(this.left, this.ratio) - weight(CUT_FRONT));
     this.kept.push({ entry: { ...e, text, attachment: null }, content: null });
-    this.left -= estimateTokens(text);
+    this.left -= estimateTokens(text, this.ratio);
   }
 
   /** Keeps `e` by name when it fits. */
   private keep(e: ContextEntry): boolean {
-    const cost = minimalTokens(e);
+    const cost = minimalTokens(e, this.ratio);
     if (cost > this.left) return false;
     this.kept.push({ entry: e, content: null });
     this.left -= cost;
@@ -276,7 +288,12 @@ export class ContextPlan {
 
   /** Tokens an attachment's content may take at most: what is left, plus its name's, which the content replaces. */
   room(slot: number): number {
-    return this.left + estimateTokens(attachmentLabel(this.kept[slot]!.entry.attachment!));
+    return this.left + estimateTokens(attachmentLabel(this.kept[slot]!.entry.attachment!), this.ratio);
+  }
+
+  /** Tokens `text` is planned at (its weight at the plan's ratio): what the caller compares with `room`. */
+  textTokens(text: string): number {
+    return estimateTokens(text, this.ratio);
   }
 
   /** Whether one more image may be shown. */
@@ -287,7 +304,7 @@ export class ContextPlan {
   /** Shows `content` instead of the attachment's name when it fits (and is within the per-call limits); true if so. */
   offer(slot: number, content: AttachmentContent): boolean {
     const k = this.kept[slot]!;
-    const cost = partTokens(attachmentPart(k.entry.attachment!, content));
+    const cost = partTokens(attachmentPart(k.entry.attachment!, content), this.ratio);
     const bytes = content.type === "text" ? Buffer.byteLength(content.text, "utf8") : content.data.length;
     if (cost > this.room(slot) || bytes > this.bytesLeft) return false;
     if (content.type === "image" && this.imagesLeft === 0) return false;
@@ -302,8 +319,9 @@ export class ContextPlan {
 
   /**
    * The call's turns, oldest first: a turn of the Agent's first is left out (a call starts with the owner's), and
-   * consecutive messages of one side are one turn, their parts in order. `tokens`: what they are counted as (`partTokens`);
-   * `fixed`: the part of it that is images and PDFs at their constants.
+   * consecutive messages of one side are one turn, their parts in order. `tokens`: what they are counted as at ratio 1
+   * (`partTokens`: the estimate admission corrects and settlement learns from, not the plan's count); `fixed`: the part of
+   * it that is images and PDFs at their constants.
    */
   build(): { messages: ModelCall["messages"]; tokens: number; fixed: number } {
     const oldestFirst = [...this.kept].reverse();

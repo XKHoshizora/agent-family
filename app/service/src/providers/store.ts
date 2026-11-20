@@ -4,6 +4,7 @@ import { lockAccount } from "../accounts/store.ts";
 import type { Protocol, ReasoningLevel } from "../config.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
+import { forgetProviderRatios } from "../metering/tokens.ts";
 import { userText } from "../schemas.ts";
 import { openKey, sealKey } from "./crypto.ts";
 
@@ -229,7 +230,8 @@ export async function mergeListedModels(t: Tx, ownerId: string, id: string, name
 /**
  * Deletes the owner's provider. Refused (409 `provider_in_use`, with the Agents) while an Agent that is not deleted
  * uses it; deleted Agents that still name it lose their model. The row is locked `for update` first, so an Agent
- * cannot take it meanwhile (`lockProviderModels` waits, then finds nothing). 404 when it is not theirs.
+ * cannot take it meanwhile (`lockProviderModels` waits, then finds nothing). Its models' learned token ratios are
+ * deleted with it (`forgetProviderRatios`), in the same transaction. 404 when it is not theirs.
  */
 export async function deleteProvider(t: Tx, ownerId: string, id: string): Promise<void> {
   const { rows: found } = await t.query("select 1 from providers where id = $1 and owner_id = $2 for update", [id, ownerId]);
@@ -247,6 +249,8 @@ export async function deleteProvider(t: Tx, ownerId: string, id: string): Promis
     [id],
   );
   await t.query("delete from providers where id = $1", [id]);
+  // What its models' replies taught is that provider's own (metering/tokens.ts `ratioKey`): it goes with it.
+  await forgetProviderRatios(t, id);
 }
 
 /**

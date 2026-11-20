@@ -6,6 +6,7 @@ import { readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound, type ErrorDetails } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
+import { planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
 import { resolveModel } from "../models/resolve.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
@@ -224,7 +225,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   }
   /**
    * Whether the Agent's current model can carry the whole palace in its own conversation: the notes passage of everything it may be
-   * shown there is within `MEMORY.passageShare` of the model's context. No model call (the passage is measured, `fitNotes`); true when
+   * shown there is within `MEMORY.passageShare` of the model's context, measured as a reply's run measures it (at the model's
+   * planning ratio, metering/tokens.ts `planRatio`). No model call (the passage is measured, `fitNotes`); true when
    * there is nothing to measure against (no model that can be called, no notes read, no persona yet).
    */
   async function palaceFits(agent: AgentRow, ownerName: string): Promise<boolean> {
@@ -237,7 +239,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     }
     if (resolved === null) return true;
     const found = await loadNotes(db, agent, { conversationId: agent.conversationId, group: false });
-    return fitNotes(found, false, config.siteTimezone, ownerName, passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare)).fits;
+    const planned = planRatio(await db.tx((t) => readRatio(t, ratioKey(resolved))));
+    return fitNotes(found, false, config.siteTimezone, ownerName, passageBudget(resolved.contextTokens, resolved.call.maxOutputTokens, config.memory.passageShare), planned).fits;
   }
   const mustLive = (agent: { deleted: boolean }): void => {
     if (agent.deleted) throw new AppError(409, "agent_deleted");

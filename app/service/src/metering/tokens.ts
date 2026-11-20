@@ -1,4 +1,4 @@
-import type { Tx } from "../db.ts";
+import type { Queryable, Tx } from "../db.ts";
 
 /**
  * The one measure of tokens (README "Metering", "Token estimates"). Every estimate the service makes of what a text costs
@@ -11,7 +11,8 @@ import type { Tx } from "../db.ts";
  *
  * What one model really counts for a weight is its own (its tokenizer, how it wraps a turn): a call's input estimate is
  * corrected by its model's ratio (`readRatio`), learned from the input tokens upstreams report for replies (`learnRatio`,
- * table `token_ratios`, by model and never by owner: `ratioKey`).
+ * table `token_ratios`, by model and never by owner: `ratioKey`). A context is planned at that ratio when it is above 1
+ * (`planRatio`), and keeps `CONTEXT_HEADROOM` of its room free.
  */
 
 const encoder = new TextEncoder();
@@ -59,6 +60,15 @@ export function estimateTokens(text: string, ratio = 1): number {
   return Math.ceil(weight(text) * TOKENS_PER_WEIGHT * ratio);
 }
 
+/** The most weight whose estimate at `ratio` (`estimateTokens`) is at most `tokens`; 0 when none is. */
+export function weightWithin(tokens: number, ratio: number): number {
+  const perWeight = TOKENS_PER_WEIGHT * ratio;
+  let w = Math.max(0, Math.floor(tokens / perWeight));
+  // Floating point may put the product of the quotient a hair above `tokens`.
+  while (w > 0 && Math.ceil(w * perWeight) > tokens) w--;
+  return w;
+}
+
 /**
  * A call's input estimate as its model is expected to count it: of `estimate` (tokens at ratio 1), the `fixed` part —
  * images and PDFs at their constants — as it is, and the rest, text in weight, times the model's `ratio`, rounded up.
@@ -67,13 +77,31 @@ export function correctedEstimate(estimate: number, fixed: number, ratio: number
   return Math.ceil((estimate - fixed) * ratio) + fixed;
 }
 
+// --- planning a context -------------------------------------------------------------------------------------------------
+
+/**
+ * Of the room a model's context leaves for the conversation (its context less its output limit and the system text), the
+ * part a plan keeps free: what an estimate may fall short by. Applied once, where that room is worked out
+ * (agents/runtime/context.ts `contextBudget`).
+ */
+export const CONTEXT_HEADROOM = 0.1;
+
+/**
+ * The ratio a context is planned at: the model's learned ratio when it is above 1, else 1 — a model that counts more
+ * than its weight is sent less, and one that counts less is never sent more than weight says.
+ */
+export const planRatio = (ratio: number): number => Math.max(1, ratio);
+
 // --- the learned ratio --------------------------------------------------------------------------------------------------
 
 /** A ratio is used once it has learned from this many replies; until then it is 1. */
 export const MIN_SAMPLES = 5;
-/** The least and the most a ratio is (and a sample is taken as). */
-export const MIN_RATIO = 0.5;
-export const MAX_RATIO = 3;
+/**
+ * The least and the most a ratio is (and a sample is taken as): one owner's crafted text can lower a shared hold by at most
+ * a fifth; real ratios measured on filler and on ordinary text (0.61–1.03, 0.9–1.03) are within it or held over.
+ */
+export const MIN_RATIO = 0.8;
+export const MAX_RATIO = 2;
 /** How much one sample moves a ratio: new = old × (1 − this) + sample × this (a first sample moves it from 1). */
 export const SAMPLE_WEIGHT = 0.1;
 /** An estimate smaller than this teaches nothing: what wraps a turn (a few tokens) would be too much of it. */
@@ -89,13 +117,24 @@ export interface RatioLog {
   warn(details: Record<string, unknown>, msg: string): void;
 }
 
+/** How every ratio key of the provider row `providerId` starts. */
+const providerPrefix = (providerId: string): string => `provider:${providerId}:`;
+
 /**
- * What a model's ratio is kept under: `site:<id>` for a site model, `provider:<protocol>:<model name>` for a model of an
- * owner's provider — what the model is, never whose it is or how it is reached (no owner, provider id, key or address in
- * it), so that every owner's calls of one model teach and read one ratio.
+ * What a model's ratio is kept under: `site:<id>` for a site model, shared by every owner's calls of it;
+ * `provider:<provider row id>:<model name>` for a model of an owner's provider — that provider row's own (its usage is
+ * whatever the owner's endpoint reports, so it teaches no one else), and never the owner's id, a key or an address.
+ * Throws for a provider model resolved without its row's id (`resolveModel` always gives it): a bug.
  */
-export function ratioKey(resolved: { source: "site" | "provider"; name: string; call: { protocol: string } }): string {
-  return resolved.source === "site" ? `site:${resolved.name}` : `provider:${resolved.call.protocol}:${resolved.name}`;
+export function ratioKey(resolved: { source: "site" | "provider"; name: string; providerId?: string }): string {
+  if (resolved.source === "site") return `site:${resolved.name}`;
+  if (resolved.providerId === undefined) throw new Error("ratioKey: a provider model was resolved without its provider's id");
+  return `${providerPrefix(resolved.providerId)}${resolved.name}`;
+}
+
+/** Deletes every ratio of the provider row `providerId`, in the caller's transaction (the provider's deletion: providers/store.ts). */
+export async function forgetProviderRatios(q: Queryable, providerId: string): Promise<void> {
+  await q.query("delete from token_ratios where left(key, char_length($1)) = $1", [providerPrefix(providerId)]);
 }
 
 /**

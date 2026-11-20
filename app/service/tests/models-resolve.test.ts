@@ -109,6 +109,8 @@ describe("resolveModel", () => {
       pdf: false,
       reasoningAllowed: REASONING_LEVELS,
       reasoning: "xhigh",
+      // The provider's row: what the model's learned token ratio is kept under (metering/tokens.ts `ratioKey`).
+      providerId: provider.id,
     });
     const plain = await agentWith(owner, { model: { source: "provider", providerId: provider.id, model: "plain" } });
     // Not marked as one that reasons: none only, the default output limit, no thinking switch.

@@ -1,5 +1,4 @@
 import { randomInt } from "node:crypto";
-import { TOKENS_PER_WEIGHT, weight } from "../../memory/weight.ts";
 import { estimateTokens } from "../../metering/prices.ts";
 
 /**
@@ -316,14 +315,15 @@ export function notesPassage(notes: PromptNotes, group: boolean, timeZone: strin
 
 /**
  * The notes a run is given when the passage may take at most `maxTokens` of the model's context (`MEMORY.passageShare` of it; the
- * passage is measured in weight, one weight a token, `TOKENS_PER_WEIGHT`: the one measure of memory, memory/weight.ts): the notes as they are when their passage fits; else entries are left
+ * passage is measured in weight, one weight a token (`estimateTokens`, `TOKENS_PER_WEIGHT`: the one measure, metering/tokens.ts) — times
+ * `ratio`, the ratio the context is planned at, metering/tokens.ts `planRatio`): the notes as they are when their passage fits; else entries are left
  * out, in this order, until it does — hearsay (oldest said first), the Agent's own notes (lowest `strength`, then the oldest
  * `seenAt`), notes about the owner (the same order). Nothing tells the model so. `fits` is false when anything was left out. No
  * model call: it is arithmetic on the text the passage would be.
  */
-export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, ownerName: string, maxTokens: number): { notes: PromptNotes; fits: boolean } {
+export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, ownerName: string, maxTokens: number, ratio = 1): { notes: PromptNotes; fits: boolean } {
   const label = labelSafe(ownerName);
-  const size = (n: PromptNotes): number => weight(notesPassage(n, group, timeZone, label)) * TOKENS_PER_WEIGHT;
+  const size = (n: PromptNotes): number => estimateTokens(notesPassage(n, group, timeZone, label), ratio);
   if (size(notes) <= maxTokens) return { notes, fits: true };
   const weakest = (list: readonly PromptNote[]): number[] =>
     list
@@ -357,11 +357,11 @@ export function fitNotes(notes: PromptNotes, group: boolean, timeZone: string, o
 
 /**
  * What a system text counts in the context budget, from the parts it was composed of (`SystemText`; a text with no passage is all `rest`):
- * each in weight (`estimateTokens`, metering/tokens.ts) — the passage as `fitNotes` measures it. One function for every place that
- * counts the system text, so the passage is never counted by two rules.
+ * each in weight times `ratio` (`estimateTokens`, metering/tokens.ts; the plan's ratio) — the passage as `fitNotes` measures it.
+ * One function for every place that counts the system text, so the passage is never counted by two rules.
  */
-export function systemTokens(system: Pick<SystemText, "rest" | "passage">): number {
-  return estimateTokens(system.rest) + estimateTokens(system.passage);
+export function systemTokens(system: Pick<SystemText, "rest" | "passage">, ratio = 1): number {
+  return estimateTokens(system.rest, ratio) + estimateTokens(system.passage, ratio);
 }
 
 /** What the notes passage may take of a model's context (`MEMORY.passageShare` of the input the model has room for: its context less its output limit). */

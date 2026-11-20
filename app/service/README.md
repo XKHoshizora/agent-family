@@ -806,7 +806,7 @@ what the notes passage may take of a model's context, the output limit of a lang
 which re-exports it from `src/metering/tokens.ts`: it is the service's one measure of tokens, Metering, Token estimates; the web mirrors it in `app/web/src/data/memoryWeight.js`, and both are tested against one shared list of strings). Both of what a limit bounds, what a reply costs and how much of the context the notes take, are
 token quantities, and code points are not: one fact is about 10 code points in Chinese and 30 to 40 in English at about the same tokens. A Chinese or Japanese or Korean
 character weighs 1 and a Latin letter a third, so a room of 2000 holds about 2000 Chinese characters or about 6000 English letters, and one weight is taken as one token
-(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `metering/tokens.ts` is the single place to change — and the web's mirror (`weight` and `storedWeight`, the weight of a typed text once its whitespace is collapsed and trimmed as `cleanText` does, in `memoryWeight.js`) must change with it, with the shared test rows. The reply's context budget counts the notes passage in weight too, as it counts everything (`systemTokens`: the system text without the passage, plus the passage, each in weight, the one function both the budget and `loadContext` use; it takes the parts the system text was composed of, `systemText` / `groupSystemText`, so where the passage is is never guessed from the text, and a persona holding the notes heading is measured as persona), so a passage held to `MEMORY.passageShare` is counted as that share, in Latin script as in Chinese.
+(`TOKENS_PER_WEIGHT`). The database's `char_length` checks on a note (9000) and on hearsay (600) are only coarse guards, wide enough for any text a room's limit lets in. When a real tokenizer replaces the estimate, the body of `weight` in `metering/tokens.ts` is the single place to change — and the web's mirror (`weight` and `storedWeight`, the weight of a typed text once its whitespace is collapsed and trimmed as `cleanText` does, in `memoryWeight.js`) must change with it, with the shared test rows. The reply's context budget counts the notes passage in weight too, as it counts everything (`systemTokens`: the system text without the passage, plus the passage, each in weight, the one function both the budget and `loadContext` use; it takes the parts the system text was composed of, `systemText` / `groupSystemText`, so where the passage is is never guessed from the text, and a persona holding the notes heading is measured as persona), so a passage held to `MEMORY.passageShare` is counted as that share, in Latin script as in Chinese (both the share and the budget count weight times the model's learned ratio when it is above 1: Metering, Token estimates).
 
 An Agent can keep notes (`memory`, an owner's setting per Agent). There are three rooms, each with a limit in weight
 (below; `MEMORY.roomOwner` 2000, `roomSelf` 3000, `roomHearsay` 2000): notes about the owner (shared by all their Agents unless
@@ -2545,8 +2545,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
   later failure is shown by its name (`tests/runs-faults.test.ts`).
 - The budget: the model's context, less the call's output limit (at a reasoning level, its thinking allowance included)
-  and the system text, counted in the service's one measure (text in weight, `ceil(utf-8 bytes / 3)`; 1 500 an image,
-  300 per KB of PDF; Metering, Token estimates). What fits, in this order: the current turn (the owner's messages after
+  and the system text, less a tenth of what that leaves (kept free for what the estimate may be short by), counted in the
+  service's one measure (text in weight, `ceil(utf-8 bytes / 3)`, times the model's learned ratio when it is above 1;
+  1 500 an image, 300 per KB of PDF; Metering, Token estimates) — the system text, every message, the notes passage's
+  share and the cut of the newest message alike. What fits, in this order: the current turn (the owner's messages after
   the Agent's last) by name only, newest first — the owner's newest message is always there, cut from the front (`…`
   then as much of its end as the budget holds, in weight) when it alone is over the budget (which then holds at least 200 tokens: with less the run fails
   `context_too_small`, see `begin`); then the current turn's attachment contents, newest first, each if it
@@ -3016,16 +3018,23 @@ Chinese, Japanese or Korean character weighs 1 and a Latin letter a third, so 3 
 and PDFs (300 per KB) keep their constants. What one model really counts for a weight is its own, so a call's input
 estimate is corrected by its model's *ratio*, learned from replies: admission records on a reply's run its estimate at
 ratio 1 (`agent_runs.input_estimate`, only when the call showed text alone: an image's or a PDF's real tokens are not
-text's) and the key of its model's ratio (`ratio_key`: `site:<id>`, or `provider:<protocol>:<model name>` — what the
-model is, never whose: no owner, provider id, key or address in it); settlement, when the upstream reported the input
-tokens, moves that ratio (`token_ratios (key, ratio, samples, updated_at)`) by a tenth of the sample `reported /
-estimated`, from 1 for a first sample, each sample held to [0.5, 3] and so the ratio too. Nothing is learned from an
-estimate under 200, a reported count that is not a whole number above 0, a draft or a memory call, or a settlement on an
-estimate. A ratio is used once it has 5 samples (1 until then), held to [0.5, 3]: a call is held for its text's estimate
-times the ratio, rounded up, plus its images and PDFs at their constants (drafts and memory calls too). Learning never
-fails or delays a settlement: it is done in a savepoint, waits at most 100 ms for the ratio's row (another settlement of
-the same model may hold it), and when anything fails the sample is skipped with a warning that carries the database's
-error code only. Reading a ratio never fails either: a failed read is 1.
+text's) and the key of its model's ratio (`ratio_key`: `site:<id>` for a site model, shared by every owner's calls of
+it; `provider:<provider row id>:<model name>` for a model of an owner's provider — that provider row's own, since its
+usage is whatever the owner's endpoint reports, and never the owner's id, a key or an address; deleting the provider
+deletes its ratios in the same transaction); settlement, when the upstream reported the input tokens, moves that ratio
+(`token_ratios (key, ratio, samples, updated_at)`) by a tenth of the sample `reported / estimated`, from 1 for a first
+sample, each sample held to [0.8, 2] and so the ratio too (one owner's crafted text can lower a shared hold by at most a
+fifth). Nothing is learned from an estimate under 200, a reported count that is not a whole number above 0, a draft or a
+memory call, or a settlement on an estimate. A ratio is used once it has 5 samples (1 until then), held to [0.8, 2], and
+read once per call: a call is held for its text's estimate times the ratio, rounded up, plus its images and PDFs at
+their constants (drafts and memory calls too); and its context is planned at the ratio when it is above 1 (a ratio below
+1 never lets more be sent), keeping a tenth of the room free (`CONTEXT_HEADROOM`; What the model is shown, the budget).
+Learning never fails or delays a settlement: it is done in a savepoint, waits at most 100 ms for the ratio's row
+(another settlement of the same model may hold it), and when anything fails the sample is skipped with a warning that
+carries the database's error code only. Reading a ratio never fails either: a failed read is 1. **A rule for runs that
+do more than one plain call:** learning assumes the reported input is the input the run's estimate counted, so a run that
+sends tool definitions or makes more than one model call writes `input_estimate = null` — unless its estimate covers
+exactly what was sent.
 
 **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
 cost until it is settled: its input estimate (Token estimates: text in weight times its model's learned ratio; 1 500 per
