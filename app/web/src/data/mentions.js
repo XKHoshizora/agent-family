@@ -13,27 +13,32 @@ export const MENTION_LIMIT = 20;
 /**
  * The addresses of `text` — a URL (a scheme and `://`, or `www.`, up to white space or `<` `>`) and a Markdown link's
  * target (`](` up to `)` or white space) — as `[start, end)`: a name inside one is not someone addressed (the service's
- * `addressRanges`, agents/mentions.ts; fix round 1, I-3).
+ * `addressRanges`, agents/mentions.ts; fix round 1, I-3). The same pattern, character for character, as the service's
+ * `ADDRESS_PATTERN` (its test compares them): a scheme is tried only where a run of its characters begins, so a long run
+ * of letters is passed once — linear in the text (fix round 2, I-4).
  */
-const ADDRESS = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
+const ADDRESS = /(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
 export const addressRanges = (text) => [...String(text ?? "").matchAll(ADDRESS)].map((m) => [m.index, m.index + m[0].length]);
 
-/** Whether `[start, start + length)` of `text` is part of an address: right after a `/`, or inside an `addressRanges` one. */
-export const inAddress = (text, start, length) => text[start - 1] === "/" || addressRanges(text).some(([a, b]) => start < b && start + length > a);
+/**
+ * Whether `[start, start + length)` of `text` is part of an address: right after a `/`, or inside one of `ranges` (the
+ * text's `addressRanges`, found once by the caller for all of its mentions).
+ */
+export const inAddress = (text, start, length, ranges = addressRanges(text)) => text[start - 1] === "/" || ranges.some(([a, b]) => start < b && start + length > a);
 
 const isIndex = (n) => Number.isSafeInteger(n) && n >= 0;
 
 /**
  * The stored `mentions` of a message that fit its `text`: each `{id, start, length}` with a string id, inside the text,
  * beginning with "@", in ascending order and not overlapping the one before (one that does is left out), at most
- * MENTION_LIMIT. [] for anything else (a message from before mentions were stored has none).
+ * `limit` (MENTION_LIMIT). [] for anything else (a message from before mentions were stored has none).
  */
-export function mentionsIn(text, mentions) {
+export function mentionsIn(text, mentions, limit = MENTION_LIMIT) {
   if (typeof text !== "string" || !Array.isArray(mentions)) return [];
   const out = [];
   let end = 0;
   for (const m of mentions) {
-    if (out.length === MENTION_LIMIT) break;
+    if (out.length === limit) break;
     if (!m || typeof m.id !== "string" || m.id === "" || !isIndex(m.start) || !isIndex(m.length) || m.length < 1) continue;
     if (m.start < end || m.start + m.length > text.length || text[m.start] !== "@") continue;
     out.push({ id: m.id, start: m.start, length: m.length });
@@ -143,13 +148,17 @@ const REMOVALS_KEPT = 20;
  *   tag is kept as a `broken` range of what is left of it, moved with the edits, and cut when the composition ends
  *   (`settleEdits`), so no half of a tag is ever left as plain text to be read at send;
  * - the other tags move with the edit or go with what it took (`retag`);
- * - undo or redo putting back exactly a text that a deletion took, where it took it, brings back the tags it held
- *   (`removals`, moved with every later edit);
+ * - the browser's own undo and redo (`history`: the input's `historyUndo` / `historyRedo`) are never rewritten (the
+ *   browser's undo stack is the user's): a tag such an edit lands inside is dropped and remembered, the text as the
+ *   browser made it (undoing a pick leaves the `@` typed before it);
+ * - undo or redo putting back exactly a text that a deletion took, where it took it, brings back the tags it held; and
+ *   an undo or redo that puts back, at its place, the text of a tag one dropped (a pick undone, then redone) brings
+ *   that tag back (`removals`, moved with every later edit; found in the browser on a real undo/redo);
  * - a tag being picked (`picking`: `{id, start, length, text}`) is added once the text holds it at its place.
  * Returns `{ text, tags, removals, caret, picked, added, removed }`: `caret` null unless the text was rewritten,
  * `picked` whether `picking` was added, `added` and `removed` the tags' texts for the screen reader.
  */
-export function afterEdit(state, value, { hint = null, composing = false, picking = null } = {}) {
+export function afterEdit(state, value, { hint = null, composing = false, history = false, picking = null } = {}) {
   const before = state;
   let edit = editOf(before.text, value, hint);
   let text = value;
@@ -160,17 +169,23 @@ export function afterEdit(state, value, { hint = null, composing = false, pickin
   };
   const touched = before.tags.filter(inside);
   const broken = [];
-  if (touched.length > 0 && !composing) {
+  // (Tags an undo or redo landed inside: dropped, the text left as the browser made it, remembered for the redo.)
+  const dropped = history ? touched.filter((t) => !t.broken) : [];
+  if (touched.length > 0 && history) {
+    // nothing rewritten
+  } else if (touched.length > 0 && !composing) {
     const start = Math.min(edit.start, ...touched.map((t) => t.start));
     const end = Math.max(edit.end, ...touched.map((t) => t.start + t.length));
     text = before.text.slice(0, start) + edit.inserted + before.text.slice(end);
     edit = { start, end, inserted: edit.inserted };
     caret = start + edit.inserted.length;
   } else if (touched.length > 0) {
+    // What is left of each such tag, on either side of the edit (never what the composition puts in: fix round 2, M-3).
     const delta = edit.inserted.length - (edit.end - edit.start);
     for (const t of touched) {
-      const start = Math.min(t.start, edit.start);
-      broken.push({ id: t.id, start, length: Math.max(t.start + t.length, edit.end) + delta - start, broken: true });
+      const end = t.start + t.length;
+      if (t.start < edit.start) broken.push({ id: t.id, start: t.start, length: edit.start - t.start, broken: true });
+      if (end > edit.end) broken.push({ id: t.id, start: edit.end + delta, length: end - edit.end, broken: true });
     }
   }
   const { kept, removed } = retag(
@@ -191,6 +206,15 @@ export function afterEdit(state, value, { hint = null, composing = false, pickin
       back.push(...undone.tags.map((t) => ({ id: t.id, start: undone.at + t.offset, length: t.length })));
     }
   }
+  if (history && edit.inserted !== "") {
+    const putAt = [edit.start, edit.start + edit.inserted.length];
+    for (const r of [...removals].reverse()) {
+      if (back.length > 0) break;
+      if (text.slice(r.at, r.at + r.text.length) !== r.text || !(putAt[0] < r.at + r.text.length && putAt[1] > r.at)) continue;
+      removals = removals.filter((o) => o !== r);
+      back.push(...r.tags.map((t) => ({ id: t.id, start: r.at + t.offset, length: t.length })));
+    }
+  }
   const taken = [...removed, ...(caret === null ? [] : touched)].filter((t) => !t.broken);
   if (taken.length > 0) {
     removals.push({
@@ -199,13 +223,18 @@ export function afterEdit(state, value, { hint = null, composing = false, pickin
       tags: taken.map((t) => ({ id: t.id, offset: t.start - edit.start, length: t.length })),
     });
   }
+  for (const t of dropped) {
+    removals.push({ at: t.start, text: before.text.slice(t.start, t.start + t.length), tags: [{ id: t.id, offset: 0, length: t.length }] });
+  }
   removals = removals.slice(-REMOVALS_KEPT);
   let picked = false;
   if (picking && text.slice(picking.start, picking.start + picking.length) === picking.text) {
     picked = true;
     back.push({ id: picking.id, start: picking.start, length: picking.length });
   }
-  const whole = mentionsIn(text, [...kept.filter((t) => !t.broken), ...back].sort((a, b) => a.start - b.start));
+  // (No limit here: tags over MENTION_LIMIT — a deletion put back, a refill — are the composer's to turn into plain
+  // text without their "@", `capped`, never left as a typed `@name` to be read at send. Fix round 2, M-7.)
+  const whole = mentionsIn(text, [...kept.filter((t) => !t.broken), ...back].sort((a, b) => a.start - b.start), Infinity);
   const tags = [...whole, ...kept.filter((t) => t.broken), ...broken].sort((a, b) => a.start - b.start);
   const named = (t, from) => mentionName(from.slice(t.start, t.start + t.length));
   return {
@@ -215,24 +244,71 @@ export function afterEdit(state, value, { hint = null, composing = false, pickin
     caret,
     picked,
     added: back.map((t) => named(t, text)),
-    removed: [...taken, ...broken].map((t) => named(t, before.text)),
+    removed: [...taken, ...broken, ...dropped].map((t) => named(t, before.text)),
   };
 }
 
 /**
- * Once an IME composition ends: what is left of each tag an edit landed inside while it composed (`broken`) is cut
- * (`afterEdit`). Returns the state as `afterEdit` does (`caret` null when nothing was cut).
+ * Once an IME composition ends — or before a send, with one still open: what is left of each tag an edit landed inside
+ * while it composed (`broken`) is cut (`afterEdit`), the composed text kept. Returns the state as `afterEdit` does:
+ * `caret` where the caret was (`caret`, moved back by what was cut before it), or the first cut's place when not given;
+ * null when nothing was cut.
  */
-export function settleEdits(state) {
+export function settleEdits(state, caret = null) {
   const cut = state.tags.filter((t) => t.broken).sort((a, b) => b.start - a.start);
   if (cut.length === 0) return { ...state, caret: null };
   let text = state.text;
   let tags = state.tags.filter((t) => !t.broken);
+  let at = caret;
   for (const c of cut) {
     text = text.slice(0, c.start) + text.slice(c.start + c.length);
     tags = tags.map((t) => (t.start >= c.start + c.length ? { ...t, start: t.start - c.length } : t));
+    if (at !== null && at > c.start) at -= Math.min(c.length, at - c.start);
   }
-  return { ...state, text, tags, removals: [], caret: cut.at(-1).start };
+  return { ...state, text, tags, removals: [], caret: at ?? cut.at(-1).start };
+}
+
+/**
+ * The tags `which` picks out, turned into plain text without their "@" (the tags after them moved), so nothing reads
+ * them as typed mentions at send; where the character before such an "@" is itself an "@" (`@@阿波`), the tag's "@"
+ * becomes a space instead, so no "@name" is left behind (fix round 2, M-9). `texts`: their texts as they were.
+ */
+function unmention(state, which) {
+  if (which.length === 0) return null;
+  let text = state.text;
+  let tags = state.tags.filter((t) => !which.includes(t));
+  for (const t of [...which].sort((a, b) => b.start - a.start)) {
+    if (text[t.start - 1] === "@") {
+      text = `${text.slice(0, t.start)} ${text.slice(t.start + 1)}`;
+      continue;
+    }
+    text = text.slice(0, t.start) + text.slice(t.start + 1);
+    tags = tags.map((o) => (o.start > t.start ? { ...o, start: o.start - 1 } : o));
+  }
+  return { ...state, text, tags, removals: [], texts: which.map((t) => state.text.slice(t.start, t.start + t.length)) };
+}
+
+/**
+ * The composer's tags beyond MENTION_LIMIT (reached through 改一下 or an undo putting tags back: the list never offers a
+ * 21st), from the last, turned into plain text without their "@" (`unmention`; fix round 2, M-7): `over`, their texts.
+ * The same state when there are none.
+ */
+export function capped(state) {
+  const whole = state.tags.filter((t) => !t.broken);
+  const done = unmention(state, whole.slice(MENTION_LIMIT));
+  return done ? { ...done, over: done.texts } : state;
+}
+
+/**
+ * The composer's tags that sit in an address — right after a `/`, or inside a URL or a link's target (`inAddress`) — are
+ * tags no more: their text stays as it is, which the service reads as part of the address, naming nobody, rather than
+ * refusing the message (fix round 2, M-1). `addressed`: their texts. The same state when there are none.
+ */
+export function withoutAddressed(state) {
+  const ranges = addressRanges(state.text);
+  const addressed = state.tags.filter((t) => !t.broken && inAddress(state.text, t.start, t.length, ranges));
+  if (addressed.length === 0) return state;
+  return { ...state, tags: state.tags.filter((t) => !addressed.includes(t)), removals: [], addressed: addressed.map((t) => state.text.slice(t.start, t.start + t.length)) };
 }
 
 /**
@@ -242,15 +318,11 @@ export function settleEdits(state) {
  * line that says so. The same state when none went stale.
  */
 export function withoutStale(state, isMember) {
-  const stale = state.tags.filter((t) => !t.broken && !isMember(t.id));
-  if (stale.length === 0) return state;
-  let text = state.text;
-  let tags = state.tags.filter((t) => !stale.includes(t));
-  for (const t of [...stale].sort((a, b) => b.start - a.start)) {
-    text = text.slice(0, t.start) + text.slice(t.start + 1);
-    tags = tags.map((o) => (o.start > t.start ? { ...o, start: o.start - 1 } : o));
-  }
-  return { ...state, text, tags, removals: [], stale: stale.map((t) => state.text.slice(t.start, t.start + t.length)) };
+  const done = unmention(
+    state,
+    state.tags.filter((t) => !t.broken && !isMember(t.id)),
+  );
+  return done ? { ...done, stale: done.texts } : state;
 }
 
 /** The tag whose end is at `caret` (Backspace there takes it), or whose start is (Delete there takes it). */
@@ -309,12 +381,15 @@ export function cleanWithMentions(value, tags = []) {
   const sorted = [...(Array.isArray(tags) ? tags : [])].filter((t) => t && isIndex(t.start) && isIndex(t.length)).sort((a, b) => a.start - b.start);
   const mentions = [];
   let end = 0;
+  const addresses = addressRanges(text);
   for (const tag of sorted) {
     if (mentions.length === MENTION_LIMIT) break;
     if (tag.start + tag.length > source.length) continue;
     const start = at[tag.start] - lead;
     const stop = at[tag.start + tag.length] - lead;
     if (start < end || stop <= start || stop > text.length || text[start] !== "@") continue;
+    // (One in an address is no mention: the service would refuse it. Fix round 2, M-1.)
+    if (inAddress(text, start, stop - start, addresses)) continue;
     mentions.push({ id: tag.id, start, length: stop - start });
     end = stop;
   }

@@ -7,7 +7,7 @@
 // (the service stores none there since fix round 1, I-3; an older message may hold one), so no mark ever lands in a link;
 // the worker drops any from an address all the same (markdownPipeline.js `link`). Inside code and maths a mark is only
 // taken out: a mention there is plain text.
-import { inAddress } from "../data/mentions.js";
+import { addressRanges, inAddress } from "../data/mentions.js";
 
 const OPEN = String.fromCharCode(0xfdd0);
 const CLOSE = String.fromCharCode(0xfdd1);
@@ -20,6 +20,25 @@ const MARKS = /[\uFDD0-\uFDEF]/g;
 export const withoutMarks = (text) => (/[\uFDD0-\uFDEF]/.test(text) ? text.replace(MARKS, "") : text);
 
 /**
+ * `text` without any mark it holds itself, and `mentions` (ranges of `text`) moved onto what is left: a forged mark
+ * hides only itself, never the text's stored mentions (fix round 2, M-4). `{ text, mentions }`.
+ */
+export function withoutMarksKeeping(text, mentions) {
+  if (!/[\uFDD0-\uFDEF]/.test(text)) return { text, mentions };
+  const at = new Array(text.length + 1);
+  let out = "";
+  for (let i = 0; i < text.length; i += 1) {
+    at[i] = out.length;
+    if (!/[\uFDD0-\uFDEF]/.test(text[i])) out += text[i];
+  }
+  at[text.length] = out.length;
+  const moved = (Array.isArray(mentions) ? mentions : [])
+    .filter((m) => m && Number.isSafeInteger(m.start) && Number.isSafeInteger(m.length) && m.start >= 0 && m.start + m.length <= text.length)
+    .map((m) => ({ id: m.id, start: at[m.start], length: at[m.start + m.length] - at[m.start] }));
+  return { text: out, mentions: moved };
+}
+
+/**
  * `text` (holding no mark) with each of `mentions` (in order, not overlapping: data/mentions.js `mentionsIn`) between
  * the marks, its index after the first: `OPEN INDEX+k @name CLOSE`. A mention right after a backslash (`\@anna`, the
  * Markdown escape of @) is marked from the backslash, so the escape still works and the tag shows no backslash (M-10).
@@ -27,10 +46,12 @@ export const withoutMarks = (text) => (/[\uFDD0-\uFDEF]/.test(text) ? text.repla
  */
 export function markMentions(text, mentions) {
   if (!Array.isArray(mentions) || mentions.length === 0) return text;
+  // The text's addresses, found once for all its mentions (fix round 2, I-4).
+  const addresses = addressRanges(text);
   let out = "";
   let at = 0;
   mentions.forEach((m, k) => {
-    if (inAddress(text, m.start, m.length)) return;
+    if (inAddress(text, m.start, m.length, addresses)) return;
     const from = text[m.start - 1] === "\\" && m.start - 1 >= at ? m.start - 1 : m.start;
     out += `${text.slice(at, from)}${OPEN}${String.fromCharCode(INDEX + k)}${text.slice(from, m.start + m.length)}${CLOSE}`;
     at = m.start + m.length;

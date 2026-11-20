@@ -5,7 +5,7 @@ import { entity, isAgent, nameOf, ownerOf, senderName } from "../state/selectors
 import { Avatar, Btn, IconBtn, composing } from "../ui/primitives.jsx";
 import { useSendFiles } from "./useSendFiles.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
-import { MENTION_LIMIT, afterEdit, caretOutside, mentionName, mentionSegments, mentionsIn, settleEdits, tagEndingAt, tagStartingAt, withoutStale } from "../data/mentions.js";
+import { MENTION_LIMIT, afterEdit, capped, caretOutside, mentionName, mentionSegments, mentionsIn, settleEdits, tagEndingAt, tagStartingAt, withoutAddressed, withoutStale } from "../data/mentions.js";
 import { Smile, Image, Paperclip, AtSign, X } from "../icons.js";
 
 const EMOJI = {
@@ -22,6 +22,10 @@ const DRAFT_SAVE_MS = 300;
 export const MENTIONS_FULL_TEXT = `一条消息最多 @ ${MENTION_LIMIT} 个。`;
 /** The line under the box when picked mentions went stale (`@X 已不在这个群，已改成普通文字。`). */
 const staleText = (texts) => `${texts.join("、")} 已不在这个群，已改成普通文字。`;
+/** …when a tag came to sit in an address (fix round 2, M-1). */
+const addressedText = (texts) => `${texts.join("、")} 在网址里，已改成普通文字。`;
+/** …when more tags than a message may hold came back (改一下, an undo; fix round 2, M-7). */
+const OVER_TEXT = `一条消息最多 @ ${MENTION_LIMIT} 个，多出的已改成普通文字。`;
 
 /**
  * A draft as the data layer keeps it (a text, or `{text, mentions}` while it holds tags: model.js `setDraft`), as the
@@ -123,14 +127,23 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     setStaleNote("");
     setMention(null); setEmojiOpen(false); selection.current={start:0,end:0}; setReplyTo(null);
   }, [conv.id]);
-  // A tag whose principal is no longer a member here turns into plain text without its @ (so nothing reads it at send).
+  // The box's tags kept to what can be sent: one whose principal is no longer a member here turns into plain text without
+  // its @ (so nothing reads it at send); one that came to sit in an address stays as that text, no tag (the service
+  // would refuse it; it reads that text as the address); those over MENTION_LIMIT lose their @. Each says so below the box.
   useEffect(() => {
     const members = new Set(conv.members);
-    const after = withoutStale(current.current, id => members.has(id));
+    const stale = withoutStale(current.current, id => members.has(id));
+    const addressed = withoutAddressed(stale);
+    const after = capped(addressed);
     if (after === current.current) return;
+    const lines = [
+      ...(stale !== current.current ? [staleText(stale.stale)] : []),
+      ...(addressed !== stale ? [addressedText(addressed.addressed)] : []),
+      ...(after !== addressed ? [OVER_TEXT] : []),
+    ];
     setDraft(after);
-    setStaleNote(staleText(after.stale));
-    setTold(staleText(after.stale));
+    setStaleNote(lines.join(" "));
+    setTold(lines.join(" "));
   }, [memberKey, text]);
   // A message the service refused for a stale mention, put back here (Messages.jsx 改一下): after what the box holds.
   useEffect(() => {
@@ -187,10 +200,14 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     detect(el.value, el.selectionStart, el.selectionEnd);
   };
 
-  /** The box's text became `value` (by the browser, or by the composer itself): `afterEdit`. Returns the text kept. */
-  const changed = value => {
+  /**
+   * The box's text became `value` (by the browser, or by the composer itself): `afterEdit`; `inputType` the browser's
+   * (its own undo and redo are never rewritten). Returns the text kept.
+   */
+  const changed = (value, inputType = "") => {
     const before = current.current;
-    const after = afterEdit(before, value, { hint: selection.current, composing: composition.current, picking: picking.current });
+    const history = inputType === "historyUndo" || inputType === "historyRedo";
+    const after = afterEdit(before, value, { hint: selection.current, composing: composition.current, history, picking: picking.current });
     if (after.picked) picking.current = null;
     if (after.caret !== null) caretAfter.current = after.caret;
     setDraft(after);
@@ -198,10 +215,10 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     else if (after.removed.length > 0) setTold(`已去掉提到 ${after.removed.join("、")}`);
     return after.text;
   };
-  /** An IME composition ended: what is left of a tag it cut into goes (`settleEdits`). */
+  /** An IME composition ended: what is left of a tag it cut into goes (`settleEdits`), the caret kept where it was. */
   const compositionEnded = () => {
     composition.current = false;
-    const after = settleEdits(current.current);
+    const after = settleEdits(current.current, inputRef.current?.selectionStart ?? null);
     if (after.caret === null) return;
     caretAfter.current = after.caret;
     setDraft(after);
@@ -249,7 +266,9 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
   };
   const send = () => {
     if(!body || invisible || disabled || tooLong) return;
-    actions.sendText(conv.id, text, { replyToSeq: replyTo?.seq ?? null, mentions: tags });
+    // With an IME composition still open (a tap on 发送): what is left of a tag it cut into goes first (fix round 2, M-3).
+    const ready = settleEdits(current.current);
+    actions.sendText(conv.id, ready.text, { replyToSeq: replyTo?.seq ?? null, mentions: ready.tags.filter(t => !t.broken) });
     picking.current = null;
     setDraft({ text: "", tags: [], removals: [] }); saveDraft();
     setStaleNote("");
@@ -333,7 +352,7 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
             {"\u200b"}
           </div>
           <textarea ref={inputRef} rows={1} value={text} style={{height}} disabled={disabled} placeholder={disabled?"当前无法发送新消息":"发送消息，或 @ 会话成员"} aria-label="消息内容" aria-autocomplete="list" aria-controls={mention?"mention-picker":undefined} aria-expanded={Boolean(mention)} aria-activedescendant={mention&&matches[selected]?`mention-${matches[selected]}`:undefined} aria-describedby={tags.length>0?tagsId:undefined}
-            onChange={e=>{const kept=changed(e.target.value);const caret=kept===e.target.value?e.target.selectionStart:caretAfter.current;const end=kept===e.target.value?e.target.selectionEnd:caret;detect(kept,caret,end,current.current.tags);}}
+            onChange={e=>{const kept=changed(e.target.value,e.nativeEvent?.inputType);const caret=kept===e.target.value?e.target.selectionStart:caretAfter.current;const end=kept===e.target.value?e.target.selectionEnd:caret;detect(kept,caret,end,current.current.tags);}}
             onSelect={e=>{selection.current={start:e.target.selectionStart,end:e.target.selectionEnd};}}
             onMouseUp={e=>settleCaret(e.currentTarget)}
             onScroll={e=>{if(mirrorRef.current)mirrorRef.current.scrollTop=e.currentTarget.scrollTop;}}

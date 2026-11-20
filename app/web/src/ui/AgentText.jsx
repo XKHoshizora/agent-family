@@ -11,7 +11,7 @@
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
 import { mentionsIn } from "../data/mentions.js";
-import { markMentions, withoutMarks } from "./mentionMarks.js";
+import { markMentions, withoutMarks, withoutMarksKeeping } from "./mentionMarks.js";
 import { MentionText } from "./MentionText.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
@@ -141,12 +141,14 @@ const plainKnown = (client, text) => {
  * (mentionMarks.js; Markdown.jsx turns them into tags, and inside code into nothing: plain text there).
  */
 export const AgentText = memo(function AgentText({ text, id = null, mentions = null }) {
-  // Bidirectional controls, and any mark of mentionMarks.js the text holds itself (only marks put in here make a tag, M-1).
-  const shown = useMemo(() => withoutMarks(withoutBidiControls(text)), [text]);
   // The mentions, as a key that stays the same while they do (the message's view is made again at every change).
   const key = Array.isArray(mentions) ? mentions.map((m) => `${m?.id}:${m?.start}:${m?.length}`).join(",") : "";
-  // (Only over the text as stored: the service keeps no bidi controls in a reply, so `shown` is `text` whenever it has any.)
-  const tags = useMemo(() => (shown === text ? mentionsIn(shown, mentions) : []), [shown, text, key]);
+  // Any mark of mentionMarks.js the text holds itself is taken out, the mentions moved onto what is left (only marks put
+  // in here make a tag, M-1; a forged one hides only itself, fix round 2 M-4); then bidirectional controls. (The service
+  // keeps none of those in a reply: when it took any out, the mentions are not shown.)
+  const unmarked = useMemo(() => withoutMarksKeeping(text, mentions), [text, key]);
+  const shown = useMemo(() => withoutBidiControls(unmarked.text), [unmarked]);
+  const tags = useMemo(() => (shown === unmarked.text ? mentionsIn(shown, unmarked.mentions) : []), [shown, unmarked]);
   const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
   const mentionIds = useMemo(() => tags.map((t) => t.id), [tags]);
   const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;

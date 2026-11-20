@@ -8,7 +8,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { App } from "../src/App.jsx";
 import { createDataLayer } from "../src/data/store.jsx";
-import { afterEdit, cleanWithMentions, editOf, mentionSegments, mentionsIn, retag, settleEdits, withoutStale } from "../src/data/mentions.js";
+import { afterEdit, capped, cleanWithMentions, editOf, mentionSegments, mentionsIn, retag, settleEdits, withoutAddressed, withoutStale } from "../src/data/mentions.js";
+import { markMentions } from "../src/ui/mentionMarks.js";
 import { messageText } from "../src/auth/validation.js";
 import { MentionText } from "../src/ui/MentionText.jsx";
 import { ANN, BO, D1, G1, ME, ME_ID, PRINCIPALS, apiError, direct, emptySocial, fakeTimers, fakeTransport, group, principal, syncOf, wire } from "./fixtures.js";
@@ -139,6 +140,18 @@ describe("the composer: a mention picked from the @ list is a tag meaning the on
     expect([input().selectionStart, input().selectionEnd]).toEqual([4, 4]);
     press("Enter");
     expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "你好 x" });
+  });
+
+  it("the browser's own undo of a pick is kept as the browser made it (the @ typed before stays), and its redo brings the tag back", async () => {
+    await openApp();
+    await openChat("周末小组");
+    pick("你好 ", "阿波");
+    fireEvent.input(input(), { target: { value: "你好 @", selectionStart: 4, selectionEnd: 4 }, inputType: "historyUndo" });
+    expect(input().value).toBe("你好 @");
+    expect(chips()).toEqual([]);
+    fireEvent.input(input(), { target: { value: "你好 @阿波 ", selectionStart: 7, selectionEnd: 7 }, inputType: "historyRedo" });
+    expect(input().value).toBe("你好 @阿波 ");
+    expect(chips()).toEqual(["@阿波"]);
   });
 
   it("a deletion during IME composition that cuts into a tag takes all of it once the composition ends", async () => {
@@ -306,6 +319,79 @@ describe("the composer: a mention picked from the @ list is a tag meaning the on
     expect(api.sendMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("改一下 into a box that already holds text and tags: the refused message follows on a new line, its tags moved with it (fix round 2, M-5)", async () => {
+    const sendMessage = vi.fn(async () => Promise.reject(apiError(400, "bad_mentions")));
+    await openApp({ api: { sendMessage } });
+    await openChat("周末小组");
+    pick("你好 ", "阿波");
+    press("Enter");
+    await flush();
+    pick("新的 ", "小安");
+    fireEvent.click([...document.querySelectorAll("li.msg.mine button")].find((b) => b.textContent.trim() === "改一下"));
+    await flush();
+    expect(input().value).toBe("新的 @小安 \n你好 @阿波");
+    expect(chips()).toEqual(["@小安", "@阿波"]);
+    expect(spoken()).toEqual(["提到 小安", "提到 阿波"]);
+  });
+
+  it("the 20 cap holds when a cut tag comes back where it was (as an undo brings it back): the one over loses its @ (fix round 2, M-7)", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    for (let i = 0; i < 20; i += 1) pick(input().value, i % 2 ? "小安" : "阿波");
+    expect(chips()).toHaveLength(20);
+    // The first tag cut (19), one more picked at the end (20), the cut text put back at its place: its tag comes back.
+    edit(input().value.slice(3), 0);
+    expect(chips()).toHaveLength(19);
+    pick(input().value, "小安");
+    expect(chips()).toHaveLength(20);
+    edit(`@阿波${input().value}`, 3);
+    expect(chips()).toHaveLength(20);
+    expect(chips()[0]).toBe("@阿波");
+    expect(input().value.endsWith(" 小安 ")).toBe(true);
+    expect(document.querySelector(".composer").textContent).toContain("一条消息最多 @ 20 个，多出的已改成普通文字。");
+    press("Enter");
+    expect(sentBody(api).mentions).toHaveLength(20);
+  });
+
+  it("the 20 cap holds through 改一下: what is over it turns into plain text without its @, and a line says so (fix round 2, M-7)", async () => {
+    const sendMessage = vi.fn(async () => Promise.reject(apiError(400, "bad_mentions")));
+    await openApp({ api: { sendMessage } });
+    await openChat("周末小组");
+    pick("", "阿波");
+    press("Enter");
+    await flush();
+    for (let i = 0; i < 20; i += 1) pick(input().value, i % 2 ? "小安" : "阿波");
+    fireEvent.click([...document.querySelectorAll("li.msg.mine button")].find((b) => b.textContent.trim() === "改一下"));
+    await flush();
+    expect(chips()).toHaveLength(20);
+    expect(input().value.endsWith("\n阿波")).toBe(true);
+    expect(document.querySelector(".composer").textContent).toContain("一条消息最多 @ 20 个，多出的已改成普通文字。");
+  });
+
+  it("a tag that comes to sit in an address (right after a / or inside a URL) turns into plain text, and a line says so (fix round 2, M-1)", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("", "阿波");
+    caretAt(0);
+    edit("https://x.example/@阿波 ", 18);
+    expect(chips()).toEqual([]);
+    expect(input().value).toBe("https://x.example/@阿波 ");
+    expect(document.querySelector(".composer").textContent).toContain("@阿波 在网址里，已改成普通文字。");
+    press("Enter");
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "https://x.example/@阿波" });
+  });
+
+  it("send with an IME composition open (a tap on 发送): what is left of a tag it cut into is cut first, the composed text kept (fix round 2, M-3)", async () => {
+    const { api } = await openApp();
+    await openChat("周末小组");
+    pick("你好 ", "阿波");
+    fireEvent.compositionStart(input());
+    edit("你好 @阿哈波 ", 6);
+    expect(chips()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(sentBody(api)).toEqual({ clientTxn: "tx-1", text: "你好 哈" });
+  });
+
   it("a 21st mention cannot be picked: the list says so and nothing is inserted (fix round 1, M-4)", async () => {
     await openApp();
     await openChat("周末小组");
@@ -429,6 +515,74 @@ describe("data/mentions.js", () => {
     expect(settleEdits(composing)).toMatchObject({ text: "嗨  好", tags: [], caret: 2 });
     const picked = afterEdit({ text: "@", tags: [], removals: [] }, "@阿波 ", { hint: { start: 0, end: 1 }, picking: { id: BO, start: 0, length: 3, text: "@阿波" } });
     expect(picked.tags).toEqual([{ id: BO, start: 0, length: 3 }]);
+  });
+
+  it("afterEdit: the browser's own undo and redo are never rewritten — an undo that cuts into a tag drops it, the redo brings it back (real-browser check)", () => {
+    const picked = { text: "你好 @阿波 ", tags: [{ id: BO, start: 3, length: 3 }], removals: [] };
+    const undone = afterEdit(picked, "你好 @", { hint: { start: 7, end: 7 }, history: true });
+    expect([undone.text, undone.tags, undone.caret]).toEqual(["你好 @", [], null]);
+    const redone = afterEdit(undone, "你好 @阿波 ", { hint: { start: 4, end: 4 }, history: true });
+    expect([redone.text, redone.tags]).toEqual(["你好 @阿波 ", [{ id: BO, start: 3, length: 3 }]]);
+    // Typing the same text by hand is no redo: it stays plain.
+    expect(afterEdit(undone, "你好 @阿波 ", { hint: { start: 4, end: 4 } }).tags).toEqual([]);
+  });
+
+  it("afterEdit while composing keeps the composed text: only what is left of the tag is cut (fix round 2, M-3)", () => {
+    const state = { text: "嗨 @阿波 好", tags: [{ id: BO, start: 2, length: 3 }], removals: [] };
+    const composing = afterEdit(state, "嗨 @阿x波 好", { hint: { start: 4, end: 4 }, composing: true });
+    expect(composing.tags.map((t) => [t.start, t.length, Boolean(t.broken)])).toEqual([
+      [2, 2, true],
+      [5, 1, true],
+    ]);
+    expect(settleEdits(composing, 5)).toMatchObject({ text: "嗨 x 好", tags: [], caret: 3 });
+  });
+
+  it("withoutStale: a @ right before the tag is kept from making a new mention (fix round 2, M-9)", () => {
+    const state = { text: "@@阿波 好", tags: [{ id: BO, start: 1, length: 3 }], removals: [] };
+    expect(withoutStale(state, () => false)).toMatchObject({ text: "@ 阿波 好", tags: [], stale: ["@阿波"] });
+  });
+
+  it("withoutAddressed and capped: a tag in an address stays as text without its tag; over 20, the last ones lose their @", () => {
+    const addressed = withoutAddressed({ text: "x.example/@阿波 和 @小安", tags: [{ id: BO, start: 10, length: 3 }, { id: ANN, start: 16, length: 3 }], removals: [] });
+    expect([addressed.text, addressed.tags, addressed.addressed]).toEqual(["x.example/@阿波 和 @小安", [{ id: ANN, start: 16, length: 3 }], ["@阿波"]]);
+    const many = { text: "@x ".repeat(21).trim(), tags: Array.from({ length: 21 }, (_, i) => ({ id: BO, start: i * 3, length: 2 })), removals: [] };
+    const cut = capped(many);
+    expect(cut.tags).toHaveLength(20);
+    expect(cut.text.endsWith("@x x")).toBe(true);
+    expect(cut.over).toEqual(["@x"]);
+  });
+
+  it("cleanWithMentions sends no tag that sits in an address (the service would refuse it)", () => {
+    expect(cleanWithMentions("x.example/@阿波", [{ id: BO, start: 10, length: 3 }])).toEqual({ text: "x.example/@阿波", mentions: [] });
+  });
+
+  it("markMentions is linear: 20 mentions in 8 000 characters (the longest a message is) take about four times what 2 000 take (fix round 2, I-4)", () => {
+    const make = (n) => {
+      const head = Array.from({ length: 20 }, () => "@阿波 ").join("");
+      return { text: `${head}@${"a".repeat(n - head.length - 1)}`, tags: Array.from({ length: 20 }, (_, i) => ({ id: BO, start: i * 4, length: 3 })) };
+    };
+    // One call's time over a burst: the call repeated for at least 30 ms. Per call: the shortest of three bursts (a busy
+    // machine only adds time). The ratio: after a warm-up, the median of five, the two measured one right after the other.
+    const burst = (work) => {
+      let calls = 0;
+      const started = performance.now();
+      let spent = 0;
+      do {
+        work();
+        calls += 1;
+        spent = performance.now() - started;
+      } while (spent < 30);
+      return spent / calls;
+    };
+    const perCall = (work) => Math.min(burst(work), burst(work), burst(work));
+    const [small, large] = [make(2000), make(8000)];
+    expect(large.text).toHaveLength(8000);
+    const [inLarge, inSmall] = [() => markMentions(large.text, large.tags), () => markMentions(small.text, small.tags)];
+    burst(inLarge);
+    burst(inSmall);
+    const ratios = Array.from({ length: 5 }, () => perCall(inLarge) / perCall(inSmall));
+    const ratio = ratios.sort((a, b) => a - b)[2];
+    expect(ratio, `4× the text took ${ratio.toFixed(1)}× the time`).toBeLessThan(8);
   });
 
   it("withoutStale: a tag whose principal is gone loses its @ and its mention; the others move with it", () => {

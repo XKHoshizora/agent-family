@@ -396,6 +396,38 @@ describe("an Agent's stored mentions in its Markdown (Task M)", () => {
     expect(container.querySelector(".mention")).toBeNull();
   });
 
+  it("one forged mark in a reply hides only itself: the reply's stored mentions are still tags (fix round 2, M-4)", async () => {
+    const forged = `${String.fromCharCode(0xfdd0)}看 @阿波 和 @小安`;
+    const root = await showWith(forged, [
+      { id: ANN, start: 3, length: 3 },
+      { id: ANN, start: 9, length: 3 },
+    ]);
+    expect(tags(root)).toEqual([
+      ["提到 阿波", "@阿波"],
+      ["提到 小安", "@小安"],
+    ]);
+    await settle();
+    expect(tags(root.querySelector(".md"))).toEqual([
+      ["提到 阿波", "@阿波"],
+      ["提到 小安", "@小安"],
+    ]);
+  });
+
+  it("the worker takes marks out of a link's address, as they are or percent-encoded (fix round 2, M-5)", () => {
+    const [open, index, close] = [0xfdd0, 0xfdd2, 0xfdd1].map((c) => String.fromCharCode(c));
+    const tree = renderToTree(`[一](https://x.example/u/${open}${index}@a${close}) [二](https://x.example/%EF%B7%90b%ef%b7%91)`, { now: () => 0 });
+    const hrefs = [];
+    const walk = (nodes) => {
+      for (const n of nodes) {
+        if (typeof n === "string") continue;
+        if (n.tag === "a") hrefs.push(n.props.href);
+        walk(n.children ?? []);
+      }
+    };
+    walk(tree.tree);
+    expect(hrefs).toEqual(["https://x.example/u/@a", "https://x.example/b"]);
+  });
+
   it("an escaped \\@ keeps its tag and shows no backslash (fix round 1, M-10)", async () => {
     const root = await showWith("转义 \\@阿波 好", [{ id: ANN, start: 4, length: 3 }]);
     await settle();
