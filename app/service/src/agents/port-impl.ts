@@ -28,7 +28,8 @@ import {
   type LoadedContext,
   type Speaker,
 } from "./context.ts";
-import { holdsNewest } from "./runtime/context.ts";
+import { contextBudget, holdsNewest } from "./runtime/context.ts";
+import { FINAL_LINE } from "./runtime/loop.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
@@ -48,7 +49,7 @@ import {
   type ToolOutcome,
   type Usage,
 } from "./runtime/port.ts";
-import { fitNotes, groupSystemText, NO_NOTES, passageBudget, systemText, type SystemText } from "./runtime/prompt.ts";
+import { fitNotes, groupSystemText, NO_NOTES, passageBudget, systemText, systemTokens, type SystemText } from "./runtime/prompt.ts";
 import {
   actOnTriggered,
   budgetReachedWith,
@@ -100,6 +101,14 @@ export interface Toolbox {
 
 /** What a toolbox offers a run. */
 type Offer = ReturnType<Toolbox["offer"]>;
+
+/**
+ * Tokens a reply offered tools keeps in its context plan for what they bring back (`begin`): two results of
+ * `resultMaxWeight` at the plan's `ratio`, but at most a third of `conversation`, what the plan gives the conversation
+ * beside the system text and the tools' definitions. Planned only: nothing is held or charged for it.
+ */
+const resultReserve = (resultMaxWeight: number, ratio: number, conversation: number): number =>
+  Math.min(Math.ceil(2 * resultMaxWeight * ratio), Math.floor(conversation / 3));
 
 /** What `extend` prices a reply's later calls by, kept from `begin` in this process (`RunFlags.money`). */
 interface RunMoney {
@@ -339,8 +348,11 @@ export class DbAgentPort implements AgentPort {
    *    of the room kept free (`contextBudget`). The tools the reply is offered are decided here, before the plan: its
    *    toolbox's (`AgentPortDeps.toolbox`; none without one, and none while `TOOLS.enabled` is false), their definitions
    *    (at the plan's ratio) and what providers add around them (`TOOL_PREAMBLE_TOKENS`) reserved in the plan as the
-   *    system text is; when, with that reservation, the conversation would not get the room a call needs at least (the
-   *    `context_too_small` rule), none are offered and the run is planned, and goes on, as one that offers none.
+   *    system text is — and, from what that plan gives the conversation, room for what the tools bring back
+   *    (`resultReserve`) and the last call's line (`FINAL_LINE`), reserved with them, so that the conversation is planned
+   *    once more; when, with that reservation, the conversation would not get the room a call needs at least (the
+   *    `context_too_small` rule), none are offered and the run is planned, and goes on, as one that offers none. The
+   *    reservation is a plan only: nothing is held or charged for it (step 3 holds what is sent).
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
@@ -375,7 +387,7 @@ export class DbAgentPort implements AgentPort {
     const now = new Date();
     const first = await db.tx(async (t): Promise<
       | { end: RunEnd }
-      | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number; offer: Offer | null }
+      | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number; offer: Offer | null; reserved: number }
     > => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
@@ -440,17 +452,25 @@ export class DbAgentPort implements AgentPort {
       // context: their definitions at the plan's ratio and what providers add around them, reserved as the system text is.
       let offer: Offer | null = config.tools.enabled && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
-      const reserved = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
+      const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
+      let reserved = definitions;
       let loaded = await loadContext(t, { ...plan, reserved }, resolved, system, this.deps.drawMark);
+      if (offer !== null && holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
+        // And room for what the tools bring back, from what that plan gives the conversation (`resultReserve`), with
+        // the last call's line: reserved as the definitions are.
+        reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`, planned) + resultReserve(config.tools.resultMaxWeight, planned, loaded.budget);
+        loaded = await loadContext(t, { ...plan, reserved }, resolved, system, this.deps.drawMark);
+      }
       if (offer !== null && !holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // With the tools reserved the conversation would not get the room a call needs at least: none are offered, and
         // the reply is planned, and made, as one that offers none.
         offer = null;
+        reserved = 0;
         loaded = await loadContext(t, plan, resolved, system, this.deps.drawMark);
       }
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers, coveredBefore, key, ratio, offer };
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved };
     });
     if ("end" in first) return first.end;
 
@@ -491,7 +511,7 @@ export class DbAgentPort implements AgentPort {
         }
         return { end: ENDED_QUIETLY, told };
       }
-      const { resolved, loaded, covers, key, ratio, offer } = first;
+      const { resolved, loaded, covers, key, ratio, offer, reserved } = first;
       // The tools the reply is offered (step 1).
       const tools = offer?.tools ?? [];
       // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
@@ -539,6 +559,12 @@ export class DbAgentPort implements AgentPort {
                   ratio,
                   planRatio: planned,
                   planned: correctedEstimate(context.inputTokensEstimate, context.fixedTokens, planned),
+                  // The plan's limit: the system text, the reservation (step 1) and the conversation's budget before a
+                  // group's cap — what the rounds may fill is what is left of it.
+                  limit:
+                    systemTokens(loaded.system, planned) +
+                    reserved +
+                    contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, loaded.system, planned, reserved),
                 },
         },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,

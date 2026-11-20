@@ -30,7 +30,8 @@ export interface Prepared {
   /**
    * The tools the model is offered. Empty: none — the reply is exactly one call, as before tools existed, and `toolRun`
    * is null. Otherwise the reply runs the tool loop (worker.ts), bounded by `toolRun`; its context was planned with the
-   * tools' definitions reserved (port-impl.ts `begin`: with too little room left for the conversation, none are offered).
+   * tools' definitions and room for their results reserved (port-impl.ts `begin`: with too little room left for the
+   * conversation, none are offered).
    */
   readonly tools: readonly ToolSpec[];
   readonly toolRun: ToolRun | null;
@@ -52,6 +53,14 @@ export interface ToolRun {
    */
   readonly planRatio: number;
   readonly planned: number;
+  /**
+   * The most the plan lets one call's input take, at `planRatio` (port-impl.ts `begin`): the system text, what was
+   * reserved beside it — the tools' definitions and what providers add around them, the last call's line, and room for
+   * what the tools bring back — and what the conversation may take before a group's cap (`contextBudget`). What the
+   * rounds may add is what it leaves beside `planned`, the definitions, the line and that framing: at least the room
+   * kept for results, and whatever of its budget the conversation left unused.
+   */
+  readonly limit: number;
 }
 
 /** The status a tool's work shows while a reply runs tools. */

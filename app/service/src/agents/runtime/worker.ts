@@ -1,6 +1,6 @@
 import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
 import { isCount } from "../../metering/prices.ts";
-import { CONTEXT_HEADROOM, estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
+import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
 import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
 import { cutResult, FINAL_LINE, fitsSchema, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
@@ -448,8 +448,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    *   cut at its limit (its input may be cut) — is not run: `UNUSABLE`; the reply's second marks the tools unusable;
    * - a repeat (`LoopGuard`) is answered `REPEATED`, a call over its tool's count `OVER_CAP`, neither run;
    * - anything else runs through the port (`runTool`), its output cut (`cutResult`) to `resultMaxWeight` and to what the
-   *   model's context has left for the rounds (`room`: what the plan's limit leaves beside the planned input, the tools'
-   *   definitions and the last call's line, at the plan's ratio, and what providers add around the definitions).
+   *   model's context has left for the rounds (`room`: what the plan's limit, `ToolRun.limit`, leaves beside the planned
+   *   input, the tools' definitions and the last call's line, at the plan's ratio, and what providers add around the
+   *   definitions — at least the room the plan kept for results).
    * Then the port holds what the next call can cost (`extend`; its bound: the call's text, the tools and every step at
    * their bytes, as admission holds a call, and what providers add around tool definitions, `TOOL_PREAMBLE_TOKENS`). The
    * tool phase ends — the next call is the last: the same tools and steps,
@@ -474,11 +475,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const offered = new Map(tools.map((t) => [t.name, t]));
     const toolsText = JSON.stringify(tools);
     const texts = prepared.call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
-    const room =
-      Math.floor((bounds.contextTokens - prepared.call.maxOutputTokens) * (1 - CONTEXT_HEADROOM)) -
-      bounds.planned -
-      estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio) -
-      TOOL_PREAMBLE_TOKENS;
+    const room = bounds.limit - bounds.planned - estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio) - TOOL_PREAMBLE_TOKENS;
     const guard = new LoopGuard({ maxRounds: limits.maxRounds, perTool: bounds.perTool });
     const out = new ReplyStream((delta) => port.emit(run, delta));
     const meter = new Meter();

@@ -123,7 +123,8 @@ true; false: no reply is offered any tool), `maxRounds` (rounds of one reply tha
 `maxPoints` (whole points one reply's tool rounds may spend before it must answer — its first round is bounded by
 admission alone —, 1–100 000, default 20), `searchPerReply` and
 `filePerReply` (calls of the search and the file tool one reply may run, 1–1 000, default 6 and 4), `resultMaxWeight`
-(the most one tool result weighs when it goes back to the model, 1–100 000, default 3 000), `runTimeoutMs` (how long a
+(the most one tool result weighs when it goes back to the model, 1–100 000, default 3 000; a reply offered tools keeps
+room for two in its context plan, at most a third of the conversation's), `runTimeoutMs` (how long a
 reply that offers tools may take in all, 1 000–3 600 000, default 300 000: 5 minutes; a reply that offers none is held
 to `AGENT_RUN_TIMEOUT_MS` alone)),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
@@ -2675,15 +2676,27 @@ most what the context leaves beside the output limit, attachments at their estim
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
 `tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox;
-none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). The tools' definitions are part
-of the context plan: their weight at the plan's ratio and 400 tokens for what providers add around them
-(`TOOL_PREAMBLE_TOKENS`) are kept out of the conversation's budget as the system text is; when, with that reservation, the
-conversation would not get the room a call needs at least (200 tokens of the owner's newest message, or all of it:
-`context_too_small`), the reply is offered none. A reply offered none is
-exactly the one call above, as before tools existed. A reply offered some calls the model round by round (Calling a
-model, Tools): each round carries the tools and, after the first, every round so far; a round that calls no tool is the
-answer. Each call of a round that called tools is answered in order, by its place in the round (never by its id, which
-may repeat or be empty), with its own id and name as it came:
+none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). The tools are part of the
+context plan, and so is room for what they bring back:
+
+**What a reply offered tools reserves in its plan** (`port-impl.ts` `begin`; `tests/tool-loop-money.test.ts`). Kept out
+of the conversation's budget as the system text is: the tools' definitions, their weight at the plan's ratio; 400 tokens
+for what providers add around them (`TOOL_PREAMBLE_TOKENS`); the last call's line (below); and room for the results —
+two results of `TOOLS.resultMaxWeight` at the plan's ratio (6 000 tokens at the default), but at most a third of what
+the plan would give the conversation beside the system text and the definitions (on a small model, a third of its
+room; in a group, a third of `AGENT_GROUP_CONTEXT_TOKENS`, 4 000 tokens, which on a model with a large context comes out
+of the context beyond the group's cap, not out of its messages). A long conversation is therefore shown fewer older
+messages when tools are offered, and the rounds may fill that room and whatever the conversation left unused of what
+it may take. When, with all of that reserved, the conversation would not get the room a call needs at least (200
+tokens of the owner's newest message, or all of it: `context_too_small`), the reply is offered no tools and is planned
+as one offered none. None of the reservation is charged, or held, unless it is sent: the plan only decides what the
+model is shown; admission and every later call are held for what each call really sends, at its bytes (Metering,
+Admission and Extension), and settlement charges what the rounds used (or their estimate).
+
+A reply offered none is exactly the one call above, as before tools existed. A reply offered some calls the model round
+by round (Calling a model, Tools): each round carries the tools and, after the first, every round so far; a round that
+calls no tool is the answer. Each call of a round that called tools is answered in order, by its place in the round
+(never by its id, which may repeat or be empty), with its own id and name as it came:
 
 - **garbled** — a tool not offered, an input null, or one its tool's schema refuses (an object with every required key,
   each named key of its type, no other key when the schema says none; `fitsSchema`), or any call of a round cut at its
@@ -2705,10 +2718,11 @@ Before every call after the first the port holds what it can cost (`extend`, Met
 the next call is the last, sent with the same tools and every round, the model told it may call none (`toolChoice`
 `none`), and the system text ending with `你已经不能再查了，请用上面查到的内容直接回答。` — after `TOOLS.maxRounds`
 rounds that called tools, a call made a third time, the second garbled call, once the rounds fill what the context plan
-leaves (the plan's limit, `(context − output limit) × (1 − CONTEXT_HEADROOM)`, less the planned input, the tools'
-definitions and that line, at the plan's ratio, and the 400 for what providers add around the definitions), or when
-`extend` says so. A tool call in the last round is not run and no
-call follows: its text is the reply (with none, the run fails as an empty answer). An upstream that refused the tools
+leaves (the plan's limit — the system text, the reservation above and what the conversation may take before a group's
+cap, `ToolRun.limit` — less the planned input, the tools' definitions and that line, at the plan's ratio, and the 400
+for what providers add around the definitions: at least the room kept for results), or when `extend` says so. A tool
+call in the last round is not run and no call follows: its text is the reply (with none, the run fails as an empty
+answer). An upstream that refused the tools
 (the first round: Calling a model) marks them unusable (`toolsUnusable`, `refused`); that round's text is the reply, and
 nothing more is called. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
 nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call

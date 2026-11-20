@@ -186,7 +186,11 @@ export interface ToolsConfig {
   /** Calls of the search tool, and of the file tool, one reply may run; further ones are answered with a fixed note. */
   searchPerReply: number;
   filePerReply: number;
-  /** The most one tool result weighs (metering/tokens.ts `weight`) when it goes back to the model; more is cut, and marked so. */
+  /**
+   * The most one tool result weighs (metering/tokens.ts `weight`) when it goes back to the model; more is cut, and marked
+   * so. A reply offered tools keeps room for two in its context plan, at most a third of the conversation's
+   * (src/agents/port-impl.ts `begin`).
+   */
   resultMaxWeight: number;
   /**
    * How long a reply that offers tools may take in all, its rounds and its tools, in ms (each model call and each tool

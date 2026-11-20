@@ -4,19 +4,20 @@ import { contextBudget } from "../src/agents/runtime/context.ts";
 import { isRunEnd, type Prepared, type ToolOutcome } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
-import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS } from "../src/metering/tokens.ts";
+import { CONTEXT_HEADROOM, estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS } from "../src/metering/tokens.ts";
 import type { ModelCall, ToolCall, ToolSpec } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
-import { costOf, grant, METER_ENV } from "./helpers/metering.ts";
+import { costOf, grant, METER_ENV, paidReply } from "./helpers/metering.ts";
 import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
 import { closeAllSockets } from "./helpers/ws.ts";
 
 /**
  * The money of a reply that offers tools (agents/runtime/worker.ts, port-impl.ts `extend`, metering/admit.ts
- * `raiseHold`): one admission, its tools' definitions reserved in the context plan and held; before every later call
+ * `raiseHold`): one admission, its tools' definitions reserved in the context plan with room for what they bring back,
+ * and held; before every later call
  * the hold raised — never lowered — to what the reply has cost so far and the most that call can cost (every step it
  * carries), within `TOOLS.maxPoints` and its lane's budgets for another tool round, else for one last call while
  * something is left after what the reply has spent; and one settlement on the rounds' summed usage, each round's
@@ -286,8 +287,9 @@ describe("the money of a reply that offers tools", () => {
     expect(await recordsOf(run.id)).toMatchObject([{ estimated: false, cost, balance: cost, forgiven: "0" }]);
 
     // The last call reported nothing: it is settled on its estimate. Its input's estimate is at most its bytes, which
-    // the hold counts; only its output's (`weight`, not tokens) can pass what is held for it, its output limit — so what
-    // is forgiven is at most that excess at the output price.
+    // the hold counts; only its output's (`weight`, not tokens) can pass what is held for it, its output limit — by
+    // 904 000 here, which the input's estimate, about 62 000 tokens under its bytes, more than makes up: nothing is
+    // forgiven.
     const text = "答".repeat(5000);
     const unreported = scriptedGateway().callTools(ten, { usage: U(2000, 300) }).reply(text, { usage: null });
     const b = await owned("dearestimated", DEAR);
@@ -296,9 +298,41 @@ describe("the money of a reply that offers tools", () => {
     expect(await toolWorker(unreported, box).worker.runOnce()).toBe(true);
     const [record] = await recordsOf((await runOf(b.owner.id)).id);
     expect(record).toMatchObject({ estimated: true });
-    const slack = BigInt(Math.max(0, estimateTokens(text) - 4096)) * 1000n;
-    expect(slack).toBe(904_000n);
-    expect(BigInt(record.forgiven)).toBeLessThanOrEqual(slack);
+    expect(BigInt(Math.max(0, estimateTokens(text) - 4096)) * 1000n).toBe(904_000n);
+    expect(record.forgiven).toBe("0");
+  });
+
+  it("the dearest model, a later call that reported nothing and wrote far past its output limit (a long Latin answer, a small input): what its estimate passes its hold by — its output's estimate over the limit, less what its input's estimate is under its bytes — is forgiven, exactly", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(2000, 300) });
+    const last = gateway.hang();
+    const { owner, conv } = await owned("dearlatin", DEAR);
+    await grant(db, owner.id, 60n * POINT);
+    await say(owner, conv, "附近有什么好吃的？");
+    const running = toolWorker(gateway).worker.runOnce();
+    const call = await last.reached;
+    expect(isFinal(call)).toBe(false);
+    const run = await runOf(owner.id);
+    // Held for it: what the first round cost, and the most this call can send at its bytes and its whole output.
+    const hold = (2000n + 300n) * 1000n + dearMax(nextInput(call, 100_000, 4096));
+    expect(await holdOf(run.id)).toBe(hold);
+    const text = "a".repeat(20_000);
+    last.release(text, { usage: null });
+    await running;
+
+    const [record] = await recordsOf(run.id);
+    expect(record).toMatchObject({ estimated: true, source: "site" });
+    // Settled on the first round's report and this call's estimate: its input (the conversation, the tools and the
+    // step it carried, in weight) and what it wrote — 6 667 tokens by weight, 2 571 past its output limit.
+    const input = estimateTokens(call.system) + textsOf(call).reduce((n, t) => n + estimateTokens(t), 0) + estimateTokens(JSON.stringify(call.tools) + JSON.stringify(call.steps));
+    expect([record.input, record.output]).toEqual([2000 + input, 300 + estimateTokens(text)]);
+    const cost = BigInt(record.input + record.output) * 1000n;
+    expect(record.cost).toBe(cost.toString());
+    // Charged up to the hold; what passes it is forgiven, and it is less than the output's overshoot alone.
+    const forgiven = cost - hold;
+    expect(forgiven).toBeGreaterThan(0n);
+    expect(forgiven).toBeLessThan(BigInt(estimateTokens(text) - 4096) * 1000n);
+    expect(record).toMatchObject({ balance: hold.toString(), forgiven: forgiven.toString() });
+    expect(await holdOf(run.id)).toBe(0n);
   });
 
   it("a hold is never lowered: whatever extend answers — another round, the last call, or none — the run holds at least what it held before", async () => {
@@ -618,6 +652,48 @@ describe("the money of a reply that offers tools", () => {
     expect(await recordsOf(run.id)).toMatchObject([{ source: "provider", cost: "0", free: "0", balance: "0", input: 900_000, output: 9000 }]);
   });
 
+  it("a provider's model in a lane with a daily budget: extend answers ok while the budget is not reached, and final once what is settled reaches it — nothing held either way, its owner's account never waited on", async () => {
+    const owner = await signUp(app, "ownbudget");
+    const member = await signUp(app, "ownbudgetmember");
+    const g = await group(app, owner, "饭搭子", [member, await signUp(app, "ownbudgetthird")]);
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "mine" }] }))).json;
+    const model = { source: "provider", providerId: provider.id as string, model: "mine" } as const;
+    // Someone else's call, in the others' lane; its daily budget a point.
+    const agent = await mustCreateAgent(app, owner, { handle: "ownchef", name: "ownchef", model, persona: "简短地回答。", othersBudget: "1" });
+    await db.query("insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1", [g, agent.id]);
+    await grant(db, owner.id, 20n * POINT);
+    await say(member, g, "@ownchef 附近有什么好吃的？");
+    const { port } = toolWorker(scriptedGateway());
+    const ticket = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(ticket))).toBe(false);
+    const none = { inputChars: 0, outputChars: 0 };
+    // However much the reply has used and its next call could send: it costs nothing.
+    const extend = async () => {
+      // Someone holds the owner's account row: nothing here waits on it.
+      const holder = await db.pool.connect();
+      try {
+        await holder.query("begin");
+        await holder.query("select 1 from accounts where principal_id = $1 for update", [owner.id]);
+        return await Promise.race([
+          port.extend(ticket, U(100_000, 1000), none, 99_000),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("extend waited on the owner's account")), 3_000)),
+        ]);
+      } finally {
+        await holder.query("rollback").catch(() => {});
+        holder.release();
+      }
+    };
+
+    // The budget not reached: another round.
+    expect(await extend()).toBe("ok");
+    expect(await holdOf(ticket.id)).toBe(0n);
+    // An earlier reply of the Agent's to someone else, on a site model, settled today at a point: the budget is reached,
+    // and the next call is the last.
+    await paidReply(db, { agentId: agent.id, ownerId: owner.id, conversationId: g, lane: "others", micro: POINT });
+    expect(await extend()).toBe("final");
+    expect(await holdOf(ticket.id)).toBe(0n);
+  });
+
   it("TOOLS.enabled false: no reply is offered tools, whatever the port could offer; the reply is one call, as before, and teaches the ratio", async () => {
     const gateway = scriptedGateway().reply("你好。", { usage: U(300, 10) });
     const { worker } = toolWorker(gateway, toolbox(), withTools({ enabled: false }));
@@ -631,7 +707,7 @@ describe("the money of a reply that offers tools", () => {
   });
 });
 
-describe("the tools' definitions in the context plan", () => {
+describe("the tools' definitions, and room for what they bring back, in the context plan", () => {
   /** A toolbox offering `BIG`. */
   const big: Toolbox = { offer: () => ({ tools: [BIG], perTool: { search: 6 } }), run: async () => ({ output: { hits: [] }, activity: "search" }) };
 
@@ -663,7 +739,7 @@ describe("the tools' definitions in the context plan", () => {
     expect((await runOf(owner.id)).input_estimate).not.toBe(null);
   });
 
-  it("a model with room: the tools are offered and their reservation is taken from the conversation's plan — fewer older messages are shown than to the same conversation without tools", async () => {
+  it("a model with room: the tools are offered and their reservation is taken from the conversation's plan — fewer older messages are shown than to the same conversation without tools; on a model this small the room for what the tools bring back is a third of what the conversation would get", async () => {
     const owner = await signUp(app, "roomyplan");
     const model = await smallModel(owner);
     const tooled = await mustCreateAgent(app, owner, { name: "甲", model, persona: "简短地回答。" });
@@ -684,14 +760,147 @@ describe("the tools' definitions in the context plan", () => {
     expect(a.system).not.toBe(b.system);
     expect(estimateTokens(a.system)).toBe(estimateTokens(b.system));
 
-    // The newest message, then older ones, newest first, while they fit what the plan leaves them.
-    const reserved = estimateTokens(JSON.stringify([BIG])) + TOOL_PREAMBLE_TOKENS;
+    // The newest message, then older ones, newest first, while they fit what the plan leaves them. Reserved: the
+    // definitions and what providers add around them; the last call's line; and room for what the tools bring back —
+    // two results of `resultMaxWeight`, but at most a third of what the plan would give the conversation beside the
+    // definitions (about 4 160 tokens here: 1 386 are kept).
+    const definitions = estimateTokens(JSON.stringify([BIG])) + TOOL_PREAMBLE_TOKENS;
+    const conversation = contextBudget(8192, a.maxOutputTokens, { rest: a.system, passage: "" }, 1, definitions);
+    const results = Math.min(2 * app.deps.config.tools.resultMaxWeight, Math.floor(conversation / 3));
+    expect(results).toBe(1386);
+    const reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`) + results;
     const shown = (budget: number) => 1 + Math.min(older.length, Math.floor((budget - estimateTokens("附近有什么好吃的？")) / 310));
     const plans = [contextBudget(8192, b.maxOutputTokens, { rest: b.system, passage: "" }), contextBudget(8192, a.maxOutputTokens, { rest: a.system, passage: "" }, 1, reserved)];
     expect([textsOf(b).length, textsOf(a).length]).toEqual(plans.map(shown));
-    // About 5 070 and 4 160 tokens: 16 older messages and 13, each count about a third of a message from the next.
-    expect([textsOf(b).length, textsOf(a).length]).toEqual([17, 14]);
+    // About 5 070 and 2 890 tokens: 16 older messages and 9, each count about a third of a message from the next.
+    expect([textsOf(b).length, textsOf(a).length]).toEqual([17, 10]);
     expect(textsOf(a).at(-1)).toBe("附近有什么好吃的？");
-    expect(textsOf(a)).toEqual(textsOf(b).slice(3));
+    expect(textsOf(a)).toEqual(textsOf(b).slice(7));
+  });
+
+  it("a long conversation that fills its plan, on the meter model: room is kept for what the tools bring back — fewer older messages are shown, a result of 3 000 weight goes back whole, and one result does not end the tool phase", async () => {
+    // A system text of about 5 000 tokens, the search tool's definition, a context of 100 000; older messages of 3 000
+    // weight fill what the definitions alone left the conversation to within about 200 tokens (the review's case: the
+    // conversation filling its plan).
+    const { owner, conv } = await owned("fullplan", PAID, { persona: "简".repeat(4480) });
+    await grant(db, owner.id, 100n * POINT);
+    // 32 older messages of 3 000 weight each, then the question: more than either plan holds.
+    const older = Array.from({ length: 32 }, (_, i) => `${String(i).padStart(2, "0")}${"字".repeat(2999)}`);
+    for (const text of older) await say(owner, conv, text);
+    const question = "附近有什么好吃的？";
+    await say(owner, conv, question);
+    const hits = "川".repeat(3000);
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "川菜" } }], { usage: U(1000, 50) })
+      .reply("川菜馆有一家。", { usage: U(1000, 20) });
+    expect(await toolWorker(gateway, toolbox(() => ({ output: hits, activity: "search" }))).worker.runOnce()).toBe(true);
+
+    expect(gateway.calls).toHaveLength(2);
+    const [first, second] = gateway.calls as [ModelCall, ModelCall];
+    expect(first.tools).toEqual(TOOLS);
+    const system = { rest: first.system, passage: "" };
+    const definitions = estimateTokens(JSON.stringify(TOOLS)) + TOOL_PREAMBLE_TOKENS;
+    const conversation = contextBudget(CONTEXT, MAX_OUT, system, 1, definitions);
+    const results = Math.min(2 * app.deps.config.tools.resultMaxWeight, Math.floor(conversation / 3));
+    expect(results).toBe(6000);
+    const reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`) + results;
+    const shown = (budget: number) => 1 + Math.min(older.length, Math.floor((budget - estimateTokens(question)) / 3000));
+    const planned = (texts: number) => estimateTokens(first.system) + estimateTokens(question) + (texts - 1) * 3000;
+    const framing = estimateTokens(`${JSON.stringify(TOOLS)}\n\n${FINAL_LINE}`) + TOOL_PREAMBLE_TOKENS;
+    // Before: the definitions alone reserved, 28 older messages shown, and the rounds left what the context leaves
+    // beside the output limit, less its headroom, that input, the definitions, the line and the 400 — less than nothing:
+    // the result went back as the mark alone, and the next call was the last.
+    const before = shown(conversation);
+    expect(Math.floor((CONTEXT - MAX_OUT) * (1 - CONTEXT_HEADROOM)) - planned(before) - framing).toBeLessThan(0);
+    // Now: the line and two results' worth are kept out of the conversation's plan too, and the rounds have what the
+    // plan's limit (the system text, the reservation, the conversation's budget) leaves: at least those two results.
+    const budget = contextBudget(CONTEXT, MAX_OUT, system, 1, reserved);
+    const after = shown(budget);
+    expect([before, after]).toEqual([29, 27]);
+    expect(estimateTokens(first.system) + reserved + budget - planned(after) - framing).toBeGreaterThanOrEqual(results);
+    expect(textsOf(first)).toHaveLength(after);
+    expect(textsOf(first).at(-1)).toBe(question);
+    // The result went back whole, and the second call was another round, not the last.
+    expect(isFinal(second)).toBe(false);
+    expect(second.tools).toEqual(TOOLS);
+    expect(second.steps?.map((s) => s.results.map((r) => r.output))).toEqual([[hits]]);
+    expect(await runOf(owner.id)).toMatchObject({ status: "done", hold: "0" });
+  });
+
+  it("the plan's limit the rounds fill (ToolRun.limit): the system text, the reservation, and what the conversation may take before a group's cap — so the rounds get the room kept for results and what the conversation left unused; in a group, where a third of the cap is kept, the context beyond the cap too", async () => {
+    const { port } = toolWorker(scriptedGateway());
+    const lineTokens = estimateTokens(`\n\n${FINAL_LINE}`);
+    const definitions = estimateTokens(JSON.stringify(TOOLS)) + TOOL_PREAMBLE_TOKENS;
+    /** What `prepared` was planned with, with the conversation's room capped at `cap` (a group's). */
+    const planOf = (prepared: Prepared, cap: number | null) => {
+      const system = { rest: prepared.call.system, passage: "" };
+      const capped = (n: number) => (cap === null ? n : Math.min(n, cap));
+      const results = Math.min(2 * app.deps.config.tools.resultMaxWeight, Math.floor(capped(contextBudget(CONTEXT, MAX_OUT, system, 1, definitions)) / 3));
+      const reserved = definitions + lineTokens + results;
+      const whole = contextBudget(CONTEXT, MAX_OUT, system, 1, reserved);
+      const toolRun = prepared.toolRun!;
+      expect(toolRun.limit).toBe(estimateTokens(prepared.call.system) + reserved + whole);
+      // The rounds' room: the results' share, and what the conversation (the planned input less the system text) left
+      // unused of what it may take — give or take the token the line and the definitions round to apart.
+      const room = toolRun.limit - toolRun.planned - estimateTokens(`${JSON.stringify(TOOLS)}\n\n${FINAL_LINE}`) - TOOL_PREAMBLE_TOKENS;
+      const unused = whole - (toolRun.planned - estimateTokens(prepared.call.system));
+      expect(room - (results + unused)).toBeGreaterThanOrEqual(0);
+      expect(room - (results + unused)).toBeLessThanOrEqual(1);
+      return { results, whole };
+    };
+
+    // Its own conversation: two results' worth.
+    const a = await owned("limitown", PAID);
+    await grant(db, a.owner.id, 20n * POINT);
+    await say(a.owner, a.conv, "附近有什么好吃的？");
+    const own = (await port.begin((await port.claimNext())!)) as Prepared;
+    expect(isRunEnd(own)).toBe(false);
+    expect(planOf(own, null).results).toBe(6000);
+
+    // In a group: a third of its cap (12 000) is kept, and the rounds may go past the cap, as far as the context allows.
+    const owner = await signUp(app, "limitgroup");
+    const member = await signUp(app, "limitmember");
+    const g = await group(app, owner, "饭搭子", [member, await signUp(app, "limitthird")]);
+    const agent = await mustCreateAgent(app, owner, { handle: "limitchef", name: "limitchef", model: PAID, persona: "简短地回答。" });
+    await grant(db, owner.id, 20n * POINT);
+    await db.query("insert into memberships (conversation_id, principal_id, role, joined_seq) select $1, $2, 'speaker', seq from conversations where id = $1", [g, agent.id]);
+    await say(member, g, "@limitchef 附近有什么好吃的？");
+    const inGroup = (await port.begin((await port.claimNext())!)) as Prepared;
+    expect(isRunEnd(inGroup)).toBe(false);
+    const cap = app.deps.config.agentGroupContextTokens;
+    expect(cap).toBe(12_000);
+    const plan = planOf(inGroup, cap);
+    expect(plan.results).toBe(4000);
+    expect(plan.whole).toBeGreaterThan(cap);
+  });
+
+  it("a model too small for the definitions and the room for what the tools bring back, though it has room for the definitions alone: no tools are offered, and the reply is one call, as one without tools", async () => {
+    const owner = await signUp(app, "smallresults");
+    const model = await smallModel(owner);
+    // A persona that leaves the conversation about 260 tokens beside the search tool's definitions: enough for the
+    // newest message's 200 alone, not once the line and a third of it for results are kept too.
+    const agent = await mustCreateAgent(app, owner, { name: "小", model, persona: "简".repeat(4892) });
+    const question = `附近有什么好吃的？${"我想吃辣的。".repeat(40)}`;
+    const gateway = scriptedGateway().reply("去吃川菜。", { usage: U(6000, 10) });
+    await say(owner, agent.conversationId, question);
+    expect(await toolWorker(gateway).worker.runOnce()).toBe(true);
+
+    expect(gateway.calls).toHaveLength(1);
+    const call = gateway.calls[0]!;
+    expect(call).not.toHaveProperty("tools");
+    expect(call).not.toHaveProperty("toolChoice");
+    expect(textsOf(call)).toEqual([question]);
+    // What the conversation would get beside the definitions (enough: at least the 200 a call needs), and beside the
+    // definitions, the line and the room for results (not enough).
+    expect(estimateTokens(question)).toBeGreaterThan(200);
+    const system = { rest: call.system, passage: "" };
+    const definitions = estimateTokens(JSON.stringify(TOOLS)) + TOOL_PREAMBLE_TOKENS;
+    const conversation = contextBudget(8192, call.maxOutputTokens, system, 1, definitions);
+    expect(conversation).toBeGreaterThanOrEqual(200);
+    const results = Math.min(2 * app.deps.config.tools.resultMaxWeight, Math.floor(conversation / 3));
+    expect(contextBudget(8192, call.maxOutputTokens, system, 1, definitions + estimateTokens(`\n\n${FINAL_LINE}`) + results)).toBeLessThan(200);
+    // Exactly a reply without tools: answered, and its estimate recorded for the ratio.
+    expect(await runOf(owner.id)).toMatchObject({ status: "done" });
+    expect((await runOf(owner.id)).input_estimate).not.toBe(null);
   });
 });

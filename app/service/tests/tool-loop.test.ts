@@ -67,6 +67,8 @@ interface FakeOptions {
 function fakePort(options: FakeOptions = {}): Fake {
   const ticket: RunTicket = { id: "run-1", agentId: "agent-1", ownerId: "owner-1", conversationId: "conv-1" };
   const tools = options.tools ?? TOOLS;
+  const contextTokens = options.toolRun?.contextTokens ?? 100_000;
+  const maxOutputTokens = options.call?.maxOutputTokens ?? 1000;
   const prepared: Prepared = {
     call: {
       protocol: "openai_chat",
@@ -76,7 +78,7 @@ function fakePort(options: FakeOptions = {}): Fake {
       system: SYSTEM,
       messages: [{ role: "user", parts: [{ type: "text", text: "附近有什么好吃的？" }] }],
       reasoning: "none",
-      maxOutputTokens: 1000,
+      maxOutputTokens,
       ...options.call,
     },
     inputChars: options.inputChars ?? 120,
@@ -84,7 +86,17 @@ function fakePort(options: FakeOptions = {}): Fake {
     toolRun:
       tools.length === 0
         ? null
-        : { perTool: options.perTool ?? {}, contextTokens: 100_000, fixedTokens: 0, ratio: 1, planRatio: 1, planned: 120, ...options.toolRun },
+        : {
+            perTool: options.perTool ?? {},
+            contextTokens,
+            fixedTokens: 0,
+            ratio: 1,
+            planRatio: 1,
+            planned: 120,
+            // A plan with nothing reserved: all the context leaves beside the output limit, less its headroom.
+            limit: Math.floor((contextTokens - maxOutputTokens) * (1 - CONTEXT_HEADROOM)),
+            ...options.toolRun,
+          },
   };
   let claimed = false;
   let stopped = false;
@@ -592,6 +604,28 @@ describe("a reply that offers tools", () => {
     expect(sent).toBeLessThan(contextTokens - 1000);
     const [first, second] = outputsOf(last, 0) as [string, string];
     expect(first.endsWith(CUT_MARK)).toBe(true);
+    expect(second).toBe(CUT_MARK);
+    expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
+  });
+
+  it("the room the rounds may fill is what the plan's limit leaves (ToolRun.limit) beside the planned input, the tools, the last call's line and their framing, however large the model's context", async () => {
+    const gateway = scriptedGateway().callTools([
+      { name: "search", input: { query: "a" } },
+      { name: "search", input: { query: "b" } },
+    ]);
+    gateway.reply("够了。");
+    const room = 200;
+    const limit = 120 + estimateTokens(JSON.stringify(TOOLS) + `\n\n${FINAL_LINE}`) + 400 + room;
+    const fake = fakePort({ toolRun: { limit }, tool: async () => ({ output: "很长的结果。".repeat(500), activity: "search" }) });
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(2);
+    const last = gateway.calls[1]!;
+    expect(isFinal(last)).toBe(true);
+    const [first, second] = outputsOf(last, 0) as [string, string];
+    // Cut by the room (beside the round's own call and the framing), not by `resultMaxWeight` (3 000).
+    expect(first.endsWith(CUT_MARK)).toBe(true);
+    expect(weight(first)).toBeGreaterThan(room / 3);
+    expect(weight(first)).toBeLessThanOrEqual(room);
     expect(second).toBe(CUT_MARK);
     expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
   });
