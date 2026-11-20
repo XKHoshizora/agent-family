@@ -444,6 +444,61 @@ export async function hearFrom(t: Tx, runId: string, from: number, to: number | 
   return rows[0]?.askers ?? null;
 }
 
+/**
+ * The block rule a call meets when it is made, met again by every call reply run `runId` of an Agent of `ownerId`
+ * answers as it begins (reverse-paths audit A12; Task R fix round 1), whatever the run's lane: a call (`call_seqs`; its
+ * `covers_seq` when not known) whose person has a block with the owner, either way — the sender of a person's message;
+ * for an Agent's message that Agent's owner and the person behind it (`behindMessageSql`), as `followUp` reads them — would
+ * be refused were it made now (`triggerInGroup`, `triggerFromAgent`), and is dropped: it is no longer among the calls the
+ * run answers and nobody the owner has a block with is among its askers; what the run covers ends at the latest call
+ * left (`covers_seq`, or `pending_seq` when that call was noted after its claim), so what came after that call is heard
+ * by the usual rule as the run begins (`hearFrom`: someone blocked who wrote there is heard, as anyone is, and counts
+ * toward its line, never as a call). A run whose caller is dropped becomes the remaining calls' by `followUp`'s rule —
+ * its owner's own when the owner is behind one of them, else the earliest one's — and a person's while a person's call
+ * is left (a reply nobody asked for keeps its lane, caller and trigger). The owner's own call is never dropped (nobody has
+ * a block with themselves). Returns what the run now covers and has noted (empty when nothing was dropped: one query),
+ * or null when no call is left — then only its `pending_seq` is cleared, so no follow-up answers a dropped call.
+ */
+export async function dropBlockedCalls(t: Tx, runId: string, ownerId: string): Promise<{ covers_seq?: string | null; pending_seq?: string | null } | null> {
+  const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; behind: string | null; blocked: boolean; lane: Lane; caller_blocked: boolean }>(
+    `select m.seq::text as seq, p.kind, bh.caller_id as behind, ${blockedEitherWay("$2::uuid", "coalesce(p.owner_id, p.id), bh.caller_id")} as blocked,
+            r.lane, ${blockedEitherWay("$2::uuid", "r.caller_id")} as caller_blocked
+       from agent_runs r
+       join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, array[r.covers_seq]))
+       join principals p on p.id = m.sender_id
+       left join agent_runs pr on p.kind = 'agent' and ${postingRun("m", "pr")}
+       cross join lateral (select ${behindMessageSql("p", "pr")} as caller_id) bh
+      where r.id = $1
+      order by m.seq`,
+    [runId, ownerId],
+  );
+  if (!rows.some((r) => r.blocked)) return {};
+  const left = rows.filter((r) => !r.blocked);
+  if (left.length === 0) {
+    await t.query("update agent_runs set pending_seq = null where id = $1", [runId]);
+    return null;
+  }
+  const { lane } = rows[0]!;
+  const caller: Caller | null =
+    lane === "proactive" || !rows[0]!.caller_blocked
+      ? null
+      : left.some((r) => r.behind === ownerId)
+        ? callerOf(ownerId, ownerId)
+        : callerOf(ownerId, left.find((r) => r.behind !== null)?.behind ?? null);
+  const by: TriggeredBy | null = lane === "proactive" ? null : left.some((r) => r.kind === "human") ? "human" : "agent";
+  const updated = await t.query<{ covers_seq: string | null; pending_seq: string | null }>(
+    `update agent_runs set call_seqs = $2::bigint[], covers_seq = least(covers_seq, $3::bigint),
+            pending_seq = case when $3::bigint > covers_seq then $3::bigint end,
+            asker_ids = case when asker_ids is null then null
+                             else array(select x.a from unnest(asker_ids) as x (a) where not ${blockedEitherWay("$4::uuid", "x.a")} order by x.a) end,
+            caller_id = case when $5::boolean then $6::uuid else caller_id end, lane = case when $5::boolean then $7::text else lane end,
+            triggered_by = coalesce($8::text, triggered_by)
+      where id = $1 returning covers_seq::text as covers_seq, pending_seq::text as pending_seq`,
+    [runId, left.map((r) => Number(r.seq)), Number(left.at(-1)!.seq), ownerId, caller !== null, caller?.id ?? null, caller?.lane ?? null, by],
+  );
+  return updated.rows[0]!;
+}
+
 /** That run `runId` answers the calls at `seqs` too (`call_seqs`, migration 046), besides those it has. */
 async function answersCalls(t: Tx, runId: string, seqs: readonly number[]): Promise<void> {
   if (seqs.length === 0) return;

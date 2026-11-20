@@ -748,7 +748,8 @@ or nobody had — it was to speak unasked — and a member halted Agents, Agents
 answer is before a new topic you started; in a group, none of the messages that called for it is one the Agent can see,
 A reply there, Whose joining it reaches back to; or — a reply someone else called for in a group — the Agent's others' daily
 budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group;
-or a block between you and the person who called for it, either way, was made before it began: nothing was called or charged).
+or everyone whose call it answered has had a block with you, either way, since the call and before it began — a call from
+such a person is dropped and the others are still answered; with none left nothing was called or charged).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed`, `context_too_small` and `model_gone`, and for every run that did not fail; true
 after `rate_limited`, which a retry within the same minute meets again as 429). `resetsAt` (ISO instant): for
@@ -2590,9 +2591,12 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    in any of them ends the run `failed`, `busy`):
    1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
       `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
-      `cancelled`, `agent_removed`, a reply whose caller and the Agent's owner now have a block between them (either
-      way; made since the call) `cancelled` with no error (the call would be refused now: no call, nothing held or
-      charged, no message, nothing to retry), a model that no longer resolves `failed`
+      `cancelled`, `agent_removed`. Every call the run answers meets the block rule of a call made now, whatever its
+      lane (a call its owner's own call took over, and a retry, included): one whose person has a block with the Agent's
+      owner, either way, made since (for an Agent's message: its owner, or the person behind it) is dropped — no longer a
+      call it answers, nobody with such a block among its askers, and what it covers ends at the latest call left, so what
+      came after that is heard as usual (Whose joining it reaches back to) — and a run with no call left ends `cancelled`
+      with no error (no call, nothing held or charged, no message, nothing to retry). A model that no longer resolves ends `failed`
       (`model_gone`, not retryable; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
       run takes on what was noted meanwhile — but a reply nobody had asked for (lane `proactive`) with a mention noted on
       it since its claim ends here instead, `cancelled` with no error, no call and nothing held or charged, and its
