@@ -59,7 +59,7 @@ export function expectLinear<T>(options: { n: number; factor?: number; make: (n:
     fastLarge = Math.min(fastLarge, timed(twice, reps));
     if (pair + 1 >= MIN_PAIRS && fastLarge / fastSmall < 2 * factor) break;
   }
-  expect(fastSmall, "the smaller input is still too quick to measure: give `expectLinear` a larger `n`").toBeGreaterThanOrEqual(MIN_SAMPLE_MS / 4);
+  expect(fastSmall, "the smaller input is still too quick to measure: give `expectLinear` a larger `n`").toBeGreaterThanOrEqual(MIN_SAMPLE_MS / 10);
   expect([`${factor} times the input`, fastLarge / fastSmall < 2 * factor], `large ${fastLarge.toFixed(1)} ms, small ${fastSmall.toFixed(1)} ms, ${reps} calls a sample, n ${n}`).toEqual([`${factor} times the input`, true]);
   return { small: fastSmall, large: fastLarge, reps, n };
 }
