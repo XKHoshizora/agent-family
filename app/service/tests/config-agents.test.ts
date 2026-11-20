@@ -513,6 +513,11 @@ describe("the memory configuration", () => {
     for (const bad of ['{"summaryMinMessages":0}', '{"summaryMinMessages":1.5}', '{"summaryMinMessages":201}', '{"summaryMaxWeight":0}', '{"summaryMaxWeight":2001}', '{"summaryMaxWeight":"800"}']) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }
+    // A job never reads fewer than its minimum for weight: a review's window holds at least as many messages.
+    for (const bad of ['{"reviewMessages":10}', '{"summaryMinMessages":41}', '{"reviewMessages":30,"summaryMinMessages":31}']) {
+      expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY.*reviewMessages/);
+    }
+    expect(loadConfig({ ...base, MEMORY: '{"reviewMessages":10,"summaryMinMessages":10}' }).memory).toMatchObject({ reviewMessages: 10, summaryMinMessages: 10 });
   });
 
   test("the hearsay limits can be set", () => {

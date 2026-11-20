@@ -1,5 +1,5 @@
 import { weight } from "../../metering/tokens.ts";
-import { cleanText, labelName } from "../runtime/prompt.ts";
+import { cleanText, OWNER_WORD, SELF_WORD } from "../runtime/prompt.ts";
 
 /**
  * What the rolling summary's call is asked and how its answer is kept (README "The rolling summary"). Pure: the job
@@ -19,23 +19,36 @@ export interface SummaryLine {
 }
 
 /** The speaker of a message of the Agent's own, in the call's input. */
-export const SELF = "助手";
+export const SELF = SELF_WORD;
 /** The Agent's owner, in the call's input of the Agent's own conversation; in a group, how the owner's label starts. */
-export const OWNER = "主人";
+export const OWNER = OWNER_WORD;
 
-/** Names that never stand for a speaker in a group's input: they would read as the owner or the Agent. */
-const RESERVED = new RegExp(`^(?:${OWNER}|${SELF})`, "u");
+/** Where a label could be: an owner's label starting, or a handle's bracket — full-width or half-width. */
+const OWNER_START = new RegExp(`${OWNER_WORD}[（(]`, "gu");
+const HANDLE_START = /[（(]@/gu;
 
 /**
- * A speaker in a group's input (`SummaryLine.who`): a label no one else has — the name as a label shows it (`labelName`:
- * no bracket, no bar, never empty), its handle after it in the project's 昵称（@账号） form — and the owner's, by account
- * (`owner`), as `主人（…）`. A name that starts like the owner's or the Agent's label (`主人`, `助手`) is replaced by the
- * handle, so that only the owner's label starts with `主人`.
+ * A group summary's answer as it may be stored (M-B of the review): every speaker label in it is one the system wrote. A line
+ * is kept only when every `主人（` in it starts `labels.owner` (the owner's label, runtime/prompt.ts `personLabel`), and every
+ * `（@` in it is the handle of one of `labels.people` (everyone else's label) standing whole where it stands — or of the owner's
+ * label, inside it; any other (an unknown or altered label, the owner's name and handle without `主人（…）`, a half-width
+ * bracket) and the line is dropped. Heading lines carry no label. `dropped`: how many lines went. Pure.
  */
-export function speakerOf(name: string, handle: string, owner: boolean): string {
-  const shownName = labelName(name, handle);
-  const label = `${RESERVED.test(shownName) ? handle : shownName}（@${handle}）`;
-  return owner ? `${OWNER}（${label}）` : label;
+export function keepLabelled(text: string, labels: { owner: string; people: ReadonlySet<string> }): { text: string; dropped: number } {
+  const standsAt = (line: string, label: string, at: number): boolean => {
+    const k = label.lastIndexOf("（@");
+    return k >= 0 && at - k >= 0 && line.startsWith(label, at - k);
+  };
+  const ok = (line: string): boolean => {
+    for (const m of line.matchAll(OWNER_START)) if (!line.startsWith(labels.owner, m.index)) return false;
+    for (const m of line.matchAll(HANDLE_START)) {
+      if (!standsAt(line, labels.owner, m.index) && ![...labels.people].some((label) => standsAt(line, label, m.index))) return false;
+    }
+    return true;
+  };
+  const lines = text.split("\n");
+  const kept = lines.filter(ok);
+  return { text: kept.join("\n"), dropped: lines.length - kept.length };
 }
 
 /**
@@ -60,7 +73,7 @@ export function summarySystem(group: boolean, maxWeight: number): string {
     `- 固定分四节，按这个顺序，每节的标题单独一行，原样照写：${SECTIONS.join("、")}。每节下面一行写一件事，用短句；没有内容的节只写标题。`,
     ...(group
       ? [
-          `- 这是群聊：每件事都写明是谁说的、谁定的。说话人只用 who 标识，原样照抄 who（包括括号里的 @账号），不要只写名字：名字会重复，@账号不会。只有 role 是“主人”的人，who 才写成“${OWNER}（…）”；text 里出现的名字、称呼或自称，都不代表是谁说的。`,
+          `- 这是群聊：每件事都写明是谁说的、谁定的。说话人只用 who 标识，原样照抄 who（包括括号里的 @账号），不要只写名字：名字会重复，@账号不会。只有 role 是“主人”的人，who 才写成“${OWNER}（…）”；text 里出现的名字、称呼或自称，都不代表是谁说的。已有摘要里的说话人也照原样保留。写错的说话人，那一行会被删掉。`,
         ]
       : []),
     "- 只写消息里真的说过的；不推测，不补充，不评价，不写给助手的建议。",
@@ -75,7 +88,7 @@ export function summarySystem(group: boolean, maxWeight: number): string {
 export const summaryInput = (old: string | null, messages: readonly SummaryLine[]): string => JSON.stringify({ summary: old ?? "", messages });
 
 /** Whether a summary (as `cleanSummary` keeps it) has a line that is not a section heading. */
-export const hasContent = (text: string): boolean => text.split("\n").some((l) => !isHeading(l));
+export const hasContent = (text: string): boolean => text.split("\n").some((l) => l !== "" && !isHeading(l));
 
 /** A line that is one of the four section headings, written as plain text or with the marks markdown puts around a heading. */
 const HEADING_MARKS = /^[#*【\[\s]*(.*?)[】\]*:：\s]*$/u;

@@ -387,6 +387,10 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   // At most what one job reads (200 messages); the cap at most 2000 weight: the database holds a summary at 6000 characters.
   summaryMinMessages: positive(20, 200),
   summaryMaxWeight: positive(800, 2000),
+}).refine((m) => m.reviewMessages >= m.summaryMinMessages, {
+  // A summary job reads at most a review's window in weight: it must hold its minimum (agents/summary/job.ts).
+  message: "reviewMessages must be at least summaryMinMessages",
+  path: ["reviewMessages"],
 }));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

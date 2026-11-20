@@ -42,17 +42,25 @@ const placedParams = (r: PlacedReader, after: number, upto: number) => [r.agentI
  * or before seq `maxSeq` (a read bounded on both sides; agents/context.ts counts the rest from what it loaded).
  */
 export async function countPlaced(q: Queryable, r: PlacedReader, after: number, upto: number, maxSeq?: number): Promise<number> {
-  return (await placedRange(q, r, after, upto, maxSeq)).messages;
+  if (upto <= after) return 0;
+  const { rows } = await q.query<{ n: number }>(`select count(*)::int as n ${PLACED_FROM} ${PLACED_WHERE} and ($7::bigint is null or m.seq <= $7::bigint)`, [
+    ...placedParams(r, after, upto),
+    maxSeq ?? null,
+  ]);
+  return rows[0]?.n ?? 0;
 }
 
-/** `countPlaced`, with the first place among them (null when there are none). */
-export async function placedRange(q: Queryable, r: PlacedReader, after: number, upto: number, maxSeq?: number): Promise<{ messages: number; first: number | null }> {
-  if (upto <= after) return { messages: 0, first: null };
-  const { rows } = await q.query<{ n: number; first: string | null }>(
-    `select count(*)::int as n, min(coalesce(r.covers_seq, m.seq))::text as first ${PLACED_FROM} ${PLACED_WHERE} and ($7::bigint is null or m.seq <= $7::bigint)`,
-    [...placedParams(r, after, upto), maxSeq ?? null],
+/** Everyone `r` reads a message of whose place is after `after` and at most `upto`: their name, handle and kind, each once. */
+export async function placedSpeakers(q: Queryable, r: PlacedReader, after: number, upto: number): Promise<Array<{ id: string; name: string; handle: string; kind: "human" | "agent" }>> {
+  if (upto <= after) return [];
+  const { rows } = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent" }>(
+    `select distinct sp.id, sp.display_name as name, sp.handle::text as handle, sp.kind
+       ${PLACED_FROM}
+       join principals sp on sp.id = m.sender_id
+      ${PLACED_WHERE}`,
+    placedParams(r, after, upto),
   );
-  return { messages: rows[0]?.n ?? 0, first: rows[0]?.first == null ? null : Number(rows[0].first) };
+  return rows;
 }
 
 /** A message as a summary reads it: its place, who sent it (their name, handle and kind), its text and its attachment. */
@@ -93,22 +101,29 @@ export async function readPlaced(q: Queryable, r: PlacedReader, after: number, u
 }
 
 /**
- * Where what Agent `agentId` may be shown of `conversationId` starts: the later of where its current membership began and
- * the latest new topic it can see (agents/context.ts `topicStart`) — a summary covers only what is after it. Null when the
- * Agent is not a member there now.
+ * Agent `agentId`'s current stay in `conversationId`, in one read: where its membership began (`joined`, the visibility rule's
+ * `joined_seq`) and the latest new topic it can see there (`topic`, the seq of the latest `topic_reset` after it; 0 when none).
+ * Null when it is not a member there now. What a reply's context starts after (agents/context.ts `loadContext`) and where
+ * a summary may begin (`summaryBase`) are both read from it.
  */
-export async function summaryBase(q: Queryable, agentId: string, conversationId: string): Promise<number | null> {
-  const { rows } = await q.query<{ base: string }>(
-    `select greatest(ms.joined_seq,
-                     coalesce((select max(m.seq) from messages m
-                                where m.conversation_id = ms.conversation_id and m.seq > ms.joined_seq
-                                  and m.kind = 'system' and m.body ->> 'event' = 'topic_reset'), 0))::text as base
+export async function stayOf(q: Queryable, agentId: string, conversationId: string): Promise<{ joined: number; topic: number } | null> {
+  const { rows } = await q.query<{ joined: string; topic: string }>(
+    `select ms.joined_seq::text as joined,
+            coalesce((select max(m.seq) from messages m
+                       where m.conversation_id = ms.conversation_id and m.seq > ms.joined_seq
+                         and m.kind = 'system' and m.body ->> 'event' = 'topic_reset'), 0)::text as topic
        from memberships ms
       where ms.conversation_id = $2 and ms.principal_id = $1 and ms.left_seq is null`,
     [agentId, conversationId],
   );
-  return rows[0] ? Number(rows[0].base) : null;
+  return rows[0] ? { joined: Number(rows[0].joined), topic: Number(rows[0].topic) } : null;
 }
+
+/** Where a stay's summary may begin: after the later of its joining and its latest new topic (`stayOf`); null with no stay. */
+export const baseOf = (stay: { joined: number; topic: number } | null): number | null => (stay === null ? null : Math.max(stay.joined, stay.topic));
+
+/** `baseOf` the Agent's current stay, read now: a summary covers only what is after it. Null when the Agent is not a member there. */
+export const summaryBase = async (q: Queryable, agentId: string, conversationId: string): Promise<number | null> => baseOf(await stayOf(q, agentId, conversationId));
 
 /**
  * A pair's summary: `text` covers the messages its Agent could see whose place in the conversation (`position`: a message's

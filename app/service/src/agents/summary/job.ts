@@ -4,10 +4,10 @@ import { memoryCall, type MemoryCallDeps, type MemoryCallReport } from "../../me
 import { shown } from "../../memory/review.ts";
 import { count } from "../../memory/stats.ts";
 import { attachmentLabel } from "../runtime/context.ts";
-import { speakerRole } from "../runtime/prompt.ts";
+import { personLabel, speakerRole } from "../runtime/prompt.ts";
 import { liveAgent, lockAgent } from "../store.ts";
-import { cleanSummary, hasContent, OWNER, SELF, speakerOf, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
-import { countPlaced, readPlaced, readSummary, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
+import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
+import { countPlaced, placedSpeakers, readPlaced, readSummary, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
 /**
  * One rolling-summary job (README "The rolling summary"; queued after a reply by agents/port-impl.ts `finish`, run by the
@@ -47,7 +47,7 @@ export const SUMMARY_MAX_MESSAGES = 200;
 
 /**
  * A message as the call is shown it (prompt.ts `SummaryLine`): in a group, who said it by a label no one else has
- * (`speakerOf`: the name and the handle, the owner's as `主人（…）` by account) and who they are to the Agent by account
+ * (runtime/prompt.ts `personLabel`, the roster's: the name and the handle, the owner's as `主人（…）` by account) and who they are to the Agent by account
  * (`speakerRole`, the labels' own mapping).
  */
 function lineOf(m: PlacedMessage, reader: PlacedReader, maxWeight: number): SummaryLine {
@@ -56,7 +56,7 @@ function lineOf(m: PlacedMessage, reader: PlacedReader, maxWeight: number): Summ
   if (m.senderId === reader.agentId) return { who: SELF, text };
   if (!reader.group) return { who: OWNER, text };
   const role = speakerRole(m.senderId, m.kind, reader.ownerId);
-  return { who: speakerOf(m.name, m.handle, role === "你的主人"), role: role === "你的主人" ? "主人" : role, text };
+  return { who: personLabel(m.name, m.handle, role === "你的主人"), role: role === "你的主人" ? "主人" : role, text };
 }
 
 /**
@@ -108,6 +108,9 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   if (n === 0) return;
   const upto = cut ? read[n - 1]!.at : job.upTo;
   const taken = lines.slice(0, n).filter((l) => l.text !== "");
+  // Messages with nothing left of them once cleaned do not count toward the minimum (a window cut for its size holds at
+  // least `reviewMessages` of them, which the configuration holds to at least `summaryMinMessages`: it is not asked again).
+  if (!cut && taken.length < memory.summaryMinMessages) return;
   const next: Omit<Summary, "text"> = { fromSeq: old?.fromSeq ?? read[0]!.at, uptoSeq: upto };
 
   count(db, "summary_run");
@@ -125,8 +128,15 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   );
   if (ctx.closing.aborted) return;
   const cleaned = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
-  // Headings and nothing else never replace a summary that said something.
-  const text = cleaned !== null && !hasContent(cleaned) && old !== null && hasContent(old.text) ? null : cleaned;
+  // In a group every speaker label must be one the system wrote: a line with any other goes (counted).
+  let labelled = cleaned;
+  if (cleaned !== null && reader.group) {
+    const kept = keepLabelled(cleaned, await speakerLabels(db, reader, base, job.upTo));
+    count(db, "summary_label_dropped", kept.dropped);
+    labelled = kept.text;
+  }
+  // Headings and nothing else are no summary: never stored, and the messages are not swallowed.
+  const text = labelled !== null && hasContent(labelled) ? labelled : null;
   if (text === null) {
     // A refusal for the allowance is counted where it is decided (`memory_refused_allowance`).
     if (!report.refused) count(db, "summary_failed");
@@ -164,6 +174,19 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   }
   count(db, "summary_written");
   ctx.summaryAttempted(null);
+}
+
+/**
+ * The speaker labels a group summary may hold (prompt.ts `keepLabelled`): the owner's, and everyone else's who has a message
+ * the pair could cover (placed after `base` and up to `upTo`) — by their names and handles now (runtime/prompt.ts
+ * `personLabel`). Counted: how many lines of an answer went (`summary_label_dropped`).
+ */
+async function speakerLabels(db: SummaryDeps["db"], reader: PlacedReader, base: number, upTo: number): Promise<{ owner: string; people: Set<string> }> {
+  const owner = (await db.query<{ name: string; handle: string }>("select display_name as name, handle::text as handle from principals where id = $1", [reader.ownerId])).rows[0]!;
+  const people = new Set(
+    (await placedSpeakers(db, reader, base, upTo)).flatMap((p) => (p.id === reader.ownerId || p.id === reader.agentId ? [] : [personLabel(p.name, p.handle, false)])),
+  );
+  return { owner: personLabel(owner.name, owner.handle, true), people };
 }
 
 const sameSummary = (a: Summary | null, b: Summary | null): boolean =>

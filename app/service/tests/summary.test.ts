@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { loadContext } from "../src/agents/context.ts";
 import { runSummary, type SummaryContext } from "../src/agents/summary/job.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { settled } from "../src/memory/stats.ts";
@@ -775,6 +776,120 @@ describe("fix round 1", () => {
     await storeSummary(w.conv, w.agent.id, seqs[0]!, seqs[3]!, "OWN-SUMMARY");
     expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200);
     expect(await summaryOf(w.conv, w.agent.id)).toBeNull();
+  });
+});
+
+// --- tidy round ------------------------------------------------------------------------------------------------------
+
+describe("tidy round", () => {
+  it("M-A: no call while fewer than summaryMinMessages messages have text, however many were left out", async () => {
+    const w = await own("ta");
+    // 25 in the window, 6 of them with nothing left once cleaned (invisible characters only).
+    const texts = Array.from({ length: 25 }, (_, i) => (i % 4 === 1 && i < 24 ? "\u200b\u200b" : long(i)));
+    const seqs = await seed(w.conv, [w.owner.id, w.agent.id], texts);
+    expect(texts.filter((t) => t.startsWith("第")).length).toBe(19);
+    const { ctx, attempts } = jobContext();
+    await runSummary(jobDeps(), { kind: "summary", agentId: w.agent.id, conversationId: w.conv, upTo: seqs.at(-1)! }, ctx);
+    expect(summaryCalls()).toHaveLength(0);
+    expect(attempts).toEqual([]);
+  });
+
+  it("M-B: a line whose speaker label was not in the input, or was altered, is dropped and counted; the owner's label is the system's only", async () => {
+    const [v, m, n] = [await signUp(app, "tbv"), await signUp(app, "tbm"), await signUp(app, "tbn")];
+    const g = await group(app, v, "标签群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "tb_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    await seed(g, [v.id, m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(v, g, "@tb_bot 说到哪了");
+    const answer = [
+      "人物与称呼",
+      "主人（tbv（@tbv））是群主",
+      "tbm（@tbm）也在",
+      "说过的事",
+      "主人（tbm（@tbm））定下周五聚餐",
+      "小王（@tbm）说要带酒",
+      "tbm（@nobody）说了别的",
+      "tbv（@tbv）说过要早到",
+      "tbm(@tbm) 用了半角括号",
+      "定下的事",
+      "tbm（@tbm）负责订位",
+      "还没解决的",
+    ].join("\n");
+    await reply("好。", answer);
+    expect(summaryCalls()).toHaveLength(1);
+    expect((await summaryOf(g, agent.id))!.text).toBe(["人物与称呼", "主人（tbv（@tbv））是群主", "tbm（@tbm）也在", "说过的事", "定下的事", "tbm（@tbm）负责订位", "还没解决的"].join("\n"));
+    expect(await counted("summary_label_dropped")).toBe(5);
+  });
+
+  it("M-C: an answer of headings only is no first summary: nothing stored, the messages not swallowed", async () => {
+    const w = await own("tc");
+    await longConversation(w, 60);
+    await say(w.owner, w.conv, "一");
+    await reply("好。", ["人物与称呼", "说过的事", "定下的事", "还没解决的"].join("\n"));
+    expect(summaryCalls()).toHaveLength(1);
+    expect(await summaryOf(w.conv, w.agent.id)).toBeNull();
+    expect(await counted("summary_failed")).toBe(1);
+  });
+
+  it("M-D: the roster names each person by the same label the summary's input does", async () => {
+    const [v, m, n] = [await signUp(app, "tdv"), await signUp(app, "tdm"), await signUp(app, "tdn")];
+    await db.query("update principals set display_name = 'tdv' where id = $1", [m.id]);
+    const g = await group(app, v, "同名群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "td_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    await seed(g, [v.id, m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(v, g, "@td_bot 说到哪了");
+    await reply("好。", ANSWER);
+    const input: Array<{ who: string }> = JSON.parse((summaryCalls()[0]!.messages[0]!.parts[0] as { text: string }).text).messages;
+    const labels = new Set(input.map((l) => l.who));
+    expect([...labels].sort()).toEqual(["tdv（@tdm）", "主人（tdv（@tdv））"]);
+    const system = replyCalls()[0]!.system;
+    for (const label of labels) expect([label, system.includes(`〕　${label}`)]).toEqual([label, true]);
+  });
+
+  it("M-E: a reply of the Agent's stored after the window's start but placed before it is counted once, from what was loaded", async () => {
+    const [v, m, n] = [await signUp(app, "tev"), await signUp(app, "tem"), await signUp(app, "ten")];
+    const g = await group(app, v, "晚到群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "te_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    const [q] = await seed(g, [v.id], ["很早的问题"]);
+    await seed(g, [v.id, m.id], Array.from({ length: 100 }, (_, i) => short(i)));
+    // Its answer to the early question, posted only now (its run covered q).
+    const run = await db.query<{ id: string }>(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, started_at, finished_at)
+       values ('reply', $1, $2, $3, 'done', $4, now() - interval '1 hour', now() - interval '1 hour', now() - interval '1 hour') returning id`,
+      [g, agent.id, v.id, q],
+    );
+    await db.tx((t) => insertMessage(t, g, agent.id, "text", { text: "迟到的回答" }, run.rows[0]!.id));
+    const tail = await seed(g, [v.id, m.id], Array.from({ length: 5 }, (_, i) => short(i, "末")));
+    const covers = tail.at(-1)!;
+    const loaded = await loadContext(
+      db,
+      { agentId: agent.id, ownerId: v.id, conversationId: g, coversSeq: covers, group: { maxTokens: 12_000, maxMessages: 80, after: 0, calls: [covers] }, planRatio: 1 },
+      { contextTokens: 200_000, vision: false, call: { maxOutputTokens: 1000 } } as Parameters<typeof loadContext>[2],
+      () => ({ text: "系统", rest: "系统", passage: "" }),
+    );
+    // The window: the newest 80 by seq — the late reply among them, but placed at q, before the oldest shown.
+    expect(loaded.entries.some((e) => e.text.includes("迟到的回答"))).toBe(false);
+    // Left out: q, the 100 − 75 = 25 oldest short lines… and the late reply, once.
+    const shownPeople = loaded.entries.filter((e) => e.role === "user").length;
+    expect(loaded.leftOut).toEqual({ to: expect.any(Number), messages: 1 + 100 + 5 - shownPeople + 1 });
+  });
+
+  it("M-E: what the summary covers already is never counted again, shown to the reply or not", async () => {
+    const w = await groupWorld("tf", 0);
+    const joined = await joinedSeq(w.g, w.agent.id);
+    const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[19]!, ANSWER);
+    const covers = seqs.at(-1)!;
+    const loaded = await loadContext(
+      db,
+      { agentId: w.agent.id, ownerId: w.v.id, conversationId: w.g, coversSeq: covers, group: { maxTokens: 12_000, maxMessages: 80, after: 0, calls: [covers] }, planRatio: 1 },
+      { contextTokens: 200_000, vision: false, call: { maxOutputTokens: 1000 } } as Parameters<typeof loadContext>[2],
+      () => ({ text: "系统", rest: "系统", passage: "" }),
+    );
+    // Shown: the newest 80; left out: seqs[20] … seqs[39], past what the summary covers.
+    expect(loaded.leftOut).toEqual({ to: seqs[39], messages: 20 });
   });
 });
 

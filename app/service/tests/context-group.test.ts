@@ -11,7 +11,8 @@ import { useApp } from "./helpers/harness.ts";
 /**
  * A group's window (Task 10; README "What the model is shown", "The rolling summary"): the newest messages that fit
  * min(the model's context budget, `AGENT_GROUP_CONTEXT_TOKENS`), at most `GROUP_CONTEXT_MESSAGES`, whichever bites first —
- * and what it leaves out (`leftOut`) exact at each: every visible message placed before the oldest one shown, counted.
+ * and what it leaves out (`leftOut`) exact at each: the place just before the oldest one shown (`to`) and how many visible
+ * messages lie before it (`messages`).
  * `loadContext` is called straight, as `begin` calls it, with a system text of a known size.
  */
 
@@ -85,7 +86,7 @@ describe("a group's window", () => {
     expect(loaded.budget).toBe(app.deps.config.agentGroupContextTokens);
     expect(loaded.entries).toHaveLength(GROUP_CONTEXT_MESSAGES);
     expect(fitting(loaded)).toBe(GROUP_CONTEXT_MESSAGES);
-    expect(loaded.leftOut).toEqual({ from: w.seqs[0], to: w.seqs[39], messages: 40 });
+    expect(loaded.leftOut).toEqual({ to: w.seqs[39], messages: 40 });
   });
 
   it("AGENT_GROUP_CONTEXT_TOKENS bites first: the newest that fit 12 000, and leftOut is exactly the rest", async () => {
@@ -97,7 +98,7 @@ describe("a group's window", () => {
     expect(kept).toBeGreaterThan(10);
     expect(kept).toBeLessThan(GROUP_CONTEXT_MESSAGES);
     const firstShown = w.seqs.length - kept;
-    expect(loaded.leftOut).toEqual({ from: w.seqs[0], to: w.seqs[firstShown - 1], messages: firstShown });
+    expect(loaded.leftOut).toEqual({ to: w.seqs[firstShown - 1], messages: firstShown });
   });
 
   it("the model's context bites first: the newest that fit its budget, and leftOut is exactly the rest", async () => {
@@ -109,7 +110,7 @@ describe("a group's window", () => {
     const kept = fitting(loaded);
     expect(kept).toBeLessThan(GROUP_CONTEXT_MESSAGES);
     const firstShown = w.seqs.length - kept;
-    expect(loaded.leftOut).toEqual({ from: w.seqs[0], to: w.seqs[firstShown - 1], messages: firstShown });
+    expect(loaded.leftOut).toEqual({ to: w.seqs[firstShown - 1], messages: firstShown });
   });
 
   it("nothing left out: no leftOut", async () => {

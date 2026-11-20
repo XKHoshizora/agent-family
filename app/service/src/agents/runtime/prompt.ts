@@ -232,6 +232,25 @@ export function labelName(name: string, handle: string): string {
   return shown === "" ? handle : shown;
 }
 
+/** How the Agent's owner, and the Agent itself, are written where people are named by `personLabel`. */
+export const OWNER_WORD = "主人";
+export const SELF_WORD = "助手";
+/** Names that never stand for anyone in a `personLabel`: they would read as the owner or the Agent. */
+const RESERVED_NAME = new RegExp(`^(?:${OWNER_WORD}|${SELF_WORD})`, "u");
+
+/**
+ * Someone as the system names them where a name alone is not enough — the one label of a person in a group's roster
+ * (`groupSystemText`) and in the rolling summary (its input's speakers, what its answer may name, agents/summary/): the
+ * name as a label shows it (`labelName`: no bracket, no bar, never empty) and the handle, `名字（@账号）` — a handle is
+ * unique —; the Agent's owner, by account only (`owner`), `主人（名字（@账号））`. A name that starts like the owner's or the
+ * Agent's own word (`主人`, `助手`) is replaced by the handle, so that only the owner's label starts with `主人`.
+ */
+export function personLabel(name: string, handle: string, owner: boolean): string {
+  const shown = labelName(name, handle);
+  const label = `${RESERVED_NAME.test(shown) ? handle : shown}（@${handle}）`;
+  return owner ? `${OWNER_WORD}（${label}）` : label;
+}
+
 /**
  * An appellation as the system text shows it — in the roster, and in the Agent's own conversation — inside `「」`:
  * `labelSafe`, as a name is shown; null when there is none, or nothing is left of it (then it is as none).
@@ -497,7 +516,8 @@ export function withoutMarkAtCut(text: string, mark: string): string {
 }
 
 /** How the roster is introduced, before its lines; and its last line when it lists fewer than are there. */
-const ROSTER_HEADING = "以下是群里的人，由系统列出。写着“称呼”的，你就这样称呼他；没写的，按名字称呼。称呼只是叫法，不改变谁是你的主人：";
+const ROSTER_HEADING =
+  "以下是群里的人，由系统列出。每行标签后面是这个人独一无二的写法“名字（@账号）”，你的主人写作“主人（名字（@账号））”，更早的对话摘要里也这样写。写着“称呼”的，你就这样称呼他；没写的，按名字称呼。称呼只是叫法，不改变谁是你的主人：";
 const MORE_PEOPLE = "……群里还有别的人，这里没有一一列出。";
 
 /**
@@ -551,7 +571,8 @@ export function groupSystemText(
           ROSTER_HEADING,
           ...group.people.map((p) => {
             const appellation = shownAppellation(p.appellation);
-            return `- ${speakerLabel(mark, labelName(p.name, p.handle), p.role)}${appellation === null ? "" : `　称呼：「${appellation}」`}`;
+            const label = personLabel(p.name, p.handle, p.role === "你的主人");
+            return `- ${speakerLabel(mark, labelName(p.name, p.handle), p.role)}　${label}${appellation === null ? "" : `　称呼：「${appellation}」`}`;
           }),
           ...(group.morePeople ? [MORE_PEOPLE] : []),
         ].join("\n") + "\n\n";
