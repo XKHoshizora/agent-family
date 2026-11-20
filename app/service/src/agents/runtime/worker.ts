@@ -1,5 +1,6 @@
 import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
-import { CONTEXT_HEADROOM, estimateTokens, holdTokens, weightWithin } from "../../metering/tokens.ts";
+import { isCount } from "../../metering/prices.ts";
+import { CONTEXT_HEADROOM, estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
 import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
 import { cutResult, FINAL_LINE, fitsSchema, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
@@ -135,9 +136,10 @@ const CUT_SHORT: Finished = { usage: null, truncated: true, toolCalls: [], assis
 const NO_QUOTA: RunEnd = { status: "failed", error: "no_quota" };
 
 /**
- * What a reply's rounds used, for its one settlement: each round's reported usage and its estimate (`Estimated`). The
- * usage is the rounds' sum, or null when there is no round or any round reported none — settlement then counts the
- * estimates' sum.
+ * What a reply's rounds used, for its one settlement (and for `extend`, which counts it the same way): each round's
+ * reported usage and its estimate (`Estimated`). `usage` is the rounds' sum, or null when there is no round or any round
+ * reported none — settlement then counts `estimated`, and the record says it was estimated: per round its reported
+ * usage when it has one (hidden reasoning included, as the upstream counts it), its estimate only when it has none.
  */
 class Meter {
   private readonly rounds: Array<{ usage: Usage | null; input: number; output: number }> = [];
@@ -158,7 +160,14 @@ class Meter {
   }
 
   estimated(): Estimated {
-    return { inputChars: this.rounds.reduce((n, r) => n + r.input, 0), outputChars: this.rounds.reduce((n, r) => n + r.output, 0) };
+    let inputChars = 0;
+    let outputChars = 0;
+    for (const { usage, input, output } of this.rounds) {
+      const reported = usage !== null && isCount(usage.inputTokens) && isCount(usage.outputTokens);
+      inputChars += reported ? usage.inputTokens : input;
+      outputChars += reported ? usage.outputTokens : output;
+    }
+    return { inputChars, outputChars };
   }
 }
 
@@ -440,9 +449,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * - a repeat (`LoopGuard`) is answered `REPEATED`, a call over its tool's count `OVER_CAP`, neither run;
    * - anything else runs through the port (`runTool`), its output cut (`cutResult`) to `resultMaxWeight` and to what the
    *   model's context has left for the rounds (`room`: what the plan's limit leaves beside the planned input, the tools'
-   *   definitions and the last call's line, at the plan's ratio).
+   *   definitions and the last call's line, at the plan's ratio, and what providers add around the definitions).
    * Then the port holds what the next call can cost (`extend`; its bound: the call's text, the tools and every step at
-   * their bytes, as admission holds a call). The tool phase ends — the next call is the last: the same tools and steps,
+   * their bytes, as admission holds a call, and what providers add around tool definitions, `TOOL_PREAMBLE_TOKENS`). The
+   * tool phase ends — the next call is the last: the same tools and steps,
    * `toolChoice` `none`, the system text with `FINAL_LINE` — after `maxRounds` such rounds, a call made a third time, the
    * second garbled call, once the steps have filled the room, or when `extend` says "final"; a tool call that comes in
    * the last round is not run, and no call follows. An upstream that refused the tools (the first round): they are marked
@@ -452,9 +462,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * `no_quota`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
    * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
    * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
-   * paragraph break. One settlement: the rounds' summed usage, or with any round unreported their summed estimates (the
-   * conversation's, plus the tools and the steps it carried, at the model's ratio; what it wrote, its calls included); a
-   * round that failed counts only the usage its upstream reported. Only counts and outcome classes are logged.
+   * paragraph break. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
+   * reported usage, or of its estimate when it reported none (the conversation's, plus the tools and the steps it carried,
+   * at the model's ratio — no tools for a round whose upstream refused them; what it wrote, its calls included); a round
+   * that failed counts only the usage its upstream reported. Only counts and outcome classes are logged.
    */
   async function toolReply(run: RunTicket, prepared: Prepared, bounds: ToolRun, shutdown: AbortSignal): Promise<void> {
     const limits = opts.tools ?? DEFAULT_TOOLS;
@@ -466,7 +477,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const room =
       Math.floor((bounds.contextTokens - prepared.call.maxOutputTokens) * (1 - CONTEXT_HEADROOM)) -
       bounds.planned -
-      estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio);
+      estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio) -
+      TOOL_PREAMBLE_TOKENS;
     const guard = new LoopGuard({ maxRounds: limits.maxRounds, perTool: bounds.perTool });
     const out = new ReplyStream((delta) => port.emit(run, delta));
     const meter = new Meter();
@@ -555,8 +567,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         break;
       }
       const calls = finished.toolCalls.length > 0 ? estimateTokens(JSON.stringify(finished.toolCalls)) : 0;
-      meter.add(finished.usage, input, estimateTokens(said.text) + estimateTokens(said.reasoning) + calls);
-      if (finished.toolsRefused && !final) {
+      // A round whose upstream refused the tools was answered without them: its input is the conversation's alone.
+      const refused = finished.toolsRefused && !final;
+      meter.add(finished.usage, refused ? prepared.inputChars : input, estimateTokens(said.text) + estimateTokens(said.reasoning) + calls);
+      if (refused) {
         // Its upstream refused the tools: this round's text is the answer, and nothing more is called.
         await toolsUnusable(run, "refused");
         ending = { last: round };
@@ -630,11 +644,14 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         await toolsUnusable(run, "garbled");
       }
 
-      // What the next call can cost, held before it is made: its text, the tools and every step at their bytes (the last
-      // call's line included, whichever it is), its images and PDFs at their constants, and its whole output. When no
-      // further call can be made, what the reply wrote stands, as cut.
+      // What the next call can cost, held before it is made: its text, the tools and every step at their bytes, what
+      // providers add around tool definitions, its images and PDFs at their constants, and its whole output. The last
+      // call's line is in it whichever call is next: the port may answer "ok" and the call still be the last (the caps
+      // and the room below), so one bound is held, the last call's. When no further call can be made, what the reply
+      // wrote stands, as cut.
       const next = await extend(
-        holdTokens([withFinalLine(prepared.call.system), ...texts, toolsText, JSON.stringify(steps)], bounds.contextTokens, prepared.call.maxOutputTokens),
+        holdTokens([withFinalLine(prepared.call.system), ...texts, toolsText, JSON.stringify(steps)], bounds.contextTokens, prepared.call.maxOutputTokens) +
+          TOOL_PREAMBLE_TOKENS,
       );
       if (next === "stop" || next === "busy") {
         ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };

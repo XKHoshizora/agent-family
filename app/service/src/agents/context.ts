@@ -91,6 +91,12 @@ export interface ContextRun {
    * run): every text of the plan — the system text, the messages, the cut of the newest — counts its weight times this.
    */
   planRatio: number;
+  /**
+   * Tokens the call sends besides the system text and the conversation, at `planRatio`, kept out of the budget as the
+   * system text is (`contextBudget`): a reply's tool definitions and what providers add around them (port-impl.ts
+   * `begin`). None when absent.
+   */
+  reserved?: number;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
@@ -393,7 +399,7 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
  * the messages after the latest new topic in the order they were answered, read newest first until they are more than
- * the budget (the model's context less its output limit and `system`; in a group at most `run.group.maxTokens`) can
+ * the budget (the model's context less its output limit, `system` and `run.reserved`; in a group at most `run.group.maxTokens`) can
  * hold — in a group, its latest `run.group.maxMessages` messages at most, as if what is older were left unread — and the
  * records of the attachments the plan could show — looked up only through `findDownloadable` with the Agent as reader
  * (the download's own permission); an image is not looked up when the model cannot see images. Everything that uses
@@ -419,7 +425,7 @@ export async function loadContext(
 ): Promise<LoadedContext> {
   const ratio = run.planRatio;
   const budgetWith = (text: SystemText): number => {
-    const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text, ratio);
+    const whole = contextBudget(resolved.contextTokens, resolved.call.maxOutputTokens, text, ratio, run.reserved ?? 0);
     return run.group === null ? whole : Math.min(whole, run.group.maxTokens);
   };
   const reading = budgetWith(system("", []));

@@ -21,13 +21,19 @@ export const CUT_MARK = "…（结果太长，后面的省略了）";
 /** The system text of a reply's last call: the fixed line after it. */
 export const withFinalLine = (system: string): string => (system === "" ? FINAL_LINE : `${system}\n\n${FINAL_LINE}`);
 
-/** `value` as JSON text with every object's keys in order, at every depth: the same input written in another order is the same. */
+/**
+ * `value` as JSON text with every object's keys in order, at every depth, and every string and key in one Unicode form
+ * (NFC): the same input written in another order, or with its accents composed otherwise, is the same.
+ */
 export function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value !== null && typeof value === "object") {
-    const keys = Object.keys(value).sort();
-    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
+    const keys = Object.keys(value)
+      .map((k) => [k.normalize("NFC"), k] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${keys.map(([shown, k]) => `${JSON.stringify(shown)}:${canonicalJson((value as Record<string, unknown>)[k])}`).join(",")}}`;
   }
+  if (typeof value === "string") return JSON.stringify(value.normalize("NFC"));
   return JSON.stringify(value) ?? "null";
 }
 

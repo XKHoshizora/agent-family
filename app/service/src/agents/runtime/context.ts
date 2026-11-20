@@ -68,12 +68,14 @@ export type AttachmentContent =
 export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): string => (a.image ? `[图片：${a.name}]` : `[文件：${a.name}]`);
 
 /**
- * Tokens the conversation may take: of what the model's context leaves beside its output limit and the system text (as
- * `systemTokens` counts its parts at `ratio`), all but `CONTEXT_HEADROOM` of it, rounded down — the one place the headroom
- * is kept. `ratio`: what the context is planned at (metering/tokens.ts `planRatio`), which every count of the plan uses too.
+ * Tokens the conversation may take: of what the model's context leaves beside its output limit, the system text (as
+ * `systemTokens` counts its parts at `ratio`) and `reserved`, all but `CONTEXT_HEADROOM` of it, rounded down — the one
+ * place the headroom is kept. `ratio`: what the context is planned at (metering/tokens.ts `planRatio`), which every count
+ * of the plan uses too. `reserved`: tokens the call sends besides the system text and the conversation, at that ratio (a
+ * reply's tool definitions and what providers add around them, agents/port-impl.ts `begin`); none by default.
  */
-export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">, ratio = 1): number {
-  return Math.floor((contextTokens - maxOutputTokens - systemTokens(system, ratio)) * (1 - CONTEXT_HEADROOM));
+export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">, ratio = 1, reserved = 0): number {
+  return Math.floor((contextTokens - maxOutputTokens - systemTokens(system, ratio) - reserved) * (1 - CONTEXT_HEADROOM));
 }
 
 /** The first `QUOTE_MAX_CHARS` characters of a quoted message, each line as `> line`. */

@@ -120,7 +120,8 @@ replies, Configuration), `PROACTIVE` (their tunings, JSON, every field optional;
 `MEMORY` (an Agent's memory tunings, JSON, every field optional; Memory calls, Configuration),
 `TOOLS` (what bounds a reply's tools, JSON, every field optional; Agents and runs, Tools in a reply: `enabled` (default
 true; false: no reply is offered any tool), `maxRounds` (rounds of one reply that may call tools, 1–50, default 8),
-`maxPoints` (whole points one reply may spend before it must answer, 1–100 000, default 20), `searchPerReply` and
+`maxPoints` (whole points one reply's tool rounds may spend before it must answer — its first round is bounded by
+admission alone —, 1–100 000, default 20), `searchPerReply` and
 `filePerReply` (calls of the search and the file tool one reply may run, 1–1 000, default 6 and 4), `resultMaxWeight`
 (the most one tool result weighs when it goes back to the model, 1–100 000, default 3 000), `runTimeoutMs` (how long a
 reply that offers tools may take in all, 1 000–3 600 000, default 300 000: 5 minutes; a reply that offers none is held
@@ -2431,8 +2432,9 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       tokens of it: `failed`, `context_too_small`, not retryable (the persona is too long for the model's context, or the
       context too small, or at a reasoning level its thinking allowance leaves too little room): nothing is admitted
       or charged. The model resolved here sizes the call — its level, output limit (Calling a model) and so what is
-      shown and held — and the call is sent that level, whatever the Agent's is by step 3. A run in a group is marked
-      here, in this process, as one that streams nothing (step 2).
+      shown and held — and the call is sent that level, whatever the Agent's is by step 3. The tools the reply is offered
+      are decided here too, before what is shown is planned, which reserves room for them (Tools in a reply). A run in
+      a group is marked here, in this process, as one that streams nothing (step 2).
    2. No transaction: the attachments' bytes are read and the call is assembled (`buildContext`). A send to the
       conversation, a pause or a delete meanwhile does not wait for it (`tests/context.test.ts`). It is interruptible and
       bounded (`tests/runs-faults.test.ts`): once the owner stops the reply or the Agent is paused or deleted, no further
@@ -2593,7 +2595,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   run fails `busy`, as it does when reading takes longer than `AGENT_RUN_TIMEOUT_MS`; once one read has succeeded, every
   later failure is shown by its name (`tests/runs-faults.test.ts`).
 - The budget: the model's context, less the call's output limit (at a reasoning level, its thinking allowance included)
-  and the system text, less a tenth of what that leaves (kept free for what the estimate may be short by), counted in the
+  and the system text (and, for a reply offered tools, their reservation: Tools in a reply), less a tenth of what that
+  leaves (kept free for what the estimate may be short by), counted in the
   service's one measure (text in weight, `ceil(utf-8 bytes / 3)`, times the model's learned ratio when it is above 1;
   1 500 an image, 300 per KB of PDF; Metering, Token estimates) — the system text, every message, the notes passage's
   share and the cut of the newest message alike. What fits, in this order: the current turn (the owner's messages after
@@ -2619,7 +2622,11 @@ most what the context leaves beside the output limit, attachments at their estim
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
 `tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox;
-none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). A reply offered none is
+none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). The tools' definitions are part
+of the context plan: their weight at the plan's ratio and 400 tokens for what providers add around them
+(`TOOL_PREAMBLE_TOKENS`) are kept out of the conversation's budget as the system text is; when, with that reservation, the
+conversation would not get the room a call needs at least (200 tokens of the owner's newest message, or all of it:
+`context_too_small`), the reply is offered none. A reply offered none is
 exactly the one call above, as before tools existed. A reply offered some calls the model round by round (Calling a
 model, Tools): each round carries the tools and, after the first, every round so far; a round that calls no tool is the
 answer. Each call of a round that called tools is answered in order, by its place in the round (never by its id, which
@@ -2629,7 +2636,8 @@ may repeat or be empty), with its own id and name as it came:
   each named key of its type, no other key when the schema says none; `fitsSchema`), or any call of a round cut at its
   output limit (its input may be cut) — is not run, and is answered `{"error": "这个请求无法执行。"}`; the reply's
   second garbled call marks its model as unable to use the tools (`toolsUnusable`, `garbled`) and ends the tool phase;
-- **a repeat** — the same tool with the same input (compared with every object's keys in order) as a call that ran — is
+- **a repeat** — the same tool with the same input (compared with every object's keys in order, every string and key in
+  one Unicode form, NFC) as a call that ran — is
   answered `{"note": "这个已经查过了，结果和上次一样。请用已经查到的内容回答。"}`; the same call a third time ends the
   tool phase;
 - **over its count** — a tool run as often as one reply may run it (its count comes with the offer, `ToolRun.perTool`:
@@ -2645,22 +2653,27 @@ the next call is the last, sent with the same tools and every round, the model t
 `none`), and the system text ending with `你已经不能再查了，请用上面查到的内容直接回答。` — after `TOOLS.maxRounds`
 rounds that called tools, a call made a third time, the second garbled call, once the rounds fill what the context plan
 leaves (the plan's limit, `(context − output limit) × (1 − CONTEXT_HEADROOM)`, less the planned input, the tools'
-definitions and that line, at the plan's ratio), or when `extend` says so. A tool call in the last round is not run and no
+definitions and that line, at the plan's ratio, and the 400 for what providers add around the definitions), or when
+`extend` says so. A tool call in the last round is not run and no
 call follows: its text is the reply (with none, the run fails as an empty answer). An upstream that refused the tools
 (the first round: Calling a model) marks them unusable (`toolsUnusable`, `refused`); that round's text is the reply, and
 nothing more is called. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
 nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call
-— no tools, no rounds, the conversation alone, its cost held first — and its answer follows what the reply wrote; nothing
-is marked. `extend` answering that nothing more can be held ends the reply with what it wrote, as
+— no tools, no rounds, the conversation alone, its cost held first (not made when nothing more can be held) — and its
+answer follows what the reply wrote; nothing is marked. `extend` answering that nothing more can be held ends the reply
+with what it wrote, as
 `truncated` (with nothing written: `failed`, `no_quota`). The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
 all, each call and each tool also within `AGENT_RUN_TIMEOUT_MS` — and the service closing are honoured between events,
 between tool calls and between rounds, and end the reply as they end one of one call. What the rounds write streams as it
 comes, a later round's after a paragraph break, and is posted as one reply (text written before a tool call is kept);
 reasoning likewise, cut at 32 000 characters as always. The status line follows what the tools did (`activity`: after each
 tool that ran, then none once the tool phase is over; not shown anywhere yet). One settlement for the reply: the rounds'
-summed usage, or, with any round unreported, the sum of every round's estimate — the conversation's, plus the tools and
-the rounds it carried, at the model's ratio; what it wrote, its tool calls included; a round that failed counts only
-the usage its upstream reported. Such a reply teaches the ratio nothing (Metering, Token estimates). Only counts and
+summed usage, or, with any round unreported (the record then says `estimated`), the sum, per round, of its reported usage
+(its hidden reasoning included, as the upstream counts it), or of its estimate when it reported none — the
+conversation's, plus the tools and the rounds it carried (none for a round whose upstream refused the tools), at the
+model's ratio; what it wrote, its tool calls included; a round that failed counts only the usage its upstream reported,
+and the rounds that completed before it count as any: a reply that fails, or answers nothing, after them is charged what
+they used. Such a reply teaches the ratio nothing (Metering, Token estimates). Only counts and
 outcome classes are logged: never a tool's input or output, the model's text, or a name it made up.
 
 **Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
@@ -2674,13 +2687,13 @@ outcome classes are logged: never a tool's input or output, the model's text, or
 | In a group, another Agent's message called for it, or nobody did (Proactive replies), and a member halted Agents (Agents in a group) | queued: none, no call made, no usage record; running and not yet posted: none, what it had said is discarded, what it used is settled | `cancelled`, `halted` |
 | Paused or deleted while running, before it posted (resumed since or not) | none; what it had said is discarded, what it used is settled | `cancelled`, `agent_paused` / `agent_deleted` |
 | The Agent left the run's group (taken out by the creator or its owner, or along with its owner), or is otherwise no longer a member there when the run begins or posts | queued: none, no call made, no usage record; running and not yet posted (added back since or not): none, what it had said is discarded, what it used is settled | `cancelled`, `agent_removed`; never followed up: a mention noted on it meanwhile is dropped |
-| The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing |
+| The provider failed (key refused, unreachable, address refused), or cut the stream off midway | none; what it had said is discarded | `failed` with that code (a cut-off stream: `provider_unavailable`); charged only what the upstream reported, so as a rule nothing (a reply with tools: and what its rounds before it used) |
 | The model stopped at its output limit having only thought (no visible text; reasoning came, or the upstream reported reasoning tokens) | none; the reasoning streamed meanwhile is discarded | `failed`, `thinking_exhausted`, retryable; charged what the upstream reported |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
 | A reply with tools, between its rounds: nothing more can be held for another call (Metering, Extension) | what had been said, `truncated: true` (nothing said: no message) | `done` (nothing said: `failed`, `no_quota`); charged what its rounds used |
 | The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
-| An empty answer (no visible text, no reasoning; in a group, no visible text) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
+| An empty answer (no visible text, no reasoning; in a group, no visible text) | none | `failed`, `provider_unavailable`; charged only what the upstream reported (a reply with tools: and what its rounds before it used) |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
@@ -3154,27 +3167,34 @@ balance, by the same rule; a paid-tier model only to the balance. With neither, 
 (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
 so). A memory call (purpose `memory`) on a site model is the exception: see "The memory allowance" below. The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
 Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
-A reply offered tools holds their definitions too, at their bytes.
+A reply offered tools holds their definitions too, at their bytes, and 400 tokens for what providers add around them
+(`TOOL_PREAMBLE_TOKENS`).
 
 **Extension** (`admit.ts` `raiseHold`, `port-impl.ts` `extend`; `tests/tool-loop-money.test.ts`). A reply offered tools
 makes a call per round, admitted once; before each call after its first, in one transaction under the run's locks and
-then the account's, its hold is set again. *So far* is what its rounds have cost — their reported usage, or with any round
-unreported their estimates (Agents and runs, Tools in a reply) — at the model's price; *the next round's most* is what
-the next call can send — its text, the tools' definitions and every round so far at their bytes, at most what the context
-leaves beside the output limit (as Admission bounds a call), images and PDFs at their constants — and its whole output
-limit; *an ordinary call's most* is the reply's own admission without the tools or any round. Another round that may call
-tools is allowed only while so far and the next round's most stay within `TOOLS.maxPoints` (so no round is started that
-could take the reply past it, and a reply costs at most that and its one last call), and no budget of its lane is reached
-by so far counted with what is settled (the Agent's others' daily budget for someone else's call, its proactive budget for
-a reply nobody asked for, and in a group, for a reply in an Agents' chain, its chain budget). The hold becomes so far and
-the next round's most when the owner can hold that — no more than the run holds already, or no more than what is left of
-the run's own source (today's free allowance or the balance, by admission's rule: less what the owner's other running calls
-hold, this run's own hold not counted; never another source than admission chose) — and the reply goes on (its next call
-the last when another tool round is not allowed); else so far and an ordinary call's most, held the same way, and the next
-call is the last; else nothing changes and no call is made (the reply ends with what it wrote, as cut, or `no_quota`). A
-provider's model holds nothing and is bounded by its rounds alone. Whatever the rounds, the reply is settled once, on
-their sum, never charged more than its hold: the free allowance used never goes past the day's allowance (what is above
-is forgiven), and a raised hold never takes more than what was left (or what the run held already).
+then the account's, its hold is raised — never lowered — to what that call can make the reply cost. *So far* is what its
+rounds have cost — their reported usage, or with any round unreported each round's reported usage, or its estimate when
+it reported none (Agents and runs, Tools in a reply) — at the model's price; *the next call's most* is everything that
+call can send — its text, the tools' definitions, every round so far and the last call's line at their bytes, at most what
+the context leaves beside the output limit (as Admission bounds a call), 400 for what providers add around tool
+definitions, images and PDFs at their constants — and its whole output limit, whichever call it is (the worker may make
+it the last for reasons of its own: the rounds' cap, a repeat, the context). *Left* is what is left of the run's own
+source — today's free allowance or the balance, by admission's rule, less what the owner's other running calls hold —
+with this run's own hold added back; never another source than admission chose. In this order: a budget of its lane
+reached by so far counted with what is settled (the Agent's others' daily budget for someone else's call, its proactive
+budget for a reply nobody asked for, and in a group, for a reply in an Agents' chain, its chain budget) allows the last
+call at most; else, while so far and the next call's most stay within `TOOLS.maxPoints` and within *left*, the hold
+becomes that and another round may call tools; else, while *left* is above *so far* (admission's own rule: a call starts
+while something is left), the hold becomes so far and the next call's most — past *left* if it must be, as an admitted
+call's hold may be — and the next call is the last; else nothing changes and no call is made (the reply ends with what it
+wrote, as cut, or `no_quota`). The ordinary call that follows a later round the upstream refused is held the same way, at
+its own most (no tools, no rounds), and is not made when nothing is left after what the reply has spent. So no round
+after the first is started that could take the reply past `TOOLS.maxPoints`: a reply costs at most the larger of that and
+its first round (which admission alone bounds), and its one last call. A provider's model holds nothing; its rounds, its
+context and its lane's budgets bound it. Whatever the rounds, the reply is settled once, on their sum: every call of it
+was held at its most, so it is charged what it cost (Forgiveness says what can still pass a hold), the free allowance used
+never goes past the day's allowance (what is above is forgiven), and what the holds pass a source by stays under one call's
+most (The debt bound).
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
 reported none, the estimate — its input in weight times its model's learned ratio (Token estimates; images and PDFs at
@@ -3183,7 +3203,9 @@ their estimate), its output in weight — and the record says
 ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
 (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
 with nothing in it, nothing said before the time limit) is charged only what the upstream reported: what it streamed
-before it failed is discarded and not counted, so with no usage reported it costs nothing. A run that never reached
+before it failed is discarded and not counted, so with no usage reported it costs nothing (a reply with tools is settled
+once for all its rounds: one that fails, or answers nothing, after rounds that completed is charged what those rounds
+used — Agents and runs, Tools in a reply). A run that never reached
 admission costs nothing either, and nor does one admitted whose model was never called (a stop, pause or delete that
 landed between its admission and the call: settled on no tokens at all, not on its input estimate; `tests/runs.test.ts`). The charge goes to the source admission chose, never more than the call held: a call on
 the allowance uses the allowance of the site day it ends in (one that starts before midnight and ends after it uses
@@ -3257,7 +3279,9 @@ allowance — and recorded as such (`forgiven_micro`):
 **The debt bound.** However many replies and drafts you start at once, the free overrun forgiven in a day and the debt on
 the balance are each less than one call's maximum cost: admission holds a call's maximum cost against its source
 before the call, under the account lock, and admits only while what is left after the holds is above zero
-(`tests/metering-concurrency.test.ts`: twenty at once, also with every call costing far more than it held).
+(`tests/metering-concurrency.test.ts`: twenty at once, also with every call costing far more than it held). A reply with
+tools holds each of its later calls the same way (Extension): within what is left, or past it only while something is
+left after what the reply has spent, so the holds then pass the source by less than that one call's maximum cost.
 
 **Records.** Every call appends one usage record (who, which Agent, which source and model, tokens, whether
 `estimated`, the true cost, and how much of it the allowance, the balance and forgiveness took — the three always add up

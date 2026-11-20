@@ -193,6 +193,14 @@ describe("LoopGuard", () => {
     }
     expect(guard.exhausted()).toBe(true);
   });
+
+  it("the same input in another Unicode form (composed or not) is the same call, in its values and its keys", () => {
+    const guard = new LoopGuard({ maxRounds: 8, perTool: {} });
+    expect(guard.admit(call("search", { query: "Café" }))).toBe("run");
+    expect(guard.admit(call("search", { query: "Café" }))).toBe("repeat");
+    expect(guard.admit(call("search", { ["clé"]: "a" }))).toBe("run");
+    expect(guard.admit(call("search", { ["clé"]: "a" }))).toBe("repeat");
+  });
 });
 
 describe("a reply that offers tools", () => {
@@ -363,6 +371,13 @@ describe("a reply that offers tools", () => {
     expect(fake.extends).toEqual([]);
   });
 
+  it("an upstream that refused the tools was sent none: with no usage reported, that round's estimate counts no tool definitions", async () => {
+    const gateway = scriptedGateway().refuseTools("没有工具也能回答。");
+    const fake = fakePort({ inputChars: 120 });
+    await runOn(fake, gateway);
+    expect(fake.finished).toEqual([{ end: { status: "done" }, usage: null, fallback: { inputChars: 120, outputChars: estimateTokens("没有工具也能回答。") } }]);
+  });
+
   it("a tool call in the last round is not run, and no call follows: its text is the reply; with no text, the run fails as an empty answer", async () => {
     const gateway = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }])
@@ -419,6 +434,27 @@ describe("a reply that offers tools", () => {
     await runOn(again, twice);
     expect(twice.calls).toHaveLength(3);
     expect(finishedAs(again)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
+  });
+
+  it("a later round refused (400) with nothing left to hold the ordinary call for: it is not made, and the reply ends as when nothing more can be held", async () => {
+    const said = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
+      .fail("provider_unavailable", { status: 400 });
+    const withText = fakePort({ extend: (n) => (n === 1 ? "ok" : "stop") });
+    await runOn(withText, said);
+    expect(said.calls).toHaveLength(2);
+    expect(withText.extends).toHaveLength(2);
+    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(finishedAs(withText)).toEqual([{ status: "done" }]);
+
+    const mute = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) })
+      .fail("provider_unavailable", { status: 422 });
+    const silent = fakePort({ extend: (n) => (n === 1 ? "ok" : "stop") });
+    await runOn(silent, mute);
+    expect(mute.calls).toHaveLength(2);
+    expect(silent.posted).toEqual([]);
+    expect(finishedAs(silent)).toEqual([{ status: "failed", error: "no_quota" }]);
   });
 
   it("the owner's stop between rounds, or between two tool calls: what was written is posted as stopped, nothing more is called or run", async () => {
@@ -581,7 +617,22 @@ describe("a reply that offers tools", () => {
     expect(stopSilent.finished).toEqual([{ end: { status: "failed", error: "no_quota" }, usage: U(100, 10), fallback: expect.any(Object) }]);
   });
 
-  it("settles once on the summed usage, or, when a round reported none, on the summed estimates of every round", async () => {
+  it("the port failing to answer about money ends the reply with what it wrote, as cut; with nothing written it fails busy, our own trouble", async () => {
+    const said = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) });
+    const withText = fakePort({ extend: () => Promise.reject(new Error("the database is gone")) });
+    await runOn(withText, said);
+    expect(said.calls).toHaveLength(1);
+    expect(withText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(finishedAs(withText)).toEqual([{ status: "done" }]);
+
+    const mute = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) });
+    const silent = fakePort({ extend: () => Promise.reject(new Error("the database is gone")) });
+    await runOn(silent, mute);
+    expect(silent.posted).toEqual([]);
+    expect(finishedAs(silent)).toEqual([{ status: "failed", error: "busy" }]);
+  });
+
+  it("settles once on the summed usage, or, when a round reported none, on each round's reported usage and the estimates of the rounds that reported none", async () => {
     const gateway = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10), text: "查" })
       .callTools([{ name: "search", input: { query: "b" } }])
@@ -590,15 +641,20 @@ describe("a reply that offers tools", () => {
     await runOn(fake, gateway);
     expect(fake.finished).toHaveLength(1);
     const { usage, fallback } = fake.finished[0]!;
+    // One round reported nothing: no usage in all, so the record says it was estimated.
     expect(usage).toBe(null);
-    // Each round: the conversation's estimate, the tools and the steps it carried in weight; what it wrote, its calls included.
+    // Round 2's estimate: the conversation's, the tools and the step it carried in weight; what it wrote — its calls.
     const roundInput = (c: ModelCall) => 120 + estimateTokens(JSON.stringify(TOOLS) + (c.steps ? JSON.stringify(c.steps) : ""));
-    const input = gateway.calls.map(roundInput).reduce((a, b) => a + b, 0);
-    expect(fallback.inputChars).toBe(input);
-    expect(fallback.outputChars).toBeGreaterThanOrEqual(estimateTokens("查") + estimateTokens("好的"));
-    // The money asked between the rounds: what was spent so far (none reported for round 2: none in all).
+    const id = resultsOf(gateway.calls[2]!, 1)[0]!.id;
+    const roundOutput = estimateTokens(JSON.stringify([{ id, name: "search", input: { query: "b" } }]));
+    // Rounds 1 and 3 count what they reported.
+    expect(fallback).toEqual({ inputChars: 100 + roundInput(gateway.calls[1]!) + 300, outputChars: 10 + roundOutput + 30 });
+    // The money asked between the rounds: what was spent so far, counted the same way.
     expect(fake.extends.map((e) => e.spent)).toEqual([U(100, 10), null]);
-    expect(fake.extends[0]!.estimated.inputChars).toBe(roundInput(gateway.calls[0]!));
+    expect(fake.extends.map((e) => e.estimated)).toEqual([
+      { inputChars: 100, outputChars: 10 },
+      { inputChars: 100 + roundInput(gateway.calls[1]!), outputChars: 10 + roundOutput },
+    ]);
   });
 
   it("ids that repeat or are empty within a round: each call is answered in its place, with its own id and name as received", async () => {

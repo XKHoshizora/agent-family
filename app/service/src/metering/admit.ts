@@ -14,6 +14,13 @@ import { maxCostMicro } from "./prices.ts";
  * charges no call more than it held, what the owner's calls can overrun is bounded: the forgiven free overrun of a day
  * and the negative balance are each less than one call's maximum cost (tests/metering-concurrency.test.ts).
  *
+ * A reply that offers tools makes several calls on one admission. Before each after its first, extension (`raiseHold`)
+ * holds what the reply has cost so far and the true most of that call — everything it sends, every earlier round
+ * included — never less than before. The bound still holds: a hold that stays within what is left overdraws nothing,
+ * and one that passes it is taken, as admission's is, only while something is left after what the reply has spent, so
+ * what the holds then pass the source by is less than that one call's most. Settlement then charges the reply's real
+ * cost, all of it within its hold.
+ *
  * Lock order: the run row (admitRun, settle), then the `accounts` row. Neither function locks a conversation or an
  * `agents` row: callers that need those take them first.
  */
@@ -161,21 +168,27 @@ export async function admitRun(
 
 /**
  * Extension: a reply that offers tools makes a call per round (agents/runtime/worker.ts), and before each call after its
- * first the hold of its run — admitted on a site model, still running, its row locked by the caller — is set to the
- * first of `wanted` (each what the reply has cost so far and the most its next call can cost) that its owner can hold:
- * no more than the run holds already, or no more than what is left of the run's own pool (its `charge_to`: today's free
- * allowance, the balance, or the memory allowance) by admission's headroom (`headroom`, `memoryLeft`: what is left less
- * what running calls hold), this run's own hold not counted against it. Its index in `wanted`, or null when none can be
- * held — the hold is then left as it is. Never another pool than admission chose. Under the owner's account lock (lock
- * order: the run's row, then the account).
+ * first the hold of its run — admitted on a site model, still running, its row locked by the caller — is raised to
+ * `wanted`: what the reply has cost so far (`spent`) and the true most of that call. It is never lowered. `left` is what
+ * is left of the run's own source (its `charge_to`: today's free allowance, the balance, or the memory allowance) by
+ * admission's headroom (`headroom`, `memoryLeft`: what is left less what running calls hold), this run's own hold added
+ * back; never another source than admission chose.
+ * - "ok": `toolsAllowed` (the caller's cap and lane budgets) and `wanted` within `left` — the hold overdraws nothing;
+ * - "final": else, while `left` is above `spent` (admission's own rule: a call starts while something is left) — the
+ *   next call is the last, and its hold may pass `left`, by less than that call's most, as an admitted call's may;
+ * - "stop": else; the hold is left as it is.
+ * Under the owner's account lock (lock order: the run's row, then the account), so two runs of one owner raise their
+ * holds one after the other, each seeing the other's.
  */
 export async function raiseHold(
   t: Tx,
   config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "memory">,
   run: { id: string; ownerId: string; chargeTo: ChargeTo; holdMicro: bigint },
-  wanted: readonly bigint[],
+  spent: bigint,
+  wanted: bigint,
+  toolsAllowed: boolean,
   now: Date,
-): Promise<number | null> {
+): Promise<"ok" | "final" | "stop"> {
   const account = await lockAccount(t, run.ownerId);
   let left: bigint;
   if (run.chargeTo === "memory") {
@@ -189,8 +202,7 @@ export async function raiseHold(
     });
     left = (run.chargeTo === "free" ? per.freeMicro : per.balanceMicro) + run.holdMicro;
   }
-  const which = wanted.findIndex((hold) => hold <= run.holdMicro || hold <= left);
-  if (which < 0) return null;
-  await t.query("update agent_runs set hold_micro = $2 where id = $1", [run.id, wanted[which]!.toString()]);
-  return which;
+  const answer = toolsAllowed && wanted <= left ? "ok" : left > spent ? "final" : "stop";
+  if (answer !== "stop") await t.query("update agent_runs set hold_micro = greatest(hold_micro, $2::bigint) where id = $1", [run.id, wanted.toString()]);
+  return answer;
 }

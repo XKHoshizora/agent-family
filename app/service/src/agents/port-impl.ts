@@ -9,7 +9,7 @@ import { AppError } from "../errors.ts";
 import { admitRun, raiseHold, type ChargeTo } from "../metering/admit.ts";
 import { assertCount, costMicro, isCount, type Price } from "../metering/prices.ts";
 import { settle } from "../metering/settle.ts";
-import { correctedEstimate, holdTokens, planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
+import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
@@ -90,12 +90,16 @@ export interface AgentPortDeps {
 /**
  * Where a reply's tools come from (`AgentPortDeps.toolbox`): what a run is offered, with at most how many calls of each
  * tool one reply may run (`ToolRun.perTool`), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot
- * answer, its signal honoured). Nothing is offered while `TOOLS.enabled` is false.
+ * answer, its signal honoured). Nothing is offered while `TOOLS.enabled` is false. `offer` is asked once per run, in
+ * `begin`'s first step (inside its transaction, under the run's locks), before the context is planned.
  */
 export interface Toolbox {
   offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number> };
   run(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
 }
+
+/** What a toolbox offers a run. */
+type Offer = ReturnType<Toolbox["offer"]>;
 
 /** What `extend` prices a reply's later calls by, kept from `begin` in this process (`RunFlags.money`). */
 interface RunMoney {
@@ -103,8 +107,6 @@ interface RunMoney {
   price: Price | null;
   /** The call's output limit, which every call of the reply is held for whole. */
   maxOutputTokens: number;
-  /** The bound of the reply's input without the tools' definitions or any round (its admission's, `holdTokens`): an ordinary call's. */
-  ordinaryInput: number;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -334,7 +336,11 @@ export class DbAgentPort implements AgentPort {
    *    `failed` `busy`; and so does one whose model's context cannot hold the newest such message, or 200 tokens of it,
    *    beside the system text, roster and all (`failed`, `context_too_small`). Everything here is planned at the model's
    *    learned ratio when it is above 1 (metering/tokens.ts `planRatio`; read once, here, for the whole run), with a tenth
-   *    of the room kept free (`contextBudget`).
+   *    of the room kept free (`contextBudget`). The tools the reply is offered are decided here, before the plan: its
+   *    toolbox's (`AgentPortDeps.toolbox`; none without one, and none while `TOOLS.enabled` is false), their definitions
+   *    (at the plan's ratio) and what providers add around them (`TOOL_PREAMBLE_TOKENS`) reserved in the plan as the
+   *    system text is; when, with that reservation, the conversation would not get the room a call needs at least (the
+   *    `context_too_small` rule), none are offered and the run is planned, and goes on, as one that offers none.
    * 2. No transaction: the attachments' bytes are read and the call's turns assembled (`buildContext`). A send to the
    *    conversation, a pause or a delete meanwhile does not wait for it. No further file is read once the run should
    *    stop (step 3 then ends it); a file that cannot be read is shown by its name; the store failing on two files
@@ -360,15 +366,16 @@ export class DbAgentPort implements AgentPort {
    *    the run for settlement to learn from, and the Agent's read marker moves to what the run covers (announced after
    *    commit). What settlement falls back on when no usage is reported is the estimate with its text corrected by the
    *    model's learned ratio (the one step 1 read). The reasoning level is the Agent's when the model allows it, else `none`.
-   *    The tools the reply is offered are its toolbox's (`AgentPortDeps.toolbox`; none without one, and none while
-   *    `TOOLS.enabled` is false): with some, their definitions are held at their bytes too, no estimate is recorded (such
-   *    a reply teaches the ratio nothing), and what its later rounds are priced by is kept for `extend` (`RunFlags.money`).
+   *    A reply offered tools (step 1) has their definitions held at their bytes too, and what providers add around them
+   *    (`TOOL_PREAMBLE_TOKENS`); no estimate is recorded (such a reply teaches the ratio nothing), and what its later
+   *    calls are priced by is kept for `extend` (`RunFlags.money`).
    */
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
     const now = new Date();
     const first = await db.tx(async (t): Promise<
-      { end: RunEnd } | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number }
+      | { end: RunEnd }
+      | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number; offer: Offer | null }
     > => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
@@ -428,16 +435,22 @@ export class DbAgentPort implements AgentPort {
           : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES } : null;
-      const loaded = await loadContext(
-        t,
-        { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned },
-        resolved,
-        system,
-        this.deps.drawMark,
-      );
+      const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
+      // The tools the reply is offered (none while `TOOLS.enabled` is false, or with no toolbox), and what they take of the
+      // context: their definitions at the plan's ratio and what providers add around them, reserved as the system text is.
+      let offer: Offer | null = config.tools.enabled && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      if (offer !== null && offer.tools.length === 0) offer = null;
+      const reserved = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
+      let loaded = await loadContext(t, { ...plan, reserved }, resolved, system, this.deps.drawMark);
+      if (offer !== null && !holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
+        // With the tools reserved the conversation would not get the room a call needs at least: none are offered, and
+        // the reply is planned, and made, as one that offers none.
+        offer = null;
+        loaded = await loadContext(t, plan, resolved, system, this.deps.drawMark);
+      }
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers, coveredBefore, key, ratio };
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer };
     });
     if ("end" in first) return first.end;
 
@@ -478,17 +491,18 @@ export class DbAgentPort implements AgentPort {
         }
         return { end: ENDED_QUIETLY, told };
       }
-      const { resolved, loaded, covers, key, ratio } = first;
-      // The tools the reply is offered: none while `TOOLS.enabled` is false, or with no toolbox.
-      const offer = config.tools.enabled && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      const { resolved, loaded, covers, key, ratio, offer } = first;
+      // The tools the reply is offered (step 1).
       const tools = offer?.tools ?? [];
       // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
       // leaves beside the output limit (`holdTokens`), images and PDFs at their constants — whatever the model's ratio.
-      // Offered tools go with the call too: their definitions are held at their bytes as well.
+      // Offered tools go with the call too: their definitions are held at their bytes as well, and what providers add
+      // around them.
       const texts = [loaded.system.text, ...context.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])))];
-      const ordinaryInput = holdTokens(texts, resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
       const held =
-        tools.length === 0 ? ordinaryInput : holdTokens([...texts, JSON.stringify(tools)], resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
+        tools.length === 0
+          ? holdTokens(texts, resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens
+          : holdTokens([...texts, JSON.stringify(tools)], resolved.contextTokens, resolved.call.maxOutputTokens) + TOOL_PREAMBLE_TOKENS + context.fixedTokens;
       // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned;
       // read in step 1), images and PDFs at their constants. What settlement falls back on when no usage is reported.
       const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, ratio);
@@ -528,7 +542,7 @@ export class DbAgentPort implements AgentPort {
                 },
         },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
-        money: { price: resolved.price ?? null, maxOutputTokens: resolved.call.maxOutputTokens, ordinaryInput },
+        money: { price: resolved.price ?? null, maxOutputTokens: resolved.call.maxOutputTokens },
       };
     });
     if ("end" in result) {
@@ -562,17 +576,20 @@ export class DbAgentPort implements AgentPort {
 
   /**
    * `AgentPort.extend`, in one transaction under `lockRun` (the run's conversation row and its Agent's, then the run's;
-   * the account's after, as admission takes them): a run no longer running answers "stop". A provider's model costs
-   * nothing: "ok", nothing held. On a site model, at its price as `begin` resolved it (`RunMoney`):
-   * - so far: `spent` when it is two counts, else `estimated` — what settlement would charge now, before its cap;
-   * - the next round's most: `nextInputTokens` and the whole output limit; an ordinary call's most: the reply's input
-   *   without the tools or any round (its admission's bound) and the whole output limit;
-   * - a round that may call tools may start only if so far and its most stay within `TOOLS.maxPoints`, and no budget of
-   *   the run's lane is reached by what it has cost so far (runs.ts `budgetReachedWith`: the others' daily, the
-   *   proactive daily, the chain budget);
-   * - the hold becomes so far and the next round's most if its owner can hold that (admit.ts `raiseHold`: what it holds
-   *   already, or what is left of its pool) — "ok", or "final" when a round may not call tools — else so far and an
-   *   ordinary call's most — "final" — else it is left as it is — "stop".
+   * the account's after, as admission takes them): a run no longer running answers "stop". At the site model's price as
+   * `begin` resolved it (`RunMoney`), what the reply has cost so far is `spent` when it is two counts, else `estimated` —
+   * what settlement would charge now, before its cap — and the most the next call can cost is `nextInputTokens` (the
+   * worker's bound of everything that call sends — the last call's line, every step and the tools' definitions included —
+   * whichever call it is: tool round or last) and the whole output limit. In this order:
+   * 1. a budget of the run's lane reached by what it has cost so far (runs.ts `budgetReachedWith`: the others' daily,
+   *    the proactive daily, the chain budget) makes the answer at most "final";
+   * 2. so far and the next call's most within `TOOLS.maxPoints` and within what is left of the run's source, its own hold
+   *    added back (admit.ts `raiseHold`), and step 1 not reached: the hold raised to that — "ok";
+   * 3. else, while what is left is above what the reply has spent (admission's own "anything left" rule): the hold raised
+   *    to so far and the next call's most, past what is left if it must, as an admitted call's may be — "final";
+   * 4. else "stop", the hold as it was.
+   * A hold is never lowered. A provider's model costs nothing: nothing is held, and the answer is "ok", or "final" once a
+   * budget of its lane is reached (its rounds and its context bound it otherwise, in the worker).
    */
   async extend(run: RunTicket, spent: Usage | null, estimated: Estimated, nextInputTokens: number): Promise<"ok" | "final" | "stop"> {
     assertCount("extend: estimated.inputChars", estimated.inputChars);
@@ -585,18 +602,14 @@ export class DbAgentPort implements AgentPort {
     try {
       return await db.tx(async (t) => {
         const { agent, state } = await this.lockRun(t, run);
+        const lane = { conversationId: run.conversationId, lane: state.lane, coversSeq: Number(state.covers_seq ?? 0) };
         const row = (await t.query<{ charge_to: ChargeTo | null; hold: string }>("select charge_to, hold_micro::text as hold from agent_runs where id = $1", [run.id])).rows[0]!;
-        if (money.price === null || row.charge_to === null) return "ok";
+        if (money.price === null || row.charge_to === null) return (await budgetReachedWith(t, lane, agent, 0n, config)) ? "final" : "ok";
         const reported = spent !== null && isCount(spent.inputTokens) && isCount(spent.outputTokens);
         const cost = costMicro(money.price, reported ? spent.inputTokens : estimated.inputChars, reported ? spent.outputTokens : estimated.outputChars);
         const next = costMicro(money.price, nextInputTokens, money.maxOutputTokens);
-        const ordinary = costMicro(money.price, money.ordinaryInput, money.maxOutputTokens);
-        const tools =
-          cost + next <= BigInt(config.tools.maxPoints) * MICRO_PER_POINT &&
-          !(await budgetReachedWith(t, { conversationId: run.conversationId, lane: state.lane, coversSeq: Number(state.covers_seq ?? 0) }, agent, cost, config));
-        const which = await raiseHold(t, config, { id: run.id, ownerId: run.ownerId, chargeTo: row.charge_to, holdMicro: BigInt(row.hold) }, [cost + next, cost + ordinary], new Date());
-        if (which === null) return "stop";
-        return which === 0 && tools ? "ok" : "final";
+        const tools = cost + next <= BigInt(config.tools.maxPoints) * MICRO_PER_POINT && !(await budgetReachedWith(t, lane, agent, cost, config));
+        return raiseHold(t, config, { id: run.id, ownerId: run.ownerId, chargeTo: row.charge_to, holdMicro: BigInt(row.hold) }, cost, cost + next, tools, new Date());
       });
     } catch (err) {
       if (err instanceof RunNotRunning) return "stop";

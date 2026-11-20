@@ -105,6 +105,14 @@ export const CONTEXT_HEADROOM = 0.1;
  */
 export const planRatio = (ratio: number): number => Math.max(1, ratio);
 
+/**
+ * Tokens a provider adds around the tool definitions a call sends (Anthropic's tool-use system text is a few hundred;
+ * the others' framing is less), which no estimate of the definitions themselves sees. A reply offered tools has them
+ * reserved in its context plan beside its definitions' estimate (agents/port-impl.ts `begin`), and every call of it that
+ * sends tools is held for them beside the definitions' bytes (`begin`, agents/runtime/worker.ts).
+ */
+export const TOOL_PREAMBLE_TOKENS = 400;
+
 // --- the learned ratio --------------------------------------------------------------------------------------------------
 
 /** A ratio is used once it has learned from this many replies; until then it is 1. */

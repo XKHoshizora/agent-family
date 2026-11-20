@@ -178,8 +178,9 @@ export interface ToolsConfig {
   /** Rounds one reply may run tools in; then one last call answers, calling none (src/agents/runtime/worker.ts). */
   maxRounds: number;
   /**
-   * Whole points one reply may spend before it must answer: no tool round is started that could take it past this
-   * (src/agents/port-impl.ts `extend`), so a reply costs at most this and its one last call.
+   * Whole points one reply may spend before it must answer: no tool round after its first is started that could take it
+   * past this (src/agents/port-impl.ts `extend`), so a reply costs at most the larger of this and its first round (which
+   * admission alone bounds), and its one last call.
    */
   maxPoints: number;
   /** Calls of the search tool, and of the file tool, one reply may run; further ones are answered with a fixed note. */

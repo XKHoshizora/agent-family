@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentPort, staleAfterMs, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
+import { contextBudget } from "../src/agents/runtime/context.ts";
 import { isRunEnd, type Prepared, type ToolOutcome } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
-import { holdTokens } from "../src/metering/tokens.ts";
+import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS } from "../src/metering/tokens.ts";
 import type { ModelCall, ToolCall, ToolSpec } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent } from "./helpers/agents.ts";
@@ -15,14 +16,35 @@ import { closeAllSockets } from "./helpers/ws.ts";
 
 /**
  * The money of a reply that offers tools (agents/runtime/worker.ts, port-impl.ts `extend`, metering/admit.ts
- * `raiseHold`): one admission, a hold raised between rounds to what the reply has cost so far and the most its next call
- * can cost, a cap on what its tool rounds spend (`TOOLS.maxPoints`), the lanes' budgets read again with what it has
- * cost, and one settlement on the rounds' summed usage. On the real port and database, the meter models (METER_ENV: 100
+ * `raiseHold`): one admission, its tools' definitions reserved in the context plan and held; before every later call
+ * the hold raised — never lowered — to what the reply has cost so far and the most that call can cost (every step it
+ * carries), within `TOOLS.maxPoints` and its lane's budgets for another tool round, else for one last call while
+ * something is left after what the reply has spent; and one settlement on the rounds' summed usage, each round's
+ * reported usage counted where it has one. On the real port and database, the meter models (METER_ENV: 100
  * micro-points an input token, 1 000 an output token, at most 1 000 output tokens, a context of 100 000; 3 free points a
- * day), with tools offered through a toolbox the test gives the port.
+ * day) and a dear one (`pricey`: 1 000 a token either way, at most 4 096 output tokens), with tools offered through a
+ * toolbox the test gives the port.
  */
 
-const { app, db } = useApp({ env: METER_ENV, agentWorker: false });
+const PRICEY = {
+  id: "pricey",
+  label: "Pricey",
+  tier: "paid",
+  protocol: "openai_chat",
+  baseUrl: "https://api.example.test/v1",
+  apiKeyEnv: "METER_UPSTREAM_KEY",
+  model: "pricey-1",
+  inputMicroPerToken: 1000,
+  outputMicroPerToken: 1000,
+  maxOutputTokens: 4096,
+  contextTokens: 100000,
+  vision: false,
+  pdf: false,
+  reasoning: [],
+};
+const ENV = { ...METER_ENV, SITE_MODELS: JSON.stringify([...JSON.parse(METER_ENV.SITE_MODELS), PRICEY]) };
+
+const { app, db } = useApp({ env: ENV, agentWorker: false });
 
 afterEach(async () => {
   await closeAllSockets();
@@ -31,6 +53,7 @@ afterEach(async () => {
 const FINAL_LINE = "你已经不能再查了，请用上面查到的内容直接回答。";
 const FREE = { source: "site", id: "meter_free" } as const;
 const PAID = { source: "site", id: "meter_paid" } as const;
+const DEAR = { source: "site", id: "pricey" } as const;
 const POINT = 1_000_000n;
 /** The meter models' output limit and context. */
 const MAX_OUT = 1000;
@@ -41,7 +64,14 @@ const SEARCH: ToolSpec = {
   description: "Search this conversation's messages.",
   parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
 };
+const READ: ToolSpec = {
+  name: "read_file",
+  description: "Read a file shared here.",
+  parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false },
+};
 const TOOLS = [SEARCH];
+/** A search tool whose definition weighs about 600 (its description in Chinese). */
+const BIG: ToolSpec = { ...SEARCH, description: "搜".repeat(560) };
 
 const U = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
 const plus = (...us: Array<{ inputTokens: number; outputTokens: number }>) =>
@@ -68,10 +98,20 @@ const say = async (who: Actor, conv: string, text: string) => {
   expect(sent.status).toBe(201);
 };
 
-async function owned(name: string, model: typeof FREE | typeof PAID | { source: "provider"; providerId: string; model: string } = FREE, over: Record<string, unknown> = {}) {
+async function owned(
+  name: string,
+  model: typeof FREE | typeof PAID | typeof DEAR | { source: "provider"; providerId: string; model: string } = FREE,
+  over: Record<string, unknown> = {},
+) {
   const owner = await signUp(app, name);
   const agent = await mustCreateAgent(app, owner, { model, persona: "简短地回答。", ...over });
   return { owner, agent, conv: agent.conversationId as string };
+}
+
+/** A provider of `owner`'s with one model, `small8k`: a context of 8 192 tokens (its calls get the default 2 048 output). */
+async function smallModel(owner: Actor) {
+  const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "small8k", contextTokens: 8192 }] }))).json;
+  return { source: "provider", providerId: provider.id as string, model: "small8k" } as const;
 }
 
 const runOf = async (ownerId: string) =>
@@ -93,15 +133,31 @@ const recordsOf = async (runId: string) =>
   ).rows;
 const freeUsed = async (ownerId: string) =>
   (await db.query<{ used: string }>("select coalesce(sum(used_micro), 0)::text as used from free_usage where owner_id = $1", [ownerId])).rows[0]!.used;
+const balanceOf = async (ownerId: string) =>
+  BigInt((await db.query<{ b: string }>("select balance_micro::text as b from accounts where principal_id = $1", [ownerId])).rows[0]!.b);
+/** Someone else's spending: the owner's free allowance used today, set to `micro`. */
+const setFreeUsed = (ownerId: string, micro: bigint) =>
+  db.query(
+    `insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, $2)
+     on conflict (owner_id, day) do update set used_micro = $2`,
+    [ownerId, micro.toString()],
+  );
 
 /** The text parts a call sends. */
-const textsOf = (call: ModelCall) => call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
-/** The most the call after `call`'s rounds can take as input, as the hold counts it: what `call` sends, the last call's line too. */
-const nextInput = (call: ModelCall) =>
-  holdTokens([`${call.system}\n\n${FINAL_LINE}`, ...textsOf(call), JSON.stringify(call.tools), JSON.stringify(call.steps ?? [])], CONTEXT, MAX_OUT);
+const textsOf = (call: Pick<ModelCall, "messages">) => call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
+const isFinal = (call: ModelCall) => call.toolChoice === "none" && call.system.endsWith(`\n\n${FINAL_LINE}`);
+/** A system text with the last call's line (once). */
+const withLine = (system: string) => (system.endsWith(`\n\n${FINAL_LINE}`) ? system : `${system}\n\n${FINAL_LINE}`);
+/**
+ * The most the call after `call`'s rounds can take as input, as the hold counts it: what `call` sends — the last call's
+ * line too, the tools' definitions and every step at their bytes — and what providers add around tool definitions.
+ */
+const nextInput = (call: ModelCall, context = CONTEXT, maxOut = MAX_OUT) =>
+  holdTokens([withLine(call.system), ...textsOf(call), JSON.stringify(call.tools), JSON.stringify(call.steps ?? [])], context, maxOut) + TOOL_PREAMBLE_TOKENS;
 /** The most one call of `inputTokens` can cost on a meter model. */
 const callMax = (inputTokens: number) => BigInt(inputTokens) * 100n + BigInt(MAX_OUT) * 1000n;
-const isFinal = (call: ModelCall) => call.toolChoice === "none" && call.system.endsWith(`\n\n${FINAL_LINE}`);
+/** The same on `pricey`. */
+const dearMax = (inputTokens: number) => BigInt(inputTokens) * 1000n + 4096n * 1000n;
 
 describe("the money of a reply that offers tools", () => {
   it("three rounds are admitted once and settled once: one usage record, its tokens the rounds' sums, charged once; the run teaches the ratio nothing", async () => {
@@ -136,7 +192,8 @@ describe("the money of a reply that offers tools", () => {
     const running = worker.runOnce();
     const call = await third.reached;
     const run = await runOf(owner.id);
-    // The text of the call the hold is for — the conversation, the tools and both rounds — at its bytes.
+    // The text of the call the hold is for — the conversation, the tools and both rounds — at its bytes, and what
+    // providers add around tool definitions.
     expect(await holdOf(run.id)).toBe(costOf(plus(U(1000, 50), U(1500, 60))) + callMax(nextInput(call)));
     third.release("好。", { usage: U(2000, 70) });
     await running;
@@ -170,36 +227,209 @@ describe("the money of a reply that offers tools", () => {
     expect(record.balance).toBe(costOf(U(2000, 950)).toString());
   });
 
-  it("the headroom gone mid-run: the last call when what the run holds still covers an ordinary call, else no call; the free allowance is never overdrawn", async () => {
-    // Someone else's spending uses up the free allowance while the first round's tool runs.
-    const spendAll = (ownerId: string) => async (): Promise<ToolOutcome> => {
-      await db.query(
-        `insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, 3000000)
-         on conflict (owner_id, day) do update set used_micro = 3000000`,
-        [ownerId],
+  it("the review's case: 6 points of balance, six searches of 3 000 weight each — the last call is held at its own most, every step it carries, above what is left; the reply is charged in full, nothing forgiven", async () => {
+    const six = Array.from({ length: 6 }, (_, i) => ({ name: "search", input: { query: `第${i}家` } }));
+    const gateway = scriptedGateway().callTools(six, { usage: U(1200, 100) });
+    const last = gateway.hang();
+    const { worker } = toolWorker(gateway, toolbox(() => ({ output: "川".repeat(3000), activity: "search" })));
+    const { owner, conv } = await owned("sixpoints", PAID);
+    await grant(db, owner.id, 6n * POINT);
+    await say(owner, conv, "附近有什么好吃的？");
+    const running = worker.runOnce();
+    const call = await last.reached;
+    expect(isFinal(call)).toBe(true);
+    const run = await runOf(owner.id);
+    const spent = costOf(U(1200, 100));
+    const ordinary = callMax(holdTokens([gateway.calls[0]!.system, ...textsOf(call)], CONTEXT, MAX_OUT));
+    const most = callMax(nextInput(call));
+    // An ordinary call's most would fit what is left; the last call's own most does not — it is held all the same.
+    expect(spent + ordinary).toBeLessThan(6n * POINT);
+    expect(spent + most).toBeGreaterThan(6n * POINT);
+    expect(await holdOf(run.id)).toBe(spent + most);
+    last.release("川菜馆有六家。", { usage: U(19_500, 300) });
+    await running;
+    const total = plus(U(1200, 100), U(19_500, 300));
+    const cost = costOf(total);
+    expect(cost).toBe(2_470_000n);
+    expect(await recordsOf(run.id)).toEqual([
+      { input: total.inputTokens, output: total.outputTokens, estimated: false, source: "site", outcome: "done", cost: cost.toString(), free: "0", balance: cost.toString(), forgiven: "0" },
+    ]);
+    expect(await balanceOf(owner.id)).toBe(6n * POINT - cost);
+    expect(await holdOf(run.id)).toBe(0n);
+  });
+
+  it("the dearest model, at the default limits: six searches and four file reads of 3 000 weight, then the last call held at its own most; reported, nothing is forgiven; unreported, at most what its output estimate passes its output limit by", async () => {
+    const box: Toolbox = {
+      offer: () => ({ tools: [SEARCH, READ], perTool: { search: 6, read_file: 4 } }),
+      run: async (_run, call) => ({ output: "川".repeat(3000), activity: call.name === "read_file" ? "file" : "search" }),
+    };
+    const ten = [
+      ...Array.from({ length: 6 }, (_, i) => ({ name: "search", input: { query: `第${i}家` } })),
+      ...Array.from({ length: 4 }, (_, i) => ({ name: "read_file", input: { name: `菜单${i}.txt` } })),
+    ];
+
+    // Every round reported: the last call's real cost (32 000 tokens in, its whole output) is within its hold.
+    const reported = scriptedGateway().callTools(ten, { usage: U(2000, 300) });
+    const last = reported.hang();
+    const a = await owned("dearreported", DEAR);
+    await grant(db, a.owner.id, 60n * POINT);
+    await say(a.owner, a.conv, "附近有什么好吃的？");
+    const running = toolWorker(reported, box).worker.runOnce();
+    const call = await last.reached;
+    expect(isFinal(call)).toBe(true);
+    const run = await runOf(a.owner.id);
+    const spent = 2000n * 1000n + 300n * 1000n;
+    expect(await holdOf(run.id)).toBe(spent + dearMax(nextInput(call, 100_000, 4096)));
+    last.release("答案。", { usage: U(32_000, 4096) });
+    await running;
+    const cost = ((2000n + 32_000n) * 1000n + (300n + 4096n) * 1000n).toString();
+    expect(await recordsOf(run.id)).toMatchObject([{ estimated: false, cost, balance: cost, forgiven: "0" }]);
+
+    // The last call reported nothing: it is settled on its estimate. Its input's estimate is at most its bytes, which
+    // the hold counts; only its output's (`weight`, not tokens) can pass what is held for it, its output limit — so what
+    // is forgiven is at most that excess at the output price.
+    const text = "答".repeat(5000);
+    const unreported = scriptedGateway().callTools(ten, { usage: U(2000, 300) }).reply(text, { usage: null });
+    const b = await owned("dearestimated", DEAR);
+    await grant(db, b.owner.id, 60n * POINT);
+    await say(b.owner, b.conv, "附近有什么好吃的？");
+    expect(await toolWorker(unreported, box).worker.runOnce()).toBe(true);
+    const [record] = await recordsOf((await runOf(b.owner.id)).id);
+    expect(record).toMatchObject({ estimated: true });
+    const slack = BigInt(Math.max(0, estimateTokens(text) - 4096)) * 1000n;
+    expect(slack).toBe(904_000n);
+    expect(BigInt(record.forgiven)).toBeLessThanOrEqual(slack);
+  });
+
+  it("a hold is never lowered: whatever extend answers — another round, the last call, or none — the run holds at least what it held before", async () => {
+    const { port } = toolWorker(scriptedGateway());
+    const { owner, conv } = await owned("neverlower", PAID);
+    await grant(db, owner.id, 10n * POINT);
+    await say(owner, conv, "你好");
+    const ticket = (await port.claimNext())!;
+    const prepared = (await port.begin(ticket)) as Prepared;
+    expect(isRunEnd(prepared)).toBe(false);
+    // Admission holds the call's text and the tools' definitions at their bytes, and what providers add around them.
+    const admitted = callMax(holdTokens([prepared.call.system, ...textsOf(prepared.call), JSON.stringify(TOOLS)], CONTEXT, MAX_OUT) + TOOL_PREAMBLE_TOKENS);
+    expect(await holdOf(ticket.id)).toBe(admitted);
+
+    const none = { inputChars: 0, outputChars: 0 };
+    // What is left of the balance, the run's own hold added back, stays 10 points throughout (nothing else runs).
+    const steps: Array<{ spent: ReturnType<typeof U>; next: number; answer: "ok" | "final" | "stop"; hold: (before: bigint) => bigint }> = [
+      // A next call cheaper than the hold: another round, the hold kept as it is (not lowered to what was asked).
+      { spent: U(100, 10), next: 100, answer: "ok", hold: (before) => before },
+      // Within what is left: raised.
+      { spent: U(100, 10), next: 60_000, answer: "ok", hold: () => costOf(U(100, 10)) + callMax(60_000) },
+      // Cheap again: kept.
+      { spent: U(100, 10), next: 100, answer: "ok", hold: (before) => before },
+      // Past what is left, while something is left after what was spent: the last call, held at its own most, above it.
+      { spent: U(1000, 100), next: 95_000, answer: "final", hold: () => costOf(U(1000, 100)) + callMax(95_000) },
+      // Spent exactly what is left: nothing more; the hold kept.
+      { spent: U(0, 10_000), next: 100, answer: "stop", hold: (before) => before },
+      // Spent a hundred micro-points less: the last call, its hold raised to what was spent and its most.
+      { spent: U(9, 9_999), next: 100, answer: "final", hold: () => costOf(U(9, 9_999)) + callMax(100) },
+      // And cheap again after it: kept.
+      { spent: U(9, 9_999), next: 100, answer: "final", hold: (before) => before },
+    ];
+    for (const [i, step] of steps.entries()) {
+      const before = await holdOf(ticket.id);
+      const answer = await port.extend(ticket, step.spent, none, step.next);
+      const after = await holdOf(ticket.id);
+      expect({ i, answer, after }).toEqual({ i, answer: step.answer, after: step.hold(before) });
+      expect(after).toBeGreaterThanOrEqual(before);
+    }
+  });
+
+  it("two replies of one owner extending at the same moment cannot both take the same headroom: the account's lock lets one through, and the other gets the last call", async () => {
+    const owner = await signUp(app, "twins");
+    const first = await mustCreateAgent(app, owner, { model: PAID, persona: "简短地回答。" });
+    const second = await mustCreateAgent(app, owner, { model: PAID, persona: "简短地回答。" });
+    await grant(db, owner.id, 8n * POINT);
+    await say(owner, first.conversationId, "你好");
+    await say(owner, second.conversationId, "你好");
+    const { port } = toolWorker(scriptedGateway());
+    const tickets = [(await port.claimNext())!, (await port.claimNext())!];
+    for (const t of tickets) expect(isRunEnd(await port.begin(t))).toBe(false);
+    const holds = await Promise.all(tickets.map((t) => holdOf(t.id)));
+    // Each asks for 5.2 points: what is left after both admissions holds one such raise, not two.
+    const spent = U(1000, 100);
+    const wanted = costOf(spent) + callMax(40_000);
+    expect(wanted).toBe(5_200_000n);
+    expect(wanted).toBeLessThanOrEqual(8n * POINT - holds[1]!);
+    expect(wanted).toBeLessThanOrEqual(8n * POINT - holds[0]!);
+    expect(2n * wanted).toBeGreaterThan(8n * POINT);
+
+    // Both wait on the owner's account row (the second behind the first), so both have read nothing yet when the first
+    // goes on.
+    const holder = await db.pool.connect();
+    let answers: string[];
+    try {
+      await holder.query("begin");
+      await holder.query("select 1 from accounts where principal_id = $1 for update", [owner.id]);
+      const extending = Promise.all(tickets.map((t) => port.extend(t, spent, { inputChars: 0, outputChars: 0 }, 40_000)));
+      await vi.waitFor(
+        async () =>
+          expect(
+            (
+              await db.query<{ n: number }>(
+                "select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like '%from accounts where principal_id = $1 for update%'",
+              )
+            ).rows[0]!.n,
+          ).toBe(2),
+        { timeout: 5_000 },
       );
-      return { output: { hits: [] }, activity: "search" };
+      await holder.query("commit");
+      answers = await extending;
+    } finally {
+      await holder.query("rollback").catch(() => {});
+      holder.release();
+    }
+    expect([...answers].sort()).toEqual(["final", "ok"]);
+    // Both are held at what they asked: the second above what was left for it, as a last call may be.
+    expect(await Promise.all(tickets.map((t) => holdOf(t.id)))).toEqual([wanted, wanted]);
+  });
+
+  it("what is left between an ordinary call's most and the last call's own most: the last call, held at its own most; with nothing left after what was spent, no call — and the free allowance is never overdrawn, nor the balance touched", async () => {
+    const hits = "川".repeat(3000);
+    const two = [
+      { name: "search", input: { query: "a" } },
+      { name: "search", input: { query: "b" } },
+    ];
+    // Someone else's spending leaves `left` of the day's 3 free points while the first round's tools run.
+    const leaving = (ownerId: string, left: bigint) => async (): Promise<ToolOutcome> => {
+      await setFreeUsed(ownerId, 3n * POINT - left);
+      return { output: hits, activity: "search" };
     };
 
-    // A cheap first round: what the run holds since admission (its text and the tools' definitions at their bytes, and a
-    // whole output) still covers it and an ordinary call (the text without the tools) — the last call.
-    const cheap = await owned("headfinal");
-    const finalGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(10, 1) }).reply("好的。", { usage: U(20, 2) });
-    await say(cheap.owner, cheap.conv, "查一查");
-    expect(await toolWorker(finalGateway, toolbox(spendAll(cheap.owner.id))).worker.runOnce()).toBe(true);
-    expect(finalGateway.calls).toHaveLength(2);
-    expect(isFinal(finalGateway.calls[1]!)).toBe(true);
-    const cheapRun = await runOf(cheap.owner.id);
-    expect(cheapRun).toMatchObject({ status: "done", hold: "0" });
-    const cheapCost = costOf(U(30, 3)).toString();
-    expect(await recordsOf(cheapRun.id)).toMatchObject([{ cost: cheapCost, free: "0", balance: "0", forgiven: cheapCost }]);
-    expect(await freeUsed(cheap.owner.id)).toBe("3000000");
+    // 2 points left: an ordinary call's most would fit, the last call's own most (its two steps) does not.
+    const leave = 2n * POINT;
+    const w = await owned("headwindow");
+    const windowGateway = scriptedGateway().callTools(two, { usage: U(1000, 50) });
+    const last = windowGateway.hang();
+    await say(w.owner, w.conv, "查一查");
+    const running = toolWorker(windowGateway, toolbox(leaving(w.owner.id, leave))).worker.runOnce();
+    const call = await last.reached;
+    expect(isFinal(call)).toBe(true);
+    const run = await runOf(w.owner.id);
+    const spent = costOf(U(1000, 50));
+    const ordinary = callMax(holdTokens([windowGateway.calls[0]!.system, ...textsOf(call)], CONTEXT, MAX_OUT));
+    const most = callMax(nextInput(call));
+    expect(spent + ordinary).toBeLessThanOrEqual(leave);
+    expect(spent + most).toBeGreaterThan(leave);
+    expect(await holdOf(run.id)).toBe(spent + most);
+    last.release("就这两家。", { usage: U(3000, 100) });
+    await running;
+    const cost = costOf(plus(U(1000, 50), U(3000, 100)));
+    expect(await recordsOf(run.id)).toMatchObject([{ cost: cost.toString(), free: cost.toString(), balance: "0", forgiven: "0" }]);
+    expect(await freeUsed(w.owner.id)).toBe((3n * POINT - leave + cost).toString());
 
-    // A dear first round: nothing left, and what it holds no longer covers another call — no call; what it wrote stands, cut.
+    // Nothing left: what the reply has spent is not covered — no call; what it wrote stands, cut. The balance it also
+    // has is never moved to.
     const dear = await owned("headstop");
+    await grant(db, dear.owner.id, 20n * POINT);
     const stopGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 500), text: "我先查一下。" });
     await say(dear.owner, dear.conv, "查一查");
-    expect(await toolWorker(stopGateway, toolbox(spendAll(dear.owner.id))).worker.runOnce()).toBe(true);
+    expect(await toolWorker(stopGateway, toolbox(leaving(dear.owner.id, 0n))).worker.runOnce()).toBe(true);
     expect(stopGateway.calls).toHaveLength(1);
     const dearRun = await runOf(dear.owner.id);
     expect(dearRun).toMatchObject({ status: "done", hold: "0" });
@@ -208,13 +438,42 @@ describe("the money of a reply that offers tools", () => {
     const dearCost = costOf(U(1000, 500)).toString();
     expect(await recordsOf(dearRun.id)).toMatchObject([{ cost: dearCost, free: "0", balance: "0", forgiven: dearCost }]);
     expect(await freeUsed(dear.owner.id)).toBe("3000000");
+    expect(await balanceOf(dear.owner.id)).toBe(20n * POINT);
 
-    // And with nothing written: no_quota.
+    // A cheap first round, nothing written: no_quota all the same — nothing is left after what it spent.
     const mute = await owned("headmute");
-    const muteGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 500) });
+    const muteGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(10, 1) });
     await say(mute.owner, mute.conv, "查一查");
-    expect(await toolWorker(muteGateway, toolbox(spendAll(mute.owner.id))).worker.runOnce()).toBe(true);
+    expect(await toolWorker(muteGateway, toolbox(leaving(mute.owner.id, 0n))).worker.runOnce()).toBe(true);
+    expect(muteGateway.calls).toHaveLength(1);
     expect(await runOf(mute.owner.id)).toMatchObject({ status: "failed", error: "no_quota", hold: "0" });
+    expect(await freeUsed(mute.owner.id)).toBe("3000000");
+  });
+
+  it("a later round the upstream refuses (400): the ordinary call that follows is held at its own most on top of what was spent, and the hold is not lowered for it", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50) })
+      .fail("provider_unavailable", { status: 400 });
+    const plain = gateway.hang();
+    const { worker } = toolWorker(gateway, toolbox(() => ({ output: "川".repeat(3000), activity: "search" })));
+    const { owner, conv } = await owned("plainhold", PAID);
+    await grant(db, owner.id, 20n * POINT);
+    await say(owner, conv, "查一查");
+    const running = worker.runOnce();
+    const call = await plain.reached;
+    expect(call).not.toHaveProperty("tools");
+    expect(call).not.toHaveProperty("steps");
+    const run = await runOf(owner.id);
+    const spent = costOf(U(1000, 50));
+    // Held for the second round (its step of 3 000 weight): more than the ordinary call's most, and kept.
+    const second = gateway.calls[1]!;
+    const ordinary = callMax(holdTokens([call.system, ...textsOf(call)], CONTEXT, MAX_OUT));
+    expect(spent + callMax(nextInput(second))).toBeGreaterThan(spent + ordinary);
+    expect(await holdOf(run.id)).toBe(spent + callMax(nextInput(second)));
+    plain.release("不查也能说：川菜。", { usage: U(800, 20) });
+    await running;
+    const cost = costOf(plus(U(1000, 50), U(800, 20))).toString();
+    expect(await recordsOf(run.id)).toMatchObject([{ estimated: false, cost, balance: cost, forgiven: "0" }]);
   });
 
   it("the Agent's others' daily budget reached mid-run by what the reply has cost: the next call is the last", async () => {
@@ -233,6 +492,82 @@ describe("the money of a reply that offers tools", () => {
     expect(gateway.calls).toHaveLength(2);
     expect(isFinal(gateway.calls[1]!)).toBe(true);
     expect(await runOf(owner.id)).toMatchObject({ status: "done", hold: "0" });
+  });
+
+  it("stopped during its third round, which reported nothing: the first two rounds' reported tokens, their hidden reasoning in them, are charged; the third's estimate is added; the raised hold is released", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 2500), reasoning: "想".repeat(50) })
+      .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 2500), reasoning: "再想".repeat(30) });
+    const third = gateway.hangAfter("我查到了一些，");
+    const { port, worker } = toolWorker(gateway);
+    const { owner, conv } = await owned("stopthird", PAID);
+    await grant(db, owner.id, 20n * POINT);
+    await say(owner, conv, "附近有什么好吃的？");
+    const running = worker.runOnce();
+    const call = await third.reached;
+    expect(isFinal(call)).toBe(false);
+    const run = await runOf(owner.id);
+    expect(await holdOf(run.id)).toBe(costOf(plus(U(1000, 2500), U(1500, 2500))) + callMax(nextInput(call)));
+    port.requestStop(run.id);
+    await running;
+
+    // Round 3's estimate: the conversation, the tools and both steps it carried; what it wrote before the stop.
+    const thirdInput = estimateTokens(call.system) + textsOf(call).reduce((n, t) => n + estimateTokens(t), 0) + estimateTokens(JSON.stringify(TOOLS) + JSON.stringify(call.steps));
+    const tokens = { input: 1000 + 1500 + thirdInput, output: 2500 + 2500 + estimateTokens("我查到了一些，") };
+    const cost = costOf(U(tokens.input, tokens.output)).toString();
+    expect(await recordsOf(run.id)).toEqual([{ ...tokens, estimated: true, source: "site", outcome: "stopped", cost, free: "0", balance: cost, forgiven: "0" }]);
+    expect(await runOf(owner.id)).toMatchObject({ status: "stopped", hold: "0" });
+  });
+
+  it("a raised hold is released by every other ending of the tool phase too: a later round's failure, the reply's time running out, the service closing", async () => {
+    // A later round fails (502): settled on the round that completed, failed.
+    const failing = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50) })
+      .fail("provider_unavailable", { status: 502 });
+    const a = await owned("endfailed", PAID);
+    await grant(db, a.owner.id, 20n * POINT);
+    await say(a.owner, a.conv, "查一查");
+    expect(await toolWorker(failing, toolbox()).worker.runOnce()).toBe(true);
+    const failedRun = await runOf(a.owner.id);
+    expect(failedRun).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    const failedCost = costOf(U(1000, 50)).toString();
+    expect(await recordsOf(failedRun.id)).toMatchObject([{ input: 1000, output: 50, estimated: false, outcome: "failed", cost: failedCost, balance: failedCost }]);
+
+    // The reply's time (TOOLS.runTimeoutMs) runs out in its second round: what it wrote is posted, cut; settled on the
+    // first round's usage and the second's estimate.
+    const slow = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50), text: "我先查一下。" });
+    const hung = slow.hang();
+    const b = await owned("endtimeout", PAID);
+    await grant(db, b.owner.id, 20n * POINT);
+    await say(b.owner, b.conv, "查一查");
+    const timing = toolWorker(slow, toolbox(), withTools({ runTimeoutMs: 1_000 })).worker.runOnce();
+    await hung.reached;
+    const raised = await holdOf((await runOf(b.owner.id)).id);
+    expect(raised).toBeGreaterThan(costOf(U(1000, 50)));
+    await timing;
+    const timedOut = await runOf(b.owner.id);
+    expect(timedOut).toMatchObject({ status: "done", hold: "0" });
+    const [timedRecord] = await recordsOf(timedOut.id);
+    expect(timedRecord).toMatchObject({ estimated: true, outcome: "done", forgiven: "0" });
+    expect(timedRecord.input).toBeGreaterThan(1000);
+    expect(timedRecord.output).toBe(50);
+
+    // The service closes during the second round: the run is released as recovery releases one — nothing charged.
+    const closing = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50) });
+    const open = closing.hang();
+    const c = await owned("endclosing", PAID);
+    await grant(db, c.owner.id, 20n * POINT);
+    await say(c.owner, c.conv, "查一查");
+    const { worker } = toolWorker(closing, toolbox());
+    const closed = worker.runOnce();
+    await open.reached;
+    const closingRun = await runOf(c.owner.id);
+    expect(await holdOf(closingRun.id)).toBeGreaterThan(costOf(U(1000, 50)));
+    await worker.stop();
+    await closed;
+    expect(await runOf(c.owner.id)).toMatchObject({ status: "failed", error: "provider_unavailable", hold: "0" });
+    expect(await recordsOf(closingRun.id)).toMatchObject([{ cost: "0", balance: "0" }]);
+    expect(await balanceOf(c.owner.id)).toBe(20n * POINT);
   });
 
   it("a crashed run with a raised hold is swept after 2 × max(AGENT_RUN_TIMEOUT_MS, TOOLS.runTimeoutMs) + 1 minute, and its hold released", async () => {
@@ -293,5 +628,70 @@ describe("the money of a reply that offers tools", () => {
     expect(gateway.calls[0]).not.toHaveProperty("tools");
     expect(gateway.calls[0]).not.toHaveProperty("toolChoice");
     expect((await runOf(owner.id)).input_estimate).not.toBe(null);
+  });
+});
+
+describe("the tools' definitions in the context plan", () => {
+  /** A toolbox offering `BIG`. */
+  const big: Toolbox = { offer: () => ({ tools: [BIG], perTool: { search: 6 } }), run: async () => ({ output: { hits: [] }, activity: "search" }) };
+
+  it("a small model whose system text leaves the conversation a few hundred tokens, too few beside 600 of tool definitions: no tools are offered, and the reply is one call, as one without tools", async () => {
+    const owner = await signUp(app, "smallplan");
+    const model = await smallModel(owner);
+    // A persona that leaves the conversation about 465 tokens of the 8 192 − 2 048 (as the review's case: 10 % of what
+    // the system text leaves is about that much).
+    const agent = await mustCreateAgent(app, owner, { name: "小", model, persona: "简".repeat(5120) });
+    const gateway = scriptedGateway().reply("去吃川菜。", { usage: U(6000, 10) });
+    await say(owner, agent.conversationId, "附近有什么好吃的？");
+    expect(await toolWorker(gateway, big).worker.runOnce()).toBe(true);
+
+    expect(gateway.calls).toHaveLength(1);
+    const call = gateway.calls[0]!;
+    expect(call).not.toHaveProperty("tools");
+    expect(call).not.toHaveProperty("toolChoice");
+    expect(textsOf(call)).toEqual(["附近有什么好吃的？"]);
+    // What the system text leaves the conversation, and what the tools would leave of it.
+    const definitions = estimateTokens(JSON.stringify([BIG]));
+    expect(definitions).toBeGreaterThan(560);
+    expect(definitions).toBeLessThan(640);
+    const room = contextBudget(8192, call.maxOutputTokens, { rest: call.system, passage: "" });
+    expect(room).toBeGreaterThan(400);
+    expect(room).toBeLessThan(530);
+    expect(contextBudget(8192, call.maxOutputTokens, { rest: call.system, passage: "" }, 1, definitions + TOOL_PREAMBLE_TOKENS)).toBeLessThan(estimateTokens("附近有什么好吃的？"));
+    // Exactly a reply without tools: answered, and its estimate recorded for the ratio.
+    expect(await runOf(owner.id)).toMatchObject({ status: "done" });
+    expect((await runOf(owner.id)).input_estimate).not.toBe(null);
+  });
+
+  it("a model with room: the tools are offered and their reservation is taken from the conversation's plan — fewer older messages are shown than to the same conversation without tools", async () => {
+    const owner = await signUp(app, "roomyplan");
+    const model = await smallModel(owner);
+    const tooled = await mustCreateAgent(app, owner, { name: "甲", model, persona: "简短地回答。" });
+    const plain = await mustCreateAgent(app, owner, { name: "乙", model, persona: "简短地回答。" });
+    // 24 older messages of 310 weight each, then the question: more than either plan holds.
+    const older = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, "0")}${"字".repeat(309)}`);
+    for (const agent of [tooled, plain]) {
+      for (const text of older) await say(owner, agent.conversationId, text);
+      await say(owner, agent.conversationId, "附近有什么好吃的？");
+    }
+    const withBox = scriptedGateway().reply("好。");
+    expect(await toolWorker(withBox, big).worker.runOnce()).toBe(true);
+    const without = scriptedGateway().reply("好。");
+    expect(await toolWorker(without, null).worker.runOnce()).toBe(true);
+    const [a, b] = [withBox.calls[0]!, without.calls[0]!];
+    expect(a.tools).toEqual([BIG]);
+    expect(b).not.toHaveProperty("tools");
+    expect(a.system).not.toBe(b.system);
+    expect(estimateTokens(a.system)).toBe(estimateTokens(b.system));
+
+    // The newest message, then older ones, newest first, while they fit what the plan leaves them.
+    const reserved = estimateTokens(JSON.stringify([BIG])) + TOOL_PREAMBLE_TOKENS;
+    const shown = (budget: number) => 1 + Math.min(older.length, Math.floor((budget - estimateTokens("附近有什么好吃的？")) / 310));
+    const plans = [contextBudget(8192, b.maxOutputTokens, { rest: b.system, passage: "" }), contextBudget(8192, a.maxOutputTokens, { rest: a.system, passage: "" }, 1, reserved)];
+    expect([textsOf(b).length, textsOf(a).length]).toEqual(plans.map(shown));
+    // About 5 070 and 4 160 tokens: 16 older messages and 13, each count about a third of a message from the next.
+    expect([textsOf(b).length, textsOf(a).length]).toEqual([17, 14]);
+    expect(textsOf(a).at(-1)).toBe("附近有什么好吃的？");
+    expect(textsOf(a)).toEqual(textsOf(b).slice(3));
   });
 });

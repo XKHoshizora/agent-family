@@ -29,7 +29,8 @@ export interface Prepared {
   readonly inputChars: number;
   /**
    * The tools the model is offered. Empty: none — the reply is exactly one call, as before tools existed, and `toolRun`
-   * is null. Otherwise the reply runs the tool loop (worker.ts), bounded by `toolRun`.
+   * is null. Otherwise the reply runs the tool loop (worker.ts), bounded by `toolRun`; its context was planned with the
+   * tools' definitions reserved (port-impl.ts `begin`: with too little room left for the conversation, none are offered).
    */
   readonly tools: readonly ToolSpec[];
   readonly toolRun: ToolRun | null;
@@ -65,7 +66,8 @@ export interface ToolOutcome {
 /**
  * What calls are counted at when their upstream reports no usage: tokens by the weight estimate (input times the
  * model's learned ratio; metering/tokens.ts), whole numbers of 0 or more — what settlement falls back on (settle.ts
- * `fallback`). The field names are settlement's own.
+ * `fallback`); for a reply of several rounds, each round that reported its usage counts that instead (`finish`). The
+ * field names are settlement's own.
  */
 export interface Estimated {
   inputChars: number;
@@ -177,8 +179,12 @@ export interface AgentPort {
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
   /**
-   * Settles the call and records how the run ended (one transaction), then queues the follow-up for messages that came
-   * meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts.
+   * Settles the call and records how the run ended (one transaction, one usage record), then queues the follow-up for
+   * messages that came meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts,
+   * and the record says it was estimated. A reply of several rounds (one that offers tools) is settled once, on their
+   * sums: `usage` is the rounds' summed usage, null when any round reported none; `fallback` is then, summed over the
+   * rounds, each round's reported usage when it has one (its hidden reasoning included, as the upstream counts it) and
+   * its estimate only when it has none.
    */
   finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: Estimated): Promise<void>;
   /**
@@ -189,13 +195,16 @@ export interface AgentPort {
    */
   tool(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
   /**
-   * Between two rounds of a reply that offers tools, in one transaction under the run's lock: whether, and how, the
-   * reply may go on — what it has cost so far (`spent`, the rounds' summed usage, or with any round unreported null and
-   * then `estimated`; nothing for a provider's model) and the most its next call can cost (`nextInputTokens`, the bound of
-   * what it will send, and its whole output limit) are held for it. "ok": another round that may call tools; "final":
-   * one last call, which calls none (the reply's spend, or a budget of its lane, has reached its cap; or only such a call
-   * can be held); "stop": no further call (nothing more can be held, or the run is no longer running) — the worker posts
-   * what the reply wrote, or with nothing written the run fails `no_quota`.
+   * Before each call of a reply after its first (a reply that offers tools), in one transaction under the run's lock:
+   * whether, and how, the reply may go on. What it has cost so far (`spent`, the rounds' summed usage, or with any round
+   * unreported null and then `estimated`, counted as `finish`'s fallback is) and the most its next call can cost
+   * (`nextInputTokens`, the bound of everything that call will send, and its whole output limit) are held for it — the
+   * hold raised to that, never lowered. "ok": another round that may call tools (within `TOOLS.maxPoints`, no budget of
+   * its lane reached, and what is left of its source covers the hold); "final": one last call, which calls none (else,
+   * while something is left after what the reply has spent; the hold may then pass what is left, as an admitted call's
+   * may); "stop": no further call (nothing is left after what it has spent, or the run is no longer running), the hold
+   * as it was — the worker posts what the reply wrote, or with nothing written the run fails `no_quota`. A provider's
+   * model holds nothing: "ok", or "final" once a budget of its lane is reached.
    */
   extend(run: RunTicket, spent: Usage | null, estimated: Estimated, nextInputTokens: number): Promise<"ok" | "final" | "stop">;
   /**
