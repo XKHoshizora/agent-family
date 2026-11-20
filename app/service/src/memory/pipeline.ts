@@ -105,9 +105,10 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
  * its positions moved to now (below): what was said before it was switched off and not yet reviewed is never learned — the owner
  * switched it off, that is the point; its notes stay. On: the positions are moved to now again and any flag is dropped, so nothing said
  * while memory was off is ever reviewed, nor heard in a group; unless the owner asked it to look back (`catchUp`): then the
- * positions stay where switching off put them, and the next review reads exactly what was said while it was off within its usual
- * window (`reviewMessages`, the topic, in a group what came after it joined), and in a group the next judgement may flag for it what
- * it says of the off period that is still new to the judgement (within `transcriptMessages`). The positions: every review position of the Agent — its
+ * positions stay where switching off put them, the next review reads exactly what was said while it was off within its usual
+ * window (`reviewMessages`, the topic, in a group what came after it joined), and in every group it is in a catch-up is queued
+ * (`memory_catchups`, memory/catchup.ts: what members said there while it was off, judged for it alone). Any other switch drops the
+ * Agent's catch-ups (one under way does nothing more). The positions: every review position of the Agent — its
  * own conversation, every conversation it is a member of, any it was reviewed in — and, in every group it is in, where it hears from
  * (`agent_group_state.heard_from_seq`: a line there raises a flag for it only above this, listeners.ts), each the conversation's
  * current seq, never moved back. They are this Agent's alone: the group's judgement keeps its own position (`judged_seq`, what is
@@ -126,10 +127,25 @@ export async function memorySwitched(
   catchUp: boolean,
   locked: { groups: readonly string[]; wait: boolean },
 ): Promise<void> {
-  if (on && catchUp) return;
   // Only the groups taken: one the Agent joins after this (while the owner's account below is waited for, say) gets no row here, and
   // its positions stay where a join puts them (from the join), which is right whichever way memory is switched.
   const held = await lockJoinedSince(t, agent, locked);
+  if (on && catchUp) {
+    // The positions stay. One catch-up per group it is in: after its heard position (where switching off left it; never before its join)
+    // up to the group's latest now. A catch-up left from an earlier switch is replaced (a new `token`: one under way stops).
+    await t.query(
+      `insert into memory_catchups (agent_id, conversation_id, from_seq, to_seq, next_seq)
+         select $1, c.id, f.from_seq, c.seq, f.from_seq + 1
+           from memberships m join conversations c on c.id = m.conversation_id
+          cross join lateral (select greatest(m.joined_seq, coalesce((select s.heard_from_seq from agent_group_state s where s.agent_id = $1 and s.conversation_id = c.id), 0)) as from_seq) f
+          where m.principal_id = $1 and m.left_seq is null and c.id <> $2 and c.id = any($3::uuid[]) and c.seq > f.from_seq
+       on conflict (agent_id, conversation_id) do update
+         set from_seq = excluded.from_seq, to_seq = excluded.to_seq, next_seq = excluded.next_seq, token = gen_random_uuid(), created_at = now()`,
+      [agent.id, agent.conversationId, held],
+    );
+    return;
+  }
+  await t.query("delete from memory_catchups where agent_id = $1", [agent.id]);
   await t.query("delete from memory_flags where agent_id = $1", [agent.id]);
   if (!on) await discardPendingOf(t, agent.ownerId, agent.id);
   await t.query(

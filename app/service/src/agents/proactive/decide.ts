@@ -10,7 +10,7 @@ import type { StoredMessage } from "../../messages/model.ts";
 import { count } from "../../memory/stats.ts";
 import { noneTriggered, overLaneLimit, proactiveBudgetSpent, queueRun, toldSince, type RunLimits, type Triggered } from "../runs.ts";
 import { lockAgent, type AgentRow } from "../store.ts";
-import { judgeable, judgedAgentIds, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type Option } from "./candidates.ts";
+import { judgeable, judgedAgentIds, mayAnswerUnasked, NOBODY, optionsFor, PICK, quietKey, requestFor, type Flaggable, type JudgeRequest, type Option } from "./candidates.ts";
 import { listenersFor, writeFlags, type MemoryFlag } from "./listeners.ts";
 import { decidedAlready, lockStates, othersSinceSurcharge, saveState, stampJudged } from "./state.ts";
 import { afterProactive, afterQuiet, thresholdNow, type GroupState } from "./threshold.ts";
@@ -79,29 +79,13 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
   const listeners = await listenersFor(db, conversationId, seq);
   if (options.length === 0 && listeners.length === 0) return noneTriggered();
   const day = siteDay(new Date(), config.siteTimezone);
-  if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
-  // Listening alone never uses up what unasked replies need: with no Agent to pick, past `listenShare` of the limit, skip.
-  if (options.length === 0 && (await judgementsOn(db, day)) >= config.memory.listenShare * config.judge.dailyLimit) {
-    count(db, "judge_memory_skipped_share");
-    return noneTriggered();
-  }
+  if (options.length === 0 ? !(await mayListen(db, day, config, log)) : await atDailyLimit(db, day, config.judge.dailyLimit, log)) return noneTriggered();
   const request = await requestFor(db, conversationId, seq, options, config.proactive, listeners);
   if (request === null) return noneTriggered();
-  const { state, questions, flaggable } = request;
+  const { questions, flaggable } = request;
 
-  let answers: Map<string, Answer> | null = null;
-  // Each channel is tried for at most `timeoutMs`; nothing waits longer than all of them together.
-  const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
-  deps.onAsk?.();
-  try {
-    answers = await judge.ask(state, questions, deadline);
-  } catch (err) {
-    // Why, coarsely (`JudgeError.reason`; out of all the channels' time together: `timeout`).
-    const reason = err instanceof JudgeError ? err.reason : deadline.aborted ? "timeout" : "network";
-    log.info({ metric: "judge_failed", reason, conversationId }, "the judgement model gave no answer: no Agent replies unasked");
-  }
-  // Whatever came of it: one more judgement today, and each option judged now — up to this message when it was answered.
-  await countJudgement(db, day);
+  const answers = await askJudgement(deps, request, conversationId, day);
+  // Whatever came of it, each option judged now — up to this message when it was answered.
   await stampJudged(db, conversationId, judgedAgentIds(options, listeners), answers === null ? null : seq);
   if (answers === null) return noneTriggered();
 
@@ -128,12 +112,48 @@ export async function decideProactive(deps: DecideDeps, conversationId: string, 
 }
 
 /**
+ * Whether a judgement that only listens (no Agent to pick: the listener questions alone, or a catch-up, memory/catchup.ts) may be
+ * asked on site day `day`: under the day's limit, and — so that listening never uses up what unasked replies need — under
+ * `listenShare` of it (past it: counted `judge_memory_skipped_share`).
+ */
+export async function mayListen(db: Queryable, day: string, config: Pick<DecideDeps["config"], "judge" | "memory">, log: DecideDeps["log"]): Promise<boolean> {
+  if (config.judge === null || (await atDailyLimit(db, day, config.judge.dailyLimit, log))) return false;
+  if ((await judgementsOn(db, day)) >= config.memory.listenShare * config.judge.dailyLimit) {
+    count(db, "judge_memory_skipped_share");
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Asks the judgement model `request` once, each channel for at most `timeoutMs` and nothing longer than all of them together, and
+ * counts one more of the site's judgements of `day` whatever came of it. The answers, or null when there were none (logged, why
+ * coarsely: `judge_failed`).
+ */
+export async function askJudgement(deps: Pick<DecideDeps, "db" | "judge" | "config" | "log" | "onAsk">, request: JudgeRequest, conversationId: string, day: string): Promise<Map<string, Answer> | null> {
+  const { db, judge, config, log } = deps;
+  if (judge === null || config.judge === null) return null;
+  let answers: Map<string, Answer> | null = null;
+  const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
+  deps.onAsk?.();
+  try {
+    answers = await judge.ask(request.state, request.questions, deadline);
+  } catch (err) {
+    // Why, coarsely (`JudgeError.reason`; out of all the channels' time together: `timeout`).
+    const reason = err instanceof JudgeError ? err.reason : deadline.aborted ? "timeout" : "network";
+    log.info({ metric: "judge_failed", reason, conversationId }, "the judgement model gave no answer: nothing comes of this judgement");
+  }
+  await countJudgement(db, day);
+  return answers;
+}
+
+/**
  * The flags the answers raise: a hearsay question answered at `hearsayAt` or more flags each message it was asked of for
  * every Agent of that owner that listens; an own question at `ownAt` or more, for the owner's reviewing Agent alone. A
  * question left unanswered, or answered with a choice, raises nothing. Of these, `writeFlags` writes only what each Agent may
  * hear (above its `heard_from_seq`).
  */
-function flagged(flaggable: readonly Flaggable[], answers: ReadonlyMap<string, Answer>, M: Pick<Config["memory"], "hearsayAt" | "ownAt">, conversationId: string): MemoryFlag[] {
+export function flagged(flaggable: readonly Flaggable[], answers: ReadonlyMap<string, Answer>, M: Pick<Config["memory"], "hearsayAt" | "ownAt">, conversationId: string): MemoryFlag[] {
   const out: MemoryFlag[] = [];
   for (const f of flaggable) {
     const a = answers.get(f.key);

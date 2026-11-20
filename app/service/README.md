@@ -844,13 +844,11 @@ own, only when its seq is above this) at the conversation's current seq: what wa
 reviewed is never learned (the owner switched it off; that is the point). These positions are the Agent's own. The group's judgement
 keeps its own (`judged_seq`, what is new to judge, read as the latest of the group's Agents), and no switch moves it: no position of
 another owner's Agents in the group moves when this one is switched, in any order, any number of times. Who listens can still change
-what a judgement shows and asks, in three ways (accepted, not changed): (a) with no proactive option, the transcript a judgement is
+what a judgement shows and asks, in two ways (accepted, not changed): (a) with no proactive option, the transcript a judgement is
 shown starts after the latest join among the listeners (`candidates.ts` `requestFor`), so this Agent listening again can leave out
 lines another listener joined before and that were never judged (a judgement that failed or was capped), and judging past them;
-(b) catchUp brings back only lines still new to the shared judgement, so in a group where another memory-on or proactive Agent is
-judged, catchUp brings back the owner's own lines (the group review reads them) but usually no member's lines (they were judged
-for the other Agent meanwhile); (c) at most 20 owners listen in one judgement (`MAX_LISTENERS`, the least recently judged first): an
-Agent switched on (never judged there) takes a place, and the most recently judged listener sits that judgement out. In a hearsay
+(b) at most 20 owners listen in one judgement (`MAX_LISTENERS`, the least recently judged first): an Agent switched on (never judged
+there) takes a place, and the most recently judged listener sits that judgement out. In a hearsay
 call nothing at or below where the Agent hears from is read, flagged or as context (`hearsay.ts` `HEARD_FROM`). The reviewer drops its quiet timers, flag wake-ups, retry and queued reviews (a review or a hearsay
 call that was under way applies nothing, also when memory is on again by the time it answers); its notes stay, and no listener raises
 a flag for an Agent with memory off. **Turning it back on** asks the owner (the web app shows the choice under the switch:
@@ -859,17 +857,29 @@ at the conversation's current seq again and drops any flag, so nothing said whil
 member said meanwhile is heard for the Agent (the group's judgement may still show such a line as new, and ask other owners' questions
 about it; this Agent's question counts only what came after the switch-on, and no flag is written for it below its position); `true` leaves the positions where switching off
 put them and queues one review of the own conversation at once, as after a quiet time, which reads exactly what was said there while
-memory was off, within its usual window (`reviewMessages`, the topic boundary). In a group, with `true`: what the owner said there while
-memory was off is read by the next review of that group (at the Agent's next reply there, or a flag of the owner's own remark), from the
-switch-off on, within the same window and only what came after the Agent joined; what members said there while it was off can be heard
-only through the group's next judgement (when a message comes there; nothing looks back on its own), and only a line that is among the
-judgement's last `transcriptMessages` lines, came after the Agent joined, and is still new to the judgement — the judgement's position
-is the group's, so a line another Agent there was judged on while this one was off is not asked about again, and its hearsay is not
-learned. Nothing from before the switch-off is heard or reviewed, with either answer (`memory/pipeline.ts` `memorySwitched`, the
-reviewer's `switched`; `agents/proactive/listeners.ts` `writeFlags`, `candidates.ts` `listenerQuestions`). Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`, `memoryLanguage`) — reaches
+memory was off, within its usual window (`reviewMessages`, the topic boundary). In a group, `true` (也回顾一下) means "as if memory had
+never been off" (the product owner's decision of 2026-11-21): what the owner said there while it was off is read by the next review of
+that group (at the Agent's next reply there, or a flag of the owner's own remark), from the switch-off on, within the same window and
+only what came after the Agent joined; and what members said there while it was off is caught up (`memory/catchup.ts`). The switch
+stores one catch-up per group the Agent is in (`memory_catchups`): the lines after where switching off left its heard position (never
+before it joined) up to the group's latest at the switch. A job runs each, after the switch's commit (and again after a restart,
+`resume`): the group's own judgement (`requestFor`, `askJudgement`) asked this Agent's questions alone — whether someone said something
+lasting about the owner, whether the owner did — over those lines, oldest first, a window (`PROACTIVE.transcriptMessages`) at a time,
+shown nothing from before the switch-off or the join, with no pick and no other owner's question; the group's `judged_seq` and every
+other Agent's state stay as they were. What it flags goes the way of any flag: the owner's own remarks reviewed, the hearsay call (with
+nothing at or below the Agent's heard position as context), its entries in 听说的, charged to the owner's memory allowance. Its bounds:
+the most recent `MEMORY.catchUpLines` (200) lines of each group's off period, none older than `MEMORY.catchUpDays` (30) days; older lines
+are not caught up. It stops quietly — the rest is not caught up — when the owner's memory allowance is used up, when the site's
+judgements of the day are (or listening's share of them, `listenShare`), or when the judgement gives no answer; and a catch-up whose
+memory was switched again since it was queued does nothing more. Each step is recorded with the flags it raised, so a job run twice
+never asks or flags a line twice; and until the Agent's memory is switched again the group's normal judgements flag nothing for it at
+or below the catch-up's end (those lines are the catch-up's), so no line is flagged for it twice. Counted: `catchup_group_jobs`,
+`catchup_lines_judged`, `catchup_flags`. With `false` nothing is caught up. Nothing from before the switch-off is heard or reviewed,
+with either answer (`memory/pipeline.ts` `memorySwitched`, the reviewer's `switched`; `agents/proactive/listeners.ts` `writeFlags`,
+`candidates.ts` `listenerQuestions`). Nothing of memory — a note, a setting (`memory`, `memoryAsk`, `sharedNotes`, `newNotes`, `memoryModel`, `memoryLanguage`) — reaches
 anyone but the owner. Storage: `owner_notes`, `agent_notes`, `agent_hearsay`, `memory_changes`, `memory_review_state`,
 `memory_flags`, and the columns `agents.memory`, `memory_ask`, `shared_notes` and `accounts.new_notes`, `accounts.memory_model`,
-`accounts.dream`, `accounts.dreamed_at` and `accounts.memory_language`, `agent_group_state.heard_from_seq` (migration 047), and `strength` and `seen_at` on both kinds of note.
+`accounts.dream`, `accounts.dreamed_at` and `accounts.memory_language`, `agent_group_state.heard_from_seq` (migration 047), `memory_catchups` (migration 053), and `strength` and `seen_at` on both kinds of note.
 
 **The owner reads and edits the palace.** Every route below is the owner's only: anyone else, a fellow member of a group
 the Agent is in, and an id that is nobody's (or another Agent's, another note) get the same 404 `not_found`. *Session:
@@ -3100,6 +3110,7 @@ milliseconds.
 | `shareAt`, `sameAt`, `hearsayAt`, `ownAt` | 0.6, 0.8, 0.65, 0.6 (0–1) | The judgement thresholds: out of the vault, the same note, hearsay worth flagging, the owner's own remark worth flagging. `sameAt` is 0.8 because the single-request duplicate check, measured on the real judgement model, made false "same" verdicts below it (2 at 0.5, 1 at 0.55–0.75, none from 0.8 up) |
 | `flaggedMax`, `flaggedContext` | 20 (1–500), 3 (0–50) | At most this many flagged messages are reviewed together, each with this many messages of context |
 | `hearsayPerHour` | 4 (1–1000) | At most this many paid hearsay calls (Acting on flags) per Agent and group in a rolling hour; over it the flags wait |
+| `catchUpLines`, `catchUpDays` | 200 (1–10000), 30 (1–365) | 也回顾一下 (memory switched on with `catchUp`) catches up, in each group, at most this many of the most recent lines said while memory was off, and none older than this many days (`memory/catchup.ts`); older lines are not caught up |
 | `hearsayNewAt`, `hearsayAbuseAt` | 0.7, 0.6 (0–1) | Before a hearsay call the judgement model is asked whether the batch holds something new (below the first: no call) and whether it looks like flooding or probing (at or above the second: with `hearsayMute` `"on"`, a speaker with at least 3 of the batch's flagged messages and more than half of them is muted and the batch is dropped) |
 | `hearsayMuteMs` | 21 600 000 (1–31 536 000 000) | How long a speaker judged to flood or probe raises no hearsay flags for an owner |
 | `hearsayMute` | `"observe"` (`"off"`, `"observe"`, `"on"`) | `"on"`: flooding speakers are muted as above; `"observe"`: nobody is muted or dropped, and `memory_mute_would` is logged (counts only) each time a speaker would have been; `"off"`: the flooding question is not asked |
@@ -3473,6 +3484,7 @@ container `node dist/cli.js memory:stats --days 7` (`npm run memory:stats`, `mem
 | `lock_auto` | a review's `lock` applied at once, nobody asked (one per lock; every lock a review applies now is one; a lock of a note the owner took out of the vault, or of one already in it, is dropped and counts nothing) |
 | `merge_joined` | a review's `merge` op, its notes joined in their own words, applied at once as a dream's merge (`MEMORY.mergeAuto` `"on"`; one put on a card by 先问我再记 counts `card_shown_ask_first` instead). Days before 2026-11-21 have `merge_auto` (a merge the judgement found faithful) and `merge_would_auto` / `merge_would_card` (observed) |
 | `merge_join_skipped` | a review's merge whose joined note could not be written — longer than `modelEntryMax`, or its room too full — so nothing happened to its notes |
+| `catchup_group_jobs`, `catchup_lines_judged`, `catchup_flags` | 也回顾一下 in a group (`memory/catchup.ts`): a catch-up job that had lines to look at; the lines its judgements were asked about; the flags it wrote (the hearsay and own remarks it found, acted on as any flag) |
 | `merge_undone` | the owner undid a change that applied a review's merge (`MEMORY.mergeAuto` `"on"`; also counted `undo_rest`): the live sign that a joined note was not wanted. A dream's merge undone is `undo_dream` only |
 | `card_shown_remove`, `card_shown_ask_first`, `card_shown_other` | a card was shown — a pending change with something in it was stored — by why it waits: a remove the owner did not ask for; 先问我再记 (a review's — its joined merge included — or a dream's); anything else (a replace before the owner's word, a request to take notes out of the vault). Days before 2026-11-21 may have `card_shown_unfaithful_merge` (a merge the judgement did not find faithful) |
 | `card_confirmed`, `card_discarded` | the owner confirmed or discarded a pending card (a confirmation that finds the card stale, and the cards of a deleted Agent or of one whose memory was turned off, count neither); days before 2026-11-20 have these as `pending_confirmed` / `pending_discarded` |

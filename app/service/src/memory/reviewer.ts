@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from "fastify";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
+import type { CatchUpContext, CatchUpJob } from "./catchup.ts";
 import { liveAgents, newDreamState, SWEEP_JOB, type DreamContext, type DreamJob, type NapJob, type SweepJob } from "./dream.ts";
 import type { FlagsContext, FlagsJob } from "./hearsay.ts";
 import type { ConversionState, ConvertJob, ConvertResult, MemoryLanguage } from "./language.ts";
@@ -33,6 +34,9 @@ import { EXPLICIT } from "./review.ts";
  * rooms, one after another: two dream jobs of one owner never run together). After a change was applied (`changed`) a `nap`
  * job looks at whether a room is nearly full. The sweep's jobs run through the same runner, so they have the clock the
  * pipeline has; what they remember between runs is `DreamState`, here.
+ *
+ * 也回顾一下 in a group (catchup.ts): memory switched on with catchUp queues a `catchup` job for every group whose catch-up the switch
+ * stored (`memory_catchups`), and `resume` queues every one a restart left unfinished; they run as any job of the Agent (one at a time).
  */
 
 export const MAX_REVIEWS_AT_ONCE = 4;
@@ -46,10 +50,10 @@ export const realTimer: SetTimer = (fn, ms) => {
   return { clear: () => clearTimeout(timer) };
 };
 
-export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob | ConvertJob;
+export type Job = ReviewJob | FlagsJob | DreamJob | NapJob | SweepJob | ConvertJob | CatchUpJob;
 
 /** What a job is handed: the context of every kind (each job uses what its kind needs). */
-export type JobContext = FlagsContext & DreamContext;
+export type JobContext = FlagsContext & DreamContext & CatchUpContext;
 
 export interface ReviewerDeps {
   db: Db;
@@ -74,8 +78,8 @@ export interface Reviewer {
   /**
    * After commit: Agent `agentId`'s `memory` was switched off or on (pipeline.ts `memorySwitched`). What was waiting for it is dropped —
    * its quiet timers, its flags' wake-ups, its retry, its queued reviews (one under way applies nothing once memory is off, nor once it
-   * is on again: pipeline.ts `runReview`). `lookBack`
-   * (turned on with `catchUp`): one review of its own conversation `conversationId` is queued, as after a quiet time.
+   * is on again: pipeline.ts `runReview`), and its waiting catch-ups. `lookBack` (turned on with `catchUp`): one review of its own
+   * conversation `conversationId` is queued, as after a quiet time, and a catch-up for every group the switch stored one for.
    */
   switched(agentId: string, conversationId: string, lookBack: boolean): void;
   /**
@@ -93,8 +97,8 @@ export interface Reviewer {
   remembered(): number;
   /**
    * At start: arms a quiet timer for every pair whose Agent replied in the last day and has replies after `reviewed_seq`,
-   * and a wake-up for every pair with flags left over from the last day (older flags are deleted); how many pairs. Also arms
-   * the dream sweep (one timer: arming it again moves it).
+   * and a wake-up for every pair with flags left over from the last day (older flags are deleted); queues every catch-up left
+   * unfinished; how many pairs. Also arms the dream sweep (one timer: arming it again moves it).
    */
   resume(): Promise<number>;
   close(): void;
@@ -172,6 +176,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         changed: (agentId) => api.changed(agentId),
         dream,
         enqueue: (next) => enqueue(next),
+        flagged: (agentId, conversationId, kind) => api.flagged(agentId, conversationId, kind),
       };
       if (job.kind === "flags") hearsayCalls.set(key, ctx.hearsayCalls);
       void Promise.resolve()
@@ -303,6 +308,19 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     timers.delete(key);
   };
 
+  /** Queues a `catchup` job for every unfinished catch-up of the Agent (`agentId`), or of every Agent with memory on (none given); how many. */
+  async function queueCatchUps(agentId?: string): Promise<number> {
+    const { rows } = await db.query<{ agent_id: string; conversation_id: string }>(
+      `select c.agent_id, c.conversation_id from memory_catchups c
+         join agents a on a.principal_id = c.agent_id and a.memory and not a.paused and a.deleted_at is null
+        where c.next_seq <= c.to_seq and ($1::uuid is null or c.agent_id = $1)
+        order by c.created_at, c.conversation_id`,
+      [agentId ?? null],
+    );
+    for (const r of rows) enqueue({ kind: "catchup", agentId: r.agent_id, conversationId: r.conversation_id });
+    return closed ? 0 : rows.length;
+  }
+
   /** Decides what a reply means for the pair: review at once, or (re)arm its quiet timer. */
   async function considerReply(agentId: string, conversationId: string): Promise<void> {
     if (closed || (await reviewableAgent(db, agentId)) === null) return;
@@ -359,8 +377,11 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         for (const timer of pair) timer.clear();
         flagTimers.delete(key);
       }
-      waiting = waiting.filter((j) => j.agentId !== agentId || (j.kind !== "review" && j.kind !== "flags"));
-      if (lookBack) void enqueueIfNew({ kind: "review", agentId, conversationId });
+      waiting = waiting.filter((j) => j.agentId !== agentId || (j.kind !== "review" && j.kind !== "flags" && j.kind !== "catchup"));
+      if (lookBack) {
+        void enqueueIfNew({ kind: "review", agentId, conversationId });
+        void track(async () => void (await queueCatchUps(agentId)));
+      }
       settleIdle();
     },
     async convert(ownerId, language) {
@@ -415,6 +436,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         for (const r of flags.rows) {
           if (armFlags({ kind: "flags", agentId: r.agent_id, conversationId: r.conversation_id })) armed++;
         }
+        // Catch-ups a restart left unfinished (or whose job never ran) go on where they stopped.
+        armed += await queueCatchUps();
       });
       return armed;
     },

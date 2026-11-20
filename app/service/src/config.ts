@@ -253,6 +253,12 @@ export interface MemoryConfig {
   /** At most this many hearsay calls (the owner's memory allowance) per Agent and group in a rolling hour. */
   hearsayPerHour: number;
   /**
+   * 也回顾一下 in a group (memory/catchup.ts): what an Agent switched on with catchUp catches up of what members said while its memory was
+   * off — at most the most recent `catchUpLines` lines of each group, none older than `catchUpDays` days.
+   */
+  catchUpLines: number;
+  catchUpDays: number;
+  /**
    * Before a hearsay call the judgement model is asked whether the batch holds something new (below `hearsayNewAt`: no
    * call) and whether it looks like flooding or probing (`hearsayAbuseAt` or more: no call, and the speaker is not
    * listened to for `hearsayMuteMs`).
@@ -357,6 +363,8 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   flaggedMax: positive(20, 500),
   flaggedContext: z.number().int().min(0).max(50).default(3),
   hearsayPerHour: positive(4, 1000),
+  catchUpLines: positive(200, 10_000),
+  catchUpDays: positive(30, 365),
   hearsayNewAt: probability(0.7),
   hearsayAbuseAt: probability(0.6),
   hearsayMuteMs: positive(21_600_000, 31_536_000_000),
