@@ -1,0 +1,60 @@
+
+== forget: 58 true, 111 false
+T 0.5: 误放 0  漏 0
+T 0.6: 误放 0  漏 0
+T 0.7: 误放 0  漏 1
+T 0.8: 误放 0  漏 6
+T 0.85: 误放 0  漏 17
+T 0.9: 误放 0  漏 24
+false 最高：
+  0.30 zh-remember-14 区别记住
+  0.28 en-question-02 will you forget this?
+  0.27 zh-quote-01 他说“把那条删掉”
+  0.25 mix-quote-01 他说 “delete it”
+  0.21 zh-question-05 你删掉了吗？
+  0.18 zh-mention-04 性别记录
+true 最低：
+  0.66 ja-ask-02 忘れて
+  0.72 zh-not-keep-14 老是别记
+  0.73 en-ask-02 Forget it
+  0.74 zh-not-keep-16 那个别记录一下
+  0.78 zh-question-01 能不能删掉？
+  0.79 en-ask-07 I want to forget it
+  0.80 zh-not-keep-17 给你别记录
+  0.80 zh-question-02 能不能删掉
+  0.80 en-ask-05 Forget about it
+  0.82 ja-question-01 消してもらえる？
+  0.82 en-ask-06 I don't need it, forget it
+  0.83 zh-ask-11 要不删掉吧
+  0.83 zh-ask-12 不如删掉
+  0.83 zh-not-keep-04 不用记了
+
+== lock: 24 true, 15 false
+T 0.5: 误放 0  漏 0
+T 0.6: 误放 0  漏 0
+T 0.7: 误放 0  漏 0
+T 0.8: 误放 0  漏 5
+T 0.85: 误放 0  漏 6
+T 0.9: 误放 0  漏 8
+false 最高：
+  0.35 zh-quote-04 他说“锁起来”
+  0.09 ja-lock-not-01 秘密基地を作った
+  0.09 en-lock-not-03 a lock of hair
+  0.06 zh-lock-not-01 门锁上了吗
+  0.05 zh-lock-not-02 我买了个新保险箱
+  0.05 zh-lock-not-04 这不是什么秘密，可以告诉别人
+true 最低：
+  0.71 en-lock-02 lock it
+  0.72 en-lock-03 please lock it
+  0.73 en-lock-05 lock that one
+  0.76 mix-both-01 那条 remove 掉，再 lock 一下住址
+  0.79 en-lock-04 Lock this
+  0.81 mix-lock-01 把这个 lock 起来
+  0.85 ja-lock-04 金庫に入れておいて
+  0.87 zh-lock-01 把住址锁起来
+  0.90 zh-lock-04 锁进保险箱
+  0.90 zh-lock-06 这个要保密
+  0.90 zh-both-02 忘掉喝茶那条，再把住址锁起来
+  0.91 zh-both-01 把住址那条删掉，电话那条锁起来
+  0.93 zh-lock-05 放进保险箱
+  0.93 mix-lock-02 我的 password 别告诉别人

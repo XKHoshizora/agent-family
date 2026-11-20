@@ -14,6 +14,7 @@
 | `ownAt` | 主人在群里说的话值不值得记 | 0.6 | 误报 0、漏报 0 | `judge-flags-run1.txt` |
 | `faithfulAt` | 合并、改写、拆分有没有走样 | 0.6 | 加了内容、改了意思的全部拦下，忠实的 16/16 通过 | `judge-split-run1.txt` |
 | `hearsayNewAt` | 花钱整理之前：有没有新东西 | 0.7 | 漏 0，多花钱 0 | `judge-hearsay-check-run1.txt` |
+| `explicitAt` | 主人是不是明确要求了忘掉 / 锁起来（是，改动才直接生效；否则变成确认卡片） | 0.5 | 250 条样本（中、日、英、混合，其中 36 条是多句对话）：不该算的最高 0.29，该算的最低 0.64；0.5–0.6 之间误判 0、漏判 0。第一版问法在 0.85 才零误判，漏 35/58，已弃用 | `judge-explicit-run1.txt`（旧问法）、`judge-explicit-wording2.txt`、`judge-explicit-run2.txt` |
 | `hearsayAbuseAt` | 是不是有人在刷屏试探 | 0.6 | 误报 0、漏报 0；这条规则默认只观察不生效 | `judge-hearsay-check-run1.txt` |
 
 ## 整理质量（60 段对话）

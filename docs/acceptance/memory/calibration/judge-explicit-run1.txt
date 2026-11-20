@@ -1,0 +1,109 @@
+主人有没有要求（explicit；remove / lock 能不能马上生效的那一问）  模型 jev-latest  样本 209（问到的窗口 205，问题 208：成功 208，失败 0）  默认 explicitAt = 0.7
+  分数 >= T 就当作主人要求了，remove / lock 马上生效；否则变成等主人确认的卡片。label false 却过了门槛（误放）是危险的一侧：一条笔记没问主人就被删或被锁（30 天内可撤销）；label true 没过门槛只是多一张卡片。
+
+零、词表没让问的窗口（生产里不会问判断模型，remove / lock 一律变成卡片）
+  4 条：zh-question-08、zh-lock-not-03、ja-negation-02、ja-mention-03
+  其中 label 为 true 却被词表挡掉的（只会多一张卡片）：没有
+
+一、分数分布（最小 / 中位 / 最大）
+  按问题 / label
+    forget / false         110  0.01 / 0.03 / 0.80
+    forget / true          58   0.29 / 0.79 / 0.99
+    lock / false           15   0.01 / 0.02 / 0.85
+    lock / true            25   0.18 / 0.93 / 0.98
+  按问题 / 类别
+    forget / ask           31   0.31 / 0.89 / 0.99
+    forget / both          3    0.80 / 0.95 / 0.98
+    forget / mention       25   0.01 / 0.02 / 0.07
+    forget / negation      33   0.02 / 0.03 / 0.13
+    forget / not-keep      17   0.29 / 0.68 / 0.84
+    forget / question      11   0.06 / 0.61 / 0.97
+    forget / quote         6    0.02 / 0.38 / 0.70
+    forget / remember      38   0.01 / 0.03 / 0.29
+    forget / retract       4    0.52 / 0.71 / 0.92
+    lock / both            3    0.35 / 0.69 / 0.85
+    lock / lock            21   0.18 / 0.95 / 0.98
+    lock / lock-not        13   0.01 / 0.02 / 0.03
+    lock / question        1    0.93 / 0.93 / 0.93
+    lock / quote           1    0.62 / 0.62 / 0.62
+    lock / retract         1    0.85 / 0.85 / 0.85
+  按问题 / 语言
+    forget / en            47   0.01 / 0.03 / 0.99
+    forget / ja            16   0.01 / 0.45 / 0.98
+    forget / mix           9    0.01 / 0.80 / 0.95
+    forget / zh            96   0.01 / 0.07 / 0.98
+    lock / en              12   0.01 / 0.10 / 0.98
+    lock / ja              6    0.02 / 0.93 / 0.97
+    lock / mix             6    0.02 / 0.65 / 0.97
+    lock / zh              16   0.01 / 0.85 / 0.98
+
+二（forget）、门槛扫描（label true 58 条，false 110 条）
+  T     误放(label false 却过了，必须 0)  漏(label true 没过，多一张卡片)
+  0.50  6                               6
+  0.55  5                               7
+  0.60  4                               8
+  0.65  2                               12
+  0.70  2                               16
+  0.75  1                               23
+  0.80  1                               30
+  0.85  0                               35
+  0.90  0                               40
+  0.95  0                               46
+  按语言：对 / 总
+                      0.50    0.55    0.60    0.65    0.70    0.75    0.80    0.85    0.90    0.95    
+  zh                  90/96   90/96   89/96   87/96   84/96   80/96   74/96   71/96   69/96   65/96   
+  ja                  15/16   15/16   15/16   15/16   15/16   14/16   13/16   12/16   11/16   10/16   
+  en                  43/47   43/47   43/47   43/47   42/47   41/47   41/47   42/47   41/47   40/47   
+  mix                 8/9     8/9     9/9     9/9     9/9     9/9     9/9     8/9     7/9     7/9     
+
+二（lock）、门槛扫描（label true 25 条，false 15 条）
+  T     误放(label false 却过了，必须 0)  漏(label true 没过，多一张卡片)
+  0.50  2                               6
+  0.55  2                               6
+  0.60  2                               6
+  0.65  1                               6
+  0.70  1                               7
+  0.75  1                               7
+  0.80  1                               7
+  0.85  1                               8
+  0.90  0                               10
+  0.95  0                               14
+  按语言：对 / 总
+                      0.50    0.55    0.60    0.65    0.70    0.75    0.80    0.85    0.90    0.95    
+  zh                  14/16   14/16   14/16   15/16   14/16   14/16   14/16   13/16   12/16   9/16    
+  ja                  6/6     6/6     6/6     6/6     6/6     6/6     6/6     6/6     6/6     5/6     
+  en                  8/12    8/12    8/12    8/12    8/12    8/12    8/12    8/12    8/12    8/12    
+  mix                 4/6     4/6     4/6     4/6     4/6     4/6     4/6     4/6     4/6     4/6     
+
+三、站在错误一侧的样本（按默认 explicitAt = 0.7）
+  lock   zh-retract-03      retract   0.85  没要求却当成要求了（误放）：这事先别告诉别人 ／ 算了，无所谓，告诉谁都行
+  forget en-retract-01      retract   0.80  没要求却当成要求了（误放）：delete what I said about my salary ／ actually no, keep it
+  forget zh-quote-01        quote     0.70  没要求却当成要求了（误放）：他说“把那条删掉”
+  lock   zh-both-01         both      0.69  主人要求了却没认出（卡片）：把住址那条删掉，电话那条锁起来
+  forget zh-ask-12          ask       0.68  主人要求了却没认出（卡片）：不如删掉
+  forget zh-not-keep-09     not-keep  0.68  主人要求了却没认出（卡片）：不用了。别记这个
+  forget zh-not-keep-12     not-keep  0.68  主人要求了却没认出（卡片）：麻烦别记
+  forget en-ask-07          ask       0.66  主人要求了却没认出（卡片）：I want to forget it
+  forget zh-not-keep-01     not-keep  0.64  主人要求了却没认出（卡片）：这个不用记
+  forget zh-not-keep-11     not-keep  0.64  主人要求了却没认出（卡片）：最好别记
+  forget zh-not-keep-14     not-keep  0.64  主人要求了却没认出（卡片）：老是别记
+  forget ja-question-01     question  0.61  主人要求了却没认出（卡片）：消してもらえる？
+  forget zh-ask-11          ask       0.57  主人要求了却没认出（卡片）：要不删掉吧
+  forget zh-not-keep-17     not-keep  0.52  主人要求了却没认出（卡片）：给你别记录
+  forget zh-not-keep-15     not-keep  0.48  主人要求了却没认出（卡片）：这个别记录下来
+  forget en-ask-06          ask       0.45  主人要求了却没认出（卡片）：I don't need it, forget it
+  forget en-ask-05          ask       0.44  主人要求了却没认出（卡片）：Forget about it
+  forget zh-not-keep-16     not-keep  0.36  主人要求了却没认出（卡片）：那个别记录一下
+  lock   mix-both-01        both      0.35  主人要求了却没认出（卡片）：那条 remove 掉，再 lock 一下住址
+  lock   en-lock-04         lock      0.34  主人要求了却没认出（卡片）：Lock this
+  lock   mix-lock-01        lock      0.33  主人要求了却没认出（卡片）：把这个 lock 起来
+  lock   en-lock-03         lock      0.32  主人要求了却没认出（卡片）：please lock it
+  forget en-ask-02          ask       0.31  主人要求了却没认出（卡片）：Forget it
+  lock   en-lock-05         lock      0.30  主人要求了却没认出（卡片）：lock that one
+  forget zh-not-keep-08     not-keep  0.29  主人要求了却没认出（卡片）：先别记
+  lock   en-lock-02         lock      0.18  主人要求了却没认出（卡片）：lock it
+
+需要决定的数字
+  - forget：误放为零的最低门槛 0.85（这时漏 35 / 58）；当前 0.7：误放 2，漏 16。
+  - lock：误放为零的最低门槛 0.90（这时漏 10 / 25）；当前 0.7：误放 1，漏 7。
+  - explicitAt 是 forget 和 lock 共用的一个数：取两个零误放门槛里较高的那个，再留一点余量。
