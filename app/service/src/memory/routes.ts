@@ -3,6 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { fitNotes, passageBudget } from "../agents/runtime/prompt.ts";
 import { readOwnedAgent, type AgentRow } from "../agents/store.ts";
+import { lockConversationKeys } from "../conversations/store.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound, type ErrorDetails } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
@@ -422,7 +423,11 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       await writeLimit(req, me.id);
       const agent = await ownAgent(me.id, req.params.id);
       const room: Room = { kind: "owner", ownerId: me.id };
+      // The note points at the group the entry was heard in: that row is taken first, before the room and the hearsay (the lock
+      // order; conversations/store.ts `lockConversationKeys`). An entry's group never changes, so it is read before the transaction.
+      const where = await db.query<{ conversation_id: string }>("select conversation_id from agent_hearsay where id = $1 and agent_id = $2", [req.params.hearsayId, agent.id]);
       const id = await db.tx(async (t) => {
+        await lockConversationKeys(t, where.rows.map((r) => r.conversation_id));
         await lockRoom(t, room);
         await lockHearsay(t, agent.id);
         const heard = await takeHearsay(t, agent.id, req.params.hearsayId);

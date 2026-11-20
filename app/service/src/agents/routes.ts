@@ -7,7 +7,7 @@ import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
 import { discardPendingOf } from "../memory/apply.ts";
-import { lockSwitchGroups, memorySwitched } from "../memory/pipeline.ts";
+import { lockSwitchGroups, memorySwitched, SwitchAgain } from "../memory/pipeline.ts";
 import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
@@ -91,6 +91,13 @@ const DEFAULT_PROACTIVE_BUDGET = 20n * MICRO_PER_POINT;
 
 /** What an Agent has spent today in the two lanes with a daily budget when nothing is (a new Agent). */
 const NO_SPEND = { others: 0n, proactive: 0n } as const;
+
+/**
+ * How many times `PATCH /api/agents/:id` runs its transaction when the memory switch has to run it again (memory/pipeline.ts
+ * `SwitchAgain`: memory switched by another request since it looked, or the Agent joined a group in between). Each needs a race
+ * that ends within milliseconds; the last try waits for a group as for any lock.
+ */
+const SWITCH_TRIES = 3;
 
 /**
  * 409 `proactive_unavailable` when `proactive` turns on (`on`) while the judgement model is not configured. An Agent
@@ -351,9 +358,16 @@ export function registerAgentRoutes(
     async (req) => {
       const me = await requirePrincipal(req);
       await writeLimit(req, me.id);
-      const { agent, switched } = await db.tx(async (t) => {
-        // Turning memory off or on writes rows of the Agent's groups: their rows first, before the Agent's (the lock order).
-        if (req.body.memory !== undefined) await lockSwitchGroups(t, me.id, req.params.id);
+      // Turning memory off or on writes rows of the Agent's groups: their rows first, before the Agent's (the lock order;
+      // memory/pipeline.ts `lockSwitchGroups`). Only when it switches: a `memory` that is what it already is takes nothing. What it
+      // is now is looked at first, outside the transaction; when it has changed by the time the Agent is locked, or the Agent joined
+      // a group in between (`SwitchAgain`), the transaction runs again with the groups taken first — at most `SWITCH_TRIES` times,
+      // the last one waiting for any group as for any lock.
+      const looked = req.body.memory === undefined ? null : await readOwnedAgent(db, me.id, req.params.id);
+      let groupsFirst = looked !== null && looked.memory !== req.body.memory;
+      // One try: `last`, the switch waits for a group it did not take first as for any lock.
+      const once = (last: boolean) => db.tx(async (t) => {
+        const groups = groupsFirst ? await lockSwitchGroups(t, me.id, req.params.id) : null;
         const current = await lockOwnedAgent(t, me.id, req.params.id);
         if (current.deleted) throw deletedError();
         assertProactiveAvailable(config, req.body.proactive);
@@ -362,6 +376,8 @@ export function registerAgentRoutes(
         // (memory/pipeline.ts `memorySwitched`). Whether to look back at what was said while it was off is said only when turning it on.
         const switching = req.body.memory !== undefined && req.body.memory !== current.memory;
         if (catchUp !== undefined && !(switching && req.body.memory === true)) throw new AppError(400, "invalid_request");
+        // It switches after all (another request switched it since the look): again, its groups first.
+        if (switching && groups === null) throw new SwitchAgain();
         const patch: AgentPatch = {
           ...Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)),
           ...(budget === undefined ? {} : { chainBudgetMicro: budget }),
@@ -372,9 +388,19 @@ export function registerAgentRoutes(
         const next = { ...current, ...patch };
         if ("model" in patch || "reasoning" in patch) await assertModelChoice(t, me.id, next.model, next.reasoning, config);
         const updated = await updateAgent(t, current, patch);
-        if (switching) await memorySwitched(t, current, req.body.memory === true, catchUp === true);
+        if (switching) await memorySwitched(t, current, req.body.memory === true, catchUp === true, { groups: groups ?? [], wait: last });
         return { agent: updated, switched: switching ? { lookBack: req.body.memory === true && catchUp === true } : null };
       });
+      let done: Awaited<ReturnType<typeof once>> | undefined;
+      for (let attempt = 1; done === undefined; attempt++) {
+        try {
+          done = await once(attempt === SWITCH_TRIES);
+        } catch (err) {
+          if (!(err instanceof SwitchAgain) || attempt === SWITCH_TRIES) throw err;
+          groupsFirst = true;
+        }
+      }
+      const { agent, switched } = done;
       // After commit: the reviewer drops what it had waiting for the Agent (and, looking back, reviews its own conversation now).
       if (switched) app.deps.memory?.switched(agent.id, agent.conversationId, switched.lookBack);
       conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);

@@ -69,7 +69,8 @@ export interface LeaveDeps {
 
 /**
  * A deleted Agent leaves every open group it is still a current member of (plan ruling 4): one transaction per group,
- * so that no transaction locks more than one conversation row — the group's, then nothing else — each appending a
+ * so that no transaction locks more than one conversation row `for update` — the group's, then nothing else (the memory
+ * paths that hold several groups' rows hold them `for key share`, taken before anything else: agents/store.ts `lockAgent`) — each appending a
  * `member_left` notice (actor: its owner, who did the deleting; principal: the Agent) whose seq ends the membership, and
  * each published once committed. Its messages there stay. With `agentId`, only that Agent's groups: what
  * `DELETE /api/agents/:id` runs once its own transaction (the dedicated conversation's row, then the `agents` row) has

@@ -615,6 +615,10 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
   let noRoom = 0;
   // What a dream's change did, counted once it has committed (a conversion and a pending card are no dream's doing).
   let made: AppliedOp[] = [];
+  // A split's parts keep their source's origin (origin.ts): inserting one takes that conversation's row for its foreign key, so the
+  // rows are taken first, before the Agent's (the lock order). No other op of a dream writes an origin it did not find there.
+  const splitting = new Set(ops.flatMap((op, i) => (op.op === "split" && checked.has(i) ? [refs.get(op.ref)!.id] : [])));
+  const origins = notes.flatMap((n) => (splitting.has(n.note.id) && n.note.originConversationId !== null ? [n.note.originConversationId] : []));
   const notices = await inLockedAgent(db, by.id, async (t, locked): Promise<StoredMessage[]> => {
     const applied = await applyDream(t, { ownerId: locked.ownerId, agentId: locked.id, sharedNotes: locked.sharedNotes, kinds: new Set<NoteKind>([room.kind]) }, ops, refs, {
       conversationId: locked.conversationId,
@@ -630,7 +634,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     if (applied?.changeId == null) return [];
     rewritten = applied.applied.filter((o) => o.op === "replace").length;
     return [await memoryNotice(t, locked, applied.changeId, { unlock: false, phase: "dream", linesOf: dreamLines })];
-  });
+  }, origins);
   // What came of the room: the notes rewritten, the others left as they were (those among them the room could not hold the restated text of, told apart).
   if (conversion) {
     conversion.tally.converted += rewritten;

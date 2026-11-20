@@ -3,6 +3,7 @@ import { listenersFor } from "../agents/proactive/listeners.ts";
 import { lockAgent, readOwnedAgent, type AgentRow } from "../agents/store.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
+import { lockConversationKeys } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Db, Queryable, Tx } from "../db.ts";
 import type { Judge } from "../judge/client.ts";
@@ -111,10 +112,22 @@ async function markReviewed(q: Queryable, agentId: string, conversationId: strin
  * (`agent_group_state.heard_from_seq`: a line there raises a flag for it only above this, listeners.ts), each the conversation's
  * current seq, never moved back. They are this Agent's alone: the group's judgement keeps its own position (`judged_seq`, what is
  * new to judge, read across the group's Agents) and the switch leaves it, so no other Agent there hears any less or more.
- * The caller has taken the rows of the groups written here first (`lockSwitchGroups`), before the Agent's.
+ * The caller has taken the rows of the groups written here first (`lockSwitchGroups`), before the Agent's: `locked` says which, and
+ * whether this is its last try (`wait`). The groups are read again here, under the Agent's row: one the Agent joined since (a join
+ * between the two reads) is taken `for key share nowait` — free, it is held from now on; held by anyone (a send there, which will ask
+ * for this Agent next), `SwitchAgain` is thrown, the transaction rolls back and the caller runs it again, whose first statement then
+ * takes that group with the others, in order, holding nothing. Nothing ever waits for a group while the Agent is held, except on the
+ * last try (`wait`), as any lock is waited for.
  */
-export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">, on: boolean, catchUp: boolean): Promise<void> {
+export async function memorySwitched(
+  t: Tx,
+  agent: Pick<AgentRow, "id" | "ownerId" | "conversationId">,
+  on: boolean,
+  catchUp: boolean,
+  locked: { groups: readonly string[]; wait: boolean },
+): Promise<void> {
   if (on && catchUp) return;
+  await lockJoinedSince(t, agent, locked);
   await t.query("delete from memory_flags where agent_id = $1", [agent.id]);
   if (!on) await discardPendingOf(t, agent.ownerId, agent.id);
   await t.query(
@@ -136,36 +149,63 @@ export async function memorySwitched(t: Tx, agent: Pick<AgentRow, "id" | "ownerI
 }
 
 /**
- * Before the switch's transaction takes the Agent's row (agents/routes.ts, before `lockOwnedAgent`, when the update names `memory`):
- * the rows of the groups `memorySwitched` writes state rows for — every group the Agent is a current member of, or has a review
- * position or a group state row (`agent_group_state`) in — `for key share` (the lock those rows' foreign keys take), in id order, one statement. A send in a group takes
- * the group's row and then the Agent's (agents/store.ts's lock order): taken first, while nothing else is held, no switch ever holds the
- * Agent while it waits for a group. The Agent's own conversation is not among them: `lockAgent` takes it `for update` next (a shared lock
- * of it taken first would leave two switches of one Agent each waiting to strengthen theirs). Nothing is taken for anyone else's Agent.
+ * SQL, `$1` the Agent: the conversations the memory switch writes state rows in — every group it is a current member of, or has a
+ * review position or a group state row (`agent_group_state`) in — and its own conversation.
  */
-export async function lockSwitchGroups(t: Tx, ownerId: string, agentId: string): Promise<void> {
-  await t.query(
-    `select c.id from conversations c
-      where c.id in (select m.conversation_id from memberships m where m.principal_id = $1 and m.left_seq is null
+const SWITCH_CONVERSATIONS = `select m.conversation_id from memberships m where m.principal_id = $1 and m.left_seq is null
                      union select s.conversation_id from memory_review_state s where s.agent_id = $1
-                     union select g.conversation_id from agent_group_state g where g.agent_id = $1)
+                     union select g.conversation_id from agent_group_state g where g.agent_id = $1`;
+
+/** The switch's transaction ran into a group the Agent joined after its groups were taken (`memorySwitched`): run it again. */
+export class SwitchAgain extends Error {
+  override name = "SwitchAgain";
+}
+
+/**
+ * Before the switch's transaction takes the Agent's row (agents/routes.ts, before `lockOwnedAgent`, when the update switches `memory`):
+ * the rows of the groups `memorySwitched` writes state rows for (`SWITCH_CONVERSATIONS`) `for key share` (the lock those rows'
+ * foreign keys take), in id order, one statement; their ids are returned. A send in a group takes the group's row and then the
+ * Agent's (agents/store.ts's lock order): taken first, while nothing else is held, no switch ever holds the Agent while it waits for
+ * a group. The Agent's own conversation is not among them: `lockAgent` takes it `for update` next (a shared lock of it taken first
+ * would leave two switches of one Agent each waiting to strengthen theirs). Nothing is taken for anyone else's Agent.
+ */
+export async function lockSwitchGroups(t: Tx, ownerId: string, agentId: string): Promise<string[]> {
+  const { rows } = await t.query<{ id: string }>(
+    `select c.id from conversations c
+      where c.id in (${SWITCH_CONVERSATIONS})
         and c.id is distinct from (select a.conversation_id from agent_conversations a where a.agent_id = $1)
         and exists (select 1 from principals p where p.id = $1 and p.owner_id = $2)
       order by c.id
         for key share of c`,
     [agentId, ownerId],
   );
+  return rows.map((r) => r.id);
+}
+
+/** Under the Agent's row: the switch's groups read again, and any not among `locked.groups` taken as `memorySwitched` says. */
+async function lockJoinedSince(t: Tx, agent: Pick<AgentRow, "id" | "conversationId">, locked: { groups: readonly string[]; wait: boolean }): Promise<void> {
+  const { rows } = await t.query<{ id: string }>(`select c.id from conversations c where c.id in (${SWITCH_CONVERSATIONS}) and c.id <> $2 order by c.id`, [agent.id, agent.conversationId]);
+  const joined = rows.map((r) => r.id).filter((id) => !locked.groups.includes(id));
+  if (joined.length === 0) return;
+  try {
+    await t.query(`select 1 from conversations where id = any($1::uuid[]) order by id for key share${locked.wait ? "" : " nowait"}`, [joined]);
+  } catch (err) {
+    // 55P03 lock_not_available: someone holds it.
+    if ((err as { code?: unknown }).code === "55P03") throw new SwitchAgain();
+    throw err;
+  }
 }
 
 /**
  * The transaction prologue of everything that writes an Agent's memory: the Agent's conversation and row locked (the order
  * every writer uses), then `work` — unless the Agent was deleted, paused or turned memory off meanwhile: then nothing
- * happens and null comes back. `group`: the group whose rows `work` writes rows that point at (a group review's position and notes,
- * hearsay entries), taken `for key share` first, before the Agent's (a send there takes the group, then the Agent).
+ * happens and null comes back. `groups`: the conversations `work` writes rows that point at (a group review's position and notes,
+ * hearsay entries, a dream's split parts that keep a group's origin), taken `for key share` first, in id order, before the Agent's
+ * (a send there takes the group, then the Agent; conversations/store.ts `lockConversationKeys`, which leaves the Agent's own out).
  */
-export async function inLockedAgent<T>(db: Db, agentId: string, work: (t: Tx, locked: AgentRow) => Promise<T>, group?: string): Promise<T | null> {
+export async function inLockedAgent<T>(db: Db, agentId: string, work: (t: Tx, locked: AgentRow) => Promise<T>, groups?: string | readonly string[]): Promise<T | null> {
   return db.tx(async (t) => {
-    if (group !== undefined) await t.query("select 1 from conversations where id = $1 for key share", [group]);
+    if (groups !== undefined) await lockConversationKeys(t, typeof groups === "string" ? [groups] : groups, agentId);
     const locked = await lockAgent(t, agentId);
     if (locked.deleted || locked.paused || !locked.memory) return null;
     return work(t, locked);

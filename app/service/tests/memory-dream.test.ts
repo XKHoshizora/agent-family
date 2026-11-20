@@ -5,6 +5,7 @@ import { weight } from "../src/memory/weight.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge, type ScriptedAnswers } from "./helpers/judge.ts";
+import { holdGroupThenAgent, someoneWaits } from "./helpers/locks.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
@@ -649,6 +650,26 @@ describe("splitting", () => {
     await night(20 * MIN);
     expect((await ownerNotes(w3.owner.id)).map((r) => r.text)).toEqual(["喝茶"]);
     expect(judge.calls.flatMap((c) => c.questions).filter((q) => q.key.startsWith("faithful"))).toHaveLength(0);
+  });
+
+  it("parts that keep a group's origin point at the group's row: the dream takes it before the Agent's (the lock order) — a send holding the group, then asking for the Agent, waits for nothing the dream holds; both commit, and the split applies", async () => {
+    const w = await owned("dd4");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "dd4_mia"), await signUp(app, "dd4_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    const src = await seeded(w.owner, w.agent.id, SRC, false);
+    // Learned in the group: each part keeps that origin, so inserting it takes the group's row (its foreign key).
+    await db.query("update owner_notes set origin = 'review', origin_conversation_id = $2 where id = $1", [src.id, g]);
+    judge.answer(splitJudge(0.9));
+    gateway.reply(dreamAns(split("n1", ["喜欢茶", "对花生过敏"])));
+    const sender = holdGroupThenAgent(db, g, w.agent.id);
+    await sender.locked;
+    const dreaming = night();
+    // The dream waits for the group's row: at its first statement (the order), or — out of order — at a part's insert, holding the Agent.
+    await someoneWaits(db, ["%for key share%", "%insert into owner_notes%"]).finally(() => sender.release());
+    await sender.done;
+    await dreaming;
+    expect((await ownerNotes(w.owner.id)).map((r) => r.text)).toEqual(["喜欢茶", "对花生过敏"]);
+    expect((await db.query("select distinct origin_conversation_id as g from owner_notes where owner_id = $1", [w.owner.id])).rows).toEqual([{ g }]);
   });
 });
 

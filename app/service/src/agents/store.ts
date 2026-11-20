@@ -146,7 +146,12 @@ export function modelParams(model: AgentModel): [string | null, string | null, s
 
 /**
  * Locks one conversation row, then the Agent's `agents` row (`for update`): the order every writer uses (pair lock →
- * one conversation → agents → run rows → accounts). The conversation is the one the caller acts in — whatever acts for
+ * one conversation → agents → run rows → accounts). One conversation is taken `for update`; a writer that also writes rows
+ * pointing at other conversations (groups) takes those rows `for key share` before all of it, in id order, in one statement
+ * (conversations/store.ts `lockConversationKeys`, memory/pipeline.ts `lockSwitchGroups`: the memory switch, a group's review or
+ * hearsay, a dream's split, undo and confirm of a memory change, the hearsay confirm). Key share never waits for key share, and
+ * the one row taken `for update` comes after, so several conversation rows are held then without breaking the order: do not
+ * "fix" them into it. The conversation is the one the caller acts in — whatever acts for
  * a run passes the run's own (`agent_runs.conversation_id`) — and by default the Agent's dedicated conversation, which
  * the owner's routes on the Agent itself (edit, pause, resume, delete, avatar, proposals) take. Pause, resume, delete
  * and `postAsAgent` go through it, so the row it returns cannot change until the transaction ends. 404 for an unknown

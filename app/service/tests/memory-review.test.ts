@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { memoryCall } from "../src/memory/call.ts";
-import { runReview, type PipelineDeps } from "../src/memory/pipeline.ts";
+import { memorySwitched, runReview, type PipelineDeps } from "../src/memory/pipeline.ts";
 import { createReviewer, MAX_REVIEWS_AT_ONCE } from "../src/memory/reviewer.ts";
 import * as reviewModule from "../src/memory/review.ts";
 import { EXPLICIT, REMEMBER, reviewInput } from "../src/memory/review.ts";
@@ -9,7 +9,7 @@ import { JudgeError } from "../src/judge/client.ts";
 import { weight } from "../src/memory/weight.ts";
 import { notesFor, setNewNotes } from "../src/memory/store.ts";
 import { settled } from "../src/memory/stats.ts";
-import { readOwnedAgent } from "../src/agents/store.ts";
+import { lockAgent, readOwnedAgent } from "../src/agents/store.ts";
 import { toWireForReaders } from "../src/messages/read.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -17,6 +17,7 @@ import { useApp } from "./helpers/harness.ts";
 import { runningRun } from "./helpers/metering.ts";
 import { scriptedJudge } from "./helpers/judge.ts";
 import { scriptedGateway } from "./helpers/models.ts";
+import { holdGroupThenAgent, holdThen, someoneWaits } from "./helpers/locks.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
 
 /**
@@ -529,29 +530,6 @@ describe("switching memory off and on again", () => {
     expect(await chips(w.owner, w.conv)).toEqual([]);
   });
 
-  /** Another connection holds group `g`'s row (as a send there does) until `release`; then, as a mention does, it asks for the Agent's row. */
-  const holdGroupThenAgent = (g: string, agentId: string) => {
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
-    let locked!: () => void;
-    const groupLocked = new Promise<void>((r) => (locked = r));
-    const done = db.tx(async (t) => {
-      await t.query("select 1 from conversations where id = $1 for update", [g]);
-      locked();
-      await held;
-      await t.query("select 1 from agents where principal_id = $1 for update", [agentId]);
-    });
-    return { groupLocked, release, done };
-  };
-  /** At least `n` statements of this database are waiting for a lock. */
-  const someoneWaits = (n = 1) =>
-    vi.waitFor(
-      async () => {
-        const { rows } = await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'");
-        expect(rows[0]!.n).toBeGreaterThanOrEqual(n);
-      },
-      { timeout: 5000 },
-    );
   const stateRows = async (agentId: string, g: string) =>
     (await db.query<{ n: number }>("select (select count(*) from memory_review_state where agent_id = $1 and conversation_id = $2)::int + (select count(*) from agent_group_state where agent_id = $1 and conversation_id = $2)::int as n", [agentId, g])).rows[0]!.n;
 
@@ -565,11 +543,10 @@ describe("switching memory off and on again", () => {
       await db.query("delete from agent_group_state where agent_id = $1 and conversation_id = $2", [w.agent.id, g]);
       // No state row in the group: the switch's rows there are new, and their foreign key takes the group's row.
       expect(await stateRows(w.agent.id, g)).toBe(0);
-      const sender = holdGroupThenAgent(g, w.agent.id);
-      await sender.groupLocked;
+      const sender = holdGroupThenAgent(db, g, w.agent.id);
+      await sender.locked;
       const switching = patch(w, body);
-      await someoneWaits();
-      sender.release();
+      await someoneWaits(db, ["%for key share%"]).finally(() => sender.release());
       await sender.done;
       expect([body, (await switching).status]).toEqual([body, 200]);
       expect(await stateRows(w.agent.id, g)).toBe(2);
@@ -592,7 +569,7 @@ describe("switching memory off and on again", () => {
     });
     await ownLocked;
     const both = Promise.all([patch(w, { memory: false }), patch(w, { memory: false })]);
-    await someoneWaits(2);
+    await someoneWaits(db, ["%from conversations where id = $1 for update%"], 2);
     release();
     await holder;
     expect((await both).map((r) => r.status)).toEqual([200, 200]);
@@ -606,17 +583,150 @@ describe("switching memory off and on again", () => {
     await say(w.owner, g, "我最近在学吉他");
     judge.answer(() => ({ sort: 0.05 }));
     gateway.reply(ops(add("在学吉他")));
-    const sender = holdGroupThenAgent(g, w.agent.id);
-    await sender.groupLocked;
+    const sender = holdGroupThenAgent(db, g, w.agent.id);
+    await sender.locked;
     const deps: PipelineDeps = { db, config: app.deps.config, models: gateway, judge, log: app.log, inFlight: new Set<string>(), conversations: app.deps.conversations, now: clock.now };
     // Its notes begin in the group, and its position there is a new row: both take the group's row.
     const reviewing = runReview(deps, { kind: "review", agentId: w.agent.id, conversationId: g }, { closing: new AbortController().signal, attempted: () => {} });
-    await someoneWaits();
-    sender.release();
+    await someoneWaits(db, ["%for key share%"]).finally(() => sender.release());
     await sender.done;
     await reviewing;
     expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["在学吉他"]);
     expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+  });
+
+  /** What `p` came to within `ms`: its value, the error's name when it failed, or `waited` (it was still waiting). */
+  const within = <T,>(p: Promise<T>, ms = 2000): Promise<T | string> =>
+    Promise.race([p.catch((e: unknown) => (e instanceof Error ? e.name : String(e))), new Promise<string>((r) => setTimeout(() => r("waited"), ms))]);
+
+  it("a group the Agent has left but still has state rows in is among the rows the switch takes first: a send holding it, then asking for the Agent, waits for nothing the switch holds", async () => {
+    const w = await owned("swlg");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swlg_mia"), await signUp(app, "swlg_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    expect((await patch(w, { memory: false })).status).toBe(200);
+    expect((await patch(w, { memory: true })).status).toBe(200);
+    // It leaves the group; its review position and its group state row there stay.
+    await db.query("update memberships set left_seq = (select seq from conversations where id = $2) where principal_id = $1 and conversation_id = $2", [w.agent.id, g]);
+    expect(await stateRows(w.agent.id, g)).toBe(2);
+    const sender = holdGroupThenAgent(db, g, w.agent.id);
+    await sender.locked;
+    const switching = patch(w, { memory: false });
+    // The switch waits for that group's row at its first statement, holding nothing yet.
+    await someoneWaits(db, ["%for key share%"]).finally(() => sender.release());
+    await sender.done;
+    expect((await switching).status).toBe(200);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+  });
+
+  it("naming memory with the value it already has switches nothing and takes no group's row: a send holding a group of the Agent's holds nothing of it back", async () => {
+    const w = await owned("swn");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swn_mia"), await signUp(app, "swn_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    const holder = holdThen(db, ["select 1 from conversations where id = $1 for update", [g]], ["select 1", []]);
+    await holder.locked;
+    try {
+      expect(await within(patch(w, { memory: true }).then((r) => r.status))).toBe(200);
+    } finally {
+      holder.release();
+      await holder.done;
+    }
+  });
+
+  it("memory switched by another request between this one's look and its transaction: it runs again, the groups' rows first, and switches", async () => {
+    const w = await owned("swr");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swr_mia"), await signUp(app, "swr_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const ownLocked = new Promise<void>((r) => (locked = r));
+    const holder = db.tx(async (t) => {
+      await t.query("select 1 from conversations where id = $1 for update", [w.conv]);
+      locked();
+      await held;
+    });
+    await ownLocked;
+    // First in line: memory off. Then, while memory still reads on, a request to turn it on (the same value at its look: no groups taken).
+    const off = patch(w, { memory: false });
+    let on: ReturnType<typeof patch> | undefined;
+    try {
+      await someoneWaits(db, ["%from conversations where id = $1 for update%"]);
+      on = patch(w, { memory: true });
+      await someoneWaits(db, ["%from conversations where id = $1 for update%"], 2);
+    } finally {
+      release();
+    }
+    await holder;
+    expect([(await off).status, (await on!).status]).toEqual([200, 200]);
+    // The second found memory off under the Agent's lock: a switch after all, made with the groups' rows taken first.
+    expect((await readOwnedAgent(db, w.owner.id, w.agent.id))!.memory).toBe(true);
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+  });
+
+  it("a group the Agent joined after the switch took its groups' rows: the switch does not wait for it while holding the Agent — held by anyone, it gives up (SwitchAgain) for its transaction to run again, groups first", async () => {
+    const w = await owned("swj");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "swj_mia"), await signUp(app, "swj_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    const holder = holdThen(db, ["select 1 from conversations where id = $1 for update", [g]], ["select 1", []]);
+    await holder.locked;
+    const agent = (await readOwnedAgent(db, w.owner.id, w.agent.id))!;
+    // The switch's transaction as the route runs it, its groups taken before the Agent joined `g` (none).
+    const switching = db.tx(async (t) => {
+      await lockAgent(t, w.agent.id);
+      await memorySwitched(t, agent, false, false, { groups: [], wait: false });
+    });
+    try {
+      expect(await within(switching)).toBe("SwitchAgain");
+    } finally {
+      holder.release();
+      await holder.done;
+      await switching.catch(() => undefined);
+    }
+    // On its last try it waits as for any lock: held by nobody now, it goes through.
+    await db.tx(async (t) => {
+      await lockAgent(t, w.agent.id);
+      await memorySwitched(t, agent, false, false, { groups: [], wait: true });
+    });
+    expect(await reviewedSeq(w.agent.id, g)).toBe(await seqOf(g));
+  });
+
+  it("undo writes a note's group origin back: it takes the group's row before the owner's account (the lock order) — a send holding the group, then asking for the account, waits for nothing the undo holds; both commit", async () => {
+    const w = await owned("udl");
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "udl_mia"), await signUp(app, "udl_ned")]);
+    const note = await seeded(w.owner, w.agent.id, "在学吉他", false);
+    await db.query("update owner_notes set origin = 'review', origin_conversation_id = $2 where id = $1", [note.id, g]);
+    // A correction in the owner's own conversation: the note's text is no longer the group's, so its origin goes; undo puts it back.
+    await exchange(w, "我现在不学吉他了，在学钢琴");
+    await quietThen(ops({ op: "replace", ref: "n1", text: "在学钢琴" }));
+    const [chip] = await chips(w.owner, w.conv);
+    expect((await db.query("select origin_conversation_id as g from owner_notes where id = $1", [note.id])).rows).toEqual([{ g: null }]);
+    const sender = holdThen(db, ["select 1 from conversations where id = $1 for update", [g]], ["select 1 from accounts where principal_id = $1 for update", [w.owner.id]]);
+    await sender.locked;
+    const undoing = api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${chip.system.changeId}/undo`);
+    await someoneWaits(db, ["%for key share%", "%update owner_notes%"]).finally(() => sender.release());
+    await sender.done;
+    expect((await undoing).status).toBe(200);
+    expect((await db.query("select text, origin_conversation_id as g from owner_notes where id = $1", [note.id])).rows).toEqual([{ text: "在学吉他", g }]);
+  });
+
+  it("confirming a group review's card writes a note pointing at the group: the group's row is taken before the owner's account — a send holding the group, then asking for the account, waits for nothing the confirmation holds; both commit", async () => {
+    const w = await owned("cfl", { memoryAsk: true });
+    const g = await group(app, w.owner, "读书会", [await signUp(app, "cfl_mia"), await signUp(app, "cfl_ned")]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${g}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await say(w.owner, g, "我最近在学吉他");
+    judge.answer(() => ({ sort: 0.05 }));
+    gateway.reply(ops(add("在学吉他")));
+    const deps: PipelineDeps = { db, config: app.deps.config, models: gateway, judge, log: app.log, inFlight: new Set<string>(), conversations: app.deps.conversations, now: clock.now };
+    await runReview(deps, { kind: "review", agentId: w.agent.id, conversationId: g }, { closing: new AbortController().signal, attempted: () => {} });
+    const [card] = (await db.query<{ id: string }>("select id from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows;
+    expect(card).toBeDefined();
+    const sender = holdThen(db, ["select 1 from conversations where id = $1 for update", [g]], ["select 1 from accounts where principal_id = $1 for update", [w.owner.id]]);
+    await sender.locked;
+    const confirming = api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/changes/${card!.id}/confirm`);
+    await someoneWaits(db, ["%for key share%", "%insert into owner_notes%"]).finally(() => sender.release());
+    await sender.done;
+    expect((await confirming).status).toBe(200);
+    expect((await db.query("select text, origin_conversation_id as g from owner_notes where owner_id = $1", [w.owner.id])).rows).toEqual([{ text: "在学吉他", g }]);
   });
 
   it("the reviewer drops what waits for an Agent whose memory is switched — its quiet timer, its flags' wake-up, its queued jobs (one under way is left to find memory off) — and with a look back queues one review of its own conversation", async () => {

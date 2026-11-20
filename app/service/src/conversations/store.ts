@@ -92,6 +92,25 @@ const toMembership = (r: MembershipDbRow): Membership => ({
 });
 
 /** Locks the conversation row (`select … for update`) for the rest of the transaction. */
+/**
+ * The rows of conversations `ids` taken `for key share`, in id order, in one statement: the lock a foreign key to a conversation
+ * takes when a row pointing at it is written (a note's origin, a hearsay entry's group, a review or group state row). Taken first,
+ * before anything else in the transaction (agents/store.ts `lockAgent` says the order): a send holds its conversation `for update`
+ * and then asks for an Agent's row or an account's, so a writer that held one of those and then waited for the conversation could
+ * close a circle. `exceptOwnOf`: an Agent whose own conversation is left out — its transaction takes that row `for update` next
+ * (`lockAgent`), and a shared lock of it taken first would leave two such transactions each waiting to strengthen theirs.
+ */
+export async function lockConversationKeys(t: Tx, ids: readonly string[], exceptOwnOf?: string): Promise<void> {
+  if (ids.length === 0) return;
+  await t.query(
+    `select 1 from conversations
+      where id = any($1::uuid[]) and id is distinct from (select conversation_id from agent_conversations where agent_id = $2::uuid)
+      order by id
+        for key share`,
+    [[...new Set(ids)], exceptOwnOf ?? null],
+  );
+}
+
 export async function lockConversation(t: Tx, conversationId: string): Promise<ConversationRow | null> {
   const { rows } = await t.query<ConversationDbRow>(
     "select id, type, title, creator_id, seq, closed_at from conversations where id = $1 for update",

@@ -6,6 +6,7 @@ import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { parseEntries } from "../src/memory/hearsay.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedJudge } from "./helpers/judge.ts";
+import { holdGroupThenAgent, holdThen, someoneWaits } from "./helpers/locks.ts";
 import { FAST, flagHelpers, JUDGE, MIN, PERSONA, settle, textOf } from "./helpers/memory-flags.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -1226,5 +1227,43 @@ describe("memory switched off and on again", () => {
     await wake();
     expect(hearsayCalls()).toHaveLength(0);
     expect(await hearsayRows(w.agent.id)).toEqual([]);
+  });
+});
+
+describe("the lock order of what points at a group", () => {
+  it("a hearsay call's entries point at the group: the group's row is taken before the Agent's — a send holding the group, then asking for the Agent, waits for nothing the call holds; both commit, and the entry is kept", async () => {
+    const w = await world("lka");
+    const seq = await say(w.mia, w.g, "小李下周要去北京出差");
+    await flag(w.agent.id, w.g, seq, "hearsay");
+    gateway.reply(answer([entry("m1", SAID)]));
+    const sender = holdGroupThenAgent(db, w.g, w.agent.id);
+    await sender.locked;
+    const waking = wake();
+    await someoneWaits(db, ["%for key share%", "%insert into agent_hearsay%"]).finally(() => sender.release());
+    await sender.done;
+    await waking;
+    expect((await hearsayRows(w.agent.id)).map((r) => [r.text, r.conversation_id])).toEqual([[SAID, w.g]]);
+  });
+
+  it("属实 writes a note pointing at the group: the group's row is taken before the owner's room — with a send holding the group, then asking for the Agent, and a job holding the Agent, then asking for the room, all three commit", async () => {
+    const w = await world("lkb");
+    const { rows } = await db.query<{ id: string }>(
+      "insert into agent_hearsay (agent_id, conversation_id, speaker_id, speaker_name, text, said_at) values ($1, $2, $3, '某人', $4, now()) returning id",
+      [w.agent.id, w.g, w.mia.id, SAID],
+    );
+    const sender = holdGroupThenAgent(db, w.g, w.agent.id);
+    await sender.locked;
+    // A memory job of the Agent's (a review, a dream): the Agent's row, and then the owner's room.
+    const job = holdThen(db, ["select 1 from agents where principal_id = $1 for update", [w.agent.id]], ["select pg_advisory_xact_lock(hashtextextended($1, 0))", [`memory-room:owner:${w.owner.id}`]]);
+    await job.locked;
+    const confirming = api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/hearsay/${rows[0]!.id}/confirm`);
+    await someoneWaits(db, ["%for key share%", "%insert into owner_notes%"]).finally(() => {
+      job.release();
+      sender.release();
+    });
+    await job.done;
+    await sender.done;
+    expect((await confirming).status).toBe(201);
+    expect((await db.query("select text, origin_conversation_id as g from owner_notes where owner_id = $1", [w.owner.id])).rows).toEqual([{ text: SAID, g: w.g }]);
   });
 });

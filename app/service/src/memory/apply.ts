@@ -1,4 +1,5 @@
 import { lockAccount } from "../accounts/store.ts";
+import { lockConversationKeys } from "../conversations/store.ts";
 import type { Tx } from "../db.ts";
 import { modelNote } from "./clean.ts";
 import type { Op } from "./ops.ts";
@@ -866,6 +867,33 @@ function fitsRoom(room: { owner: number; self: number }, size: number, kind: Not
   return false;
 }
 
+/** The keys of a stored op that name a conversation a note or an entry points at (a note's origin before and after, a hearsay entry's group). */
+const POINTING_KEYS = new Set(["originConversationId", "originBefore", "originAfter", "conversationId"]);
+
+/** Every conversation `value` (a change's stored ops, with their merged-away notes and split-off parts) names under `POINTING_KEYS`. */
+function pointedAt(value: unknown, out: Set<string>): Set<string> {
+  if (Array.isArray(value)) for (const v of value) pointedAt(v, out);
+  else if (value !== null && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (POINTING_KEYS.has(k) && typeof v === "string") out.add(v);
+      else pointedAt(v, out);
+    }
+  }
+  return out;
+}
+
+/**
+ * Before the account's row: the rows of every conversation the change's notes and entries point at, `for key share`, in id order
+ * (conversations/store.ts `lockConversationKeys`) — what putting back, inserting or re-pointing them takes for their foreign keys. A
+ * send holds its conversation `for update` and then asks for rows after it (an Agent's, an account's): taken first, while nothing
+ * else is held, an undo or a confirmation never holds the account while it waits for a group. The ops are read without a lock; the
+ * change is read again under the account (`readChange`), and an op can only be dropped from it since, never added.
+ */
+async function lockChangeConversations(t: Tx, ownerId: string, changeId: string): Promise<void> {
+  const { rows } = await t.query<{ ops: unknown }>("select ops from memory_changes where id = $1 and owner_id = $2", [changeId, ownerId]);
+  if (rows[0]) await lockConversationKeys(t, [...pointedAt(rows[0].ops, new Set())].sort());
+}
+
 /**
  * Undoes an applied change of the owner's: every note it touched is put back exactly as it was (text, vault state,
  * `vault_by`, `unsure`), an added note goes, a removed one returns (same id). Refused as `stale` (nothing changed) when
@@ -875,6 +903,7 @@ function fitsRoom(room: { owner: number; self: number }, size: number, kind: Not
  * change, so changes to one note undo newest first. Null when the change is not the owner's or not applied.
  */
 export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, full?: FullRoom): Promise<"undone" | "stale" | "full" | null> {
+  await lockChangeConversations(t, ownerId, changeId);
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "applied") return null;
@@ -1042,6 +1071,7 @@ function refreshPending(state: State, ops: StoredOp[]): void {
  * it answers `full` and writes nothing (the change stays pending; `report` says why, as `FullRoom`). Null when the change is not the owner's or not pending.
  */
 export async function confirmChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, report?: { dropped: number } & FullRoom): Promise<AppliedOp[] | "stale" | "full" | null> {
+  await lockChangeConversations(t, ownerId, changeId);
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "pending") return null;
