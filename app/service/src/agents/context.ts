@@ -26,7 +26,7 @@ import {
   type SystemText,
 } from "./runtime/prompt.ts";
 import type { AgentRow } from "./store.ts";
-import { countPlaced, readSummary, summaryBase, type Summary } from "./summary/store.ts";
+import { placedRange, readSummary, summaryBase, type Summary } from "./summary/store.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -126,7 +126,7 @@ export interface LoadedContext {
   topicStart: number;
   /**
    * What the conversation part left out (README "The rolling summary"): the messages the Agent could see placed (agents/
-   * summary/store.ts: a message's seq, an Agent's reply the seq its run covered) from `from` to `to`, both
+   * summary/store.ts: a message's seq, an Agent's reply the seq its run covered) from `from` (the first of them) to `to`, both
    * included — after where the part starts (the topic start; in a group the asker's line too) and past what the pair's summary
    * covers (shown to this run or not), and before the oldest message the plan shows (by name: `ContextPlan.shownAt`; in the
    * Agent's own conversation, at the last reply of the Agent's before it: `leftOutTo`) — in its own conversation because they
@@ -575,10 +575,11 @@ export async function loadContext(
   if (to !== null && to > after) {
     // Counted in two parts, so that no read reaches past `to`: what is stored at or before it, and what was loaded after it
     // (every message after it is among those loaded) whose place is not.
-    const late = loaded.filter((l) => l.seq > to && l.answers > after && l.answers <= to).length;
+    const late = loaded.filter((l) => l.seq > to && l.answers > after && l.answers <= to).map((l) => l.answers);
     const reader = { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null };
-    const messages = (await countPlaced(q, reader, after, to, to)) + late;
-    if (messages > 0) leftOut = { from: after + 1, to, messages };
+    const before = await placedRange(q, reader, after, to, to);
+    const firsts = [...late, ...(before.first === null ? [] : [before.first])];
+    if (firsts.length > 0) leftOut = { from: Math.min(...firsts), to, messages: before.messages + late.length };
   }
   const attachments = new Map<string, Downloadable>();
   for (const [, a] of [...could.attachments(false), ...could.attachments(true)]) {

@@ -42,12 +42,17 @@ const placedParams = (r: PlacedReader, after: number, upto: number) => [r.agentI
  * or before seq `maxSeq` (a read bounded on both sides; agents/context.ts counts the rest from what it loaded).
  */
 export async function countPlaced(q: Queryable, r: PlacedReader, after: number, upto: number, maxSeq?: number): Promise<number> {
-  if (upto <= after) return 0;
-  const { rows } = await q.query<{ n: number }>(`select count(*)::int as n ${PLACED_FROM} ${PLACED_WHERE} and ($7::bigint is null or m.seq <= $7::bigint)`, [
-    ...placedParams(r, after, upto),
-    maxSeq ?? null,
-  ]);
-  return rows[0]?.n ?? 0;
+  return (await placedRange(q, r, after, upto, maxSeq)).messages;
+}
+
+/** `countPlaced`, with the first place among them (null when there are none). */
+export async function placedRange(q: Queryable, r: PlacedReader, after: number, upto: number, maxSeq?: number): Promise<{ messages: number; first: number | null }> {
+  if (upto <= after) return { messages: 0, first: null };
+  const { rows } = await q.query<{ n: number; first: string | null }>(
+    `select count(*)::int as n, min(coalesce(r.covers_seq, m.seq))::text as first ${PLACED_FROM} ${PLACED_WHERE} and ($7::bigint is null or m.seq <= $7::bigint)`,
+    [...placedParams(r, after, upto), maxSeq ?? null],
+  );
+  return { messages: rows[0]?.n ?? 0, first: rows[0]?.first == null ? null : Number(rows[0].first) };
 }
 
 /** A message as a summary reads it: its place, who sent it (their name, handle and kind), its text and its attachment. */
