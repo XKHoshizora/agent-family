@@ -267,7 +267,9 @@ const fromAgent = (conv, m) => conv.type === "agent" && Boolean(conv.agentId) &&
  * the run ends)? Then its stream is dropped and the run is marked posted, so no later delta brings the bubble back.
  * A pushed message (`pushed`: a push, also a duplicate of one already held) is in order with the run's push: any
  * message of the Agent after it is the reply. Messages from a snapshot or a page (sync, catch-up, history) are not in
- * that order: there the reply is a message of the Agent after the run's `since`.
+ * that order: there the reply is a message of the Agent after the run's `since`. An acknowledgement (`ack`: what the
+ * Agent said before it looked something up, posted as its own message while the reply goes on) is never the reply: a
+ * pushed one only takes the place of what was streamed so far, and the run goes on being written.
  */
 function notePosted(state, conversationId, arrived, pushed) {
   return noteGroupPosted(noteRunPosted(state, conversationId, arrived, pushed), conversationId, arrived, pushed);
@@ -277,9 +279,10 @@ function noteRunPosted(state, conversationId, arrived, pushed) {
   const conv = state.conversations[conversationId];
   const run = state.runs[conversationId];
   if (!conv || !run || run.status !== "running" || run.posted) return state;
-  const replies = arrived.filter((m) => fromAgent(conv, m));
+  const said = arrived.filter((m) => fromAgent(conv, m));
+  const replies = said.filter((m) => m.ack !== true);
   const isReply = pushed ? replies.length > 0 : typeof run.since === "number" && replies.some((m) => m.seq > run.since);
-  if (!isReply) return state;
+  if (!isReply) return pushed && said.length > 0 ? { ...state, streams: without(state.streams, run.id) } : state;
   return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
 }
 
@@ -293,7 +296,7 @@ function noteGroupPosted(state, conversationId, arrived, pushed) {
   let next = null;
   for (const [agentId, slot] of Object.entries(slots)) {
     if (!replyingSlot(slot) || slot.posted) continue;
-    const replies = arrived.filter((m) => m.senderId === agentId && m.kind !== "system");
+    const replies = arrived.filter((m) => m.senderId === agentId && m.kind !== "system" && m.ack !== true);
     const isReply = pushed ? replies.length > 0 : typeof slot.since === "number" && replies.some((m) => m.seq > slot.since);
     if (!isReply) continue;
     next ??= { ...slots };

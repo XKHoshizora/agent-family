@@ -105,7 +105,7 @@ export const isKatexRootClass = (name) => name === "katex" || name === "katex-di
  */
 export const APP_CLASSES = new Set(
   `active app appellation-rows apply-box approvals attachment-image auth-card auth-foot auth-form auth-head auth-page auth-submit avatar
-  avatar-dot avatar-editor avatar-fallback avatar-img back badge blocker boxed brand-mark brand-name btn btn-danger
+  avatar-dot avatar-editor avatar-fallback avatar-img back badge blocker boxed brand-mark brand-name btn btn-danger cite
   btn-primary btn-sm btn-text bubble card card-actions card-head card-title chat chat-head chat-head-actions chat-search
   chat-title check checks compact composer composer-hint composer-input composer-resize composer-row composer-tools
   current device-rows device-static disc-actions disc-bar disc-text document-address document-label document-preview

@@ -5,7 +5,8 @@
 //   - every link opens a new tab, with rel="noopener noreferrer nofollow", its real address as its tooltip, and its real
 //     host after its text (always: also when the text is that address), both isolated from the text around them;
 //   - a code block has 复制, a table scrolls sideways inside the bubble.
-import React, { createElement, memo, useEffect, useRef, useState } from "react";
+import React, { createElement, memo, useContext, useEffect, useRef, useState } from "react";
+import { CitesContext, withCites } from "./cites.jsx";
 import { linkTextShown, safeHref, withoutBidiControls } from "./markdownRules.js";
 import { shownHost } from "./markdownTree.js";
 import "katex/dist/katex.min.css";
@@ -70,12 +71,21 @@ function CodeBlock({ children }) {
 const linkText = (node) => (node.children?.length === 1 && typeof node.children[0] === "string" ? node.children[0] : "");
 const isKatexRoot = (node) => node.tag === "span" && (node.props?.className ?? []).some((name) => name === "katex" || name === "katex-display" || name === "katex-error");
 
-/** One checked element as React's: the app's parts for links, code blocks and tables; classes joined; a cell's alignment. */
-function toElement(node, katex) {
+/** Elements whose text is never read for citations: code, and inside formulas. */
+const LITERAL = new Set(["code", "pre"]);
+
+/**
+ * One checked element as React's: the app's parts for links, code blocks and tables; classes joined; a cell's alignment;
+ * in its text (not in code or a formula) what the message cites, as links (`cites`: cites.jsx).
+ */
+function toElement(node, katex, cites) {
   const inKatex = katex || isKatexRoot(node);
   const { className, align, ...rest } = node.props ?? {};
   if (!inKatex && node.tag === "a") return createElement(Link, { href: rest.href, text: linkText(node) });
-  const children = (node.children ?? []).map((child) => (typeof child === "string" ? child : toElement(child, inKatex)));
+  const literal = inKatex || LITERAL.has(node.tag);
+  const children = (node.children ?? []).map((child, i) =>
+    typeof child === "string" ? (literal ? child : withCites(child, cites, `c${i}`)) : toElement(child, inKatex, literal ? null : cites),
+  );
   if (!inKatex && node.tag === "pre") return createElement(CodeBlock, null, ...children);
   if (!inKatex && node.tag === "table") return createElement(Table, null, ...children);
   const props = { ...rest };
@@ -85,7 +95,8 @@ function toElement(node, katex) {
   return createElement(node.tag, props, ...children);
 }
 
-/** A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree changes. */
+/** A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree, or what its message cites, changes. */
 export const RichTree = memo(function RichTree({ tree }) {
-  return createElement("div", { className: "md" }, ...tree.map((node) => (typeof node === "string" ? node : toElement(node, false))));
+  const cites = useContext(CitesContext);
+  return createElement("div", { className: "md" }, ...tree.map((node, i) => (typeof node === "string" ? withCites(node, cites, `c${i}`) : toElement(node, false, cites))));
 });

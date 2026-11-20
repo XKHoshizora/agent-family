@@ -10,6 +10,7 @@
 // the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
+import { CitedText } from "./cites.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
 import { inFrame, useMarkdownView } from "./markdownView.jsx";
@@ -159,7 +160,8 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
   }, [client, view, shown, near, result]);
 
   const granted = useBudget(view, host, result, epoch, true);
-  let body = shown;
+  // Plain, with what it cites (cites.jsx) as links; rich, the tree does the same.
+  let body = <CitedText text={shown} />;
   let kind = "plain";
   if (result?.plain) {
     body = plainOf(shown, result);

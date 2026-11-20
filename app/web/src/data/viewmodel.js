@@ -300,6 +300,22 @@ function foundView(found) {
   return found.filter((f) => f && typeof f.conversationId === "string" && isCountAbove0(f.seq)).map((f) => ({ conversationId: f.conversationId, seq: f.seq }));
 }
 
+/** The numbers of a citation as a reply writes it (〔m3〕). */
+const CITE_NUMBER = /^m[1-9][0-9]{0,5}$/;
+
+/**
+ * A reply's `cites` (of what its text cites, the messages I can see, by number) as `{m3: {conversationId, seq}}`; null
+ * when there is none. A number it does not name is plain text in the reply.
+ */
+function citesView(cites) {
+  if (!cites || typeof cites !== "object" || Array.isArray(cites)) return null;
+  const out = {};
+  for (const [n, at] of Object.entries(cites)) {
+    if (CITE_NUMBER.test(n) && at && typeof at.conversationId === "string" && isCountAbove0(at.seq)) out[n] = { conversationId: at.conversationId, seq: at.seq };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 /**
  * The quiet line under a reply that looked things up: 查了 n 次聊天记录 and 看了 n 个文件, joined with ，; time lookups are
  * never in it. Null when there is nothing to say (no lookups, or only at the time).
@@ -383,6 +399,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     // more), and the words searched for — only in my Agent's own conversation, whatever a message carries elsewhere.
     lookups: m.kind === "text" ? lookupsView(m.lookups) : null,
     found: m.kind === "text" ? foundView(m.found) : [],
+    // What its text cites (〔m3〕), of the messages I can see.
+    cites: m.kind === "text" ? citesView(m.cites) : null,
     queries:
       m.kind === "text" && typeof agentId === "string" && m.senderId === agentId && Array.isArray(m.queries)
         ? m.queries.filter((q) => typeof q === "string" && q.trim() !== "")
