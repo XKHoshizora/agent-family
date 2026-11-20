@@ -775,26 +775,38 @@ function byPlace(a, b) {
   return at !== 0 ? at : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }
 
+/** By when they were made (then by id): the order of open whispers whose place is not loaded. */
+function byMade(a, b) {
+  const at = (timeOf(a.createdAt) ?? 0) - (timeOf(b.createdAt) ?? 0);
+  return at !== 0 ? at : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 /**
  * The rows of a message list with my whispers (`whispers`, ascending by place) among its messages: each after the message
  * it follows (`afterSeq`: after every message up to that seq, before the next), and before what I am still sending (no seq
- * yet). One that follows a message before the first one shown appears only when the list holds everything from the start
- * (`complete`: no older page); one after the last message shown only when the list reaches the newest (`toEnd`: not a
- * detached window). → [{msg} | {whisper}].
+ * yet). One that follows a message before the first one shown is at its place only when the list holds everything from the
+ * start (`complete`: no older page); until then an open one is at the top, before the first message (several: by when they
+ * were made), so the chat list's mark never points at nothing, and an answered one waits for its page. One after the last
+ * message shown appears only when the list reaches the newest (`toEnd`: not a detached window). `bubble`: the reply being
+ * written, a row at the end (`true`), or, while it finishes, the row in place of its stored message (that message's id),
+ * so a whisper after that message is below it and stays there once the message replaces it. → [{msg} | {whisper} | {bubble}].
  */
-export function placeWhispers(messages, whispers, { complete, toEnd }) {
+export function placeWhispers(messages, whispers, { complete, toEnd, bubble = null }) {
   const seqs = messages.filter((m) => Number.isSafeInteger(m.seq));
   const first = seqs[0]?.seq ?? null;
   const last = seqs[seqs.length - 1]?.seq ?? null;
-  const shown = whispers.filter((w) => (complete || (first !== null && w.afterSeq >= first)) && (toEnd || (last !== null && w.afterSeq <= last)));
-  const rows = [];
+  const above = (w) => !complete && (first === null || w.afterSeq < first);
+  const top = whispers.filter((w) => above(w) && w.status === "open").sort(byMade);
+  const shown = whispers.filter((w) => !above(w) && (toEnd || (last !== null && w.afterSeq <= last)));
+  const rows = top.map((whisper) => ({ whisper }));
   let i = 0;
   for (const msg of messages) {
     const limit = Number.isSafeInteger(msg.seq) ? msg.seq : Infinity;
     while (i < shown.length && shown[i].afterSeq < limit) rows.push({ whisper: shown[i++] });
-    rows.push({ msg });
+    rows.push(bubble !== null && bubble !== true && msg.id === bubble ? { bubble: true } : { msg });
   }
   while (i < shown.length) rows.push({ whisper: shown[i++] });
+  if (bubble === true) rows.push({ bubble: true });
   return rows;
 }
 

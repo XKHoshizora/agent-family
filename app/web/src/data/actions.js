@@ -69,6 +69,8 @@ export const MAX_UPLOADS = 3;
 /** My whispers are asked for this many at a time (the service's most), at most `WHISPER_PAGES` pages for one page of messages. */
 export const WHISPER_PAGE = 100;
 export const WHISPER_PAGES = 3;
+/** A page of them refused for going too fast (429) is asked for once more, this long after. */
+export const WHISPER_RETRY_MS = 1000;
 
 /** Lone surrogates → U+FFFD (`String.prototype.toWellFormed`, by hand where a browser lacks it). */
 function wellFormed(text) {
@@ -430,18 +432,28 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
    * My whispers (README "Whispers") before `before` — an afterSeq: the `before` of the page of messages loaded with them —
    * down to `from` (the oldest seq of that page), newest first, a page of WHISPER_PAGE at a time (at most WHISPER_PAGES).
    * Only where I may have some (model.js `mayWhisper`: elsewhere the route is a 404 anyway). Never fails: a refusal or an
-   * error is no whispers (an open one comes with the next sync).
+   * error is no more whispers (an open one comes with the next sync), but a page refused for going too fast (429) is asked
+   * for once more, WHISPER_RETRY_MS later.
    */
   async function whispersBefore(conversationId, before, from) {
     if (!mayWhisper(getModel(), conversationId)) return [];
     const found = [];
     let next = before;
+    let retried = false;
+    const ask = (b) => api.listWhispers(conversationId, { before: b, limit: WHISPER_PAGE });
     for (let i = 0; i < WHISPER_PAGES && next !== null; i += 1) {
       let page;
       try {
-        page = await api.listWhispers(conversationId, { before: next, limit: WHISPER_PAGE });
-      } catch {
-        break;
+        page = await ask(next);
+      } catch (err) {
+        if (retried || errorOf(err).status !== 429) break;
+        retried = true;
+        await new Promise((resolve) => setTimeout(resolve, WHISPER_RETRY_MS));
+        try {
+          page = await ask(next);
+        } catch {
+          break;
+        }
       }
       if (Array.isArray(page?.whispers)) found.push(...page.whispers);
       next = Number.isSafeInteger(page?.nextBefore) && page.nextBefore > from ? page.nextBefore : null;

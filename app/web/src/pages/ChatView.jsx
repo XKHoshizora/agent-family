@@ -198,10 +198,10 @@ export function ChatView({ conv }) {
     const timer = setTimeout(() => setFinish(null), FINISH_GIVE_UP_MS);
     return () => clearTimeout(timer);
   }, [finish]);
-  const listed = finishing ? messages.filter((m) => m.id !== finishing.messageId) : messages;
-  // My whispers (悄悄话) among them, each after the message it follows (`placeWhispers`).
+  // My whispers (悄悄话) among the messages, each after the message it follows, and the reply's bubble: at the end while it is
+  // written, in its stored message's place while it finishes — so a whisper after that message is below it, and stays (`placeWhispers`).
   const whispers = conv.whispers ?? [];
-  const rows = placeWhispers(listed, whispers, { complete: !hasOlder, toEnd: !detached });
+  const rows = placeWhispers(messages, whispers, { complete: !hasOlder, toEnd: !detached, bubble: finishing ? finishing.messageId : replying ? true : null });
   // A group: each Agent's reply being written, my Agent's status line, someone else's 暂时无法回复 — at the end of the
   // list (not under a detached window); and 让 Agent 停下 above the composer while its Agents talk to each other.
   const groupRows = group && !detached ? conv.agentRuns ?? [] : [];
@@ -543,22 +543,23 @@ export function ChatView({ conv }) {
       )}
       <MarkdownView listRef={listRef} newest={newestAgentTexts} onChange={keepNewestInView}>
         <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
-          {rows.map(({ msg, whisper }) =>
-            whisper ? (
+          {rows.map(({ msg, whisper, bubble }) =>
+            bubble ? (
+              // One key wherever it is in the list: from written to finishing it is the same bubble, never made again.
+              <StreamBubble
+                key="stream-bubble"
+                conv={conv}
+                finishing={finishing}
+                onReveal={(runId, done) => {
+                  revealedAll.current = { runId, done };
+                }}
+                onFinished={() => setFinish(null)}
+              />
+            ) : whisper ? (
               <Whisper key={`w:${whisper.id}`} whisper={whisper} conv={conv} />
             ) : (
               <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
             ),
-          )}
-          {(replying || finishing) && (
-            <StreamBubble
-              conv={conv}
-              finishing={finishing}
-              onReveal={(runId, done) => {
-                revealedAll.current = { runId, done };
-              }}
-              onFinished={() => setFinish(null)}
-            />
           )}
           {failedRun && <RunStatusLine key={failedRun.id} conv={conv} run={failedRun} />}
           {groupRows.map((row) =>

@@ -7,7 +7,8 @@ import "./markdown-ready.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { A1, AG1, ANN, BO, G1, ME_ID, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, at, deferred, group, range, syncOf, wire } from "./fixtures.js";
-import { click, flush, installBrowser, openApp, push } from "./harness.jsx";
+import { click, elapse, flush, installBrowser, openApp, push } from "./harness.jsx";
+import { WHISPER_RETRY_MS } from "../src/data/actions.js";
 import { applyCatchup, applyGone, applySync, applyWhisper, initial } from "../src/data/model.js";
 import { placeWhispers } from "../src/data/viewmodel.js";
 
@@ -160,7 +161,7 @@ describe("a whisper in the conversation", () => {
 });
 
 describe("with older history", () => {
-  it("one following a message not loaded is not shown; the page of older messages brings the whispers before it (the list route's `before`)", async () => {
+  it("an open one following a message not loaded shows at the top until its page comes, then at its place; the page of older messages brings the whispers before it (the list route's `before`)", async () => {
     const older = whisper("w5", G1, 5);
     const answered = whisper("w7", G1, 7, { status: "declined" });
     const { api } = await openGroup({
@@ -171,15 +172,74 @@ describe("with older history", () => {
         listWhispers: vi.fn(async () => ({ whispers: [answered, older], nextBefore: null })),
       },
     });
-    expect(rows().filter((r) => r.startsWith("w:"))).toEqual([]);
+    // Open, its message not loaded: at the top of what is (the chat list's mark points at something).
+    expect(rows().slice(0, 2)).toEqual(["w:w5", "m11"]);
+    expect(rows().filter((r) => r.startsWith("w:"))).toEqual(["w:w5"]);
+    expect(inWhisper("w5").getByRole("button", { name: "告诉他们" })).toBeTruthy();
     fireEvent.scroll(timeline());
     await flush();
     expect(api.listMessages).toHaveBeenCalledWith(G1, { before: 11, limit: 50 });
     expect(api.listWhispers).toHaveBeenCalledTimes(1);
     expect(api.listWhispers).toHaveBeenCalledWith(G1, { before: 11, limit: 100 });
     const shown = rows();
+    expect(shown.slice(0, 1)).toEqual(["m1"]);
     expect(shown.slice(4, 9)).toEqual(["m5", "w:w5", "m6", "m7", "w:w7"]);
+    expect(shown.filter((r) => r === "w:w5")).toHaveLength(1);
     expect(whisperLi("w7").textContent).toBe("已忽略");
+  });
+
+  it("several open ones above what is loaded: at the top by when they were made; an answered one there waits for its page", async () => {
+    await openGroup({
+      messages: range(G1, 11, 40, [ANN, BO]),
+      whispers: [whisper("w8", G1, 8, { createdAt: at(30) }), whisper("w3", G1, 3, { createdAt: at(40) }), whisper("w6", G1, 6, { status: "accepted" })],
+    });
+    expect(rows().slice(0, 3)).toEqual(["w:w8", "w:w3", "m11"]);
+    expect(rows().filter((r) => r.startsWith("w:"))).toEqual(["w:w8", "w:w3"]);
+  });
+
+  it("a page whose whispers were refused for going too fast (429) asks once more, a moment later", async () => {
+    const answered = whisper("w7", G1, 7, { status: "declined" });
+    let calls = 0;
+    const { api } = await openGroup({
+      messages: range(G1, 11, 40, [ANN, BO]),
+      whispers: [],
+      api: {
+        listMessages: vi.fn(async () => ({ messages: range(G1, 1, 10, [ANN, BO]), nextBefore: null })),
+        listWhispers: vi.fn(async () => {
+          calls += 1;
+          if (calls === 1) throw apiError(429, "rate_limited");
+          return { whispers: [answered], nextBefore: null };
+        }),
+      },
+    });
+    fireEvent.scroll(timeline());
+    await flush();
+    expect(api.listWhispers).toHaveBeenCalledTimes(1);
+    await elapse(WHISPER_RETRY_MS);
+    await flush();
+    expect(api.listWhispers).toHaveBeenCalledTimes(2);
+    expect(rows().slice(6, 9)).toEqual(["m7", "w:w7", "m8"]);
+  });
+
+  it("refused twice, the page comes without its whispers (once more only)", async () => {
+    const { api } = await openGroup({
+      messages: range(G1, 11, 40, [ANN, BO]),
+      whispers: [],
+      api: {
+        listMessages: vi.fn(async () => ({ messages: range(G1, 1, 10, [ANN, BO]), nextBefore: null })),
+        listWhispers: vi.fn(async () => {
+          throw apiError(429, "rate_limited");
+        }),
+      },
+    });
+    fireEvent.scroll(timeline());
+    await flush();
+    await elapse(WHISPER_RETRY_MS);
+    await flush();
+    await elapse(10 * WHISPER_RETRY_MS);
+    await flush();
+    expect(api.listWhispers).toHaveBeenCalledTimes(2);
+    expect(rows().slice(0, 2)).toEqual(["m1", "m2"]);
   });
 
   it("a conversation where I have no Agent and no whisper asks the list route for nothing", async () => {
@@ -239,16 +299,40 @@ describe("the held whispers (model.js)", () => {
     expect(state.whispers[G1]).toBeUndefined();
   });
 
+  const m = (seq) => ({ id: `m${seq}`, seq });
+  const pending = { id: "p1", seq: null };
+  const w = (id, afterSeq, status = "declined", createdAt = at(afterSeq)) => ({ id, afterSeq, status, createdAt });
+  const ids = (out) => out.map((r) => (r.bubble ? "bubble" : r.whisper ? `w:${r.whisper.id}` : r.msg.id));
+
   it("placeWhispers: after the message it follows, before what I am still sending; before the first held message only when it is all there", () => {
-    const m = (seq) => ({ id: `m${seq}`, seq });
-    const pending = { id: "p1", seq: null };
-    const w = (id, afterSeq) => ({ id, afterSeq });
-    const ids = (out) => out.map((r) => (r.whisper ? `w:${r.whisper.id}` : r.msg.id));
     expect(ids(placeWhispers([m(4), m(6), pending], [w("a", 2), w("b", 4), w("c", 5), w("d", 9)], { complete: false, toEnd: true }))).toEqual(["m4", "w:b", "w:c", "m6", "w:d", "p1"]);
     expect(ids(placeWhispers([m(4), m(6)], [w("a", 2), w("b", 4)], { complete: true, toEnd: true }))).toEqual(["w:a", "m4", "w:b", "m6"]);
     // A detached window (not reaching the newest message): only those within it.
     expect(ids(placeWhispers([m(4), m(6)], [w("b", 4), w("d", 9)], { complete: false, toEnd: false }))).toEqual(["m4", "w:b", "m6"]);
     expect(ids(placeWhispers([], [w("a", 0)], { complete: true, toEnd: true }))).toEqual(["w:a"]);
+  });
+
+  it("placeWhispers: an open one whose message is older than those held is at the top (by when they were made) until it is all there", () => {
+    const open = [w("x", 3, "open", at(50)), w("y", 1, "open", at(60)), w("z", 2, "open", at(40))];
+    expect(ids(placeWhispers([m(4), m(6)], [...open, w("a", 2), w("b", 4)].sort((p, q) => p.afterSeq - q.afterSeq), { complete: false, toEnd: true }))).toEqual([
+      "w:z",
+      "w:x",
+      "w:y",
+      "m4",
+      "w:b",
+      "m6",
+    ]);
+    // Once it is all there, at its place.
+    expect(ids(placeWhispers([m(1), m(2), m(4)], [w("y", 1, "open"), w("z", 2, "open")], { complete: true, toEnd: true }))).toEqual(["m1", "w:y", "m2", "w:z", "m4"]);
+    // Nothing held yet: the open ones only.
+    expect(ids(placeWhispers([], [w("a", 2), w("y", 1, "open")], { complete: false, toEnd: true }))).toEqual(["w:y"]);
+  });
+
+  it("placeWhispers: the reply bubble — at the end while it is written; while it finishes, in its stored message's place, a whisper after that message below it", () => {
+    expect(ids(placeWhispers([m(4), m(5)], [w("b", 4), w("c", 5)], { complete: true, toEnd: true, bubble: true }))).toEqual(["m4", "w:b", "m5", "w:c", "bubble"]);
+    expect(ids(placeWhispers([m(4), m(5)], [w("b", 4), w("c", 5)], { complete: true, toEnd: true, bubble: "m5" }))).toEqual(["m4", "w:b", "bubble", "w:c"]);
+    // Once it has finished, the message is where the bubble was: nothing moved.
+    expect(ids(placeWhispers([m(4), m(5)], [w("b", 4), w("c", 5)], { complete: true, toEnd: true }))).toEqual(["m4", "w:b", "m5", "w:c"]);
   });
 });
 
