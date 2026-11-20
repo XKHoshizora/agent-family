@@ -292,6 +292,14 @@ export function registerProviderRoutes(
           secret,
         ),
       );
+      // An edit of its models may take an Agent's model off the list (or put it back): the Agents on it go to their
+      // owner's sockets again (`agent`), so their pages read `modelUsable` anew.
+      if (b.models !== undefined) {
+        const using = await db.query<{ id: string }>("select principal_id as id from agents where provider_id = $1 and deleted_at is null order by principal_id", [
+          req.params.id,
+        ]);
+        for (const a of using.rows) app.realtime.pushAgentChanged(me.id, a.id);
+      }
       return toView(updated);
     },
   );

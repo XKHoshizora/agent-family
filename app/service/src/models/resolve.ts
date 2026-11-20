@@ -1,7 +1,7 @@
 import type { AgentRow } from "../agents/store.ts";
 import { REASONING_LEVELS, type Config, type ReasoningAllowance, type ReasoningLevel } from "../config.ts";
 import type { Queryable } from "../db.ts";
-import { loadProviderForCall } from "../providers/store.ts";
+import { listProviders, loadProviderForCall } from "../providers/store.ts";
 import type { ModelCall } from "./gateway.ts";
 
 /** An Agent's model, ready to call: where and how, what it can take, and (site models) what it costs. */
@@ -32,6 +32,23 @@ export interface Resolved {
    * finds it unable, `markToolsOff`).
    */
   tools: boolean;
+}
+
+/**
+ * Whether each of `models` (models of `ownerId`'s Agents) is there to call, by what `resolveModel` needs besides opening
+ * the key: a site model still configured with its key variable set, a model still on the list of a provider of the
+ * owner's. True for no model chosen: nothing is gone. The owner's view of an Agent (`modelUsable`); a reply on a model
+ * that is not fails `model_gone`. One read of the owner's providers when any model is a provider's; no key is opened.
+ */
+export async function modelsUsable(q: Queryable, config: Pick<Config, "siteModels">, ownerId: string, models: ReadonlyArray<AgentRow["model"]>): Promise<boolean[]> {
+  const providers = models.some((m) => m?.source === "provider") ? await listProviders(q, ownerId) : [];
+  return models.map((m) => {
+    if (m === null) return true;
+    if (m.source === "provider") return providers.some((p) => p.id === m.providerId && p.models.some((listed) => listed.name === m.model));
+    const site = config.siteModels.find((s) => s.id === m.id);
+    const apiKey = site ? process.env[site.apiKeyEnv] : undefined;
+    return apiKey !== undefined && apiKey !== "";
+  });
 }
 
 /** The level a call is made at: `wanted` when the model takes it, else `none`. */

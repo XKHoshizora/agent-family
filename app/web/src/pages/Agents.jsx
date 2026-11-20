@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { MODEL_GONE_TEXT } from "../data/errorTexts.js";
 import { formatPoints, pointsReached, proactiveLevelLabel } from "../data/viewmodel.js";
 import { Avatar, ConvAvatar, Tag, Btn, IconBtn, Notice, Reason, KV, Modal } from "../ui/primitives.jsx";
 import { ListHeader, Pills } from "./ChatList.jsx";
@@ -57,6 +58,8 @@ function StatusTag({ agent, long = false }) {
   if (agent.paused) return <Tag tone="pending">{long ? "已暂停全部会话" : "已暂停"}</Tag>;
   if (!agent.loaded) return null;
   if (!agent.model) return <Tag tone="warn">未选模型</Tag>;
+  // (Its model is not there to call any more: it cannot reply, and its page says why.)
+  if (!agent.modelUsable) return null;
   return <Tag tone="ok">可回复</Tag>;
 }
 
@@ -293,7 +296,7 @@ function AgentDetail({ agent }) {
                   rows={[
                     ["主人", "你（不可修改）"],
                     ["擅长领域", agent.field || "未填写"],
-                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}</>],
+                    ["模型", <><LabLogo lab={modelLab(state, agent.model)} size={16} />{modelLabel(state, agent.model) ?? "未选择"}{agent.model && !agent.modelUsable && <Reason>{MODEL_GONE_TEXT}</Reason>}</>],
                     ["思考程度", levelLabel(agent.reasoning)],
                     ["人格文档", agent.persona ? excerpt(agent.persona) : "未填写（它会先在会话里问你几个问题）"],
                     ["私聊回复方式", agent.privateReply],

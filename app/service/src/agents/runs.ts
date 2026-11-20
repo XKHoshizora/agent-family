@@ -30,9 +30,9 @@ export type RunStatus = (typeof RUN_STATUSES)[number];
 
 /**
  * Errors after which trying again unchanged does not help (the key, the address, the Agent itself, a context too small
- * for the persona: the owner must change something first).
+ * for the persona, a model that is gone: the owner must change something first).
  */
-const NOT_RETRYABLE: ReadonlySet<string> = new Set(["provider_rejected", "address_not_allowed", "agent_deleted", "context_too_small"]);
+const NOT_RETRYABLE: ReadonlySet<string> = new Set(["provider_rejected", "address_not_allowed", "agent_deleted", "context_too_small", "model_gone"]);
 
 /** A run on the wire (README "Wire shapes"). */
 export const wireRunSchema = z.object({

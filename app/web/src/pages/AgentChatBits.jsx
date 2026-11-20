@@ -444,7 +444,7 @@ export function RunStatusLine({ conv, run, agentId = null }) {
                 查看用量与余额
               </Btn>
             )}
-            {run.error === "context_too_small" && (
+            {(run.error === "context_too_small" || run.error === "model_gone") && (
               <Btn small onClick={() => go({ section: "agents", agentId: agent, agentView: "edit" })}>
                 修改 Agent
               </Btn>

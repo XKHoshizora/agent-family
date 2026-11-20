@@ -148,6 +148,20 @@ describe("the header and the list row", () => {
     expect(within(subtitle()).getByRole("button", { name: "模型：未选模型，点击更改" }).querySelector(".model-brand")).toBeNull();
   });
 
+  it("an Agent whose model is gone (modelUsable false): the header's model button says 这个模型现在用不了，换一个, and still opens the picker", async () => {
+    const subtitle = () => document.querySelector(".chat-head .chat-title p");
+    await openAgentChat({ agent: { model: PROVIDER_MODEL, modelUsable: false }, providers: [providerOf()] });
+    const model = within(subtitle()).getByRole("button", { name: "模型：gpt-x（这个模型现在用不了，换一个），点击更改" });
+    expect(model.textContent).toBe("这个模型现在用不了，换一个");
+    await click(model);
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    cleanup();
+
+    // Usable (or not said): the model's name, as always.
+    await openAgentChat({ agent: { model: PROVIDER_MODEL, modelUsable: true }, providers: [providerOf()] });
+    expect(within(subtitle()).getByRole("button", { name: "模型：gpt-x，点击更改" }).textContent).toBe("gpt-x");
+  });
+
   it("a deleted Agent's row reads 已删除 after its tag", async () => {
     await openAgentChat({ agent: { deleted: true } });
     const row = screen.getByText("小助手", { selector: ".list-col .row-name" }).closest("button");
@@ -990,6 +1004,7 @@ describe("the status line of a failed reply", () => {
     ["no_quota", true, {}, "余额不足：这个模型需要余额才能使用。"],
     ["agent_paused", false, {}, "它已暂停，这次没有回复。"],
     ["agent_deleted", false, {}, "它已删除，这次没有回复。"],
+    ["model_gone", false, {}, "这个模型现在用不了，换一个。"],
   ];
   for (const [code, retryable, extra, sentence] of CASES) {
     it(`${code}${extra.resetsAt ? " (free model)" : ""}: its sentence, 重试 ${retryable ? "shown" : "hidden"}, a dismiss control`, async () => {
@@ -1036,6 +1051,14 @@ describe("the status line of a failed reply", () => {
   it("context_too_small links to the Agent's edit page", async () => {
     const { transport } = await openAgentChat({ api: { getModels: vi.fn(async () => MODELS), getUsage: vi.fn(() => new Promise(() => {})) } });
     await runPush(transport, runOf(R1, "failed", { error: "context_too_small", retryable: false }));
+    await click(within(statusLine()).getByRole("button", { name: "修改 Agent" }));
+    expect(screen.getByLabelText("人格文档")).toBeTruthy();
+  });
+
+  it("model_gone links to the Agent's edit page too, and offers no 重试", async () => {
+    const { transport } = await openAgentChat({ api: { getModels: vi.fn(async () => MODELS), getUsage: vi.fn(() => new Promise(() => {})) } });
+    await runPush(transport, runOf(R1, "failed", { error: "model_gone", retryable: false }));
+    expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
     await click(within(statusLine()).getByRole("button", { name: "修改 Agent" }));
     expect(screen.getByLabelText("人格文档")).toBeTruthy();
   });

@@ -574,6 +574,8 @@ function agentView(a, version, loaded) {
     ...(typeof a.memoryAsk === "boolean" ? { memoryAsk: a.memoryAsk } : {}),
     ...(typeof a.sharedNotes === "boolean" ? { sharedNotes: a.sharedNotes } : {}),
     model: a.model ?? null,
+    /** False when the service says its model is not there to call any more (then 这个模型现在用不了，换一个); true otherwise. */
+    modelUsable: a.modelUsable !== false,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),
     deleted: Boolean(a.deleted),

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
 import { useStore } from "../data/store.jsx";
+import { MODEL_GONE_TEXT } from "../data/errorTexts.js";
 import { Btn, Notice, Reason } from "../ui/primitives.jsx";
 import { ModelBrand } from "../ui/ModelBrand.jsx";
 import { brandOf } from "../ui/modelBrands.js";
@@ -288,7 +289,9 @@ export function AgentModelSwitch({ agentId, shown = null, note = null }) {
 
   const model = saving ?? agent.model;
   const name = shown ? shown.name : modelName(state, model);
-  const current = shown ?? (model ? { name, brand: modelLab(state, model) } : null);
+  // Its model is not there to call any more (the service's `modelUsable`): the button says so, not the model's name.
+  const gone = !shown && saving === null && model !== null && agent.modelUsable === false;
+  const current = shown ?? (model ? { name: gone ? MODEL_GONE_TEXT : name, brand: modelLab(state, model) } : null);
   if (agent.deleted) {
     return (
       <span className="head-model">
@@ -314,7 +317,7 @@ export function AgentModelSwitch({ agentId, shown = null, note = null }) {
   return (
     <ModelSelect
       compact
-      label={`模型：${name ?? "未选模型"}，点击更改`}
+      label={`模型：${name ?? "未选模型"}${gone ? `（${MODEL_GONE_TEXT}）` : ""}，点击更改`}
       value={modelKey(agent.model)}
       current={current}
       placeholder="未选模型"

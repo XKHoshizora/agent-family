@@ -153,6 +153,8 @@ const BLOCKED_SINCE: RunEnd = { status: "cancelled" };
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 /** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
 const KEY_UNREADABLE: RunEnd = { status: "failed", error: "provider_rejected" };
+/** The Agent's model does not resolve (`resolveModel` null: off its provider's list, no longer configured): not retryable. */
+const MODEL_GONE: RunEnd = { status: "failed", error: "model_gone" };
 /** The Agent is no longer a member of the run's group: nothing is called or posted there. */
 const REMOVED: RunEnd = { status: "cancelled", error: "agent_removed" };
 /**
@@ -361,7 +363,7 @@ export class DbAgentPort implements AgentPort {
    *
    * 1. A short transaction under `lockRun`: a run that is `halted` ends here, and so does one in a group its Agent is no
    *    longer a member of (`cancelled`, `agent_removed`) and one whose model does not resolve (`failed`,
-   *    `provider_unavailable`). A run in a group is flagged so that none of it is streamed (`emit`). A reply nobody asked
+   *    `model_gone`). A run in a group is flagged so that none of it is streamed (`emit`). A reply nobody asked
    *    for (lane `proactive`) that a mention was noted on since its claim ends here quietly (`ENDED_QUIETLY`): the moment
    *    for an unasked remark has passed, and its follow-up answers the mention, noted still, in the caller's lane.
    *    Otherwise the run takes on what came meanwhile (`covers_seq` = max(covers, pending)), and what the model may be
@@ -451,7 +453,7 @@ export class DbAgentPort implements AgentPort {
         log.error({ err, runId: run.id }, "agent run: the provider's saved key cannot be opened (PROVIDER_KEY_SECRET changed, or the value was moved or damaged)");
         return { end: KEY_UNREADABLE };
       }
-      if (!resolved) return { end: UNAVAILABLE };
+      if (!resolved) return { end: MODEL_GONE };
       // The model's learned ratio, read once for the run: the context is planned at it when it is above 1 (`planRatio`),
       // and step 3 corrects by it the input estimate settlement falls back on (never the hold).
       const key = ratioKey(resolved);

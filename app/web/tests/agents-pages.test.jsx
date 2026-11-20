@@ -159,6 +159,24 @@ describe("the Agent list", () => {
     expect(rowOf("小助手").querySelector(".tag").textContent).toBe("未选模型");
     expect(rowOf("小助手").querySelector(".row-preview").textContent).toBe("未填写擅长领域 · 未选择模型");
   });
+
+  it("an Agent whose model is gone (modelUsable false) says 这个模型现在用不了，换一个 by its model on its page; one whose model is there does not", async () => {
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: false })] });
+    await openRow("小助手");
+    const modelRow = () => [...document.querySelectorAll(".main-col dt")].find((dt) => dt.textContent === "模型").nextElementSibling;
+    expect(modelRow().textContent).toContain("小模型");
+    expect(modelRow().textContent).toContain("这个模型现在用不了，换一个");
+    // Nor does it claim 可回复, on its page or in the list.
+    expect(mainText()).not.toContain("可回复");
+    expect(rowOf("小助手").querySelector(".tag")).toBeNull();
+    cleanup();
+
+    await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: true })] });
+    await openRow("小助手");
+    expect(modelRow().textContent).toContain("小模型");
+    expect(mainText()).not.toContain("这个模型现在用不了");
+    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("可回复");
+  });
 });
 
 describe("creating an Agent", () => {
