@@ -327,6 +327,12 @@ export interface MemoryConfig {
    * otherwise at least a minute. Whispers (whispers/store.ts) are expired and cleaned on this same timer: 0 stops that too.
    */
   changesSweepMs: number;
+  /**
+   * The rolling summary (agents/summary/; README "The rolling summary"): after a reply whose context left out at least
+   * `summaryMinMessages` messages, a job folds them into the pair's summary, which is at most `summaryMaxWeight` weight.
+   */
+  summaryMinMessages: number;
+  summaryMaxWeight: number;
 }
 
 /** `reviewMessageChars` was this setting's name before sizes were measured in weight: still read, when the new name is absent. */
@@ -378,6 +384,9 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
   // 0 (no timer) or at least a minute: anything between would sweep back to back.
   changesSweepMs: z.number().int().min(0).max(86_400_000).refine((ms) => ms === 0 || ms >= 60_000).default(3_600_000),
+  // At most what one job reads (200 messages); the cap at most 2000 weight: the database holds a summary at 6000 characters.
+  summaryMinMessages: positive(20, 200),
+  summaryMaxWeight: positive(800, 2000),
 }));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

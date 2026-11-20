@@ -467,6 +467,8 @@ describe("the memory configuration", () => {
     passageShare: 0.25,
     freeDailyPoints: 20,
     changesSweepMs: 3_600_000,
+    summaryMinMessages: 20,
+    summaryMaxWeight: 800,
   };
 
   test("unset or empty: every default", () => {
@@ -504,6 +506,13 @@ describe("the memory configuration", () => {
     for (const bad of ['{"mergeAuto":"observe"}', '{"mergeAuto":"yes"}', '{"mergeAuto":true}', '{"mergeAuto":null}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY.*mergeAuto/);
     for (const bad of ['{"reviewMergeAt":0.7}', '{"reviewMergeAt":0.7,"mergeAuto":"on"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY.*reviewMergeAt/);
     expect(loadConfig({ ...base, MEMORY: "{}" }).memory).not.toHaveProperty("reviewMergeAt");
+  });
+
+  test("the rolling summary: a job once 20 messages are left out, a summary of at most 800 weight; whole numbers, the cap at most 2000 (the database holds 6000 characters)", () => {
+    expect(loadConfig({ ...base, MEMORY: '{"summaryMinMessages":5,"summaryMaxWeight":2000}' }).memory).toMatchObject({ summaryMinMessages: 5, summaryMaxWeight: 2000 });
+    for (const bad of ['{"summaryMinMessages":0}', '{"summaryMinMessages":1.5}', '{"summaryMinMessages":201}', '{"summaryMaxWeight":0}', '{"summaryMaxWeight":2001}', '{"summaryMaxWeight":"800"}']) {
+      expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
+    }
   });
 
   test("the hearsay limits can be set", () => {
