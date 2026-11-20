@@ -40,6 +40,12 @@
 // messages), `unknown` (could not be fetched), and `dismissed` (the failed run I closed). A slot goes with its Agent:
 // a pushed leave or removal notice of the Agent, or a member list without it, drops it (an owner's run that ended because
 // the Agent was taken out stays until closed: it says so).
+//
+// Whispers (悄悄话, app/service/README.md "Whispers"). `whispers[conversationId][whisperId]` is a note only I see, about my
+// Agent there, as the service sent it: never a message (it takes no seq, so nothing here counts it as one — position,
+// unread, lastSeq), shown after the message it follows (`afterSeq`). An open one comes with /api/sync, catch-up, a `whisper`
+// push or the list route; an answered or expired one stays as history (an answer is final: an older copy saying open does
+// not reopen it). A sync's list of open ones replaces the open ones held; a conversation that goes takes its whispers along.
 
 import { isMemoryLanguage } from "./memoryLanguages.js";
 
@@ -96,6 +102,8 @@ export function initial() {
     streams: {},
     /** group id → Agent id → its latest reply there, as this reader may know it (see the header). */
     groupRuns: {},
+    /** conversation id → whisper id → my whisper there (see the header). */
+    whispers: {},
   };
 }
 
@@ -116,7 +124,12 @@ const bumpStays = (stays, ids) => {
  * (Where the conversation itself is dropped — gone, sync, 404 — its counters and unsent messages go with it.)
  */
 function startNewStay(state, conversationId) {
-  let next = { ...state, stays: bumpStays(state.stays, [conversationId]), windows: without(state.windows, conversationId) };
+  let next = {
+    ...state,
+    stays: bumpStays(state.stays, [conversationId]),
+    windows: without(state.windows, conversationId),
+    whispers: without(state.whispers ?? {}, conversationId),
+  };
   const conv = next.conversations[conversationId];
   if (conv) next = putConversation(next, backToConfirmedRead({ ...conv, readsInFlight: 0 }, next.messages[conversationId] ?? [], next.me?.id));
   const sending = Object.values(next.pending).filter((p) => p.conversationId === conversationId && p.status === "sending");
@@ -423,7 +436,10 @@ export function applySync(state, sync) {
     dismissed: filterValues(state.dismissed, (_runId, id) => id in conversations),
     // A group that is gone takes its Agents' replies with it; so does an Agent no longer among its members.
     groupRuns: filterValues(state.groupRuns, (_slots, id) => conversations[id]?.type === "group"),
+    // My whispers: the answered and expired ones of the conversations kept stay; the open ones are this snapshot's.
+    whispers: answeredWhispers(state.whispers ?? {}, conversations),
   };
+  next = putWhispers(next, sync.whispers);
   for (const id of Object.keys(next.groupRuns)) next = pruneGroupSlots(next, id);
   // The Agent's reply may have come with this snapshot (its push then reads as a duplicate).
   for (const id of new Set([...Object.keys(runs), ...Object.keys(next.groupRuns)])) next = notePosted(next, id, windows.get(id) ?? [], false);
@@ -471,7 +487,8 @@ export function applyCatchup(state, response) {
     }
     next = applyMessage(next, wire, { pushed: false }).state;
   }
-  return { state: next };
+  // My whispers there: the open ones, and those made or answered since the position.
+  return { state: putWhispers(next, response.whispers) };
 }
 
 /**
@@ -494,6 +511,7 @@ export function applyGone(state, conversationId) {
     streams: run ? without(state.streams, run.id) : state.streams,
     dismissed: without(state.dismissed, conversationId),
     groupRuns: without(state.groupRuns, conversationId),
+    whispers: without(state.whispers ?? {}, conversationId),
   };
 }
 
@@ -972,6 +990,73 @@ export function setMemoryChangeStatus(state, conversationId, changeId, status) {
     messages: { ...state.messages, [conversationId]: mark(state.messages[conversationId] ?? []) },
     windows: win ? { ...state.windows, [conversationId]: { ...win, messages: mark(win.messages) } } : state.windows,
   };
+}
+
+// ───────── whispers (see the header)
+
+const WHISPER_STATUSES = new Set(["open", "accepted", "declined", "expired"]);
+const WHISPER_ACTIONS = new Set(["tell", "dismiss"]);
+
+/** A whisper as the service sends it (README "Whispers"), only the fields shown; null when it is not one. */
+function whisperOf(w) {
+  if (!w || typeof w !== "object" || typeof w.id !== "string" || typeof w.conversationId !== "string") return null;
+  if (!Number.isSafeInteger(w.afterSeq) || w.afterSeq < 0 || typeof w.text !== "string" || !WHISPER_STATUSES.has(w.status)) return null;
+  return {
+    id: w.id,
+    conversationId: w.conversationId,
+    agentId: typeof w.agentId === "string" ? w.agentId : null,
+    afterSeq: w.afterSeq,
+    kind: typeof w.kind === "string" ? w.kind : null,
+    text: w.text,
+    actions: Array.isArray(w.actions) ? [...new Set(w.actions.filter((a) => WHISPER_ACTIONS.has(a)))] : [],
+    status: w.status,
+    createdAt: typeof w.createdAt === "string" ? w.createdAt : null,
+  };
+}
+
+/** The answered and expired whispers held of the conversations in `kept` (an open one's state is the next snapshot's). */
+function answeredWhispers(held, kept) {
+  const out = {};
+  for (const [id, byId] of Object.entries(held)) {
+    if (!(id in kept)) continue;
+    const answered = filterValues(byId, (w) => w.status !== "open");
+    if (Object.keys(answered).length > 0) out[id] = answered;
+  }
+  return out;
+}
+
+/** `list` put into the held whispers of their conversations (one not held keeps none); an answer is never undone by an older copy. */
+function putWhispers(state, list) {
+  if (!Array.isArray(list) || list.length === 0) return state;
+  const before = state.whispers ?? {};
+  let whispers = before;
+  for (const raw of list) {
+    const w = whisperOf(raw);
+    if (!w || !state.conversations[w.conversationId]) continue;
+    const held = whispers[w.conversationId]?.[w.id];
+    if (held && held.status !== "open" && w.status === "open") continue;
+    whispers = { ...whispers, [w.conversationId]: { ...(whispers[w.conversationId] ?? {}), [w.id]: w } };
+  }
+  return whispers === before ? state : { ...state, whispers };
+}
+
+/** A whisper pushed (`whisper`), or answered by my own request: put in, or replacing the copy held. */
+export const applyWhisper = (state, wire) => putWhispers(state, [wire]);
+/** A page of the list route (`GET /api/conversations/:id/whispers`): merged into the held ones. */
+export const applyWhispers = (state, list) => putWhispers(state, list);
+/** A whisper the service no longer has (404): gone from the held ones. */
+export function dropWhisper(state, conversationId, whisperId) {
+  const held = state.whispers?.[conversationId];
+  if (!held || !(whisperId in held)) return state;
+  const rest = without(held, whisperId);
+  return { ...state, whispers: Object.keys(rest).length > 0 ? { ...state.whispers, [conversationId]: rest } : without(state.whispers, conversationId) };
+}
+/** Whether I may have whispers in a held conversation: my Agent's own, one with an Agent of mine among its members, or one I hold whispers of. */
+export function mayWhisper(state, conversationId) {
+  const conv = state.conversations[conversationId];
+  if (!conv) return false;
+  if (conv.type === "agent" || Object.keys(state.whispers?.[conversationId] ?? {}).length > 0) return true;
+  return conv.members.some((m) => m.id !== state.me?.id && ownsAgent(state, m.id));
 }
 
 // ───────── runs and streams

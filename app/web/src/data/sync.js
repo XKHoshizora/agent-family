@@ -13,7 +13,7 @@
 // fails is tried once more, then shown as unknown), and on the first connection that manages it the site's models.
 // A failure there is isolated: what it was to load is loaded again by the next connection. These answers arrive while
 // pushes are applied live, so they are applied by the rules that make a late answer harmless (model.js `applyRun`).
-// `principal`, `run` and `delta` pushes are applied as they come.
+// `principal`, `run`, `delta` and `whisper` pushes are applied as they come.
 //
 // Agents in a group (batch 2C): a `run` push of a group is kept by (group, Agent) (model.js `applyGroupRun`); a group's
 // replies (`GET …/runs`) are loaded when asked (`request({groupRuns})`: the group was opened, or the connection came
@@ -37,6 +37,7 @@ import {
   applyRun,
   applySocial,
   applySync,
+  applyWhisper,
   clearStreams,
   dropAgent,
   markGroupRunsUnknown,
@@ -617,6 +618,10 @@ export function start(
       }
       case "delta":
         setModel(applyDelta(model, event));
+        return;
+      case "whisper":
+        // A whisper of mine made, answered or expired (one of a conversation not held is left to the sync that brings it).
+        setModel(applyWhisper(model, event.whisper));
         return;
       default:
         return;

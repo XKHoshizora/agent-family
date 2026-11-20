@@ -24,7 +24,8 @@ import {
 import { ChatHitRow, SearchFooter } from "./SearchHits.jsx";
 import { useJumpTo } from "./useJumpTo.js";
 import { useMessageSearch } from "./useMessageSearch.js";
-import { searchHitView } from "../data/viewmodel.js";
+import { placeWhispers, searchHitView } from "../data/viewmodel.js";
+import { Whisper } from "./Whisper.jsx";
 import { Search, Menu, ChevronLeft, X } from "../icons.js";
 
 import { Composer } from "./Composer.jsx";
@@ -198,6 +199,9 @@ export function ChatView({ conv }) {
     return () => clearTimeout(timer);
   }, [finish]);
   const listed = finishing ? messages.filter((m) => m.id !== finishing.messageId) : messages;
+  // My whispers (悄悄话) among them, each after the message it follows (`placeWhispers`).
+  const whispers = conv.whispers ?? [];
+  const rows = placeWhispers(listed, whispers, { complete: !hasOlder, toEnd: !detached });
   // A group: each Agent's reply being written, my Agent's status line, someone else's 暂时无法回复 — at the end of the
   // list (not under a detached window); and 让 Agent 停下 above the composer while its Agents talk to each other.
   const groupRows = group && !detached ? conv.agentRuns ?? [] : [];
@@ -206,7 +210,7 @@ export function ChatView({ conv }) {
   /** What changes at the end of the list besides messages: the bubble growing, the status lines coming or going. */
   const tail = `${replying ? `${run.id}:${conv.stream?.text.length ?? 0}:${conv.stream?.reasoning.length ?? 0}` : ""}|${finishing ? `finishing:${finishing.runId}` : ""}|${failedRun?.id ?? ""}|${groupRows
     .map((r) => `${r.agentId}:${r.kind}:${r.run?.id ?? ""}`)
-    .join(",")}`;
+    .join(",")}|${whispers.map((w) => `${w.id}:${w.status}`).join(",")}`;
   // A group with Agents: what their replies are now is fetched when it opens, and again when the connection comes back
   // (the pushes of a break are not sent again).
   useEffect(() => {
@@ -539,9 +543,13 @@ export function ChatView({ conv }) {
       )}
       <MarkdownView listRef={listRef} newest={newestAgentTexts} onChange={keepNewestInView}>
         <ol className="messages" data-testid="message-list" ref={listRef} onScroll={onScroll} style={showHits ? { display: "none" } : undefined}>
-          {listed.map((msg) => (
-            <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
-          ))}
+          {rows.map(({ msg, whisper }) =>
+            whisper ? (
+              <Whisper key={`w:${whisper.id}`} whisper={whisper} conv={conv} />
+            ) : (
+              <MessageItem key={msg.id} msg={msg} conv={conv} flash={flash !== null && msg.seq === flash} onReply={block ? () => dispatch({ type: "toast", text: block.text }) : setReplyTo} />
+            ),
+          )}
           {(replying || finishing) && (
             <StreamBubble
               conv={conv}

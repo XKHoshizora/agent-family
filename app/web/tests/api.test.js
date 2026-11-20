@@ -80,6 +80,11 @@ const table = [
   ["retryRun (a group's Agent)", () => routes.retryRun(ID, ID2), "POST", `/api/conversations/${ID}/runs/retry`, { agentId: ID2 }],
   ["dismissRun (a group's Agent)", () => routes.dismissRun(ID, ID2), "POST", `/api/conversations/${ID}/runs/dismiss`, { agentId: ID2 }],
   ["haltAgents", () => routes.haltAgents(ID), "POST", `/api/conversations/${ID}/agents/halt`, undefined],
+  // Whispers (悄悄话): a conversation's, a page at a time, and the two answers
+  ["listWhispers", () => routes.listWhispers(ID, { before: 11, limit: 100 }), "GET", `/api/conversations/${ID}/whispers?before=11&limit=100`, undefined],
+  ["listWhispers (newest)", () => routes.listWhispers(ID), "GET", `/api/conversations/${ID}/whispers`, undefined],
+  ["acceptWhisper", () => routes.acceptWhisper(ID), "POST", `/api/whispers/${ID}/accept`, undefined],
+  ["declineWhisper", () => routes.declineWhisper(ID), "POST", `/api/whispers/${ID}/decline`, undefined],
   ["listProviders", () => routes.listProviders(), "GET", "/api/providers", undefined],
   ["createProvider", () => routes.createProvider({ name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }), "POST", "/api/providers", { name: "p", protocol: "gemini", baseUrl: "https://g.example", apiKey: "k-12345678" }],
   ["patchProvider", () => routes.patchProvider(ID, { name: "q" }), "PATCH", `/api/providers/${ID}`, { name: "q" }],

@@ -116,6 +116,15 @@ export const undoMemoryChange = (agentId, changeId) => request("POST", `/api/age
 export const confirmMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/confirm`);
 export const discardMemoryChange = (agentId, changeId) => request("POST", `/api/agents/${seg(agentId)}/memory/changes/${seg(changeId)}/discard`);
 
+// ───────── whispers (悄悄话: notes in a conversation only I see, about my Agent there; app/service/README.md "Whispers")
+/** → {whispers: WireWhisper[] (newest first), nextBefore}: mine there, before `before` (an afterSeq); 404 where I can have none. */
+export const listWhispers = (conversationId, { before, limit } = {}) =>
+  request("GET", withQuery(`/api/conversations/${seg(conversationId)}/whispers`, { before, limit }));
+/** 告诉他们 → the whisper, `accepted`. 409 stale_whisper when it is not open (or offers no 告诉他们). */
+export const acceptWhisper = (whisperId) => request("POST", `/api/whispers/${seg(whisperId)}/accept`);
+/** 不用 → the whisper, `declined`. */
+export const declineWhisper = (whisperId) => request("POST", `/api/whispers/${seg(whisperId)}/decline`);
+
 // ───────── the memory palace: 关于我 (mine, shared by my Agents) and an Agent's own notes and hearsay
 // Note: {id, text, vault, unsure, origin: "review"|"owner"|"hearsay", source: {kind: "agent"|"group"|"manual", title}, createdAt, updatedAt};
 // a room's counts are code points: {notes, used, limit}. Refusals: 422 note_refused, 409 room_full.

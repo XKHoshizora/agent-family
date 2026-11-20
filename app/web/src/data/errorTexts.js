@@ -94,6 +94,15 @@ const pick = (table, action, error) => {
 /** For a route that has no codes of its own (loading a list): the shared sentences, else the generic one. */
 export const commonErrorText = (error) => pick({}, null, error);
 
+const WHISPER = {
+  answer: {
+    stale_whisper: "这条悄悄话已经处理过了。",
+    not_found: "这条悄悄话已经不在了。",
+  },
+};
+/** Why my answer to a whisper (告诉他们, 不用) was refused. */
+export const whisperErrorText = (error) => pick(WHISPER, "answer", error);
+
 /** action: lookup | sendRequest | accept | reject | withdraw | unfriend | block | unblock */
 export const friendErrorText = (action, error) => pick(FRIENDS, action, error);
 /** action: create | rename | add | remove | leave, and addAgent | removeAgent (the member is an Agent) */

@@ -124,5 +124,6 @@ export const APP_CLASSES = new Set(
   tag tag-human tag-muted tag-ok tag-pending tag-row tag-solid tag-warn task-controls task-list-item theirs thinking
   thinking-text toast typed up upload-progress vis-banner
   memory-card memory-chip memory-detail memory-foot memory-hint memory-lines msg-memory
+  msg-whisper whisper whisper-head whisper-text whisper-actions whisper-done whisper-dot
   memory-room memory-head memory-add memory-add-line memory-rows memory-row memory-body memory-text memory-source memory-actions memory-open memory-stale memory-switches memory-vault`.split(/\s+/),
 );

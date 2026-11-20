@@ -134,6 +134,8 @@ export function ChatList() {
                 <span className="row-sub">
                   <span className="row-preview">{lastPreview(state, c)}</span>
                   {c.unread > 0 && <span className="badge inline">{c.unread}</span>}
+                  {/* My whispers there that wait for me (悄悄话): a small dot, gone once none is open. */}
+                  {c.openWhispers > 0 && <span className="whisper-dot" role="img" aria-label="有只给你的悄悄话" title="有只给你的悄悄话" />}
                 </span>
               </span>
             </button>

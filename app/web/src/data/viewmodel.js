@@ -691,6 +691,8 @@ export function toView(model, { now = Date.now() } = {}) {
     const streamed = run && run.status === "running" && !run.posted && !run.joined ? model.streams?.[run.id] : null;
     // A group: each Agent's reply in progress or failed (never streamed), and whether its Agents are talking.
     const agentRuns = conv.type === "group" ? groupRunRows(conv, model.groupRuns?.[conv.id]) : [];
+    // My whispers here, where they sit (`placeWhispers` interleaves them with the messages shown).
+    const whispers = Object.values(model.whispers?.[conv.id] ?? {}).sort(byPlace).map((w) => ({ ...w, agentId: alias(w.agentId) }));
     convs[conv.id] = {
       id: conv.id,
       type: direct ? "human" : agentChat ? "agent" : "group",
@@ -704,6 +706,10 @@ export function toView(model, { now = Date.now() } = {}) {
       /** [{agentId, mine, kind: "replying" | "status" | "unavailable", run?}] (`groupRunRow`); empty but in a group. */
       agentRuns: agentRuns.map((row) => ({ ...row, agentId: alias(row.agentId) })),
       agentsTalking: conv.type === "group" && agentsTalking(model, conv, held, agentRuns),
+      /** My whispers here (悄悄话), ascending by where they sit: [{id, afterSeq, kind, text, actions, status, createdAt, agentId}]. */
+      whispers,
+      /** How many of them are open (the chat list's mark). */
+      openWhispers: whispers.filter((w) => w.status === "open").length,
       title: direct ? null : conv.title,
       members,
       memberRoles: conv.members.map((m) => ({ id: alias(m.id), role: m.role, isCreator: Boolean(m.isCreator) })),
@@ -760,6 +766,36 @@ export function toView(model, { now = Date.now() } = {}) {
     /** principal id (the real one, mine too) → the version in its avatar URL; for an avatar of someone nobody names. */
     avatarVersions: versions,
   };
+}
+
+/** Where a whisper sits: after the message it follows, several there by when they were made. */
+function byPlace(a, b) {
+  if (a.afterSeq !== b.afterSeq) return a.afterSeq - b.afterSeq;
+  const at = (timeOf(a.createdAt) ?? 0) - (timeOf(b.createdAt) ?? 0);
+  return at !== 0 ? at : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * The rows of a message list with my whispers (`whispers`, ascending by place) among its messages: each after the message
+ * it follows (`afterSeq`: after every message up to that seq, before the next), and before what I am still sending (no seq
+ * yet). One that follows a message before the first one shown appears only when the list holds everything from the start
+ * (`complete`: no older page); one after the last message shown only when the list reaches the newest (`toEnd`: not a
+ * detached window). → [{msg} | {whisper}].
+ */
+export function placeWhispers(messages, whispers, { complete, toEnd }) {
+  const seqs = messages.filter((m) => Number.isSafeInteger(m.seq));
+  const first = seqs[0]?.seq ?? null;
+  const last = seqs[seqs.length - 1]?.seq ?? null;
+  const shown = whispers.filter((w) => (complete || (first !== null && w.afterSeq >= first)) && (toEnd || (last !== null && w.afterSeq <= last)));
+  const rows = [];
+  let i = 0;
+  for (const msg of messages) {
+    const limit = Number.isSafeInteger(msg.seq) ? msg.seq : Infinity;
+    while (i < shown.length && shown[i].afterSeq < limit) rows.push({ whisper: shown[i++] });
+    rows.push({ msg });
+  }
+  while (i < shown.length) rows.push({ whisper: shown[i++] });
+  return rows;
 }
 
 /**

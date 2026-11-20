@@ -287,6 +287,18 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .memory-lines .tag { margin-left: 6px; }
 .memory-foot, .memory-hint { margin: 6px 0 0; font-size: 13px; }
 .memory-card { width: min(420px, 100%); }
+/* A whisper (悄悄话): a small private note after the message it follows, only its owner sees it; answered, a quiet line */
+.msg-whisper { align-self: center; display: flex; flex-direction: column; align-items: center; max-width: 78%; }
+.whisper {
+  width: min(420px, 100%); padding: 8px 12px; border-radius: 12px; border: 1px dashed var(--line-strong);
+  background: var(--purple-tint); font-size: 13.5px; text-align: left; overflow-wrap: anywhere;
+}
+.whisper-head { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; color: var(--ink-3); }
+.whisper-text { margin: 4px 0 0; white-space: pre-wrap; }
+.whisper-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.whisper-done > span { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+/* The chat list: a conversation with whispers waiting for me */
+.whisper-dot { flex: none; width: 8px; height: 8px; margin-left: 6px; border-radius: 50%; background: var(--purple); }
 /* The memory palace: a room's open entries as bordered rows, the vault block set apart under them. A row wraps (text, then its actions) on a phone. */
 .memory-stale { margin: 4px 0; font-size: 13px; }
 .memory-switches { margin: 0; padding: 0; border: 0; min-width: 0; }

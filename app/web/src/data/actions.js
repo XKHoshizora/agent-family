@@ -8,7 +8,7 @@
 import * as routes from "../api/routes.js";
 import { hasVisibleText, messageText } from "../auth/validation.js";
 import { ME } from "./identities.js";
-import { agentErrorText, commonErrorText, providerErrorText, replyErrorText } from "./errorTexts.js";
+import { agentErrorText, commonErrorText, providerErrorText, replyErrorText, whisperErrorText } from "./errorTexts.js";
 import {
   applyAgent,
   applyAgents,
@@ -25,17 +25,21 @@ import {
   applyProviders,
   applyRun,
   applyUsage,
+  applyWhisper,
+  applyWhispers,
   bumpAvatar,
   closeWindow,
   discardPending,
   dismissGroupRunOf,
   dismissRunOf,
+  dropWhisper,
   markFailed,
   markReadDone,
   markReading,
   markSending,
   markSent,
   markUploading,
+  mayWhisper,
   modelLevels,
   openWindow,
   publicProvider,
@@ -62,6 +66,9 @@ export const JUMP_AFTER = 25;
 
 /** Uploads in flight at once across the app (the service allows 3 per person); the rest wait in order. */
 export const MAX_UPLOADS = 3;
+/** My whispers are asked for this many at a time (the service's most), at most `WHISPER_PAGES` pages for one page of messages. */
+export const WHISPER_PAGE = 100;
+export const WHISPER_PAGES = 3;
 
 /** Lone surrogates → U+FFFD (`String.prototype.toWellFormed`, by hand where a browser lacks it). */
 function wellFormed(text) {
@@ -359,10 +366,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     entry.promise = (async () => {
       try {
         const page = await api.listMessages(conversationId, { before, limit });
+        // My whispers that follow these messages come with them (one update: nothing moves under the place kept).
+        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, before, page.messages?.[0]?.seq ?? 0);
         const why = staleness(token);
         if (why) return { ok: false, error: dropped(why) };
         if ((getModel().windows[conversationId]?.n ?? 0) !== (win?.n ?? 0)) return { ok: false, error: dropped("stale") };
-        setModel(win ? applyOlderInWindow(getModel(), conversationId, page, win.n) : applyOlder(getModel(), conversationId, page));
+        const next = win ? applyOlderInWindow(getModel(), conversationId, page, win.n) : applyOlder(getModel(), conversationId, page);
+        setModel(applyWhispers(next, whispers));
         return { ok: true, loaded: page.messages.length, hasOlder: page.nextBefore !== null };
       } catch (err) {
         const error = errorOf(err);
@@ -396,11 +406,12 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       try {
         // The service pages backwards only: the page below `newest + 1 + limit` holds the messages after `newest`.
         const page = await api.listMessages(conversationId, { before: newest + 1 + limit, limit });
+        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, newest + 1 + limit, page.messages?.[0]?.seq ?? 0);
         const why = staleness(token);
         if (why) return { ok: false, error: dropped(why) };
         if (getModel().windows[conversationId]?.n !== win.n) return { ok: false, error: dropped("stale") };
         const had = getModel().windows[conversationId].messages.length;
-        setModel(applyNewerInWindow(getModel(), conversationId, page, win.n));
+        setModel(applyWhispers(applyNewerInWindow(getModel(), conversationId, page, win.n), whispers));
         const now = getModel().windows[conversationId];
         return { ok: true, loaded: now ? now.messages.length - had : page.messages.length, attached: !now };
       } catch (err) {
@@ -413,6 +424,38 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       }
     })();
     return entry.promise;
+  }
+
+  /**
+   * My whispers (README "Whispers") before `before` — an afterSeq: the `before` of the page of messages loaded with them —
+   * down to `from` (the oldest seq of that page), newest first, a page of WHISPER_PAGE at a time (at most WHISPER_PAGES).
+   * Only where I may have some (model.js `mayWhisper`: elsewhere the route is a 404 anyway). Never fails: a refusal or an
+   * error is no whispers (an open one comes with the next sync).
+   */
+  async function whispersBefore(conversationId, before, from) {
+    if (!mayWhisper(getModel(), conversationId)) return [];
+    const found = [];
+    let next = before;
+    for (let i = 0; i < WHISPER_PAGES && next !== null; i += 1) {
+      let page;
+      try {
+        page = await api.listWhispers(conversationId, { before: next, limit: WHISPER_PAGE });
+      } catch {
+        break;
+      }
+      if (Array.isArray(page?.whispers)) found.push(...page.whispers);
+      next = Number.isSafeInteger(page?.nextBefore) && page.nextBefore > from ? page.nextBefore : null;
+    }
+    return found;
+  }
+
+  /** A whisper held is not what the service has (an answer was refused as stale): the page around it is read again. */
+  async function refreshWhisper(conversationId, whisperId) {
+    const held = getModel().whispers?.[conversationId]?.[whisperId];
+    if (!held) return;
+    const token = tokenFor(conversationId);
+    const found = await whispersBefore(conversationId, held.afterSeq + 1, held.afterSeq);
+    if (!staleness(token)) setModel(applyWhispers(getModel(), found));
   }
 
   /** Back to the newest messages: the detached window (if any) is dropped. */
@@ -444,11 +487,13 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     const token = tokenFor(conversationId);
     try {
       const page = await api.listMessages(conversationId, { before: seq + JUMP_AFTER, limit: JUMP_WINDOW });
+      const found = !staleness(token) && (page.messages ?? []).some((m) => m.seq === seq);
+      const whispers = found ? await whispersBefore(conversationId, seq + JUMP_AFTER, page.messages[0].seq) : [];
       const why = staleness(token);
       if (why) return { ok: false, error: dropped(why) };
       if (jumps.get(conversationId) !== n) return { ok: false, error: dropped("superseded") };
       if (!(page.messages ?? []).some((m) => m.seq === seq)) return { ok: false, error: { code: "not_found", reason: null, status: 404 } };
-      setModel(openWindow(getModel(), conversationId, page, { focusSeq: seq, n }));
+      setModel(applyWhispers(openWindow(getModel(), conversationId, page, { focusSeq: seq, n }), whispers));
       return { ok: true };
     } catch (err) {
       const error = errorOf(err);
@@ -910,6 +955,20 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     },
 
     loadUsage: () => attempt(() => api.getUsage(), { after: (usage) => setModel(applyUsage(getModel(), usage)), text: commonErrorText }),
+    /**
+     * My answer to my whisper `whisperId` in `conversationId`: `accept` (告诉他们) or `decline` (不用) → value: the whisper as
+     * it is now, kept at once (the service pushes it to my other tabs too). Refused as stale (answered or expired meanwhile):
+     * the whisper is read again; gone (404): it goes.
+     */
+    answerWhisper: (conversationId, whisperId, answer) =>
+      attempt(() => (answer === "accept" ? api.acceptWhisper(whisperId) : api.declineWhisper(whisperId)), {
+        after: (whisper) => setModel(applyWhisper(getModel(), whisper)),
+        text: whisperErrorText,
+        onFail: (error) => {
+          if (error.status === 404) setModel(dropWhisper(getModel(), conversationId, whisperId));
+          else if (error.status === 409) void refreshWhisper(conversationId, whisperId);
+        },
+      }),
     /** The site's models again (Settings and the Agent form open). */
     loadModels: () => attempt(() => api.getModels(), { after: (res) => setModel(applyModels(getModel(), res)), text: commonErrorText }),
   };
