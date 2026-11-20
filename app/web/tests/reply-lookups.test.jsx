@@ -183,6 +183,31 @@ describe("what a reply looked up", () => {
     expect(storedLi(7).classList.contains("flash")).toBe(true);
   });
 
+  it("a row that could not be loaded for another reason says so — not that the message is gone; what was loaded is not loaded again when the line is opened again, and one that failed is tried again", async () => {
+    let failing = true;
+    const getMessage = vi.fn(async (_conversationId, seq) => {
+      if (seq === 404) throw apiError(404, "not_found");
+      if (seq === 503) {
+        if (failing) throw apiError(503, "busy");
+        return { message: wire(A1, 1, AG1, "你好，我是小助手"), principals: {} };
+      }
+      return { message: wire(A1, 2, ME_ID, "在吗"), principals: {} };
+    });
+    const found = [{ conversationId: A1, seq: 2 }, { conversationId: A1, seq: 404 }, { conversationId: A1, seq: 503 }];
+    await openChats({ messages: [...BASE, reply(3, { lookups: { search: 1 }, found })], api: { getMessage } });
+    const line = within(lookupLine(3)).getByRole("button", { name: "查了 1 次聊天记录" });
+    const texts = () => [...lookupLine(3).querySelectorAll(".lookup-rows > li")].map((li) => li.querySelector(".row-preview")?.textContent ?? li.textContent);
+    await click(line);
+    expect(texts()).toEqual(["在吗", "这条消息已经看不到了", "没能打开这条消息，请稍后再试"]);
+    expect(getMessage).toHaveBeenCalledTimes(3);
+    await click(line);
+    failing = false;
+    await click(line);
+    // Only the row that failed is asked for again.
+    expect(getMessage.mock.calls.map(([, seq]) => seq)).toEqual([2, 404, 503, 503]);
+    expect(texts()).toEqual(["在吗", "这条消息已经看不到了", "你好，我是小助手"]);
+  });
+
   it("closing the line hides the list again; in a group no words are shown, whatever a message carries", async () => {
     const getMessage = vi.fn(async () => ({ message: wire(G1, 1, ANN, "周六见"), principals: {} }));
     await openChats({

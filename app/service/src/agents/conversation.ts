@@ -274,10 +274,11 @@ export async function postAsAgent(
   if (truncated) body.truncated = true;
   if (proposalId !== null) body.proposalId = proposalId;
   // What its tools looked up: the counts, and the messages found (each reader is sent only those they can see,
-  // messages/read.ts); the search words only in its own conversation, its owner's to read — in a group they are not kept.
+  // messages/read.ts) — in a group only that group's own, the only ones a reply there may find; the search words only in
+  // its own conversation, its owner's to read — in a group they are not kept.
   const lookups = lookupsOf(reply.lookups);
   if (lookups) body.lookups = lookups;
-  const found = foundOf(reply.found);
+  const found = foundOf(reply.found).filter((r) => own || r.conversationId === conversationId);
   if (found.length > 0) body.found = found;
   const queries = own ? queriesOf(reply.queries) : [];
   if (queries.length > 0) body.queries = queries;

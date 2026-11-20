@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentPort, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
 import { isRunEnd, type RunTicket } from "../src/agents/runtime/port.ts";
-import { groupSystemText, NO_NOTES, systemText } from "../src/agents/runtime/prompt.ts";
+import { groupSystemText, NO_NOTES, NO_TOOLS, systemText } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
 import type { ModelCall, ToolSpec } from "../src/models/gateway.ts";
@@ -47,8 +47,6 @@ afterEach(async () => {
 
 /** The whisper's words, verbatim (task 5's copy). */
 const TOOLS_OFF = "这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。";
-/** How the system text's sentence saying it has no tools starts. */
-const NO_TOOLS = "你没有任何工具";
 const FAST = { source: "site", id: "fast" } as const;
 const PLAIN_SITE = { source: "site", id: "plain_site" } as const;
 
@@ -153,6 +151,9 @@ describe("a provider's model: given tools until it is found unable, then marked 
     gateway.refuseTools("我直接回答：没有找到。");
     await work();
     expect(await bodyOf(own, askSeq + 1)).toEqual({ text: "我直接回答：没有找到。" });
+    // The call offered the tools with the text for them, and gave the text the gateway sends when it goes without them.
+    const refused = gateway.calls.at(-1)!;
+    expect(refused.system).not.toContain(NO_TOOLS);
 
     const stored = await storedModels(providerId);
     expect(stored.map((m) => [m.name, m.tools])).toEqual([
@@ -175,6 +176,9 @@ describe("a provider's model: given tools until it is found unable, then marked 
     await work();
     expect(offers).toBe(before);
     plainCall(gateway.calls.at(-1)!);
+    // The text the refused call gave for going without tools is the one a reply never offered them is sent, word for word.
+    expect(refused.systemWithoutTools).toBe(gateway.calls.at(-1)!.system);
+    expect(gateway.calls.at(-1)).not.toHaveProperty("systemWithoutTools");
     expect((await lastRun(agent.id)).input_estimate).not.toBeNull();
     // Told once.
     expect(await whispersOf(owner.id)).toHaveLength(1);

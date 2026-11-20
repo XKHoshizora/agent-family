@@ -1179,7 +1179,8 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
 /**
  * A new connection: what was streamed before it is not sent again, so every stream goes; and every run held — in an
  * Agent's conversation or in a group — is known only from before it (`joined`) until a push of this connection names it
- * again. (A group slot that then says nothing at all is forgotten.)
+ * again, and what its tool was doing then (`activity`) is not shown any more. (A group slot that then says nothing at
+ * all is forgotten.)
  */
 export function clearStreams(state) {
   const settled = Object.values(state.runs).every((r) => !r || r.joined);
@@ -1189,7 +1190,7 @@ export function clearStreams(state) {
   for (const [id, r] of Object.entries(state.runs)) {
     if (!r || r.joined) runs[id] = r;
     else {
-      const { since: _since, ...rest } = r;
+      const { since: _since, activity: _activity, ...rest } = r;
       runs[id] = { ...rest, joined: true };
     }
   }
@@ -1197,7 +1198,7 @@ export function clearStreams(state) {
   for (const [id, slots] of Object.entries(state.groupRuns)) {
     const kept = {};
     for (const [agentId, slot] of Object.entries(slots)) {
-      const { since: _since, ...rest } = slot;
+      const { since: _since, activity: _activity, ...rest } = slot;
       const known = { ...rest, joined: true };
       if (!emptySlot(known)) kept[agentId] = known;
     }

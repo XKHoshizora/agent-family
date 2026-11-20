@@ -102,8 +102,9 @@ export function queriesOf(value: unknown): string[] {
 
 /**
  * What the tools of one reply looked up, as they ran (agents/runtime/worker.ts `toolReply`): a call that ran — its tool
- * answered — counts under its tool's kind (one with no kind counts nothing); what it found and the word it searched for
- * are kept by the rules above, in the order the calls ran. A call answered with a note or an error is never `ran`.
+ * answered with something usable — counts under its tool's kind, and what it found and the word it searched for are kept
+ * by the rules above, in the order the calls ran. A tool with no kind counts nothing and keeps nothing (nothing would
+ * show it). A call answered with a note or an error — the loop's own, or the tool's (`{ error }`) — is never `ran`.
  */
 export class LookedUp {
   private readonly counts: Lookups = {};
@@ -112,7 +113,8 @@ export class LookedUp {
   private readonly words: string[] = [];
 
   ran(kind: Activity | undefined, outcome: { found?: unknown; query?: unknown }): void {
-    if (kind !== undefined) this.counts[kind] = (this.counts[kind] ?? 0) + 1;
+    if (kind === undefined) return;
+    this.counts[kind] = (this.counts[kind] ?? 0) + 1;
     addFound(this.found, this.seen, outcome.found);
     addQuery(this.words, outcome.query);
   }

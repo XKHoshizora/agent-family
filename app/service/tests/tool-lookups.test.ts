@@ -213,10 +213,11 @@ describe("while a reply's tool runs, and what the reply keeps of it", () => {
       expect([frame.type, text.includes(QUERY), text.includes(OUTPUT)]).toEqual([frame.type, false, false]);
     }
 
-    // Stored with the reply in a group: no words at all.
-    expect(await bodyOf(g, replySeq)).toEqual({ text: "蜀香在春熙路，周一休息。", lookups: { search: 1 }, found: foundNow });
+    // Stored with the reply in a group: no words at all, and of what was found only the group's own messages — a group
+    // reply can find nothing elsewhere, and a reference elsewhere is not kept even if a tool hands one over.
+    expect(await bodyOf(g, replySeq)).toEqual({ text: "蜀香在春熙路，周一休息。", lookups: { search: 1 }, found: [ref(g, early), ref(g, later), ref(g, 9999)] });
     const seen = {
-      owner: [ref(g, early), ref(g, later), ref(own, privateSeq)],
+      owner: [ref(g, early), ref(g, later)],
       mia: [ref(g, early), ref(g, later)],
       ned: [ref(g, early), ref(g, later)],
       // Joined after the early message: it is not theirs to see, and not theirs to be pointed at.

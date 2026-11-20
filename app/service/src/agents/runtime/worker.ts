@@ -1,10 +1,10 @@
 import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
 import { LookedUp, type LookupFields } from "../../messages/lookups.ts";
 import { isCount } from "../../metering/prices.ts";
-import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
+import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR, weightWithin } from "../../metering/tokens.ts";
 import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
-import { cutResult, FINAL_LINE, fitsSchema, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
+import { cutResult, FINAL_LINE, fitsSchema, isRefusal, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
 import {
   BUSY,
   isRunEnd,
@@ -453,8 +453,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * - a repeat (`LoopGuard`) is answered `REPEATED`, a call over its tool's count `OVER_CAP`, neither run;
    * - anything else runs through the port (`runTool`), its output cut (`cutResult`) to `resultMaxWeight` and to what the
    *   model's context has left for the rounds (`room`: what the plan's limit, `ToolRun.limit`, leaves beside the planned
-   *   input, the tools' definitions and the last call's line, at the plan's ratio, and what providers add around the
-   *   definitions — at least the room the plan kept for results).
+   *   input, the tools' definitions and the last call's line, at the plan's ratio — the tools' text, definitions, steps and
+   *   results alike, times `TOOL_TEXT_FACTOR` — and what providers add around the definitions — at least the room the
+   *   plan kept for results).
    * While a tool runs the reply's status says its kind (`AgentPort.activity`, from `ToolRun.kinds`, once per change), and
    * nothing as soon as the model is called again; the counts, the messages found and the search words of the calls that
    * ran and answered go with the posted reply (messages/lookups.ts `LookedUp`).
@@ -479,10 +480,16 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const limits = opts.tools ?? DEFAULT_TOOLS;
     const deadline = Date.now() + limits.runTimeoutMs;
     const tools = [...prepared.tools];
+    // The ordinary call, made once after a later round its upstream refused: no tools, so the text for going without
+    // them (`ModelCall.systemWithoutTools`) when the call has one.
+    const { systemWithoutTools, ...withTools } = prepared.call;
+    const ordinary: Omit<ModelCall, "signal"> = systemWithoutTools === undefined ? withTools : { ...withTools, system: systemWithoutTools };
     const offered = new Map(tools.map((t) => [t.name, t]));
     const toolsText = JSON.stringify(tools);
     const texts = prepared.call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
-    const room = bounds.limit - bounds.planned - estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio) - TOOL_PREAMBLE_TOKENS;
+    /** What the tools' text — definitions, steps, results — is planned at: the plan's ratio times `TOOL_TEXT_FACTOR`. */
+    const toolRatio = bounds.planRatio * TOOL_TEXT_FACTOR;
+    const room = bounds.limit - bounds.planned - estimateTokens(toolsText, toolRatio) - estimateTokens(`\n\n${FINAL_LINE}`, bounds.planRatio) - TOOL_PREAMBLE_TOKENS;
     const guard = new LoopGuard({ maxRounds: limits.maxRounds, perTool: bounds.perTool });
     const out = new ReplyStream((delta) => port.emit(run, delta));
     const meter = new Meter();
@@ -525,7 +532,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       // The model is called again: no tool is running.
       quiet();
       const request: Omit<ModelCall, "signal"> = plain
-        ? prepared.call
+        ? ordinary
         : {
             ...prepared.call,
             ...(final ? { system: withFinalLine(prepared.call.system), toolChoice: "none" as const } : {}),
@@ -556,7 +563,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         // A later round the upstream refused (400, 422: something in the rounds it will not take, which nothing of ours can
         // mend): once, the reply is asked for as one that offers no tools, from the conversation alone, its cost held first.
         if (steps.length > 0 && !plain && (round.status === 400 || round.status === 422)) {
-          const next = await extend(holdTokens([prepared.call.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
+          const next = await extend(holdTokens([ordinary.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
           if (next === "stop" || next === "busy") {
             ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
             break;
@@ -593,7 +600,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       guard.roundDone();
       tally.rounds++;
       const results: ToolResult[] = [];
-      let left = room - stepsTokens - estimateTokens(JSON.stringify({ assistant: finished.assistant, results: [] }), bounds.planRatio);
+      let left = room - stepsTokens - estimateTokens(JSON.stringify({ assistant: finished.assistant, results: [] }), toolRatio);
       let cut: Interruption | null = null;
       for (const toolCall of finished.toolCalls) {
         cut = interrupted();
@@ -631,11 +638,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
               output = { error: UNUSABLE };
             } else {
               tally.ran++;
-              const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), bounds.planRatio);
+              const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), toolRatio);
               try {
-                output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), bounds.planRatio)));
-                // It ran and answered: what it looked up is the reply's.
-                looked.ran(kind, ran.outcome);
+                output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), toolRatio)));
+                // It ran and answered with something usable: what it looked up is the reply's. Its own refusal is not.
+                if (!isRefusal(ran.outcome.output)) looked.ran(kind, ran.outcome);
               } catch {
                 // Not JSON (a port's bug): nothing of it goes to the model.
                 tally.failed++;
@@ -646,7 +653,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         }
         const result: ToolResult = { id: toolCall.id, name: toolCall.name, output };
         results.push(result);
-        left -= estimateTokens(JSON.stringify(result), bounds.planRatio);
+        left -= estimateTokens(JSON.stringify(result), toolRatio);
       }
       if (cut !== null) {
         ending = { last: { finished: null, failure: null, why: cut } };
@@ -654,7 +661,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       }
       const step = { assistant: finished.assistant, results };
       steps.push(step);
-      stepsTokens += estimateTokens(JSON.stringify(step), bounds.planRatio);
+      stepsTokens += estimateTokens(JSON.stringify(step), toolRatio);
       if (tally.garbled >= 2 && !unusable) {
         unusable = true;
         await toolsUnusable(run, "garbled");

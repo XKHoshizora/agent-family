@@ -1570,7 +1570,9 @@ the request's length ("context", "too long", "maximum … tokens", "token limit"
 if that request is answered are tools remembered as refused by that upstream, for 6 hours (`TOOLS_REFUSAL_TTL_MS`;
 until then its calls without `steps` go without them, and after it they are offered again). A call with `steps` always
 sends its tools, is never asked again without them, and marks nothing: a 400 to it is the call's failure. Every call
-that offered tools and did not send them finishes `toolsRefused`.
+that offered tools and did not send them finishes `toolsRefused`, and was sent, in place of its system text, the one it
+gives for going without them when it gives one (`ModelCall.systemWithoutTools`: a reply's is exactly the text a reply
+offered no tools is sent, saying it has none), so that an answer written with no tools is never told it has some.
 
 What follows for a person choosing a model and a level:
 
@@ -2053,7 +2055,8 @@ owner also removes their Agent.
 #### `GET /api/conversations/:id/messages/:seq`
 
 *Session: required.* → 200 `{"message": WireMessage, "principals": { "<id>": Principal }}` (as above, for this one message); 404 `not_found` when you cannot see it (from before
-you joined, not a member, no such seq — identical).
+you joined, not a member, no such seq — identical). Limit: 120 per minute per principal (what a reply's lookups open is a
+read each), then 429 `rate_limited`.
 
 #### `POST /api/conversations/:id/read`
 
@@ -2210,8 +2213,11 @@ people's text stays plain.
 
 **What a reply looked up** (`messages/lookups.ts`, `messages/read.ts` `toWireForReaders`; `tests/tool-lookups.test.ts`): a
 reply whose tools ran (Agents and runs, Tools in a reply) keeps, with its message, how many calls of each kind ran and
-answered (`lookups`: `search`, `file`, `time`; a call answered with a note or an error is not counted), the messages its
-tools found (`found`: the first 20, in the order they came, each once) and, in the Agent's own conversation only, the
+answered with something usable (`lookups`: `search`, `file`, `time`; a call answered with a note or an error is not
+counted — the loop's own, or the tool's own refusal, an output `{"error": "…"}` such as a search that timed out, words
+too short to search for, or a file that cannot be read; nor is a tool the offer names no kind for, and what such calls
+found or searched for is not kept either), the messages its tools found (`found`: the first 20, in the order they came,
+each once; a reply in a group keeps only that group's) and, in the Agent's own conversation only, the
 words its searches were for (`queries`: the first 6, each once, cut to a weight of 60). None of it is text: no search
 matches it, no model is ever shown it, no preview or quote carries it. Each reader is sent their part, decided when the
 message is read (history, a single message, `GET /api/sync`, catch-up, both searches, every push): `lookups` to everyone
@@ -2819,9 +2825,11 @@ was, its system text saying it has no tools. The tools are part of the context p
 back:
 
 **What a reply offered tools reserves in its plan** (`port-impl.ts` `begin`; `tests/tool-loop-money.test.ts`). Kept out
-of the conversation's budget as the system text is: the tools' definitions, their weight at the plan's ratio; 400 tokens
-for what providers add around them (`TOOL_PREAMBLE_TOKENS`); the last call's line (below); and room for the results —
-two results of `TOOLS.resultMaxWeight` at the plan's ratio (6 000 tokens at the default), but at most a third of what
+of the conversation's budget as the system text is: the tools' definitions, their weight at the plan's ratio times 1.5
+(`TOOL_TEXT_FACTOR`: JSON and punctuation cost up to 1.5 tokens a weight on the dearest provider measured, prose 0.6 to
+1.16 — so every text of the tools, definitions, rounds and results alike, is planned at it; never held or charged at
+it); 400 tokens for what providers add around them (`TOOL_PREAMBLE_TOKENS`); the last call's line (below); and room for
+the results — two results of `TOOLS.resultMaxWeight` at that (9 000 tokens at the default), but at most a third of what
 the plan would give the conversation beside the system text and the definitions (on a small model, a third of its
 room; in a group, a third of `AGENT_GROUP_CONTEXT_TOKENS`, 4 000 tokens, which on a model with a large context comes out
 of the context beyond the group's cap, not out of its messages). A long conversation is therefore shown fewer older
@@ -2871,7 +2879,8 @@ marked all the same. A site model's configuration is never changed: one metric l
 `tools_refused_site`). Either way the reply goes on as described here, and from the next reply on a marked model is offered
 none. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
 nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call
-— no tools, no rounds, the conversation alone, its cost held first (not made when nothing more can be held) — and its
+— no tools, no rounds, the conversation alone, under the system text of a reply offered none, its cost held first (not
+made when nothing more can be held) — and its
 answer follows what the reply wrote; nothing is marked. `extend` answering that nothing more can be held ends the reply
 with what it wrote, as
 `truncated` (with nothing written: `failed`, `no_quota`). The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
@@ -2880,9 +2889,9 @@ between tool calls and between rounds, and end the reply as they end one of one 
 comes, a later round's after a paragraph break, and is posted as one reply (text written before a tool call is kept);
 reasoning likewise, cut at 32 000 characters as always. While a tool runs, the reply's status says what kind of work it
 is (`activity`, its kind from the offer, `ToolRun.kinds`: told as the tool starts, again only when it changes, and none as
-soon as the model is called again; a tool with no kind shows none: Wire shapes, Pushes); what the calls that ran and
-answered looked up goes with the posted reply (`lookups`, `found`, `queries`: Wire shapes, What a reply looked up — a
-reply whose tools ran none is posted as one offered none). One settlement for the reply: the rounds'
+soon as the model is called again; a tool with no kind shows none and clears what was shown: Wire shapes, Pushes); what
+the calls that ran and answered with something usable looked up goes with the posted reply (`lookups`, `found`,
+`queries`: Wire shapes, What a reply looked up — a reply whose tools ran none is posted as one offered none). One settlement for the reply: the rounds'
 summed usage, or, with any round unreported (the record then says `estimated`), the sum, per round, of its reported usage
 (its hidden reasoning included, as the upstream counts it), or of its estimate when it reported none — the
 conversation's, plus the tools and the rounds it carried (none for a round whose upstream refused the tools), at the

@@ -106,6 +106,8 @@ export interface ContextRun {
 export interface LoadedContext {
   /** The run's system text, with its notes passage known apart (what the budget and the estimate measure). */
   system: SystemText;
+  /** Who spoke in what was read and is in the group now (`speakersOf`), as `system`'s roster lists them; none in the Agent's own conversation. */
+  speakers: Speaker[];
   /**
    * In a group, the run's mark (`newMark`), which `system` and the labels of `entries` carry and nothing else they show
    * does; null in the Agent's own conversation.
@@ -528,7 +530,7 @@ export async function loadContext(
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start };
+  return { system: text, speakers, mark, budget, planRatio: ratio, entries, attachments, topicStart: start };
 }
 
 /** Whether there is anything to answer: an owner's message among what may be shown (in a group, anyone else's). */

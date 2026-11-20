@@ -17,6 +17,16 @@ describe("message and group rate limits", () => {
     expect((await send(b, 1)).status).toBe(201);
   });
 
+  it("allows 120 reads of one message per minute per principal (what a reply's lookups open), then 429 rate_limited; the other party is unaffected", async () => {
+    const [a, b] = [await signUp(app, "fay"), await signUp(app, "gus")];
+    const { conversationId: dm } = await befriend(app, a, b);
+    expect((await api(app, a, "POST", `/api/conversations/${dm}/messages`, { text: "hi", clientTxn: "fay-1" })).status).toBe(201);
+    const read = (who: typeof a) => api(app, who, "GET", `/api/conversations/${dm}/messages/1`);
+    for (let i = 1; i <= 120; i++) expect((await read(a)).status).toBe(200);
+    expect(await read(a)).toMatchObject({ status: 429, json: { error: "rate_limited" } });
+    expect((await read(b)).status).toBe(200);
+  });
+
   it("allows 10 group creations per minute per principal, then 429 rate_limited", async () => {
     const [a, b, c] = [await signUp(app, "carol"), await signUp(app, "dave"), await signUp(app, "erin")];
     await befriend(app, a, b);

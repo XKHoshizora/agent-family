@@ -113,6 +113,15 @@ export const planRatio = (ratio: number): number => Math.max(1, ratio);
  */
 export const TOOL_PREAMBLE_TOKENS = 400;
 
+/**
+ * How much more than prose a tool's text — its definition, a call's arguments, its result: JSON and punctuation — is
+ * planned at: its weight times the plan's ratio times this. Measured (docs/acceptance/batch2-tools/tokenizer-compare.txt,
+ * real billed tokens): JSON and dense punctuation cost up to 1.5 tokens a weight on the dearest provider, prose 0.6 to 1.16.
+ * Used wherever a reply's context plan reserves room for tools (agents/port-impl.ts `begin`) and its rounds measure what
+ * they add (agents/runtime/worker.ts); a plan only — holds stay at bytes (`holdTokens`), charges at what is reported.
+ */
+export const TOOL_TEXT_FACTOR = 1.5;
+
 // --- the learned ratio --------------------------------------------------------------------------------------------------
 
 /** A ratio is used once it has learned from this many replies; until then it is 1. */

@@ -3,8 +3,10 @@
 // searches were for (in my Agent's own conversation only) and the messages it found that I can see (the service sends
 // no more), each loaded as any one message is (`actions.foundMessage`, GET …/messages/:seq) and each jumping to its
 // place (`onJump`: the chat's own useJumpTo, which outlives this list when the jump opens another conversation — the
-// chat scrolls to the message and it flashes). A reply that looked nothing up, or only at the time, shows nothing here.
-import React, { useEffect, useState } from "react";
+// chat scrolls to the message and it flashes). A row loaded (or found gone) is kept while the reply is shown, so opening
+// the line again loads nothing again; a row that failed for any other reason says so and is tried again next time. A
+// reply that looked nothing up, or only at the time, shows nothing here.
+import React, { useEffect, useRef, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { lookupLine, searchHitView } from "../data/viewmodel.js";
 import { ChatHitRow } from "./SearchHits.jsx";
@@ -12,6 +14,8 @@ import { ChatHitRow } from "./SearchHits.jsx";
 /** The line under `msg` (a view message) in `conv`, or nothing; `onJump(conversationId, seq)` opens a message found. */
 export function ReplyLookups({ msg, conv, onJump }) {
   const [open, setOpen] = useState(false);
+  /** What each row found loaded as, by `conversationId:seq`: kept across closing and opening the line. */
+  const loaded = useRef(new Map());
   const line = lookupLine(msg.lookups);
   if (!line) return null;
   // The words are its owner's, in its own conversation: never shown in a group, whatever the message carries.
@@ -29,7 +33,7 @@ export function ReplyLookups({ msg, conv, onJump }) {
           {found.length > 0 && (
             <ul className="lookup-rows">
               {found.map((ref) => (
-                <FoundRow key={`${ref.conversationId}:${ref.seq}`} found={ref} onJump={onJump} />
+                <FoundRow key={`${ref.conversationId}:${ref.seq}`} found={ref} onJump={onJump} kept={loaded.current} />
               ))}
             </ul>
           )}
@@ -39,22 +43,31 @@ export function ReplyLookups({ msg, conv, onJump }) {
   );
 }
 
-/** One message the reply found: loading, then its sender, time and a line of it (a button that jumps to it), or 看不到了. */
-function FoundRow({ found, onJump }) {
+/**
+ * One message the reply found: loading, then its sender, time and a line of it (a button that jumps to it); 看不到了 when
+ * the service says it is not there for me (`not_found`), else that it could not be opened now. `kept`: the rows loaded
+ * so far (a failure other than `not_found` is not kept: it is asked for again the next time the line opens).
+ */
+function FoundRow({ found, onJump, kept }) {
   const { state, actions } = useStore();
   const meId = state.account?.id ?? null;
-  const [loaded, setLoaded] = useState(null);
+  const key = `${found.conversationId}:${found.seq}`;
+  const [loaded, setLoaded] = useState(() => kept.get(key) ?? null);
   useEffect(() => {
+    if (kept.has(key)) return undefined;
     let live = true;
     actions.foundMessage(found.conversationId, found.seq).then((res) => {
-      if (live) setLoaded(res.ok ? { message: res.message } : { gone: true });
+      const now = res.ok ? { message: res.message } : res.error?.code === "not_found" ? { gone: true } : { failed: true };
+      if (!now.failed) kept.set(key, now);
+      if (live) setLoaded(now);
     });
     return () => {
       live = false;
     };
-  }, [actions, found.conversationId, found.seq]);
+  }, [actions, kept, key, found.conversationId, found.seq]);
   if (loaded === null) return <li className="muted">正在加载…</li>;
   if (loaded.gone) return <li className="muted">这条消息已经看不到了</li>;
+  if (loaded.failed) return <li className="muted">没能打开这条消息，请稍后再试</li>;
   const hit = searchHitView(loaded.message, { meId, now: Date.now() });
   return <ChatHitRow hit={hit} q="" onPick={() => onJump(found.conversationId, found.seq)} />;
 }

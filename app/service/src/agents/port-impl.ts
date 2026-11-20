@@ -9,7 +9,7 @@ import { AppError } from "../errors.ts";
 import { admitRun, raiseHold, type ChargeTo } from "../metering/admit.ts";
 import { assertCount, costMicro, isCount, type Price } from "../metering/prices.ts";
 import { settle } from "../metering/settle.ts";
-import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS } from "../metering/tokens.ts";
+import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
@@ -112,11 +112,12 @@ type Offer = ReturnType<Toolbox["offer"]>;
 
 /**
  * Tokens a reply offered tools keeps in its context plan for what they bring back (`begin`): two results of
- * `resultMaxWeight` at the plan's `ratio`, but at most a third of `conversation`, what the plan gives the conversation
- * beside the system text and the tools' definitions. Planned only: nothing is held or charged for it.
+ * `resultMaxWeight` at the plan's `ratio`, as tools' text is planned (`TOOL_TEXT_FACTOR`), but at most a third of
+ * `conversation`, what the plan gives the conversation beside the system text and the tools' definitions. Planned only:
+ * nothing is held or charged for it.
  */
 const resultReserve = (resultMaxWeight: number, ratio: number, conversation: number): number =>
-  Math.min(Math.ceil(2 * resultMaxWeight * ratio), Math.floor(conversation / 3));
+  Math.min(Math.ceil(2 * resultMaxWeight * ratio * TOOL_TEXT_FACTOR), Math.floor(conversation / 3));
 
 /**
  * What a provider model's owner is told, once, when a reply finds it cannot use tools (`toolsUnusable`): a whisper in
@@ -417,7 +418,17 @@ export class DbAgentPort implements AgentPort {
     const now = new Date();
     const first = await db.tx(async (t): Promise<
       | { end: RunEnd }
-      | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number; offer: Offer | null; reserved: number }
+      | {
+          resolved: Resolved;
+          loaded: LoadedContext;
+          covers: number;
+          coveredBefore: number;
+          key: string;
+          ratio: number;
+          offer: Offer | null;
+          reserved: number;
+          withoutTools: string | null;
+        }
     > => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
@@ -491,11 +502,12 @@ export class DbAgentPort implements AgentPort {
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
       // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it
-      // offers none; then what they take of the context — their definitions at the plan's ratio and what providers add
-      // around them, reserved as the system text is — and room for what they bring back (below).
+      // offers none; then what they take of the context — their definitions at the plan's ratio, as tools' text is planned
+      // (`TOOL_TEXT_FACTOR`), and what providers add around them, reserved as the system text is — and room for what they
+      // bring back (below).
       let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
-      const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
+      const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned * TOOL_TEXT_FACTOR) + TOOL_PREAMBLE_TOKENS;
       let reserved = definitions;
       let loaded = await loadContext(t, { ...plan, reserved }, resolved, system(offer !== null), this.deps.drawMark);
       if (offer !== null && holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
@@ -513,7 +525,11 @@ export class DbAgentPort implements AgentPort {
       }
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved };
+      // A reply offered tools also carries the text a reply offered none is sent (the same mark and roster), for whenever
+      // its tools are not sent: an upstream that refuses them, or the ordinary call after a later round it refused
+      // (`ModelCall.systemWithoutTools`). Its plan holds it: the tools' definitions it leaves out are larger.
+      const withoutTools = offer === null ? null : system(false)(loaded.mark ?? "", loaded.speakers).text;
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools };
     });
     if ("end" in first) return first.end;
 
@@ -554,7 +570,7 @@ export class DbAgentPort implements AgentPort {
         }
         return { end: ENDED_QUIETLY, told };
       }
-      const { resolved, loaded, covers, key, ratio, offer, reserved } = first;
+      const { resolved, loaded, covers, key, ratio, offer, reserved, withoutTools } = first;
       // The tools the reply is offered (step 1).
       const tools = offer?.tools ?? [];
       // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
@@ -589,7 +605,13 @@ export class DbAgentPort implements AgentPort {
       const planned = planRatio(ratio);
       return {
         prepared: {
-          call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning },
+          call: {
+            ...resolved.call,
+            system: loaded.system.text,
+            ...(tools.length > 0 && withoutTools !== null ? { systemWithoutTools: withoutTools } : {}),
+            messages: context.messages,
+            reasoning,
+          },
           inputChars: input,
           tools,
           toolRun:

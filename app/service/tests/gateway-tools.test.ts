@@ -650,6 +650,28 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
       expect(stub.requests.map((r) => "tools" in r.body)).toEqual([true, false]);
     });
 
+    it("a call that gives its system text for going without them: every request that sends no tools carries that text, every one that sends them its own", async () => {
+      const PLAIN = "No tools here, stub.";
+      const has = (text: string) => stub.requests.map((r) => r.raw.includes(text));
+      stub.answer(refusing(400, REFUSAL[protocol]));
+      const upstreamId = `provider:plain-text-${protocol}`;
+      const events = await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId, systemWithoutTools: PLAIN })));
+      expect(finishOf(events)).toMatchObject({ toolsRefused: true });
+      // Refused with the tools and their own text; asked again without them, with the text for going without.
+      expect([has(SYSTEM), has(PLAIN)]).toEqual([
+        [true, false],
+        [false, true],
+      ]);
+      // Left without them at once next time: that text at once.
+      stub.requests.length = 0;
+      await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId, systemWithoutTools: PLAIN })));
+      expect([has(SYSTEM), has(PLAIN)]).toEqual([[false], [true]]);
+      // A call that offers no tools sends its own text, whatever else it gives.
+      stub.requests.length = 0;
+      await collect(gateway.stream(call(protocol, { systemWithoutTools: PLAIN })));
+      expect([has(SYSTEM), has(PLAIN)]).toEqual([[true], [false]]);
+    });
+
     it("a 422 naming them is taken as a 400 is", async () => {
       stub.answer(refusing(422, JSON.stringify({ detail: [{ loc: ["body", "tools"], msg: "Extra inputs are not permitted", type: "extra_forbidden" }] })));
       const events = await collect(gateway.stream(call(protocol, { tools: TOOLS, upstreamId: `provider:strict-${protocol}` })));

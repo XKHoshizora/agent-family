@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LoopGuard } from "../src/agents/runtime/loop.ts";
 import type { Activity, AgentPort, Delta, Estimated, Prepared, Reply, RunEnd, RunTicket, ToolOutcome, ToolRun, Usage } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type ToolLimits, type WorkerLog } from "../src/agents/runtime/worker.ts";
-import { CONTEXT_HEADROOM, estimateTokens, weight } from "../src/metering/tokens.ts";
+import { CONTEXT_HEADROOM, estimateTokens, TOOL_TEXT_FACTOR, weight } from "../src/metering/tokens.ts";
 import type { ModelCall, ModelEvent, ModelGateway, ToolCall, ToolSpec } from "../src/models/gateway.ts";
 import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
 
@@ -452,6 +452,24 @@ describe("a reply that offers tools", () => {
     expect(finishedAs(again)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
   });
 
+  it("the ordinary call after a later round refused is told it has no tools: the prepared text for going without them, when the call has one, and nothing else changes", async () => {
+    const PLAIN = "你是一个助手。你没有任何工具。";
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) })
+      .fail("provider_unavailable", { status: 400 })
+      .reply("不查也能说：川菜。", { usage: U(80, 8) });
+    const fake = fakePort({ call: { systemWithoutTools: PLAIN } });
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(3);
+    // The rounds that send the tools carry both texts (the gateway sends the second only if the tools are not sent).
+    expect([gateway.calls[0]!.system, gateway.calls[0]!.systemWithoutTools]).toEqual([SYSTEM, PLAIN]);
+    const { signal: _signal, ...plain } = gateway.calls[2]!;
+    const { systemWithoutTools: _without, ...ordinary } = fake.prepared.call;
+    expect(plain).toStrictEqual({ ...ordinary, system: PLAIN });
+    // Its cost was held at its own text's bound.
+    expect(fake.extends[1]!.next).toBe(Buffer.byteLength(PLAIN) + Buffer.byteLength("附近有什么好吃的？"));
+  });
+
   it("a later round refused (400) with nothing left to hold the ordinary call for: it is not made, and the reply ends as when nothing more can be held", async () => {
     const said = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
@@ -612,24 +630,27 @@ describe("a reply that offers tools", () => {
     expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
   });
 
-  it("the room the rounds may fill is what the plan's limit leaves (ToolRun.limit) beside the planned input, the tools, the last call's line and their framing, however large the model's context", async () => {
+  it("the room the rounds may fill is what the plan's limit leaves (ToolRun.limit) beside the planned input, the tools, the last call's line and their framing, however large the model's context; the tools' text — definitions, steps, results — counted at TOOL_TEXT_FACTOR times its weight", async () => {
     const gateway = scriptedGateway().callTools([
       { name: "search", input: { query: "a" } },
       { name: "search", input: { query: "b" } },
     ]);
     gateway.reply("够了。");
-    const room = 200;
-    const limit = 120 + estimateTokens(JSON.stringify(TOOLS) + `\n\n${FINAL_LINE}`) + 400 + room;
+    const room = 300;
+    // The definitions at the factor, the line as prose.
+    expect(TOOL_TEXT_FACTOR).toBe(1.5);
+    const limit = 120 + estimateTokens(JSON.stringify(TOOLS), TOOL_TEXT_FACTOR) + estimateTokens(`\n\n${FINAL_LINE}`) + 400 + room;
     const fake = fakePort({ toolRun: { limit }, tool: async () => ({ output: "很长的结果。".repeat(500), activity: "search" }) });
     await runOn(fake, gateway);
     expect(gateway.calls).toHaveLength(2);
     const last = gateway.calls[1]!;
     expect(isFinal(last)).toBe(true);
     const [first, second] = outputsOf(last, 0) as [string, string];
-    // Cut by the room (beside the round's own call and the framing), not by `resultMaxWeight` (3 000).
+    // Cut by the room (beside the round's own call and the framing), not by `resultMaxWeight` (3 000): a result of
+    // weight w takes 1.5 w of it.
     expect(first.endsWith(CUT_MARK)).toBe(true);
-    expect(weight(first)).toBeGreaterThan(room / 3);
-    expect(weight(first)).toBeLessThanOrEqual(room);
+    expect(weight(first)).toBeGreaterThan(room / 3 / TOOL_TEXT_FACTOR);
+    expect(weight(first)).toBeLessThanOrEqual(room / TOOL_TEXT_FACTOR);
     expect(second).toBe(CUT_MARK);
     expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
   });
@@ -760,18 +781,44 @@ describe("what a reply's tools are doing, and what it looked up", () => {
     expect(fake.posted.map((p) => p.text)).toEqual(["好了。"]);
   });
 
-  it("a tool the offer names no kind for shows no status and is not counted", async () => {
+  it("a tool the offer names no kind for shows no status and is not counted: nothing it found or searched for is kept either", async () => {
     const gateway = scriptedGateway()
       .callTools([
         { name: "search", input: { query: "a" } },
         { name: "read_file", input: { name: "菜单.txt" } },
       ])
       .reply("好了。");
-    const fake = fakePort({ toolRun: { kinds: { search: "search" } } });
+    const A = "00000000-0000-4000-8000-00000000000a";
+    const fake = fakePort({
+      toolRun: { kinds: { search: "search" } },
+      // The kindless tool says it found a message and searched for a word: neither is the reply's.
+      tool: async (call) => (call.name === "read_file" ? { output: "菜单", found: [{ conversationId: A, seq: 3 }], query: "菜单" } : { output: { hits: [] } }),
+    });
     await runOn(fake, gateway);
     expect(fake.tools).toHaveLength(2);
     expect(fake.activities).toEqual(["search", null]);
-    expect(fake.posted[0]!.lookups).toEqual({ search: 1 });
+    expect(fake.posted).toStrictEqual([{ text: "好了。", reasoning: "", stopped: false, truncated: false, lookups: { search: 1 } }]);
+  });
+
+  it("a tool's own refusal (its output an `{ error }`: it timed out, the query was too short, the file cannot be read) is not counted, and nothing it found or searched for is kept", async () => {
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "x" } },
+        { name: "read_file", input: { name: "图.pdf" } },
+      ])
+      .reply("没查成。");
+    const A = "00000000-0000-4000-8000-00000000000a";
+    const fake = fakePort({
+      tool: async (call) =>
+        call.name === "search"
+          ? { output: { error: "这次查找超时了。" }, found: [{ conversationId: A, seq: 1 }], query: "x" }
+          : { output: { error: "这种文件我读不了内容。" } },
+    });
+    await runOn(fake, gateway);
+    // The model is sent each refusal as it is.
+    expect(outputsOf(gateway.calls[1]!, 0)).toEqual([{ error: "这次查找超时了。" }, { error: "这种文件我读不了内容。" }]);
+    // The reply looked nothing up: no key about it, as a reply whose tools ran none.
+    expect(fake.posted).toStrictEqual([{ text: "没查成。", reasoning: "", stopped: false, truncated: false }]);
   });
 
   it("the reply carries what was looked up: per kind the tools that ran; what they found, in order, without repeats, the first 20; the first 6 search words, each cut to 60 weight", async () => {

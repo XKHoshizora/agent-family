@@ -30,9 +30,9 @@ export function siteDate(now: Date, timeZone: string): string {
 
 /**
  * That it has no tools, and must not claim what it cannot do: the same words in every conversation, for every reply that
- * is offered no tools (one that is offered some is not told this).
+ * is offered no tools (one that is offered some is not told this), on a line of its own.
  */
-const NO_TOOLS =
+export const NO_TOOLS =
   "你没有任何工具：不能上网、不能运行程序、不能收发消息或邮件，也不能读写任何文件；除了对话里给你看的内容，你看不到别的东西。" +
   "不要声称做了你做不到的事，比如“我已经帮你查过了”“我已经发出去了”。做不到就直接说做不到。";
 
