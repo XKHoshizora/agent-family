@@ -39,6 +39,19 @@ const rowsOf = (shown) => [...shown.lead, ...shown.groups.flatMap((g) => g.optio
 const EDGE = 12;
 const GAP = 6;
 const TALLEST = 420;
+/** Below this much room under its button (about six rows) the list may open above it instead (px). */
+const ENOUGH_BELOW = 240;
+
+/** The nearest box around `node` that scrolls up and down and has more than it shows (a page's body), or null. */
+function scrollerOf(node) {
+  for (let el = node.parentElement; el && el !== document.body; el = el.parentElement) {
+    const { overflowY } = getComputedStyle(el);
+    if ((overflowY === "auto" || overflowY === "scroll") && el.scrollHeight > el.clientHeight) return el;
+  }
+  return null;
+}
+/** The list is a sheet at the bottom of the screen (styles.css, under 480 px). */
+const onPhone = () => typeof window.matchMedia === "function" && window.matchMedia("(max-width: 480px)").matches;
 
 /**
  * A model picker: a button showing the current model (its brand mark and name) that opens a searchable list of models
@@ -114,8 +127,10 @@ export function ModelSelect({
     if (key !== value) onChange?.(key, row);
   };
 
-  // Opened: the search field takes the focus; the popover is placed under its button, or above it when there is more
-  // room there (laid out before it is painted, and again when the window scrolls or changes size).
+  // Opened: the search field takes the focus; the popover opens under its button — its page first scrolled, as far as it
+  // can with the button still in sight, so that the list has room there — and above it only when there is still not
+  // enough room below and more above (laid out before it is painted, and again when the window scrolls or changes size).
+  // A phone's sheet needs none of it.
   useLayoutEffect(() => {
     if (!open) return undefined;
     searchRef.current?.focus();
@@ -127,10 +142,24 @@ export function ModelSelect({
       const left = Math.max(EDGE, Math.min(r.left, window.innerWidth - EDGE - width));
       const below = window.innerHeight - r.bottom - GAP - EDGE;
       const above = r.top - GAP - EDGE;
-      const up = below < 280 && above > below;
+      const up = below < ENOUGH_BELOW && above > below;
       const height = Math.max(160, Math.min(TALLEST, up ? above : below));
       setPlace(up ? { up, left, width, height, bottom: window.innerHeight - r.top + GAP } : { up, left, width, height, top: r.bottom + GAP });
     };
+    const button = triggerRef.current;
+    if (button && !onPhone()) {
+      button.scrollIntoView?.({ block: "nearest" });
+      // As tall as the list is now (at most TALLEST), and never less than ENOUGH_BELOW.
+      const want = Math.min(TALLEST, Math.max(popRef.current?.offsetHeight ?? 0, ENOUGH_BELOW));
+      const r = button.getBoundingClientRect();
+      const below = window.innerHeight - r.bottom - GAP - EDGE;
+      const scroller = below < want ? scrollerOf(button) : null;
+      if (scroller) {
+        const shown = Math.max(scroller.getBoundingClientRect().top, 0);
+        const by = Math.min(want - below, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop, r.top - shown - EDGE);
+        if (by > 0) scroller.scrollTop += by;
+      }
+    }
     placeIt();
     const onScroll = (event) => {
       if (!popRef.current?.contains(event.target)) placeIt();

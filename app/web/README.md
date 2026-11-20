@@ -83,4 +83,9 @@ restart spec and the specs that need the model stub (Agents, providers, Markdown
   (`src/data/model.js` `STREAM_CHARS`). The chat list's preview of an Agent's message has its Markdown markers taken
   out by `src/ui/markdownPreview.js` (no library).
 
-- Lab logos (`public/logos/labs/*.svg`, shown only through `<img>` by `src/ui/LabLogo.jsx`): where they come from and their licence are in `logos-NOTICE.md`; `node scripts/check-logos.mjs` re-checks every file.
+- Brand marks (`src/assets/model-brands/*.svg`, lobe-icons, MIT: their source and licence are beside them): the app's one
+  set, bundled with the page (no mark is fetched from another site), shown before a model's name everywhere — the model
+  picker (`src/pages/ModelSelect.jsx`), the Agent list and page, the line under a reply, the provider pages — by
+  `src/ui/ModelBrand.jsx` (`src/ui/LabLogo.jsx` is it under its old name), the brand read from the model's name by
+  `src/ui/modelBrands.js` `brandOf`; a colour file as an `<img>`, a single-colour one as a mask in the text's colour, never
+  inlined; no brand: a generic chip. `node scripts/check-logos.mjs` re-checks every file.

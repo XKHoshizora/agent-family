@@ -203,14 +203,14 @@ describe("which model and level a reply of mine used (via)", () => {
     window.dispatchEvent(new StorageEvent("storage", { key: null }));
   });
 
-  it("a muted line under the reply: the model with its lab's logo and the level; a site model by its label, a provider's by its name; no line without via", async () => {
+  it("a muted line under the reply: the model with its brand mark and the level; a site model by its label, a provider's by its name; no line without via", async () => {
     await openAgentChat({ messages: [...BASE, wire(A1, 3, AG1, "好的", { via: SOL }), wire(A1, 4, AG1, "嗯", { via: CLAUDE })] });
     expect(viaLine(1)).toBeNull(); // the greeting: no run posted it
     expect(viaLine(2)).toBeNull(); // mine
     expect(viaLine(3).textContent).toBe("GPT-6 Sol · 思考：中");
-    expect(viaLine(3).querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(viaLine(3).querySelector(".lab-logo").dataset.brand).toBe("openai");
     expect(viaLine(4).textContent).toBe("claude-x · 不思考");
-    expect(viaLine(4).querySelector("img.lab-logo").getAttribute("src")).toBe("/logos/labs/anthropic.svg");
+    expect(viaLine(4).querySelector(".lab-logo").dataset.brand).toBe("claude");
     // Below the answer, not in it.
     const parts = [...storedLi(3).querySelector(".msg-main").children];
     expect(parts.indexOf(viaLine(3))).toBeGreaterThan(parts.indexOf(storedLi(3).querySelector(".bubble")));

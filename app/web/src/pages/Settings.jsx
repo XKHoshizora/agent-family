@@ -226,6 +226,8 @@ function convertedLine(result) {
 
 /** The first row of 用哪个模型整理记忆: the site's calibrated model (stored as no choice, null). */
 const CALIBRATED = { key: "", name: "站点的模型（已校准）", terms: ["站点的模型（已校准）"] };
+/** Why a paid site model cannot tidy memory (the service refuses it). */
+const PAID_FOR_MEMORY = "记忆由站点出钱，只能用免费模型";
 
 function MemorySettings() {
   const { dispatch, actions } = useStore();
@@ -302,9 +304,10 @@ function MemorySettings() {
     if (res.ok) setSettings((cur) => ({ ...cur, newNotes: res.value }));
   };
 
-  // Memory the site pays for runs only on its free models: a paid site model is not offered here. The chosen model leads the list when
-  // it is no longer offered, as it does on the Agent form, after the site's calibrated model (no choice: null).
-  const memorySources = { ...sources, choices: { ...sources.choices, site: sources.choices.site.filter((c) => !c.paid) } };
+  // Memory the site pays for runs only on its free models: a paid site model is shown, but cannot be chosen, and says why. The chosen
+  // model leads the list when it is no longer offered, as it does on the Agent form, after the site's calibrated model (no choice: null).
+  const site = sources.choices.site.map((c) => (c.paid ? { ...c, usable: false, reason: PAID_FOR_MEMORY } : c));
+  const memorySources = { ...sources, choices: { ...sources.choices, site } };
   const options = settings ? choiceList(memorySources, settings.memoryModel) : [];
   const lead = [CALIBRATED, ...staleRows(options)];
   const groups = pickerGroups(memorySources);

@@ -131,7 +131,7 @@ describe("the model picker", () => {
     expect(modelBox().textContent).toBe("gpt-x");
   });
 
-  it("every row and the button carry the model's brand mark (the generic one when it has none); the lab of a choice is still read as before", async () => {
+  it("every row and the button carry the model's brand mark (the generic one when it has none); the brand of a choice is read from a site model's id or label, a provider model's name", async () => {
     await openForm();
     await openPicker();
     expect(rowOf("gpt-x").querySelector(".model-brand").dataset.brand).toBe("openai");
@@ -140,9 +140,9 @@ describe("the model picker", () => {
     expect(modelBox().querySelector(".model-brand").dataset.brand).toBe("openai");
     const state = { siteModels: [{ id: "site-1", label: "Claude Mini" }, { id: "free-1", label: "小模型" }] };
     expect(modelLab(state, { source: "site", id: "gpt-4o" })).toBe("openai");
-    expect(modelLab(state, { source: "site", id: "site-1" })).toBe("anthropic");
+    expect(modelLab(state, { source: "site", id: "site-1" })).toBe("claude");
     expect(modelLab(state, { source: "site", id: "free-1" })).toBeNull();
-    expect(modelLab(state, { source: "provider", providerId: "p", model: "gemini-2" })).toBe("google");
+    expect(modelLab(state, { source: "provider", providerId: "p", model: "gemini-2" })).toBe("gemini");
     expect(modelLab(state, { source: "provider", providerId: "p", model: "house-blend" })).toBeNull();
   });
 
@@ -324,6 +324,53 @@ describe("opening, closing and the keyboard", () => {
     await click(tiny);
     expect(listbox()).not.toBeNull();
     expect(modelBox().textContent).toBe("请选择模型");
+  });
+});
+
+describe("where the list opens", () => {
+  /** The form's scrolling page: 700 px seen, `room` px more below. */
+  const scrollerOf = (room) => {
+    const scroller = modelBox().closest(".page-body");
+    scroller.style.overflowY = "auto";
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 700 });
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 700 + room });
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, writable: true, value: 0 });
+    return scroller;
+  };
+  /** The button `fromTop` px down the (768 px) window before its page scrolls; 42 px high. */
+  const placeButton = (scroller, fromTop) =>
+    vi.spyOn(modelBox(), "getBoundingClientRect").mockImplementation(() => {
+      const top = fromTop - scroller.scrollTop;
+      return { top, bottom: top + 42, left: 20, right: 520, width: 500, height: 42, x: 20, y: top };
+    });
+  const pop = () => document.querySelector(".model-pop");
+
+  it("near the window's bottom it first scrolls its page to make room below, then opens downward", async () => {
+    await openForm();
+    const scroller = scrollerOf(1000);
+    placeButton(scroller, 600);
+    await click(modelBox());
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    expect(pop().classList.contains("up")).toBe(false);
+    expect(pop().getAttribute("style")).toContain(`--pop-top: ${600 - scroller.scrollTop + 42 + 6}px`);
+  });
+
+  it("with room below it neither scrolls nor opens upward", async () => {
+    await openForm();
+    const scroller = scrollerOf(1000);
+    placeButton(scroller, 120);
+    await click(modelBox());
+    expect(scroller.scrollTop).toBe(0);
+    expect(pop().classList.contains("up")).toBe(false);
+  });
+
+  it("opens upward only when its page cannot make enough room below", async () => {
+    await openForm();
+    const scroller = scrollerOf(0);
+    placeButton(scroller, 600);
+    await click(modelBox());
+    expect(scroller.scrollTop).toBe(0);
+    expect(pop().classList.contains("up")).toBe(true);
   });
 });
 

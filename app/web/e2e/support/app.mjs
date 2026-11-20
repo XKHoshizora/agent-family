@@ -149,6 +149,17 @@ export const FREE_MODEL = "演示快速模型 · 免费";
 export const PAID_MODEL = "演示高级模型 · 需余额";
 
 /**
+ * Picks a model in a form's model picker (src/pages/ModelSelect.jsx): its 模型 button opens a list (outside the form, at
+ * the page's end), whose rows are named by their model's label and then their marks (“演示快速模型 · 免费 · 工具”); the
+ * row whose name is `label`, or begins with it, is chosen.
+ */
+export async function chooseModelUi(page, form, label) {
+  await form.getByLabel("模型", { exact: true }).click();
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await page.getByRole("listbox", { name: "模型" }).getByRole("option", { name: new RegExp(`^${escaped}(?: · |$)`) }).click();
+}
+
+/**
  * Agent → 创建 Agent → the form (名称, the model picked by its label, optionally 简介, 擅长领域, 思考程度, 人格文档) →
  * 创建 Agent. `onFilled(form)` runs just before that click. Resolves with the Agent's conversation, which opens by itself.
  */
@@ -159,7 +170,7 @@ export async function createAgentUi(page, { name, model = FREE_MODEL, intro, fie
   await form.getByLabel("名称", { exact: true }).fill(name);
   if (intro) await form.getByLabel("简介", { exact: true }).fill(intro);
   if (field) await form.getByLabel("擅长领域", { exact: true }).fill(field);
-  await form.getByLabel("模型", { exact: true }).selectOption({ label: model });
+  await chooseModelUi(page, form, model);
   if (reasoning) await form.getByLabel("思考程度", { exact: true }).selectOption({ label: reasoning });
   if (persona) await form.getByLabel("人格文档", { exact: true }).fill(persona);
   if (onFilled) await onFilled(form);

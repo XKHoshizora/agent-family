@@ -200,7 +200,9 @@ button:disabled { cursor: not-allowed; }
 .menu button:hover { background: var(--purple-tint); }
 
 /* ───────── model picker: a button (a form field's, or a compact one in a line of text) and its searchable list */
-.model-brand { flex: none; display: inline-block; width: 16px; height: 16px; }
+/* A brand mark (its size is set where it is drawn): a brand's own colours, a single-colour one in the text's colour, or the generic chip. */
+.model-brand { flex: none; display: inline-block; }
+img.model-brand { object-fit: contain; }
 span.model-brand {
   background-color: currentColor; -webkit-mask-size: contain; mask-size: contain; -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat;
   -webkit-mask-position: center; mask-position: center;

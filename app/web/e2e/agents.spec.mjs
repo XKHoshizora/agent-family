@@ -7,6 +7,7 @@ import { grantPoints, uniq } from "./support/accounts.mjs";
 import {
   PAID_MODEL,
   agentMessagesWith,
+  chooseModelUi,
   createAgentUi,
   expectOnce,
   expectStored,
@@ -213,7 +214,7 @@ test("used-up free allowance: the reply says so with its reset time; after a gra
   const detail = await openAgentDetail(ann.page, name);
   await detail.getByRole("button", { name: "编辑" }).click();
   const form = ann.page.getByRole("region", { name: "编辑 Agent" });
-  await form.getByLabel("模型", { exact: true }).selectOption({ label: PAID_MODEL });
+  await chooseModelUi(ann.page, form, PAID_MODEL);
   await expect(form.getByText("你现在的余额是 5 点")).toBeVisible();
   await form.getByRole("button", { name: "保存", exact: true }).click();
   await expect(detail.locator(".kv-row").filter({ hasText: "模型" })).toContainText("演示高级模型");

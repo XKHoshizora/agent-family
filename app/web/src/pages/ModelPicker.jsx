@@ -1,7 +1,6 @@
 import React, { useCallback, useEffect, useId, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Btn, Notice, Reason } from "../ui/primitives.jsx";
-import { labOfModel } from "../ui/LabLogo.jsx";
 import { ModelBrand } from "../ui/ModelBrand.jsx";
 import { brandOf } from "../ui/modelBrands.js";
 import { ModelSelect } from "./ModelSelect.jsx";
@@ -33,20 +32,13 @@ export function modelLabel(state, model) {
   return provider ? `${provider.name} · ${model.model}` : model.model;
 }
 
-/** The lab of a chosen model, for its logo: a site model by its id, then its label; a provider model by its name; else null. */
+/** The brand of a chosen model, for its mark: a site model by its id, then its label; a provider model by its name; else null. */
 export function modelLab(state, model) {
   if (!model) return null;
   if (model.source === "site") {
     const site = state.siteModels.find((m) => m.id === model.id);
-    return labOfModel(model.id) ?? labOfModel(site?.label);
+    return brandOf(model.id) ?? brandOf(site?.label);
   }
-  return labOfModel(model.model);
-}
-
-/** The brand of a chosen model, for its mark in the picker: a site model by its id, then its label; a provider model by its name. */
-export function modelBrand(state, model) {
-  if (!model) return null;
-  if (model.source === "site") return brandOf(model.id) ?? brandOf(state.siteModels.find((m) => m.id === model.id)?.label);
   return brandOf(model.model);
 }
 
@@ -199,7 +191,7 @@ export function useModelSources({ load = true } = {}) {
     choices,
     usage: state.usage,
     labelOf: (model) => modelLabel(state, model),
-    brandOf: (model) => modelBrand(state, model),
+    brandOf: (model) => modelLab(state, model),
   };
 }
 
@@ -290,7 +282,7 @@ export function AgentModelSwitch({ agentId }) {
 
   const model = saving ?? agent.model;
   const name = modelName(state, model);
-  const current = model ? { name, brand: modelBrand(state, model) } : null;
+  const current = model ? { name, brand: modelLab(state, model) } : null;
   if (agent.deleted) {
     return (
       <span className="head-model">

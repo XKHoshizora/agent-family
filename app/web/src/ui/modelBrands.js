@@ -1,6 +1,10 @@
-// Which brand a model is, by its name or id, for the mark before it in the model picker (src/ui/ModelBrand.jsx draws it).
+// Which brand a model is, by its name or id, for the mark before it wherever a model is named (src/ui/ModelBrand.jsx
+// draws it; src/ui/LabLogo.jsx's labOfModel is this under its old name).
 
-/** The brands with a mark of their own (src/assets/model-brands/<brand>.svg); tests/model-brands.test.jsx keeps the two in step. */
+/**
+ * The brands with a mark of their own (src/assets/model-brands/<brand>-color.svg, or <brand>.svg for a brand drawn in one
+ * colour); tests/model-brands.test.jsx keeps the two in step.
+ */
 export const BRANDS = Object.freeze(["openai", "claude", "deepseek", "gemini", "qwen", "moonshot", "zhipu", "doubao", "minimax", "mistral", "meta", "grok"]);
 
 // [how the name starts, brand]. The name is lower-cased and anything up to its last "/" ("openai/gpt-4o",
@@ -11,12 +15,12 @@ const RULES = [
   [/^claude/, "claude"],
   [/^deepseek/, "deepseek"],
   [/^(?:gemini|gemma)/, "gemini"],
-  [/^(?:qwen|qwq)/, "qwen"],
+  [/^(?:qwen|qwq|qvq)/, "qwen"],
   [/^(?:kimi|moonshot)/, "moonshot"],
   [/^(?:glm|zhipu)/, "zhipu"],
   [/^doubao/, "doubao"],
   [/^(?:minimax|abab)/, "minimax"],
-  [/^(?:mistral|mixtral|codestral)/, "mistral"],
+  [/^(?:mistral|mixtral|codestral|pixtral)/, "mistral"],
   [/^(?:meta-)?llama/, "meta"],
   [/^grok/, "grok"],
 ];

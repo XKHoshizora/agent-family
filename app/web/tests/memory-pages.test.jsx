@@ -813,12 +813,21 @@ describe("用哪个模型整理记忆", () => {
       g.getAttribute("aria-label"),
       [...g.querySelectorAll('[role="option"]')].map((o) => (o.getAttribute("aria-disabled") === "true" ? `(${o.querySelector(".model-name").textContent})` : o.querySelector(".model-name").textContent)),
     ]);
-    // Memory the site pays for runs only on its free models: a paid one is not offered.
+    // Memory the site pays for runs only on its free models: a paid one is shown and cannot be chosen, saying why.
     expect(groups).toEqual([
-      ["站点提供", ["小模型"]],
+      ["站点提供", ["小模型", "(大模型)"]],
       ["我的供应商 · 我的 OpenAI", ["gpt-x", "plain", "(tiny)"]],
     ]);
+    const paid = rowNamed("大模型");
+    expect(paid.getAttribute("title")).toBe("记忆由站点出钱，只能用免费模型");
+    expect(paid.querySelector(".model-reason").textContent).toBe("记忆由站点出钱，只能用免费模型");
+    expect(paid.querySelector(".model-mark")).toBeNull();
     expect(rowNamed("tiny").getAttribute("title")).toBe("上下文太小");
+    expect(rowNamed("tiny").querySelector(".model-reason").textContent).toBe("上下文太小");
+    await click(paid);
+    expect(list()).not.toBeNull();
+    expect(svc.api.updateMemoryModel).not.toHaveBeenCalled();
+    expect(picker().textContent).toBe("站点的模型（已校准）");
     // Settings: the foot of the list leads to my providers.
     expect(within(document.querySelector(".model-foot")).getByRole("button", { name: "管理供应商" })).toBeTruthy();
     expect(inMain().getByText("换成自己的模型后，记得好不好我们没法保证；安全检查不变。")).toBeTruthy();

@@ -1,13 +1,14 @@
-// Safety check for the vendored lab logos (public/logos/labs/*.svg). They are shown only through <img src>, never
-// inlined, but a file is still refused unless it is one plain <svg> document with nothing active in it.
-// A failing file is rejected, never "fixed". Run `node scripts/check-logos.mjs [file-or-dir ...]` (default: the
-// committed logos); the exit code is 1 when any file fails. tests/lab-logo.test.jsx runs `checkSvg` over every file.
+// Safety check for the vendored brand marks (src/assets/model-brands/*.svg, the app's one set: src/ui/ModelBrand.jsx). They
+// are shown only as images (an <img src>, or a CSS mask image), never inlined, but a file is still refused unless it is one
+// plain <svg> document with nothing active in it. A failing file is rejected, never "fixed". Run
+// `node scripts/check-logos.mjs [file-or-dir ...]` (default: the committed marks); the exit code is 1 when any file fails.
+// tests/model-brands.test.jsx runs `checkSvg` over every file, tests/lab-logo.test.jsx this run.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const MAX_BYTES = 20 * 1024;
-export const LOGO_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "public", "logos", "labs");
+export const LOGO_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "assets", "model-brands");
 
 const FORBIDDEN_TAGS = new Set(["script", "foreignobject", "image", "iframe", "object", "embed", "audio", "video", "animate", "set", "animatetransform", "animatemotion"]);
 const NAME = String.raw`[A-Za-z_][\w:.-]*`;
@@ -90,12 +91,12 @@ export function checkPaths(paths) {
   const files = [];
   for (const p of paths) {
     if (statSync(p).isDirectory()) {
-      for (const f of readdirSync(p).sort()) files.push(path.join(p, f));
+      for (const f of readdirSync(p).sort()) if (f.endsWith(".svg")) files.push(path.join(p, f));
     } else files.push(p);
   }
   return files.map((file) => {
     const problems = [];
-    if (!/^[a-z0-9]+\.svg$/.test(path.basename(file))) problems.push("file name is not <lowercase-id>.svg");
+    if (!/^[a-z0-9]+(?:-color)?\.svg$/.test(path.basename(file))) problems.push("file name is not <lowercase-id>.svg or <lowercase-id>-color.svg");
     const buf = readFileSync(file);
     problems.push(...checkSvg(buf.toString("utf8"), buf.length));
     return { file, problems };

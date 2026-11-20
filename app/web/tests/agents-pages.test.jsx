@@ -124,8 +124,8 @@ describe("the Agent list", () => {
     expect(rowNames()).toEqual(["小助手", "厨师"]);
     expect(rowOf("小助手").querySelector(".tag").textContent).toBe("可回复");
     expect(rowOf("小助手").querySelector(".row-preview").textContent).toBe("旅行规划 · 小模型");
-    // 小模型 is of no known lab: no logo.
-    expect(rowOf("小助手").querySelector(".row-preview img")).toBeNull();
+    // 小模型 is of no known brand: the generic mark.
+    expect(rowOf("小助手").querySelector(".row-preview .lab-logo").dataset.brand).toBe("generic");
     expect(rowOf("厨师").querySelector(".tag").textContent).toBe("已删除");
   });
 
@@ -1092,12 +1092,12 @@ describe("someone else's Agent (batch 2C)", () => {
 });
 
 describe("the model's logo", () => {
-  it("shows the lab's logo before a known model's name in the list and on the page", async () => {
+  it("shows the brand's mark before a known model's name in the list and on the page", async () => {
     const agents = [agentOf(AG1, { field: "旅行", model: { source: "provider", providerId: P1, model: "gpt-x" } })];
     await openAgents({ agents });
-    expect(rowOf("小助手").querySelector(".row-preview img").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(rowOf("小助手").querySelector(".row-preview .lab-logo").dataset.brand).toBe("openai");
     await openRow("小助手");
-    expect(document.querySelector(".main-col .kv img").getAttribute("src")).toBe("/logos/labs/openai.svg");
+    expect(document.querySelector(".main-col .kv .lab-logo").dataset.brand).toBe("openai");
   });
 });
 
@@ -1112,7 +1112,7 @@ describe("the Agent's page", () => {
     const kv = document.querySelector(".main-col .kv").textContent;
     for (const text of ["你（不可修改）", "旅行", "小模型", "你是旅行家。", "收到消息时回复"]) expect(kv).toContain(text);
     expect(kv).not.toContain("群内回复方式");
-    expect(document.querySelector(".main-col .kv img")).toBeNull();
+    expect(document.querySelector(".main-col .kv .lab-logo").dataset.brand).toBe("generic");
     const tabs = within(inMain().getByRole("tablist", { name: "Agent 分区" })).getAllByRole("tab").map((t) => t.textContent);
     expect(tabs).toEqual(["资料", "参与的会话", "记忆宫殿"]);
     expect(document.querySelector(".main-col input, .main-col select")).toBeNull();
