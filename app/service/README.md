@@ -1176,34 +1176,40 @@ made (`afterSeq`; several there: by `createdAt`). So it is in no history, search
 catch-up `messages`, and never in what an Agent's model is shown. Its owner gets it in the `whisper` push, in
 `GET /api/sync` and catch-up (`whispers`), in the conversation entry's count of open ones (`whispers: n`, only when
 n > 0), and from the list route below; **nobody else gets anything of it — no frame, no key, no count**: a fellow member's
-answers are byte for byte what they were before it existed.
+answers are byte for byte what they were before it existed. Its owner gets only the whispers of their current stay in the
+conversation (made at or after the seq their membership began): after leaving and coming back, the earlier ones are not
+sent again.
 
 **WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory",
 "text": "…", "actions": ["tell", "dismiss"], "status": "open" | "accepted" | "declined" | "expired", "createdAt",
 "detail"?: …}`. `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
-`detail` what its kind keeps with it, when it has any. An open whisper is answered once; it expires — `status: "expired"`,
-pushed to its owner — 7 days after it was made (the periodic sweep, `MEMORY.changesSweepMs`, bounded batches), when its
-owner or its Agent leaves the conversation (or is removed), and when its Agent is deleted (everywhere at once). Its row
-goes with the conversation's, the owner's or the Agent's.
+`detail` what its kind keeps with it, when it has any: at most 8 192 bytes of JSON (utf-8), nested at most 6 deep, at most
+200 values; no string in a whisper holds U+0000 or a lone surrogate (the service makes no whisper whose body breaks one of
+these, and logs only its kind). An open whisper is answered once; it expires — `status: "expired"`, pushed to its owner —
+7 days after it was made, when its owner or its Agent leaves the conversation (or is removed), and when its Agent is
+deleted (everywhere at once). An answered or expired one is deleted 30 days after it was made. Both run on the existing
+periodic sweep of memory changes, on its schedule (`MEMORY.changesSweepMs`; `0` stops them too; `attachments:sweep` runs
+them by hand), in bounded batches that never wait for a row in use. Its row goes with the conversation's, the owner's or
+the Agent's.
 
 #### `GET /api/conversations/:id/whispers`
 
 *Session: required.* Query: `before` (an `afterSeq`, 1 … 2^53−1: only whispers before that message's place), `limit`
 (1–100, default 50). Your whispers in the conversation, every status, newest first (by `afterSeq`, then `createdAt`) → 200
 `{"whispers": WireWhisper[], "nextBefore": number | null}`: the newest `limit`, and with them the rest of those at the same
-place as the last (a page never splits one place); `nextBefore` is that place when older ones remain. A client loading an
-older page of messages (`…/messages?before=b`) asks this with the same `before` for the whispers that follow them. 404
-`not_found`, byte for byte as for an id that does not exist, unless you are a current member and own an Agent that is one
-too, or have a whisper there (a fellow member without an Agent there, a stranger, an id that is none: the same answer, at
-the same cost). Limit: 120 per minute.
+place as the last, at most 100 more (a page never splits one place); `nextBefore` is that place when older ones remain. A
+client loading an older page of messages (`…/messages?before=b`) asks this with the same `before` for the whispers that
+follow them. 404 `not_found`, byte for byte as for an id that does not exist, unless you are a current member and own an
+Agent that is one too, or have a whisper of your current stay there (a fellow member without an Agent there, a stranger,
+an id that is none: the same answer; what it costs depends on nobody's whispers but yours). Limit: 120 per minute.
 
 #### `POST /api/whispers/:id/accept`
 
 *Session: required.* Body: none or `{}`. Answers your open whisper `告诉他们` → 200 WireWhisper with `status: "accepted"`,
 pushed to your sockets too. What an answer does besides that is its kind's (later batches); nothing yet. 409
 `stale_whisper` when it is not open any more (answered, expired) or does not offer `"tell"`; 404 `not_found` for anyone
-else's whisper and an id that is none alike (one read, the same answer, the same cost). Limit: 30 per minute, shared with
-decline.
+else's whisper and an id that is none alike (one read, the same answer, the same cost), and for yours once its Agent is
+deleted or it or you are no longer a member of the conversation. Limit: 30 per minute, shared with decline.
 
 #### `POST /api/whispers/:id/decline`
 
@@ -2012,15 +2018,15 @@ How they work together is under Sync and realtime below.
 *Session: required.* Everything a client loads at start → 200 `{"me", "conversations", "principals",
 "messages", "whispers"?}` (shape under Wire shapes). `whispers` (only when there are any): your own whispers (Whispers)
 — every open one, and the answered or expired ones that follow a message `messages` holds (all of a conversation whose
-messages are all there) —, at most 500 (the newest), ascending by `afterSeq`, then `createdAt`, per conversation in
-`conversations` order. Limit: 60 per minute.
+messages are all there) —, at most 500 (every open one first, then the newest answered or expired ones), ascending by
+`afterSeq`, then `createdAt`, per conversation in `conversations` order. Limit: 60 per minute.
 
 #### `POST /api/sync/catchup`
 
 *Session: required.* Body: `positions`: an object of at most 500 conversation ids (no two differing only in
 case) → the last seq you have (0 … 2^53−1). → 200 `{"messages": WireMessage[], "gone": string[],
 "more": boolean, "whispers"?: WireWhisper[]}`: `whispers` (only when there are any) your own in the conversations caught
-up, the open ones and those at or after the position (Whispers). Limit: 60 per minute.
+up, the open ones and those at or after the position, at most 500 as in `GET /api/sync` (Whispers). Limit: 60 per minute.
 
 #### `POST /api/ws-ticket`
 
@@ -2950,7 +2956,7 @@ milliseconds.
 | `judgeShare` | 0.5 (0–1) | Memory's judgement requests (all owners together) are held to this share of the site's judge `dailyLimit`: once the site's judgements of the day (`judge_usage`) have reached it, every memory check is skipped as "no answer", each caller as it does at `judgePerOwnerDay` — so memory never uses up what unasked replies need |
 | `explicitAt` | 0.5 (above 0, up to 1) | In the owner's own conversation a review's `remove` or `lock` is applied at once only when the judgement model is at least this sure the owner's words in the review's window asked for it (to forget or delete something they had told before; to keep something secret or lock it away: An Agent's memory, *In the owner's own conversation a destructive op needs the owner's words*); below it, or with no answer, it waits for the owner's yes. 0.5 as calibrated on the real judgement model over `calibration/memory-explicit.jsonl` (`scripts/calibrate-memory.mjs --mode explicit`): every window that did not ask scored at most 0.29 (forget) and 0.27 (lock), every one that asked at least 0.64 and 0.71. 0 is refused: every answer would be a yes |
 | `freeDailyPoints` | 20 (0–1 000 000, whole points) | The memory allowance the site pays per owner and site day for memory calls on a site model (Metering, "The memory allowance"); used up, those calls are not made until the next site day; 0 turns site-paid memory off (memory then works only for an owner who chose a model of their own provider). Never the owner's free allowance or balance |
-| `changesSweepMs` | 3 600 000 (0, or 60 000–86 400 000) | How often the record of memory changes is swept (Memory changes, below): its own timer, not `SWEEP_INTERVAL_MINUTES`; 0: no timer (`attachments:sweep` still runs it by hand). The test harness sets 0 |
+| `changesSweepMs` | 3 600 000 (0, or 60 000–86 400 000) | How often the record of memory changes is swept (Memory changes, below): its own timer, not `SWEEP_INTERVAL_MINUTES`; 0: no timer (`attachments:sweep` still runs it by hand). Whispers are expired and cleaned on the same timer (Whispers): 0 stops that too. The test harness sets 0 |
 | `passageShare` | 0.25 (above 0, up to 1) | The notes passage of a run takes at most this share of the input the model has room for (its context less its output limit; the passage measured in weight, one weight a token, and the context budget counts it the same way: `systemTokens`, the system text without the passage a token a code point plus the passage in weight): over it entries are left out until it fits — what an Agent heard first (oldest said first), then its own notes, then those about the owner (each weakest `strength` first, then the oldest `seen_at`) — and nothing tells the model so, so the notes never crowd out the conversation. `GET /api/agents/:id/memory` says (`fits`) whether the Agent's model carries the whole palace |
 | `roomNotes` | 150 (1–100 000) | A room of notes holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room (a review's, the owner's own add, confirming hearsay), and an undo or a confirm that would pass it is 409 `room_full` |
 | `listenShare` | 0.5 (0–1) | A group judgement with no proactive Agent to pick, only Agents with memory listening for what is said about their owner, is skipped once the site's judgements of the day have reached this share of the judge's daily limit: listening never uses up what unasked replies need |

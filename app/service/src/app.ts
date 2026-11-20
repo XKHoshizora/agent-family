@@ -57,7 +57,7 @@ import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
 import { registerWebClient } from "./web.ts";
 import { pushWhispers, registerWhisperRoutes } from "./whispers/routes.ts";
-import { expireWhispers } from "./whispers/store.ts";
+import { expireWhispers, removeOldWhispers } from "./whispers/store.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -296,7 +296,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   if (sweeper) app.addHook("onClose", async () => sweeper.stop());
   // The record of what memory changed is kept 30 days (memory/sweep.ts): its own timer, every `MEMORY.changesSweepMs` (0: none), so that it
   // runs whether or not the attachment sweep is switched off and whatever that sweep does. A failure is logged (a code, never a note).
-  // Whispers left open 7 days expire on the same timer (whispers/store.ts), each pushed to its owner (never logged).
+  // Whispers left open 7 days expire on the same timer (whispers/store.ts), each pushed to its owner (never logged); answered
+  // and expired ones made 30 days ago are deleted.
   const changeSweeper = startSweeper({
     run: async () => {
       await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
@@ -304,6 +305,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         app.log.warn({ code: (err as { code?: string }).code }, "whisper sweep failed; trying again next interval");
         return [];
       });
+      await removeOldWhispers(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "whisper clean-up failed; trying again next interval"));
       // (The hub is decorated once the app is built; a run before that has nobody to tell.)
       const hub = app.hasDecorator("realtime") ? app.realtime : null;
       if (hub) pushWhispers(hub, expired);
@@ -431,7 +433,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     const armed = (await memory?.resume()) ?? 0;
     if (armed > 0) app.log.info({ armed }, "conversations with replies or flags still to act on were armed");
     // A deleted Agent still in a group (its delete committed, its leaving did not happen) leaves it now.
-    const left = await leaveGroupsOfDeleted({ db: deps.db, conversations: deps.conversations, log: app.log });
+    const left = await leaveGroupsOfDeleted({ db: deps.db, conversations: deps.conversations, log: app.log, realtime: app.realtime });
     if (left > 0) app.log.info({ left }, "deleted Agents left the groups they were still in");
     agentWorker.start();
     if (options.staleRunSweep !== false) staleTimer = startStaleRunSweep(() => staleRunSweep.run(), app.log, options.staleRunSweep ?? {});

@@ -1,7 +1,10 @@
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createWhisper, expireWhispers, type Whisper } from "../src/whispers/store.ts";
 import { toWireWhisper } from "../src/whispers/wire.ts";
-import { api, group, signUp, type Actor } from "./helpers/actors.ts";
+import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
@@ -193,6 +196,87 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
     nothingOf(bodies, [a.id]);
   });
 
+  it("someone who joins after a whisper was made sees nothing of it, nor of one made after they came", async () => {
+    const w = await world();
+    const ownerSocket = await connect(app, w.owner);
+    const a = await whisper(w);
+    await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === a.id);
+    const lee = await signUp(app, "lee");
+    await befriend(app, w.owner, lee);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/members`, { principalId: lee.id })).status).toBe(201);
+    const leeSocket = await connect(app, lee);
+    const first = await reads(w, lee, a.id);
+    const b = await whisper(w);
+    await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id);
+    expect((await api(app, w.owner, "POST", `/api/whispers/${b.id}/accept`)).status).toBe(200);
+    await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id && e.whisper.status === "accepted");
+    // Byte for byte what they read before the second one (its id answered as the first's was: as an id that is none).
+    expect(await reads(w, lee, b.id)).toEqual(first);
+    expect(leeSocket.events).toEqual([]);
+    nothingOf(
+      first.map(([label, , body]) => [label, body]),
+      [a.id, b.id],
+    );
+    for (const [label, status, body] of first) {
+      if (label.startsWith("whispers") || label === "accept" || label === "decline") expect([label, status, body]).toEqual([label, 404, { error: "not_found" }]);
+    }
+  });
+
+  /**
+   * `run` ends the open whisper `made` (its owner's socket gets it expired) while the fellow members' `sockets` are open: they get what
+   * `seen` waits for (the leaving), and nothing of the whisper — no frame of it, no key, its text or its id.
+   */
+  async function endsUnseen(sockets: TestSocket[], ownerSocket: TestSocket, made: Whisper, run: () => Promise<void>, seen: (e: any) => boolean) {
+    await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === made.id);
+    await run();
+    await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === made.id && e.whisper.status === "expired");
+    for (const socket of sockets) await socket.waitFor(seen);
+    const frames: Array<[string, unknown]> = sockets.flatMap((s, i) => s.events.map((e, j): [string, unknown] => [`socket ${i} frame ${j}`, e]));
+    nothingOf(frames, [made.id]);
+    for (const [label, frame] of frames) expect([label, (frame as { type: string }).type]).not.toEqual([label, "whisper"]);
+  }
+
+  it("the owner leaving with a whisper open: the others see the leaving, and nothing of the whisper it expires", async () => {
+    const w = await world();
+    const [miaSocket, nedSocket, ownerSocket] = [await connect(app, w.mia), await connect(app, w.ned), await connect(app, w.owner)];
+    const made = await whisper(w);
+    await endsUnseen(
+      [miaSocket, nedSocket],
+      ownerSocket,
+      made,
+      async () => expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.g}/members/${w.owner.id}`)).status).toBe(200),
+      (e) => e.type === "message" && e.message.system?.event === "member_left" && e.message.system?.principalId === w.owner.id,
+    );
+  });
+
+  it("the owner removed with a whisper open: the others see the removal, and nothing of the whisper it expires", async () => {
+    const w = await world();
+    const hers = await group(app, w.mia, "hers", [w.owner, w.ned]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${hers}/members`, { principalId: w.agent.id })).status).toBe(201);
+    const [miaSocket, nedSocket, ownerSocket] = [await connect(app, w.mia), await connect(app, w.ned), await connect(app, w.owner)];
+    const made = await whisper(w, hers);
+    await endsUnseen(
+      [miaSocket, nedSocket],
+      ownerSocket,
+      made,
+      async () => expect((await api(app, w.mia, "DELETE", `/api/conversations/${hers}/members/${w.owner.id}`)).status).toBe(200),
+      (e) => e.type === "message" && e.message.system?.event === "member_removed",
+    );
+  });
+
+  it("the Agent deleted with a whisper open: the others see it leave, and nothing of the whisper the delete expires", async () => {
+    const w = await world();
+    const [miaSocket, nedSocket, ownerSocket] = [await connect(app, w.mia), await connect(app, w.ned), await connect(app, w.owner)];
+    const made = await whisper(w);
+    await endsUnseen(
+      [miaSocket, nedSocket],
+      ownerSocket,
+      made,
+      async () => expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200),
+      (e) => e.type === "message" && e.message.system?.event === "member_left" && e.message.system?.principalId === w.agent.id,
+    );
+  });
+
   it("the Agent's model is never shown a whisper: not in a group, not in its own conversation", async () => {
     const w = await world();
     await whisper(w);
@@ -209,5 +293,34 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
       expect(shown).toContain(call === gateway.calls[0] ? "在吗" : "你好");
       expect(shown).not.toContain("WHISPER-zq9");
     }
+  });
+});
+
+describe("who reads the whispers table (a static check)", () => {
+  /**
+   * Every statement in `source` that names the `whispers` table: read, written or joined. Model context, memory, search, the judge —
+   * anything that could put a whisper in front of someone else — must go through src/whispers/ (owner_id = the reader) to reach one.
+   */
+  const tableRefs = (source: string): string[] => [...source.matchAll(/\b(?:from|join|into|update|table|references)\s+(?:only\s+)?"?whispers"?(?![\w-])/gi)].map((m) => m[0]);
+
+  it("the check finds every way of naming the table, and not the word in prose or other names", () => {
+    for (const sql of ["select 1 from whispers w", "SELECT * FROM  whispers", "left join whispers on", 'insert into "whispers" (id)', "update whispers set", "delete from whispers where", "alter table whispers add"]) {
+      expect([sql, tableRefs(sql).length]).toEqual([sql, 1]);
+    }
+    for (const prose of ["// whispers from the owner", 'import { whispersFrom } from "../whispers/store.ts"', "the whispers of whoever left", "from whispers_backup", "whispersFrom(t, me, from)"]) {
+      expect([prose, tableRefs(prose)]).toEqual([prose, []]);
+    }
+  });
+
+  it("only src/whispers/ and the conversation list's count in src/sync/read.ts name it", () => {
+    const src = fileURLToPath(new URL("../src/", import.meta.url));
+    const filesUnder = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? filesUnder(path.join(dir, e.name)) : /\.[cm]?[jt]s$/.test(e.name) ? [path.join(dir, e.name)] : []));
+    const naming = filesUnder(src)
+      .filter((f) => tableRefs(readFileSync(f, "utf8")).length > 0)
+      .map((f) => path.relative(src, f).replaceAll("\\", "/"))
+      .sort();
+    expect(naming.filter((f) => !f.startsWith("whispers/"))).toEqual(["sync/read.ts"]);
+    expect(naming).toContain("whispers/store.ts");
   });
 });

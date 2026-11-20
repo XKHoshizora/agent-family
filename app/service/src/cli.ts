@@ -7,7 +7,7 @@ import { loadConfig } from "./config.ts";
 import { createDb, type Db } from "./db.ts";
 import { formatStats, readStats } from "./memory/stats.ts";
 import { CHANGE_KEEP_DAYS, sweepMemoryChanges } from "./memory/sweep.ts";
-import { expireWhispers, WHISPER_OPEN_DAYS } from "./whispers/store.ts";
+import { expireWhispers, removeOldWhispers, WHISPER_KEEP_DAYS, WHISPER_OPEN_DAYS } from "./whispers/store.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
@@ -93,9 +93,11 @@ if (command === "migrate") {
     // The record of what memory changed too (kept 30 days): the server does this on its own timer as well.
     const changes = await sweepMemoryChanges(db);
     console.log(`swept ${changes.deleted} memory change record(s) older than ${CHANGE_KEEP_DAYS} days and discarded ${changes.discarded} that nobody answered`);
-    // And the whispers left open (the server does this on the same timer; their owners are told at their next sync).
+    // And the whispers left open (the server does this on the same timer; their owners are told at their next sync), and the old answered ones.
     const whispers = await expireWhispers(db);
     console.log(`expired ${whispers.length} whisper(s) left open ${WHISPER_OPEN_DAYS} days`);
+    const removed = await removeOldWhispers(db);
+    console.log(`deleted ${removed} answered or expired whisper(s) made ${WHISPER_KEEP_DAYS} days ago`);
   } finally {
     await db.close();
   }

@@ -311,7 +311,7 @@ export interface MemoryConfig {
   /**
    * How often the record of memory changes is swept (memory/sweep.ts: what is over is deleted, and a pending change discarded, 30 days
    * on), in ms; its own timer, apart from the attachment sweep's `SWEEP_INTERVAL_MINUTES`. 0: no timer (`attachments:sweep` still runs it);
-   * otherwise at least a minute.
+   * otherwise at least a minute. Whispers (whispers/store.ts) are expired and cleaned on this same timer: 0 stops that too.
    */
   changesSweepMs: number;
 }

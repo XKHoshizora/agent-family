@@ -12,8 +12,10 @@ import { toWireWhisper, wireWhisperSchema } from "./wire.ts";
 
 /**
  * What answering a whisper of a kind does besides its status: run in the answer's transaction, after the status is written
- * (the conversation's row and the whisper's are held); what it returns runs once that transaction has committed (pushes,
- * announcements). A throw rolls the answer back. Later tasks fill this in per kind; none does anything yet.
+ * (the conversation's row, the Agent's `for share` and the whisper's are held, in that order: store.ts's lock order; the
+ * hook may lock the Agent's row for update — `lockAgent` with the whisper's conversation —, then run rows and accounts); what
+ * it returns runs once that transaction has committed (pushes, announcements). A throw rolls the answer back. Later tasks
+ * fill this in per kind; none does anything yet.
  */
 export type WhisperHook = (t: Tx, whisper: Whisper, app: FastifyInstance) => Promise<(() => void) | void>;
 export const ANSWER_HOOKS: { [K in WhisperKind]?: Partial<Record<WhisperAnswer, WhisperHook>> } = {};

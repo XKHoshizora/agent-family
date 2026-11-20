@@ -3,7 +3,9 @@ import type { Change, ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, currentMembership, lockConversation } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Db, Tx } from "../db.ts";
-import { expireOnLeave } from "../whispers/store.ts";
+import type { Hub } from "../sync/hub.ts";
+import { pushWhispers } from "../whispers/routes.ts";
+import { expireOnLeave, type Whisper } from "../whispers/store.ts";
 import type { DbAgentPort } from "./port-impl.ts";
 import { RUN_COLUMNS, toWireRun, type Announced, type RunRow } from "./runs.ts";
 
@@ -61,6 +63,8 @@ export interface LeaveDeps {
   db: Db;
   conversations: ConversationEvents;
   log: Pick<FastifyBaseLogger, "error">;
+  /** Where the whispers a leaving expires go to their owner (none: nobody is told until their next sync). */
+  realtime?: Pick<Hub, "pushWhisper">;
 }
 
 /**
@@ -72,7 +76,8 @@ export interface LeaveDeps {
  * committed. Without, every deleted Agent's: the start-up sweep, for a delete whose leaving did not happen (the process
  * died between the two, or a group's transaction failed). Meanwhile the Agent never replies there: it is deleted, which
  * the trigger and every step of a run refuse. A group whose transaction fails is logged and left for the next start.
- * Returns how many memberships ended.
+ * Whatever of its whispers there was still open expires with it and is pushed to its owner (`deps.realtime`). Returns how
+ * many memberships ended.
  */
 export async function leaveGroupsOfDeleted(deps: LeaveDeps, agentId?: string): Promise<number> {
   const { rows } = await deps.db.query<{ conversation_id: string; agent_id: string; owner_id: string }>(
@@ -88,17 +93,19 @@ export async function leaveGroupsOfDeleted(deps: LeaveDeps, agentId?: string): P
   );
   let left = 0;
   for (const r of rows) {
-    let change: Change | null;
+    let ended: { change: Change; whispers: Whisper[] } | null;
     try {
-      change = await deps.db.tx((t) => leaveAfterDelete(t, r.conversation_id, r.agent_id, r.owner_id));
+      ended = await deps.db.tx((t) => leaveAfterDelete(t, r.conversation_id, r.agent_id, r.owner_id));
     } catch (err) {
       deps.log.error({ err, agentId: r.agent_id, conversationId: r.conversation_id }, "a deleted Agent could not leave a group; the next start tries again");
       continue;
     }
-    if (!change) continue;
+    if (!ended) continue;
     left++;
     try {
-      deps.conversations.publish(change, deps.log);
+      deps.conversations.publish(ended.change, deps.log);
+      // After the leaving's own pushes: what it expired, to the owner alone.
+      if (deps.realtime) pushWhispers(deps.realtime, ended.whispers);
     } catch (err) {
       deps.log.error({ err, agentId: r.agent_id, conversationId: r.conversation_id }, "a deleted Agent left a group (committed), but announcing it failed");
     }
@@ -107,7 +114,7 @@ export async function leaveGroupsOfDeleted(deps: LeaveDeps, agentId?: string): P
 }
 
 /** One group of `leaveGroupsOfDeleted`, under the group's row: null when the Agent is no longer in it (or it closed). */
-async function leaveAfterDelete(t: Tx, conversationId: string, agentId: string, ownerId: string): Promise<Change | null> {
+async function leaveAfterDelete(t: Tx, conversationId: string, agentId: string, ownerId: string): Promise<{ change: Change; whispers: Whisper[] } | null> {
   const conversation = await lockConversation(t, conversationId);
   if (!conversation || conversation.closedAt) return null;
   // It may have left meanwhile: taken out, or along with its owner.
@@ -116,7 +123,8 @@ async function leaveAfterDelete(t: Tx, conversationId: string, agentId: string, 
   const before = await currentMemberIds(t, conversationId);
   const notice = await appendSystem(t, conversationId, { event: "member_left", actorId: ownerId, principalId: agentId, newCreatorId: null });
   await t.query("update memberships set left_seq = $2 where id = $1", [membership.id, notice.seq]);
-  // Its whispers there expire with it (the delete expired its open ones already, and told its owner: nothing is left to push).
-  await expireOnLeave(t, conversationId, [agentId]);
-  return { messages: [notice], conversations: [{ conversationId, principalIds: before }] };
+  // Its whispers there expire with it: the delete expired its open ones already, so this is whatever is left open (none, as
+  // `createWhisper` waits for a delete in flight), pushed to its owner all the same — whisper rows last.
+  const whispers = await expireOnLeave(t, conversationId, [agentId]);
+  return { change: { messages: [notice], conversations: [{ conversationId, principalIds: before }] }, whispers };
 }
