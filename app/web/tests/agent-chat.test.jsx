@@ -1055,12 +1055,17 @@ describe("the status line of a failed reply", () => {
     expect(screen.getByLabelText("人格文档")).toBeTruthy();
   });
 
-  it("model_gone links to the Agent's edit page too, and offers no 重试", async () => {
-    const { transport } = await openAgentChat({ api: { getModels: vi.fn(async () => MODELS), getUsage: vi.fn(() => new Promise(() => {})) } });
+  it("model_gone offers 换一个模型 and no 重试: it opens the header's model switch, right here", async () => {
+    const { transport } = await openAgentChat({ agent: { model: PROVIDER_MODEL, modelUsable: false }, providers: [providerOf()] });
     await runPush(transport, runOf(R1, "failed", { error: "model_gone", retryable: false }));
     expect(within(statusLine()).queryByRole("button", { name: "重试" })).toBeNull();
-    await click(within(statusLine()).getByRole("button", { name: "修改 Agent" }));
-    expect(screen.getByLabelText("人格文档")).toBeTruthy();
+    expect(within(statusLine()).queryByRole("button", { name: "修改 Agent" })).toBeNull();
+    await click(within(statusLine()).getByRole("button", { name: "换一个模型" }));
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    const header = document.querySelector(".chat-head .chat-title p");
+    expect(within(header).getByRole("button", { name: /^模型：/ }).getAttribute("aria-expanded")).toBe("true");
+    // Still the conversation: no form opened.
+    expect(screen.queryByLabelText("人格文档")).toBeNull();
   });
 
   it("a cancelled reply shows nothing", async () => {

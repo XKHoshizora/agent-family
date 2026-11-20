@@ -161,6 +161,9 @@ button:disabled { cursor: not-allowed; }
 .tag-warn { background: var(--warn-bg); color: var(--warn); border-color: rgba(168, 67, 28, 0.25); }
 .tag-pending { background: var(--pending-bg); color: var(--pending); }
 .tag-muted { background: rgba(120, 116, 143, 0.14); color: var(--ink-2); border-color: transparent; }
+/* A tag that acts (模型不可用 for the owner: opens where the model is chosen). */
+button.tag { font-family: inherit; line-height: inherit; cursor: pointer; }
+button.tag:hover { filter: brightness(0.96); }
 .identity-line { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 16px; }
 .owner { color: var(--ink-2); font-size: 14px; }
 

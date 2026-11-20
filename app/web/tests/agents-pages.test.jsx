@@ -5,7 +5,7 @@ import "./markdown-ready.js";
 import { readFileSync } from "node:fs";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import {
   A1,
   A2,
@@ -37,6 +37,8 @@ import {
 import { PEOPLE, click, dialog, flush, goContacts, inMain, installBrowser, mainText, openApp, push, rowNames, toastText } from "./harness.jsx";
 import { optionsOf, pickOption } from "./select-helpers.js";
 import { othersBudgetSent } from "../src/pages/AgentForm.jsx";
+import { ModelGoneTag } from "../src/pages/Agents.jsx";
+import { StoreProvider, emptyState } from "../src/data/store.jsx";
 
 beforeEach(() => {
   installBrowser();
@@ -166,10 +168,17 @@ describe("the Agent list", () => {
     const modelRow = () => [...document.querySelectorAll(".main-col dt")].find((dt) => dt.textContent === "模型").nextElementSibling;
     expect(modelRow().textContent).toContain("小模型");
     expect(modelRow().textContent).toContain("这个模型现在用不了，换一个");
-    // Nor does it claim 可回复: its tag, on its page and in the list, is a warning, 模型用不了.
+    // Nor does it claim 可回复: its tag reads 模型不可用 — in the list as text (the row is a button already), on its page
+    // a button that opens where its model is chosen.
     expect(mainText()).not.toContain("可回复");
-    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("模型用不了");
-    expect(document.querySelector(".profile-head .tag:not(:first-of-type)").textContent).toBe("模型用不了");
+    expect(rowOf("小助手").querySelector(".tag").textContent).toBe("模型不可用");
+    expect(within(rowOf("小助手")).queryByRole("button")).toBeNull();
+    const fix = inMain().getByRole("button", { name: "模型不可用，换一个模型" });
+    expect(fix.textContent).toBe("模型不可用");
+    await click(fix);
+    // No quick model switch on this page: the edit form opens, focused on its model field.
+    expect(personaBox()).toBeTruthy();
+    expect(document.activeElement).toBe(modelBox());
     cleanup();
 
     await openAgents({ agents: [agentOf(AG1, { model: SITE_MODEL, modelUsable: true })] });
@@ -177,6 +186,22 @@ describe("the Agent list", () => {
     expect(modelRow().textContent).toContain("小模型");
     expect(mainText()).not.toContain("这个模型现在用不了");
     expect(rowOf("小助手").querySelector(".tag").textContent).toBe("可回复");
+    expect(inMain().queryByRole("button", { name: /模型不可用/ })).toBeNull();
+  });
+
+  it("the 模型不可用 tag is a button for the Agent's owner only: for anyone else it is plain text with no action", () => {
+    const agent = agentOf(AG1, { model: SITE_MODEL, modelUsable: false });
+    render(
+      <StoreProvider initialState={emptyState()}>
+        <ModelGoneTag agent={{ ...agent, mine: true }} />
+        <span data-testid="theirs">
+          <ModelGoneTag agent={{ ...agent, mine: false }} />
+        </span>
+      </StoreProvider>,
+    );
+    expect(screen.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual(["模型不可用，换一个模型"]);
+    expect(screen.getByTestId("theirs").textContent).toBe("模型不可用");
+    expect(within(screen.getByTestId("theirs")).queryByRole("button")).toBeNull();
   });
 });
 
