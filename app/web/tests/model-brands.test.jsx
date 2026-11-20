@@ -30,21 +30,26 @@ describe("brandOf", () => {
     ["mistral-large-latest", "mistral"], ["mixtral-8x7b", "mistral"], ["codestral-2501", "mistral"], ["pixtral-12b", "mistral"],
     ["llama-3.3-70b", "meta"], ["meta-llama/Llama-3.1-8B-Instruct", "meta"], ["Meta-Llama-3-8B", "meta"],
     ["grok-4", "grok"], ["x-ai/grok-3-mini", "grok"],
+    ["hunyuan-turbo", "hunyuan"], ["tencent/Hunyuan-A13B-Instruct", "hunyuan"], ["tencent-hunyuan-large", "hunyuan"],
+    ["command-r-plus", "cohere"], ["command-a-03-2025", "cohere"], ["cohere.command-r-plus-v1:0", "cohere"], ["cohere-rerank", "cohere"], ["aya-expanse-32b", "cohere"],
+    ["sonar-pro", "perplexity"], ["perplexity/sonar-reasoning", "perplexity"], ["pplx-70b-online", "perplexity"],
     // anything else: no brand (the generic mark is drawn), never a guess
-    ["小模型", null], ["house-blend", null], ["plain", null], ["ernie-4.5", null], ["hunyuan-turbo", null],
+    ["小模型", null], ["house-blend", null], ["plain", null], ["ernie-4.5", null], ["ayame-7b", null], ["tencent-foo", null],
     ["o1x", null], ["o5-mini", null], ["o10", null], ["my-gpt", null], ["../openai", null],
     ["", null], ["a".repeat(301), null], [undefined, null], [null, null], [42, null], [{ toString: () => "gpt-4o" }, null],
   ])("%j -> %j", (name, brand) => {
     expect(brandOf(name)).toBe(brand);
   });
 
-  it("knows exactly the twelve brands, each one reachable", () => {
-    expect([...BRANDS].sort()).toEqual(["claude", "deepseek", "doubao", "gemini", "grok", "meta", "minimax", "mistral", "moonshot", "openai", "qwen", "zhipu"]);
+  it("knows exactly the fifteen brands, each one reachable", () => {
+    expect([...BRANDS].sort()).toEqual(
+      ["claude", "cohere", "deepseek", "doubao", "gemini", "grok", "hunyuan", "meta", "minimax", "mistral", "moonshot", "openai", "perplexity", "qwen", "zhipu"],
+    );
   });
 });
 
 /** The brands drawn in their own colours (lobe-icons has a colour file for them); the other three are single-colour. */
-const COLOURED = ["claude", "deepseek", "doubao", "gemini", "meta", "minimax", "mistral", "qwen", "zhipu"];
+const COLOURED = ["claude", "cohere", "deepseek", "doubao", "gemini", "hunyuan", "meta", "minimax", "mistral", "perplexity", "qwen", "zhipu"];
 const MONO = ["grok", "moonshot", "openai"];
 
 describe("<ModelBrand>", () => {

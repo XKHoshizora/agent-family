@@ -5,7 +5,9 @@
  * The brands with a mark of their own (src/assets/model-brands/<brand>-color.svg, or <brand>.svg for a brand drawn in one
  * colour); tests/model-brands.test.jsx keeps the two in step.
  */
-export const BRANDS = Object.freeze(["openai", "claude", "deepseek", "gemini", "qwen", "moonshot", "zhipu", "doubao", "minimax", "mistral", "meta", "grok"]);
+export const BRANDS = Object.freeze([
+  "openai", "claude", "deepseek", "gemini", "qwen", "moonshot", "zhipu", "doubao", "minimax", "mistral", "meta", "grok", "hunyuan", "cohere", "perplexity",
+]);
 
 // [how the name starts, brand]. The name is lower-cased and anything up to its last "/" ("openai/gpt-4o",
 // "models/gemini-1.5-pro") is dropped; then its start is matched by one pass over these anchored patterns, so a name is
@@ -23,6 +25,9 @@ const RULES = [
   [/^(?:mistral|mixtral|codestral|pixtral)/, "mistral"],
   [/^(?:meta-)?llama/, "meta"],
   [/^grok/, "grok"],
+  [/^(?:tencent-)?hunyuan/, "hunyuan"],
+  [/^(?:command|cohere|aya(?![a-z]))/, "cohere"],
+  [/^(?:sonar|pplx)/, "perplexity"],
 ];
 
 /** The brand of a model's name or id (one of BRANDS), or null: then the generic mark is shown, never a guess. */

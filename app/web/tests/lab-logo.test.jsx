@@ -61,7 +61,8 @@ describe("labOfModel", () => {
     ["llama-3.3-70b", "meta"], ["meta-llama/llama-3.1-8b", "meta"],
     ["doubao-pro", "doubao"],
     // no mark in the set: the generic mark is drawn, never a guess
-    ["hunyuan-turbo", null], ["command-r-plus", null], ["sonar-pro", null], ["ernie-4.5", null], ["step-2-16k", null],
+    ["hunyuan-turbo", "hunyuan"], ["command-r-plus", "cohere"], ["sonar-pro", "perplexity"],
+    ["ernie-4.5", null], ["step-2-16k", null],
     ["something-else", null], ["", null], ["a".repeat(5000), null], [undefined, null], [null, null], [42, null],
   ])("%j -> %j", (name, lab) => {
     expect(labOfModel(name)).toBe(lab);
@@ -73,7 +74,7 @@ describe("the safety check's own run", () => {
   it("checks the bundled brand marks by default, by their file names (<brand>.svg or <brand>-color.svg), all accepted", () => {
     expect(LOGO_DIR.replaceAll("\\", "/")).toMatch(/\/src\/assets\/model-brands$/);
     const results = checkPaths([LOGO_DIR]).filter((r) => r.file.endsWith(".svg"));
-    expect(results.length).toBe(12);
+    expect(results.length).toBe(15);
     for (const r of results) expect(r.problems, r.file).toEqual([]);
     const tmp = mkdtempSync(path.join(tmpdir(), "logos-"));
     try {

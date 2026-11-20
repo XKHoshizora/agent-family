@@ -1,14 +1,17 @@
 import React from "react";
 import claude from "../assets/model-brands/claude-color.svg";
+import cohere from "../assets/model-brands/cohere-color.svg";
 import deepseek from "../assets/model-brands/deepseek-color.svg";
 import doubao from "../assets/model-brands/doubao-color.svg";
 import gemini from "../assets/model-brands/gemini-color.svg";
 import grok from "../assets/model-brands/grok.svg";
+import hunyuan from "../assets/model-brands/hunyuan-color.svg";
 import meta from "../assets/model-brands/meta-color.svg";
 import minimax from "../assets/model-brands/minimax-color.svg";
 import mistral from "../assets/model-brands/mistral-color.svg";
 import moonshot from "../assets/model-brands/moonshot.svg";
 import openai from "../assets/model-brands/openai.svg";
+import perplexity from "../assets/model-brands/perplexity-color.svg";
 import qwen from "../assets/model-brands/qwen-color.svg";
 import zhipu from "../assets/model-brands/zhipu-color.svg";
 
@@ -18,15 +21,18 @@ import zhipu from "../assets/model-brands/zhipu-color.svg";
 // colour. Never inlined into the page; only a brand of this fixed table ever names a file.
 const MARKS = Object.freeze({
   claude: { src: claude, colour: true },
+  cohere: { src: cohere, colour: true },
   deepseek: { src: deepseek, colour: true },
   doubao: { src: doubao, colour: true },
   gemini: { src: gemini, colour: true },
   grok: { src: grok, colour: false },
+  hunyuan: { src: hunyuan, colour: true },
   meta: { src: meta, colour: true },
   minimax: { src: minimax, colour: true },
   mistral: { src: mistral, colour: true },
   moonshot: { src: moonshot, colour: false },
   openai: { src: openai, colour: false },
+  perplexity: { src: perplexity, colour: true },
   qwen: { src: qwen, colour: true },
   zhipu: { src: zhipu, colour: true },
 });
