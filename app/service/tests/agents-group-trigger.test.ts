@@ -12,6 +12,7 @@ import { insertMessage, type StoredMessage } from "../src/messages/model.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { NO_ANSWER_FLOOR, useApp } from "./helpers/harness.ts";
+import { expectLinear } from "./helpers/linear.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -144,21 +145,25 @@ describe("mentionedHandles", () => {
     expect(mentionedHandles(`${"@aaa ".repeat(30)}@bbb`)).toEqual(["aaa", "bbb"]);
   });
 
-  it("is linear: 8 000 characters of @a@a…, @aaaa… and the like take well under a few milliseconds", () => {
-    const cases: Array<[string, string[]]> = [
-      ["@a".repeat(4000), []],
-      [`@${"a".repeat(7999)}`, []],
-      ["@aaa".repeat(2000), ["aaa"]],
-      [`${"@".repeat(7997)}abc`, ["abc"]],
-      [`@${"a".repeat(23)}_`.repeat(320), [`${"a".repeat(23)}_`]],
-      [`${"a@".repeat(4000)}`, []],
+  it("is linear: 8 000 characters of @a@a…, @aaaa… and the like take about four times what 2 000 take", () => {
+    // Texts of about `n` characters of each shape; `expectLinear` (helpers/linear.ts) compares the two sizes with each other.
+    const cases: Array<[(n: number) => string, string[]]> = [
+      [(n) => "@a".repeat(n / 2), []],
+      [(n) => `@${"a".repeat(n - 1)}`, []],
+      [(n) => "@aaa".repeat(n / 4), ["aaa"]],
+      [(n) => `${"@".repeat(n - 3)}abc`, ["abc"]],
+      [(n) => `@${"a".repeat(23)}_`.repeat(n / 25), [`${"a".repeat(23)}_`]],
+      [(n) => `${"a@".repeat(n / 2)}`, []],
     ];
-    for (const [text, expected] of cases) {
-      expect(text.length).toBeGreaterThanOrEqual(8000);
-      expect(mentionedHandles(text)).toEqual(expected);
-      const started = performance.now();
-      for (let i = 0; i < 20; i++) mentionedHandles(text);
-      expect((performance.now() - started) / 20).toBeLessThan(5);
+    for (const [make, expected] of cases) {
+      expect(make(8000).length).toBeGreaterThanOrEqual(8000);
+      expectLinear({
+        n: 2000,
+        make,
+        run: (text) => {
+          if (JSON.stringify(mentionedHandles(text)) !== JSON.stringify(expected)) throw new Error(`mentionedHandles gave ${JSON.stringify(mentionedHandles(text))} for a text of ${text.length} characters`);
+        },
+      });
     }
   });
 });
