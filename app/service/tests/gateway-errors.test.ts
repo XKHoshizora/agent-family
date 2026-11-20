@@ -300,17 +300,17 @@ describe("an answer cut off at the output limit having only thought: thinking_ex
   it("not thinking_exhausted: cut off after some answer, cut off with no reasoning at all, or a complete answer that only thought", async () => {
     // Some answer before the limit: a truncated finish (the existing rule).
     stub.answer((req, res) => answerCanned(req, res, "length"));
-    expect((await run(gateway.stream(call("anthropic")))).events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true });
+    expect((await run(gateway.stream(call("anthropic")))).events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true, toolCalls: [], assistant: expect.anything() });
     // No answer and no sign of thinking: a truncated finish with nothing said (the reply fails as unavailable).
     const nothing = parseSse(cannedStream("openai_chat", "length")).filter((e) => !e.data.choices?.[0]?.delta?.content);
     stub.answer(stream(writeSse(nothing)));
-    expect((await run(gateway.stream(call("openai_chat")))).events).toEqual([{ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true }]);
+    expect((await run(gateway.stream(call("openai_chat")))).events).toEqual([{ type: "finish", usage: { inputTokens: 11, outputTokens: 7 }, truncated: true, toolCalls: [], assistant: expect.anything() }]);
     // Only thought, but not stopped for length: an ordinary finish.
     const stopped = parseSse(thoughtOnly("anthropic")).map((e) => (e.event === "message_delta" ? { ...e, data: { ...e.data, delta: { ...e.data.delta, stop_reason: "end_turn" } } } : e));
     stub.answer(stream(writeSse(stopped)));
     const { events, error } = await run(gateway.stream(call("anthropic", { reasoning: "high" })));
     expect(error).toBeNull();
-    expect(events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 19 }, truncated: false });
+    expect(events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 11, outputTokens: 19 }, truncated: false, toolCalls: [], assistant: expect.anything() });
   });
 });
 

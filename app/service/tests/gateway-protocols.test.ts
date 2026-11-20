@@ -89,7 +89,7 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     expect(deltas(events, "text").join("")).toBe(CANNED_TEXT);
     expect(deltas(events, "text").length).toBeGreaterThan(1);
     expect(deltas(events, "reasoning")).toEqual([]);
-    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_USAGE, truncated: false });
+    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_USAGE, truncated: false, toolCalls: [], assistant: expect.anything() });
     expect(events.filter((e) => e.type === "finish")).toHaveLength(1);
   });
 
@@ -201,7 +201,7 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     stub.answer((req, res) => answerCanned(req, res, "length"));
     const events = await collect(gateway.stream(call(protocol)));
     expect(deltas(events, "text").join("")).toBe(CANNED_TEXT);
-    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_USAGE, truncated: true });
+    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_USAGE, truncated: true, toolCalls: [], assistant: expect.anything() });
   });
 
   // Chat Completions: its `reasoning_content`, which the SDK does not read, is read off the stream by the gateway.
@@ -213,7 +213,7 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
     const firstText = events.findIndex((e) => e.type === "text");
     const lastReasoning = events.findLastIndex((e) => e.type === "reasoning");
     expect(lastReasoning).toBeLessThan(firstText);
-    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_REASONING_USAGE, truncated: false });
+    expect(events.at(-1)).toEqual({ type: "finish", usage: CANNED_REASONING_USAGE, truncated: false, toolCalls: [], assistant: expect.anything() });
   });
 });
 
@@ -235,7 +235,7 @@ const streaming = (body: string) => (_req: unknown, res: import("node:http").Ser
 function runs(events: ModelEvent[]): Array<[string, string]> {
   const out: Array<[string, string]> = [];
   for (const e of events) {
-    if (e.type === "finish") continue;
+    if (e.type === "finish" || e.type === "tool_call") continue;
     const last = out.at(-1);
     if (last && last[0] === e.type) last[1] += e.delta;
     else out.push([e.type, e.delta]);

@@ -150,6 +150,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
             finished = { usage: event.usage, truncated: event.truncated };
             break;
           }
+          if (event.type === "tool_call") continue; // the call offers no tools: none comes
           out.add(event.type, event.delta);
           if (port.shouldStop(run)) {
             interrupt("stop");

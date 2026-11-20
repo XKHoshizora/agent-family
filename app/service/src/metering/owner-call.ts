@@ -165,7 +165,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
           break;
         }
         if (event.type === "text") text += event.delta;
-        else reasoning += event.delta;
+        else if (event.type === "reasoning") reasoning += event.delta; // the call offers no tools: no tool call comes
       }
     } catch (err) {
       if (spec.onClosing && closing.aborted) {

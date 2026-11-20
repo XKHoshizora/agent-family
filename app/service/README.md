@@ -1391,6 +1391,23 @@ that site model's later calls, or that provider's at that address, leave it out 
 1 000 upstreams remembered; a provider given a new address is asked with it again). A refusal for another reason fails
 the second request too, and nothing is remembered.
 
+**Tools.** A call may offer tools (`tools`: a name, a description and an input JSON Schema each); none is run by the
+gateway, and each call is one round. They go in the protocol's own shape, the model left to choose (`openai_chat`:
+`tools: [{type: "function", function: {name, description, parameters}}]`, `tool_choice: "auto"`; `openai_responses`:
+`tools: [{type: "function", name, description, parameters, strict: false}]`, `tool_choice: "auto"`; `anthropic`:
+`tools: [{name, description, input_schema}]`, `tool_choice: {type: "auto"}`, each input asked for whole, no
+`eager_input_streaming`; `gemini`: `tools: [{functionDeclarations: [{name, description, parametersJsonSchema}]}]`,
+`toolConfig: {functionCallingConfig: {mode: "AUTO"}}`). A call offering none sends exactly what it sent before tools
+existed. The rounds of the answer so far (`steps`) follow the conversation: each round's assistant turn as its finish
+gave it, then one tool message with its calls' results (a string as it is, anything else as its JSON) — so the next
+request carries what the protocol needs back: Anthropic's signed thinking before its `tool_use`, the Responses
+reasoning item with its encrypted content (nothing is kept at OpenAI, so nothing is referred to by id), Gemini's thought
+signature on its `functionCall`, and on `openai_chat` the round's `reasoning_content` on the assistant message whose
+tool calls it came before (DeepSeek, Kimi and other upstreams that think while calling tools need it back; the SDK
+neither reads nor sends it, the gateway does both). An upstream that answers 400 or 422 naming tools ("tool", or
+"function" as Gemini says it) before anything streamed is asked once more without them, as above; that round, and
+every later call to that upstream while it is remembered, finishes `toolsRefused`.
+
 What follows for a person choosing a model and a level:
 
 - Anthropic levels other than `none` ask for adaptive thinking, which Claude models before 4.6 refuse; Gemini levels
@@ -1410,15 +1427,21 @@ thought summaries; Chat Completions' `reasoning_content` / `reasoning`, which th
 the stream, or a leading `<think>` block; reasoning comes out in its place among the text as it arrives, and never
 becomes text. The gateway reads the stream in time proportional to its bytes however they are cut, and stops reading
 it — the SDK still reads all of it, so the answer is whole — at a line, or an event's data, over 1 048 576
-characters), then one finish: the usage the upstream reported (reasoning tokens count as output; none reported: no usage)
-and whether the model stopped for length. An answer may be up to 8 MiB on the wire and is given up after 60 s without a
-byte (before or after the headers); how long it may take in all is the caller's to bound.
+characters), and each tool call the model makes, with its id (made up by the SDK on Gemini, which gives none), the
+tool's name and its input parsed (null when it is not JSON or names a tool the call did not offer: the caller decides);
+then one finish: the usage the upstream reported for this round alone (reasoning tokens count as output; none reported:
+no usage), whether the model stopped for length, the round's tool calls (none: the model answered), and the round's
+assistant turn — opaque, plain JSON, to be passed back untouched in the next call's `steps` — and `toolsRefused` when
+the tools offered were not sent. An answer may be up to 8 MiB on the wire and is given up after 60 s without a byte
+(before or after the headers); how long it may take in all is the caller's to bound. Nothing a model calls a tool with,
+nor any tool's result, is logged.
 
 **Failures** are a `ModelError` with one of four codes and a fixed sentence: 401 or 403 is `provider_rejected`; any
 other error status, a network failure, silence, a redirect, an oversized answer, and a stream that is malformed or ends
 without the protocol's completion are `provider_unavailable`; the guard's refusal is `address_not_allowed`; an answer
-cut off at its output limit with no visible text, having reasoned (reasoning came, or the upstream reported reasoning
-tokens), is `thinking_exhausted` and carries the usage the upstream reported, which the call is charged. Besides the
+cut off at its output limit with no visible text and no tool call, having reasoned (reasoning came, or the upstream
+reported reasoning tokens), is `thinking_exhausted` and carries the usage the upstream reported, which the call is
+charged. Besides the
 code it keeps only the upstream's HTTP status, for the log; nothing the upstream sent is kept, printed or logged.
 Stopping a call (its abort signal) ends it at once and closes the upstream connection.
 

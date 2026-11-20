@@ -41,14 +41,14 @@ describe("scriptedGateway", () => {
     expect(text(one.events, "reasoning")).toBe("hmm");
     expect(text(one.events)).toBe("first answer, long enough for several chunks");
     expect(one.events.filter((e) => e.type === "text").length).toBeGreaterThan(1);
-    expect(one.events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 3, outputTokens: 4 }, truncated: false });
+    expect(one.events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 3, outputTokens: 4 }, truncated: false, toolCalls: [], assistant: expect.anything() });
 
     const two = await run(g.stream(calls[1]!));
     expect(two.error).toBeInstanceOf(ModelError);
     expect(two.error).toMatchObject({ code: "provider_rejected" });
 
-    expect((await run(g.stream(calls[2]!))).events).toEqual([{ type: "finish", usage: null, truncated: false }]);
-    expect((await run(g.stream(calls[3]!))).events.at(-1)).toEqual({ type: "finish", usage: null, truncated: true });
+    expect((await run(g.stream(calls[2]!))).events).toEqual([{ type: "finish", usage: null, truncated: false, toolCalls: [], assistant: expect.anything() }]);
+    expect((await run(g.stream(calls[3]!))).events.at(-1)).toEqual({ type: "finish", usage: null, truncated: true, toolCalls: [], assistant: expect.anything() });
 
     expect(g.calls).toEqual(calls);
     expect(g.calls[1]).toBe(calls[1]);
@@ -105,5 +105,72 @@ describe("scriptedGateway", () => {
     }
     expect(seen).toHaveLength(2);
     expect(error).toBe(controller.signal.reason);
+  });
+});
+
+describe("scriptedGateway with tools", () => {
+  const SEARCH = { name: "search_messages", description: "Search.", parameters: { type: "object", properties: { query: { type: "string" } } } };
+
+  it("callTools: one round that streams its text, then one tool_call per call, then a finish naming them with an opaque assistant turn", async () => {
+    const g = scriptedGateway().callTools(
+      [
+        { name: "search_messages", input: { query: "川菜" } },
+        { name: "read_file", input: { id: "f1" } },
+      ],
+      { text: "Let me look.", usage: { inputTokens: 5, outputTokens: 6 } },
+    );
+    const { events, error } = await run(g.stream(call({ tools: [SEARCH] })));
+    expect(error).toBeNull();
+    expect(text(events)).toBe("Let me look.");
+    const calls = events.flatMap((e) => (e.type === "tool_call" ? [e.call] : []));
+    expect(calls).toEqual([
+      { id: expect.any(String), name: "search_messages", input: { query: "川菜" } },
+      { id: expect.any(String), name: "read_file", input: { id: "f1" } },
+    ]);
+    expect(new Set(calls.map((c) => c.id)).size).toBe(2);
+    const finish = events.at(-1);
+    expect(finish).toEqual({ type: "finish", usage: { inputTokens: 5, outputTokens: 6 }, truncated: false, toolCalls: calls, assistant: expect.anything() });
+    // The opaque turn survives a JSON round trip, as the real one does.
+    const assistant = (finish as { assistant: unknown }).assistant;
+    expect(JSON.parse(JSON.stringify(assistant))).toEqual(assistant);
+
+    // Ids are not reused by a later round.
+    g.callTools([{ name: "search_messages", input: { query: "火锅" } }]);
+    const again = await run(g.stream(call({ tools: [SEARCH] })));
+    const [later] = again.events.flatMap((e) => (e.type === "tool_call" ? [e.call] : []));
+    expect(calls.map((c) => c.id)).not.toContain(later!.id);
+    expect(again.events.at(-1)).toMatchObject({ usage: null, toolCalls: [later] });
+  });
+
+  it("refuseTools: the round answers with text and reports toolsRefused", async () => {
+    const g = scriptedGateway().refuseTools("answered without tools", { usage: { inputTokens: 1, outputTokens: 2 } }).refuseTools();
+    const { events } = await run(g.stream(call({ tools: [SEARCH] })));
+    expect(text(events)).toBe("answered without tools");
+    expect(events.at(-1)).toEqual({
+      type: "finish",
+      usage: { inputTokens: 1, outputTokens: 2 },
+      truncated: false,
+      toolCalls: [],
+      assistant: expect.anything(),
+      toolsRefused: true,
+    });
+    const second = await run(g.stream(call({ tools: [SEARCH] })));
+    expect(text(second.events)).not.toBe("");
+    expect(second.events.at(-1)).toMatchObject({ toolCalls: [], toolsRefused: true });
+    // A plain reply reports nothing of the kind.
+    g.reply("plain");
+    expect((await run(g.stream(call()))).events.at(-1)).not.toHaveProperty("toolsRefused");
+  });
+
+  it("records each call's tools and steps as they were when it was made", async () => {
+    const g = scriptedGateway().callTools([{ name: "search_messages", input: { query: "a" } }]).reply("done");
+    const steps: NonNullable<ModelCall["steps"]> = [];
+    const first = await run(g.stream(call({ tools: [SEARCH], steps })));
+    const finish = first.events.at(-1) as Extract<ModelEvent, { type: "finish" }>;
+    steps.push({ assistant: finish.assistant, results: [{ id: finish.toolCalls[0]!.id, name: "search_messages", output: { hits: [] } }] });
+    await run(g.stream(call({ tools: [SEARCH], steps })));
+    expect(g.calls.map((c) => c.steps?.length)).toEqual([0, 1]);
+    expect(g.calls[1]!.steps![0]!.results).toEqual([{ id: finish.toolCalls[0]!.id, name: "search_messages", output: { hits: [] } }]);
+    expect(g.calls.map((c) => c.tools)).toEqual([[SEARCH], [SEARCH]]);
   });
 });

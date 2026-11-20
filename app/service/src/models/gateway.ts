@@ -1,7 +1,21 @@
 import { createAnthropic, type AnthropicLanguageModelOptions } from "@ai-sdk/anthropic";
 import { createGoogle, type GoogleLanguageModelOptions } from "@ai-sdk/google";
 import { createOpenAI, type OpenAILanguageModelChatOptions, type OpenAILanguageModelResponsesOptions } from "@ai-sdk/openai";
-import { APICallError, streamText, type LanguageModel, type LanguageModelUsage, type ModelMessage, type TextStreamPart, type ToolSet } from "ai";
+import {
+  APICallError,
+  jsonSchema,
+  streamText,
+  tool,
+  type AssistantModelMessage,
+  type JSONSchema7,
+  type JSONValue,
+  type LanguageModel,
+  type LanguageModelUsage,
+  type ModelMessage,
+  type TextStreamPart,
+  type ToolResultPart,
+  type ToolSet,
+} from "ai";
 import type { Protocol, ReasoningLevel } from "../config.ts";
 import { AppError } from "../errors.ts";
 import { hasVisibleText } from "../schemas.ts";
@@ -22,6 +36,30 @@ export type Part =
   | { type: "text"; text: string }
   | { type: "image"; mime: string; data: Uint8Array }
   | { type: "file"; mime: "application/pdf"; name: string; data: Uint8Array };
+
+/** A tool the model may call: its name, what it is for, and its input as a JSON Schema (an object's). */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+/**
+ * A tool call the model made: the protocol's id for it (the SDK makes one up where the protocol gives none: Gemini),
+ * the tool's name and its input, parsed — null when it was not valid JSON or named no tool the call offered.
+ */
+export interface ToolCall {
+  id: string;
+  name: string;
+  input: unknown;
+}
+
+/** What a tool call gave, for the next round: the call's id and name, and its output (JSON-serialisable). */
+export interface ToolResult {
+  id: string;
+  name: string;
+  output: unknown;
+}
 
 export interface ModelCall {
   protocol: Protocol;
@@ -46,6 +84,17 @@ export interface ModelCall {
    * nothing is remembered.
    */
   upstreamId?: string;
+  /**
+   * The tools the model may call in this round (none is run here: the caller runs them and sends their results in the
+   * next call's `steps`). Absent or empty: the request is exactly a call's without tools. An upstream that refuses them
+   * is asked once more without them, and its later calls leave them out (`OptionalField` `tools`).
+   */
+  tools?: ToolSpec[];
+  /**
+   * The rounds of this answer so far, oldest first, sent after `messages`: each round's assistant turn as its finish
+   * gave it (`assistant`, passed back untouched), then its tool calls' results.
+   */
+  steps?: Array<{ assistant: unknown; results: ToolResult[] }>;
   /** Bounds the call: aborting it ends the stream at once and closes the upstream connection. */
   signal: AbortSignal;
 }
@@ -53,15 +102,34 @@ export interface ModelCall {
 export type ModelEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
-  | { type: "finish"; usage: { inputTokens: number; outputTokens: number } | null; truncated: boolean };
+  | { type: "tool_call"; call: ToolCall }
+  | {
+      type: "finish";
+      usage: { inputTokens: number; outputTokens: number } | null;
+      truncated: boolean;
+      /** The round's tool calls, in order: [] when the model answered. */
+      toolCalls: ToolCall[];
+      /**
+       * The round's assistant turn, for the next call's `steps`: opaque to the caller, JSON (it survives a JSON round
+       * trip). What it carries is what the protocol needs back (thinking signatures, encrypted reasoning, Chat
+       * Completions' `reasoning_content`).
+       */
+      assistant: unknown;
+      /**
+       * The call offered tools and they were not sent: the upstream refused them — this round was asked once more
+       * without them, or they were left out because that upstream refused them before.
+       */
+      toolsRefused?: true;
+    };
 
 export interface ModelGateway {
   /**
-   * The answer as `text` / `reasoning` deltas, then exactly one `finish` (reasoning tokens are part of `outputTokens`;
-   * `usage` is null when the upstream reported none; `truncated` when the model stopped for length). A failure is a
-   * thrown `ModelError` — also an answer cut off at the output limit before any text, having only thought
-   * (`thinking_exhausted`, carrying the reported usage). When `call.signal` aborts, the iterator stops at once by
-   * throwing `call.signal.reason`.
+   * One round of the answer: `text` / `reasoning` deltas and a `tool_call` for each tool call the model makes, then
+   * exactly one `finish` (reasoning tokens are part of `outputTokens`; `usage` is null when the upstream reported none,
+   * and is this round's alone; `truncated` when the model stopped for length; `toolCalls` and `assistant` for the next
+   * round). A failure is a thrown `ModelError` — also an answer cut off at the output limit before any text or tool
+   * call, having only thought (`thinking_exhausted`, carrying the reported usage). When `call.signal` aborts, the
+   * iterator stops at once by throwing `call.signal.reason`.
    */
   stream(call: ModelCall): AsyncIterable<ModelEvent>;
   /** The provider's model list (the provider probe's `GET {baseUrl}/models`); a failure is a thrown `ModelError`. */
@@ -177,13 +245,17 @@ const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
  * What a call may send that an upstream may not know, besides `REASONING_PARAMS`: `thinking`, the thinking switch of
  * a Chat Completions call with `thinkingSwitch` (body field `thinking: {type: "disabled"}` at `none`, `{type:
  * "enabled"}` at any other level, next to the level's `reasoning_effort`); `summary`, the reasoning summary a
- * Responses call asks for at any level but `none` (`reasoning.summary: "auto"`). An upstream that refuses one — a 400
- * or 422 whose body names it — is asked once more without it, and once that is answered its later calls leave it out
+ * Responses call asks for at any level but `none` (`reasoning.summary: "auto"`); `tools`, the tool definitions of a
+ * call with `tools` (and the protocol's choice field the SDK sends with them). An upstream that refuses one — a 400 or
+ * 422 whose body names it — is asked once more without it, and once that is answered its later calls leave it out
  * (`Refusals`).
  */
-export type OptionalField = "thinking" | "summary";
-/** How a refusal names each field: what a 400's or 422's body is looked through for (its first `REFUSAL_CHARS`). */
-const NAMES: Readonly<Record<OptionalField, RegExp>> = { thinking: /thinking/i, summary: /summary/i };
+export type OptionalField = "thinking" | "summary" | "tools";
+/**
+ * How a refusal names each field: what a 400's or 422's body is looked through for (its first `REFUSAL_CHARS`). Tools
+ * are named "tools" by most, "function calling" by some (Gemini).
+ */
+const NAMES: Readonly<Record<OptionalField, RegExp>> = { thinking: /thinking/i, summary: /summary/i, tools: /tool|function/i };
 const REFUSAL_CHARS = 4096;
 /** Upstreams whose refusals are remembered at most; the one used longest ago is forgotten first. */
 export const MAX_REMEMBERED_UPSTREAMS = 1000;
@@ -193,8 +265,11 @@ function optionalFields(call: ModelCall, left: ReadonlySet<OptionalField>): Opti
   const fields: OptionalField[] = [];
   if (call.protocol === "openai_chat" && call.thinkingSwitch === true && !left.has("thinking")) fields.push("thinking");
   if (call.protocol === "openai_responses" && call.reasoning !== "none" && !left.has("summary")) fields.push("summary");
+  if (offersTools(call) && !left.has("tools")) fields.push("tools");
   return fields;
 }
+
+const offersTools = (call: ModelCall): boolean => (call.tools?.length ?? 0) > 0;
 
 /** What upstreams refused, by `ModelCall.upstreamId`, in this process: at most `MAX_REMEMBERED_UPSTREAMS` of them. */
 export class Refusals {
@@ -233,7 +308,9 @@ function refuses(err: unknown, field: OptionalField): boolean {
 /**
  * The call's provider options: the protocol's own, with the reasoning level's merged in, per provider namespace; a
  * Responses call whose upstream refused the summary asks for none (`reasoningSummary: null`: left out, where the SDK
- * would otherwise ask for one).
+ * would otherwise ask for one). An Anthropic call that sends tools asks for their input whole (`toolStreaming: false`:
+ * no `eager_input_streaming` on each tool, a field compatible upstreams may not know; nothing here reads an input
+ * before it is complete).
  */
 function providerOptionsFor(call: ModelCall, left: ReadonlySet<OptionalField>): ProviderOptions {
   const base = PROTOCOL_OPTIONS[call.protocol];
@@ -242,6 +319,9 @@ function providerOptionsFor(call: ModelCall, left: ReadonlySet<OptionalField>): 
   for (const name of new Set([...Object.keys(base), ...Object.keys(reasoning)])) merged[name] = { ...base[name], ...reasoning[name] };
   if (call.protocol === "openai_responses" && call.reasoning !== "none" && left.has("summary")) {
     merged.openai = { ...merged.openai, reasoningSummary: null } satisfies OpenAILanguageModelResponsesOptions;
+  }
+  if (call.protocol === "anthropic" && optionalFields(call, left).includes("tools")) {
+    merged.anthropic = { ...merged.anthropic, toolStreaming: false } satisfies AnthropicLanguageModelOptions;
   }
   return merged;
 }
@@ -324,6 +404,70 @@ function toModelMessages(messages: ModelCall["messages"]): ModelMessage[] {
   });
 }
 
+/** The tools as the SDK takes them: a description and an input schema each, and no `execute` (the caller runs them). */
+function toolSet(specs: ToolSpec[]): ToolSet {
+  return Object.fromEntries(specs.map((s) => [s.name, tool({ description: s.description, inputSchema: jsonSchema(s.parameters as JSONSchema7) })]));
+}
+
+/** A step's assistant turn: what an earlier finish gave as `assistant` (`assistantTurn`). */
+const turnOf = (step: { assistant: unknown }): ModelMessage[] => step.assistant as ModelMessage[];
+
+/**
+ * The rounds so far as SDK messages, after the conversation: each round's assistant turn as its finish gave it, then
+ * one tool message with its results (none: no tool message). A string output is sent as it is, anything else as JSON.
+ */
+function stepMessages(steps: NonNullable<ModelCall["steps"]>): ModelMessage[] {
+  return steps.flatMap((step): ModelMessage[] => [
+    ...turnOf(step),
+    ...(step.results.length === 0
+      ? []
+      : [
+          {
+            role: "tool" as const,
+            content: step.results.map(
+              (r): ToolResultPart => ({
+                type: "tool-result",
+                toolCallId: r.id,
+                toolName: r.name,
+                output: typeof r.output === "string" ? { type: "text", value: r.output } : { type: "json", value: (r.output ?? null) as JSONValue },
+              }),
+            ),
+          },
+        ]),
+  ]);
+}
+
+/**
+ * The round's assistant turn, as `steps` takes it back: the SDK's response messages for the round, its assistant
+ * message only — text, reasoning with what the provider attached to it (Anthropic's signature, OpenAI's encrypted
+ * reasoning), tool calls with theirs (Gemini's thought signature). The tool message the SDK adds for a call it found
+ * invalid is left out: the caller answers every call. On Chat Completions, whose reasoning the SDK neither reads nor
+ * sends, the reasoning read off the stream goes in as a reasoning part (`chatReasoning`; `chatFetch` sends it back).
+ * Plain JSON: strings, numbers and objects only.
+ */
+function assistantTurn(messages: readonly ModelMessage[] | undefined, chatReasoning: string): AssistantModelMessage[] {
+  const turn = (messages ?? []).filter((m): m is AssistantModelMessage => m.role === "assistant");
+  const [first, ...rest] = turn;
+  if (chatReasoning === "" || first === undefined) return turn;
+  const content = typeof first.content === "string" ? [{ type: "text" as const, text: first.content }] : first.content;
+  return [{ ...first, content: [{ type: "reasoning", text: chatReasoning }, ...content] }, ...rest];
+}
+
+/**
+ * Chat Completions: the reasoning each earlier round read off the stream (`assistantTurn`), by the id of the first tool
+ * call of its turn — what upstreams that think while calling tools (DeepSeek, Kimi and others) need back with it.
+ */
+function chatReasoningByCall(steps: ModelCall["steps"]): Map<string, string> {
+  const byCall = new Map<string, string>();
+  for (const message of (steps ?? []).flatMap(turnOf)) {
+    if (message.role !== "assistant" || typeof message.content === "string") continue;
+    const reasoning = message.content.flatMap((p) => (p.type === "reasoning" ? [p.text] : [])).join("");
+    const call = message.content.find((p) => p.type === "tool-call");
+    if (reasoning !== "" && call !== undefined) byCall.set(call.toolCallId, reasoning);
+  }
+  return byCall;
+}
+
 /** The reported usage, or null unless the upstream reported both counts. */
 function usageOf(usage: LanguageModelUsage): { inputTokens: number; outputTokens: number } | null {
   const { inputTokens, outputTokens } = usage;
@@ -351,28 +495,59 @@ function toModelError(err: unknown): ModelError {
 
 /**
  * The `fetch` of a Chat Completions call: the request's JSON body gets the thinking switch when it is sent
- * (`thinking`), and every successful response's body is read by `tap` on its way to the SDK. The key stays in the
- * headers the SDK set; nothing here reads them.
+ * (`thinking`) and, on an assistant message whose first tool call is in `reasoning`, that reasoning as
+ * `reasoning_content`; and every successful response's body is read by `tap` on its way to the SDK, `tool_calls` and
+ * all, unchanged. A body that gets neither is sent as the SDK wrote it. The key stays in the headers the SDK set;
+ * nothing here reads them.
  */
-function chatFetch(fetch: typeof globalThis.fetch, tap: ChatReasoningTap, thinking: { type: "enabled" | "disabled" } | null): typeof globalThis.fetch {
+function chatFetch(
+  fetch: typeof globalThis.fetch,
+  tap: ChatReasoningTap,
+  thinking: { type: "enabled" | "disabled" } | null,
+  reasoning: ReadonlyMap<string, string>,
+): typeof globalThis.fetch {
   return (async (input: string | URL | Request, init?: RequestInit) => {
-    const body = thinking !== null && typeof init?.body === "string" ? JSON.stringify({ ...JSON.parse(init.body), thinking }) : undefined;
-    const res = await fetch(input, body === undefined ? init : { ...init, body });
+    const res = await fetch(input, withChatFields(init, thinking, reasoning));
     if (!res.ok || res.body === null) return res;
     return new Response(res.body.pipeThrough(tap.transform()), { status: res.status, statusText: res.statusText, headers: res.headers });
   }) as typeof globalThis.fetch;
 }
 
+/** `chatFetch`'s request: the thinking switch and the earlier rounds' reasoning added to its body, or as it was. */
+function withChatFields(
+  init: RequestInit | undefined,
+  thinking: { type: "enabled" | "disabled" } | null,
+  reasoning: ReadonlyMap<string, string>,
+): RequestInit | undefined {
+  if ((thinking === null && reasoning.size === 0) || typeof init?.body !== "string") return init;
+  const body = JSON.parse(init.body) as { messages?: unknown; thinking?: unknown };
+  let changed = false;
+  for (const message of Array.isArray(body.messages) ? (body.messages as Array<Record<string, unknown>>) : []) {
+    const calls = message?.role === "assistant" && Array.isArray(message.tool_calls) ? (message.tool_calls as Array<{ id?: unknown }>) : [];
+    const thought = typeof calls[0]?.id === "string" ? reasoning.get(calls[0].id) : undefined;
+    if (thought === undefined) continue;
+    message.reasoning_content = thought;
+    changed = true;
+  }
+  if (thinking !== null) {
+    body.thinking = thinking;
+    changed = true;
+  }
+  return changed ? { ...init, body: JSON.stringify(body) } : init;
+}
+
 /** `attempt`'s events: its finish also says how many reasoning tokens the upstream reported (0: none). */
-type AttemptEvent = Exclude<ModelEvent, { type: "finish" }> | (Extract<ModelEvent, { type: "finish" }> & { reasoningTokens: number });
+type AttemptEvent =
+  | Exclude<ModelEvent, { type: "finish" }>
+  | (Omit<Extract<ModelEvent, { type: "finish" }>, "toolsRefused"> & { reasoningTokens: number });
 
 /**
  * The call as events: one attempt (`attempt`), and when the upstream refused an optional field it sent
  * (`OptionalField`) before anything came back, one more without it — the refusal remembered for the call's upstream
  * once that one shows leaving it out helped (its first event came), so a refusal for some other reason, which fails
- * the retry too, is not. A model that stopped for length with no answer (no text that shows anything), having reasoned
- * — reasoning came, or the upstream reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported,
- * instead of finishing.
+ * the retry too, is not. A call whose tools were left out so finishes `toolsRefused`. A model that stopped for length
+ * with no answer (no text that shows anything, no tool call), having reasoned — reasoning came, or the upstream
+ * reported reasoning tokens — ends `thinking_exhausted`, with the usage it reported, instead of finishing.
  */
 async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refusals: Refusals): AsyncGenerator<ModelEvent> {
   try {
@@ -382,6 +557,7 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
     let refused: OptionalField | undefined;
     for (let retry = false; ; retry = true) {
       const sent = optionalFields(call, left);
+      const toolsRefused = offersTools(call) && left.has("tools");
       let started = false;
       let answered = false;
       let thought = false;
@@ -390,12 +566,13 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
           if (!started && refused !== undefined) refusals.add(call.upstreamId, refused);
           started = true;
           if (event.type === "finish") {
-            const { usage, truncated, reasoningTokens } = event;
+            const { usage, truncated, reasoningTokens, toolCalls, assistant } = event;
             if (truncated && !answered && (thought || reasoningTokens > 0)) throw new ModelError("thinking_exhausted", undefined, usage ?? undefined);
-            yield { type: "finish", usage, truncated };
+            yield { type: "finish", usage, truncated, toolCalls, assistant, ...(toolsRefused ? { toolsRefused: true as const } : {}) };
             return;
           }
           if (event.type === "text") answered ||= hasVisibleText(event.delta);
+          else if (event.type === "tool_call") answered = true;
           else thought = true;
           yield event;
         }
@@ -417,23 +594,40 @@ async function* streamCall(call: ModelCall, fetch: typeof globalThis.fetch, refu
  * Completions (where the SDK reads no reasoning) a delta's own reasoning field is read off the stream
  * (`ChatReasoningTap`) and comes out in its place among the text, as soon as it arrives; an answer that streamed none
  * of it before its first text and opens with `<think>` has that block taken out as reasoning (`ThinkTags`). Reasoning
- * never becomes text.
+ * never becomes text. One round only (the SDK's default: one step): a tool call is reported (`tool_call`; its input
+ * null when the SDK found it invalid — not JSON, or a tool the call did not offer) and never run; the finish names the
+ * calls and carries the round's assistant turn (`assistantTurn`), which the SDK hands over (`onStepEnd`) before it
+ * gives the finish.
  */
 async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: ReadonlySet<OptionalField>): AsyncGenerator<AttemptEvent> {
   // Ends the upstream request however this iterator ends: finished, failed, stopped, or left early by its reader.
   const own = new AbortController();
   const tap = call.protocol === "openai_chat" ? new ChatReasoningTap() : null;
-  const thinking = optionalFields(call, left).includes("thinking") ? { type: call.reasoning === "none" ? ("disabled" as const) : ("enabled" as const) } : null;
+  const sent = optionalFields(call, left);
+  const thinking = sent.includes("thinking") ? { type: call.reasoning === "none" ? ("disabled" as const) : ("enabled" as const) } : null;
+  const tools = sent.includes("tools") ? toolSet(call.tools ?? []) : undefined;
   /** Chat Completions: undecided until the first text, then whether the answer is looked at for `<think>`. */
   let tags: ThinkTags | null | undefined = tap ? undefined : null;
   /** Reasoning arrived in the protocol's own field. */
   let structured = false;
+  /** Chat Completions: the reasoning read off the stream so far, for the round's assistant turn. */
+  const tapped: string[] = [];
+  /** Reasoning the tap gives, due now: the protocol's own (`structured`), and kept (`tapped`). */
+  const fromTap = (deltas: string[]): string[] => {
+    if (deltas.length > 0) structured = true;
+    tapped.push(...deltas);
+    return deltas;
+  };
+  const toolCalls: ToolCall[] = [];
+  /** The SDK's response messages for the round, once it has them. */
+  let responded: ModelMessage[] | undefined;
   let parts: AsyncIterator<StreamPart> | undefined;
   try {
     const result = streamText({
-      model: languageModel(call, tap ? chatFetch(fetch, tap, thinking) : fetch),
+      model: languageModel(call, tap ? chatFetch(fetch, tap, thinking, chatReasoningByCall(call.steps)) : fetch),
       ...(call.system === "" ? {} : { instructions: call.system }),
-      messages: toModelMessages(call.messages),
+      messages: [...toModelMessages(call.messages), ...stepMessages(call.steps ?? [])],
+      ...(tools === undefined ? {} : { tools }),
       maxOutputTokens: call.maxOutputTokens,
       providerOptions: providerOptionsFor(call, left),
       abortSignal: AbortSignal.any([call.signal, own.signal]),
@@ -441,17 +635,17 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
       telemetry: { isEnabled: false },
       // Failures arrive below as `error` parts; the default handler would print them, upstream text and all.
       onError: () => {},
+      onStepEnd: (step) => {
+        responded = step.response.messages;
+      },
     });
     parts = result.stream[Symbol.asyncIterator]();
     let next: Promise<IteratorResult<StreamPart>> | null = null;
     while (true) {
       if (tap) {
         // Reasoning ahead of every text still to come is due now, whatever the SDK is waiting for.
-        const due = tap.leading();
-        for (const delta of due) {
-          structured = true;
-          yield { type: "reasoning", delta };
-        }
+        const due = fromTap(tap.leading());
+        for (const delta of due) yield { type: "reasoning", delta };
         if (due.length > 0) continue;
       }
       next ??= parts.next();
@@ -464,10 +658,7 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
       switch (part.type) {
         case "text-delta":
           if (part.text === "") break;
-          for (const delta of tap?.beforeText() ?? []) {
-            structured = true;
-            yield { type: "reasoning", delta };
-          }
+          for (const delta of fromTap(tap?.beforeText() ?? [])) yield { type: "reasoning", delta };
           if (tags === undefined) tags = structured ? null : new ThinkTags();
           if (tags) for (const split of tags.push(part.text)) yield split;
           else yield { type: "text", delta: part.text };
@@ -475,12 +666,20 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
         case "reasoning-delta":
           if (part.text !== "") yield { type: "reasoning", delta: part.text };
           break;
+        case "tool-call": {
+          // The reasoning the tap read before the call comes out before it.
+          for (const delta of fromTap(tap?.leading() ?? [])) yield { type: "reasoning", delta };
+          const made: ToolCall = { id: part.toolCallId, name: part.toolName, input: part.invalid === true ? null : part.input };
+          toolCalls.push(made);
+          yield { type: "tool_call", call: made };
+          break;
+        }
         case "error":
           throw part.error;
         case "abort":
           throw new ModelError("provider_unavailable");
         case "finish":
-          for (const delta of tap?.rest() ?? []) yield { type: "reasoning", delta };
+          for (const delta of fromTap(tap?.rest() ?? [])) yield { type: "reasoning", delta };
           if (tags) for (const split of tags.end()) yield split;
           // "interrupted": the stream ended without the protocol's completion; "error": the upstream reported one.
           if (part.finishReason === "interrupted" || part.finishReason === "error") throw new ModelError("provider_unavailable");
@@ -489,6 +688,8 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
             usage: usageOf(part.totalUsage),
             truncated: part.finishReason === "length",
             reasoningTokens: part.totalUsage.outputTokenDetails?.reasoningTokens ?? 0,
+            toolCalls,
+            assistant: assistantTurn(responded, tapped.join("")),
           };
           return;
       }

@@ -26,7 +26,7 @@ const racing: ModelGateway = {
     yield { type: "text", delta: "好的，" };
     await sleep(random(10), call.signal);
     yield { type: "text", delta: "我明白了。" };
-    yield { type: "finish", usage: null, truncated: false };
+    yield { type: "finish", usage: null, truncated: false, toolCalls: [], assistant: [] };
   },
   async listModels() {
     return [];

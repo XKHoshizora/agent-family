@@ -30,7 +30,7 @@ const answer = { text: "好的。" };
 const models: ModelGateway = {
   async *stream(): AsyncGenerator<ModelEvent> {
     if (answer.text !== "") yield { type: "text", delta: answer.text };
-    yield { type: "finish", usage: null, truncated: false };
+    yield { type: "finish", usage: null, truncated: false, toolCalls: [], assistant: [] };
   },
   async listModels() {
     return ["fuzz-model"];

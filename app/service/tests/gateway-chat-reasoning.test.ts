@@ -264,7 +264,7 @@ describe("the gateway past the reader's limit", () => {
     }
     expect(events.filter((e) => e.type === "reasoning")).toEqual([{ type: "reasoning", delta: "first" }]);
     expect(events.flatMap((e) => (e.type === "text" ? [e.delta] : [])).join("")).toBe("The whole answer.");
-    expect(events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 3, outputTokens: 5 }, truncated: false });
+    expect(events.at(-1)).toEqual({ type: "finish", usage: { inputTokens: 3, outputTokens: 5 }, truncated: false, toolCalls: [], assistant: expect.anything() });
   });
 });
 
