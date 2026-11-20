@@ -13,7 +13,7 @@ import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
 import { lookedAt, parseAnswer, parseOps, refusedInPlace, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
-import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
+import { duplicateOf, ownerAsked, sortNote, type Asked, type KnownNote, type SortDeps } from "./sort.ts";
 import { count, countNoteOps } from "./stats.ts";
 import { getNewNotes, listAgentNotes, listOwnerNotes, roomOf, type NoteKind } from "./store.ts";
 import { bumpNotes } from "./write.ts";
@@ -250,6 +250,9 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   const repeats = [...sorted.repeats, ...mentioned, ...(await exactRepeats(deps, agent, kinds, answer, ops))];
   // A `seen` only says the owner mentioned a note again (above): there is nothing in it to apply, record or tell.
   const changing = ops.filter((o) => o.op !== "seen");
+  // Whether the owner's words asked for the destructive ops, judged outside any transaction (once per answer, when it can matter).
+  const asked = await askedFor(deps, agent, changing.filter(inPlace), input, group);
+  if (ctx.closing.aborted) return;
 
   // What took effect, counted once the transaction has committed (`stats.ts`).
   const made: AppliedOp[] = [];
@@ -265,12 +268,12 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
       await bumpNotes(t, kind === "owner" ? { kind, ownerId: locked.ownerId } : { kind, agentId }, ids);
     }
     strengthened = bumped.size;
-    // In the owner's own conversation a destructive op needs the owner's words (`needsWords`): else it waits for their yes, all
+    // In the owner's own conversation a destructive op needs the owner's words (`needsWords`, `asked`): else it waits for their yes, all
     // together in one pending change, the card 先问我再记 produces. The ops that change a note in place depend on one another
     // (a merge is a replace plus a remove, and the room check of the one counts on the space the other frees), so when ANY of them
     // is held ALL of them are, together; adds apply at once. With 先问我再记 on everything waits as one change anyway.
     const changesInPlace = changing.filter(inPlace);
-    const held: Op[] = group || locked.memoryAsk || !changesInPlace.some((op) => needsWords(op, input)) ? [] : changesInPlace;
+    const held: Op[] = group || locked.memoryAsk || !changesInPlace.some((op) => needsWords(op, input, asked)) ? [] : changesInPlace;
     const direct = changing.filter((op) => !held.includes(op));
     const apply = (list: Op[], status: "applied" | "pending") =>
       applyOps(t, { ...ids, sharedNotes: locked.sharedNotes, kinds }, list, input.refs, {
@@ -316,17 +319,43 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
 }
 
 /**
- * Whether a destructive op of the owner's own conversation lacks the owner's words and so waits for their yes: a `remove` unless some
- * owner line of the review's window asks to forget (`FORGET`), a `lock` unless one asks to lock (`LOCK`); a `replace` unless the window
- * holds an owner line at all and one of them came after the note was last changed. An `add` (or an `unlock`, which is only ever a
- * request) never waits.
+ * Whether a destructive op of the owner's own conversation lacks the owner's words and so waits for their yes: a `remove` unless the
+ * owner asked, in the review's window, to forget or delete something (`asked.forget`), a `lock` unless they asked to keep something
+ * secret (`asked.lock`); a `replace` unless the window holds an owner line at all and one of them came after the note was last changed.
+ * An `add` (or an `unlock`, which is only ever a request) never waits.
  */
-function needsWords(op: Op, input: Pick<ReviewInput, "forget" | "lock" | "ownerAt" | "refs">): boolean {
-  if (op.op === "remove") return !input.forget;
-  if (op.op === "lock") return !input.lock;
+function needsWords(op: Op, input: Pick<ReviewInput, "ownerAt" | "refs">, asked: Asked): boolean {
+  if (op.op === "remove") return !asked.forget;
+  if (op.op === "lock") return !asked.lock;
   if (op.op !== "replace") return false;
   const note = input.refs.get(op.ref);
   return note === undefined || input.ownerAt.length === 0 || !input.ownerAt.some((at) => at > note.updatedAt);
+}
+
+const NOT_ASKED: Asked = { forget: false, lock: false };
+
+/**
+ * What the owner asked for, for `inPlaceOps` (the replace, remove and lock ops of an answer): the judgement's answer (`ownerAsked`),
+ * ONE request for the whole answer, made only when it can change what is applied at once — in the owner's own conversation (a group
+ * review only adds), without 先问我再记 (everything waits then), for a `remove` only when the window holds a word of forgetting
+ * (`FORGET_WORDS`) and a `lock` only when it holds a word of locking (`LOCK_WORDS`), and not when an op waits whatever the answer (a
+ * remove or a lock without such a word, a replace with no owner line after its note's last change: the ops in place stand or fall
+ * together). Otherwise nothing is asked and nothing was asked for.
+ */
+async function askedFor(deps: PipelineDeps, agent: AgentRow, inPlaceOps: Op[], input: ReviewInput, group: boolean): Promise<Asked> {
+  if (group || agent.memoryAsk || inPlaceOps.length === 0) return NOT_ASKED;
+  const kinds = new Set<keyof Asked>();
+  for (const op of inPlaceOps) {
+    if (op.op === "remove") {
+      if (!input.forgetWords) return NOT_ASKED;
+      kinds.add("forget");
+    } else if (op.op === "lock") {
+      if (!input.lockWords) return NOT_ASKED;
+      kinds.add("lock");
+    } else if (needsWords(op, input, NOT_ASKED)) return NOT_ASKED;
+  }
+  if (kinds.size === 0) return NOT_ASKED;
+  return ownerAsked({ db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log }, input.said, kinds);
 }
 
 /** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */

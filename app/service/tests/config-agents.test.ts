@@ -417,6 +417,7 @@ describe("the memory configuration", () => {
     faithfulAt: 0.6,
     judgePerOwnerDay: 300,
     judgeShare: 0.5,
+    explicitAt: 0.7,
     roomNotes: 150,
     passageShare: 0.25,
     freeDailyPoints: 20,
@@ -462,7 +463,8 @@ describe("the memory configuration", () => {
     for (const bad of ['{"roomOwner":3001}', '{"roomSelf":3001}', '{"roomHearsay":3001}', '{"modelEntryMax":201}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     expect(loadConfig({ ...base, MEMORY: '{"roomOwner":3000,"modelEntryMax":100}' }).memory).toMatchObject({ roomOwner: 3000, modelEntryMax: 100 });
     expect(loadConfig({ ...base, MEMORY: '{"judgeShare":0.25}' }).memory.judgeShare).toBe(0.25);
-    for (const bad of ['{"judgeShare":1.5}', '{"judgeShare":-0.1}', '{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"hearsayMute":"yes"}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"judgePerOwnerDay":0}', '{"roomNotes":1.5}', '{"passageShare":0}', '{"passageShare":1.5}', '{"freeDailyPoints":-1}', '{"freeDailyPoints":1.5}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
+    expect(loadConfig({ ...base, MEMORY: '{"explicitAt":0.85}' }).memory.explicitAt).toBe(0.85);
+    for (const bad of ['{"explicitAt":1.5}', '{"explicitAt":-0.1}', '{"explicitAt":"0.7"}', '{"judgeShare":1.5}', '{"judgeShare":-0.1}', '{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"hearsayMute":"yes"}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"judgePerOwnerDay":0}', '{"roomNotes":1.5}', '{"passageShare":0}', '{"passageShare":1.5}', '{"freeDailyPoints":-1}', '{"freeDailyPoints":1.5}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }
   });

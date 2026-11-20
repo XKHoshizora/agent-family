@@ -81,12 +81,12 @@ describe("the owner's own remark, flagged", () => {
     expect(posted.rows[0].n).toBe(0);
   });
 
-  it("is the normal group review: add-only (a scripted remove, lock and replace are dropped), the owner's room and the Agent's own both shown and writable", async () => {
+  it("is the normal group review: add-only (a scripted remove, lock and replace are dropped, and the owner's words of forgetting and locking ask the judgement nothing), the owner's room and the Agent's own both shown and writable", async () => {
     const w = await world("b");
     const seeded = (await api(app, w.owner, "POST", "/api/memory/notes", { text: "喜欢喝茶", vault: false })).json;
     await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/memory/notes`, { text: "回答要简短", vault: false });
-    const seq = await say(w.owner, w.g, "我现在不喝茶了，改喝咖啡");
-    judge.answer(() => ({ sort: 0.95 }));
+    const seq = await say(w.owner, w.g, "我现在不喝茶了，改喝咖啡，喝茶那条删掉，再锁起来");
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95, explicit_lock: 0.95 }));
     gateway.reply(ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n1" }, { op: "replace", ref: "n1", text: "喜欢咖啡" }, add("答案要带例子", "self"), add("喝咖啡")));
     await flag(w.agent.id, w.g, seq, "own");
     await wake();
@@ -104,6 +104,7 @@ describe("the owner's own remark, flagged", () => {
     ]);
     const own = await api(app, w.owner, "GET", `/api/agents/${w.agent.id}/memory`);
     expect(own.json.notes.map((n: any) => n.text)).toEqual(["回答要简短", "答案要带例子"]);
+    expect(judge.calls.flatMap((c) => c.questions.map((q) => q.key)).filter((k) => k.startsWith("explicit_"))).toEqual([]);
   });
 
   it("a seen is allowed in a group: the note it names is one stronger, with no change row, no chip, no judge call; the group prompt offers add and seen only", async () => {

@@ -10,7 +10,7 @@ import { planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
 import { resolveModel } from "../models/resolve.ts";
 import { uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
-import { confirmChange, discardChange, undoChange } from "./apply.ts";
+import { confirmChange, discardChange, undoChange, type FullRoom } from "./apply.ts";
 import { noCallCanStart } from "./call.ts";
 import { loadNotes } from "./passage.ts";
 import { ownerNote } from "./clean.ts";
@@ -448,7 +448,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   /**
    * One of the owner's decisions on a change of this Agent's: `run` does it in a transaction and says how it went. 404 for
    * anyone else's change or another Agent's; asking again for what is already so answers it again; any other state of
-   * the change, or a note that moved on since, is 409 `stale_change`; a room that cannot take it back 409 `room_full`.
+   * the change, or a note that moved on since, is 409 `stale_change`; a room that cannot take it back 409 `room_full`, with the
+   * weight really left in that room (`full`, filled in by `run`) and `count` when it is the number of its notes that refuses.
    */
   async function decide(
     ownerId: string,
@@ -457,13 +458,14 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     wanted: "applied" | "undone" | "discarded",
     run: (t: Tx) => Promise<"ok" | "stale" | "full" | null>,
     acted: () => void = () => undefined,
+    full: FullRoom = {},
   ): Promise<{ status: typeof wanted }> {
     const found = await db.query<{ agent_id: string; status: string }>("select agent_id, status from memory_changes where id = $1 and owner_id = $2", [changeId, ownerId]);
     if (found.rows[0]?.agent_id !== agentId) throw notFound();
     const outcome = await db.tx(run);
     if (outcome === "ok") acted();
     if (outcome === "stale") throw new AppError(409, "stale_change");
-    if (outcome === "full") throw roomFull(0);
+    if (outcome === "full") throw roomFull(full.left ?? 0, full.count === true);
     if (outcome === null) {
       const now = await db.query<{ status: string }>("select status from memory_changes where id = $1", [changeId]);
       if (now.rows[0]?.status === wanted) return { status: wanted };
@@ -475,7 +477,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
   const changeRoute = (
     verb: "undo" | "confirm" | "discard",
     wanted: "undone" | "applied" | "discarded",
-    act: (t: Tx, ownerId: string, changeId: string, report: { dropped: number }) => Promise<"ok" | "stale" | "full" | null>,
+    act: (t: Tx, ownerId: string, changeId: string, report: { dropped: number } & FullRoom) => Promise<"ok" | "stale" | "full" | null>,
   ) =>
     api.post(
       `/api/agents/:id/memory/changes/:changeId/${verb}`,
@@ -484,8 +486,9 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
         const agent = await ownAgent(me.id, req.params.id);
-        // A confirmation that applied the adds of a change whose in-place ops went stale says how many ops it left out.
-        const report = { dropped: 0 };
+        // A confirmation that applied the adds of a change whose in-place ops went stale says how many ops it left out; an undo or a
+        // confirmation that does not fit, why (`FullRoom`).
+        const report: { dropped: number } & FullRoom = { dropped: 0 };
         // The notice of the change is pushed to its owner again, now with its new status (read when it is sent) — also when
         // a confirmation found the change stale and discarded it.
         const again = async (): Promise<void> => {
@@ -498,7 +501,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
         let decided: { status: typeof wanted };
         try {
           const kind = verb === "discard" ? null : await changeKind(db, req.params.changeId);
-          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId, report), () => countDecision(db, verb, kind));
+          decided = await decide(me.id, agent.id, req.params.changeId, wanted, (t) => act(t, me.id, req.params.changeId, report), () => countDecision(db, verb, kind), report);
         } catch (err) {
           if (verb === "confirm" && err instanceof AppError && err.code === "stale_change") await again();
           throw err;
@@ -510,7 +513,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       },
     );
 
-  changeRoute("undo", "undone", async (t, ownerId, changeId) => undoChange(t, ownerId, changeId, limits).then((r) => (r === "undone" ? "ok" : r)));
+  changeRoute("undo", "undone", async (t, ownerId, changeId, report) => undoChange(t, ownerId, changeId, limits, report).then((r) => (r === "undone" ? "ok" : r)));
   changeRoute("confirm", "applied", async (t, ownerId, changeId, report) => {
     const r = await confirmChange(t, ownerId, changeId, limits, report);
     return r === "stale" || r === "full" || r === null ? r : "ok";

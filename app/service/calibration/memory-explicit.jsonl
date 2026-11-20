@@ -1,0 +1,209 @@
+{"id":"zh-ask-01","lang":"zh","cat":"ask","said":["把我去大阪那件事忘掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-02","lang":"zh","cat":"ask","said":["帮我把那条删掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-03","lang":"zh","cat":"ask","said":["把它删掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-04","lang":"zh","cat":"ask","said":["别，删掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-05","lang":"zh","cat":"ask","said":["不用了。把住址那条删掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-06","lang":"zh","cat":"ask","said":["没事 删掉它"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-07","lang":"zh","cat":"ask","said":["忘掉那个"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-08","lang":"zh","cat":"ask","said":["忘了它吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-09","lang":"zh","cat":"ask","said":["删掉它"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-10","lang":"zh","cat":"ask","said":["我工资那件事你忘了吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-11","lang":"zh","cat":"ask","said":["要不删掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-12","lang":"zh","cat":"ask","said":["不如删掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-13","lang":"zh","cat":"ask","said":["前任那条可以删了"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-01","lang":"zh","cat":"not-keep","said":["这个不用记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-02","lang":"zh","cat":"not-keep","said":["请别记这个"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-03","lang":"zh","cat":"not-keep","said":["别记这个"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-04","lang":"zh","cat":"not-keep","said":["不用记了"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-05","lang":"zh","cat":"not-keep","said":["这个别记了"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-06","lang":"zh","cat":"not-keep","said":["那个别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-07","lang":"zh","cat":"not-keep","said":["你别记了"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-08","lang":"zh","cat":"not-keep","said":["先别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-09","lang":"zh","cat":"not-keep","said":["不用了。别记这个"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-10","lang":"zh","cat":"not-keep","said":["请别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-11","lang":"zh","cat":"not-keep","said":["最好别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-12","lang":"zh","cat":"not-keep","said":["麻烦别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-13","lang":"zh","cat":"not-keep","said":["麻烦别记这个"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-14","lang":"zh","cat":"not-keep","said":["老是别记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-15","lang":"zh","cat":"not-keep","said":["这个别记录下来"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-16","lang":"zh","cat":"not-keep","said":["那个别记录一下"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-not-keep-17","lang":"zh","cat":"not-keep","said":["给你别记录"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-question-01","lang":"zh","cat":"question","said":["能不能删掉？"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-question-02","lang":"zh","cat":"question","said":["能不能删掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-question-03","lang":"zh","cat":"question","said":["你能把我住址那条删了吗？"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-question-04","lang":"zh","cat":"question","said":["你会不会忘掉？"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-question-05","lang":"zh","cat":"question","said":["你删掉了吗？"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-question-06","lang":"zh","cat":"question","said":["没删掉吧"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-question-07","lang":"zh","cat":"question","said":["可以别告诉他吗"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-question-08","lang":"zh","cat":"question","said":["这件事你会告诉别人吗？"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-01","lang":"zh","cat":"negation","said":["别把它删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-02","lang":"zh","cat":"negation","said":["不许删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-03","lang":"zh","cat":"negation","said":["不要再删掉了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-04","lang":"zh","cat":"negation","said":["这条不用删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-05","lang":"zh","cat":"negation","said":["不必删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-06","lang":"zh","cat":"negation","said":["千万别把那条笔记删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-07","lang":"zh","cat":"negation","said":["不需要删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-08","lang":"zh","cat":"negation","said":["无需删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-09","lang":"zh","cat":"negation","said":["无须删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-10","lang":"zh","cat":"negation","said":["毋须删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-11","lang":"zh","cat":"negation","said":["毋庸删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-12","lang":"zh","cat":"negation","said":["我反对删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-13","lang":"zh","cat":"negation","said":["我拒绝删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-14","lang":"zh","cat":"negation","said":["拒绝删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-15","lang":"zh","cat":"negation","said":["免得删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-16","lang":"zh","cat":"negation","said":["休想删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-17","lang":"zh","cat":"negation","said":["勿删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-18","lang":"zh","cat":"negation","said":["请勿删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-19","lang":"zh","cat":"negation","said":["甭删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-20","lang":"zh","cat":"negation","said":["不准删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-21","lang":"zh","cat":"negation","said":["禁止删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-22","lang":"zh","cat":"negation","said":["不该删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-23","lang":"zh","cat":"negation","said":["不应该删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-24","lang":"zh","cat":"negation","said":["不可以删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-25","lang":"zh","cat":"negation","said":["用不着删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-26","lang":"zh","cat":"negation","said":["莫删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-27","lang":"zh","cat":"negation","said":["未删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-negation-28","lang":"zh","cat":"negation","said":["我不是说删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-01","lang":"zh","cat":"remember","said":["别忘了提醒我"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-02","lang":"zh","cat":"remember","said":["别忘了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-03","lang":"zh","cat":"remember","said":["别忘了它"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-04","lang":"zh","cat":"remember","said":["不要忘"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-05","lang":"zh","cat":"remember","said":["不要忘了它"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-06","lang":"zh","cat":"remember","said":["不要忘掉这件事"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-07","lang":"zh","cat":"remember","said":["别记错了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-08","lang":"zh","cat":"remember","said":["不能忘了它"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-09","lang":"zh","cat":"remember","said":["千万不能忘掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-10","lang":"zh","cat":"remember","said":["别再忘了它"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-11","lang":"zh","cat":"remember","said":["我不想忘掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-12","lang":"zh","cat":"remember","said":["特别记一下"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-13","lang":"zh","cat":"remember","said":["特别记住"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-14","lang":"zh","cat":"remember","said":["区别记住"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-15","lang":"zh","cat":"remember","said":["分别记下来"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-16","lang":"zh","cat":"remember","said":["类别记下"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-17","lang":"zh","cat":"remember","said":["级别记一下"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-remember-18","lang":"zh","cat":"remember","said":["辨别记住"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-01","lang":"zh","cat":"mention","said":["我老是忘带钥匙"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-02","lang":"zh","cat":"mention","said":["我不会忘掉的"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-03","lang":"zh","cat":"mention","said":["个别记录有问题"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-04","lang":"zh","cat":"mention","said":["性别记录"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-05","lang":"zh","cat":"mention","said":["识别记号"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-06","lang":"zh","cat":"mention","said":["昨天把照片删了好多"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-mention-07","lang":"zh","cat":"mention","said":["忘年交难得"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-quote-01","lang":"zh","cat":"quote","said":["他说“把那条删掉”"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-quote-02","lang":"zh","cat":"quote","said":["我妈说“忘了吧”，可我忘不了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-quote-03","lang":"zh","cat":"quote","said":["小王让我把他的号码删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-quote-04","lang":"zh","cat":"quote","said":["他说“锁起来”"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-lock-01","lang":"zh","cat":"lock","said":["把住址锁起来"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-02","lang":"zh","cat":"lock","said":["这件事别告诉别人"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-03","lang":"zh","cat":"lock","said":["不要告诉别人"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-04","lang":"zh","cat":"lock","said":["锁进保险箱"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-05","lang":"zh","cat":"lock","said":["放进保险箱"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-06","lang":"zh","cat":"lock","said":["这个要保密"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-07","lang":"zh","cat":"lock","said":["我工资多少你得保密"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-not-01","lang":"zh","cat":"lock-not","said":["门锁上了吗"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-lock-not-02","lang":"zh","cat":"lock-not","said":["我买了个新保险箱"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-lock-not-03","lang":"zh","cat":"lock-not","said":["可以告诉别人"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-lock-not-04","lang":"zh","cat":"lock-not","said":["这不是什么秘密，可以告诉别人"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-lock-not-05","lang":"zh","cat":"lock-not","said":["密码锁坏了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-both-01","lang":"zh","cat":"both","said":["把住址那条删掉，电话那条锁起来"],"expect":{"forget":true,"lock":true}}
+{"id":"zh-both-02","lang":"zh","cat":"both","said":["忘掉喝茶那条，再把住址锁起来"],"expect":{"forget":true,"lock":true}}
+{"id":"zh-retract-01","lang":"zh","cat":"retract","said":["把那条删掉","等等，不用删了"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-retract-02","lang":"zh","cat":"retract","said":["我想想","算了，那条删掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-retract-03","lang":"zh","cat":"retract","said":["这事先别告诉别人","算了，无所谓，告诉谁都行"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-ask-01","lang":"ja","cat":"ask","said":["さっきの住所は消して"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-ask-02","lang":"ja","cat":"ask","said":["忘れて"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-ask-03","lang":"ja","cat":"ask","said":["消して"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-ask-04","lang":"ja","cat":"ask","said":["このことは忘れてください"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-ask-05","lang":"ja","cat":"ask","said":["大阪の件は忘れていいよ"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-ask-06","lang":"ja","cat":"ask","said":["このメモは削除して"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-question-01","lang":"ja","cat":"question","said":["消してもらえる？"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-question-02","lang":"ja","cat":"question","said":["忘れちゃうかな？"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-negation-01","lang":"ja","cat":"negation","said":["削除しないで"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-negation-02","lang":"ja","cat":"negation","said":["消さないでね"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-remember-01","lang":"ja","cat":"remember","said":["忘れないでね"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-remember-02","lang":"ja","cat":"remember","said":["絶対に忘れない"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-mention-01","lang":"ja","cat":"mention","said":["鍵をよく忘れる"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-mention-02","lang":"ja","cat":"mention","said":["忘年会が楽しみ"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-mention-03","lang":"ja","cat":"mention","said":["消しゴムを買った"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-quote-01","lang":"ja","cat":"quote","said":["彼が「それ消して」と言った"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-lock-01","lang":"ja","cat":"lock","said":["これは秘密にして"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-lock-02","lang":"ja","cat":"lock","said":["誰にも言わないで"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-lock-03","lang":"ja","cat":"lock","said":["内緒にしてね"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-lock-04","lang":"ja","cat":"lock","said":["金庫に入れておいて"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-lock-not-01","lang":"ja","cat":"lock-not","said":["秘密基地を作った"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-lock-not-02","lang":"ja","cat":"lock-not","said":["別に秘密じゃないよ"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-mention-04","lang":"ja","cat":"mention","said":["鍵をかけ忘れた"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-retract-01","lang":"ja","cat":"retract","said":["住所は消して","あ、やっぱり消さないで"],"expect":{"forget":false,"lock":false}}
+{"id":"en-ask-01","lang":"en","cat":"ask","said":["delete what I said about my salary"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-02","lang":"en","cat":"ask","said":["Forget it"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-03","lang":"en","cat":"ask","said":["please forget my address"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-04","lang":"en","cat":"ask","said":["forget it, please"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-05","lang":"en","cat":"ask","said":["Forget about it"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-06","lang":"en","cat":"ask","said":["I don't need it, forget it"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-07","lang":"en","cat":"ask","said":["I want to forget it"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-08","lang":"en","cat":"ask","said":["remove the note about my ex"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-09","lang":"en","cat":"ask","said":["please erase what I told you about my rent"],"expect":{"forget":true,"lock":false}}
+{"id":"en-question-01","lang":"en","cat":"question","said":["can you delete that?"],"expect":{"forget":true,"lock":false}}
+{"id":"en-question-02","lang":"en","cat":"question","said":["will you forget this?"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-01","lang":"en","cat":"remember","said":["don’t forget my birthday"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-02","lang":"en","cat":"remember","said":["don't forget my birthday"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-03","lang":"en","cat":"remember","said":["Do not forget it"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-04","lang":"en","cat":"remember","said":["never forget that"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-05","lang":"en","cat":"remember","said":["don't ever forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-06","lang":"en","cat":"remember","said":["Don't you forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-07","lang":"en","cat":"remember","said":["never ever forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-08","lang":"en","cat":"remember","said":["I don’t ever forget it"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-09","lang":"en","cat":"remember","said":["I don't want you to forget this"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-10","lang":"en","cat":"remember","said":["doNOT forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-11","lang":"en","cat":"remember","said":["shouldnt forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-12","lang":"en","cat":"remember","said":["don`t forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-13","lang":"en","cat":"remember","said":["ain't forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-14","lang":"en","cat":"remember","said":["don‘t forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-15","lang":"en","cat":"remember","said":["don′t forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-16","lang":"en","cat":"remember","said":["don＇t forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-remember-17","lang":"en","cat":"remember","said":["lest I forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-negation-01","lang":"en","cat":"negation","said":["don't delete that"],"expect":{"forget":false,"lock":false}}
+{"id":"en-negation-02","lang":"en","cat":"negation","said":["please don't remove my address"],"expect":{"forget":false,"lock":false}}
+{"id":"en-negation-03","lang":"en","cat":"negation","said":["no need to forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-01","lang":"en","cat":"mention","said":["I always forget my keys"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-02","lang":"en","cat":"mention","said":["I keep forgetting names"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-03","lang":"en","cat":"mention","said":["I cannot forget her"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-04","lang":"en","cat":"mention","said":["I can never forget her"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-05","lang":"en","cat":"mention","said":["I cannot  forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-06","lang":"en","cat":"mention","said":["I cant forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-07","lang":"en","cat":"mention","said":["I wont forget it"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-08","lang":"en","cat":"mention","said":["I didnt forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-09","lang":"en","cat":"mention","said":["unable to forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-10","lang":"en","cat":"mention","said":["How could I forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-11","lang":"en","cat":"mention","said":["I hardly forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-12","lang":"en","cat":"mention","said":["I might forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-13","lang":"en","cat":"mention","said":["I tend to forget"],"expect":{"forget":false,"lock":false}}
+{"id":"en-mention-14","lang":"en","cat":"mention","said":["I removed the stain from my shirt"],"expect":{"forget":false,"lock":false}}
+{"id":"en-quote-01","lang":"en","cat":"quote","said":["She said \"delete it\""],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-01","lang":"en","cat":"lock","said":["keep this secret"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-02","lang":"en","cat":"lock","said":["lock it"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-03","lang":"en","cat":"lock","said":["please lock it"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-04","lang":"en","cat":"lock","said":["Lock this"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-05","lang":"en","cat":"lock","said":["lock that one"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-06","lang":"en","cat":"lock","said":["don't tell anyone about my surgery"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-not-01","lang":"en","cat":"lock-not","said":["unlock it"],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-not-02","lang":"en","cat":"lock-not","said":["the clock is wrong"],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-not-03","lang":"en","cat":"lock-not","said":["a lock of hair"],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-not-04","lang":"en","cat":"lock-not","said":["my phone's lock screen is broken"],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-not-05","lang":"en","cat":"lock-not","said":["it's no secret that I love jazz"],"expect":{"forget":false,"lock":false}}
+{"id":"en-lock-not-06","lang":"en","cat":"lock-not","said":["you can tell anyone about my new job"],"expect":{"forget":false,"lock":false}}
+{"id":"en-retract-01","lang":"en","cat":"retract","said":["delete what I said about my salary","actually no, keep it"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-ask-01","lang":"mix","cat":"ask","said":["那个 address 删掉"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-ask-02","lang":"mix","cat":"ask","said":["forget 我说的那个 salary"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-ask-03","lang":"mix","cat":"ask","said":["please 把 Osaka 的事忘掉"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-question-01","lang":"mix","cat":"question","said":["能不能 delete 那条？"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-remember-01","lang":"mix","cat":"remember","said":["别 forget 提醒我"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-negation-01","lang":"mix","cat":"negation","said":["don't 删掉"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-mention-01","lang":"mix","cat":"mention","said":["我总是 forget my keys"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-quote-01","lang":"mix","cat":"quote","said":["他说 “delete it”"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-lock-01","lang":"mix","cat":"lock","said":["把这个 lock 起来"],"expect":{"forget":false,"lock":true}}
+{"id":"mix-lock-02","lang":"mix","cat":"lock","said":["我的 password 别告诉别人"],"expect":{"forget":false,"lock":true}}
+{"id":"mix-lock-03","lang":"mix","cat":"lock","said":["これは秘密 don’t tell anyone"],"expect":{"forget":false,"lock":true}}
+{"id":"mix-lock-04","lang":"mix","cat":"lock","said":["这件事 keep it secret 好吗"],"expect":{"forget":false,"lock":true}}
+{"id":"mix-lock-not-01","lang":"mix","cat":"lock-not","said":["门 lock 坏了"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-both-01","lang":"mix","cat":"both","said":["那条 remove 掉，再 lock 一下住址"],"expect":{"forget":true,"lock":true}}

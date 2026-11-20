@@ -1223,6 +1223,23 @@ describe("fix round 1", () => {
     expect(scope.getByText("已用 10%")).toBeTruthy();
   });
 
+  it("a 409 room_full with `count` when the page does not know how many notes the room holds says the room is full, in general words", async () => {
+    const svc = service({
+      limit: 100,
+      over: {
+        addMemoryNote: vi.fn(async () => {
+          throw apiError(409, "room_full", null, { left: 90, count: true });
+        }),
+      },
+    });
+    await openPalace(svc);
+    const scope = inRoom("关于我");
+    typeInto(scope.getByLabelText("新的笔记"), "一条");
+    await click(scope.getByRole("button", { name: "添加" }));
+    expect(within(room("关于我")).getByRole("alert").textContent).toBe("这个房间装不下了，先删掉或合并几条。");
+    expect(scope.getByText("已用 10%")).toBeTruthy();
+  });
+
   it("新记下的内容 that cannot be read is off and says so with 重试, not 自动判断", async () => {
     const svc = service();
     svc.api.getMe = vi.fn(async () => {

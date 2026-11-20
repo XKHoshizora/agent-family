@@ -575,7 +575,10 @@ describe("the follow-up rulings", () => {
     const big = await seed(w, "owner", "乙".repeat(1900));
     const r = await run(w, [{ op: "remove", ref: "big" }], new Map([["big", ref("owner", big)]]), { rooms });
     await seed(w, "owner", "丙".repeat(200));
-    expect(await undo(w, r!.changeId!, rooms)).toBe("full");
+    // What is said back: the weight really left in the room that cannot take it (not a count refusal).
+    const report: { left?: number; count?: boolean } = {};
+    expect(await db.tx((t) => undoChange(t, w.ownerId, r!.changeId!, rooms, report))).toBe("full");
+    expect(report).toEqual({ left: 2000 - 200, count: false });
     expect((await ownerNotes(w)).map((n) => n.text.length)).toEqual([200]);
     expect((await changeRow(r!.changeId!)).status).toBe("applied");
     await db.query("delete from owner_notes where owner_id = $1", [w.ownerId]);
@@ -946,23 +949,27 @@ describe("a room holds at most roomNotes notes", () => {
     expect((await run(w, [{ op: "add", kind: "owner", text: "more" }], new Map()))!.full).toBe(false);
   });
 
-  it("confirming a pending add that would pass the count answers full and writes nothing", async () => {
+  it("confirming a pending add that would pass the count answers full and writes nothing; it says so, with the weight really left", async () => {
     const w = await world();
     const r = await run(w, [{ op: "add", kind: "owner", text: "waiting" }], new Map(), { status: "pending", rooms: CAP(5) });
     await seed(w, "owner", "x");
     await seed(w, "owner", "y");
-    expect(await confirm(w, r!.changeId!, CAP(2))).toBe("full");
+    const report = { dropped: 0 } as { dropped: number; left?: number; count?: boolean };
+    expect(await db.tx((t) => confirmChange(t, w.ownerId, r!.changeId!, CAP(2), report))).toBe("full");
+    expect(report).toEqual({ dropped: 0, left: 2000 - 2, count: true });
     expect((await ownerNotes(w)).map((n) => n.text).sort()).toEqual(["x", "y"]);
     expect(await confirm(w, r!.changeId!, CAP(3))).not.toBe("full");
   });
 
-  it("undoing a remove that would put the room over the count answers full", async () => {
+  it("undoing a remove that would put the room over the count answers full, and says so with the weight really left", async () => {
     const w = await world();
     const a = await seed(w, "owner", "a");
     await seed(w, "owner", "b");
     const r = await run(w, [{ op: "remove", ref: "n1" }], new Map([["n1", ref("owner", a)]]), { rooms: CAP(2) });
     await seed(w, "owner", "c");
-    expect(await undo(w, r!.changeId!, CAP(2))).toBe("full");
+    const report: { left?: number; count?: boolean } = {};
+    expect(await db.tx((t) => undoChange(t, w.ownerId, r!.changeId!, CAP(2), report))).toBe("full");
+    expect(report).toEqual({ left: 2000 - 2, count: true });
     expect(await undo(w, r!.changeId!, CAP(3))).toBe("undone");
   });
 });

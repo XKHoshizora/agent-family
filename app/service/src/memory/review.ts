@@ -13,21 +13,18 @@ import { cutToWeight, weightOf } from "./weight.ts";
  */
 
 /**
- * What an owner's message may ask for, in three lists (a word that asks to REMEMBER must never open the way to deleting or locking):
- * `REMEMBER` only asks for a review at once; `FORGET` is what lets a `remove` apply at once; `LOCK` is what lets a `lock` apply at once.
- * `EXPLICIT`, their union, is what makes a review run at once. `FORGET` does not match a negated forget or delete, the negation anywhere
- * before it in the same clause (back to the last `，。！？,.!?` or line break), or one that asks to remember (`别忘了它`, `不要忘掉`,
- * `千万别把那条笔记删掉`, `不许删掉`, `不用删掉`, `不必删掉`, `不想忘掉`, `没删掉`, `don't forget`, `I don't want you to forget this`,
- * `never forget`, `I cannot forget`, `doNOT forget`, `I always forget`, `keep forgetting`) nor `别记错`, nor `别记` inside a
- * remember-phrase or a word (`特别记一下`, `区别记住`, `分别记下来`: those are `REMEMBER` only; `个别记录`); `LOCK` matches only a few
- * whole phrases (`lock it`, never `unlock` or `clock`; `锁起来`, never `门锁上了`). Only a fast path: whatever these miss becomes a card the
- * owner confirms.
+ * What an owner's message may ask for, in three lists of bare words. `REMEMBER` only asks for a review at once. `FORGET_WORDS` (忘, 删,
+ * 别记, 不用记, forget, delete, remove, 消して, 削除…) and `LOCK_WORDS` (锁, 保险箱, 别告诉, 保密, lock, secret, 秘密, 内緒…) decide
+ * nothing by themselves: they are the cheap filter before the one question that does (sort.ts `ownerAsked`, the judgement model: did
+ * the owner, in these words, ask to forget or delete something, or to keep something secret?). A window with none of them is never
+ * asked about, and a `remove` or a `lock` of it waits for the owner's yes. They hold no negation and no grammar on purpose (`别忘了`,
+ * `无须删掉`, `the clock` all pass): what the words mean is the judgement's to say, not a list's. `EXPLICIT`, their union, is what makes a
+ * review run at once.
  */
 export const REMEMBER = /记住|记一下|记下来|别忘了|remember|覚えて/i;
-export const FORGET =
-  /(?<!(?:别|不|勿|甭|莫|未|没|无需|禁止|用不着)[^，。！？,.!?\n\r]*)(?:忘掉|忘了它|删掉)|(?<=^|[^\p{Script=Han}]|你|就|先|也|可|还|千万|这个|那个)别记(?!错)|不用记|(?<!(?:\b(?:can|won|didn|doesn|don|couldn|shouldn|wouldn|mustn|needn|isn|aren|wasn|weren|haven|hasn|hadn)['’`]?t|\bnot|\bdonot|\bcannot|\bnever|\balways|\bno need to)[^，。！？,.!?\n\r]*)\bforget\b|忘れて|消して/iu;
-export const LOCK = /锁起来|锁进保险箱|放进保险箱|别告诉别人|不要告诉别人|(?<![a-z])lock (?:it|this|that)\b|秘密にして/i;
-export const EXPLICIT = new RegExp([REMEMBER, FORGET, LOCK].map((r) => r.source).join("|"), "iu");
+export const FORGET_WORDS = /忘|删|刪|别记|別記|不用记|不用記|forget|delete|remove|erase|消して|消す|削除/i;
+export const LOCK_WORDS = /锁|鎖|保险箱|保險箱|金庫|别告诉|別告訴|不要告诉|不要告訴|保密|lock|secret|tell anyone|tell anybody|tell no one|秘密|内緒|ないしょ|誰にも言わ/i;
+export const EXPLICIT = new RegExp([REMEMBER, FORGET_WORDS, LOCK_WORDS].map((r) => r.source).join("|"), "iu");
 
 /** What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote. */
 export const UNSPOKEN = "coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb";
@@ -50,10 +47,12 @@ export interface ReviewInput {
   existing: string[];
   /** The newest message the review covers: reviewed up to here once it is done. */
   upToSeq: number;
-  /** Some owner entry of the review's window asks for something to be forgotten (`FORGET`): what lets a `remove` apply at once. */
-  forget: boolean;
-  /** Some owner entry of the review's window asks for something to be locked (`LOCK`): what lets a `lock` apply at once. */
-  lock: boolean;
+  /** What the owner said in the review's window, oldest first, each entry as the review is shown it: what the judgement is asked about (`ownerAsked`). */
+  said: string[];
+  /** Some owner entry of the window holds a word of forgetting (`FORGET_WORDS`): only then may the judgement be asked whether a `remove` was asked for. */
+  forgetWords: boolean;
+  /** Some owner entry of the window holds a word of locking (`LOCK_WORDS`): only then may the judgement be asked whether a `lock` was asked for. */
+  lockWords: boolean;
   /** When each owner entry of the window was sent: a replace of a note needs one, after the note's last change (and so at least one). */
   ownerAt: Date[];
   /** The owner said something in a later topic than the one reviewed (a review never reaches across a new topic): another review is due after it. */
@@ -214,7 +213,11 @@ export async function readReview(
   });
   const system = reviewSystem(group, todayIn(opts.now, opts.config.siteTimezone), await getMemoryLanguage(q, agent.ownerId));
   const owner = spoken.filter((m) => m.who === "owner");
-  return { input: { system, user, refs, existing, upToSeq: spoken[lastOwner]!.seq, forget: owner.some((m) => FORGET.test(m.text)), lock: owner.some((m) => LOCK.test(m.text)), ownerAt: owner.map((m) => m.at), more }, seen };
+  const said = owner.map((m) => m.text);
+  return {
+    input: { system, user, refs, existing, upToSeq: spoken[lastOwner]!.seq, said, forgetWords: said.some((t) => FORGET_WORDS.test(t)), lockWords: said.some((t) => LOCK_WORDS.test(t)), ownerAt: owner.map((m) => m.at), more },
+    seen,
+  };
 }
 
 /** `readReview`'s input alone: null when there is no owner message to look at. */

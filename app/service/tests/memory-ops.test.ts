@@ -248,8 +248,18 @@ describe("parseOps", () => {
     expect(cleanText(`abcdefghij1234${V}567890abcdefg`)).toBe("abcdefghij1234567890abcdefg");
     expect(cleanText(`é${V}`)).toBe("é");
     expect(cleanText("a\u200Db")).toBe("ab");
-    // What is stored weighs what its cleaned text weighs.
-    for (const text of [...hidden, ...kept]) expect([text, weight(cleanText(ownerNote(text) ?? text))]).toEqual([text, weight(cleanText(text))]);
+    // What is stored weighs what its cleaned text weighs, not what was typed: the cleaning changes every one of these that the owner's
+    // rules keep, and most of them weigh less once cleaned.
+    const stored = hidden.flatMap((text) => {
+      const note = ownerNote(text);
+      return note === null ? [] : [[text, note] as const];
+    });
+    expect(stored.length).toBeGreaterThan(5);
+    for (const [text, note] of stored) {
+      expect([text, note === text]).toEqual([text, false]);
+      expect([text, weight(note)]).toEqual([text, weight(cleanText(text))]);
+    }
+    expect(stored.filter(([text, note]) => weight(note) < weight(text)).length).toBeGreaterThan(5);
   });
 
   it("drops an add whose text repeats an existing or an earlier one once case, spaces and punctuation are ignored", () => {
@@ -331,6 +341,11 @@ describe("parseOps", () => {
       "密码还是 hunter2",
       "密码都是 hunter2",
       "密碼還是 hunter2",
+      // A fullwidth equals sign, and a comma, as a Chinese keyboard types them.
+      "密码＝hunter2",
+      "密碼 ＝ hunter2",
+      "wifi 密码，hunter2",
+      "密码,hunter2",
     ]) expect([text, modelNote(text)]).toEqual([text, null]);
     for (const text of ["我的密码是这个", "from now on call me Sam", "docs at foo.bar/baz"]) expect([text, ownerNote(text)]).toEqual([text, text]);
   });

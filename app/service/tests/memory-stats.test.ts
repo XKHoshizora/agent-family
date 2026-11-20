@@ -142,14 +142,30 @@ describe("a review", () => {
     expect(await stats()).toEqual({ review_run: 1, strength_bump: 1 });
   });
 
-  it("with an explicit request replaces, removes and locks: one count each", async () => {
+  it("with an explicit request replaces, removes and locks: one count each, and the question whether the owner asked: once per statement, one request", async () => {
     const w = await owned("st3");
     await seeded(w.owner, "喜欢鱼香肉丝", false);
     await seeded(w.owner, "住在东门", false);
     await seeded(w.owner, "不吃辣", false);
-    judging(0.95);
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.9, explicit_lock: 0.9 }));
     await sayAndReview(w, "我现在喜欢麻婆豆腐了，住址忘掉吧，不吃辣那条锁起来", ops({ op: "replace", ref: "n1", text: "喜欢麻婆豆腐" }, { op: "remove", ref: "n2" }, { op: "lock", ref: "n3" }));
-    expect(await stats()).toMatchObject({ review_run: 1, note_replaced: 1, note_removed: 1, note_locked: 1 });
+    expect(await stats()).toMatchObject({ review_run: 1, note_replaced: 1, note_removed: 1, note_locked: 1, explicit_asked: 2, explicit_yes: 2, judge_memory_call_explicit: 1 });
+    expect(await stats()).not.toHaveProperty("explicit_no");
+  });
+
+  it("the judgement's no and no answer at all are counted apart; nothing is counted when it is not asked", async () => {
+    const w = await owned("st3b");
+    await seeded(w.owner, "住在东门", false);
+    await seeded(w.owner, "不吃辣", false);
+    // A no for the forget statement; nothing for the lock one.
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.2 }));
+    await sayAndReview(w, "住址忘掉吧，不吃辣那条锁起来", ops({ op: "remove", ref: "n1" }, { op: "lock", ref: "n2" }));
+    expect(await stats()).toEqual({ review_run: 1, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 1 });
+    // No word of forgetting: not asked, nothing counted.
+    const v = await owned("st3c");
+    await seeded(v.owner, "住在东门", false);
+    await sayAndReview(v, "记住我养了猫", ops({ op: "remove", ref: "n1" }));
+    expect(await stats()).toEqual({ review_run: 2, explicit_asked: 2, explicit_no: 1, explicit_no_answer: 1, judge_memory_call_explicit: 1 });
   });
 
   it("whose call fails counts the run and the failure; one that answers garbage is no failure", async () => {

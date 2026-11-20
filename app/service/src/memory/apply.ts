@@ -837,19 +837,35 @@ const undoGrowth = (s: StoredOp): number =>
             ? weight(s.before!) - weightOf(s.parts!)
             : 0;
 
+/** Why a change does not fit, filled in when an undo or a confirm answers `full`: the weight really left in the room that cannot take it, and whether it is the number of its notes that refuses. */
+export interface FullRoom {
+  left?: number;
+  count?: boolean;
+}
+
+/**
+ * Whether a change growing the room of `kind` by `growth` weight and `notes` notes fits; when it does not, `full` says why (`FullRoom`).
+ */
+function fitsRoom(room: { owner: number; self: number }, size: number, kind: NoteKind, growth: number, notes: number, rooms: Rooms, full?: FullRoom): boolean {
+  const tooMany = !fitsCount(size, notes, noteCap(rooms));
+  if (!tooMany && fits(room[kind], growth, roomLimit(rooms, kind))) return true;
+  if (full) Object.assign(full, { left: Math.max(0, roomLimit(rooms, kind) - room[kind]), count: tooMany });
+  return false;
+}
+
 /**
  * Undoes an applied change of the owner's: every note it touched is put back exactly as it was (text, vault state,
  * `vault_by`, `unsure`), an added note goes, a removed one returns (same id). Refused as `stale` (nothing changed) when
- * any touched note is not as the change left it, and as `full` (nothing changed) when restoring would put a room over
+ * any touched note is not as the change left it, and as `full` (nothing changed, `full` says why) when restoring would put a room over
  * its limit. A note that was in the vault before the change is in it after; one the change moved in from outside goes
  * back outside (the stale check proves nothing touched it since). A note is put back with the `updated_at` it had before the
  * change, so changes to one note undo newest first. Null when the change is not the owner's or not applied.
  */
-export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms): Promise<"undone" | "stale" | "full" | null> {
+export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, full?: FullRoom): Promise<"undone" | "stale" | "full" | null> {
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "applied") return null;
-  if (change.hearsay.length > 0) return undoHearsay(t, changeId, change.agentId, change.hearsay, rooms);
+  if (change.hearsay.length > 0) return undoHearsay(t, changeId, change.agentId, change.hearsay, rooms, full);
   const w = { ownerId, agentId: change.agentId };
   const state = await loadState(t, w);
   for (const s of change.ops) {
@@ -864,7 +880,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
     count[s.kind] -= countGrowth(s);
   }
   for (const kind of ["owner", "self"] as const) {
-    if (!fits(room[kind], growth[kind], roomLimit(rooms, kind)) || !fitsCount(state[kind].size, count[kind], noteCap(rooms))) return "full";
+    if (!fitsRoom(room, state[kind].size, kind, growth[kind], count[kind], rooms, full)) return "full";
   }
 
   for (const s of [...change.ops].reverse()) {
@@ -940,7 +956,7 @@ export async function undoChange(t: Tx, ownerId: string, changeId: string, rooms
  * is (presence only: entries are never edited); full when putting the dropped ones back would pass the room. The entries
  * it inserted go, those it dropped return with their ids and times (one whose group is gone stays gone).
  */
-async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: StoredHearsayOp[], rooms: Rooms): Promise<"undone" | "stale" | "full"> {
+async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: StoredHearsayOp[], rooms: Rooms, full?: FullRoom): Promise<"undone" | "stale" | "full"> {
   await lockHearsay(t, agentId);
   const existing = await listHearsayExact(t, agentId);
   const present = new Set(existing.map((e) => e.id));
@@ -948,7 +964,10 @@ async function undoHearsay(t: Tx, changeId: string, agentId: string, ops: Stored
   // An entry whose group is gone cannot come back (restoreHearsay), so it takes no room.
   const alive = new Set((await t.query<{ id: string }>("select id from conversations where id = any($1::uuid[])", [ops.map((s) => s.conversationId)])).rows.map((r) => r.id));
   const growth = ops.reduce((sum, s) => sum + (s.op === "hearsay_add" ? -hearsayCost(s) : alive.has(s.conversationId) ? hearsayCost(s) : 0), 0);
-  if (!fits(hearsayUsed(existing), growth, rooms.hearsay)) return "full";
+  if (!fits(hearsayUsed(existing), growth, rooms.hearsay)) {
+    if (full) Object.assign(full, { left: Math.max(0, rooms.hearsay - hearsayUsed(existing)), count: false });
+    return "full";
+  }
   await deleteHearsay(t, agentId, ops.filter((s) => s.op === "hearsay_add").map((s) => s.hearsayId));
   for (const s of ops) {
     if (s.op === "hearsay_drop") await restoreHearsay(t, agentId, { id: s.hearsayId, conversationId: s.conversationId, speakerId: s.speakerId, speakerName: s.speakerName, text: s.text, saidAt: s.saidAt, createdAt: s.createdAt! });
@@ -1007,9 +1026,9 @@ function refreshPending(state: State, ops: StoredOp[]): void {
  * then applied with only what was done recorded, so its notice and its undo are about that alone. With no add left to apply it is
  * `stale`: the change is discarded and nothing is written. The one code that opens a note nobody else has
  * opened: an `unlock` takes it out of the vault, `vault_by` the owner. When the whole change would put a room over its limit
- * it answers `full` and writes nothing (the change stays pending). Null when the change is not the owner's or not pending.
+ * it answers `full` and writes nothing (the change stays pending; `report` says why, as `FullRoom`). Null when the change is not the owner's or not pending.
  */
-export async function confirmChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, report?: { dropped: number }): Promise<AppliedOp[] | "stale" | "full" | null> {
+export async function confirmChange(t: Tx, ownerId: string, changeId: string, rooms: Rooms, report?: { dropped: number } & FullRoom): Promise<AppliedOp[] | "stale" | "full" | null> {
   await lockAccount(t, ownerId);
   const change = await readChange(t, ownerId, changeId);
   if (!change || change.status !== "pending") return null;
@@ -1033,7 +1052,7 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
     if (s.op !== "unlock") count[s.kind] += countGrowth(s);
   }
   for (const kind of ["owner", "self"] as const) {
-    if (!fits(room[kind], growth[kind], roomLimit(rooms, kind)) || !fitsCount(state[kind].size, count[kind], noteCap(rooms))) return "full";
+    if (!fitsRoom(room, state[kind].size, kind, growth[kind], count[kind], rooms, report)) return "full";
   }
   const done = await execute(t, w, ops.filter((s) => s.op !== "unlock"));
   for (const s of ops) {

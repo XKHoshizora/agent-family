@@ -234,7 +234,7 @@ export interface MemoryConfig {
   faithfulAt: number;
   /**
    * The site's judgement model is asked at most this many times a site day on behalf of one owner's memory (sorting, the duplicate
-   * test, the faithful check, the hearsay pre-check): past it that owner's memory checks are skipped as "no answer", so one heavy
+   * test, the faithful check, the hearsay pre-check, whether the owner asked): past it that owner's memory checks are skipped as "no answer", so one heavy
    * owner can never use up what everyone else's checks need. All owners' memory together stops earlier still, at `judgeShare` of the
    * site's daily limit.
    */
@@ -245,6 +245,12 @@ export interface MemoryConfig {
    * uses up what unasked replies need. Each owner's `judgePerOwnerDay` stays besides.
    */
   judgeShare: number;
+  /**
+   * In the owner's own conversation a review's `remove` or `lock` is applied at once only when the judgement model is at least this sure
+   * that the owner's words in the review's window asked for it (to forget or delete something, to keep something secret); otherwise,
+   * or with no answer, it waits for the owner's yes.
+   */
+  explicitAt: number;
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
   roomNotes: number;
   /**
@@ -306,6 +312,7 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   faithfulAt: probability(0.6),
   judgePerOwnerDay: positive(300, 1_000_000),
   judgeShare: probability(0.5),
+  explicitAt: probability(0.7),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
