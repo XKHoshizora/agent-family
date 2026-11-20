@@ -10,6 +10,15 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
 2. `npm install` then `npm run dev` here. Vite serves `http://127.0.0.1:5273` (port is fixed, `strictPort`) and proxies
    `/api`, WebSocket included, to the service with the Host and Origin headers unchanged.
 
+## Browsers
+
+The bundle needs **Chrome or Edge 111, Firefox 114, Safari or iOS Safari 16.4** or later: the build's target
+(`vite.config.mjs` `build.target`, stated there; Vite 8's own default today). The hard floor comes from the code: the
+mention address pattern (`src/data/mentions.js`, `ADDRESS_PATTERN`) and the Markdown worker's GFM autolinks use a
+RegExp lookbehind, which Safari and iOS have only from 16.4 (Chrome 62, Firefox 78). In an older browser the main
+bundle does not even parse: the page stays blank. Raising the target is a decision; lowering it needs those patterns
+written without lookbehind first.
+
 ## Test and build
 
 - `npm test` runs ESLint and vitest (`tests/`).
@@ -26,9 +35,10 @@ errors and the XSS probe (`support/fixtures.mjs`).
 **Local mode** (default). Global setup builds this client and the service (`npm run build` in both;
 `E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
 `TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced; `E2E_DATABASE` names another,
-which must end in `_e2e` and is created when it does not exist — with its own `E2E_PORT`, a second run beside another;
-unset, nothing changes) and empties every table but
-`pgmigrations`, starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
+lower case, ending in `_e2e`, at most 63 bytes, created when it does not exist — with its own `E2E_PORT`, a second run
+beside another; unset, nothing changes) and empties every table but
+`pgmigrations`. **An existing database of that name is migrated and emptied, whatever it holds**: the suffix is the only
+guard, so never point `E2E_DATABASE` at a database you want to keep. The suite then starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
 speaking OpenAI Chat Completions and Anthropic Messages, streamed, scripted by the specs) and the judgement stub
 (`support/judge-stub.mjs`: a local stand-in for the judgement model of proactive replies, answering by fixed rules on the
 message judged — 川菜 picks the first Agent, 别插话 asks it to be quiet, anything else picks nobody — and recording what it

@@ -11,6 +11,11 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root,
   build: {
+    // The browsers the bundle needs, stated rather than left to Vite's default (which it is today: "baseline widely
+    // available" in Vite 8): Chrome and Edge 111, Firefox 114, Safari and iOS 16.4. The floor is set by what the code
+    // itself uses — the RegExp lookbehind of the mention address pattern (data/mentions.js; Safari 16.4) and of the
+    // Markdown worker's GFM autolinks — and older browsers fail to parse the bundle at all (README "Browsers").
+    target: ["chrome111", "edge111", "firefox114", "safari16.4", "ios16.4"],
     outDir: "dist",
     emptyOutDir: true,
     // The maths fonts (KaTeX's, in the Markdown chunk) are files served from the same origin, never inlined as data:

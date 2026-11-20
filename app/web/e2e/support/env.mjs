@@ -22,17 +22,20 @@ export const BASE_URL = REMOTE ? remoteBase : `http://127.0.0.1:${PORT}`;
 /**
  * The database the local suite owns: `af_e2e`, or the name in `E2E_DATABASE` (a second run beside another, with its own
  * `E2E_PORT`): lower-case, ending in `_e2e` (the e2e service starts on no other, e2e-server.ts), so never af_dev or
- * af_test. Created on the server of TEST_DATABASE_URL when it does not exist yet (system.mjs `freshDatabase`).
+ * af_test, and at most 63 bytes (Postgres would cut a longer name on `create` and then find no database by the whole
+ * one). Created on the server of TEST_DATABASE_URL when it does not exist yet; an existing one is migrated and emptied
+ * (system.mjs `freshDatabase`, README).
  */
 export const E2E_DATABASE = (() => {
   const name = (process.env.E2E_DATABASE ?? "af_e2e").trim();
   if (!/^[a-z0-9_]+_e2e$/.test(name)) throw new Error("E2E_DATABASE must be a lower-case database name ending in _e2e");
+  if (name.length > 63) throw new Error("E2E_DATABASE must be at most 63 characters (Postgres's limit for a name)");
   return name;
 })();
 
 /**
  * The local suite's database URL: the server, role and password of TEST_DATABASE_URL (the environment, else
- * app/service/.env) with the database name replaced by E2E_DATABASE (af_e2e). Never printed. `name`: another database of
+ * app/service/.env) with the database name replaced by E2E_DATABASE (af_e2e by default). Never printed. `name`: another database of
  * that server (the maintenance database `postgres`, to create the suite's own).
  */
 export function e2eDatabaseUrl(name = E2E_DATABASE) {
@@ -121,5 +124,5 @@ export function serviceEnv(extra) {
   return { ...env, ...extra };
 }
 
-/** Environment for the service's CLI (migrate, invite:create, inbox:list, credits:grant) against af_e2e. */
+/** Environment for the service's CLI (migrate, invite:create, inbox:list, credits:grant) against the suite's database. */
 export const cliEnv = () => serviceEnv({ DATABASE_URL: e2eDatabaseUrl() });

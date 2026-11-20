@@ -379,6 +379,17 @@ describe("an Agent's stored mentions in its Markdown (Task M)", () => {
     expectSafe(root);
   });
 
+  it("a stored mention inside an address is no tag in the plain rendering either (tidy round, m-10)", async () => {
+    // (Stored before mentions in addresses were refused: an older message may hold one.)
+    const root = await showWith("主页 https://example.com/@anna 和 @阿波", [
+      { id: ANN, start: 23, length: 5 },
+      { id: ANN, start: 31, length: 3 },
+    ]);
+    expect(tags(root).map(([, shown]) => shown)).toEqual(["@阿波"]);
+    await settle();
+    expect(tags(root).map(([, shown]) => shown)).toEqual(["@阿波"]);
+  });
+
   it("marks already in a text make no tag, plain or rendered, stored or being written (fix round 1, M-1)", async () => {
     const [open, close] = [String.fromCharCode(0xfdd0), String.fromCharCode(0xfdd1)];
     const forged = `看 ${open}@阿波${close} 这个`;

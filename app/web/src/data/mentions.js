@@ -11,20 +11,59 @@ import { MESSAGE_DROPPED } from "../auth/validation.js";
 export const MENTION_LIMIT = 20;
 
 /**
- * The addresses of `text` — a URL (a scheme and `://`, or `www.`, up to white space or `<` `>`) and a Markdown link's
- * target (`](` up to `)` or white space) — as `[start, end)`: a name inside one is not someone addressed (the service's
- * `addressRanges`, agents/mentions.ts; fix round 1, I-3). The same pattern, character for character, as the service's
- * `ADDRESS_PATTERN` (its test compares them): a scheme is tried only where a run of its characters begins, so a long run
- * of letters is passed once — linear in the text (fix round 2, I-4).
+ * An address — a URL (a scheme and `://`, or `www.`, up to white space or `<` `>`) or a Markdown link's target (`](` up
+ * to `)` or white space): a name inside one is not someone addressed (the service's `ADDRESS_PATTERN`,
+ * agents/mentions.ts; fix round 1, I-3). The same pattern, character for character: both test suites assert the shared
+ * table app/shared/address-cases.json. A scheme is tried only where a run of its characters begins, so a long run of
+ * letters is passed once — linear in the text (fix round 2, I-4).
+ *
+ * (The lookbehind needs Safari 16.4 / iOS 16.4, Chrome and Edge 62, Firefox 78; the build's target is the floor, README.)
  */
-const ADDRESS = /(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
-export const addressRanges = (text) => [...String(text ?? "").matchAll(ADDRESS)].map((m) => [m.index, m.index + m[0].length]);
+export const ADDRESS_PATTERN = /(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
+
+/** `[start, end)` of each of `tags` (`{start, length}`). */
+const rangesOf = (tags) => tags.map((t) => [t.start, t.start + t.length]);
 
 /**
- * Whether `[start, start + length)` of `text` is part of an address: right after a `/`, or inside one of `ranges` (the
- * text's `addressRanges`, found once by the caller for all of its mentions).
+ * `text` with every character of `taken` (the tags' ranges, `[start, end)`) as `_`: a tag's own text is never read as an
+ * address — a person named `www.anna` or `a://b` is picked like anyone, the tag is decided by its id (tidy round, m-6) —
+ * while an address that runs into a tag still holds it (`_` is no scheme character, no white space, no `<` `>` `)`).
+ */
+function withTagsHidden(text, taken) {
+  if (taken.length === 0) return text;
+  let out = "";
+  let at = 0;
+  for (const [a, b] of [...taken].sort((x, y) => x[0] - y[0])) {
+    const from = Math.max(a, at);
+    const to = Math.min(b, text.length);
+    if (to <= from) continue;
+    out += text.slice(at, from) + "_".repeat(to - from);
+    at = to;
+  }
+  return out + text.slice(at);
+}
+
+/** The addresses of `text` as `[start, end)`, in order; the text of `taken` (the tags' ranges) is never read as one. */
+export const addressRanges = (text, taken = []) => [...withTagsHidden(String(text ?? ""), taken).matchAll(ADDRESS_PATTERN)].map((m) => [m.index, m.index + m[0].length]);
+
+/**
+ * Whether `[start, start + length)` of `text` is part of an address: right after a `/`, or overlapping one of `ranges`
+ * (the text's `addressRanges`, found once by the caller for all of its mentions). The service's `inAddress` is the same
+ * test (the shared table).
  */
 export const inAddress = (text, start, length, ranges = addressRanges(text)) => text[start - 1] === "/" || ranges.some(([a, b]) => start < b && start + length > a);
+
+/**
+ * `mentions` (`{start, length}`, of `text`) but those in an address (`inAddress`; their own text never read as one):
+ * a stored message's, shown as tags in its plain and its rendered text alike (tidy round, m-10), and the composer's at
+ * send. The same list when none is (and nothing looked for when there are none).
+ */
+export function outsideAddresses(text, mentions) {
+  if (mentions.length === 0) return mentions;
+  const ranges = addressRanges(text, rangesOf(mentions));
+  const kept = mentions.filter((m) => !inAddress(text, m.start, m.length, ranges));
+  return kept.length === mentions.length ? mentions : kept;
+}
 
 const isIndex = (n) => Number.isSafeInteger(n) && n >= 0;
 
@@ -300,14 +339,17 @@ export function capped(state) {
 }
 
 /**
- * The composer's tags that sit in an address — right after a `/`, or inside a URL or a link's target (`inAddress`) — are
- * tags no more: their text stays as it is, which the service reads as part of the address, naming nobody, rather than
- * refusing the message (fix round 2, M-1). `addressed`: their texts. The same state when there are none.
+ * The composer's tags that sit in an address — right after a `/`, or inside a URL or a link's target (`inAddress`; a
+ * tag's own text, `www.anna`, is never read as one: tidy round, m-6) — are tags no more: their text stays as it is,
+ * which the service reads as part of the address, naming nobody, rather than refusing the message (fix round 2, M-1).
+ * `addressed`: their texts. The same state when there are none.
  */
 export function withoutAddressed(state) {
-  const ranges = addressRanges(state.text);
-  const addressed = state.tags.filter((t) => !t.broken && inAddress(state.text, t.start, t.length, ranges));
-  if (addressed.length === 0) return state;
+  const live = state.tags.filter((t) => !t.broken);
+  // (No tags, nothing to look for: m-8.)
+  const kept = outsideAddresses(state.text, live);
+  if (kept === live) return state;
+  const addressed = live.filter((t) => !kept.includes(t));
   return { ...state, tags: state.tags.filter((t) => !addressed.includes(t)), removals: [], addressed: addressed.map((t) => state.text.slice(t.start, t.start + t.length)) };
 }
 
@@ -379,19 +421,16 @@ export function cleanWithMentions(value, tags = []) {
   const lead = cleaned.length - cleaned.trimStart().length;
   const text = cleaned.trim();
   const sorted = [...(Array.isArray(tags) ? tags : [])].filter((t) => t && isIndex(t.start) && isIndex(t.length)).sort((a, b) => a.start - b.start);
-  const mentions = [];
+  const mapped = [];
   let end = 0;
-  const addresses = addressRanges(text);
   for (const tag of sorted) {
-    if (mentions.length === MENTION_LIMIT) break;
     if (tag.start + tag.length > source.length) continue;
     const start = at[tag.start] - lead;
     const stop = at[tag.start + tag.length] - lead;
     if (start < end || stop <= start || stop > text.length || text[start] !== "@") continue;
-    // (One in an address is no mention: the service would refuse it. Fix round 2, M-1.)
-    if (inAddress(text, start, stop - start, addresses)) continue;
-    mentions.push({ id: tag.id, start, length: stop - start });
+    mapped.push({ id: tag.id, start, length: stop - start });
     end = stop;
   }
-  return { text, mentions };
+  // (One in an address is no mention: the service would refuse it. Fix round 2, M-1.)
+  return { text, mentions: outsideAddresses(text, mapped).slice(0, MENTION_LIMIT) };
 }

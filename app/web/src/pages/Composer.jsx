@@ -126,6 +126,8 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     setTold("");
     setStaleNote("");
     setMention(null); setEmojiOpen(false); selection.current={start:0,end:0}; setReplyTo(null);
+    // (A composition the browser never ended does not carry over to another chat: tidy round, m-9.)
+    composition.current = false;
   }, [conv.id]);
   // The box's tags kept to what can be sent: one whose principal is no longer a member here turns into plain text without
   // its @ (so nothing reads it at send); one that came to sit in an address stays as that text, no tag (the service
@@ -270,6 +272,8 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
     const ready = settleEdits(current.current);
     actions.sendText(conv.id, ready.text, { replyToSeq: replyTo?.seq ?? null, mentions: ready.tags.filter(t => !t.broken) });
     picking.current = null;
+    // (The box is empty now: whatever composition was open is over, whether or not the browser says so. m-9.)
+    composition.current = false;
     setDraft({ text: "", tags: [], removals: [] }); saveDraft();
     setStaleNote("");
     selection.current={start:0,end:0};
@@ -358,6 +362,7 @@ export function Composer({ conv, block, replyTo, setReplyTo, sendFiles: sendThro
             onScroll={e=>{if(mirrorRef.current)mirrorRef.current.scrollTop=e.currentTarget.scrollTop;}}
             onCompositionStart={()=>{composition.current=true;}}
             onCompositionEnd={compositionEnded}
+            onBlur={()=>{if(composition.current)compositionEnded();}}
             onClick={e=>settleCaret(e.currentTarget)} onKeyDown={keyDown} onPaste={paste}
             onKeyUp={e=>{const from=keyFrom.current;keyFrom.current=null;if(!e.nativeEvent.isComposing && ["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End","PageUp","PageDown"].includes(e.key))settleCaret(e.currentTarget,from);}}/>
         </div>

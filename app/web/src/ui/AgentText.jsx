@@ -10,7 +10,7 @@
 // the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
-import { mentionsIn } from "../data/mentions.js";
+import { mentionsIn, outsideAddresses } from "../data/mentions.js";
 import { markMentions, withoutMarks, withoutMarksKeeping } from "./mentionMarks.js";
 import { MentionText } from "./MentionText.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
@@ -148,7 +148,8 @@ export const AgentText = memo(function AgentText({ text, id = null, mentions = n
   // keeps none of those in a reply: when it took any out, the mentions are not shown.)
   const unmarked = useMemo(() => withoutMarksKeeping(text, mentions), [text, key]);
   const shown = useMemo(() => withoutBidiControls(unmarked.text), [unmarked]);
-  const tags = useMemo(() => (shown === unmarked.text ? mentionsIn(shown, unmarked.mentions) : []), [shown, unmarked]);
+  // (None inside an address, in the plain text as in the rendered one: tidy round, m-10.)
+  const tags = useMemo(() => (shown === unmarked.text ? outsideAddresses(shown, mentionsIn(shown, unmarked.mentions)) : []), [shown, unmarked]);
   const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
   const mentionIds = useMemo(() => tags.map((t) => t.id), [tags]);
   const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;

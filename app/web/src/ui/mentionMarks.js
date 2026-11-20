@@ -7,7 +7,7 @@
 // (the service stores none there since fix round 1, I-3; an older message may hold one), so no mark ever lands in a link;
 // the worker drops any from an address all the same (markdownPipeline.js `link`). Inside code and maths a mark is only
 // taken out: a mention there is plain text.
-import { addressRanges, inAddress } from "../data/mentions.js";
+import { outsideAddresses } from "../data/mentions.js";
 
 const OPEN = String.fromCharCode(0xfdd0);
 const CLOSE = String.fromCharCode(0xfdd1);
@@ -46,12 +46,12 @@ export function withoutMarksKeeping(text, mentions) {
  */
 export function markMentions(text, mentions) {
   if (!Array.isArray(mentions) || mentions.length === 0) return text;
-  // The text's addresses, found once for all its mentions (fix round 2, I-4).
-  const addresses = addressRanges(text);
+  // The ones in no address (the text's addresses found once for all of them: fix round 2, I-4).
+  const kept = new Set(outsideAddresses(text, mentions));
   let out = "";
   let at = 0;
   mentions.forEach((m, k) => {
-    if (inAddress(text, m.start, m.length, addresses)) return;
+    if (!kept.has(m)) return;
     const from = text[m.start - 1] === "\\" && m.start - 1 >= at ? m.start - 1 : m.start;
     out += `${text.slice(at, from)}${OPEN}${String.fromCharCode(INDEX + k)}${text.slice(from, m.start + m.length)}${CLOSE}`;
     at = m.start + m.length;

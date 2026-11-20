@@ -65,20 +65,46 @@ const chips = (page) => page.locator(".composer-mirror .mention-chip").allTextCo
  * For every tag the composer draws: its boxes (one per line it is on) and the boxes of the same characters as the
  * textarea lays them out — measured with a Range in a clone made from the textarea's own computed style (not the
  * layer's), placed where the textarea is and scrolled as it is. Also the tag's text and where it is in the box's value.
+ *
+ * And against the textarea itself, where a page can see its layout (tidy round, m-3): a second textarea of the same
+ * style and width, no height, gives by its scrollHeight how many lines a text takes in a textarea's own layout — of the
+ * whole value (`lines.textarea`), against a div of the same style (`lines.div`: the clone's layout, which the tags are
+ * checked against); and, for a tag followed by white space or nothing (where a line may break), of the value up to the
+ * tag's end: the line the tag ends on in the textarea (`textareaEndLine`), against the line its last drawn box is on
+ * (`drawnEndLine`).
  */
 function measureTags() {
   const box = document.querySelector(".composer textarea");
   const mirror = document.querySelector(".composer-mirror");
   const cs = getComputedStyle(box);
-  const clone = document.createElement("div");
-  for (const p of [
+  const STYLE = [
     "boxSizing", "width", "height", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth",
     "borderBottomWidth", "borderLeftWidth", "borderTopStyle", "borderRightStyle", "borderBottomStyle", "borderLeftStyle", "fontFamily",
     "fontSize", "fontWeight", "fontStyle", "fontVariant", "fontStretch", "fontKerning", "fontFeatureSettings", "lineHeight", "letterSpacing",
     "wordSpacing", "textIndent", "textTransform", "tabSize", "whiteSpace", "overflowWrap", "wordBreak", "lineBreak", "direction", "textAlign",
     "scrollbarWidth", "scrollbarGutter", "overflowX", "overflowY",
-  ]) clone.style[p] = cs[p];
+  ];
+  const clone = document.createElement("div");
+  for (const p of STYLE) clone.style[p] = cs[p];
   const at = box.getBoundingClientRect();
+  const lineHeight = parseFloat(cs.lineHeight);
+  const pads = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
+  // The probes: no height (their scrollHeight is their text's), with a scroll bar exactly when the box has one.
+  const bar = box.offsetWidth - box.clientWidth - parseFloat(cs.borderLeftWidth) - parseFloat(cs.borderRightWidth) > 0.5;
+  const probe = (tag) => {
+    const el = document.createElement(tag);
+    for (const p of STYLE) el.style[p] = cs[p];
+    Object.assign(el.style, { position: "fixed", left: "0px", top: "0px", height: "0px", minHeight: "0px", maxHeight: "none", overflowY: bar ? "scroll" : "hidden", visibility: "hidden", zIndex: "-1" });
+    document.body.append(el);
+    return el;
+  };
+  const area = probe("textarea");
+  const flat = probe("div");
+  const linesOf = (el) => Math.round((el.scrollHeight - pads) / lineHeight);
+  area.value = box.value;
+  flat.textContent = `${box.value}\u200b`;
+  const lines = { textarea: linesOf(area), div: linesOf(flat) };
+  const contentTop = at.top + parseFloat(cs.borderTopWidth) + parseFloat(cs.paddingTop) - box.scrollTop;
   Object.assign(clone.style, { position: "fixed", left: `${at.left}px`, top: `${at.top}px`, margin: "0", visibility: "hidden", zIndex: "-1" });
   // (The textarea keeps a line for its caret after a final line break; so does the layer, with the same character.)
   clone.textContent = `${box.value}\u200b`;
@@ -104,23 +130,42 @@ function measureTags() {
       const range = document.createRange();
       range.setStart(textNode, offset);
       range.setEnd(textNode, offset + text.length);
-      tags.push({ text, start: offset, same: box.value.slice(offset, offset + text.length) === text, drawn: rects(node.getClientRects()), laid: rects(range.getClientRects()) });
+      const drawn = rects(node.getClientRects());
+      const end = offset + text.length;
+      let textareaEndLine = null;
+      if (!/\S/.test(box.value[end] ?? "")) {
+        area.value = box.value.slice(0, end);
+        textareaEndLine = linesOf(area) - 1;
+      }
+      const last = drawn.at(-1);
+      const drawnEndLine = last ? Math.floor((last.y + last.h / 2 - contentTop) / lineHeight) : null;
+      tags.push({ text, start: offset, same: box.value.slice(offset, end) === text, drawn, laid: rects(range.getClientRects()), textareaEndLine, drawnEndLine });
     }
     offset += text.replace(/\u200b$/, "").length;
   }
   clone.remove();
-  return { tags, scrollTop: box.scrollTop, mirrorScrollTop: mirror.scrollTop, boxTop: at.top, lineHeight: parseFloat(cs.lineHeight) };
+  area.remove();
+  flat.remove();
+  return { tags, lines, scrollTop: box.scrollTop, mirrorScrollTop: mirror.scrollTop, boxTop: at.top, lineHeight };
 }
 
 /**
  * Every drawn tag lies on its own characters: the same text, the same number of line boxes, and each box within 1.5 px
- * of the characters' box (x, y, width, height). Resolves with the measurement.
+ * of the characters' box (x, y, width, height); the textarea's own layout takes as many lines as the div's, and each tag
+ * that can be checked so ends on the line of the textarea it is drawn on. First the layer has scrolled with the box (a
+ * condition waited for, within one device pixel). Resolves with the measurement.
  */
 async function expectTagsAligned(page, label) {
+  await expect
+    .poll(() => page.evaluate(() => Math.abs(document.querySelector(".composer textarea").scrollTop - document.querySelector(".composer-mirror").scrollTop) <= 1 / devicePixelRatio), {
+      message: `${label}: the layer scrolled with the box`,
+    })
+    .toBe(true);
   const m = await page.evaluate(measureTags);
   expect(m.tags.length, `${label}: tags drawn`).toBeGreaterThan(0);
-  expect(m.mirrorScrollTop, `${label}: the layer scrolled with the box`).toBeCloseTo(m.scrollTop, 0);
+  expect(m.lines.textarea, `${label}: lines in the textarea's own layout and in the div's`).toBe(m.lines.div);
   for (const tag of m.tags) {
+    if (tag.textareaEndLine !== null) expect(tag.drawnEndLine, `${label}: ${tag.text} ends on the textarea's line`).toBe(tag.textareaEndLine);
     expect(tag.same, `${label}: ${tag.text} is drawn over the same characters`).toBe(true);
     expect(tag.drawn.length, `${label}: ${tag.text} line boxes`).toBe(tag.laid.length);
     tag.drawn.forEach((d, i) => {
@@ -203,12 +248,10 @@ test("each tag is drawn exactly over its characters: one line, wrapped, split ac
   await box.evaluate((el) => {
     el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2);
   });
-  await page.waitForTimeout(100);
   await expectTagsAligned(page, "scrolled to the middle");
   await box.evaluate((el) => {
     el.scrollTop = 0;
   });
-  await page.waitForTimeout(100);
   await expectTagsAligned(page, "scrolled to the top");
 
   // Phone width: the phone's type and padding for both.
@@ -393,6 +436,23 @@ test("an IME composition inside a tag keeps what was composed and takes the tag;
   // What was composed is sent as it stood (Chrome commits it when the box loses focus); no piece of the tag is.
   expect(last.text).toBe("再见 zai");
   expect(last.mentions ?? null).toBeNull();
+
+  // 发送 clicked without the box losing focus (as a tap that keeps the keyboard up does), the composition still open:
+  // the send itself cuts what is left of the tag (Composer.jsx send, tidy round m-4), and sends what was composed.
+  await box.click();
+  await page.keyboard.type("再来 ");
+  await pick(page, bo.displayName);
+  await box.evaluate((el) => el.setSelectionRange(5, 5));
+  await composing(["l", "lai"]);
+  await chatPane(page, title).getByRole("button", { name: "发送", exact: true }).dispatchEvent("click");
+  expect(await page.evaluate(() => document.activeElement?.tagName)).toBe("TEXTAREA");
+  await expect(messageList(chatPane(page, title)).locator("li.msg.mine[data-msg^='m']").filter({ hasText: "再来" })).toHaveCount(1);
+  const again = (await storedMessages(ann, groupId)).at(-1);
+  expect(again.text).toBe("再来 lai");
+  expect(again.mentions ?? null).toBeNull();
+  // The composition the browser still holds is given up: the box stays empty.
+  await ime.send("Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 });
+  await expect(box).toHaveValue("");
 });
 
 // --- 5. what is sent ------------------------------------------------------------------------------------------------

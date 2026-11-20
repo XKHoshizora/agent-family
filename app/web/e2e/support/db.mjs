@@ -1,10 +1,10 @@
-// Direct changes to the local suite's own database (af_e2e) for what no person can do in the app, such as a message
-// sent yesterday. Local mode only; the connection is refused unless it really is af_e2e.
+// Direct changes to the local suite's own database (E2E_DATABASE, af_e2e by default) for what no person can do in the
+// app, such as a message sent yesterday. Local mode only; the connection is refused unless it really is that database.
 import { createRequire } from "node:module";
 import path from "node:path";
 import { E2E_DATABASE, REMOTE, SERVICE_DIR, e2eDatabaseUrl } from "./env.mjs";
 
-/** Runs `work(client)` on a connection to af_e2e; resolves with what it returns. */
+/** Runs `work(client)` on a connection to the suite's database; resolves with what it returns. */
 async function withDatabase(work) {
   if (REMOTE) throw new Error("the database is reachable only in the local suite");
   const pg = createRequire(path.join(SERVICE_DIR, "package.json"))("pg");
