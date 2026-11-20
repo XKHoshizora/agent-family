@@ -384,6 +384,43 @@ describe("the proactive replies' configuration", () => {
   });
 });
 
+describe("the tools configuration", () => {
+  const defaults = { enabled: true, maxRounds: 8, maxPoints: 20, searchPerReply: 6, filePerReply: 4, resultMaxWeight: 3000, runTimeoutMs: 300_000 };
+
+  test("unset or empty: every default", () => {
+    expect(loadConfig(base).tools).toEqual(defaults);
+    expect(loadConfig({ ...base, TOOLS: "" }).tools).toEqual(defaults);
+    expect(loadConfig({ ...base, TOOLS: "{}" }).tools).toEqual(defaults);
+  });
+
+  test("an override keeps the rest; tools can be turned off", () => {
+    expect(loadConfig({ ...base, TOOLS: '{"maxRounds":3,"resultMaxWeight":500}' }).tools).toEqual({ ...defaults, maxRounds: 3, resultMaxWeight: 500 });
+    expect(loadConfig({ ...base, TOOLS: '{"enabled":false}' }).tools).toEqual({ ...defaults, enabled: false });
+    expect(loadConfig({ ...base, TOOLS: '{"runTimeoutMs":1000}' }).tools.runTimeoutMs).toBe(1000);
+  });
+
+  test("a count that is not a whole number of at least 1, a time out of range, an unknown key and bad JSON refuse", () => {
+    for (const bad of [
+      '{"maxRounds":0}',
+      '{"maxRounds":1.5}',
+      '{"maxRounds":51}',
+      '{"maxPoints":0}',
+      '{"searchPerReply":0}',
+      '{"filePerReply":-1}',
+      '{"resultMaxWeight":0}',
+      '{"runTimeoutMs":999}',
+      '{"runTimeoutMs":3600001}',
+      '{"enabled":"yes"}',
+      '{"maxRounds":"8"}',
+      '{"nope":1}',
+      "[]",
+      "nope",
+    ]) {
+      expect(() => loadConfig({ ...base, TOOLS: bad }), bad).toThrow(/TOOLS/);
+    }
+  });
+});
+
 describe("the memory configuration", () => {
   const defaults = {
     model: null,

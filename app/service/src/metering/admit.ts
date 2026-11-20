@@ -158,3 +158,39 @@ export async function admitRun(
   ]);
   return admission;
 }
+
+/**
+ * Extension: a reply that offers tools makes a call per round (agents/runtime/worker.ts), and before each call after its
+ * first the hold of its run — admitted on a site model, still running, its row locked by the caller — is set to the
+ * first of `wanted` (each what the reply has cost so far and the most its next call can cost) that its owner can hold:
+ * no more than the run holds already, or no more than what is left of the run's own pool (its `charge_to`: today's free
+ * allowance, the balance, or the memory allowance) by admission's headroom (`headroom`, `memoryLeft`: what is left less
+ * what running calls hold), this run's own hold not counted against it. Its index in `wanted`, or null when none can be
+ * held — the hold is then left as it is. Never another pool than admission chose. Under the owner's account lock (lock
+ * order: the run's row, then the account).
+ */
+export async function raiseHold(
+  t: Tx,
+  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "memory">,
+  run: { id: string; ownerId: string; chargeTo: ChargeTo; holdMicro: bigint },
+  wanted: readonly bigint[],
+  now: Date,
+): Promise<number | null> {
+  const account = await lockAccount(t, run.ownerId);
+  let left: bigint;
+  if (run.chargeTo === "memory") {
+    left = (await memoryLeft(t, config, run.ownerId, now)) + run.holdMicro;
+  } else {
+    const per = headroom({
+      freeDailyMicro: config.freeDailyMicro,
+      freeUsedMicro: await freeUsedToday(t, run.ownerId, now, config.siteTimezone),
+      balanceMicro: account.balanceMicro,
+      holds: await readHolds(t, run.ownerId),
+    });
+    left = (run.chargeTo === "free" ? per.freeMicro : per.balanceMicro) + run.holdMicro;
+  }
+  const which = wanted.findIndex((hold) => hold <= run.holdMicro || hold <= left);
+  if (which < 0) return null;
+  await t.query("update agent_runs set hold_micro = $2 where id = $1", [run.id, wanted[which]!.toString()]);
+  return which;
+}

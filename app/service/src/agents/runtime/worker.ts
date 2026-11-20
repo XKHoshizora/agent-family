@@ -1,12 +1,33 @@
-import { ModelError, type ModelGateway } from "../../models/gateway.ts";
+import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
+import { CONTEXT_HEADROOM, estimateTokens, holdTokens, weightWithin } from "../../metering/tokens.ts";
+import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
-import { BUSY, isRunEnd, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Prepared, type Reply, type RunEnd, type RunErrorCode, type RunTicket, type Usage } from "./port.ts";
+import { cutResult, FINAL_LINE, fitsSchema, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
+import {
+  BUSY,
+  isRunEnd,
+  NOTHING,
+  RunNotRunning,
+  UNAVAILABLE,
+  type AgentPort,
+  type Estimated,
+  type Prepared,
+  type Reply,
+  type RunEnd,
+  type RunErrorCode,
+  type RunTicket,
+  type ToolOutcome,
+  type ToolRun,
+  type Usage,
+} from "./port.ts";
 import { ReplyStream } from "./stream.ts";
 
 /**
  * The reply worker (README "Agents and runs"): claims queued replies, calls the model, streams the reply to the owner
- * and posts it, all through `AgentPort`. It runs in the service's process; it never holds a database transaction open
- * across a model call (begin, post and finish are each their own).
+ * and posts it, all through `AgentPort`. A reply that offers tools calls the model round by round, runs the calls it
+ * makes through the port between them, and ends its tool phase with one last call that may call none (`toolReply`). It
+ * runs in the service's process; it never holds a database transaction open across a model call (begin, post, extend
+ * and finish are each their own).
  */
 
 /** How often the worker looks for queued replies besides being woken by a trigger. */
@@ -52,7 +73,16 @@ export interface WorkerOptions {
   /** False: no background loop; replies run only through `runOnce` / `drain` (tests drive the worker by hand). */
   background: boolean;
   log: WorkerLog;
+  /** What bounds a reply that offers tools (`TOOLS`); default the configuration's defaults. */
+  tools?: ToolLimits;
 }
+
+/**
+ * The site's bounds of a reply's tool rounds: at most `maxRounds` rounds that call tools, each result cut to
+ * `resultMaxWeight`, the whole reply within `runTimeoutMs` (each model call and each tool also within `runTimeoutMs` of
+ * `WorkerOptions`, `AGENT_RUN_TIMEOUT_MS`).
+ */
+export type ToolLimits = Pick<ToolsConfig, "maxRounds" | "resultMaxWeight" | "runTimeoutMs">;
 
 export interface AgentWorker {
   /** Starts the background loop (when there is one). */
@@ -77,6 +107,81 @@ export interface AgentWorker {
 
 type Interruption = "stop" | "timeout" | "shutdown";
 
+/** How a model round finished: its usage, whether it was cut at its limit, the tools it called and its assistant turn. */
+interface Finished {
+  usage: Usage | null;
+  truncated: boolean;
+  toolCalls: ToolCall[];
+  assistant: unknown;
+  toolsRefused: boolean;
+}
+
+/** One model round as the worker saw it end. */
+interface Round {
+  /** Its finish — or, for a failure the upstream reported usage for (`thinking_exhausted`), that usage, as cut; else null. */
+  finished: Finished | null;
+  failure: RunErrorCode | null;
+  /** A failure's upstream HTTP status, when the upstream answered with one. */
+  status?: number;
+  why: Interruption | null;
+  /** Whether the model was called at all: a stop, pause or close before it means no call was made. */
+  opened: boolean;
+}
+
+/** A reply that can make no further call: what it wrote stands, as cut. */
+const CUT_SHORT: Finished = { usage: null, truncated: true, toolCalls: [], assistant: [], toolsRefused: false };
+
+/** A reply's spend could not be held for another call, and it wrote nothing. */
+const NO_QUOTA: RunEnd = { status: "failed", error: "no_quota" };
+
+/**
+ * What a reply's rounds used, for its one settlement: each round's reported usage and its estimate (`Estimated`). The
+ * usage is the rounds' sum, or null when there is no round or any round reported none — settlement then counts the
+ * estimates' sum.
+ */
+class Meter {
+  private readonly rounds: Array<{ usage: Usage | null; input: number; output: number }> = [];
+
+  add(usage: Usage | null, input: number, output: number): void {
+    this.rounds.push({ usage, input, output });
+  }
+
+  usage(): Usage | null {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const { usage } of this.rounds) {
+      if (usage === null) return null;
+      inputTokens += usage.inputTokens;
+      outputTokens += usage.outputTokens;
+    }
+    return this.rounds.length === 0 ? null : { inputTokens, outputTokens };
+  }
+
+  estimated(): Estimated {
+    return { inputChars: this.rounds.reduce((n, r) => n + r.input, 0), outputChars: this.rounds.reduce((n, r) => n + r.output, 0) };
+  }
+}
+
+/** `promise`, or `signal`'s reason as soon as it aborts (a rejection of `promise` after that is nobody's). */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  promise.catch(() => {});
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => (signal.removeEventListener("abort", onAbort), resolve(v)),
+      (e: unknown) => (signal.removeEventListener("abort", onAbort), reject(e)),
+    );
+  });
+}
+
+/** What goes between two rounds' text (or reasoning) in a reply: a paragraph break after visible text, none at its start. */
+function gapAfter(so: string): string {
+  if (!hasVisibleText(so) || so.endsWith("\n\n")) return "";
+  return so.endsWith("\n") ? "\n" : "\n\n";
+}
+
 export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const { port, models, log, maxRunsInFlight } = opts;
   const inFlight = new Set<Promise<void>>();
@@ -89,7 +194,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   let again = false;
   let timer: NodeJS.Timeout | null = null;
 
-  async function finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
+  async function finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: Estimated): Promise<void> {
     try {
       await port.finish(run, end, usage, fallback);
     } catch (err) {
@@ -119,8 +224,17 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
   const ended = (posted: "posted" | "refused" | "failed", ok: RunEnd): RunEnd =>
     posted === "posted" ? ok : posted === "refused" ? { status: "cancelled" } : BUSY;
 
-  /** Streams the model's answer to the owner; how the stream ended and what it produced. */
-  async function call(run: RunTicket, prepared: Prepared, shutdown: AbortSignal) {
+  /**
+   * One model call (`request` and an abort signal of its own), what the model says going to `say` as it comes: how it
+   * ended. It is abandoned at once when the owner stops the reply, after `timeoutMs`, and when the service closes.
+   */
+  async function call(
+    run: RunTicket,
+    request: Omit<ModelCall, "signal">,
+    say: (kind: "text" | "reasoning", delta: string) => void,
+    shutdown: AbortSignal,
+    timeoutMs: number,
+  ): Promise<Round> {
     const controller = new AbortController();
     let why: Interruption | null = null;
     const interrupt = (reason: Interruption): void => {
@@ -130,28 +244,29 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     };
     const onShutdown = () => interrupt("shutdown");
     const stopCheck = setInterval(() => port.shouldStop(run) && interrupt("stop"), STOP_CHECK_MS);
-    const deadline = setTimeout(() => interrupt("timeout"), opts.runTimeoutMs);
+    const deadline = setTimeout(() => interrupt("timeout"), timeoutMs);
     stopCheck.unref();
     deadline.unref();
     shutdown.addEventListener("abort", onShutdown, { once: true });
     if (shutdown.aborted) interrupt("shutdown");
     if (port.shouldStop(run)) interrupt("stop");
 
-    const out = new ReplyStream((delta) => port.emit(run, delta));
-    let finished: { usage: Usage | null; truncated: boolean } | null = null;
+    let finished: Finished | null = null;
     let failure: RunErrorCode | null = null;
-    /** Whether the model was called at all: a stop, pause or close before it means no call was made. */
+    let status: number | undefined;
     let opened = false;
     try {
       if (why === null) {
         opened = true;
-        for await (const event of models.stream({ ...prepared.call, signal: controller.signal })) {
+        for await (const event of models.stream({ ...request, signal: controller.signal })) {
           if (event.type === "finish") {
-            finished = { usage: event.usage, truncated: event.truncated };
+            const { usage, truncated, toolCalls, assistant } = event;
+            finished = { usage, truncated, toolCalls, assistant, toolsRefused: event.toolsRefused === true };
             break;
           }
-          if (event.type === "tool_call") continue; // the call offers no tools: none comes
-          out.add(event.type, event.delta);
+          // Acted on at the finish, which alone says whether the round was cut (a call offering no tools gets none).
+          if (event.type === "tool_call") continue;
+          say(event.type, event.delta);
           if (port.shouldStop(run)) {
             interrupt("stop");
             break;
@@ -162,10 +277,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       if (why === null) {
         failure = err instanceof ModelError ? err.code : "provider_unavailable";
         // A failure the upstream reported usage for (`thinking_exhausted`: the model did finish) is charged that usage.
-        if (err instanceof ModelError && err.usage) finished = { usage: err.usage, truncated: true };
+        if (err instanceof ModelError && err.usage) finished = { usage: err.usage, truncated: true, toolCalls: [], assistant: [], toolsRefused: false };
         if (!(err instanceof ModelError)) log.error({ err, runId: run.id }, "agent run: the model call failed unexpectedly");
         // An upstream that refused (429) or failed (5xx) is counted: an operator reads how often from the log.
-        const status = err instanceof ModelError ? err.upstreamStatus : undefined;
+        status = err instanceof ModelError ? err.upstreamStatus : undefined;
         if (status !== undefined && (status === 429 || status >= 500)) log.info({ metric: "upstream_refused", status }, "agent run: the upstream refused the call");
       }
     } finally {
@@ -173,7 +288,109 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       clearTimeout(deadline);
       shutdown.removeEventListener("abort", onShutdown);
     }
-    return { out, finished, failure, why: why as Interruption | null, opened };
+    return { finished, failure, ...(status === undefined ? {} : { status }), why: why as Interruption | null, opened };
+  }
+
+  /**
+   * One tool call through the port. Its signal aborts when the owner stops the reply, the service closes, the reply's
+   * time is up (`deadline`), or the tool has taken `runTimeoutMs` (`AGENT_RUN_TIMEOUT_MS`); a tool that ignores it is
+   * not waited for. `outcome` null: it failed or took too long (the call is answered `UNUSABLE`); `interrupted`: the
+   * reply itself ends. A failure is logged by its kind only, never its message.
+   */
+  async function runTool(
+    run: RunTicket,
+    toolCall: ToolCall,
+    shutdown: AbortSignal,
+    deadline: number,
+  ): Promise<{ outcome: ToolOutcome | null; interrupted: Interruption | null }> {
+    const controller = new AbortController();
+    let why: Interruption | "slow" | null = null;
+    const abort = (reason: Interruption | "slow"): void => {
+      if (why !== null) return;
+      why = reason;
+      controller.abort(new Error(`agent tool interrupted: ${reason}`));
+    };
+    const onShutdown = () => abort("shutdown");
+    const stopCheck = setInterval(() => port.shouldStop(run) && abort("stop"), STOP_CHECK_MS);
+    const slow = setTimeout(() => abort("slow"), opts.runTimeoutMs);
+    const late = setTimeout(() => abort("timeout"), Math.max(0, deadline - Date.now()));
+    stopCheck.unref();
+    slow.unref();
+    late.unref();
+    shutdown.addEventListener("abort", onShutdown, { once: true });
+    if (shutdown.aborted) abort("shutdown");
+    try {
+      return { outcome: await untilAborted(port.tool(run, toolCall, controller.signal), controller.signal), interrupted: null };
+    } catch (err) {
+      const reason = why as Interruption | "slow" | null;
+      if (reason === null) log.error({ runId: run.id, tool: toolCall.name, failure: err instanceof Error ? err.name : typeof err }, "agent run: a tool failed");
+      if (reason === "slow") log.warn({ runId: run.id, tool: toolCall.name, metric: "tool_timeout" }, "agent run: a tool took too long and was abandoned");
+      return { outcome: null, interrupted: reason === null || reason === "slow" ? null : reason };
+    } finally {
+      clearInterval(stopCheck);
+      clearTimeout(slow);
+      clearTimeout(late);
+      shutdown.removeEventListener("abort", onShutdown);
+    }
+  }
+
+  /** `AgentPort.toolsUnusable`, whose failure only the log hears of: the reply goes on without the tools either way. */
+  async function toolsUnusable(run: RunTicket, why: "refused" | "garbled"): Promise<void> {
+    try {
+      await port.toolsUnusable(run, why);
+    } catch (err) {
+      log.error({ err, runId: run.id, why }, "agent run: could not record that its model cannot use the tools");
+    }
+  }
+
+  /**
+   * The end of a reply once its model has stopped — after its one call, or the last round of several (`last`): what it
+   * said is posted, or the run fails, and it is settled on `usage`, else `fallback` (`failedFallback` when the run fails).
+   * `noAnswer`: how a reply that said nothing fails when it did not fail otherwise.
+   */
+  async function conclude(
+    run: RunTicket,
+    out: ReplyStream,
+    last: Pick<Round, "finished" | "failure" | "why">,
+    usage: Usage | null,
+    fallback: Estimated,
+    failedFallback: Estimated,
+    noAnswer: RunEnd = UNAVAILABLE,
+  ): Promise<void> {
+    const { finished, failure, why } = last;
+    // The service is closing: nothing is posted, and the run is ended here as recovery would end it (no charge).
+    if (finished === null && why === "shutdown") {
+      out.discard();
+      return release(run);
+    }
+    out.end();
+    const failed = (end: RunEnd) => finish(run, end, usage, failedFallback);
+    if (failure !== null) return failed({ status: "failed", error: failure });
+    // The upstream ended the stream without its finish (cut off midway).
+    if (finished === null && why === null) return failed(UNAVAILABLE);
+
+    const text = cleanModelText(out.text);
+    const reasoning = cleanModelText(out.reasoning);
+    const said = hasVisibleText(text) || hasVisibleText(reasoning);
+    // In a group `post` takes the run's mark out of what is kept of the reply (the port keeps the mark from `begin`), and
+    // a reply that was nothing but the mark and labels is then "empty". Nothing of a group's reply was streamed
+    // (`AgentPort.emit`).
+    if (finished === null && why === "stop") {
+      // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
+      if (!said) return finish(run, { status: "stopped" }, usage, fallback);
+      const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
+      // All it said was inside a persona block it never finished (in a group, also: it only thought, or said only the
+      // mark and labels): as a stop with nothing said.
+      if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
+      return finish(run, ended(posted, { status: "stopped" }), usage, fallback);
+    }
+    // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
+    if (!said) return failed(noAnswer);
+    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
+    // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, or said only the
+    // mark and labels): as an answer that said nothing.
+    if (posted === "empty") return failed(noAnswer);
+    return finish(run, ended(posted, { status: "done" }), usage, fallback);
   }
 
   async function execute(run: RunTicket): Promise<void> {
@@ -201,46 +418,235 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       return finish(run, BUSY, null, NOTHING);
     }
     if (isRunEnd(prepared)) return finish(run, prepared, null, NOTHING);
+    if (prepared.tools.length > 0 && prepared.toolRun !== null) return toolReply(run, prepared, prepared.toolRun, shutdown);
 
-    const { out, finished, failure, why, opened } = await call(run, prepared, shutdown);
-    // The service is closing: nothing is posted, and the run is ended here as recovery would end it (no charge).
-    if (finished === null && why === "shutdown") {
-      out.discard();
-      return release(run);
-    }
-    out.end();
-
-    const usage = finished?.usage ?? null;
+    // A reply that offers no tools: one call, as before tools existed.
+    const out = new ReplyStream((delta) => port.emit(run, delta));
+    const round = await call(run, prepared.call, (kind, delta) => out.add(kind, delta), shutdown, opts.runTimeoutMs);
+    const usage = round.finished?.usage ?? null;
     // A call never made (a stop or pause landed between `begin` and it) costs nothing, not even its input.
-    const fallback = opened ? { inputChars: prepared.inputChars, outputChars: out.outputChars() } : NOTHING;
+    const fallback = round.opened ? { inputChars: prepared.inputChars, outputChars: out.outputChars() } : NOTHING;
     // A failed call is charged only what the upstream reported: what it said is discarded and not counted.
-    const failed = (end: RunEnd) => finish(run, end, usage, { ...fallback, outputChars: 0 });
-    if (failure !== null) return failed({ status: "failed", error: failure });
-    // The upstream ended the stream without its finish (cut off midway).
-    if (finished === null && why === null) return failed(UNAVAILABLE);
+    return conclude(run, out, round, usage, fallback, { ...fallback, outputChars: 0 });
+  }
 
-    const text = cleanModelText(out.text);
-    const reasoning = cleanModelText(out.reasoning);
-    const said = hasVisibleText(text) || hasVisibleText(reasoning);
-    // In a group `post` takes the run's mark out of what is kept of the reply (the port keeps the mark from `begin`), and
-    // a reply that was nothing but the mark and labels is then "empty". Nothing of a group's reply was streamed
-    // (`AgentPort.emit`).
-    if (finished === null && why === "stop") {
-      // Stopped by its owner (or by a pause or delete, which `post` and `finish` find out): what was said so far.
-      if (!said) return finish(run, { status: "stopped" }, usage, fallback);
-      const posted = await post(run, { text, reasoning, stopped: true, truncated: false });
-      // All it said was inside a persona block it never finished (in a group, also: it only thought, or said only the
-      // mark and labels): as a stop with nothing said.
-      if (posted === "empty") return finish(run, { status: "stopped" }, usage, fallback);
-      return finish(run, ended(posted, { status: "stopped" }), usage, fallback);
+  /**
+   * A reply that offers tools (README "Agents and runs", Tools in a reply). Round by round, the model is called with the
+   * tools and, after the first round, every round so far (`steps`); a round that calls none is the answer. Each call of
+   * a round that called tools is answered, in order, by its place in the round (never by its id), with its own id and
+   * name as it came:
+   * - garbled — a tool not offered, an input null or one the tool's schema refuses (`fitsSchema`), or any call of a round
+   *   cut at its limit (its input may be cut) — is not run: `UNUSABLE`; the reply's second marks the tools unusable;
+   * - a repeat (`LoopGuard`) is answered `REPEATED`, a call over its tool's count `OVER_CAP`, neither run;
+   * - anything else runs through the port (`runTool`), its output cut (`cutResult`) to `resultMaxWeight` and to what the
+   *   model's context has left for the rounds (`room`: what the plan's limit leaves beside the planned input, the tools'
+   *   definitions and the last call's line, at the plan's ratio).
+   * Then the port holds what the next call can cost (`extend`; its bound: the call's text, the tools and every step at
+   * their bytes, as admission holds a call). The tool phase ends — the next call is the last: the same tools and steps,
+   * `toolChoice` `none`, the system text with `FINAL_LINE` — after `maxRounds` such rounds, a call made a third time, the
+   * second garbled call, once the steps have filled the room, or when `extend` says "final"; a tool call that comes in
+   * the last round is not run, and no call follows. An upstream that refused the tools (the first round): they are marked
+   * unusable, and that round's text is the answer. A later round the upstream refuses (400 or 422: something in the
+   * rounds it will not take) is followed, once, by the ordinary call — no tools, no rounds, its cost held first — whose
+   * answer is the reply's. `extend` saying "stop" ends the reply with what it wrote, as cut (nothing written:
+   * `no_quota`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
+   * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
+   * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
+   * paragraph break. One settlement: the rounds' summed usage, or with any round unreported their summed estimates (the
+   * conversation's, plus the tools and the steps it carried, at the model's ratio; what it wrote, its calls included); a
+   * round that failed counts only the usage its upstream reported. Only counts and outcome classes are logged.
+   */
+  async function toolReply(run: RunTicket, prepared: Prepared, bounds: ToolRun, shutdown: AbortSignal): Promise<void> {
+    const limits = opts.tools ?? DEFAULT_TOOLS;
+    const deadline = Date.now() + limits.runTimeoutMs;
+    const tools = [...prepared.tools];
+    const offered = new Map(tools.map((t) => [t.name, t]));
+    const toolsText = JSON.stringify(tools);
+    const texts = prepared.call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
+    const room =
+      Math.floor((bounds.contextTokens - prepared.call.maxOutputTokens) * (1 - CONTEXT_HEADROOM)) -
+      bounds.planned -
+      estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio);
+    const guard = new LoopGuard({ maxRounds: limits.maxRounds, perTool: bounds.perTool });
+    const out = new ReplyStream((delta) => port.emit(run, delta));
+    const meter = new Meter();
+    const steps: Array<{ assistant: unknown; results: ToolResult[] }> = [];
+    let stepsTokens = 0;
+    const tally = { rounds: 0, calls: 0, ran: 0, repeats: 0, over: 0, garbled: 0, failed: 0, plain: false };
+    let final = false;
+    /** The upstream refused a later round: the reply is asked for once more as one without tools (`prepared.call`). */
+    let plain = false;
+    let unusable = false;
+    let active = false;
+    const quiet = (): void => {
+      if (!active) return;
+      active = false;
+      port.activity(run, null);
+    };
+    /** What ends the reply now, between two rounds or two tool calls. */
+    const interrupted = (): Interruption | null =>
+      shutdown.aborted ? "shutdown" : port.shouldStop(run) ? "stop" : Date.now() >= deadline ? "timeout" : null;
+    /** The port's word on the next call, whose input is held at `nextInput`; failing to get it is our trouble (`BUSY`). */
+    const extend = async (nextInput: number): Promise<"ok" | "final" | "stop" | "busy"> => {
+      try {
+        return await port.extend(run, meter.usage(), meter.estimated(), nextInput + bounds.fixedTokens);
+      } catch (err) {
+        log.error({ err, runId: run.id }, "agent run: could not hold what its next call can cost; it ends with what it wrote");
+        return "busy";
+      }
+    };
+    let ending: { last: Pick<Round, "finished" | "failure" | "why">; noAnswer?: RunEnd };
+
+    for (;;) {
+      const now = interrupted();
+      if (now !== null) {
+        ending = { last: { finished: null, failure: null, why: now } };
+        break;
+      }
+      if (final || plain) quiet();
+      const request: Omit<ModelCall, "signal"> = plain
+        ? prepared.call
+        : {
+            ...prepared.call,
+            ...(final ? { system: withFinalLine(prepared.call.system), toolChoice: "none" as const } : {}),
+            tools,
+            ...(steps.length > 0 ? { steps: [...steps] } : {}),
+          };
+      const said = { text: "", reasoning: "" };
+      const gap = { text: gapAfter(out.text), reasoning: gapAfter(out.reasoning) };
+      const round = await call(
+        run,
+        request,
+        (kind, delta) => {
+          if (gap[kind] !== "") out.add(kind, gap[kind]);
+          gap[kind] = "";
+          said[kind] += delta;
+          out.add(kind, delta);
+        },
+        shutdown,
+        Math.max(0, Math.min(opts.runTimeoutMs, deadline - Date.now())),
+      );
+      const { finished } = round;
+      const input = plain
+        ? prepared.inputChars
+        : prepared.inputChars + estimateTokens(toolsText + (steps.length > 0 ? JSON.stringify(steps) : "") + (final ? `\n\n${FINAL_LINE}` : ""), bounds.ratio);
+      if (round.failure !== null) {
+        // A failed round counts only what its upstream reported.
+        if (finished?.usage) meter.add(finished.usage, input, 0);
+        // A later round the upstream refused (400, 422: something in the rounds it will not take, which nothing of ours can
+        // mend): once, the reply is asked for as one that offers no tools, from the conversation alone, its cost held first.
+        if (steps.length > 0 && !plain && (round.status === 400 || round.status === 422)) {
+          const next = await extend(holdTokens([prepared.call.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
+          if (next === "stop" || next === "busy") {
+            ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
+            break;
+          }
+          plain = true;
+          tally.plain = true;
+          continue;
+        }
+        ending = { last: round };
+        break;
+      }
+      if (finished === null) {
+        // Interrupted (stop, time, close: what it wrote counts), or cut off by the upstream (failed: nothing does).
+        if (round.why !== null && round.opened) meter.add(null, input, estimateTokens(said.text) + estimateTokens(said.reasoning));
+        ending = { last: round };
+        break;
+      }
+      const calls = finished.toolCalls.length > 0 ? estimateTokens(JSON.stringify(finished.toolCalls)) : 0;
+      meter.add(finished.usage, input, estimateTokens(said.text) + estimateTokens(said.reasoning) + calls);
+      if (finished.toolsRefused && !final) {
+        // Its upstream refused the tools: this round's text is the answer, and nothing more is called.
+        await toolsUnusable(run, "refused");
+        ending = { last: round };
+        break;
+      }
+      // An answer; or the last round, whose tool calls are not run.
+      if (final || plain || finished.toolCalls.length === 0) {
+        ending = { last: round };
+        break;
+      }
+
+      guard.roundDone();
+      tally.rounds++;
+      const results: ToolResult[] = [];
+      let left = room - stepsTokens - estimateTokens(JSON.stringify({ assistant: finished.assistant, results: [] }), bounds.planRatio);
+      let cut: Interruption | null = null;
+      for (const toolCall of finished.toolCalls) {
+        cut = interrupted();
+        if (cut !== null) break;
+        tally.calls++;
+        const spec = toolCall.input === null ? undefined : offered.get(toolCall.name);
+        let output: unknown;
+        if (finished.truncated || spec === undefined || !fitsSchema(toolCall.input, spec.parameters)) {
+          tally.garbled++;
+          output = { error: UNUSABLE };
+        } else {
+          const admitted = guard.admit(toolCall);
+          if (admitted === "repeat") {
+            tally.repeats++;
+            output = { note: REPEATED };
+          } else if (admitted === "over") {
+            tally.over++;
+            output = { note: OVER_CAP };
+          } else {
+            const ran = await runTool(run, toolCall, shutdown, deadline);
+            if (ran.interrupted !== null) {
+              cut = ran.interrupted;
+              break;
+            }
+            if (ran.outcome === null) {
+              tally.failed++;
+              output = { error: UNUSABLE };
+            } else {
+              tally.ran++;
+              active = true;
+              port.activity(run, ran.outcome.activity);
+              const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), bounds.planRatio);
+              try {
+                output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), bounds.planRatio)));
+              } catch {
+                // Not JSON (a port's bug): nothing of it goes to the model.
+                tally.failed++;
+                output = { error: UNUSABLE };
+              }
+            }
+          }
+        }
+        const result: ToolResult = { id: toolCall.id, name: toolCall.name, output };
+        results.push(result);
+        left -= estimateTokens(JSON.stringify(result), bounds.planRatio);
+      }
+      if (cut !== null) {
+        ending = { last: { finished: null, failure: null, why: cut } };
+        break;
+      }
+      const step = { assistant: finished.assistant, results };
+      steps.push(step);
+      stepsTokens += estimateTokens(JSON.stringify(step), bounds.planRatio);
+      if (tally.garbled >= 2 && !unusable) {
+        unusable = true;
+        await toolsUnusable(run, "garbled");
+      }
+
+      // What the next call can cost, held before it is made: its text, the tools and every step at their bytes (the last
+      // call's line included, whichever it is), its images and PDFs at their constants, and its whole output. When no
+      // further call can be made, what the reply wrote stands, as cut.
+      const next = await extend(
+        holdTokens([withFinalLine(prepared.call.system), ...texts, toolsText, JSON.stringify(steps)], bounds.contextTokens, prepared.call.maxOutputTokens),
+      );
+      if (next === "stop" || next === "busy") {
+        ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
+        break;
+      }
+      final = next === "final" || guard.exhausted() || guard.mustEnd() || unusable || stepsTokens >= room;
     }
-    // A complete answer, or one cut off by the time limit (posted as truncated). Nothing said: failed.
-    if (!said) return failed(UNAVAILABLE);
-    const posted = await post(run, { text, reasoning, stopped: false, truncated: finished === null || finished.truncated });
-    // All it said was inside a persona block that a limit cut off (in a group, also: it only thought, or said only the
-    // mark and labels): as an answer that said nothing, failed `provider_unavailable`.
-    if (posted === "empty") return failed(UNAVAILABLE);
-    return finish(run, ended(posted, { status: "done" }), usage, fallback);
+
+    quiet();
+    log.info({ metric: "tool_rounds", runId: run.id, ...tally, final }, "agent run: its tool rounds");
+    const estimate = meter.estimated();
+    return conclude(run, out, ending.last, meter.usage(), estimate, estimate, ending.noAnswer);
   }
 
   function track(run: RunTicket): Promise<void> {

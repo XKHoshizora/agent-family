@@ -701,6 +701,34 @@ export async function refusedAtAdmission(
 }
 
 /**
+ * Between two rounds of a reply that offers tools (`DbAgentPort.extend`, under the run's conversation row, its Agent's
+ * and its own): whether what the reply has cost so far (`extra`, not settled yet) reaches a budget its lane is held to,
+ * counted with what is settled — then no further round may call tools:
+ * - `others`: the Agent's others' daily budget (`othersBudgetSpent`'s count; nobody is told: the reply goes on to its
+ *   last call);
+ * - `proactive`: its proactive daily budget;
+ * - in a group, a reply that covers messages after the group's latest from a person (one in an Agents' chain, counted
+ *   toward the chain budget: `chargedSince`): the Agent's chain budget there.
+ * A budget of null is none.
+ */
+export async function budgetReachedWith(
+  t: Tx,
+  run: { conversationId: string; lane: Lane; coversSeq: number },
+  agent: Pick<AgentRow, "id" | "conversationId" | "othersBudgetMicro" | "proactiveBudgetMicro" | "chainBudgetMicro">,
+  extra: bigint,
+  config: Pick<Config, "siteTimezone">,
+): Promise<boolean> {
+  if (run.lane === "others" || run.lane === "proactive") {
+    const budget = run.lane === "others" ? agent.othersBudgetMicro : agent.proactiveBudgetMicro;
+    const spent = (await spentTodayOf(t, [agent.id], siteToday(config))).get(agent.id)?.[run.lane] ?? 0n;
+    if (budget !== null && spent + extra >= budget) return true;
+  }
+  if (run.conversationId === agent.conversationId) return false;
+  const human = await latestHumanSeq(t, run.conversationId);
+  return run.coversSeq > human && (await chargedSince(t, agent.id, run.conversationId, human)) + extra >= agent.chainBudgetMicro;
+}
+
+/**
  * A person's message in a group (plan rulings 6–8): no handle in its text (`mentionedHandles`; a file's caption is its
  * text) → nothing, not even a query. Otherwise one query finds the group's current Agent members with those handles
  * whose owner and the sender have no block between them, in either direction (`blocks`, read as a send reads it and

@@ -401,6 +401,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     maxRunsInFlight: config.agentMaxRunsInFlight,
     background: options.agentWorker !== false,
     log: app.log,
+    tools: config.tools,
   });
   agentPort.onQueued(() => agentWorker.wake());
   app.decorate("agentPort", agentPort);

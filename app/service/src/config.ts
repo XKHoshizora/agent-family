@@ -169,6 +169,45 @@ const proactiveSchema = z.strictObject({
 });
 
 /**
+ * What bounds a reply's tools (`TOOLS`; README "Agents and runs", Tools in a reply); every number is a site setting with
+ * this default.
+ */
+export interface ToolsConfig {
+  /** False: no reply is offered any tool (src/agents/port-impl.ts `begin`: `Prepared.tools` is always empty). */
+  enabled: boolean;
+  /** Rounds one reply may run tools in; then one last call answers, calling none (src/agents/runtime/worker.ts). */
+  maxRounds: number;
+  /**
+   * Whole points one reply may spend before it must answer: no tool round is started that could take it past this
+   * (src/agents/port-impl.ts `extend`), so a reply costs at most this and its one last call.
+   */
+  maxPoints: number;
+  /** Calls of the search tool, and of the file tool, one reply may run; further ones are answered with a fixed note. */
+  searchPerReply: number;
+  filePerReply: number;
+  /** The most one tool result weighs (metering/tokens.ts `weight`) when it goes back to the model; more is cut, and marked so. */
+  resultMaxWeight: number;
+  /**
+   * How long a reply that offers tools may take in all, its rounds and its tools, in ms (each model call and each tool
+   * also within `AGENT_RUN_TIMEOUT_MS`); a reply that offers none is held to `AGENT_RUN_TIMEOUT_MS` alone, as before.
+   */
+  runTimeoutMs: number;
+}
+
+const toolsSchema = z.strictObject({
+  enabled: z.boolean().default(true),
+  maxRounds: positive(8, 50),
+  maxPoints: positive(20, 100_000),
+  searchPerReply: positive(6, 1000),
+  filePerReply: positive(4, 1000),
+  resultMaxWeight: positive(3000, 100_000),
+  runTimeoutMs: z.number().int().min(1000).max(3_600_000).default(300_000),
+});
+
+/** `TOOLS` unset: every default. */
+export const DEFAULT_TOOLS: Readonly<ToolsConfig> = Object.freeze(toolsSchema.parse({}));
+
+/**
  * What an Agent's memory is tuned by (`MEMORY`); every number is a site setting with this default (the plan's Numbers;
  * tuned and recorded in the last tasks). Sizes are in weight (memory/weight.ts: ceil(utf-8 bytes / 3), about a token), times in milliseconds.
  */
@@ -450,6 +489,8 @@ const envSchema = z.object({
   PROACTIVE: jsonVariable(proactiveSchema, proactiveSchema.parse({})),
   /** JSON object of an Agent's memory tunings (see MemoryConfig); every field optional, unset or empty: all defaults. */
   MEMORY: jsonVariable(memorySchema, memorySchema.parse({})),
+  /** JSON object of what bounds a reply's tools (see ToolsConfig); every field optional, unset or empty: all defaults. */
+  TOOLS: jsonVariable(toolsSchema, toolsSchema.parse({})),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -574,6 +615,8 @@ export interface Config {
   proactive: ProactiveConfig;
   /** The memory tunings. */
   memory: MemoryConfig;
+  /** What bounds a reply's tools. */
+  tools: ToolsConfig;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -725,6 +768,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     judge: e.JUDGE,
     proactive: e.PROACTIVE,
     memory: e.MEMORY,
+    tools: e.TOOLS,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

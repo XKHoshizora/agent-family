@@ -1,0 +1,658 @@
+import { describe, expect, it } from "vitest";
+import { LoopGuard } from "../src/agents/runtime/loop.ts";
+import type { Activity, AgentPort, Delta, Estimated, Prepared, Reply, RunEnd, RunTicket, ToolOutcome, ToolRun, Usage } from "../src/agents/runtime/port.ts";
+import { createAgentWorker, type ToolLimits, type WorkerLog } from "../src/agents/runtime/worker.ts";
+import { CONTEXT_HEADROOM, estimateTokens, weight } from "../src/metering/tokens.ts";
+import type { ModelCall, ModelEvent, ModelGateway, ToolCall, ToolSpec } from "../src/models/gateway.ts";
+import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
+
+/**
+ * The tool loop of a reply (agents/runtime/worker.ts, loop.ts): the worker calls the model with the tools it is offered,
+ * runs the calls the model makes through the port, hands their results back in the next round, and ends the tool phase
+ * — by its caps, a repeat, garbled calls, a full context, or the port's word on money — with one last call that may call
+ * no tool. Here against a port in memory (no database) and the scripted gateway.
+ */
+
+// The fixed sentences, as the product says them.
+const REPEATED = "这个已经查过了，结果和上次一样。请用已经查到的内容回答。";
+const OVER_CAP = "这类查询这次回复里不能再用了。";
+const UNUSABLE = "这个请求无法执行。";
+const FINAL_LINE = "你已经不能再查了，请用上面查到的内容直接回答。";
+const CUT_MARK = "…（结果太长，后面的省略了）";
+
+const SEARCH: ToolSpec = {
+  name: "search",
+  description: "Search this conversation's messages.",
+  parameters: { type: "object", properties: { query: { type: "string" }, limit: { type: "integer" } }, required: ["query"], additionalProperties: false },
+};
+const READ: ToolSpec = {
+  name: "read_file",
+  description: "Read a file shared here.",
+  parameters: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false },
+};
+const TOOLS = [SEARCH, READ];
+const SYSTEM = "你是一个助手。";
+const LIMITS: ToolLimits = { maxRounds: 8, resultMaxWeight: 3000, runTimeoutMs: 300_000 };
+
+const U = (inputTokens: number, outputTokens: number): Usage => ({ inputTokens, outputTokens });
+
+interface Fake {
+  port: AgentPort;
+  prepared: Prepared;
+  ticket: RunTicket;
+  deltas: Delta[];
+  posted: Reply[];
+  finished: Array<{ end: RunEnd; usage: Usage | null; fallback: Estimated }>;
+  tools: ToolCall[];
+  extends: Array<{ spent: Usage | null; estimated: Estimated; next: number }>;
+  activities: Array<Activity | null>;
+  unusable: Array<"refused" | "garbled">;
+  released: number;
+  stop(): void;
+}
+
+interface FakeOptions {
+  tools?: ToolSpec[];
+  perTool?: Record<string, number>;
+  toolRun?: Partial<ToolRun>;
+  inputChars?: number;
+  call?: Partial<Omit<ModelCall, "signal">>;
+  /** How a tool call runs (default: its input echoed back as the search's hits). */
+  tool?: (call: ToolCall, signal: AbortSignal, fake: Fake) => Promise<ToolOutcome>;
+  /** What `extend` answers (default "ok"). */
+  extend?: (n: number, fake: Fake) => Promise<"ok" | "final" | "stop"> | "ok" | "final" | "stop";
+}
+
+/** A port in memory: one run, prepared with `options`, recording everything the worker does with it. */
+function fakePort(options: FakeOptions = {}): Fake {
+  const ticket: RunTicket = { id: "run-1", agentId: "agent-1", ownerId: "owner-1", conversationId: "conv-1" };
+  const tools = options.tools ?? TOOLS;
+  const prepared: Prepared = {
+    call: {
+      protocol: "openai_chat",
+      baseUrl: "https://api.example.test/v1",
+      apiKey: "not-a-real-key",
+      model: "m-1",
+      system: SYSTEM,
+      messages: [{ role: "user", parts: [{ type: "text", text: "附近有什么好吃的？" }] }],
+      reasoning: "none",
+      maxOutputTokens: 1000,
+      ...options.call,
+    },
+    inputChars: options.inputChars ?? 120,
+    tools,
+    toolRun:
+      tools.length === 0
+        ? null
+        : { perTool: options.perTool ?? {}, contextTokens: 100_000, fixedTokens: 0, ratio: 1, planRatio: 1, planned: 120, ...options.toolRun },
+  };
+  let claimed = false;
+  let stopped = false;
+  const fake: Fake = {
+    ticket,
+    prepared,
+    deltas: [],
+    posted: [],
+    finished: [],
+    tools: [],
+    extends: [],
+    activities: [],
+    unusable: [],
+    released: 0,
+    stop: () => void (stopped = true),
+    port: {
+      claimNext: async () => (claimed ? null : ((claimed = true), ticket)),
+      begin: async () => prepared,
+      emit: (_run, delta) => void fake.deltas.push(delta),
+      post: async (_run, reply) => {
+        fake.posted.push(reply);
+        return "posted";
+      },
+      finish: async (_run, end, usage, fallback) => void fake.finished.push({ end, usage, fallback }),
+      release: async () => void fake.released++,
+      shouldStop: () => stopped,
+      tool: async (_run, call, signal) => {
+        fake.tools.push(call);
+        return options.tool ? options.tool(call, signal, fake) : { output: { hits: [call.input] }, activity: call.name === READ.name ? "file" : "search" };
+      },
+      extend: async (_run, spent, estimated, next) => {
+        fake.extends.push({ spent, estimated, next });
+        return options.extend ? options.extend(fake.extends.length, fake) : "ok";
+      },
+      activity: (_run, activity) => void fake.activities.push(activity),
+      toolsUnusable: async (_run, why) => void fake.unusable.push(why),
+    },
+  };
+  return fake;
+}
+
+/** What the worker logged. */
+function recordingLog(): WorkerLog & { lines: unknown[] } {
+  const lines: unknown[] = [];
+  const at = (level: string) => (details: Record<string, unknown>, msg: string) => void lines.push({ level, details, msg });
+  return { lines, info: at("info"), warn: at("warn"), error: at("error") };
+}
+
+/** Runs the fake's one run to its end on `gateway`. */
+async function runOn(fake: Fake, gateway: Pick<ModelGateway, "stream">, over: { runTimeoutMs?: number; tools?: Partial<ToolLimits>; log?: WorkerLog } = {}) {
+  const worker = createAgentWorker({
+    port: fake.port,
+    models: gateway,
+    runTimeoutMs: over.runTimeoutMs ?? 120_000,
+    maxRunsInFlight: 1,
+    background: false,
+    log: over.log ?? recordingLog(),
+    tools: { ...LIMITS, ...over.tools },
+  });
+  expect(await worker.runOnce()).toBe(true);
+}
+
+const stepsOf = (call: ModelCall) => call.steps ?? [];
+const resultsOf = (call: ModelCall, step: number) => stepsOf(call)[step]!.results;
+const outputsOf = (call: ModelCall, step: number) => resultsOf(call, step).map((r) => r.output);
+const isFinal = (call: ModelCall) => call.toolChoice === "none" && call.system === `${SYSTEM}\n\n${FINAL_LINE}`;
+const finishedAs = (fake: Fake) => fake.finished.map((f) => f.end);
+
+describe("LoopGuard", () => {
+  const call = (name: string, input: unknown, id = "x"): ToolCall => ({ id, name, input });
+
+  it("runs a call the first time; the same name and input again is a repeat, the third time ends the tool phase", () => {
+    const guard = new LoopGuard({ maxRounds: 8, perTool: {} });
+    expect(guard.admit(call("search", { query: "川菜", limit: 3 }))).toBe("run");
+    expect(guard.mustEnd()).toBe(false);
+    // The same input in another key order, under another id: the same call.
+    expect(guard.admit(call("search", { limit: 3, query: "川菜" }, "y"))).toBe("repeat");
+    expect(guard.mustEnd()).toBe(false);
+    expect(guard.admit(call("search", { query: "川菜", limit: 3 }))).toBe("repeat");
+    expect(guard.mustEnd()).toBe(true);
+    // Another input, or another tool with the same input, is another call.
+    expect(guard.admit(call("search", { query: "湘菜", limit: 3 }))).toBe("run");
+    expect(guard.admit(call("read_file", { query: "川菜", limit: 3 }))).toBe("run");
+    // Nested objects are compared by their contents too.
+    expect(guard.admit(call("search", { query: "x", where: { a: 1, b: [1, { c: 2, d: 3 }] } }))).toBe("run");
+    expect(guard.admit(call("search", { where: { b: [1, { d: 3, c: 2 }], a: 1 }, query: "x" }))).toBe("repeat");
+  });
+
+  it("over a tool's own count a new call is refused; a repeat stays a repeat; a tool with no count of its own has only the round cap", () => {
+    const guard = new LoopGuard({ maxRounds: 8, perTool: { search: 2 } });
+    expect(guard.admit(call("search", { query: "a" }))).toBe("run");
+    expect(guard.admit(call("search", { query: "b" }))).toBe("run");
+    expect(guard.admit(call("search", { query: "c" }))).toBe("over");
+    expect(guard.admit(call("search", { query: "a" }))).toBe("repeat");
+    for (let i = 0; i < 20; i++) expect(guard.admit(call("read_file", { name: `f${i}` }))).toBe("run");
+    // A count is looked up as the tool's own: a name that is a property of every object has none.
+    const plain = new LoopGuard({ maxRounds: 8, perTool: {} });
+    for (const name of ["constructor", "__proto__", "toString", "hasOwnProperty"]) expect(plain.admit(call(name, { query: "a" }))).toBe("run");
+  });
+
+  it("is exhausted once maxRounds rounds are done", () => {
+    const guard = new LoopGuard({ maxRounds: 3, perTool: {} });
+    for (let i = 0; i < 3; i++) {
+      expect(guard.exhausted()).toBe(false);
+      guard.roundDone();
+    }
+    expect(guard.exhausted()).toBe(true);
+  });
+});
+
+describe("a reply that offers tools", () => {
+  it("answers after one tool round: the call runs once through the port, its result goes back with the call's own id and name, and the reply is posted", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "川菜" } }], { usage: U(300, 20) }).reply("去吃川菜吧。", { usage: U(400, 30) });
+    const fake = fakePort();
+    await runOn(fake, gateway);
+
+    expect(gateway.calls).toHaveLength(2);
+    const [first, second] = gateway.calls as [ModelCall, ModelCall];
+    expect(first.tools).toEqual(TOOLS);
+    expect(first).not.toHaveProperty("steps");
+    expect(first).not.toHaveProperty("toolChoice");
+    expect(first.system).toBe(SYSTEM);
+    expect(first.messages).toEqual(fake.prepared.call.messages);
+    expect(fake.tools).toEqual([{ id: expect.any(String), name: "search", input: { query: "川菜" } }]);
+    expect(second.tools).toEqual(TOOLS);
+    expect(second).not.toHaveProperty("toolChoice");
+    expect(resultsOf(second, 0)).toEqual([{ id: fake.tools[0]!.id, name: "search", output: { hits: [{ query: "川菜" }] } }]);
+    expect(fake.posted).toEqual([{ text: "去吃川菜吧。", reasoning: "", stopped: false, truncated: false }]);
+    // One settlement, on the rounds' summed usage.
+    expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(700, 50), fallback: expect.any(Object) }]);
+    // The port was asked about money once, between the rounds, with what the first round cost.
+    expect(fake.extends).toHaveLength(1);
+    expect(fake.extends[0]!.spent).toEqual(U(300, 20));
+    // What the tool did, then the end of the tool phase.
+    expect(fake.activities).toEqual(["search", null]);
+    expect(fake.unusable).toEqual([]);
+  });
+
+  it("text written before a tool call is kept in the reply, streamed as it came, and the next round's text follows it", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "川菜" } }], { text: "我先查一下。", reasoning: "要查记录。" })
+      .reply("查到了：去吃川菜。", { reasoning: "找到了。" });
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    const text = "我先查一下。\n\n查到了：去吃川菜。";
+    expect(fake.posted).toEqual([{ text, reasoning: "要查记录。\n\n找到了。", stopped: false, truncated: false }]);
+    expect(fake.deltas.map((d) => d.text ?? "").join("")).toBe(text);
+    expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+  });
+
+  it("8 rounds of distinct calls: a 9th call that may call no tool, with the same tools, every step and the fixed line, and its reply is posted", async () => {
+    const gateway = scriptedGateway();
+    for (let i = 0; i < 8; i++) gateway.callTools([{ name: "search", input: { query: `第${i}次` } }], { usage: U(100, 10) });
+    gateway.reply("查了很多，结论是川菜。", { usage: U(100, 10) });
+    const fake = fakePort();
+    await runOn(fake, gateway);
+
+    expect(gateway.calls).toHaveLength(9);
+    expect(gateway.calls.slice(0, 8).every((c) => !isFinal(c) && c.system === SYSTEM)).toBe(true);
+    const last = gateway.calls[8]!;
+    expect(isFinal(last)).toBe(true);
+    expect(last.tools).toEqual(TOOLS);
+    expect(stepsOf(last)).toHaveLength(8);
+    expect(fake.tools).toHaveLength(8);
+    expect(fake.posted.map((p) => p.text)).toEqual(["查了很多，结论是川菜。"]);
+    expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(900, 90), fallback: expect.any(Object) }]);
+    expect(fake.extends).toHaveLength(8);
+    expect(fake.activities.at(-1)).toBe(null);
+    expect(fake.activities.filter((a) => a === null)).toHaveLength(1);
+  });
+
+  it("the same call three times: run once, the second answered with the fixed note, the third ends the tool phase", async () => {
+    const same = { name: "search", input: { query: "川菜" } };
+    const gateway = scriptedGateway().callTools([same]).callTools([same]).callTools([same]).reply("就是川菜。");
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(4);
+    expect(fake.tools).toHaveLength(1);
+    expect(outputsOf(gateway.calls[3]!, 1)).toEqual([{ note: REPEATED }]);
+    expect(outputsOf(gateway.calls[3]!, 2)).toEqual([{ note: REPEATED }]);
+    expect(gateway.calls.slice(0, 3).some(isFinal)).toBe(false);
+    expect(isFinal(gateway.calls[3]!)).toBe(true);
+    expect(fake.posted.map((p) => p.text)).toEqual(["就是川菜。"]);
+
+    // Three of them in one round: the same.
+    const once = scriptedGateway().callTools([same, same, same]).reply("就是川菜。");
+    const again = fakePort();
+    await runOn(again, once);
+    expect(again.tools).toHaveLength(1);
+    expect(outputsOf(once.calls[1]!, 0)).toEqual([{ hits: [{ query: "川菜" }] }, { note: REPEATED }, { note: REPEATED }]);
+    expect(isFinal(once.calls[1]!)).toBe(true);
+  });
+
+  it("a tool over its count for the reply is answered with the fixed note, and the loop goes on", async () => {
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "a" } },
+        { name: "search", input: { query: "b" } },
+        { name: "search", input: { query: "c" } },
+        { name: "read_file", input: { name: "菜单.txt" } },
+      ])
+      .callTools([{ name: "search", input: { query: "d" } }])
+      .reply("好了。");
+    const fake = fakePort({ perTool: { search: 2 } });
+    await runOn(fake, gateway);
+    expect(fake.tools.map((c) => c.input)).toEqual([{ query: "a" }, { query: "b" }, { name: "菜单.txt" }]);
+    expect(outputsOf(gateway.calls[1]!, 0)).toEqual([{ hits: [{ query: "a" }] }, { hits: [{ query: "b" }] }, { note: OVER_CAP }, { hits: [{ name: "菜单.txt" }] }]);
+    expect(outputsOf(gateway.calls[2]!, 1)).toEqual([{ note: OVER_CAP }]);
+    expect(isFinal(gateway.calls[2]!)).toBe(false);
+    expect(fake.posted.map((p) => p.text)).toEqual(["好了。"]);
+  });
+
+  it("two garbled calls (an unknown tool, an input its schema refuses) are never run: the fixed error each, the tools marked unusable, then the last call", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "web_search", input: { query: "川菜" } }])
+      .callTools([{ name: "search", input: { limit: 3 } }])
+      .reply("不用工具也能回答。");
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(fake.tools).toEqual([]);
+    expect(outputsOf(gateway.calls[2]!, 0)).toEqual([{ error: UNUSABLE }]);
+    expect(outputsOf(gateway.calls[2]!, 1)).toEqual([{ error: UNUSABLE }]);
+    // Answered with the call's own id and name, the unknown one's too.
+    expect(resultsOf(gateway.calls[2]!, 0)[0]!.name).toBe("web_search");
+    expect(fake.unusable).toEqual(["garbled"]);
+    expect(isFinal(gateway.calls[1]!)).toBe(false);
+    expect(isFinal(gateway.calls[2]!)).toBe(true);
+    expect(fake.posted.map((p) => p.text)).toEqual(["不用工具也能回答。"]);
+  });
+
+  it("an input of the wrong kind is garbled as well: a string for a string, an integer for an integer, nothing besides what the schema names", async () => {
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: 5 } },
+        { name: "search", input: { query: "a", limit: 1.5 } },
+        { name: "search", input: { query: "a", extra: true } },
+        { name: "search", input: ["a"] },
+        { name: "search", input: "a" },
+        { name: "search", input: { query: "ok", limit: 2 } },
+      ])
+      .reply("好。");
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(fake.tools.map((c) => c.input)).toEqual([{ query: "ok", limit: 2 }]);
+    expect(outputsOf(gateway.calls[1]!, 0).slice(0, 5)).toEqual(Array(5).fill({ error: UNUSABLE }));
+    expect(fake.unusable).toEqual(["garbled"]);
+    expect(isFinal(gateway.calls[1]!)).toBe(true);
+  });
+
+  it("every call of a round cut at its limit is garbled and none is run (its input may be cut)", async () => {
+    const gateway = scriptedGateway()
+      .callTools(
+        [
+          { name: "search", input: { query: "a" } },
+          { name: "search", input: {} },
+        ],
+        { truncated: true },
+      )
+      .reply("好。");
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(fake.tools).toEqual([]);
+    expect(outputsOf(gateway.calls[1]!, 0)).toEqual([{ error: UNUSABLE }, { error: UNUSABLE }]);
+    expect(fake.unusable).toEqual(["garbled"]);
+    expect(isFinal(gateway.calls[1]!)).toBe(true);
+  });
+
+  it("an upstream that refused the tools: they are marked unusable, the reply is that round's text, and no other call is made", async () => {
+    const gateway = scriptedGateway().refuseTools("没有工具也能回答。", { usage: U(200, 10) });
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(1);
+    expect(fake.unusable).toEqual(["refused"]);
+    expect(fake.posted.map((p) => p.text)).toEqual(["没有工具也能回答。"]);
+    expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(200, 10), fallback: expect.any(Object) }]);
+    expect(fake.extends).toEqual([]);
+  });
+
+  it("a tool call in the last round is not run, and no call follows: its text is the reply; with no text, the run fails as an empty answer", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }])
+      .callTools([{ name: "search", input: { query: "b" } }], { text: "就这些了。" });
+    const fake = fakePort();
+    await runOn(fake, gateway, { tools: { maxRounds: 1 } });
+    expect(gateway.calls).toHaveLength(2);
+    expect(isFinal(gateway.calls[1]!)).toBe(true);
+    expect(fake.tools.map((c) => c.input)).toEqual([{ query: "a" }]);
+    expect(fake.posted.map((p) => p.text)).toEqual(["就这些了。"]);
+    expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+
+    const silent = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }])
+      .callTools([{ name: "search", input: { query: "b" } }]);
+    const quiet = fakePort();
+    await runOn(quiet, silent, { tools: { maxRounds: 1 } });
+    expect(silent.calls).toHaveLength(2);
+    expect(quiet.posted).toEqual([]);
+    expect(finishedAs(quiet)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
+  });
+
+  it("a later round the upstream refuses (400 or 422): once, the reply is asked for as one without tools, from the conversation alone; another failure fails it", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
+      .fail("provider_unavailable", { status: 400 })
+      .reply("不查也能说：川菜。", { usage: U(80, 8) });
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(3);
+    const { signal: _signal, ...plain } = gateway.calls[2]!;
+    expect(plain).toStrictEqual(fake.prepared.call); // no tools, no steps, no choice: the ordinary call
+    expect(fake.posted.map((p) => p.text)).toEqual(["我先查一下。\n\n不查也能说：川菜。"]);
+    expect(fake.finished).toEqual([{ end: { status: "done" }, usage: U(180, 18), fallback: expect.any(Object) }]);
+    // Its cost was held first, at an ordinary call's bound.
+    expect(fake.extends).toHaveLength(2);
+    expect(fake.unusable).toEqual([]);
+
+    // A 422 likewise; an upstream that failed otherwise (5xx, unreachable) is the reply's failure, as for one call.
+    const failing = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }])
+      .fail("provider_unavailable", { status: 502 });
+    const failed = fakePort();
+    await runOn(failed, failing);
+    expect(failing.calls).toHaveLength(2);
+    expect(finishedAs(failed)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
+
+    // The ordinary call refused as well: failed.
+    const twice = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }])
+      .fail("provider_unavailable", { status: 422 })
+      .fail("provider_unavailable", { status: 400 });
+    const again = fakePort();
+    await runOn(again, twice);
+    expect(twice.calls).toHaveLength(3);
+    expect(finishedAs(again)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
+  });
+
+  it("the owner's stop between rounds, or between two tool calls: what was written is posted as stopped, nothing more is called or run", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
+    const between = fakePort({
+      extend: (_n, fake) => {
+        fake.stop();
+        return "ok";
+      },
+    });
+    await runOn(between, gateway);
+    expect(gateway.calls).toHaveLength(1);
+    expect(between.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: true, truncated: false }]);
+    expect(finishedAs(between)).toEqual([{ status: "stopped" }]);
+
+    const two = scriptedGateway().callTools(
+      [
+        { name: "search", input: { query: "a" } },
+        { name: "search", input: { query: "b" } },
+      ],
+      { text: "我查两样。" },
+    );
+    const inTools = fakePort({
+      tool: async (call, _signal, fake) => {
+        fake.stop();
+        return { output: { hits: [call.input] }, activity: "search" };
+      },
+    });
+    await runOn(inTools, two);
+    expect(two.calls).toHaveLength(1);
+    expect(inTools.tools.map((c) => c.input)).toEqual([{ query: "a" }]);
+    expect(inTools.extends).toEqual([]);
+    expect(inTools.posted).toEqual([{ text: "我查两样。", reasoning: "", stopped: true, truncated: false }]);
+    expect(finishedAs(inTools)).toEqual([{ status: "stopped" }]);
+    expect(inTools.activities.at(-1)).toBe(null);
+  });
+
+  it("a tool still running after the call timeout is aborted through its signal, and its result is the fixed error", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "慢" } }]).reply("没查到。");
+    let aborted: boolean | null = null;
+    const fake = fakePort({
+      tool: (_call, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborted = signal.aborted;
+            reject(signal.reason);
+          });
+        }),
+    });
+    const began = Date.now();
+    await runOn(fake, gateway, { runTimeoutMs: 300 });
+    expect(aborted).toBe(true);
+    expect(Date.now() - began).toBeLessThan(5_000);
+    expect(outputsOf(gateway.calls[1]!, 0)).toEqual([{ error: UNUSABLE }]);
+    expect(fake.posted.map((p) => p.text)).toEqual(["没查到。"]);
+    expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+  });
+
+  it("a tool that ignores its signal does not hold the reply up past the call timeout", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "慢" } }]).reply("没查到。");
+    const fake = fakePort({ tool: () => new Promise(() => {}) });
+    const began = Date.now();
+    await runOn(fake, gateway, { runTimeoutMs: 300 });
+    expect(Date.now() - began).toBeLessThan(5_000);
+    expect(outputsOf(gateway.calls[1]!, 0)).toEqual([{ error: UNUSABLE }]);
+  });
+
+  it("the reply's own time limit ends it between rounds or inside a tool: what was written is posted as cut, nothing more is called", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
+    const fake = fakePort({ tool: () => new Promise((resolve) => setTimeout(() => resolve({ output: "晚了", activity: "search" }), 3_000)) });
+    const began = Date.now();
+    await runOn(fake, gateway, { tools: { runTimeoutMs: 1_000 } });
+    expect(Date.now() - began).toBeLessThan(2_500);
+    expect(gateway.calls).toHaveLength(1);
+    expect(fake.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(finishedAs(fake)).toEqual([{ status: "done" }]);
+
+    // Past it between two rounds (the port took long to answer about money): no next call.
+    const later = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。" });
+    const slow = fakePort({ extend: () => new Promise((resolve) => setTimeout(() => resolve("ok"), 1_200)) });
+    await runOn(slow, later, { tools: { runTimeoutMs: 1_000 } });
+    expect(later.calls).toHaveLength(1);
+    expect(slow.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+
+    // And with nothing written: failed, as a reply that timed out having said nothing.
+    const mute = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }]);
+    const silent = fakePort({ extend: () => new Promise((resolve) => setTimeout(() => resolve("ok"), 1_200)) });
+    await runOn(silent, mute, { tools: { runTimeoutMs: 1_000 } });
+    expect(silent.posted).toEqual([]);
+    expect(finishedAs(silent)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
+  });
+
+  it("a long result is cut to resultMaxWeight with the fixed mark; any other value is cut as its JSON text and sent as a string", async () => {
+    const long = "川菜".repeat(200);
+    const gateway = scriptedGateway()
+      .callTools([
+        { name: "search", input: { query: "a" } },
+        { name: "search", input: { query: "b" } },
+        { name: "search", input: { query: "c" } },
+      ])
+      .reply("好。");
+    const outputs: Record<string, unknown> = { a: long, b: { hits: Array.from({ length: 50 }, (_, i) => ({ seq: i, text: "川菜很好吃" })) }, c: { hits: [] } };
+    const fake = fakePort({ tool: async (call) => ({ output: outputs[(call.input as { query: string }).query], activity: "search" }) });
+    await runOn(fake, gateway, { tools: { resultMaxWeight: 40 } });
+    const [a, b, c] = outputsOf(gateway.calls[1]!, 0) as [string, string, unknown];
+    expect(typeof a).toBe("string");
+    expect(a.endsWith(CUT_MARK)).toBe(true);
+    expect(long.startsWith(a.slice(0, -CUT_MARK.length))).toBe(true);
+    expect(weight(a)).toBeLessThanOrEqual(40);
+    expect(weight(a)).toBeGreaterThan(30);
+    expect(typeof b).toBe("string");
+    expect(b.endsWith(CUT_MARK)).toBe(true);
+    expect(JSON.stringify(outputs.b).startsWith(b.slice(0, -CUT_MARK.length))).toBe(true);
+    expect(weight(b)).toBeLessThanOrEqual(40);
+    expect(c).toEqual({ hits: [] }); // short enough: as it was
+  });
+
+  it("results that would overflow the model's context are cut to what is left of it, and the next call is the last: nothing sent is over the context", async () => {
+    const gateway = scriptedGateway().callTools([
+      { name: "search", input: { query: "a" } },
+      { name: "search", input: { query: "b" } },
+    ]);
+    gateway.reply("够了。");
+    const contextTokens = 3_000;
+    const planned = 400;
+    const fake = fakePort({ toolRun: { contextTokens, planned }, tool: async () => ({ output: "很长的结果。".repeat(500), activity: "search" }) });
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(2);
+    const last = gateway.calls[1]!;
+    expect(isFinal(last)).toBe(true);
+    // What the last call carries, by the same estimate the plan uses, beside what the plan had: within the plan's limit.
+    const limit = Math.floor((contextTokens - 1000) * (1 - CONTEXT_HEADROOM));
+    const sent = planned + estimateTokens(JSON.stringify(TOOLS) + JSON.stringify(last.steps) + `\n\n${FINAL_LINE}`);
+    expect(sent).toBeLessThanOrEqual(limit + 50);
+    expect(sent).toBeLessThan(contextTokens - 1000);
+    const [first, second] = outputsOf(last, 0) as [string, string];
+    expect(first.endsWith(CUT_MARK)).toBe(true);
+    expect(second).toBe(CUT_MARK);
+    expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
+  });
+
+  it("the port's word on money: final makes the next call the last; stop ends the reply with what it wrote, or with no_quota when it wrote nothing", async () => {
+    const finalGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }]).reply("就这样。");
+    const final = fakePort({ extend: () => "final" });
+    await runOn(final, finalGateway);
+    expect(isFinal(finalGateway.calls[1]!)).toBe(true);
+    expect(final.posted.map((p) => p.text)).toEqual(["就这样。"]);
+
+    const said = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) });
+    const stopWithText = fakePort({ extend: () => "stop" });
+    await runOn(stopWithText, said);
+    expect(said.calls).toHaveLength(1);
+    expect(stopWithText.posted).toEqual([{ text: "我先查一下。", reasoning: "", stopped: false, truncated: true }]);
+    expect(stopWithText.finished).toEqual([{ end: { status: "done" }, usage: U(100, 10), fallback: expect.any(Object) }]);
+
+    const nothing = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10) });
+    const stopSilent = fakePort({ extend: () => "stop" });
+    await runOn(stopSilent, nothing);
+    expect(stopSilent.posted).toEqual([]);
+    expect(stopSilent.finished).toEqual([{ end: { status: "failed", error: "no_quota" }, usage: U(100, 10), fallback: expect.any(Object) }]);
+  });
+
+  it("settles once on the summed usage, or, when a round reported none, on the summed estimates of every round", async () => {
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(100, 10), text: "查" })
+      .callTools([{ name: "search", input: { query: "b" } }])
+      .reply("好的", { usage: U(300, 30) });
+    const fake = fakePort({ inputChars: 120 });
+    await runOn(fake, gateway);
+    expect(fake.finished).toHaveLength(1);
+    const { usage, fallback } = fake.finished[0]!;
+    expect(usage).toBe(null);
+    // Each round: the conversation's estimate, the tools and the steps it carried in weight; what it wrote, its calls included.
+    const roundInput = (c: ModelCall) => 120 + estimateTokens(JSON.stringify(TOOLS) + (c.steps ? JSON.stringify(c.steps) : ""));
+    const input = gateway.calls.map(roundInput).reduce((a, b) => a + b, 0);
+    expect(fallback.inputChars).toBe(input);
+    expect(fallback.outputChars).toBeGreaterThanOrEqual(estimateTokens("查") + estimateTokens("好的"));
+    // The money asked between the rounds: what was spent so far (none reported for round 2: none in all).
+    expect(fake.extends.map((e) => e.spent)).toEqual([U(100, 10), null]);
+    expect(fake.extends[0]!.estimated.inputChars).toBe(roundInput(gateway.calls[0]!));
+  });
+
+  it("ids that repeat or are empty within a round: each call is answered in its place, with its own id and name as received", async () => {
+    let second: ModelCall | null = null;
+    const calls: ToolCall[] = [
+      { id: "", name: "search", input: { query: "a" } },
+      { id: "", name: "search", input: { query: "b" } },
+    ];
+    const gateway: Pick<ModelGateway, "stream"> = {
+      async *stream(call: ModelCall): AsyncGenerator<ModelEvent> {
+        if (!call.steps) {
+          for (const c of calls) yield { type: "tool_call", call: c };
+          yield { type: "finish", usage: null, truncated: false, toolCalls: calls, assistant: [{ role: "assistant", content: [] }] };
+          return;
+        }
+        second = call;
+        yield { type: "text", delta: "好。" };
+        yield { type: "finish", usage: null, truncated: false, toolCalls: [], assistant: [] };
+      },
+    };
+    const fake = fakePort();
+    await runOn(fake, gateway);
+    expect(fake.tools.map((c) => c.input)).toEqual([{ query: "a" }, { query: "b" }]);
+    expect(second!.steps![0]!.results).toEqual([
+      { id: "", name: "search", output: { hits: [{ query: "a" }] } },
+      { id: "", name: "search", output: { hits: [{ query: "b" }] } },
+    ]);
+  });
+
+  it("logs counts and outcome classes only: no tool input, tool output, message text or model output", async () => {
+    const log = recordingLog();
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "CANARY-INPUT" } }, { name: "CANARY-NAME", input: {} }], { text: "CANARY-TEXT" })
+      .reply("CANARY-ANSWER");
+    const fake = fakePort({ tool: async () => ({ output: "CANARY-OUTPUT", activity: "search" }) });
+    await runOn(fake, gateway, { log });
+    expect(log.lines.length).toBeGreaterThan(0);
+    expect(JSON.stringify(log.lines)).not.toMatch(/CANARY|附近有什么好吃的|你是一个助手/);
+  });
+});
+
+describe("a reply that offers no tools", () => {
+  it("makes exactly one call, as before tools existed: the prepared call as it is, nothing about tools in it, and the port is asked nothing about tools", async () => {
+    const gateway: ScriptedGateway = scriptedGateway().reply("你好！", { usage: U(50, 5), reasoning: "想一想" });
+    const fake = fakePort({ tools: [] });
+    await runOn(fake, gateway);
+    expect(gateway.calls).toHaveLength(1);
+    const { signal, ...sent } = gateway.calls[0]!;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(sent).toStrictEqual(fake.prepared.call);
+    expect(fake.posted).toEqual([{ text: "你好！", reasoning: "想一想", stopped: false, truncated: false }]);
+    expect(fake.finished).toEqual([
+      { end: { status: "done" }, usage: U(50, 5), fallback: { inputChars: 120, outputChars: estimateTokens("你好！") + estimateTokens("想一想") } },
+    ]);
+    expect([fake.tools, fake.extends, fake.activities, fake.unusable]).toEqual([[], [], [], []]);
+  });
+});

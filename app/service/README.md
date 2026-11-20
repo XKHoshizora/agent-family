@@ -118,6 +118,13 @@ latest 80 messages, files included, by the service's estimate, plus the system t
 another variable that holds its key; unset or empty, the default: there are no proactive replies at all — Proactive
 replies, Configuration), `PROACTIVE` (their tunings, JSON, every field optional; same section),
 `MEMORY` (an Agent's memory tunings, JSON, every field optional; Memory calls, Configuration),
+`TOOLS` (what bounds a reply's tools, JSON, every field optional; Agents and runs, Tools in a reply: `enabled` (default
+true; false: no reply is offered any tool), `maxRounds` (rounds of one reply that may call tools, 1–50, default 8),
+`maxPoints` (whole points one reply may spend before it must answer, 1–100 000, default 20), `searchPerReply` and
+`filePerReply` (calls of the search and the file tool one reply may run, 1–1 000, default 6 and 4), `resultMaxWeight`
+(the most one tool result weighs when it goes back to the model, 1–100 000, default 3 000), `runTimeoutMs` (how long a
+reply that offers tools may take in all, 1 000–3 600 000, default 300 000: 5 minutes; a reply that offers none is held
+to `AGENT_RUN_TIMEOUT_MS` alone)),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -2457,7 +2464,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
    that may begin one waits for the next piece and goes out in its place once it turns out not to. Reasoning deltas are
    pushed as they come. It is abandoned at once when the owner stops it or the Agent is paused or deleted (checked every
    50 ms), after `AGENT_RUN_TIMEOUT_MS` (2 minutes), and when the service closes (then the run is ended as Shutdown,
-   below, says).
+   below, says). A reply offered tools makes its calls round by round, running the tools between them (Tools in a reply,
+   below).
 3. `post` (`conversation.ts` `postAsAgent`): under the conversation row and the `agents` row — the locks pause and
    delete take — so once a pause or delete has answered, nothing more from the Agent is stored, the reply being
    generated included, whether or not the Agent has been resumed since (`tests/runs-pause-race.test.ts`,
@@ -2609,6 +2617,52 @@ reply that showed text only also records the estimate itself, for settlement to 
 holds for is no estimate but the most the input can cost: the system text and every text part at their utf-8 bytes, at
 most what the context leaves beside the output limit, attachments at their estimate (Metering, Admission).
 
+**Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
+`tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox;
+none while `TOOLS.enabled` is false — and, for now, none at all: no toolbox is wired yet). A reply offered none is
+exactly the one call above, as before tools existed. A reply offered some calls the model round by round (Calling a
+model, Tools): each round carries the tools and, after the first, every round so far; a round that calls no tool is the
+answer. Each call of a round that called tools is answered in order, by its place in the round (never by its id, which
+may repeat or be empty), with its own id and name as it came:
+
+- **garbled** — a tool not offered, an input null, or one its tool's schema refuses (an object with every required key,
+  each named key of its type, no other key when the schema says none; `fitsSchema`), or any call of a round cut at its
+  output limit (its input may be cut) — is not run, and is answered `{"error": "这个请求无法执行。"}`; the reply's
+  second garbled call marks its model as unable to use the tools (`toolsUnusable`, `garbled`) and ends the tool phase;
+- **a repeat** — the same tool with the same input (compared with every object's keys in order) as a call that ran — is
+  answered `{"note": "这个已经查过了，结果和上次一样。请用已经查到的内容回答。"}`; the same call a third time ends the
+  tool phase;
+- **over its count** — a tool run as often as one reply may run it (its count comes with the offer, `ToolRun.perTool`:
+  `TOOLS.searchPerReply` for the search tool, `filePerReply` for the file tool; a tool with none has only the rounds'
+  cap) — is answered `{"note": "这类查询这次回复里不能再用了。"}`;
+- anything else runs through the port (`tool`), its signal aborted when the owner stops the reply, its time is up, or the
+  tool has taken `AGENT_RUN_TIMEOUT_MS` (then `{"error": "这个请求无法执行。"}`); its output is cut to
+  `TOOLS.resultMaxWeight` and to what the model's context has left for the rounds — a string at its weight, anything
+  else as its JSON text then sent as a string — ending `…（结果太长，后面的省略了）`.
+
+Before every call after the first the port holds what it can cost (`extend`, Metering, Extension). The tool phase ends —
+the next call is the last, sent with the same tools and every round, the model told it may call none (`toolChoice`
+`none`), and the system text ending with `你已经不能再查了，请用上面查到的内容直接回答。` — after `TOOLS.maxRounds`
+rounds that called tools, a call made a third time, the second garbled call, once the rounds fill what the context plan
+leaves (the plan's limit, `(context − output limit) × (1 − CONTEXT_HEADROOM)`, less the planned input, the tools'
+definitions and that line, at the plan's ratio), or when `extend` says so. A tool call in the last round is not run and no
+call follows: its text is the reply (with none, the run fails as an empty answer). An upstream that refused the tools
+(the first round: Calling a model) marks them unusable (`toolsUnusable`, `refused`); that round's text is the reply, and
+nothing more is called. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
+nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call
+— no tools, no rounds, the conversation alone, its cost held first — and its answer follows what the reply wrote; nothing
+is marked. `extend` answering that nothing more can be held ends the reply with what it wrote, as
+`truncated` (with nothing written: `failed`, `no_quota`). The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
+all, each call and each tool also within `AGENT_RUN_TIMEOUT_MS` — and the service closing are honoured between events,
+between tool calls and between rounds, and end the reply as they end one of one call. What the rounds write streams as it
+comes, a later round's after a paragraph break, and is posted as one reply (text written before a tool call is kept);
+reasoning likewise, cut at 32 000 characters as always. The status line follows what the tools did (`activity`: after each
+tool that ran, then none once the tool phase is over; not shown anywhere yet). One settlement for the reply: the rounds'
+summed usage, or, with any round unreported, the sum of every round's estimate — the conversation's, plus the tools and
+the rounds it carried, at the model's ratio; what it wrote, its tool calls included; a round that failed counts only
+the usage its upstream reported. Such a reply teaches the ratio nothing (Metering, Token estimates). Only counts and
+outcome classes are logged: never a tool's input or output, the model's text, or a name it made up.
+
 **Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
 (Metering):
 
@@ -2624,12 +2678,13 @@ most what the context leaves beside the output limit, attachments at their estim
 | The model stopped at its output limit having only thought (no visible text; reasoning came, or the upstream reported reasoning tokens) | none; the reasoning streamed meanwhile is discarded | `failed`, `thinking_exhausted`, retryable; charged what the upstream reported |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
+| A reply with tools, between its rounds: nothing more can be held for another call (Metering, Extension) | what had been said, `truncated: true` (nothing said: no message) | `done` (nothing said: `failed`, `no_quota`); charged what its rounds used |
 | The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
 | An empty answer (no visible text, no reasoning; in a group, no visible text) | none | `failed`, `provider_unavailable`; charged only what the upstream reported |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
 | The model's context cannot hold the owner's newest message (or 200 tokens of it) after the system text | none, no call made | `failed`, `context_too_small`, not retryable; charged nothing |
 | Nothing to answer otherwise, or its attachments could not be read (two reads failed before any succeeded, or reading took longer than `AGENT_RUN_TIMEOUT_MS`) | none, no call made | `failed`, `busy`, retryable; charged nothing |
-| `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
+| `AGENT_RUN_TIMEOUT_MS` (2 minutes) passed, or for a reply with tools `TOOLS.runTimeoutMs` (5 minutes) in all | what had been said, `truncated: true`, without what follows an unfinished proposal block's `<af-` (nothing said, or nothing before that: `failed`, `provider_unavailable`, charged only what the upstream reported) | `done` |
 | The service closed during the call, or while its attachments were read | none | ended by the closing service itself as recovery ends one (Shutdown, below): `failed`, `provider_unavailable`, retryable; charged nothing. Only if that cannot be written (or the process died): left `running`, then recovered at the next start, or by the stale-run sweep of an instance still running |
 
 Failures are never messages: no seq, not in search or unread counts, never shown to a model. The owner sees them on the
@@ -2701,28 +2756,31 @@ alone.
 
 **The stale-run sweep** (`port-impl.ts` `sweepStaleRuns`; `tests/runs-restart.test.ts`). Once a minute while the service
 runs (first a minute after start), every run — reply, persona draft or memory call — that has been `running` for longer than twice
-`AGENT_RUN_TIMEOUT_MS` and a minute (the most attachments and then a call may take, and a minute to post and record;
-5 minutes with the default) is released exactly as start-up recovery releases one, each in a transaction of its own
+the longer of `AGENT_RUN_TIMEOUT_MS` and `TOOLS.runTimeoutMs`, and a minute (the most attachments and then a call, or a
+reply's tool rounds, may take, and a minute to post and record; 2 × max(2, 5) + 1 = 11 minutes with the defaults:
+`staleAfterMs`) is released exactly as start-up recovery releases one, each in a transaction of its own
 under the same locks — unless this process is working on it (a run its worker has claimed and not yet finished, a draft
 whose request is under way, a memory call under way): those are never touched, however old. Unlike at start-up, the owner's sockets are told
 (`run`), and a follow-up queued by the one rule wakes the worker. An instance still working on a run that old elsewhere
 is past its own limits: its `post` is refused (the run is no longer `running`) and nothing is recorded twice. So a run
 left behind by a process that is gone — a deploy's old instance killed mid-call, or whose stop could not write its runs'
 end, a `finish` that failed — is released
-within about twice `AGENT_RUN_TIMEOUT_MS` and two minutes (6 minutes with the default). Until then it is stuck: its
+within about that and another minute (12 minutes with the defaults). Until then it is stuck: its
 conversation shows it replying and the Agent answers nothing more there (an Agent has one queued or running run per
 conversation at most), it occupies one of the owner's `AGENT_MAX_CONCURRENT_RUNS` slots, and, if it was admitted, its
 hold still counts against the owner's allowance, balance or (a memory call) memory allowance.
 
 **The port boundary.** Everything under `src/agents/runtime/` — the worker, the stream (`stream.ts`), the system text
-(`prompt.ts`) — reaches the rest of the service only through `AgentPort` (`runtime/port.ts`): `claimNext`, `begin`,
-`emit`, `post`, `finish`, `release`, `shouldStop`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
+(`prompt.ts`), the tool rounds' rules (`loop.ts`) — reaches the rest of the service only through `AgentPort`
+(`runtime/port.ts`): `claimNext`, `begin`, `emit`, `post`, `finish`, `release`, `shouldStop`, and for a reply's tools
+`tool`, `extend`, `activity`, `toolsUnusable`. The SQL is in its implementation, `port-impl.ts`. `tests/agent-port-boundary.test.ts`
 fails when a file there imports `db.ts`, `pg` or any `store.ts`. It is the shape an external Agent's connection would have.
 
 Lock order of every write here: one conversation row → the `agents` row → the run row → the `accounts` row
 (`store.ts` `lockAgent`). The conversation is the one the write acts in: whatever acts for a run — the trigger, a
 retry, the worker's `begin`, `post` and `finish`, a follow-up, recovery, the stale-run sweep, a stop's release — locks
-the run's own conversation (`agent_runs.conversation_id`, which never changes), never another; the owner's writes to
+the run's own conversation (`agent_runs.conversation_id`, which never changes), never another (so does `extend`, between
+a reply's rounds); the owner's writes to
 the Agent itself (edit, pause, resume, delete, avatar, proposals) lock its dedicated conversation. Where several
 `agents` or `accounts` rows are locked at once (a person's message in a group naming several Agents) they are taken in
 id order, the `accounts` rows after every run row; a run's end (`finish`, recovery) takes its owner's `accounts` row
@@ -3081,7 +3139,7 @@ Learning never fails or delays a settlement: it is done in a savepoint, waits at
 carries the database's error code only. Reading a ratio never fails either: a failed read is 1. **A rule for runs that
 do more than one plain call:** learning assumes the reported input is the input the run's estimate counted, so a run that
 sends tool definitions or makes more than one model call writes `input_estimate = null` — unless its estimate covers
-exactly what was sent.
+exactly what was sent. A reply offered tools (Agents and runs, Tools in a reply) does so at its admission.
 
 **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
 cost until it is settled — a bound, not an estimate: its input's text at its utf-8 bytes, since no tokenizer counts more
@@ -3096,6 +3154,27 @@ balance, by the same rule; a paid-tier model only to the balance. With neither, 
 (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
 so). A memory call (purpose `memory`) on a site model is the exception: see "The memory allowance" below. The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
 Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
+A reply offered tools holds their definitions too, at their bytes.
+
+**Extension** (`admit.ts` `raiseHold`, `port-impl.ts` `extend`; `tests/tool-loop-money.test.ts`). A reply offered tools
+makes a call per round, admitted once; before each call after its first, in one transaction under the run's locks and
+then the account's, its hold is set again. *So far* is what its rounds have cost — their reported usage, or with any round
+unreported their estimates (Agents and runs, Tools in a reply) — at the model's price; *the next round's most* is what
+the next call can send — its text, the tools' definitions and every round so far at their bytes, at most what the context
+leaves beside the output limit (as Admission bounds a call), images and PDFs at their constants — and its whole output
+limit; *an ordinary call's most* is the reply's own admission without the tools or any round. Another round that may call
+tools is allowed only while so far and the next round's most stay within `TOOLS.maxPoints` (so no round is started that
+could take the reply past it, and a reply costs at most that and its one last call), and no budget of its lane is reached
+by so far counted with what is settled (the Agent's others' daily budget for someone else's call, its proactive budget for
+a reply nobody asked for, and in a group, for a reply in an Agents' chain, its chain budget). The hold becomes so far and
+the next round's most when the owner can hold that — no more than the run holds already, or no more than what is left of
+the run's own source (today's free allowance or the balance, by admission's rule: less what the owner's other running calls
+hold, this run's own hold not counted; never another source than admission chose) — and the reply goes on (its next call
+the last when another tool round is not allowed); else so far and an ordinary call's most, held the same way, and the next
+call is the last; else nothing changes and no call is made (the reply ends with what it wrote, as cut, or `no_quota`). A
+provider's model holds nothing and is bounded by its rounds alone. Whatever the rounds, the reply is settled once, on
+their sum, never charged more than its hold: the free allowance used never goes past the day's allowance (what is above
+is forgiven), and a raised hold never takes more than what was left (or what the run held already).
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
 reported none, the estimate — its input in weight times its model's learned ratio (Token estimates; images and PDFs at

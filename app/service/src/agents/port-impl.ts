@@ -1,15 +1,18 @@
 import type { FastifyBaseLogger } from "fastify";
+import { MICRO_PER_POINT } from "../accounts/store.ts";
 import type { BlobStore } from "../attachments/blob.ts";
 import type { Config } from "../config.ts";
 import type { ConversationEvents } from "../conversations/events.ts";
 import { currentMembership } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
-import { admitRun } from "../metering/admit.ts";
+import { admitRun, raiseHold, type ChargeTo } from "../metering/admit.ts";
+import { assertCount, costMicro, isCount, type Price } from "../metering/prices.ts";
 import { settle } from "../metering/settle.ts";
 import { correctedEstimate, holdTokens, planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
+import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -29,10 +32,26 @@ import { holdsNewest } from "./runtime/context.ts";
 import { postAsAgent } from "./conversation.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
-import { BUSY, NOTHING, RunNotRunning, UNAVAILABLE, type AgentPort, type Delta, type Prepared, type Reply, type RunEnd, type RunTicket, type Usage } from "./runtime/port.ts";
+import {
+  BUSY,
+  NOTHING,
+  RunNotRunning,
+  UNAVAILABLE,
+  type Activity,
+  type AgentPort,
+  type Delta,
+  type Estimated,
+  type Prepared,
+  type Reply,
+  type RunEnd,
+  type RunTicket,
+  type ToolOutcome,
+  type Usage,
+} from "./runtime/port.ts";
 import { fitNotes, groupSystemText, NO_NOTES, passageBudget, systemText, type SystemText } from "./runtime/prompt.ts";
 import {
   actOnTriggered,
+  budgetReachedWith,
   followUp,
   followUpOf,
   noneTold,
@@ -64,6 +83,28 @@ export interface AgentPortDeps {
   proactive?: Pick<ProactiveScheduler, "cancelled"> | null;
   /** The reviewer (memory/reviewer.ts), when there is one: told after a reply was posted, so it can look at the conversation once it is quiet. */
   memory?: Pick<Reviewer, "noted"> | null;
+  /** The tools a reply may be offered and how they run; none (the default): no reply is offered any. */
+  toolbox?: Toolbox | null;
+}
+
+/**
+ * Where a reply's tools come from (`AgentPortDeps.toolbox`): what a run is offered, with at most how many calls of each
+ * tool one reply may run (`ToolRun.perTool`), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot
+ * answer, its signal honoured). Nothing is offered while `TOOLS.enabled` is false.
+ */
+export interface Toolbox {
+  offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number> };
+  run(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
+}
+
+/** What `extend` prices a reply's later calls by, kept from `begin` in this process (`RunFlags.money`). */
+interface RunMoney {
+  /** The site model's price; null for a provider's model, which costs nothing. */
+  price: Price | null;
+  /** The call's output limit, which every call of the reply is held for whole. */
+  maxOutputTokens: number;
+  /** The bound of the reply's input without the tools' definitions or any round (its admission's, `holdTokens`): an ordinary call's. */
+  ordinaryInput: number;
 }
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
@@ -140,6 +181,8 @@ interface RunFlags {
    * is ever posted. Never stored, pushed or logged.
    */
   mark: string | null;
+  /** What `extend` prices the reply's later calls by, from `begin` once the call is admitted; null until then. */
+  money: RunMoney | null;
 }
 
 /**
@@ -180,7 +223,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false, mark: null };
+      flags = { stop: false, silenced: false, group: false, mark: null, money: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -317,6 +360,9 @@ export class DbAgentPort implements AgentPort {
    *    the run for settlement to learn from, and the Agent's read marker moves to what the run covers (announced after
    *    commit). What settlement falls back on when no usage is reported is the estimate with its text corrected by the
    *    model's learned ratio (the one step 1 read). The reasoning level is the Agent's when the model allows it, else `none`.
+   *    The tools the reply is offered are its toolbox's (`AgentPortDeps.toolbox`; none without one, and none while
+   *    `TOOLS.enabled` is false): with some, their definitions are held at their bytes too, no estimate is recorded (such
+   *    a reply teaches the ratio nothing), and what its later rounds are priced by is kept for `extend` (`RunFlags.money`).
    */
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
@@ -410,7 +456,7 @@ export class DbAgentPort implements AgentPort {
     }
     if (closing?.aborted) throw closing.reason;
 
-    const result = await db.tx(async (t): Promise<{ end: RunEnd; told?: Told } | { prepared: Prepared; read: number | null }> => {
+    const result = await db.tx(async (t): Promise<{ end: RunEnd; told?: Told } | { prepared: Prepared; read: number | null; money: RunMoney }> => {
       const { agent, state } = await this.lockRun(t, run);
       const halted = this.halted(run, agent, state);
       if (halted) return { end: halted };
@@ -433,10 +479,16 @@ export class DbAgentPort implements AgentPort {
         return { end: ENDED_QUIETLY, told };
       }
       const { resolved, loaded, covers, key, ratio } = first;
+      // The tools the reply is offered: none while `TOOLS.enabled` is false, or with no toolbox.
+      const offer = config.tools.enabled && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      const tools = offer?.tools ?? [];
       // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
       // leaves beside the output limit (`holdTokens`), images and PDFs at their constants — whatever the model's ratio.
+      // Offered tools go with the call too: their definitions are held at their bytes as well.
       const texts = [loaded.system.text, ...context.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])))];
-      const held = holdTokens(texts, resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
+      const ordinaryInput = holdTokens(texts, resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
+      const held =
+        tools.length === 0 ? ordinaryInput : holdTokens([...texts, JSON.stringify(tools)], resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
       // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned;
       // read in step 1), images and PDFs at their constants. What settlement falls back on when no usage is reported.
       const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, ratio);
@@ -448,17 +500,35 @@ export class DbAgentPort implements AgentPort {
         return { end: { status: "failed", error: "no_quota", ...(typeof resetsAt === "string" ? { resetsAt } : {}) } };
       }
       // What settlement learns the ratio from: the estimate at ratio 1 of a call that showed text only (an image's or a
-      // PDF's real tokens are not text's), and the ratio's key.
+      // PDF's real tokens are not text's), and the ratio's key. A reply that offers tools teaches nothing: its rounds send
+      // the tools and the steps, which the estimate does not count, and settle on their summed usage.
       await t.query("update agent_runs set input_estimate = $2, ratio_key = $3 where id = $1", [
         run.id,
-        context.fixedTokens === 0 ? context.inputTokensEstimate : null,
+        context.fixedTokens === 0 && tools.length === 0 ? context.inputTokensEstimate : null,
         key,
       ]);
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
+      const planned = planRatio(ratio);
       return {
-        prepared: { call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning }, inputChars: input },
+        prepared: {
+          call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning },
+          inputChars: input,
+          tools,
+          toolRun:
+            offer === null || tools.length === 0
+              ? null
+              : {
+                  perTool: offer.perTool,
+                  contextTokens: resolved.contextTokens,
+                  fixedTokens: context.fixedTokens,
+                  ratio,
+                  planRatio: planned,
+                  planned: correctedEstimate(context.inputTokensEstimate, context.fixedTokens, planned),
+                },
+        },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
+        money: { price: resolved.price ?? null, maxOutputTokens: resolved.call.maxOutputTokens, ordinaryInput },
       };
     });
     if ("end" in result) {
@@ -468,7 +538,9 @@ export class DbAgentPort implements AgentPort {
     }
     if (result.read !== null) this.deps.reads.publish({ conversationId: run.conversationId, principalId: run.agentId, seq: result.read }, log);
     // The mark the call carries is the one `post` takes out of the reply.
-    this.flagsOf(run.id).mark = first.loaded.mark;
+    const flags = this.flagsOf(run.id);
+    flags.mark = first.loaded.mark;
+    flags.money = result.money;
     return result.prepared;
   }
 
@@ -480,6 +552,63 @@ export class DbAgentPort implements AgentPort {
     if (!flags || flags.silenced || flags.group) return;
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
+
+  /** `AgentPort.tool`: through the toolbox that offered the tool (`begin`); with none nothing was offered, and nothing runs. */
+  tool(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome> {
+    const box = this.deps.toolbox;
+    if (!box) return Promise.reject(new Error("no tool is offered: there is no toolbox"));
+    return box.run(run, call, signal);
+  }
+
+  /**
+   * `AgentPort.extend`, in one transaction under `lockRun` (the run's conversation row and its Agent's, then the run's;
+   * the account's after, as admission takes them): a run no longer running answers "stop". A provider's model costs
+   * nothing: "ok", nothing held. On a site model, at its price as `begin` resolved it (`RunMoney`):
+   * - so far: `spent` when it is two counts, else `estimated` — what settlement would charge now, before its cap;
+   * - the next round's most: `nextInputTokens` and the whole output limit; an ordinary call's most: the reply's input
+   *   without the tools or any round (its admission's bound) and the whole output limit;
+   * - a round that may call tools may start only if so far and its most stay within `TOOLS.maxPoints`, and no budget of
+   *   the run's lane is reached by what it has cost so far (runs.ts `budgetReachedWith`: the others' daily, the
+   *   proactive daily, the chain budget);
+   * - the hold becomes so far and the next round's most if its owner can hold that (admit.ts `raiseHold`: what it holds
+   *   already, or what is left of its pool) — "ok", or "final" when a round may not call tools — else so far and an
+   *   ordinary call's most — "final" — else it is left as it is — "stop".
+   */
+  async extend(run: RunTicket, spent: Usage | null, estimated: Estimated, nextInputTokens: number): Promise<"ok" | "final" | "stop"> {
+    assertCount("extend: estimated.inputChars", estimated.inputChars);
+    assertCount("extend: estimated.outputChars", estimated.outputChars);
+    assertCount("extend: nextInputTokens", nextInputTokens);
+    const money = this.flags.get(run.id)?.money;
+    // A run this process did not begin: nothing more is called for it.
+    if (!money) return "stop";
+    const { db, config } = this.deps;
+    try {
+      return await db.tx(async (t) => {
+        const { agent, state } = await this.lockRun(t, run);
+        const row = (await t.query<{ charge_to: ChargeTo | null; hold: string }>("select charge_to, hold_micro::text as hold from agent_runs where id = $1", [run.id])).rows[0]!;
+        if (money.price === null || row.charge_to === null) return "ok";
+        const reported = spent !== null && isCount(spent.inputTokens) && isCount(spent.outputTokens);
+        const cost = costMicro(money.price, reported ? spent.inputTokens : estimated.inputChars, reported ? spent.outputTokens : estimated.outputChars);
+        const next = costMicro(money.price, nextInputTokens, money.maxOutputTokens);
+        const ordinary = costMicro(money.price, money.ordinaryInput, money.maxOutputTokens);
+        const tools =
+          cost + next <= BigInt(config.tools.maxPoints) * MICRO_PER_POINT &&
+          !(await budgetReachedWith(t, { conversationId: run.conversationId, lane: state.lane, coversSeq: Number(state.covers_seq ?? 0) }, agent, cost, config));
+        const which = await raiseHold(t, config, { id: run.id, ownerId: run.ownerId, chargeTo: row.charge_to, holdMicro: BigInt(row.hold) }, [cost + next, cost + ordinary], new Date());
+        if (which === null) return "stop";
+        return which === 0 && tools ? "ok" : "final";
+      });
+    } catch (err) {
+      if (err instanceof RunNotRunning) return "stop";
+      throw err;
+    }
+  }
+
+  /** `AgentPort.activity`: nothing is shown of it yet (no status line). */
+  activity(_run: RunTicket, _activity: Activity | null): void {}
+
+  /** `AgentPort.toolsUnusable`: nothing is recorded of it yet. */
+  async toolsUnusable(_run: RunTicket, _why: "refused" | "garbled"): Promise<void> {}
 
   /**
    * `postAsAgent` in its own transaction, announced after commit; a reply that proposed a persona (and so superseded
@@ -539,7 +668,7 @@ export class DbAgentPort implements AgentPort {
    * end (`Hub.pushChargedReply`): now that the run is charged, the reply carries its `via`. The run's flags are forgotten
    * in any case, also when this throws (a delta still waiting keeps its own).
    */
-  async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }): Promise<void> {
+  async finish(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: Estimated): Promise<void> {
     let result: Recorded | null | undefined;
     try {
       result = await this.record(run, end, usage, fallback, new Date());
@@ -562,7 +691,7 @@ export class DbAgentPort implements AgentPort {
   }
 
   /** `finish`'s transaction: what to announce once it has committed, or null for a run that no longer exists. */
-  private record(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: { inputChars: number; outputChars: number }, now: Date) {
+  private record(run: RunTicket, end: RunEnd, usage: Usage | null, fallback: Estimated, now: Date) {
     const { db, config } = this.deps;
     return db.tx(async (t): Promise<Recorded | null> => {
       const agent = await lockAgent(t, run.agentId, run.conversationId);
@@ -748,9 +877,14 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   };
 }
 
-/** How long a run must have been `running` before the stale-run sweep may release it: twice the run's time limit (the
- * reading of its attachments, then its call) and a minute for posting and recording. */
-export const staleAfterMs = (config: Pick<Config, "agentRunTimeoutMs">): number => 2 * config.agentRunTimeoutMs + 60_000;
+/**
+ * How long a run must have been `running` before the stale-run sweep may release it: twice the longer of a call's time
+ * limit (`AGENT_RUN_TIMEOUT_MS`) and a reply's with tools (`TOOLS.runTimeoutMs`) — the reading of its attachments, then
+ * its call or its rounds — and a minute for posting and recording. With the defaults 2 × max(120 s, 300 s) + 60 s: 11
+ * minutes.
+ */
+export const staleAfterMs = (config: { agentRunTimeoutMs: number; tools: Pick<Config["tools"], "runTimeoutMs"> }): number =>
+  2 * Math.max(config.agentRunTimeoutMs, config.tools.runTimeoutMs) + 60_000;
 
 /**
  * The stale-run sweep (README "Agents and runs", Recovery): every run — reply or draft — that is `running`, has been
