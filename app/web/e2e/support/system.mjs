@@ -128,10 +128,26 @@ async function healthy() {
   }
 }
 
-/** Runs the migrations on af_e2e, then empties every table but the migrations' own (the extensions stay). */
+/**
+ * Creates the suite's database (E2E_DATABASE) on the server when it is not there yet (as the service's sharded test
+ * runner does); an existing one is left as it is.
+ */
+async function ensureDatabase(pg) {
+  const admin = new pg.Client({ connectionString: e2eDatabaseUrl("postgres") });
+  await admin.connect();
+  try {
+    const { rowCount } = await admin.query("select 1 from pg_database where datname = $1", [E2E_DATABASE]);
+    if (rowCount === 0) await admin.query(`create database "${E2E_DATABASE}"`);
+  } finally {
+    await admin.end();
+  }
+}
+
+/** Runs the migrations on af_e2e (E2E_DATABASE), then empties every table but the migrations' own (the extensions stay). */
 async function freshDatabase() {
-  runCli(["migrate"]);
   const pg = createRequire(path.join(SERVICE_DIR, "package.json"))("pg");
+  await ensureDatabase(pg);
+  runCli(["migrate"]);
   const client = new pg.Client({ connectionString: e2eDatabaseUrl() });
   await client.connect();
   try {

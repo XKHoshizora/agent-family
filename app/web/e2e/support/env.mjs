@@ -19,14 +19,23 @@ export const REMOTE = remoteBase !== "";
 export const PORT = Number(process.env.E2E_PORT ?? 8911);
 /** The one origin the browsers talk to: pages, API and WebSocket. */
 export const BASE_URL = REMOTE ? remoteBase : `http://127.0.0.1:${PORT}`;
-/** The database the local suite owns. Never af_dev or af_test. */
-export const E2E_DATABASE = "af_e2e";
+/**
+ * The database the local suite owns: `af_e2e`, or the name in `E2E_DATABASE` (a second run beside another, with its own
+ * `E2E_PORT`): lower-case, ending in `_e2e` (the e2e service starts on no other, e2e-server.ts), so never af_dev or
+ * af_test. Created on the server of TEST_DATABASE_URL when it does not exist yet (system.mjs `freshDatabase`).
+ */
+export const E2E_DATABASE = (() => {
+  const name = (process.env.E2E_DATABASE ?? "af_e2e").trim();
+  if (!/^[a-z0-9_]+_e2e$/.test(name)) throw new Error("E2E_DATABASE must be a lower-case database name ending in _e2e");
+  return name;
+})();
 
 /**
  * The local suite's database URL: the server, role and password of TEST_DATABASE_URL (the environment, else
- * app/service/.env) with the database name replaced by af_e2e. Never printed.
+ * app/service/.env) with the database name replaced by E2E_DATABASE (af_e2e). Never printed. `name`: another database of
+ * that server (the maintenance database `postgres`, to create the suite's own).
  */
-export function e2eDatabaseUrl() {
+export function e2eDatabaseUrl(name = E2E_DATABASE) {
   let source = process.env.TEST_DATABASE_URL;
   if (!source) {
     let text;
@@ -39,7 +48,7 @@ export function e2eDatabaseUrl() {
   }
   if (!source) throw new Error("TEST_DATABASE_URL is missing from app/service/.env");
   const url = new URL(source);
-  url.pathname = `/${E2E_DATABASE}`;
+  url.pathname = `/${name}`;
   return url.toString();
 }
 
