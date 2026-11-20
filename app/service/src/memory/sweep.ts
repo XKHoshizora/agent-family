@@ -28,8 +28,11 @@ export async function sweepMemoryChanges(
   const total = { discarded: 0, deleted: 0 };
   for (let i = 0; i < batches; i++) {
     const stale = await q.query(
+      // The status is asked again in the update's own condition: a change confirmed while this waited for its row (now applied) is
+      // left as the confirm left it, never written discarded over it.
       `update memory_changes set status = 'discarded', resolved_at = $1::timestamptz
-        where id in (select id from memory_changes where status = 'pending' and created_at < $1::timestamptz - $2::int * interval '1 day' limit $3)`,
+        where id in (select id from memory_changes where status = 'pending' and created_at < $1::timestamptz - $2::int * interval '1 day' limit $3)
+          and status = 'pending'`,
       [now, CHANGE_KEEP_DAYS, batch],
     );
     total.discarded += stale.rowCount ?? 0;

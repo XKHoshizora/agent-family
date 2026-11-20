@@ -169,6 +169,8 @@ export interface MemoryCallReport {
   refused?: boolean;
   /** Set when the call was started (admitted and sent), whatever came of it; unset when it could not start (no model, no allowance, too many calls running). */
   started?: boolean;
+  /** Set when no call was started because the owner already had `agentMaxConcurrentRuns` calls running (a moment later it may start). */
+  capped?: boolean;
 }
 
 async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCallInput, closing: AbortSignal, report?: MemoryCallReport): Promise<string | null> {
@@ -200,6 +202,7 @@ async function callOnce(deps: MemoryCallDeps, ownerId: string, input: MemoryCall
       count(deps.db, "memory_refused_allowance");
       if (report) report.refused = true;
     }
+    if (err instanceof AppError && err.status === 429 && report) report.capped = true;
     if (!(err instanceof AppError)) log.error({ err, ownerId }, "memory call: could not be started");
     else if (err.status === 400) log.warn({ ownerId }, "memory call: the input does not fit the model's context; skipped");
     return null;

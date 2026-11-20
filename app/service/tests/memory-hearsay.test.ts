@@ -399,6 +399,48 @@ describe("before the paid call the judgement model is asked whether the batch is
     expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
   });
 
+  it("an allowance spent while the judge was asked (the call itself refused): no try, no hearsay_call, no hour's slot; the flags wait for the next site midnight plus the quiet time", async () => {
+    const w = await world("jr");
+    verdict(0.9, 0.1);
+    const { settled } = await import("../src/memory/stats.ts");
+    const stat = async (name: string): Promise<number> => {
+      await settled();
+      return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
+    };
+    const [callsBefore, refusedBefore] = [await stat("hearsay_call"), await stat("memory_refused_allowance")];
+    // Another memory call of the owner's takes the rest of the allowance while the pre-check is asked.
+    const ask = judge.ask;
+    judge.ask = async (state, questions, signal) => {
+      await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
+      return ask.call(judge, state, questions, signal);
+    };
+    const perHour = app.deps.config.memory.hearsayPerHour;
+    try {
+      const seq = await say(w.mia, w.g, "小李下周要去北京出差");
+      await flag(w.agent.id, w.g, seq, "hearsay");
+      await wake();
+      expect(hearsayQuestions()).toHaveLength(1);
+      expect(hearsayCalls()).toHaveLength(0);
+      expect((await db.query("select tries from memory_flags where agent_id = $1", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
+      expect([(await stat("hearsay_call")) - callsBefore, (await stat("memory_refused_allowance")) - refusedBefore]).toEqual([0, 1]);
+      // Not woken after the quiet time as a failed try would be.
+      judge.ask = ask;
+      await wake();
+      expect(hearsayQuestions()).toHaveLength(1);
+      // No slot of the hour was taken: with one call an hour allowed, the allowance back and a new flag, the call is made.
+      app.deps.config.memory.hearsayPerHour = 1;
+      await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);
+      gateway.reply(answer([entry("m1", SAID)]));
+      await flag(w.agent.id, w.g, await say(w.mia, w.g, "小李还说他要坐高铁去"), "hearsay");
+      await wake();
+      expect(hearsayCalls()).toHaveLength(1);
+      expect(await flagRows(w.agent.id, "hearsay")).toEqual([]);
+    } finally {
+      judge.ask = ask;
+      app.deps.config.memory.hearsayPerHour = perHour;
+    }
+  });
+
   it("an owner whose memory model is their own provider's is never held back by the site's allowance: with freeDailyPoints 0 the hearsay is asked and written", async () => {
     const w = await world("jq");
     const { providerBody } = await import("./helpers/providers.ts");

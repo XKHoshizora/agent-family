@@ -10,6 +10,7 @@ import { toWireForReaders } from "../src/messages/read.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { runningRun } from "./helpers/metering.ts";
 import { scriptedJudge } from "./helpers/judge.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -189,7 +190,7 @@ describe("reviewInput", () => {
   });
 
   it("three word lists: REMEMBER only asks for a review at once, FORGET and LOCK are what let a remove and a lock apply; EXPLICIT is their union", () => {
-    for (const t of ["记住我不吃辣", "帮我记一下", "记下来", "别忘了", "please remember this", "覚えてね"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, true, false, false]);
+    for (const t of ["记住我不吃辣", "帮我记一下", "记下来", "别忘了", "please remember this", "覚えてね", "特别记一下", "特别记住这个", "区别记住"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, true, false, false]);
     for (const t of ["忘掉那个", "忘了它吧", "别记这个", "不用记了", "删掉它", "Forget it", "忘れて", "消して"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, true, false]);
     for (const t of ["锁起来", "锁进保险箱", "放进保险箱", "别告诉别人", "不要告诉别人", "please lock it", "Lock this", "lock that one", "秘密にして"]) expect([t, REMEMBER.test(t), FORGET.test(t), LOCK.test(t)]).toEqual([t, false, false, true]);
     for (const t of ["记住", "忘掉", "锁起来", "别记", "秘密にして", "消して"]) expect([t, EXPLICIT.test(t)]).toEqual([t, true]);
@@ -209,12 +210,30 @@ describe("reviewInput", () => {
       "I always forget my keys",
       "I keep forgetting names",
       "别记错了",
+      // A negation a few characters or words before it, and the forms of "don't delete".
+      "别把它删掉",
+      "不许删掉",
+      "不能忘了它",
+      "千万不能忘掉",
+      "别再忘了它",
+      "不要再删掉了",
+      "我不会忘掉的",
+      "don't ever forget",
+      "Don't you forget",
+      "never ever forget",
+      "I don’t ever forget it",
+      "I cannot forget her",
+      // Remember-phrases that hold 别记.
+      "特别记一下",
+      "特别记住",
+      "区别记住",
+      "分别记下来",
     ]) {
       expect([t, FORGET.test(t)]).toEqual([t, false]);
     }
     for (const t of ["unlock it", "the clock is wrong", "门锁上了吗", "a lock of hair"]) expect([t, LOCK.test(t)]).toEqual([t, false]);
     // What asks to forget or to lock still does.
-    for (const t of ["忘掉那个", "忘了它吧", "别记这个", "删掉它", "Forget it", "please forget my address"]) expect([t, FORGET.test(t)]).toEqual([t, true]);
+    for (const t of ["忘掉那个", "忘了它吧", "别记这个", "删掉它", "帮我把那条删掉", "把它删掉吧", "Forget it", "please forget my address", "forget it, please"]) expect([t, FORGET.test(t)]).toEqual([t, true]);
   });
 
   it("the review window ends at the owner's last line: two Agent lines before an owner line are both shown, a trailing Agent line is left for the next review, and the window stops at the owner's line", async () => {
@@ -444,6 +463,74 @@ describe("what a review does with an answer", () => {
     expect(await reviewedSeq(w.agent.id, w.conv)).toBeNull();
   });
 
+  it("a review that could not start because the owner's calls running were at the cap is tried once more a minute later", async () => {
+    const w = await owned("rcap1");
+    await exchange(w, "我喜欢茶");
+    const runs: string[] = [];
+    for (let i = 0; i < app.deps.config.agentMaxConcurrentRuns; i++) runs.push(await runningRun(db, w.owner.id));
+    clock.advance(10 * MIN);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(0);
+    await db.query("delete from agent_runs where id = any($1::uuid[])", [runs]);
+    gateway.reply(ops(add("喜欢茶")));
+    clock.advance(59_000);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(0);
+    clock.advance(1_000);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(1);
+    expect((await roomOf(w.owner)).notes).toMatchObject([{ text: "喜欢茶" }]);
+  });
+
+  it("the retry is made once: refused at the cap again, the review waits for the owner's next words as before", async () => {
+    const w = await owned("rcap2");
+    await exchange(w, "我喜欢茶");
+    const runs: string[] = [];
+    for (let i = 0; i < app.deps.config.agentMaxConcurrentRuns; i++) runs.push(await runningRun(db, w.owner.id));
+    clock.advance(10 * MIN);
+    await memory().idle();
+    clock.advance(60_000);
+    await memory().idle();
+    await db.query("delete from agent_runs where id = any($1::uuid[])", [runs]);
+    clock.advance(30 * MIN);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(0);
+    // The owner's next words are reviewed as usual.
+    await exchange(w, "我也喜欢咖啡");
+    await quietThen(ops(add("喜欢咖啡")));
+    expect(reviewCalls()).toHaveLength(1);
+  });
+
+  it("an in-place op whose note changed since the review read it is dropped, and with it every in-place op of the answer; its adds still apply", async () => {
+    const w = await owned("stale1");
+    const a = await seeded(w.owner, w.agent.id, "路由器在客厅", false);
+    const b = await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
+    await say(w.owner, w.conv, "把路由器那两条合成一条，多的删掉。另外我喜欢茶");
+    gateway.reply("好的。");
+    const hold = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const called = await hold.reached;
+    expect(called.system).toContain("记忆整理员");
+    // The owner edits the second note while the model thinks.
+    expect((await api(app, w.owner, "PATCH", `/api/memory/notes/${b.id}`, { text: "路由器是小米的" })).status).toBe(200);
+    hold.release(ops({ op: "replace", ref: "n1", text: "路由器在客厅，是华硕的" }, { op: "remove", ref: "n2" }, add("喜欢茶")));
+    await memory().idle();
+    const texts = (await roomOf(w.owner)).notes.map((n: { text: string }) => n.text);
+    expect(texts).toEqual(["路由器在客厅", "路由器是小米的", "喜欢茶"]);
+    expect(a.id).toBeTruthy();
+    // Nothing is held for later either: no pending card asks about them.
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
+  });
+
+  it("an in-place op whose text the cleaning refuses drops every in-place op of the answer (a merge's remove is not applied alone); its adds still apply", async () => {
+    const w = await owned("stale2");
+    await seeded(w.owner, w.agent.id, "路由器在客厅", false);
+    await seeded(w.owner, w.agent.id, "路由器是华硕的", false);
+    await sayAndReview(w, "把路由器那两条合成一条，多的删掉。另外我喜欢茶", ops({ op: "replace", ref: "n1", text: "路由器在客厅，说明书在 https://example.com/manual" }, { op: "remove", ref: "n2" }, add("喜欢茶")));
+    expect((await roomOf(w.owner)).notes.map((n: { text: string }) => n.text)).toEqual(["路由器在客厅", "路由器是华硕的", "喜欢茶"]);
+    expect((await db.query("select count(*)::int as n from memory_changes where owner_id = $1 and status = 'pending'", [w.owner.id])).rows[0].n).toBe(0);
+  });
+
   it("先问我再记: the change is only pending until confirmed", async () => {
     const w = await owned("vic", { memoryAsk: true });
     await exchange(w, "我喜欢茶");
@@ -466,6 +553,21 @@ describe("what a review does with an answer", () => {
     expect(done).toEqual({ status: 200, json: { status: "discarded" } });
     expect((await roomOf(w.owner)).notes).toEqual([]);
     expect((await chips(w.owner, w.conv))[0].system.status).toBe("discarded");
+  });
+
+  it("deleting the Agent discards its pending changes in the same transaction: its card then shows no actions; another Agent's card stays", async () => {
+    const w = await owned("wdel", { memoryAsk: true });
+    const other = await mustCreateAgent(app, w.owner, { handle: "wdel_two", name: "wdel_two", model: FAST, persona: PERSONA, memoryAsk: true });
+    await exchange(w, "我喜欢茶");
+    await quietThen(ops(add("喜欢茶")));
+    await exchange({ ...w, agent: other, conv: other.conversationId as string }, "我喜欢咖啡");
+    await quietThen(ops(add("喜欢咖啡")));
+    expect((await chips(w.owner, w.conv))[0].system).toMatchObject({ pending: true, status: "pending" });
+    expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200);
+    const [chip] = await chips(w.owner, w.conv);
+    expect(chip.system).toMatchObject({ pending: false, status: "discarded" });
+    expect((await roomOf(w.owner)).notes).toEqual([]);
+    expect((await chips(w.owner, other.conversationId as string))[0].system).toMatchObject({ pending: true, status: "pending" });
   });
 
   it("an unlock op: the note stays locked and an unlock card is pending until the owner takes it out", async () => {

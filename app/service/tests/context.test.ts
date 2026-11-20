@@ -77,9 +77,10 @@ afterEach(() => {
 
 const PERSONA = "你说话简短。";
 
+/** An owner and their Agent. Its memory is off: the budgets here are measured on the system text without memory's sentence (memory-prompt.test.ts covers it). */
 async function owned(name: string, modelId = "eyes", over: Record<string, unknown> = {}) {
   const owner = await signUp(app, name);
-  const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: modelId }, persona: PERSONA, ...over });
+  const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: modelId }, persona: PERSONA, memory: false, ...over });
   return { owner, agent, conv: agent.conversationId as string };
 }
 

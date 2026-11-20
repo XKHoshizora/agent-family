@@ -6,6 +6,7 @@ import { PROACTIVE_LEVELS, REASONING_LEVELS } from "../config.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit, type PrincipalLimit } from "../limits.ts";
+import { discardPendingOf } from "../memory/apply.ts";
 import { chosenModel } from "../models/choice.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { toWireFor } from "../messages/read.ts";
@@ -391,6 +392,8 @@ export function registerAgentRoutes(
           // A deleted Agent stays deleted: deleting again is a no-op, anything else is refused.
           if (current.deleted && !("deleted" in change)) throw deletedError();
           const changed = await setAgentState(t, current, change);
+          // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
+          if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
           // Pausing or deleting ends the Agent's active reply for good, in this transaction (runs.ts); resuming a paused
           // Agent first ends what its pause could not see (`endWhatPauseMissed`).
           const stopping = "deleted" in change || change.paused;

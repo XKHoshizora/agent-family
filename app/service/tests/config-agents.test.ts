@@ -416,6 +416,7 @@ describe("the memory configuration", () => {
     napAt: 0.8,
     faithfulAt: 0.6,
     judgePerOwnerDay: 300,
+    judgeShare: 0.5,
     roomNotes: 150,
     passageShare: 0.25,
     freeDailyPoints: 20,
@@ -445,6 +446,8 @@ describe("the memory configuration", () => {
   test("the memory-change sweep has its own interval, changesSweepMs: an hour by default, 0 for no timer at all, a whole number of ms up to a day", () => {
     expect(loadConfig({ ...base, MEMORY: '{"changesSweepMs":0}' }).memory.changesSweepMs).toBe(0);
     expect(loadConfig({ ...base, MEMORY: '{"changesSweepMs":60000}' }).memory.changesSweepMs).toBe(60_000);
+    // 0, or at least a minute: anything between would sweep back to back.
+    for (const bad of ['{"changesSweepMs":1}', '{"changesSweepMs":59999}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     // Not borrowed from the attachment sweep's setting.
     expect(loadConfig({ ...base, SWEEP_INTERVAL_MINUTES: "0" }).memory.changesSweepMs).toBe(3_600_000);
     for (const bad of ['{"changesSweepMs":-1}', '{"changesSweepMs":1.5}', '{"changesSweepMs":86400001}', '{"changesSweepMs":"3600000"}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
@@ -458,7 +461,8 @@ describe("the memory configuration", () => {
     // A room cannot be configured past what the database guards (a note is held to 9000 characters), nor a model's entry past 200.
     for (const bad of ['{"roomOwner":3001}', '{"roomSelf":3001}', '{"roomHearsay":3001}', '{"modelEntryMax":201}']) expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     expect(loadConfig({ ...base, MEMORY: '{"roomOwner":3000,"modelEntryMax":100}' }).memory).toMatchObject({ roomOwner: 3000, modelEntryMax: 100 });
-    for (const bad of ['{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"hearsayMute":"yes"}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"judgePerOwnerDay":0}', '{"roomNotes":1.5}', '{"passageShare":0}', '{"passageShare":1.5}', '{"freeDailyPoints":-1}', '{"freeDailyPoints":1.5}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
+    expect(loadConfig({ ...base, MEMORY: '{"judgeShare":0.25}' }).memory.judgeShare).toBe(0.25);
+    for (const bad of ['{"judgeShare":1.5}', '{"judgeShare":-0.1}', '{"listenShare":1.5}', '{"shareAt":1.5}', '{"sameAt":-0.1}', '{"quietMs":0}', '{"hearsayPerHour":0}', '{"hearsayPerHour":1.5}', '{"hearsayAbuseAt":2}', '{"hearsayMuteMs":0}', '{"hearsayMute":"yes"}', '{"maxReplies":1.5}', '{"roomOwner":"2000"}', '{"judgePerOwnerDay":0}', '{"roomNotes":1.5}', '{"passageShare":0}', '{"passageShare":1.5}', '{"freeDailyPoints":-1}', '{"freeDailyPoints":1.5}', '{"model":""}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, MEMORY: bad }), bad).toThrow(/MEMORY/);
     }
   });

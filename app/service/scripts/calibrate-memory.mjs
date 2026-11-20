@@ -424,7 +424,7 @@ const URL_LIKE = [
   RX(F.clean, 'URL_LIKE 3', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|cn|dev|app|co|me|ai|info|xyz|ly|gg|tv|edu|gov|jp|uk|de|fr|ru)\b/i, false),
 ]
 const ADDRESSES_THE_READER = RX(F.clean, 'ADDRESSES_THE_READER', /你必须|你应该|忽略|无视|指令|听我的|無視して|\bignore|\bdisregard|\byou must\b|\bforget (?:all|your)\b|\bsystem\b/i, false)
-const STATES_A_PASSWORD = RX(F.clean, 'STATES_A_PASSWORD', /密码\s*(?:是|为)\s*\S|密码[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b)|[:=])\s*\S|\bpassword\s+was\s+\S|\bpassword's\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i)
+const STATES_A_PASSWORD = RX(F.clean, 'STATES_A_PASSWORD', /密码\s*(?:是|为)\s*\S|密码\s*[:：]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i)
 const BARE_DOMAIN_PATH = RX(F.clean, 'BARE_DOMAIN_PATH', /\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?!(?:js|ts|py|md|go|rs|json|yml|yaml|toml|lock|css|html)\b)[a-z]{2,6}\/\S{3,}/i)
 SN(F.clean, 'tidy', 'return clean === "" || keyLike(clean) ? null : clean;')
 SN(F.clean, 'modelNote 1', 'if (clean === null || weight(clean) > modelEntryMaxNow) return null;')

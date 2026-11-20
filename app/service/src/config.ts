@@ -238,6 +238,12 @@ export interface MemoryConfig {
    * owner can never use up what everyone else's checks need. The site's own daily limit stays as the last fuse.
    */
   judgePerOwnerDay: number;
+  /**
+   * Memory's judgement requests are held to this share of the site's daily judge limit (`judge.dailyLimit`): once the site's judgements
+   * of the day have reached it, every memory check is skipped as "no answer" (each caller's own no-answer behaviour), so that memory never
+   * uses up what unasked replies need. Each owner's `judgePerOwnerDay` stays besides.
+   */
+  judgeShare: number;
   /** A room holds at most this many notes besides its size limit: an addition beyond it is dropped as a full room. */
   roomNotes: number;
   /**
@@ -253,7 +259,8 @@ export interface MemoryConfig {
   freeDailyPoints: number;
   /**
    * How often the record of memory changes is swept (memory/sweep.ts: what is over is deleted, and a pending change discarded, 30 days
-   * on), in ms; its own timer, apart from the attachment sweep's `SWEEP_INTERVAL_MINUTES`. 0: no timer (`attachments:sweep` still runs it).
+   * on), in ms; its own timer, apart from the attachment sweep's `SWEEP_INTERVAL_MINUTES`. 0: no timer (`attachments:sweep` still runs it);
+   * otherwise at least a minute.
    */
   changesSweepMs: number;
 }
@@ -297,10 +304,12 @@ const memorySchema = z.preprocess(renamedReviewWeight, z.strictObject({
   napAt: probability(0.8),
   faithfulAt: probability(0.6),
   judgePerOwnerDay: positive(300, 1_000_000),
+  judgeShare: probability(0.5),
   roomNotes: positive(150, 100_000),
   passageShare: z.number().gt(0).max(1).default(0.25),
   freeDailyPoints: z.number().int().min(0).max(1_000_000).default(20),
-  changesSweepMs: z.number().int().min(0).max(86_400_000).default(3_600_000),
+  // 0 (no timer) or at least a minute: anything between would sweep back to back.
+  changesSweepMs: z.number().int().min(0).max(86_400_000).refine((ms) => ms === 0 || ms >= 60_000).default(3_600_000),
 }));
 
 const allowanceTokens = z.number().int().min(0).max(200_000);

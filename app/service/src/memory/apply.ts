@@ -169,6 +169,13 @@ export interface ApplyResult {
   unlocks: string[];
 }
 
+/** A note a review names by a ref: where it is, and when it last changed as the review read it (absent: not checked). */
+export interface ReadNote {
+  kind: NoteKind;
+  id: string;
+  updatedAt?: Date;
+}
+
 /** The key of a sorting verdict in `ApplyOpts.vaults`: the kind of the note and its text (the sorter's answer depends on the kind). */
 export const vaultKey = (kind: NoteKind, text: string): string => `${kind}:${text}`;
 
@@ -291,11 +298,21 @@ type AddStep = { index: number; op: Extract<Op, { op: "add" }>; text: string };
  * What the operations would do to the rooms as they stand. A change is judged by its net effect: every remove and every
  * shrinking replace is counted first (they free room), then every growth (a growing replace or an add) in the order the
  * ops came, each dropped (and `full` set) when its room would pass its limit. A note is touched by at most one op (the
- * first). The result lists removes, replaces and locks first, then the adds, so the notes added list in op order.
- * Nothing is written.
+ * first). When a replace, remove or lock names a note whose `updated_at` is no longer what the review read (`refs`), every replace,
+ * remove and lock is dropped (all or nothing). The result lists removes, replaces and locks first, then the adds, so the notes added
+ * list in op order. Nothing is written.
  */
-function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteKind; id: string }>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
+function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadNote>, opts: ApplyOpts): { stored: StoredOp[]; full: boolean; unlocks: string[] } {
   const allowed = (kind: NoteKind): boolean => who.kinds.has(kind) && (kind === "self" || who.sharedNotes);
+  // The in-place ops of an answer stand or fall together (a merge is a replace plus a remove): when one names a note that changed (or is
+  // gone) since the review read it, none of them is applied — what the model wrote was about a note that is no longer there.
+  const moved = ops.some((op) => {
+    if (op.op !== "replace" && op.op !== "remove" && op.op !== "lock") return false;
+    const target = refs.get(op.ref);
+    if (!target || target.updatedAt === undefined || !allowed(target.kind)) return false;
+    const now = state[target.kind].get(target.id);
+    return now === undefined || now.updatedAt.getTime() !== target.updatedAt.getTime();
+  });
   const touched = new Set<string>();
   const candidates: Candidate[] = [];
   const adds: AddStep[] = [];
@@ -318,7 +335,7 @@ function plan(state: State, who: Who, ops: Op[], refs: Map<string, { kind: NoteK
       if (note.vault && !unlocks.includes(op.ref)) unlocks.push(op.ref);
       return;
     }
-    if (touched.has(note.id)) return;
+    if (touched.has(note.id) || moved) return;
     if (op.op === "lock") {
       if (note.vault && note.vaultBy === "owner") return;
       touched.add(note.id);
@@ -493,7 +510,7 @@ export async function applyOps(
   t: Tx,
   who: Who,
   ops: Op[],
-  refs: Map<string, { kind: NoteKind; id: string }>,
+  refs: ReadonlyMap<string, ReadNote>,
   opts: ApplyOpts,
 ): Promise<ApplyResult | null> {
   await lockAccount(t, who.ownerId);
@@ -512,7 +529,7 @@ export interface DreamApplyOpts {
   conversationId: string;
   /** `pending`: the whole dream is only recorded, to be confirmed by the owner as one change. */
   status: "applied" | "pending";
-  /** The sorting verdict by `vaultKey(kind, text)` of a text a merge, rewrite or split makes, or of an open note that is new; a text with none goes into the vault, unsure. */
+  /** The sorting verdict by `vaultKey(kind, text)` of a text a merge or split makes (a rewrite keeps its note's vault state); a text with none goes into the vault, unsure. */
   vaults: Map<string, { vault: boolean; unsure: boolean }>;
   /** The indexes (in the `ops` given) of the merges, rewrites and splits the judgement found to add nothing and lose nothing (sort.ts `addsNothing`): any other is dropped. */
   checked: ReadonlySet<number>;
@@ -521,12 +538,6 @@ export interface DreamApplyOpts {
   /** The sorting verdict (sort.ts `resortNote`) of each open note that is new since the last dream: one that no op touched, that is not the owner's choice and has not changed since it was read is locked when its verdict says so. A note with no entry has no verdict and stays. */
   resorted: ReadonlyMap<string, { vault: boolean; unsure: boolean }>;
   rooms: Rooms;
-  /**
-   * A language conversion: a rewrite keeps the note's vault state (`vault`, `vault_by`, `unsure`) exactly as it is, whatever `vaults` says
-   * (a faithful restatement has the same meaning). It is held to the same limit of a model's entry as any other rewrite (weight follows
-   * tokens, so a restatement in another script weighs about what the original did).
-   */
-  conversion?: boolean;
 }
 
 /**
@@ -591,7 +602,9 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
       const text = note ? modelNote(op.text) : null;
       if (!note || text === null || text === note.text) return;
       touched.add(note.id);
-      const vault = opts.conversion ? { vault: note.vault, by: note.vaultBy, unsure: note.unsure } : keep(note, text);
+      // A faithful restatement of one note (checked: `addsNothing`) has its meaning: it keeps the note's vault state exactly, a note the
+      // owner took out of the vault included (a merge, which joins notes, is sorted).
+      const vault = { vault: note.vault, by: note.vaultBy, unsure: note.unsure };
       steps.push({
         index,
         kind: note.kind,
@@ -1020,6 +1033,16 @@ export async function confirmChange(t: Tx, ownerId: string, changeId: string, ro
   await stamp(t, w, kept);
   await resolve(t, changeId, "applied", { ops: kept, full: change.full });
   return kept.map(plain);
+}
+
+/**
+ * Discards every pending change of the owner's Agent `agentId`, in the caller's transaction (the Agent is being deleted: its cards would
+ * be left with buttons that lead nowhere); nothing is written to a note. How many.
+ */
+export async function discardPendingOf(t: Tx, ownerId: string, agentId: string): Promise<number> {
+  await lockAccount(t, ownerId);
+  const { rowCount } = await t.query("update memory_changes set status = 'discarded', resolved_at = now() where owner_id = $1 and agent_id = $2 and status = 'pending'", [ownerId, agentId]);
+  return rowCount ?? 0;
 }
 
 /** Declines a pending change of the owner's; nothing is written. Null when it is not theirs or not pending. */

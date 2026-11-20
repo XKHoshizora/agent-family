@@ -35,6 +35,8 @@ import { getMemoryLanguage, listHearsay, roomOf } from "./store.ts";
  * Failure: a flag is tried at most twice (`memory_flags.tries`). A call that could not be made, or a step that threw, counts a
  * try for the flags it covered and the pair is woken again after the quiet time; at a wake-up flags tried twice, and
  * flags older than a day, are deleted without a call. A charged answer nothing of which can be used deletes the flags at once.
+ * A call the owner's memory allowance refuses (or would: looked at first) is no failure, for either kind: no try, no slot of the
+ * hour, and the pair is woken again when the next site day has begun, after the quiet time.
  */
 
 /** A wake-up of one pair: its own remarks, then its hearsay. */
@@ -297,6 +299,12 @@ export async function runFlags(deps: PipelineDeps, job: FlagsJob, ctx: FlagsCont
 
 type Agent = NonNullable<Awaited<ReturnType<typeof reviewableAgent>>>;
 
+/** The memory allowance refused (or would refuse) the pair's call: the flags are kept, no try, and the pair is woken when the next site day has begun, after the group's quiet time. */
+function untilTheAllowance(deps: PipelineDeps, ctx: FlagsContext): void {
+  const now = deps.now();
+  ctx.again(nextSiteMidnight(new Date(now), deps.config.siteTimezone).getTime() - now + deps.config.memory.groupQuietMs);
+}
+
 /**
  * Counts a try for the flags `seqs` of `kind`: a flag tried twice is deleted, and if any flag of the pair is left that was tried
  * the pair is woken again after the quiet time.
@@ -328,8 +336,10 @@ async function ownRemarks(deps: PipelineDeps, agent: Agent, conversationId: stri
   if (flags.length === 0) return;
   // The owner's reviewing Agent in this group is chosen when the flags are written: it may have changed since.
   if (!(await kindsFor(db, agent, conversationId, true)).has("owner")) return dropAll(flags);
-  await runReview(deps, { kind: "review", agentId: agent.id, conversationId }, ctx);
+  const outcome = await runReview(deps, { kind: "review", agentId: agent.id, conversationId }, ctx);
   if (ctx.closing.aborted) return;
+  // The memory allowance refused the call: no try is lost; woken again when the next site day has begun (and the group has had its quiet).
+  if (outcome === "refused") return untilTheAllowance(deps, ctx);
   // What the review moved `reviewed_seq` past is deleted already (pipeline.ts); what is left found no answer.
   const left = (await flagSeqs(db, agent.id, conversationId, "own")).filter((s) => flags.includes(s));
   await failedTry(deps, ctx, agent.id, conversationId, "own", left);
@@ -402,8 +412,7 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
   if (await allowanceRefuses(db, config, agent.ownerId, new Date(now))) {
     count(db, "memory_refused_allowance");
     log.info({ metric: "memory_hearsay_no_allowance", agentId: agent.id, conversationId }, "the memory allowance is spent: the flags wait, nothing is asked");
-    ctx.again(nextSiteMidnight(new Date(now), config.siteTimezone).getTime() - now + config.memory.groupQuietMs);
-    return;
+    return untilTheAllowance(deps, ctx);
   }
   const verdict = await worthACall(deps, agent.ownerId, input);
   if (!verdict.call) {
@@ -421,8 +430,6 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     return done();
   }
 
-  ctx.hearsayCalls.push(now);
-  count(db, "hearsay_call");
   const report: MemoryCallReport = { answered: false };
   const answer = await memoryCall(
     { db, models: deps.models, config, log, inFlight: deps.inFlight },
@@ -431,6 +438,11 @@ async function hearsay(deps: PipelineDeps, agent: Agent, conversationId: string,
     ctx.closing,
     report,
   );
+  // Refused by the allowance (spent since the look above, by another memory call of the owner's): no call was made, so no slot of the
+  // hour and no `hearsay_call`, and no try; the flags wait for the next site day, as above.
+  if (answer === null && report.refused === true && !ctx.closing.aborted) return untilTheAllowance(deps, ctx);
+  ctx.hearsayCalls.push(now);
+  if (report.started === true) count(db, "hearsay_call");
   if (ctx.closing.aborted) return;
   // Charged for an answer that cannot be used: handled all the same (nothing is asked again for the same messages).
   if (answer === null && !report.answered) return failedTry(deps, ctx, agent.id, conversationId, "hearsay", input.seqs);

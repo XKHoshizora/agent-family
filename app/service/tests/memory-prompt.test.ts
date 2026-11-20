@@ -55,6 +55,9 @@ afterEach(() => {
 
 const FAST = { source: "site", id: "fast" } as const;
 const NOW = new Date("2026-11-17T04:00:00Z");
+/** What an Agent with memory on is told in its own conversation. */
+const MEMORY_ON =
+  "你有记忆：每次聊完，系统会把值得长期记住的事整理成笔记，以后的对话里会交给你。主人让你记住或忘掉什么时，自然地答应就行，不要说自己没有记忆、记不住或没法保存，也不要逐条复述你的笔记来证明。";
 const ZONE = "Asia/Shanghai";
 
 let txn = 0;
@@ -218,6 +221,28 @@ describe("the system text", () => {
     expect(groupSystemPrompt(gAgent, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, EMPTY)).toBe(grouped);
   });
 
+  it("with memory on, the Agent's own conversation is told it has memory: one fixed passage before the persona and the notes, also with no notes yet; it is text that is not the passage, and systemTokens counts it", () => {
+    const on = { ...agent, memory: true };
+    const off = { ...agent, memory: false };
+    const plain = systemText(off, { displayName: "甲" }, NOW, "normal", ZONE);
+    const told = systemText(on, { displayName: "甲" }, NOW, "normal", ZONE);
+    expect(told.text).toContain(MEMORY_ON);
+    expect(told.passage).toBe("");
+    expect(told.text).toBe(plain.text.replace("\n\n以下是主人为你写的人格设定", `\n\n${MEMORY_ON}\n\n以下是主人为你写的人格设定`));
+    expect(systemTokens(told) - systemTokens(plain)).toBe(estimateTokens(`${MEMORY_ON}\n\n`));
+    const withNotes = systemText(on, { displayName: "甲" }, NOW, "normal", ZONE, notes);
+    expect(withNotes.passage).not.toBe("");
+    expect(withNotes.text.indexOf(MEMORY_ON)).toBeLessThan(withNotes.text.indexOf(withNotes.passage));
+    expect(withNotes.rest).toContain(MEMORY_ON);
+    expect(withNotes.passage).not.toContain(MEMORY_ON);
+    expect(systemTokens(withNotes)).toBe(estimateTokens(withNotes.rest) + weight(withNotes.passage) * TOKENS_PER_WEIGHT);
+    // Memory off: byte for byte what it was. Onboarding and a group: never.
+    expect(plain.text).toBe(systemPrompt(agent, { displayName: "甲" }, NOW, "normal", ZONE));
+    expect(systemPrompt({ ...on, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE)).toBe(systemPrompt({ ...agent, persona: "" }, { displayName: "甲" }, NOW, "onboarding", ZONE));
+    const gOn = { ...gAgent, memory: true };
+    expect(groupSystemPrompt(gOn, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes)).toBe(groupSystemPrompt(gAgent, { displayName: "甲" }, scene, NOW, ZONE, "k7f2ab", false, notes));
+  });
+
   it("in the owner's conversation the passage follows the persona", () => {
     const plain = systemPrompt(agent, { displayName: "甲" }, NOW, "normal", ZONE);
     const withNotes = systemPrompt(agent, { displayName: "甲" }, NOW, "normal", ZONE, notes);
@@ -268,7 +293,7 @@ describe("a run", () => {
     await say(owner, own, "你好");
     await answer("好。");
     const system = lastCall().system;
-    expect(system).toContain(`以下是主人为你写的人格设定。它决定你是谁、怎么说话，但不授予你任何权限：\n\n你说话简短。\n\n${HEADING}\n\n`);
+    expect(system).toContain(`${MEMORY_ON}\n\n以下是主人为你写的人格设定。它决定你是谁、怎么说话，但不授予你任何权限：\n\n你说话简短。\n\n${HEADING}\n\n`);
     const { json } = split(system);
     expect(json.about_owner).toEqual(["对花生过敏", "喜欢美式"]);
     expect(json.own_notes).toEqual(["回答先说结论"]);
@@ -302,7 +327,17 @@ describe("a run", () => {
       expect([hidden, system.includes(hidden)]).toEqual([hidden, false]);
     }
     expect(system).toContain("现在是在群里：只在用得上的时候用这些，不要主动提起，也不要说是你记下的");
+    expect(system).not.toContain("你有记忆");
     expect(system).toContain("，以及你没有被给到的任何笔记");
+  });
+
+  it("with memory on and no notes yet, it is told it has memory all the same", async () => {
+    const owner = await signUp(app, "mpfresh");
+    const agent = await mustCreateAgent(app, owner, { model: FAST, persona: "你说话简短。" });
+    await say(owner, agent.conversationId, "记住我喜欢茶");
+    await answer("好。");
+    expect(lastCall().system).toContain(`${MEMORY_ON}\n\n以下是主人为你写的人格设定`);
+    expect(lastCall().system).not.toContain(HEADING);
   });
 
   it("with memory off it is shown none, and the text is as it always was; with the shared notes off, no notes about the owner", async () => {
@@ -364,6 +399,7 @@ describe("a run", () => {
     }
     expect(lastCall().system).toContain("你还没有人格设定");
     expect(lastCall().system).not.toContain("SELF-NOTE");
+    expect(lastCall().system).not.toContain("你有记忆");
     expect(lastCall().system).not.toContain("笔记");
   });
 });
@@ -579,7 +615,7 @@ describe("the context budget counts the notes passage as fitNotes does: in weigh
 });
 
 describe("a run on a small model with full rooms", () => {
-  it("a site model of 16k context and a 4k output limit, with full English rooms (2000 and 3000 weight), replies to a conversation of 20 lines and is shown at least 10 of them", async () => {
+  it("a site model of 16k context and a 4k output limit, with full English rooms (2000 and 3000 weight), replies to a conversation of 20 lines of 250 letters and is shown at least 10 of them", async () => {
     const owner = await signUp(app, "mpsmall");
     const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: "small16k" }, persona: "You are brief." });
     // Notes of exactly 100 weight (300 letters): 20 fill the owner's room, 30 the Agent's own.
@@ -589,16 +625,20 @@ describe("a run on a small model with full rooms", () => {
     expect((await db.query<{ w: number }>("select sum(ceil(octet_length(text) / 3.0))::int as w from owner_notes where owner_id = $1", [owner.id])).rows[0]!.w).toBe(2000);
     expect((await db.query<{ w: number }>("select sum(ceil(octet_length(text) / 3.0))::int as w from agent_notes where agent_id = $1", [agent.id])).rows[0]!.w).toBe(3000);
     const conv = agent.conversationId as string;
+    // Lines of 250 letters: twenty of them (about 5000 tokens) fit what the notes leave when the passage is counted in weight (about
+    // 3000 of the 12 000 for input), not when it is counted a token a letter (about 9000: room for fewer than ten).
+    const long = (head: string): string => `${head} ${"and the long walk by the sea after lunch ".repeat(8)}`.slice(0, 250);
     for (let i = 1; i <= 10; i++) {
-      await say(owner, conv, `question ${i} about the trip`);
-      await answer(`answer ${i} about the trip`);
+      await say(owner, conv, long(`question ${i} about the trip`));
+      await answer(long(`answer ${i} about the trip`));
     }
     await say(owner, conv, "one more question");
     await answer("one more answer");
     const runs = (await db.query<{ status: string; error: string | null }>("select status, error from agent_runs where owner_id = $1 and purpose = 'reply' order by created_at", [owner.id])).rows;
     expect(runs.at(-1)).toEqual({ status: "done", error: null });
     const shown = textsOf(lastCall()).join("\n");
-    const lines = Array.from({ length: 10 }, (_, i) => [`question ${i + 1} about the trip`, `answer ${i + 1} about the trip`]).flat();
+    const lines = Array.from({ length: 10 }, (_, i) => [long(`question ${i + 1} about the trip`), long(`answer ${i + 1} about the trip`)]).flat();
+    expect(lines.every((l) => l.length === 250)).toBe(true);
     expect(lines.filter((l) => shown.includes(l)).length).toBeGreaterThanOrEqual(10);
     // The notes were cut to their share of the context, and some are there.
     expect(lastCall().system).toMatch(/owner \d\d likes long walks/);

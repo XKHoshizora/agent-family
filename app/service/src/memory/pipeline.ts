@@ -11,7 +11,7 @@ import type { ModelGateway } from "../models/gateway.ts";
 import { applyOps, proposeUnlocks, vaultKey, type AppliedOp, type StoredOp } from "./apply.ts";
 import { memoryCall, type MemoryCallReport } from "./call.ts";
 import { modelNote } from "./clean.ts";
-import { lookedAt, parseAnswer, parseOps, sameKey, type Op } from "./ops.ts";
+import { lookedAt, parseAnswer, parseOps, refusedInPlace, sameKey, type Op } from "./ops.ts";
 import { linesOf, readReview, type RefNote, type ReviewInput } from "./review.ts";
 import { duplicateOf, sortNote, type KnownNote, type SortDeps } from "./sort.ts";
 import { count, countNoteOps } from "./stats.ts";
@@ -46,6 +46,8 @@ export interface ReviewJob {
   kind: "review";
   agentId: string;
   conversationId: string;
+  /** The one retry of a review whose call met the owner's cap of calls running (`ReviewContext.retry`): not retried again. */
+  retried?: boolean;
 }
 
 export interface ReviewContext {
@@ -57,6 +59,8 @@ export interface ReviewContext {
   changed?(agentId: string): void;
   /** After commit: the review left owner lines of a later topic for the next review (`ReviewInput.more`); the scheduler runs it after this one. */
   more?(): void;
+  /** The review's call could not start because the owner had as many calls running as they may: the scheduler runs it once more a minute later. */
+  retry?(): void;
 }
 
 /** What may be logged of an error: never its message or detail, which can carry the text of a note. */
@@ -186,7 +190,8 @@ export async function memoryNotice(
   });
 }
 
-export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<void> {
+/** A review; "refused" when its call was not made because the owner's memory allowance is spent (no failure: it waits for the next site day). */
+export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewContext): Promise<"refused" | undefined> {
   const { db, config, log } = deps;
   const { agentId, conversationId } = job;
   const agent = await reviewableAgent(db, agentId);
@@ -217,16 +222,23 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   if (answer === null && report.answered) answer = "";
   // No answer at all: no model or allowance to call on, the call failed, or the service is stopping (that one is no failure).
   if (answer === null && !ctx.closing.aborted && report.refused !== true) count(db, "review_failed");
+  // The owner's calls running were at their cap: a moment later there is room again (once; then it waits for their next words).
+  if (answer === null && !ctx.closing.aborted && report.capped === true) ctx.retry?.();
+  if (answer === null && !ctx.closing.aborted && report.refused === true) return "refused";
   if (answer === null || ctx.closing.aborted) return;
 
   const answered = parseOps(answer, new Set(input.refs.keys()), [...input.existing, ...pending.texts.map((p) => p.text)]).filter((op) => allowed(op, kinds, group, input.refs));
   // The ops that change a note in place depend on one another (a merge is a replace plus a remove), so they are decided as one group,
-  // before anything else: when any of them names a note a pending change of this owner already touches, the waiting card already asks
-  // about it, and ALL of them are dropped (adds and `seen` still go on).
-  const waits = answered.some((op) => {
-    const note = inPlace(op) ? input.refs.get(op.ref) : undefined;
-    return note !== undefined && pending.touched.has(noteKey(note.kind, note.id));
-  });
+  // before anything else: when any of them names a note a pending change of this owner already touches (the waiting card already asks
+  // about it), or the cleaning refused the text of one of them (it is gone from `answered`: the others would be half of it), ALL of them
+  // are dropped (adds and `seen` still go on). One whose note changed since it was read drops them all too, decided where they are
+  // applied (apply.ts `plan`).
+  const waits =
+    refusedInPlace(answer, new Set(input.refs.keys())) ||
+    answered.some((op) => {
+      const note = inPlace(op) ? input.refs.get(op.ref) : undefined;
+      return note !== undefined && pending.touched.has(noteKey(note.kind, note.id));
+    });
   const ops = waits ? answered.filter((op) => !inPlace(op)) : answered;
   const sorted = await sortOps(deps, agent, ops, input.refs, group ? [] : pending.texts, ctx.closing);
   if (ctx.closing.aborted) return;

@@ -237,6 +237,26 @@ describe("what happens to the flags", () => {
     expect(reviewCalls()).toHaveLength(2);
   });
 
+  it("a review the memory allowance refused loses no try: the flags are kept with no try counted, and the pair is woken at the next site midnight plus the quiet time", async () => {
+    const w = await world("gq");
+    const { nextSiteMidnight, siteDay } = await import("../src/accounts/store.ts");
+    const seq = await say(w.owner, w.g, "我下周三要搬家了");
+    await db.query("insert into memory_usage (owner_id, day, used_micro) values ($1, $2::date, 900000000000) on conflict (owner_id, day) do update set used_micro = 900000000000", [w.owner.id, siteDay(new Date(), app.deps.config.siteTimezone)]);
+    await flag(w.agent.id, w.g, seq, "own");
+    await wake();
+    expect(reviewCalls()).toHaveLength(0);
+    expect((await db.query("select tries from memory_flags where agent_id = $1 and kind = 'own'", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
+    // Not woken again after the quiet time (that would be a counted try's): at the next site midnight plus the quiet time.
+    const due = nextSiteMidnight(new Date(clock.now()), app.deps.config.siteTimezone).getTime() - clock.now() + app.deps.config.memory.groupQuietMs;
+    await wake(due - MIN);
+    expect((await db.query("select tries from memory_flags where agent_id = $1 and kind = 'own'", [w.agent.id])).rows).toEqual([{ tries: 0 }]);
+    await db.query("delete from memory_usage where owner_id = $1", [w.owner.id]);
+    gateway.reply(ops(add("下周三要搬家")));
+    await wake(MIN + 1000);
+    expect(reviewCalls()).toHaveLength(1);
+    expect(await flagRows(w.agent.id, "own")).toEqual([]);
+  });
+
   it("a charged answer nothing of which can be used counts as reviewed: the flags go with reviewed_seq", async () => {
     const w = await world("h");
     const seq = await say(w.owner, w.g, "我下周三要搬家了");

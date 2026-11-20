@@ -56,6 +56,13 @@ const ONBOARDING = [
 const NORMAL = "主人让你根据对话更新或修改人格设定时，整理一份完整的新设定，写成设定提议。主人没有这样要求时，不要写设定提议。";
 
 /**
+ * What an Agent with memory on is told in its own conversation (not in a group, not in onboarding), notes or not: that it has memory, so
+ * that it never tells its owner it cannot keep anything.
+ */
+const MEMORY_ON =
+  "你有记忆：每次聊完，系统会把值得长期记住的事整理成笔记，以后的对话里会交给你。主人让你记住或忘掉什么时，自然地答应就行，不要说自己没有记忆、记不住或没法保存，也不要逐条复述你的笔记来证明。";
+
+/**
  * A system text as it was composed: the whole `text`, and its notes passage (`notesPassage`; "" when there is none) apart from the
  * `rest` — the text with the passage taken out. What `systemTokens` measures: where the passage is is known from how the text was
  * put together, never found again by reading it (a persona may hold anything, the passage's heading included).
@@ -71,10 +78,12 @@ const composed = (before: string, passage: string, after = ""): SystemText => ({
 
 /**
  * `agent.ownerAppellation` is what its owner wants it to call them (null: by name). When it shows as anything
- * (`shownAppellation`), the first line says so; otherwise the text is as it always was.
+ * (`shownAppellation`), the first line says so; otherwise the text is as it always was. `agent.memory` (its memory is on): the
+ * fixed sentence `MEMORY_ON` comes before the persona, and so before the notes passage (outside onboarding); off or absent, the
+ * text is as it was.
  */
 export function systemText(
-  agent: { name: string; persona: string; ownerAppellation: string | null },
+  agent: { name: string; persona: string; ownerAppellation: string | null; memory?: boolean },
   owner: { displayName: string },
   now: Date,
   mode: PromptMode,
@@ -90,7 +99,8 @@ export function systemText(
   ].join("\n");
   if (mode === "onboarding") return composed(`${preamble}\n\n${ONBOARDING}\n\n${PROPOSAL_FORMAT}`, "");
   const passage = notesPassage(notes, false, timeZone, labelSafe(owner.displayName));
-  return composed(`${preamble}\n\n${NORMAL}\n\n${PROPOSAL_FORMAT}\n\n${PERSONA_HEADING}\n\n${agent.persona}${passage === "" ? "" : "\n\n"}`, passage);
+  const memory = agent.memory === true ? `${MEMORY_ON}\n\n` : "";
+  return composed(`${preamble}\n\n${NORMAL}\n\n${PROPOSAL_FORMAT}\n\n${memory}${PERSONA_HEADING}\n\n${agent.persona}${passage === "" ? "" : "\n\n"}`, passage);
 }
 
 /** The system text of a reply in the Agent's own conversation (`systemText`'s `text`). */

@@ -13,7 +13,8 @@ import { EXPLICIT } from "./review.ts";
  * `MEMORY.quietMs`, at once after `maxReplies` replies since the last review or when the owner's latest message asks for
  * something to be remembered, forgotten or locked, and at once when the owner starts a new topic. A trigger never fires
  * unless the owner said something after what the last attempt looked at, so a review that failed is not asked again for the
- * same words. One job per Agent at a time (a trigger meanwhile waits and runs once after it), at most
+ * same words — except one whose call could not start because the owner had as many calls running as they may: it is run once
+ * more `RETRY_MS` later (once only). One job per Agent at a time (a trigger meanwhile waits and runs once after it), at most
  * `MAX_REVIEWS_AT_ONCE` overall. A review never reaches across a new topic (review.ts): one that left the owner's words of a later
  * topic asks (`more`) for another review of the pair, queued at once and run after it.
  *
@@ -58,7 +59,7 @@ export interface ReviewerDeps {
   closing?: AbortSignal;
   setTimer: SetTimer;
   /** Does one job (pipeline.ts `runReview`, hearsay.ts `runFlags`, dream.ts `runDreamJob`, by `kind`); may reject: it is logged. */
-  run(job: Job, ctx: JobContext): Promise<void>;
+  run(job: Job, ctx: JobContext): Promise<unknown>;
 }
 
 export interface Reviewer {
@@ -94,6 +95,9 @@ export interface Reviewer {
   idle(): Promise<void>;
 }
 
+/** How long a review whose call met the owner's cap of calls running waits for its one retry. */
+export const RETRY_MS = 60_000;
+
 /** How far back a restart looks for replies nobody reviewed. */
 const RESUME_WINDOW = "24 hours";
 
@@ -110,6 +114,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
   const hearsayCalls = new Map<string, number[]>();
   /** The newest seq the last attempt of each pair looked at (a failed call is not asked again for the same words). */
   const attempted = new Map<string, number>();
+  /** The pairs whose review waits `RETRY_MS` for its one retry (its call met the owner's cap of calls running). */
+  const retries = new Map<string, { clear(): void }>();
   const dream = newDreamState();
   let sweepTimer: { clear(): void } | null = null;
   /** The owners with a dream job under way: the rooms of one owner are never consolidated in parallel. */
@@ -154,6 +160,7 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
         again: (afterMs) => void (job.kind === "flags" && armFlags(job, afterMs)),
         // Queued now, it runs once this job is done (one job per Agent at a time).
         more: () => void (job.kind === "review" && enqueueIfNew(job)),
+        retry: () => void (job.kind === "review" && !job.retried && armRetry(job)),
         hearsayCalls: hearsayCalls.get(key) ?? [],
         changed: (agentId) => api.changed(agentId),
         dream,
@@ -269,6 +276,20 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
     return true;
   };
 
+  /** The one retry of a review whose call met the owner's cap: queued `RETRY_MS` later, the same words (it is not asked whether the owner said more). */
+  const armRetry = (job: ReviewJob): void => {
+    if (closed) return;
+    const key = keyOf(job.agentId, job.conversationId);
+    retries.get(key)?.clear();
+    retries.set(
+      key,
+      deps.setTimer(() => {
+        retries.delete(key);
+        enqueue({ ...job, retried: true });
+      }, RETRY_MS),
+    );
+  };
+
   const disarm = (job: Job): void => {
     const key = keyOf(job.agentId, job.conversationId);
     timers.get(key)?.clear();
@@ -379,6 +400,8 @@ export function createReviewer(deps: ReviewerDeps): Reviewer {
       flagTimers.clear();
       sweepTimer?.clear();
       sweepTimer = null;
+      for (const timer of retries.values()) timer.clear();
+      retries.clear();
       hearsayCalls.clear();
       attempted.clear();
       for (const job of waiting) if (job.kind === "convert") job.settle(null);

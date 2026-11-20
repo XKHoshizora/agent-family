@@ -164,7 +164,7 @@ export async function atDailyLimit(q: Queryable, day: string, limit: number, log
 }
 
 /** The site's judgements of site day `day` so far (`judge_usage`). */
-async function judgementsOn(q: Queryable, day: string): Promise<number> {
+export async function judgementsOn(q: Queryable, day: string): Promise<number> {
   const { rows } = await q.query<{ calls: number }>("select calls from judge_usage where day = $1::date", [day]);
   return rows[0]?.calls ?? 0;
 }

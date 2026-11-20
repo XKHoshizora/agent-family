@@ -482,21 +482,44 @@ describe("what a dream may do", () => {
     expect(await dreamedAt(w.owner.id)).not.toBeNull();
   });
 
-  it("a rewrite the sorter calls private goes into the vault, unsure; one it calls harmless stays out", async () => {
+  it("a faithful rewrite keeps the note's vault state exactly (vault, vault_by, unsure): the sorter is not asked about it, whatever it would say", async () => {
     const w = await owned("dc5");
-    await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
-    await seeded(w.owner, w.agent.id, "爱吃辣", false);
-    judge.answer((state) => ({ sort: state.includes("爱吃辣，胃不好") ? 0.5 : 0.95, faithful: 0.9 }));
-    gateway.reply(dreamAns(rewrite("n1", "喜欢喝茶，不加糖"), rewrite("n2", "爱吃辣，胃不好")));
+    const tea = await openAuto(w.owner.id, "喜欢喝茶", 30);
+    const spicy = await openAuto(w.owner.id, "爱吃辣", 30);
+    const locked = await openAuto(w.owner.id, "对花生过敏", 30);
+    await db.query("update owner_notes set vault = true, unsure = true where id = $1", [locked]);
+    // Something new, so that the owner dreams; written before the dream, so not among the rewritten.
+    await openAuto(w.owner.id, "刚记下的事", 1);
+    // A sorter that would lock every rewrite, were it asked.
+    judge.answer((state) => ({ sort: state.includes("刚记下") ? 0.95 : 0.1, faithful: 0.9 }));
+    gateway.reply(dreamAns(rewrite("n1", "喜欢喝茶，不加糖"), rewrite("n2", "爱吃辣，胃不好"), rewrite("n3", "对花生严重过敏")));
     await night();
     const rows = await ownerNotes(w.owner.id);
-    expect(rows.map((r) => [r.text, r.vault, r.unsure])).toEqual([
-      ["喜欢喝茶，不加糖", false, false],
-      ["爱吃辣，胃不好", true, true],
+    expect(rows.map((r) => [r.id, r.text, r.vault, r.vault_by, r.unsure])).toEqual([
+      [tea, "喜欢喝茶，不加糖", false, "auto", false],
+      [spicy, "爱吃辣，胃不好", false, "auto", false],
+      [locked, "对花生严重过敏", true, "auto", true],
+      [expect.any(String), "刚记下的事", false, "auto", false],
     ]);
-    expect(rows[1].vault_by).toBe("auto");
+    expect(sortCalls().map((c) => c.state)).toEqual(["笔记：刚记下的事"]);
     const [chip] = await chips(w.owner, w.conv);
-    expect(chip.system).toMatchObject({ phase: "dream", count: 2, lines: ["改成了：喜欢喝茶，不加糖", "改成了：爱吃辣，胃不好"], vaultLines: [false, true] });
+    expect(chip.system).toMatchObject({ phase: "dream", count: 3, lines: ["改成了：喜欢喝茶，不加糖", "改成了：爱吃辣，胃不好", "改成了：对花生严重过敏"], vaultLines: [false, false, true] });
+  });
+
+  it("with 全部进保险箱 a faithful rewrite does not put back a note the owner took out of the vault; a merge is still sorted (into the vault)", async () => {
+    const w = await owned("dc5b");
+    expect((await api(app, w.owner, "PATCH", "/api/me", { newNotes: "vault" })).status).toBe(200);
+    const out = await seeded(w.owner, w.agent.id, "喜欢喝茶", false);
+    const a = await seeded(w.owner, w.agent.id, "爱吃辣", false);
+    const b = await seeded(w.owner, w.agent.id, "喜欢吃辣的", false);
+    for (const id of [out.id, a.id, b.id]) expect((await noteRow(id)).vault_by).toBe("owner");
+    calm();
+    gateway.reply(dreamAns(rewrite("n1", "喜欢喝茶，不加糖"), merge("n2", ["n3"], "爱吃辣")));
+    await night();
+    expect((await ownerNotes(w.owner.id)).map((r) => [r.id, r.text, r.vault, r.vault_by])).toEqual([
+      [out.id, "喜欢喝茶，不加糖", false, "owner"],
+      [a.id, "爱吃辣", true, "auto"],
+    ]);
   });
 
   it("an open note that is new since the last dream is sorted again, once: a vault verdict locks it (auto), a note that is not new is left alone", async () => {
@@ -966,9 +989,9 @@ describe("the 入梦 switch is for naps too", () => {
 });
 
 describe("the fresh re-sort moves a note only on a verdict", () => {
-  it("an untouched open new note is asked in auto mode whatever the owner's setting says; a vault verdict locks it, a harmless one leaves it", async () => {
+  it("an untouched open new note is asked when the owner's setting is 自动判断; a vault verdict locks it, a harmless one leaves it", async () => {
     const w = await owned("fb1");
-    expect((await api(app, w.owner, "PATCH", "/api/me", { newNotes: "vault" })).status).toBe(200);
+    expect((await api(app, w.owner, "PATCH", "/api/me", { newNotes: "auto" })).status).toBe(200);
     const a = await openAuto(w.owner.id, "喜欢喝茶");
     const b = await openAuto(w.owner.id, "借了朋友三万块");
     judge.answer((state) => ({ sort: state.includes("三万") ? 0.1 : 0.95 }));
@@ -977,6 +1000,23 @@ describe("the fresh re-sort moves a note only on a verdict", () => {
     expect(sortCalls()).toHaveLength(2);
     const rows = await ownerNotes(w.owner.id);
     expect(rows.map((r) => [r.id, r.vault])).toEqual([[a, false], [b, true]]);
+  });
+
+  it("with 全部进保险箱 or 全部不进保险箱 no re-sort judgement is made: the setting has decided, the notes stay where they are", async () => {
+    for (const setting of ["vault", "open"] as const) {
+      const w = await owned(`fb1${setting}`);
+      expect((await api(app, w.owner, "PATCH", "/api/me", { newNotes: setting })).status).toBe(200);
+      await openAuto(w.owner.id, "喜欢喝茶");
+      await openAuto(w.owner.id, "借了朋友三万块");
+      judge.answer(() => ({ sort: 0.1, faithful: 0.9 }));
+      judge.calls.splice(0);
+      gateway.reply(dreamAns());
+      await night();
+      expect([setting, dreamCalls().length > 0, sortCalls().length]).toEqual([setting, true, 0]);
+      expect([setting, (await ownerNotes(w.owner.id)).map((r) => r.vault)]).toEqual([setting, [false, false]]);
+      expect(await chips(w.owner, w.conv)).toEqual([]);
+      first = gateway.calls.length;
+    }
   });
 
   it("no answer from the judge (failing, or answering something else) leaves the note where it is", async () => {

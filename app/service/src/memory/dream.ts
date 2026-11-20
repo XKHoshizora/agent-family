@@ -607,7 +607,7 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
     .filter((n) => !conversion && fresh.has(n.note.id) && !n.note.vault && n.note.vaultBy === "auto")
     .sort((a, b) => b.note.updatedAt.getTime() - a.note.updatedAt.getTime())
     .map((n) => n.note.id);
-  const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing, conversion !== undefined);
+  const { vaults, checked, resorted } = await judge(deps, by, ops, input.refs, candidates, ctx.closing);
   if (ctx.closing.aborted) return "aborted";
 
   const refs = new Map([...input.refs].map(([ref, n]) => [ref, { kind: n.kind, id: n.id }]));
@@ -624,7 +624,6 @@ async function dreamRoom(deps: PipelineDeps, ctx: DreamContext, by: AgentRow, ro
       read,
       resorted,
       rooms: roomOf(config),
-      ...(conversion ? { conversion: true } : {}),
     });
     noRoom = applied?.noRoom ?? 0;
     if (applied && !conversion && !locked.memoryAsk) made = applied.applied;
@@ -694,9 +693,10 @@ async function convertibleNotes(db: Db, ownerId: string, room: DreamRoom): Promi
 
 /**
  * The judgements a dream's ops need, outside any transaction (the site's judgement model; failing closed): every merge, rewrite
- * and split is checked to add nothing and lose nothing (`addsNothing`: an op that is not sure is not applied), the texts that
- * stay open are sorted as new notes are (the owner's setting), and what is new and open that no op names is sorted again
- * (`resortNote`, at most `RESORT_AT_MOST`, always asked, no answer meaning the note stays).
+ * and split is checked to add nothing and lose nothing (`addsNothing`: an op that is not sure is not applied), the texts a merge or a
+ * split leaves open are sorted as new notes are (the owner's setting; a checked rewrite keeps its note's vault state, nothing to sort),
+ * and, when the owner's setting is `auto` (自动判断), what is new and open that no op names is sorted again (`resortNote`, at most
+ * `RESORT_AT_MOST`, no answer meaning the note stays; with `vault` or `open` the setting has decided and nothing is asked).
  */
 async function judge(
   deps: PipelineDeps,
@@ -705,7 +705,6 @@ async function judge(
   refs: DreamInput["refs"],
   candidates: ReadonlyArray<string>,
   closing: AbortSignal,
-  conversion = false,
 ): Promise<{ vaults: Map<string, { vault: boolean; unsure: boolean }>; checked: Set<number>; resorted: Map<string, { vault: boolean; unsure: boolean }> }> {
   const { db, config, log } = deps;
   const vaults = new Map<string, { vault: boolean; unsure: boolean }>();
@@ -731,8 +730,7 @@ async function judge(
       if (!(await addsNothing(sortDeps, { kind: "rewrite", sources: [note.text], result: op.text }))) continue;
       checked.add(index);
       named.add(note.id);
-      // A faithful restatement of a conversion has the same meaning: the note stays where it is, nothing is sorted.
-      if (!note.vault && !conversion) await sort(note.kind, op.text);
+      // A faithful restatement has the same meaning: the note keeps its vault state (apply.ts `planDream`), nothing is sorted.
     } else if (op.op === "split") {
       const note = refs.get(op.ref)!;
       // Parts that together are far longer than the note add something: not even asked about.
@@ -747,7 +745,8 @@ async function judge(
   }
   const byId = new Map([...refs.values()].map((n) => [n.id, n]));
   let asked = 0;
-  for (const id of candidates) {
+  // Only in auto mode: with 全部进保险箱 or 全部不进保险箱 the owner's setting already decided where a note goes.
+  for (const id of setting === "auto" ? candidates : []) {
     if (closing.aborted || asked >= RESORT_AT_MOST) break;
     const note = byId.get(id);
     if (!note || named.has(id)) continue;

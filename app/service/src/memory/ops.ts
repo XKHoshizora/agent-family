@@ -88,6 +88,27 @@ function one(raw: unknown, refs: ReadonlySet<string>): Op | null {
 }
 
 /**
+ * Whether the answer held an in-place op (`replace`) of the known shape naming a note it was shown whose text `modelNote` refuses (the
+ * entries `lookedAt` keeps): `parseOps` drops it, and since the in-place ops of an answer stand or fall together (a merge is a replace
+ * plus a remove) the caller drops the others too. Pure and total.
+ */
+export function refusedInPlace(answer: string, refs: ReadonlySet<string>): boolean {
+  try {
+    const parsed = parseAnswer(answer);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+    const list = (parsed as { ops?: unknown }).ops;
+    if (!Array.isArray(list)) return false;
+    return lookedAt(list).some((raw) => {
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+      const o = raw as Record<string, unknown>;
+      return o.op === "replace" && hasExactly(o, ["op", "ref", "text"]) && typeof o.ref === "string" && refs.has(o.ref) && typeof o.text === "string" && modelNote(o.text) === null;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
  * The operations of a review's answer: one JSON object `{"ops":[…]}`, bare or in a fenced block (text around a fenced
  * block is ignored); anything else answers `[]`. Of the first `MAX_OPS` entries (and the first `MAX_SEEN` `seen` ones, counted apart), an entry with an unknown key, an unknown
  * `ref` (one not in `refs`), the wrong shape, or a text `modelNote` refuses is dropped. An `add` whose text equals one of

@@ -66,6 +66,36 @@ describe("the sweep of memory changes", () => {
     expect((await db.query("select resolved_at is not null as done from memory_changes where id = $1", [stale])).rows[0]).toEqual({ done: true });
   });
 
+  it("a pending change confirmed while the sweep waits for its row is not discarded over it: the status is asked again in the update itself", async () => {
+    const w = await world();
+    const id = await change(w, "pending", 31);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let locked!: () => void;
+    const lockedNow = new Promise<void>((r) => (locked = r));
+    // A confirm: it holds the change's row, then writes it applied and commits.
+    const confirm = db.tx(async (t) => {
+      await t.query("select status from memory_changes where id = $1 for update", [id]);
+      locked();
+      await held;
+      await t.query("update memory_changes set status = 'applied', resolved_at = now() where id = $1", [id]);
+    });
+    await lockedNow;
+    // The sweep, on another connection, reads the change as pending and waits for its row.
+    const sweeping = sweepMemoryChanges(db);
+    await vi.waitFor(
+      async () => {
+        const { rows } = await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and query like '%update memory_changes set status = ''discarded''%'");
+        expect(rows[0]!.n).toBeGreaterThan(0);
+      },
+      { timeout: 5000 },
+    );
+    release();
+    await confirm;
+    expect((await sweeping).discarded).toBe(0);
+    expect(await statusOf(id)).toBe("applied");
+  });
+
   it("the clock is the function's: the same rows are kept at day 29 and gone at day 31", async () => {
     const w = await world();
     const id = await change(w, "applied", 0);

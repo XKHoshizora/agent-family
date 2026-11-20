@@ -293,6 +293,25 @@ describe("the owner's allowance", () => {
     expect(await ownerUsed()).toBe(1);
   });
 
+  it("memory's checks stop at judgeShare of the site's daily limit (by default half of it): past it each caller's no-answer behaviour, no call", async () => {
+    expect(app.deps.config.memory.judgeShare).toBe(0.5);
+    judge.answer(() => ({ sort: 0.9, faithful: 0.9, d0: 0.9 }));
+    const site = { judge: { ...JUDGE, dailyLimit: 10 } };
+    await db.query("insert into judge_usage (day, calls) values ($1::date, 4) on conflict (day) do update set calls = 4", [today()]);
+    expect(await sortNote(deps({}, site), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    // 5 of 10: half of the site's day is used, memory asks no more.
+    const before = judge.calls.length;
+    expect(await sortNote(deps({}, site), "x", "owner", "auto")).toEqual({ vault: true, unsure: false });
+    expect(await resortNote(deps({}, site), "x", "owner")).toBeNull();
+    expect(await duplicateOf(deps({}, site), "新", [{ id: "a", text: "a" }])).toBeNull();
+    expect(await addsNothing(deps({}, site), { kind: "rewrite", sources: ["a"], result: "b" })).toBe(false);
+    expect(judge.calls).toHaveLength(before);
+    expect(await used()).toBe(5);
+    // A larger share lets them on.
+    expect(await sortNote(deps({}, { ...site, ...withMemory({ judgeShare: 0.8 }) }), "x", "owner", "auto")).toEqual({ vault: false, unsure: false });
+    expect(await used()).toBe(6);
+  });
+
   it("a failed or hung call is still counted for the owner", async () => {
     judge.answer(() => new JudgeError("auth"));
     await sortNote(deps(), "x", "owner", "auto");

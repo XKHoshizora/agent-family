@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from "fastify";
 import { siteDay } from "../accounts/store.ts";
-import { atDailyLimit, countJudgement } from "../agents/proactive/decide.ts";
+import { countJudgement, judgementsOn } from "../agents/proactive/decide.ts";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import type { Answer, Judge, Question } from "../judge/client.ts";
@@ -55,8 +55,8 @@ async function countOwner(db: Db, ownerId: string, day: string): Promise<void> {
 
 /**
  * One judgement call with `questions` about `state`, counted in `judge_usage`, bounded as the proactive decision is (each
- * channel its `timeoutMs`). Null when it cannot be asked (no judge, the site's day used up) or gave no answer for any reason;
- * else the answers it did give, by key.
+ * channel its `timeoutMs`). Null when it cannot be asked (no judge, the owner's `judgePerOwnerDay` used up, the site's judgements of
+ * the day at `MEMORY.judgeShare` of its daily limit) or gave no answer for any reason; else the answers it did give, by key.
  */
 export async function askAll(deps: SortDeps, state: string, questions: readonly Question[], purpose: JudgePurpose): Promise<Map<string, Answer> | null> {
   const { db, judge, config, log } = deps;
@@ -67,7 +67,11 @@ export async function askAll(deps: SortDeps, state: string, questions: readonly 
       log.debug({ metric: "judge_owner_limit" }, "an owner's memory checks of the day are used up: not judged");
       return null;
     }
-    if (await atDailyLimit(db, day, config.judge.dailyLimit, log)) return null;
+    // Memory takes at most its share of the site's day: the rest is for unasked replies.
+    if ((await judgementsOn(db, day)) >= config.memory.judgeShare * config.judge.dailyLimit) {
+      log.debug({ metric: "judge_memory_share" }, "memory's share of the site's judgements of the day is used up: not judged");
+      return null;
+    }
     const deadline = AbortSignal.timeout(config.judge.timeoutMs * Math.max(1, config.judge.channels.length));
     count(db, `judge_memory_call_${purpose}`);
     let answers: Map<string, Answer> | null = null;
@@ -107,9 +111,10 @@ export async function sortNote(
 }
 
 /**
- * The same judgement for a note that already exists and is outside the vault (a dream looking at what is new): always asked
- * (the owner's setting for new notes is about new notes, never about these), and null when there is no answer (no judge, the
- * day's limit, an error, nothing usable): the caller leaves the note where it is, where `sortNote` would lock it.
+ * The same judgement for a note that already exists and is outside the vault (a dream looking at what is new, which asks it only
+ * when the owner's setting is `auto`: with `vault` or `open` the setting has already decided where a note goes; `sortNote` asks it for
+ * a new note in `auto` too). Null when there is no answer (no judge, the day's limit, an error, nothing usable): the caller leaves the
+ * note where it is, where `sortNote` would lock it.
  */
 export async function resortNote(deps: SortDeps, text: string, kind: NoteKind): Promise<{ vault: boolean; unsure: boolean } | null> {
   const instructions = kind === "owner" ? OWNER_INSTRUCTIONS : SELF_INSTRUCTIONS;
