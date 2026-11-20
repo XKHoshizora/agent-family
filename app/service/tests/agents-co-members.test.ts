@@ -99,6 +99,9 @@ const HIDDEN_KEYS = [
   "askerIds",
   "asker_ids",
   "askers",
+  // Which messages called for a reply (`agent_runs.call_seqs`, fix round 2): never on the wire either.
+  "callSeqs",
+  "call_seqs",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 

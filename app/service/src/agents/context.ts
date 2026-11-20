@@ -84,9 +84,10 @@ export interface ContextRun {
    * history its model is shown — `maxTokens` tokens, counted as the plan counts them (text in weight, attachments at their
    * estimate; the system text is not in it), when the model's context would hold more, and of the group's latest `maxMessages`
    * messages only — and nothing at or before seq `after`, the run's asker's line (`askerLine`): no message, no quote of
-   * one, no attachment of one. The Agent's own conversation is limited by the model's context alone.
+   * one, no attachment of one — but the calls it answers, at `calls` (`callsSeen`; each with its own attachment, its quote
+   * of a message at or before the line left out). The Agent's own conversation is limited by the model's context alone.
    */
-  group: { maxTokens: number; maxMessages: number; after: number } | null;
+  group: { maxTokens: number; maxMessages: number; after: number; calls: readonly number[] } | null;
   /**
    * The ratio the context is planned at (metering/tokens.ts `planRatio` of the model's learned ratio, read once by the
    * run): every text of the plan — the system text, the messages, the cut of the newest — counts its weight times this.
@@ -207,18 +208,18 @@ export async function readPrefix(
 
 /**
  * The asker's line of reply run `runId` in a group (Task 10b, the product rule of 2026-11-20): the seq at and before which
- * nothing of the group is shown to its model — the latest current-stay start (`joined_seq`, the visibility rule's) among
- * the people whose questions it answers (`agent_runs.asker_ids`, runs.ts `Askers`) and every person whose words it will be
- * shown after them: a person (never an Agent) who sent a message — text or file, what the reply is shown — after what the
- * run covers (`covers_seq`, which `begin` has set to everything it takes on before it reads this), in the group now
- * (fix round 1, I-1: a question that slipped in while the reply waited is not answered from before its sender's joining;
- * one of an older member does not move the line). Where an asker cannot be told — the run's askers are not known (a run
- * recorded before they were, a chain whose first person cannot be told), or one is not in the group now (left since, or
- * never in it) — the latest joining among the group's people now counts as well (the safe side). 0 when nothing bounds
- * it (no such run; no person in the group now). The Agent's own joining needs no line here: the visibility rule with the
- * Agent as reader (`VISIBLE_JOIN`) bounds everything it is shown already, so a reply is shown nothing before the later
- * of the two. Everything that shows a reply's model what was said in its group — this context (`loadContext`), and any
- * tool that reads the group's history or a summary of it for the reply — keeps to the same line.
+ * nothing of the group is shown to its model but the calls it answers (`callsSeen`) — the latest current-stay start
+ * (`joined_seq`, the visibility rule's) among its askers (`agent_runs.asker_ids`, runs.ts `Askers`): the people whose
+ * questions it answers and everyone it hears from, recorded as it goes (fix round 2: runs.ts `hearFrom`, wherever what it
+ * covers moves forward — so a question that slipped in while the reply waited is not answered from before its sender's
+ * joining, and an older member's does not move the line). Where an asker cannot be told — the run's askers are not
+ * known (a run recorded before they were, a chain whose first person cannot be told), or one is not in the group now
+ * (left since, or never in it) — the latest joining among the group's people now counts as well (the safe side). 0 when
+ * nothing bounds it (no such run; no person in the group now). The Agent's own joining needs no line here: the
+ * visibility rule with the Agent as reader (`VISIBLE_JOIN`) bounds everything it is shown already, so a reply is shown
+ * nothing before the later of the two. Everything that shows a reply's model what was said in its group — this context
+ * (`loadContext`), and any tool that reads the group's history or a summary of it for the reply — keeps to the same
+ * line, and records whoever it shows the reply beyond what the reply has heard (`hearFrom`) before it reads the line.
  */
 export async function askerLine(q: Queryable, runId: string): Promise<number> {
   const { rows } = await q.query<{ line: string }>(
@@ -227,20 +228,36 @@ export async function askerLine(q: Queryable, runId: string): Promise<number> {
               case when bool_or(j.joined is null) is not false
                    then (select coalesce(max(ms.joined_seq), 0) from memberships ms join principals p on p.id = ms.principal_id
                           where ms.conversation_id = r.conversation_id and ms.left_seq is null and p.kind = 'human')
-                   else 0 end,
-              (select coalesce(max(ms.joined_seq), 0) from messages m
-                 join principals p on p.id = m.sender_id and p.kind = 'human'
-                 join memberships ms on ms.conversation_id = m.conversation_id and ms.principal_id = m.sender_id and ms.left_seq is null
-                where m.conversation_id = r.conversation_id and m.seq > r.covers_seq and m.kind in ('text', 'file')))::text as line
+                   else 0 end)::text as line
        from agent_runs r
        left join lateral (select (select ms.joined_seq from memberships ms
                                    where ms.conversation_id = r.conversation_id and ms.principal_id = a.id and ms.left_seq is null) as joined
                             from unnest(r.asker_ids) as a (id)) j on true
       where r.id = $1
-      group by r.id, r.conversation_id, r.covers_seq`,
+      group by r.id, r.conversation_id`,
     [runId],
   );
   return Number(rows[0]?.line ?? 0);
+}
+
+/**
+ * The calls reply run `runId` of Agent `agentId` answers that the Agent can see, by seq, oldest first: of the messages
+ * that called for it (`agent_runs.call_seqs`, and the latest it covers, `covers_seq`; its `covers_seq` alone when not
+ * known), those that are text or file messages the Agent can see (`VISIBLE_JOIN`). In a group they are shown to its model
+ * even at or before its line (`askerLine`): what it was asked is answered, whoever spoke since. None: nothing is left to
+ * answer.
+ */
+export async function callsSeen(q: Queryable, agentId: string, runId: string): Promise<number[]> {
+  const { rows } = await q.query<{ seq: string }>(
+    `select m.seq::text as seq
+       from agent_runs r
+       join messages m on m.conversation_id = r.conversation_id and m.seq = any(coalesce(r.call_seqs, '{}'::bigint[]) || r.covers_seq)
+       ${VISIBLE_JOIN}
+      where r.id = $2 and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
+      order by m.seq`,
+    [agentId, runId],
+  );
+  return rows.map((r) => Number(r.seq));
 }
 
 /** The seq of the latest `topic_reset` notice the Agent can see in its conversation; 0 when there is none. */
@@ -332,7 +349,7 @@ const inGroupNow = (ms: string): string =>
  * the Agent's own output, so it can revise what it proposed; it counts toward the budget like any text and is never
  * read for a block again. (A reply in a group never proposes: nothing is looked up there.) In a group a quote of a
  * message at or before the asker's line (`ContextRun.group.after`) is left out as one the Agent cannot see is: the
- * quoting message's own text only.
+ * quoting message's own text only; and the calls the run answers (`ContextRun.group.calls`) belong whatever `from` is.
  * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -354,13 +371,13 @@ async function loadPage(
        join principals sp on sp.id = m.sender_id
        left join agent_runs r on m.sender_id = $1 and ${postingRun("m", "r")}
        left join persona_proposals pp on pp.message_id = m.id and pp.agent_id = $1 and m.sender_id = $1 and not $8::boolean
-      where m.conversation_id = $2 and m.seq > $3 and ($4::bigint is null or m.seq < $4::bigint)
+      where m.conversation_id = $2 and ($4::bigint is null or m.seq < $4::bigint)
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
-        and coalesce(r.covers_seq, m.seq) > $3
+        and ((m.seq > $3 and coalesce(r.covers_seq, m.seq) > $3) or m.seq = any($9::bigint[]))
         and (m.sender_id = $6 or ($8::boolean and m.sender_id <> $1) or coalesce(r.covers_seq, m.seq) <= $5)
       order by m.seq desc
       limit $7`,
-    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, limit, group],
+    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, limit, group, run.group?.calls ?? []],
   );
   const quotedSeqs = [...new Set(rows.flatMap((r) => (typeof r.reply_to === "number" && Number.isSafeInteger(r.reply_to) ? [r.reply_to] : [])))];
   const quotes = new Map<number, string>();
@@ -440,7 +457,8 @@ const answeredOrder = (list: readonly Loaded[], mark: string | null = null): Con
 /**
  * Step one of what the model is shown for `run` (spec 6.5 "发给模型的内容"; README "Agents and runs"), database only:
  * the messages after the latest new topic — in a group, and after the asker's line (`ContextRun.group.after`), the later
- * of the two — in the order they were answered, read newest first until they are more than
+ * of the two, and the calls the run answers wherever they are (`ContextRun.group.calls`) — in the order they were
+ * answered, read newest first until they are more than
  * the budget (the model's context less its output limit, `system` and `run.reserved`; in a group at most `run.group.maxTokens`) can
  * hold — in a group, its latest `run.group.maxMessages` messages at most, as if what is older were left unread — and the
  * records of the attachments the plan could show — looked up only through `findDownloadable` with the Agent as reader

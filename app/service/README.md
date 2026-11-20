@@ -738,8 +738,8 @@ has passed), for
 `cancelled` `agent_paused` or `agent_deleted`, `agent_removed` (the Agent left the run's group: the group's creator or you
 took it out, or it left with you when you left or were removed), `halted` (in a group: another Agent's message had called for it,
 or nobody had — it was to speak unasked — and a member halted Agents, Agents in a group; show it as “已被群成员叫停”), or none (everything it was to
-answer is before a new topic you started; in a group, everything it was to answer is at or before its asker's line, A
-reply there, Whose joining it reaches back to; or — a reply someone else called for in a group — the Agent's others' daily
+answer is before a new topic you started; in a group, none of the messages that called for it is one the Agent can see,
+A reply there, Whose joining it reaches back to; or — a reply someone else called for in a group — the Agent's others' daily
 budget was spent by the time it was to start: nothing was called or charged, and the group was told, Agents in a group).
 `retryable`: it failed and trying again as it is may work (false
 after `provider_rejected`, `address_not_allowed` and `context_too_small`, and for every run that did not fail; true
@@ -1135,25 +1135,32 @@ group is told), then — unless the mention folds into a reply under way, which 
   asker is the person whose message caused the reply: the sender of a message that `@`-mentions the Agent; for a reply
   nobody asked for (Proactive replies), the sender of the message the judgement picked it for; for an Agent called by
   another Agent (a chain), the person whose message started the chain — not the calling Agent; the Agent's own owner
-  asking in the group is an asker like anyone else. A reply that answers several people's calls at once (one folded into
-  a reply waiting to run, or answered by a follow-up) starts at the latest of their joinings: so the owner's own
-  question folded with a newcomer's is answered from the newcomer's line, and the Agent may seem to have forgotten what
-  came before it. Everyone whose words the reply will see after what it answers counts as asking too: a person (never
-  an Agent) who wrote in the group after the message or messages the reply covers and before it began — so a newcomer's
-  question sent without a mention while an older member's reply waits to run is not answered from before the
-  newcomer's joining; an older member writing then does not move the line. Where an asker cannot be told — a run
-  recorded before askers were, a chain whose first person is not known, an asker who is not in the group when the reply
-  begins (left since: not the start of the stay they asked in), or one who was never in it — the latest joining among
-  the group's people now counts. A reply whose every question is at or before its line (its asker asked, left and came
-  back; someone who joined after the question spoke before the reply began) ends quietly: no call, nothing failed,
-  nothing to retry. Everything before that line is not in the model's context for this reply: not as messages (the
-  Agent's own replies included), not as the quoted text of a later message that replies to one (left out, as a quote of
-  a message the Agent cannot see is), not through the attachments of earlier messages; and any summary of the group, or
-  anything a tool reads of it for the reply, must keep to the same line (each reads `askerLine` for the reply's run).
-  Deliberately not restricted: an older member asking while a newcomer reads the answer, and the Agent's own notes
-  learned in that group and the notes passage (An Agent's memory). Nor does the line change what anyone can read
-  through the API, the memory reviews' input or the judgement's transcript for unasked replies. Recorded on the run
-  (`agent_runs.asker_ids`, never on the wire), read once as the reply begins (`src/agents/context.ts` `askerLine`).
+  asking in the group is an asker like anyone else. Everyone the reply hears from counts as asking too: a person (never
+  an Agent) who wrote in the group after the message the reply was made for — while it waited to run, in what was
+  folded into it or noted on it, in what a follow-up answers, or, for an Agent it calls, while it ran — so a
+  newcomer's question sent without a mention while an older member's reply waits to run is not answered from before
+  the newcomer's joining, and neither is anything that reply hands down a chain; an older member writing then does not
+  move the line. They are recorded on the run as it goes, wherever what it covers moves forward, and an Agent it calls
+  takes them on. The line is the latest current joining among all of them: a reply that answers several people's calls
+  at once (one folded into a reply waiting to run, or answered by a follow-up) starts at the latest of their joinings,
+  so the owner's own question folded with a newcomer's is answered from the newcomer's line, and the Agent may seem to
+  have forgotten what came before it. Where an asker cannot be told — a run recorded before askers were, a chain whose
+  first person is not known, an asker who is not in the group when the reply begins (left since: not the start of the
+  stay they asked in), or one who was never in it — the latest joining among the group's people now counts. The calls
+  the reply answers — the messages that called for it — are always shown, even at or before the line (a call's own
+  quote of a message at or before it left out, as below): an older member asking still gets an answer when a newcomer
+  spoke meanwhile, from the question itself and what came after the line. Only a reply none of whose calls its Agent
+  can see ends quietly: no call, nothing failed, nothing to retry. Everything else before the line is not in the model's
+  context for this reply: not as messages (the Agent's own replies included), not as the quoted text of a later message
+  that replies to one (left out, as a quote of a message the Agent cannot see is), not through the attachments of
+  earlier messages; and any summary of the group, or anything a tool reads of it for the reply, must keep to the same
+  line (each records whoever it shows the reply beyond that, then reads `askerLine` for the reply's run). One case is
+  not covered: someone added back to the group while the reply is already being written reads a reply built from what
+  was said while they were away. Deliberately not restricted: an older member asking while a newcomer reads the answer,
+  and the Agent's own notes learned in that group and the notes passage (An Agent's memory). Nor does the line change
+  what anyone can read through the API, the memory reviews' input or the judgement's transcript for unasked replies.
+  Recorded on the run (`agent_runs.asker_ids` and the calls' `call_seqs`, never on the wire; `src/agents/runs.ts`
+  `hearFrom`), read once as the reply begins (`src/agents/context.ts` `askerLine`, `callsSeen`).
 - *How much of the group.* At most its latest 80 messages, and at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000) tokens of
   them, oldest dropped first, within that cap, as in its own conversation (What the model is shown): the cap replaces
   the model's context as the budget when the context would hold more. It is the service's estimate — text in weight,
@@ -2563,9 +2570,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
       run takes on what was noted meanwhile — but a reply nobody had asked for (lane `proactive`) with a mention noted on
       it since its claim ends here instead, `cancelled` with no error, no call and nothing held or charged, and its
-      follow-up answers the mention in the caller's lane (Proactive replies) — and, in a group, its asker's line is read
-      (Whose joining it reaches back to): a run whose every question is at or before it ends here, `cancelled` with no
-      error, no call (nothing failed, nothing to retry) — and what the model may be shown is read from
+      follow-up answers the mention in the caller's lane (Proactive replies) — and, in a group, whoever it hears from
+      since what it covered before is recorded among its askers, then its calls and its asker's line are read (Whose
+      joining it reaches back to): a run none of whose calls its Agent can see ends here, `cancelled` with no error, no
+      call (nothing failed, nothing to retry) — and what the model may be shown is read from
       the database (`loadContext`: the messages, and the records of the attachments it could show). With no message of
       the owner's in it (in a group: of anyone else's), no model is called: when everything the run was to answer is
       before a new topic, it ends
