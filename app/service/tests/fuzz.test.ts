@@ -285,6 +285,8 @@ interface Fixture {
   heard: string;
   heardToConfirm: string;
   change: string;
+  /** A whisper of the fuzzing account's about `agent` in the group, open (src/whispers/). */
+  whisper: string;
 }
 
 const FAST = { source: "site", id: "fast" } as const;
@@ -349,6 +351,11 @@ async function fixture(): Promise<Fixture> {
     agent.id,
     agent.conversationId,
   ]);
+  const whisper = await db.query<{ id: string }>(
+    `insert into whispers (conversation_id, owner_id, agent_id, after_seq, kind, body)
+     select id, $2, $3, seq, 'found_elsewhere', '{"text": "找到了", "actions": ["tell", "dismiss"]}'::jsonb from conversations where id = $1 returning id`,
+    [g, me.id, agent.id],
+  );
   return {
     me,
     peer,
@@ -371,6 +378,7 @@ async function fixture(): Promise<Fixture> {
     heard: heard.rows[0]!.id,
     heardToConfirm: heard.rows[1]!.id,
     change: change.rows[0]!.id,
+    whisper: whisper.rows[0]!.id,
   };
 }
 
@@ -415,7 +423,9 @@ function validParams(route: Pick<RouteEntry, "method" | "url">, fx: Fixture): Re
                     : fx.agent
                   : collection === "providers"
                     ? fx.provider
-                    : randomUUID(); // a route added later: still fuzzed, with an id nobody has
+                    : collection === "whispers"
+                      ? fx.whisper
+                      : randomUUID(); // a route added later: still fuzzed, with an id nobody has
     }
   }
   return out;

@@ -4,6 +4,8 @@ import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type Wi
 import { mentionedIn, readPrincipals, type SyncPrincipal } from "../messages/principals.ts";
 import { toWireFor, type ReadConfig } from "../messages/read.ts";
 import { canDirectSendMany, type DirectRefusal } from "../social/relations.ts";
+import { whispersFrom } from "../whispers/store.ts";
+import { toWireWhisper, type WireWhisper } from "../whispers/wire.ts";
 
 /** How many of the newest visible messages per conversation `GET /api/sync` returns. */
 export const SYNC_MESSAGES_PER_CONVERSATION = 30;
@@ -39,6 +41,8 @@ export interface SyncConversation {
   unread: number;
   /** Direct chats: how far the other party has read; Agent conversations: how far the Agent has (it reads when it starts a reply). */
   peerReadSeq?: number;
+  /** How many of the caller's own whispers there are open (src/whispers/); only when there are any. Nobody else's are counted. */
+  whispers?: number;
 }
 
 export type { SyncPrincipal };
@@ -49,6 +53,11 @@ export interface SyncView {
   principals: SyncPrincipal[];
   /** Per conversation (in `conversations` order) its newest visible messages, ascending by seq. */
   messages: WireMessage[];
+  /**
+   * The caller's own whispers (src/whispers/): every open one, and the answered or expired ones that follow a message
+   * `messages` holds (all of a conversation whose messages are all there); only when there are any.
+   */
+  whispers?: WireWhisper[];
 }
 
 export interface CatchUp {
@@ -58,6 +67,8 @@ export interface CatchUp {
   gone: string[];
   /** The 500-message cap cut the response short: ask again with the advanced positions. */
   more: boolean;
+  /** The caller's own whispers in the conversations caught up: the open ones and those at or after the position; only when there are any. */
+  whispers?: WireWhisper[];
 }
 
 /**
@@ -93,6 +104,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
     agent_paused: boolean | null;
     agent_deleted: boolean | null;
     agent_read_seq: string | null;
+    whispers: string;
   }>(
     // A direct chat's other party comes from its pair (direct_pairs), the one source the send path uses;
     // only the peer's read marker is read from their membership.
@@ -100,7 +112,9 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
             pair.peer_id, peer.read_seq as peer_read_seq,
             ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted, agm.read_seq as agent_read_seq,
             (select count(*) from messages m ${VISIBLE_JOIN}
-              where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread
+              where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread,
+            -- The caller's own open whispers there, and nobody else's (owner_id is the reader).
+            (select count(*) from whispers w where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open') as whispers
        from memberships me
        join conversations c on c.id = me.conversation_id
        left join lateral (
@@ -166,6 +180,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
       unread: Number(c.unread),
       ...(c.type === "direct" && c.peer_read_seq !== null ? { peerReadSeq: Number(c.peer_read_seq) } : {}),
       ...(c.type === "agent" && c.agent_read_seq !== null ? { peerReadSeq: Number(c.agent_read_seq) } : {}),
+      ...(Number(c.whispers) > 0 ? { whispers: Number(c.whispers) } : {}),
     };
   });
 }
@@ -202,6 +217,16 @@ export async function syncView(db: Db, me: string, config: ReadConfig): Promise<
     }
     const ordered = out.flatMap((c) => (recentOf.get(c.id) ?? []).sort((x, y) => x.seq - y.seq));
     const messages = await toWireFor(t, me, ordered, config);
+    // The caller's whispers: open ones, and those that follow a message returned here (of a conversation whose visible
+    // messages are all here, every one).
+    const whispers = await whispersFrom(
+      t,
+      me,
+      out.map((c) => {
+        const held = recentOf.get(c.id) ?? [];
+        return { conversationId: c.id, seq: held.length < SYNC_MESSAGES_PER_CONVERSATION ? 0 : Math.min(...held.map((m) => m.seq)) };
+      }),
+    );
 
     const mentioned = new Set<string>([me.toLowerCase()]);
     for (const c of out) for (const m of c.members) mentioned.add(m.id);
@@ -212,6 +237,7 @@ export async function syncView(db: Db, me: string, config: ReadConfig): Promise<
       conversations: out,
       principals,
       messages,
+      ...(whispers.length > 0 ? { whispers: whispers.map(toWireWhisper) } : {}),
     };
   });
 }
@@ -258,6 +284,9 @@ export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string,
     const gone = ids.filter((id) => !memberOf.has(id));
     const memberIds = ids.filter((id) => memberOf.has(id));
     if (memberIds.length === 0) return { messages: [], gone, more: false };
+    // The caller's own whispers there: the open ones, and those at or after the position (made or answered meanwhile).
+    const found = await whispersFrom(t, me, memberIds.map((id) => ({ conversationId: id, seq: positions.get(id)! })));
+    const whispers = found.length > 0 ? { whispers: found.map(toWireWhisper) } : {};
 
     // Per conversation the caller is in: how many visible messages follow the position (counted up to
     // one past the cap: enough to know whether more remain).
@@ -276,7 +305,7 @@ export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string,
     const take = allot(mine, CATCHUP_MAX_MESSAGES);
     const more = mine.some((b) => b.missed > take.get(b.id)!);
     const wanted = mine.filter((b) => take.get(b.id)! > 0);
-    if (wanted.length === 0) return { messages: [], gone, more };
+    if (wanted.length === 0) return { messages: [], gone, more, ...whispers };
 
     const { rows } = await t.query<MessageRow>(
       `select ${MESSAGE_COLUMNS}
@@ -289,6 +318,6 @@ export async function catchUp(db: Db, me: string, positions: ReadonlyMap<string,
         order by p.ord, m.seq`,
       [me, wanted.map((b) => b.id), wanted.map((b) => positions.get(b.id)!), wanted.map((b) => take.get(b.id)!)],
     );
-    return { messages: await toWireFor(t, me, rows.map(toStored), config), gone, more };
+    return { messages: await toWireFor(t, me, rows.map(toStored), config), gone, more, ...whispers };
   });
 }

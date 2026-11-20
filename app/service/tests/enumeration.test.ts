@@ -7,6 +7,7 @@ import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 import { providerBody } from "./helpers/providers.ts";
+import { createWhisper } from "../src/whispers/store.ts";
 
 /**
  * Enumeration: for every route that takes a conversation id, a message seq, an attachment id, a
@@ -115,6 +116,9 @@ describe("enumeration: an existing id that is not yours is answered like a rando
       ["stop a run", (id) => json("POST", `/api/conversations/${id}/runs/${RANDOM}/stop`)],
       ["retry an Agent's run", (id) => json("POST", `/api/conversations/${id}/runs/retry`, { agentId: RANDOM })],
       ["dismiss an Agent's run", (id) => json("POST", `/api/conversations/${id}/runs/dismiss`, { agentId: RANDOM })],
+      // An owner's whispers there (src/whispers/).
+      ["whispers", (id) => json("GET", `/api/conversations/${id}/whispers`)],
+      ["a page of whispers", (id) => json("GET", `/api/conversations/${id}/whispers?before=3&limit=2`)],
       [
         "upload",
         (id) => ({
@@ -597,6 +601,39 @@ describe("enumeration by timing (coarse)", () => {
       expect(res.json).toEqual({ messages: [], gone: [id], more: false });
     };
     const [existing, random] = await race(catchUp(busy), catchUp(RANDOM));
+    expect(ratio(existing, random), `medians: existing ${existing.toFixed(2)} ms, random ${random.toFixed(2)} ms`).toBeLessThan(2);
+  });
+
+  it("whispers: someone else's, open or answered, is a random id's to accept and decline; a group you are in without an Agent of yours has no whisper list for you", async () => {
+    const [eve, alice, bob] = [await signUp(app, "eve"), await signUp(app, "alice"), await signUp(app, "bob")];
+    const g = await group(app, alice, "told", [eve, bob]);
+    const agent = await mustCreateAgent(app, alice, { model: { source: "site", id: "fast" } });
+    expect((await api(app, alice, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    const make = () => db.tx((t) => createWhisper(t, { conversationId: g, ownerId: alice.id, agentId: agent.id, kind: "found_elsewhere", body: { text: "只给 alice", actions: ["tell", "dismiss"] } }));
+    const open = (await make())!;
+    const answered = (await make())!;
+    expect((await api(app, alice, "POST", `/api/whispers/${answered.id}/decline`)).status).toBe(200);
+    for (const verb of ["accept", "decline"]) {
+      const answer = await indistinguishable(eve, verb, (id) => json("POST", `/api/whispers/${id}/${verb}`), { open: open.id, answered: answered.id, upperCase: open.id.toUpperCase() });
+      expect([verb, answer.status, answer.body]).toEqual([verb, 404, '{"error":"not_found"}']);
+    }
+    const list = await indistinguishable(eve, "whispers", (id) => json("GET", `/api/conversations/${id}/whispers`), { member: g, agentConversation: agent.conversationId });
+    expect([list.status, list.body]).toEqual([404, '{"error":"not_found"}']);
+    // Nothing she tried answered anything.
+    expect((await db.query("select status from whispers order by created_at")).rows).toEqual([{ status: "open" }, { status: "declined" }]);
+  });
+
+  it("whispers: answering someone else's costs about what a random id costs", { timeout: 60_000 }, async () => {
+    const [eve, alice, bob] = [await signUp(app, "eve"), await signUp(app, "alice"), await signUp(app, "bob")];
+    const g = await group(app, alice, "told", [eve, bob]);
+    const agent = await mustCreateAgent(app, alice, { model: { source: "site", id: "fast" } });
+    expect((await api(app, alice, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    const told = await db.tx((t) => createWhisper(t, { conversationId: g, ownerId: alice.id, agentId: agent.id, kind: "found_elsewhere", body: { text: "只给 alice", actions: ["tell", "dismiss"] } }));
+    const accept = (id: string) => async () => {
+      const res = await api(app, eve, "POST", `/api/whispers/${id}/accept`);
+      expect(res).toEqual({ status: 404, json: { error: "not_found" } });
+    };
+    const [existing, random] = await race(accept(told!.id), accept(RANDOM));
     expect(ratio(existing, random), `medians: existing ${existing.toFixed(2)} ms, random ${random.toFixed(2)} ms`).toBeLessThan(2);
   });
 

@@ -6,6 +6,7 @@ import { perPrincipalLimit } from "../limits.ts";
 import { wireMessageSchema } from "../messages/model.ts";
 import { syncPrincipalSchema } from "../messages/principals.ts";
 import { requirePrincipal } from "../session.ts";
+import { wireWhisperSchema } from "../whispers/wire.ts";
 import { Hub } from "./hub.ts";
 import { notFound } from "../errors.ts";
 import { uuidParam } from "../schemas.ts";
@@ -34,6 +35,8 @@ const conversationEntry = z.object({
   readSeq: z.number(),
   unread: z.number(),
   peerReadSeq: z.number().optional(),
+  // The caller's own open whispers there, when there are any (src/whispers/).
+  whispers: z.number().optional(),
 });
 
 const syncResponse = z.object({
@@ -41,6 +44,7 @@ const syncResponse = z.object({
   conversations: z.array(conversationEntry),
   principals: z.array(syncPrincipalSchema),
   messages: z.array(wireMessageSchema),
+  whispers: z.array(wireWhisperSchema).optional(),
 });
 
 /** `{conversationId: lastSeqTheClientHas}`: ≤ 500 uuid keys (case-insensitive, lower-cased), bounded non-negative integers. */
@@ -50,7 +54,7 @@ const positions = z
   .refine((r) => new Set(Object.keys(r).map((k) => k.toLowerCase())).size === Object.keys(r).length, "duplicate id")
   .transform((r) => new Map(Object.entries(r).map(([id, seq]) => [id.toLowerCase(), seq])));
 
-const catchUpResponse = z.object({ messages: z.array(wireMessageSchema), gone: z.array(z.string()), more: z.boolean() });
+const catchUpResponse = z.object({ messages: z.array(wireMessageSchema), gone: z.array(z.string()), more: z.boolean(), whispers: z.array(wireWhisperSchema).optional() });
 
 function registerSyncRoutes(app: FastifyInstance, tickets: TicketStore): void {
   const { db, config } = app.deps;

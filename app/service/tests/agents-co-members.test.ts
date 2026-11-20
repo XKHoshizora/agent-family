@@ -5,6 +5,8 @@ import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
+import { createWhisper } from "../src/whispers/store.ts";
+import { toWireWhisper } from "../src/whispers/wire.ts";
 
 /**
  * What the fellow members of a group learn about an Agent in it (design rules 16–17): its name, avatar, handle, intro,
@@ -39,6 +41,8 @@ const HIDDEN = {
   ownerNote: "OWNERNOTE-zq7 keeps bees",
   selfNote: "SELFNOTE-zq7 likes tea",
   hearsay: "HEARSAY-zq7 said in the group",
+  /** A whisper (悄悄话) of the owner's about the Agent in the group: theirs alone (whispers-privacy.test.ts). */
+  whisper: "WHISPER-zq7 只给主人看",
 };
 /** Keys of an Agent's configuration, state and runs: no response to anyone but its owner carries one, at any depth. */
 const HIDDEN_KEYS = [
@@ -81,6 +85,10 @@ const HIDDEN_KEYS = [
   "agent",
   "agentId",
   "via",
+  // A whisper's (src/whispers/): the push, the sync and catch-up lists, the conversation's count, where it sits.
+  "whisper",
+  "whispers",
+  "afterSeq",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 
@@ -187,6 +195,10 @@ async function world() {
   const groupRun = await providerRun(g, agent.id, owner.id, HIDDEN.model, "high", "proactive");
   const agentSeq = await postAs(g, agent.id, "agent says needle-co7", HIDDEN.groupReasoning, groupRun);
   const quoteSeq = (await say(mia, g, "thanks", { replyToSeq: agentSeq })).json.message.seq as number;
+  // An open whisper of the owner's about it there, pushed to them: the owner's alone.
+  const whisper = await db.tx((t) => createWhisper(t, { conversationId: g, ownerId: owner.id, agentId: agent.id, kind: "found_elsewhere", body: { text: HIDDEN.whisper, actions: ["tell", "dismiss"] } }));
+  app.realtime.pushWhisper(owner.id, toWireWhisper(whisper!));
+  expect((await api(app, owner, "GET", "/api/sync")).json.whispers.map((x: any) => x.text)).toEqual([HIDDEN.whisper]);
 
   // The owner's view really holds every hidden value (so their absence below means something).
   const mine = (await api(app, owner, "GET", `/api/agents/${agent.id}`)).json;

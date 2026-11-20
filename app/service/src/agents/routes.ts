@@ -14,6 +14,8 @@ import { avatarBudget, registerAvatarPut, storeAvatar } from "../principals/avat
 import { swapAvatarKey } from "../principals/store.ts";
 import { agentName, userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
+import { pushWhispers } from "../whispers/routes.ts";
+import { expireOfAgent } from "../whispers/store.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
@@ -387,7 +389,7 @@ export function registerAgentRoutes(
       async (req) => {
         const me = await requirePrincipal(req);
         await writeLimit(req, me.id);
-        const { agent, changed, interrupted } = await db.tx(async (t) => {
+        const { agent, changed, interrupted, whispers } = await db.tx(async (t) => {
           const current = await lockOwnedAgent(t, me.id, req.params.id);
           // A deleted Agent stays deleted: deleting again is a no-op, anything else is refused.
           if (current.deleted && !("deleted" in change)) throw deletedError();
@@ -403,7 +405,9 @@ export function registerAgentRoutes(
           // A deleted Agent's memory cards that wait for a decision are discarded with it: none is left with buttons that lead nowhere.
           // After the run rows (it takes the owner's account lock): the lock order is agent → run rows → account (runs.ts).
           if ("deleted" in change) await discardPendingOf(t, me.id, current.id);
-          return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted };
+          // So are its open whispers, everywhere (src/whispers/): none is left with buttons that lead nowhere.
+          const whispers = "deleted" in change ? await expireOfAgent(t, current.id) : [];
+          return { agent: { ...current, ...("deleted" in change ? { deleted: true } : change) }, changed, interrupted, whispers };
         });
         if (interrupted) {
           // Before answering: from now on nothing of those runs reaches the owner, and their calls are abandoned.
@@ -414,6 +418,7 @@ export function registerAgentRoutes(
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);
           app.realtime.pushAgentChanged(me.id, agent.id);
         }
+        pushWhispers(app.realtime, whispers);
         if ("deleted" in change) {
           // The delete has committed: a failure of the leaving (even of its first query) is not the client's; the start-up sweep finishes it.
           await leaveGroupsOfDeleted({ db, conversations, log: req.log }, agent.id).catch((err: unknown) =>

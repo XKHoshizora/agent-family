@@ -368,6 +368,8 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 | `GET /api/agents`, `GET /api/agents/:id`, `GET /api/providers`, `GET /api/conversations/:id/run`, `GET /api/conversations/:id/runs` | 120 together | principal |
 | `POST /api/conversations/:id/runs/:runId/stop`, `…/runs/retry`, `…/runs/dismiss` | 60 together | principal |
 | `POST /api/conversations/:id/agents/halt` | 20 (a budget of its own) | principal |
+| `GET /api/conversations/:id/whispers` | 120 (a budget of its own) | principal |
+| `POST /api/whispers/:id/accept` + `POST /api/whispers/:id/decline` | 30 together | principal |
 | `GET /api/conversations/:id/search` + `GET /api/search` | 30 together; at most 2 in progress per principal (429) and 4 site-wide (503 `busy`) | principal |
 | `POST /api/conversations/:id/attachments` | 60 per hour; at most 3 in progress | principal |
 | `GET /api/sync` | 60 | principal |
@@ -1162,6 +1164,50 @@ follow-up when it ends, even if a person has written since. An `agents_halted` n
 group is still halted (nobody has written since the last halt) it changes nothing and appends nothing. → 200
 `{"ok": true}`. 404 `not_found`, byte for byte as for an id that does not exist, unless it is a group you are a current
 member of (a direct chat and an Agent's own conversation too). Limit: 20 per minute, a budget of its own.
+
+### Whispers
+
+A whisper (悄悄话, `src/whispers/`) is a small note in a conversation — an Agent's own, or a group — that only the owner
+of one of its Agents ever sees, with the buttons it offers: `告诉他们` (`"tell"`, answers it `accepted`) and `不用`
+(`"dismiss"`, `declined`). The service makes them (later batches say when); nobody sends one. It is **never a message**:
+it takes no seq (seqs stay gapless for everyone), and sits after the message that was the conversation's last when it was
+made (`afterSeq`; several there: by `createdAt`). So it is in no history, search, unread count, `lastSeq`, quote or
+catch-up `messages`, and never in what an Agent's model is shown. Its owner gets it in the `whisper` push, in
+`GET /api/sync` and catch-up (`whispers`), in the conversation entry's count of open ones (`whispers: n`, only when
+n > 0), and from the list route below; **nobody else gets anything of it — no frame, no key, no count**: a fellow member's
+answers are byte for byte what they were before it existed.
+
+**WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory",
+"text": "…", "actions": ["tell", "dismiss"], "status": "open" | "accepted" | "declined" | "expired", "createdAt",
+"detail"?: …}`. `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
+`detail` what its kind keeps with it, when it has any. An open whisper is answered once; it expires — `status: "expired"`,
+pushed to its owner — 7 days after it was made (the periodic sweep, `MEMORY.changesSweepMs`, bounded batches), when its
+owner or its Agent leaves the conversation (or is removed), and when its Agent is deleted (everywhere at once). Its row
+goes with the conversation's, the owner's or the Agent's.
+
+#### `GET /api/conversations/:id/whispers`
+
+*Session: required.* Query: `before` (an `afterSeq`, 1 … 2^53−1: only whispers before that message's place), `limit`
+(1–100, default 50). Your whispers in the conversation, every status, newest first (by `afterSeq`, then `createdAt`) → 200
+`{"whispers": WireWhisper[], "nextBefore": number | null}`: the newest `limit`, and with them the rest of those at the same
+place as the last (a page never splits one place); `nextBefore` is that place when older ones remain. A client loading an
+older page of messages (`…/messages?before=b`) asks this with the same `before` for the whispers that follow them. 404
+`not_found`, byte for byte as for an id that does not exist, unless you are a current member and own an Agent that is one
+too, or have a whisper there (a fellow member without an Agent there, a stranger, an id that is none: the same answer, at
+the same cost). Limit: 120 per minute.
+
+#### `POST /api/whispers/:id/accept`
+
+*Session: required.* Body: none or `{}`. Answers your open whisper `告诉他们` → 200 WireWhisper with `status: "accepted"`,
+pushed to your sockets too. What an answer does besides that is its kind's (later batches); nothing yet. 409
+`stale_whisper` when it is not open any more (answered, expired) or does not offer `"tell"`; 404 `not_found` for anyone
+else's whisper and an id that is none alike (one read, the same answer, the same cost). Limit: 30 per minute, shared with
+decline.
+
+#### `POST /api/whispers/:id/decline`
+
+*Session: required.* Body: none or `{}`. Answers your open whisper `不用` → 200 WireWhisper with `status: "declined"`,
+pushed to your sockets too; otherwise as accept (409 `stale_whisper` when it is not open or does not offer `"dismiss"`).
 
 ### Model providers
 
@@ -1963,13 +2009,17 @@ How they work together is under Sync and realtime below.
 #### `GET /api/sync`
 
 *Session: required.* Everything a client loads at start → 200 `{"me", "conversations", "principals",
-"messages"}` (shape under Wire shapes). Limit: 60 per minute.
+"messages", "whispers"?}` (shape under Wire shapes). `whispers` (only when there are any): your own whispers (Whispers)
+— every open one, and the answered or expired ones that follow a message `messages` holds (all of a conversation whose
+messages are all there) —, at most 500 (the newest), ascending by `afterSeq`, then `createdAt`, per conversation in
+`conversations` order. Limit: 60 per minute.
 
 #### `POST /api/sync/catchup`
 
 *Session: required.* Body: `positions`: an object of at most 500 conversation ids (no two differing only in
 case) → the last seq you have (0 … 2^53−1). → 200 `{"messages": WireMessage[], "gone": string[],
-"more": boolean}`. Limit: 60 per minute.
+"more": boolean, "whispers"?: WireWhisper[]}`: `whispers` (only when there are any) your own in the conversations caught
+up, the open ones and those at or after the position (Whispers). Limit: 60 per minute.
 
 #### `POST /api/ws-ticket`
 
@@ -2008,8 +2058,9 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
   "lastSeq": 42,       // the conversation's newest seq (counts messages from before you joined too)
   "readSeq": 40,       // your read marker
   "unread": 2,         // visible messages from others, not system notices, after readSeq
-  "peerReadSeq": 41    // direct chats: how far the other side has read; Agent conversations: how far the Agent has
+  "peerReadSeq": 41,   // direct chats: how far the other side has read; Agent conversations: how far the Agent has
                        // (it reads up to what a reply covers when the reply starts); absent in groups
+  "whispers": 1        // how many of your own whispers there are open (Whispers); absent at 0, and nobody else's are counted
 }
 ```
 
@@ -2125,6 +2176,8 @@ Clients must ignore fields and events they do not know: later batches add more.
                                         // bubble; the posted `message` replaces the bubble
 { "type": "read", "conversationId": "…", "principalId": "…", "seq": 41 }   // direct chats (either side); in your
                                         // Agent's conversation, the Agent's marker
+{ "type": "whisper", "whisper": WireWhisper }   // a whisper of yours was made, answered or expired (Whispers): to you
+                                        // only, in order with that conversation's messages; replace the copy you hold
 { "type": "pong" }                      // answer to your { "type": "ping" }
 ```
 

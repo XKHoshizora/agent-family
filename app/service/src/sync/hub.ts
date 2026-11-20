@@ -9,6 +9,7 @@ import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type Wi
 import { toWireForReaders, type ReadEvents, type ReadMarker } from "../messages/read.ts";
 import { liveSessions } from "../session.ts";
 import type { SocialEvents } from "../social/events.ts";
+import type { WireWhisper } from "../whispers/wire.ts";
 import type { TicketOwner } from "./tickets.ts";
 
 /** A principal's 6th socket closes its oldest. */
@@ -50,6 +51,8 @@ export type PushEvent =
   | { type: "run"; conversationId: string; agentId: string; state: GroupRunState }
   | { type: "delta"; conversationId: string; runId: string; text?: string; reasoning?: string }
   | { type: "read"; conversationId: string; principalId: string; seq: number }
+  // A whisper of yours, made or changed (answered, expired): to its owner only.
+  | { type: "whisper"; whisper: WireWhisper }
   | { type: "pong" };
 
 export interface Connection {
@@ -233,6 +236,15 @@ export class Hub {
    */
   pushNoticeAgain(conversationId: string, ownerId: string, seq: number): void {
     this.enqueue(conversationId, { kind: "charged", principalId: ownerId, seq });
+  }
+
+  /**
+   * A whisper of `ownerId`'s (src/whispers/), made or changed — answered, expired —, to their sockets only: nobody else is
+   * pushed anything of it, ever. Through its conversation's queue, so it comes after the message it follows (`afterSeq`)
+   * was pushed. Not replayed: `GET /api/sync` and catch-up carry the owner's whispers.
+   */
+  pushWhisper(ownerId: string, whisper: WireWhisper): void {
+    this.enqueue(whisper.conversationId, { kind: "push", principalId: ownerId.toLowerCase(), event: { type: "whisper", whisper } });
   }
 
   /** Registers an upgraded socket; closes the principal's oldest socket if this is one too many. */

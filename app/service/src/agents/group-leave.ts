@@ -3,6 +3,7 @@ import type { Change, ConversationEvents } from "../conversations/events.ts";
 import { currentMemberIds, currentMembership, lockConversation } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
 import type { Db, Tx } from "../db.ts";
+import { expireOnLeave } from "../whispers/store.ts";
 import type { DbAgentPort } from "./port-impl.ts";
 import { RUN_COLUMNS, toWireRun, type Announced, type RunRow } from "./runs.ts";
 
@@ -115,5 +116,7 @@ async function leaveAfterDelete(t: Tx, conversationId: string, agentId: string, 
   const before = await currentMemberIds(t, conversationId);
   const notice = await appendSystem(t, conversationId, { event: "member_left", actorId: ownerId, principalId: agentId, newCreatorId: null });
   await t.query("update memberships set left_seq = $2 where id = $1", [membership.id, notice.seq]);
+  // Its whispers there expire with it (the delete expired its open ones already, and told its owner: nothing is left to push).
+  await expireOnLeave(t, conversationId, [agentId]);
   return { messages: [notice], conversations: [{ conversationId, principalIds: before }] };
 }

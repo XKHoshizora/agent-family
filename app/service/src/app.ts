@@ -56,6 +56,8 @@ import { createSlots, type Slots } from "./slots.ts";
 import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
 import { registerWebClient } from "./web.ts";
+import { pushWhispers, registerWhisperRoutes } from "./whispers/routes.ts";
+import { expireWhispers } from "./whispers/store.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -294,9 +296,17 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   if (sweeper) app.addHook("onClose", async () => sweeper.stop());
   // The record of what memory changed is kept 30 days (memory/sweep.ts): its own timer, every `MEMORY.changesSweepMs` (0: none), so that it
   // runs whether or not the attachment sweep is switched off and whatever that sweep does. A failure is logged (a code, never a note).
+  // Whispers left open 7 days expire on the same timer (whispers/store.ts), each pushed to its owner (never logged).
   const changeSweeper = startSweeper({
     run: async () => {
       await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
+      const expired = await expireWhispers(deps.db).catch((err: unknown) => {
+        app.log.warn({ code: (err as { code?: string }).code }, "whisper sweep failed; trying again next interval");
+        return [];
+      });
+      // (The hub is decorated once the app is built; a run before that has nobody to tell.)
+      const hub = app.hasDecorator("realtime") ? app.realtime : null;
+      if (hub) pushWhispers(hub, expired);
       return { unsent: 0, abandoned: 0 };
     },
     intervalMinutes: config.memory.changesSweepMs / 60_000,
@@ -443,6 +453,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   const ownReads = perPrincipalLimit(app, 120);
   const { endDrafts } = registerAgentRoutes(app, { draftRuns, readLimit: ownReads });
   registerMemoryRoutes(app, { readLimit: ownReads });
+  registerWhisperRoutes(app);
   // The service's stop ends what this process was working on — the worker's replies and the persona drafts under way —
   // together, within SHUTDOWN_GRACE_MS (agentWorker.stop bounds itself). First of all the proactive scheduler is closed,
   // so that no debounce ends in a judgement once the stop has begun; a decision in flight is waited for as long (what it
