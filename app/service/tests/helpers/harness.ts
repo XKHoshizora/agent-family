@@ -49,15 +49,25 @@ export function testClock(): TestClock {
   };
 }
 
+/**
+ * The harness's own statements do not run under the app's `statement_timeout`: a file that sets it to a second to test
+ * it (db-timeout, search-limits) must not have the clean-up between its tests cut off by it when the machine is busy.
+ * They have a generous limit of their own, so that a lock nobody releases still fails the hook rather than hangs it.
+ */
+const HARNESS_STATEMENT_TIMEOUT = "25s";
+
 async function truncateAll(db: Db): Promise<void> {
-  const { rows } = await db.query<{ t: string }>(
-    `select format('%I.%I', schemaname, tablename) as t
-       from pg_tables
-      where schemaname = 'public' and tablename <> $1`,
-    [MIGRATIONS_TABLE],
-  );
-  if (rows.length === 0) return;
-  await db.query(`truncate ${rows.map((r) => r.t).join(", ")} restart identity cascade`);
+  await db.tx(async (c) => {
+    await c.query(`set local statement_timeout = '${HARNESS_STATEMENT_TIMEOUT}'`);
+    const { rows } = await c.query<{ t: string }>(
+      `select format('%I.%I', schemaname, tablename) as t
+         from pg_tables
+        where schemaname = 'public' and tablename <> $1`,
+      [MIGRATIONS_TABLE],
+    );
+    if (rows.length === 0) return;
+    await c.query(`truncate ${rows.map((r) => r.t).join(", ")} restart identity cascade`);
+  });
 }
 
 /**
@@ -81,6 +91,7 @@ export const NO_ANSWER_FLOOR = { ms: 0, jitterMs: 0 } as const;
  * `config` replaces fields of the loaded configuration, past `loadConfig`'s rules (a file that needs a value they
  * refuse, such as a connection timeout of under a second, for what it tests; nothing else is affected).
  * `app` is a stable handle that forwards to the instance built in beforeAll.
+ * The truncate before each test runs outside the app's statement timeout.
  */
 export function useApp(
   extra: Partial<Pick<Deps, "blobs" | "uploads" | "models" | "providerProbe" | "judge">> & { env?: Record<string, string>; config?: Partial<Config> } & Omit<BuildOptions, "memory"> & { memory?: boolean } = {},
