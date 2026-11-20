@@ -266,15 +266,20 @@ const PROTOCOL_OPTIONS: Readonly<Record<Protocol, ProviderOptions>> = {
 export type OptionalField = "thinking" | "summary" | "tools";
 /**
  * How a refusal names each field: what a 400's or 422's body is looked through for (its first `REFUSAL_CHARS`). Tools
- * are named as such ("tools", "tool_choice", "tool_use", "tool_calls") by most, "function calling" by some (Gemini).
+ * are named as such ("tools", "tool_choice", "tool_use", "tool_calls") by most, "function calling" by some (Gemini),
+ * by the request's field alone by Gemini-compatible proxies (`toolConfig`, `functionDeclarations`), in Chinese by
+ * relays ("工具", "函数调用", "函數調用").
  */
 const NAMES: Readonly<Record<OptionalField, RegExp>> = {
   thinking: /thinking/i,
   summary: /summary/i,
-  tools: /\btools?\b|tool_(?:use|choice|calls?)|function.?call/i,
+  tools: /\btools?\b|tool_(?:use|choice|calls?)|function.?call|tool_?config|function_?declarations|工具|函数调用|函數調用/i,
 };
-/** A body that speaks of the request's length: never a refusal of tools, whatever else it names. */
-const TOO_LONG = /context|too long|maximum.*tokens|token limit/i;
+/**
+ * A body that speaks of the request's length: never a refusal of tools, whatever else it names. Only the context's
+ * length, window, limit or size counts: a refusal that merely says "context" (a relay echoing the request) is one.
+ */
+const TOO_LONG = /context.{0,20}(?:length|window|limit|size)|too long|maximum.{0,40}tokens|token limit|上下文|超出.{0,10}长度/i;
 const REFUSAL_CHARS = 4096;
 /** Upstreams whose refusals are remembered at most; the one used longest ago is forgotten first. */
 export const MAX_REMEMBERED_UPSTREAMS = 1000;

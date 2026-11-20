@@ -689,6 +689,53 @@ describe.each(PROTOCOLS)("%s", (protocol) => {
   });
 });
 
+describe("which error bodies are taken for a refusal of tools (a call without steps)", () => {
+  /** [what it is, status, body, whether the call is asked once more without tools]. */
+  const BODIES: Array<[string, number, boolean, string]> = [
+    // Real refusals of tools: asked again without them.
+    ["OpenAI: tools unsupported", 400, true, `{"error":{"message":"'tools' is not supported with this model.","type":"invalid_request_error","param":"tools"}}`],
+    ["OpenAI: tool_choice unsupported", 400, true, `{"error":{"message":"Unsupported parameter: 'tool_choice' is not supported with this model."}}`],
+    ["OpenAI: invalid tools parameter", 400, true, `{"error":{"message":"Invalid parameter: 'tools' is not allowed for this model."}}`],
+    ["OpenAI: our tool's name (a refusal of these tools)", 400, true, `{"error":{"message":"Invalid 'tools[0].function.name': string does not match pattern."}}`],
+    ["Anthropic: extra input", 400, true, `{"type":"error","error":{"type":"invalid_request_error","message":"tools: Extra inputs are not permitted"}}`],
+    ["Anthropic: model without tools", 400, true, `{"type":"error","error":{"type":"invalid_request_error","message":"claude-x does not support tools"}}`],
+    ["Gemini: function calling off", 400, true, `{"error":{"code":400,"message":"Function calling is not enabled for models/gemini-x","status":"INVALID_ARGUMENT"}}`],
+    ["Gemini: tool use unsupported", 400, true, `{"error":{"code":400,"message":"Tool use with function calling is unsupported","status":"INVALID_ARGUMENT"}}`],
+    ["Gemini: search tools only", 400, true, `{"error":{"code":400,"message":"Multiple tools are supported only when they are all search tools.","status":"INVALID_ARGUMENT"}}`],
+    ["Gemini proxy: unknown toolConfig", 400, true, `{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \\"toolConfig\\": Cannot find field.","status":"INVALID_ARGUMENT"}}`],
+    ["Gemini proxy: unknown functionDeclarations", 400, true, `{"error":{"code":400,"message":"Invalid JSON payload received. Unknown name \\"functionDeclarations\\": Cannot find field."}}`],
+    ["DeepSeek: reasoner without function calling", 400, true, `{"error":{"message":"deepseek-reasoner does not support Function Calling","type":"invalid_request_error"}}`],
+    ["Ollama: model without tools", 400, true, `{"error":"registry.ollama.ai/library/gemma:2b does not support tools"}`],
+    ["vLLM: auto tool choice off", 400, true, `{"object":"error","message":"\\"auto\\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError","code":400}`],
+    ["Groq / Qwen-compatible: tool use unsupported", 400, true, `{"error":{"message":"tool use is not supported for this model"}}`],
+    ["a relay: tool calls in stream mode", 400, true, `{"error":{"message":"Tool calls are not supported in stream mode"}}`],
+    ["Mistral-style 422", 422, true, `{"detail":[{"loc":["body","tools"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}]}`],
+    ["a relay in Chinese: no function calling", 400, true, `{"error":{"message":"该模型不支持函数调用"}}`],
+    ["a relay in Chinese: no tools", 400, true, `{"error":{"message":"当前模型不支持工具调用"}}`],
+    ["a relay in traditional Chinese", 400, true, `{"error":{"message":"此模型不支援函數調用"}}`],
+    ["a refusal that merely says context", 400, true, `{"error":{"message":"tools are not supported","request":{"messages":[{"content":"keep the conversation context in mind"}]}}}`],
+    // Not refusals of tools: the call's failure as it came.
+    ["OpenAI: context length, counting the functions", 400, false, `{"error":{"message":"This model's maximum context length is 8192 tokens. However, your messages resulted in 9001 tokens (8780 in the messages, 221 in the functions). Please reduce the length of the messages or functions.","code":"context_length_exceeded"}}`],
+    ["OpenAI: context window", 400, false, `{"error":{"message":"Your input exceeds the context window of this model. Please adjust your input and try again."}}`],
+    ["Anthropic: prompt too long", 400, false, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 210000 tokens > 200000 maximum"}}`],
+    ["Gemini: over the token maximum", 400, false, `{"error":{"code":400,"message":"The input token count (1200000) exceeds the maximum number of tokens allowed (1048576)."}}`],
+    ["Kimi: token limit", 400, false, `{"error":{"message":"Invalid request: Your request exceeded model token limit: 262144","type":"invalid_request_error"}}`],
+    ["DeepSeek: context length", 400, false, `{"error":{"message":"This model's maximum context length is 131072 tokens. However, you requested 140000 tokens (139000 in the messages, 1000 in the completion)."}}`],
+    ["a length error naming the tools", 400, false, `{"error":{"message":"Prompt is too long: the messages and tools exceed the model's context window."}}`],
+    ["a length error in Chinese naming the tools", 400, false, `{"error":{"message":"请求超出模型上下文长度限制，工具定义过多"}}`],
+    ["not about tools", 400, false, `{"error":{"message":"max_tokens is too large"}}`],
+    ["OpenRouter: another status", 404, false, `{"error":{"message":"No endpoints found that support tool use."}}`],
+  ];
+
+  it.each(BODIES)("%s (%i): asked once more without tools: %s", async (what, status, retried, body) => {
+    stub.answer(refusing(status, body));
+    const outcome = await failure(gateway.stream(call("openai_chat", { tools: TOOLS, upstreamId: `provider:body-${what}` })));
+    expect(toolsSent()).toEqual(retried ? [true, false] : [true]);
+    if (retried) expect(outcome).toBeNull();
+    else expect(outcome).toMatchObject({ upstreamStatus: status });
+  });
+});
+
 describe("a remembered refusal of tools", () => {
   afterEach(() => {
     vi.useRealTimers();

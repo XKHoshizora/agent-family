@@ -193,6 +193,63 @@ describe("scriptedGateway with tools", () => {
     expect(text(done.events)).toBe("done");
   });
 
+  it("a turn mutated in place and passed back is not the turn it gave: the call throws", async () => {
+    const g = scriptedGateway().callTools([{ name: "search_messages", input: { query: "a" } }]).reply("done");
+    const finish = finishOf((await run(g.stream(call({ tools: [SEARCH] })))).events);
+    (finish.assistant as Array<{ content: unknown[] }>)[0]!.content.push({ type: "text", text: "added by the loop" });
+    const { error } = await run(g.stream(call({ tools: [SEARCH], steps: [answer(finish)] })));
+    expect(String(error)).toMatch(/scriptedGateway: call #2/);
+    // The calls it handed out are the caller's to change too: what it checks against is its own copy.
+    const h = scriptedGateway().callTools([{ name: "search_messages", input: { query: "a" } }]).reply("done");
+    const round = finishOf((await run(h.stream(call({ tools: [SEARCH] })))).events);
+    const step = answer(round);
+    round.toolCalls[0]!.id = "changed";
+    expect((await run(h.stream(call({ tools: [SEARCH], steps: [step] })))).error).toBeNull();
+  });
+
+  it("a call with no tools and no steps after a callTools round is answered (a new conversation, or a flattened last call), and that round can no longer be answered", async () => {
+    const g = scriptedGateway().callTools([{ name: "search_messages", input: { query: "a" } }]).reply("flattened").reply("too late");
+    const finish = finishOf((await run(g.stream(call({ tools: [SEARCH] })))).events);
+    const flat = await run(g.stream(call()));
+    expect(flat.error).toBeNull();
+    expect(text(flat.events)).toBe("flattened");
+    const late = await run(g.stream(call({ tools: [SEARCH], steps: [answer(finish)] })));
+    expect(String(late.error)).toMatch(/scriptedGateway: call #3/);
+    expect(g.pending()).toBe(1);
+  });
+
+  it("steps must be this run's rounds, all of them, in the order given: reordered, one dropped, or the last left out after a failed call, the call throws", async () => {
+    /** Two callTools rounds of one run, then two scripted answers; both rounds' finishes. */
+    const twoRounds = async () => {
+      const g = scriptedGateway()
+        .callTools([{ name: "search_messages", input: { query: "a" } }])
+        .callTools([{ name: "search_messages", input: { query: "b" } }])
+        .reply("done")
+        .reply("again");
+      const one = finishOf((await run(g.stream(call({ tools: [SEARCH] })))).events);
+      const two = finishOf((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one)] })))).events);
+      expect(two.toolCalls).toHaveLength(1);
+      return { g, one, two };
+    };
+    {
+      const { g, one, two } = await twoRounds();
+      expect(String((await run(g.stream(call({ tools: [SEARCH], steps: [answer(two), answer(one)] })))).error)).toMatch(/call #3/); // reordered
+      expect(String((await run(g.stream(call({ tools: [SEARCH], steps: [answer(two)] })))).error)).toMatch(/call #4/); // the first round dropped
+      expect(text((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one), answer(two)] })))).events)).toBe("done");
+    }
+    {
+      const { g, one, two } = await twoRounds();
+      // A call that fails the check, then a "corrected" one that leaves out the last round: still held to it.
+      expect(String((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one), { assistant: two.assistant, results: [] }] })))).error)).toMatch(/call #3/);
+      expect(String((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one)] })))).error)).toMatch(/call #4/);
+      expect(text((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one), answer(two)] })))).events)).toBe("done");
+      // A run that ended is over: a new one starts with no steps, and the old rounds are not its rounds.
+      expect((await run(g.stream(call({ tools: [SEARCH] })))).error).toBeNull();
+      g.reply("never");
+      expect(String((await run(g.stream(call({ tools: [SEARCH], steps: [answer(one), answer(two)] })))).error)).toMatch(/call #7/);
+    }
+  });
+
   it("callTools on a call that offered no tools throws; a name it did not offer arrives with input null", async () => {
     const none = scriptedGateway().callTools([{ name: "search_messages", input: { query: "a" } }]);
     expect(String((await run(none.stream(call()))).error)).toMatch(/scriptedGateway: call #1 .*offered no tools/);

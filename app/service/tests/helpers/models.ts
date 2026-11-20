@@ -154,12 +154,16 @@ function unanswered(calls: readonly ToolCall[], results: readonly ToolResult[]):
  * `finish`; a failure is a thrown `ModelError`; when the call's signal aborts the iterator stops at once by throwing the
  * signal's reason. A call with nothing scripted throws a plain Error naming it.
  *
- * Tool rounds are checked as every real upstream checks them: a call's `steps` must each pass back (deep-equal after a
- * JSON round trip) a turn this gateway gave in a `callTools` round, each turn at most once, its results answering
- * exactly that round's calls (one result each, same id and name); and the call right after a `callTools` round must
- * have that round as its last step. A call that breaks this throws a plain Error naming it, as an unscripted call
- * does, and leaves its scripted answer queued. So after a `callTools` round the gateway's next call must be that
- * answer's next round: a test whose answer stops between rounds and then makes another call uses another gateway.
+ * Tool rounds are checked as every real upstream checks them. The gateway keeps its own copy of each `callTools` round
+ * it gave in the current run (one answer: the rounds since the last call without steps). A call with `steps` must pass
+ * back exactly those rounds, all of them, in the order given — each turn deep-equal, after a JSON round trip, to the
+ * gateway's copy (so a turn changed in place is caught), its results answering exactly that round's calls (one result
+ * each, same id and name). A call without steps starts a new run, except that a call offering tools right after an
+ * unanswered `callTools` round is one that left its steps out. A call with neither tools nor steps always passes (a new
+ * conversation, or a last call with the rounds flattened into text): the round before it can no longer be answered. A
+ * call that breaks this throws a plain Error naming it, as an unscripted call does, leaves its scripted answer queued
+ * and changes nothing (the next call is held to the same rounds). Two answers interleaved on one gateway are not
+ * modelled: give each its own gateway.
  *
  * Where it still differs from the real gateway (tests must not rely on these):
  * - Ids are `scripted-call-N`, unique for the gateway's whole life; real ids are unique only within a round, and only
@@ -183,27 +187,30 @@ export function scriptedGateway(): ScriptedGateway {
   const calls: ModelCall[] = [];
   /** Tool calls made so far: each gets the next id. */
   let toolCallsMade = 0;
-  /** Every `callTools` round's turn and calls, as given; and the last one, until the next call answers it. */
-  const turns: Array<{ assistant: unknown; calls: ToolCall[] }> = [];
-  let awaiting: { assistant: unknown; calls: ToolCall[] } | null = null;
+  /** The `callTools` rounds of the current run, in order: the gateway's own copies of each turn and its calls. */
+  let rounds: Array<{ assistant: unknown; calls: ToolCall[] }> = [];
+  /** The last of `rounds` has not been answered yet. */
+  let awaiting = false;
 
-  /** Why the call's steps are not ones a real upstream would take after this gateway's rounds, or null. */
+  /**
+   * Why the call's steps are not ones a real upstream would take after this run's rounds, or null — in which case the
+   * call is the run's next (and a call without steps, unless it left them out, a new run's first).
+   */
   function stepsProblem(call: ModelCall): string | null {
-    const expected = awaiting;
-    awaiting = null;
     const steps = call.steps ?? [];
-    const used = new Set<number>();
+    if (steps.length === 0) {
+      if (awaiting && (call.tools?.length ?? 0) > 0) return "offers tools but does not answer the tool calls of the round before it";
+      rounds = [];
+      awaiting = false;
+      return null;
+    }
+    if (steps.length !== rounds.length) return `passes back ${steps.length} round(s); this answer has had ${rounds.length}, all to be passed back in order`;
     for (const [i, step] of steps.entries()) {
-      const k = turns.findIndex((t) => isDeepStrictEqual(throughJson(step.assistant), t.assistant));
-      if (k < 0) return `step ${i + 1} passes back a turn this gateway never gave`;
-      if (used.has(k)) return `step ${i + 1} passes back a turn an earlier step already did`;
-      used.add(k);
-      const problem = unanswered(turns[k]!.calls, step.results);
+      if (!isDeepStrictEqual(throughJson(step.assistant), rounds[i]!.assistant)) return `step ${i + 1} is not round ${i + 1} as this gateway gave it`;
+      const problem = unanswered(rounds[i]!.calls, step.results);
       if (problem !== null) return `step ${i + 1}: ${problem}`;
     }
-    if (expected !== null && (steps.length === 0 || !isDeepStrictEqual(throughJson(steps.at(-1)!.assistant), expected.assistant))) {
-      return "does not answer the tool calls of the round before it in its last step";
-    }
+    awaiting = false;
     return null;
   }
 
@@ -258,8 +265,9 @@ export function scriptedGateway(): ScriptedGateway {
       }
       signal.throwIfAborted();
       const finish = finished(step.options.usage ?? null, step.options.truncated ?? false, text, made);
-      awaiting = { assistant: finish.assistant, calls: made };
-      turns.push(awaiting);
+      // Its own copies: the caller may change what it was handed, and what it passes back is checked against these.
+      rounds.push({ assistant: throughJson(finish.assistant), calls: structuredClone(made) });
+      awaiting = true;
       yield finish;
       return;
     }
