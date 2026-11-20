@@ -39,11 +39,11 @@ const ADDRESSES_THE_READER = /你必须|你应该|忽略|无视|指令|听我的
 
 /**
  * A password or passcode stated with its value: a model never writes one into a note. Whatever follows `password is`, `password was`,
- * `password's` (either apostrophe), `密码是` / `密码就是` / `密码为`, `密码：` / `密码＝` or `密码，` counts as a value, with one exception: where it is kept (`is stored in`,
+ * `password's` (either apostrophe), `密码是` / `密码就是` / `密码为`, `密码：` or `密码＝` counts as a value, with one exception: where it is kept (`is stored in`,
  * `is kept with`, `is managed by`…), and only when nothing after it says `:` or `=` (`stored in plain text: hunter2` is a value). A bare
  * mention of having or forgetting one is no secret.
  */
-const STATES_A_PASSWORD = /密[码碼]\s*(?:就是|也是|还是|還是|都是|是|为|為)\s*\S|密[码碼]\s*[:：=＝，,]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
+const STATES_A_PASSWORD = /密[码碼]\s*(?:就是|也是|还是|還是|都是|是|为|為)\s*\S|密[码碼]\s*[:：=＝]\s*\S|\b(?:password|passcode)\s*(?:is(?!\s+(?:stored|kept|saved|managed)\s+(?:in|with|by)\b[^:：=]*$)|[:=])\s*\S|\b(?:password|passcode)\s+was\s+\S|\b(?:password|passcode)[’']s\s+\S|パスワードは\s*\S*[0-9A-Za-z]{3,}/i;
 
 /**
  * A bare domain with a path (`example.org/page`), which the list of known endings above does not catch: a dot-separated host of at least two

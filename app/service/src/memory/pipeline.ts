@@ -251,7 +251,7 @@ export async function runReview(deps: PipelineDeps, job: ReviewJob, ctx: ReviewC
   // A `seen` only says the owner mentioned a note again (above): there is nothing in it to apply, record or tell.
   const changing = ops.filter((o) => o.op !== "seen");
   // Whether the owner's words asked for the destructive ops, judged outside any transaction (once per answer, when it can matter).
-  const asked = await askedFor(deps, agent, changing.filter(inPlace), input, group);
+  const asked = await askedFor(deps, agent, changing.filter(inPlace), input, group, ctx.closing);
   if (ctx.closing.aborted) return;
 
   // What took effect, counted once the transaction has committed (`stats.ts`).
@@ -340,10 +340,10 @@ const NOT_ASKED: Asked = { forget: false, lock: false };
  * review only adds), without 先问我再记 (everything waits then), for a `remove` only when the window holds a word of forgetting
  * (`FORGET_WORDS`) and a `lock` only when it holds a word of locking (`LOCK_WORDS`), and not when an op waits whatever the answer (a
  * remove or a lock without such a word, a replace with no owner line after its note's last change: the ops in place stand or fall
- * together). Otherwise nothing is asked and nothing was asked for.
+ * together), and not once the service is closing (a request under way ends with it). Otherwise nothing is asked and nothing was asked for.
  */
-async function askedFor(deps: PipelineDeps, agent: AgentRow, inPlaceOps: Op[], input: ReviewInput, group: boolean): Promise<Asked> {
-  if (group || agent.memoryAsk || inPlaceOps.length === 0) return NOT_ASKED;
+async function askedFor(deps: PipelineDeps, agent: AgentRow, inPlaceOps: Op[], input: ReviewInput, group: boolean, closing: AbortSignal): Promise<Asked> {
+  if (group || agent.memoryAsk || inPlaceOps.length === 0 || closing.aborted) return NOT_ASKED;
   const kinds = new Set<keyof Asked>();
   for (const op of inPlaceOps) {
     if (op.op === "remove") {
@@ -355,7 +355,7 @@ async function askedFor(deps: PipelineDeps, agent: AgentRow, inPlaceOps: Op[], i
     } else if (needsWords(op, input, NOT_ASKED)) return NOT_ASKED;
   }
   if (kinds.size === 0) return NOT_ASKED;
-  return ownerAsked({ db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log }, input.said, kinds);
+  return ownerAsked({ db: deps.db, judge: deps.judge, ownerId: agent.ownerId, config: deps.config, log: deps.log }, input.said, kinds, closing);
 }
 
 /** Whether an op may be applied here: in a group only an addition (or a note's `seen`); only to a room this review may change. */

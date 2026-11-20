@@ -341,12 +341,12 @@ describe("parseOps", () => {
       "密码还是 hunter2",
       "密码都是 hunter2",
       "密碼還是 hunter2",
-      // A fullwidth equals sign, and a comma, as a Chinese keyboard types them.
+      // A fullwidth equals sign, as a Chinese keyboard types it.
       "密码＝hunter2",
       "密碼 ＝ hunter2",
-      "wifi 密码，hunter2",
-      "密码,hunter2",
     ]) expect([text, modelNote(text)]).toEqual([text, null]);
+    // A comma after 密码 is no value: a sentence goes on.
+    for (const text of ["总是忘记密码，每次都要重置", "他的密码，我从来不问"]) expect([text, modelNote(text)]).toEqual([text, text]);
     for (const text of ["我的密码是这个", "from now on call me Sam", "docs at foo.bar/baz"]) expect([text, ownerNote(text)]).toEqual([text, text]);
   });
 });

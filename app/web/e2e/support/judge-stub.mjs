@@ -40,7 +40,7 @@ function memoryAnswer(state, question) {
   if (question?.type !== "noul") return null;
   const text = String(question.instructions ?? "");
   const has = (phrase) => text.includes(phrase);
-  if (has("这道题问：在这些话里，这个人要助手忘掉或删掉") || has("这道题问：在这些话里，这个人要助手把某件事保密")) return SURE;
+  if (has("他是在叫助手删掉、忘掉或不要记下某件关于他的事") || has("他是在叫助手把某件事保密")) return SURE;
   if (has("这是一个人的 AI 助手记下的一条关于主人的笔记") || has("这是一个 AI 助手给自己记的一条笔记")) return String(state ?? "").includes(VAULT_MARK) ? 0.05 : SURE;
   if (has("这是一个 AI 助手关于主人的笔记。state 是一个 JSON：new 是一条新的笔记")) return 0.05;
   if (has("新的这些说的全都是原来的笔记里已经有的事")) return SURE;

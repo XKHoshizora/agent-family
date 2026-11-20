@@ -207,3 +207,44 @@
 {"id":"mix-lock-04","lang":"mix","cat":"lock","said":["这件事 keep it secret 好吗"],"expect":{"forget":false,"lock":true}}
 {"id":"mix-lock-not-01","lang":"mix","cat":"lock-not","said":["门 lock 坏了"],"expect":{"forget":false,"lock":false}}
 {"id":"mix-both-01","lang":"mix","cat":"both","said":["那条 remove 掉，再 lock 一下住址"],"expect":{"forget":true,"lock":true}}
+{"id":"zh-multi-01","lang":"zh","cat":"multi","said":["今天好累啊","晚上吃什么好呢","对了，把我去大阪那件事删掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-retract-04","lang":"zh","cat":"retract","said":["把我工资那条删掉","算了，还是留着吧"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-retract-05","lang":"zh","cat":"retract","said":["前任那条删了吧","不对，先别删","嗯……还是删了吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-multi-02","lang":"zh","cat":"multi","said":["我老是忘带钥匙","另外，住址那条你忘掉吧"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-multi-03","lang":"zh","cat":"multi","said":["别忘了周五提醒我交报告","还有，体重那条不用记了"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-multi-04","lang":"zh","cat":"multi","said":["刚才那个梗太好笑了","我的病历那条锁起来，别告诉别人"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-retract-06","lang":"zh","cat":"retract","said":["这件事别告诉别人","开玩笑的，随便说"],"expect":{"forget":false,"lock":false}}
+{"id":"zh-multi-05","lang":"zh","cat":"multi","said":["门锁坏了，明天找人修","顺便把我的银行卡那条锁进保险箱"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-multi-06","lang":"zh","cat":"multi","said":["我们周末去爬山吧","天气预报说会下雨","那就改天","对了，我跳槽的事先保密"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-retract-07","lang":"zh","cat":"retract","said":["把电话那条删掉，地址那条锁起来","等等，电话那条还是留着吧"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-multi-07","lang":"zh","cat":"multi","said":["上周的事你知道吧","别说出去"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-08","lang":"zh","cat":"lock","said":["我的体检结果放进保险箱"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-lock-09","lang":"zh","cat":"lock","said":["这条设成私密"],"expect":{"forget":false,"lock":true}}
+{"id":"zh-not-keep-18","lang":"zh","cat":"not-keep","said":["这个不要记"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-14","lang":"zh","cat":"ask","said":["把那条清除掉"],"expect":{"forget":true,"lock":false}}
+{"id":"zh-ask-15","lang":"zh","cat":"ask","said":["撤销刚才那条"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-multi-01","lang":"ja","cat":"multi","said":["今日は暑いね","さっきの住所は消して"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-retract-02","lang":"ja","cat":"retract","said":["住所は消して","やっぱりいいや、そのままで"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-retract-03","lang":"ja","cat":"retract","said":["住所は消して","やっぱり消さないで","うーん、やっぱり消して"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-multi-02","lang":"ja","cat":"multi","said":["鍵をよく忘れるんだ","ところで、元カレの話は忘れて"],"expect":{"forget":true,"lock":false}}
+{"id":"ja-multi-03","lang":"ja","cat":"multi","said":["ランチ何にしよう","転職のことは内緒にしてね"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-retract-04","lang":"ja","cat":"retract","said":["これは秘密にして","別に誰に言ってもいいよ、やっぱり"],"expect":{"forget":false,"lock":false}}
+{"id":"ja-multi-04","lang":"ja","cat":"multi","said":["スマホのロックが壊れた","あと、病院の件は誰にも言わないで"],"expect":{"forget":false,"lock":true}}
+{"id":"ja-lock-05","lang":"ja","cat":"lock","said":["その話はひみつにしてね"],"expect":{"forget":false,"lock":true}}
+{"id":"en-multi-01","lang":"en","cat":"multi","said":["what a day","anyway, delete what I said about my salary"],"expect":{"forget":true,"lock":false}}
+{"id":"en-retract-02","lang":"en","cat":"retract","said":["delete the note about my ex","actually never mind, keep it"],"expect":{"forget":false,"lock":false}}
+{"id":"en-retract-03","lang":"en","cat":"retract","said":["forget what I said about my rent","no wait, keep that","ok, on second thought, forget it after all"],"expect":{"forget":true,"lock":false}}
+{"id":"en-multi-02","lang":"en","cat":"multi","said":["I always forget my keys","also, please erase my old address"],"expect":{"forget":true,"lock":false}}
+{"id":"en-multi-03","lang":"en","cat":"multi","said":["the build is blocked again","unrelated: keep my diagnosis secret, don’t tell anyone"],"expect":{"forget":false,"lock":true}}
+{"id":"en-retract-04","lang":"en","cat":"retract","said":["lock the note about my debt","eh, doesn’t matter, anyone can know"],"expect":{"forget":false,"lock":false}}
+{"id":"en-multi-04","lang":"en","cat":"multi","said":["my phone’s lock screen is broken","and please keep my new job private"],"expect":{"forget":false,"lock":true}}
+{"id":"en-multi-05","lang":"en","cat":"multi","said":["did you see the game?","put my therapy notes in the vault"],"expect":{"forget":false,"lock":true}}
+{"id":"en-lock-07","lang":"en","cat":"lock","said":["keep this private, it’s between us"],"expect":{"forget":false,"lock":true}}
+{"id":"en-ask-10","lang":"en","cat":"ask","said":["wipe what I told you about my rent"],"expect":{"forget":true,"lock":false}}
+{"id":"en-ask-11","lang":"en","cat":"ask","said":["disregard what I said about my boss"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-multi-01","lang":"mix","cat":"multi","said":["今天好忙","please 把 salary 那条 delete 掉"],"expect":{"forget":true,"lock":false}}
+{"id":"mix-retract-01","lang":"mix","cat":"retract","said":["那条 remove 掉","算了 keep it"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-multi-02","lang":"mix","cat":"multi","said":["门 lock 坏了","我的 password 那条锁起来"],"expect":{"forget":false,"lock":true}}
+{"id":"mix-retract-02","lang":"mix","cat":"retract","said":["这件事 keep it secret","never mind，告诉谁都行"],"expect":{"forget":false,"lock":false}}
+{"id":"mix-both-02","lang":"mix","cat":"both","said":["わたしの住所、消して","and 我的病历 别说出去"],"expect":{"forget":true,"lock":true}}
+{"id":"mix-lock-05","lang":"mix","cat":"lock","said":["这条 put it in the vault"],"expect":{"forget":false,"lock":true}}
