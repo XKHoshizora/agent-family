@@ -201,4 +201,21 @@ describe("a block made after a call, as the reply begins", () => {
     expect((await latest(w.agent.id, w.g)).askers).not.toContain(w.mia.id);
     await app.agentPort.releaseRun(ticket.id);
   });
+
+  it("the owner's own chain relayed by someone else's Agent, whose owner the owner blocks since: its only asker is the owner, yet the relayed call is dropped and the reply ends quietly", async () => {
+    const w = await world();
+    const theirs = await mustCreateAgent(app, w.mia, { handle: "mia_bot", name: "米娅的助手", model: FAST, persona: "你是米娅的助手。" });
+    expect((await api(app, w.mia, "POST", `/api/conversations/${w.g}/members`, { principalId: theirs.id })).status).toBe(201);
+    await say(w.owner, w.g, "@mia_bot 帮我问问小助手");
+    gateway.reply("@helper_bot MIA-RELAY-r8 主人让我问你");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    // mia's Agent called it for the owner: the owner's own call, whose one asker is the owner.
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "queued", lane: "own", caller: w.owner.id, askers: [w.owner.id] });
+    await block(w.owner, w.mia);
+
+    const before = callsHere().length;
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(callsHere()).toHaveLength(before);
+    expect(await latest(w.agent.id, w.g)).toMatchObject({ status: "cancelled", error: null });
+  });
 });

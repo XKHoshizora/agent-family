@@ -472,7 +472,7 @@ export async function hearFrom(t: Tx, runId: string, from: number, to: number | 
  * toward its line, never as a call). A run whose caller is dropped becomes the remaining calls' by `followUp`'s rule —
  * its owner's own when the owner is behind one of them, else the earliest one's — and a person's while a person's call
  * is left (a reply nobody asked for keeps its lane, caller and trigger). The owner's own call is never dropped (nobody has
- * a block with themselves): `begin` asks this only of a group run with an asker besides its owner. Returns what the run now covers and has noted (empty when nothing was dropped: one query),
+ * a block with themselves): `begin` asks this of every group run (none in the Agent's own conversation). Returns what the run now covers and has noted (empty when nothing was dropped: one query),
  * or null when no call is left — then only its `pending_seq` is cleared, so no follow-up answers a dropped call.
  */
 export async function dropBlockedCalls(t: Tx, runId: string, ownerId: string): Promise<{ covers_seq?: string | null; pending_seq?: string | null } | null> {

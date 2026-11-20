@@ -176,10 +176,8 @@ interface RunState {
   pending_seq: string | null;
   interrupted: Interruption | null;
   lane: Lane;
-  /** Whose questions it answers (runs.ts `Askers`): `begin` asks the block rule only of a run that has someone else's. */
-  askers: string[] | null;
 }
-const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, asker_ids::text[] as askers";
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane";
 
 /**
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
@@ -440,10 +438,10 @@ export class DbAgentPort implements AgentPort {
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
       // A block made since a call, either way, between the Agent's owner and whoever made it: that call is dropped, as it
-      // would be refused now (runs.ts `dropBlockedCalls`, every lane); with no call left the reply ends quietly. Not asked
-      // (no query) in the Agent's own conversation, nor of a run whose one asker is its owner: nobody has a block with
-      // themselves.
-      if (group && !(state.askers?.length === 1 && state.askers[0] === agent.ownerId)) {
+      // would be refused now (runs.ts `dropBlockedCalls`, every lane, every group run: one of the owner's own may carry a
+      // call relayed by someone else's Agent); with no call left the reply ends quietly. Not asked (no query) in the
+      // Agent's own conversation, where every call is its owner's and nobody has a block with themselves.
+      if (group) {
         const kept = await dropBlockedCalls(t, run.id, agent.ownerId);
         if (kept === null) return { end: BLOCKED_SINCE };
         Object.assign(state, kept);
