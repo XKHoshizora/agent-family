@@ -1,4 +1,4 @@
-import { checkPicked, mentionsAtSend } from "../agents/mentions.ts";
+import { addressRanges, checkPicked, mentionsAtSend } from "../agents/mentions.ts";
 import { claimAttachment, linkAttachment } from "../attachments/store.ts";
 import { assertCanSend, lockForWrite, VISIBLE_JOIN, type WriteLock } from "../conversations/store.ts";
 import type { Tx } from "../db.ts";
@@ -82,8 +82,10 @@ export async function sendMessage(
 
   const text = input.text ?? "";
   const picked = input.mentions ?? [];
-  await checkPicked(t, conversationId, text, picked);
-  const read = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked);
+  // The text's addresses, found once for both (fix round 2).
+  const addresses = addressRanges(text);
+  await checkPicked(t, conversationId, text, picked, addresses);
+  const read = await mentionsAtSend(t, { id: conversationId, type: lock.conversation.type }, text, picked, addresses);
   const message = await insertMessage(t, conversationId, senderId, body.attachment ? "file" : "text", body, input.clientTxn, read);
   if (body.attachment && !(await linkAttachment(t, body.attachment.id, message.id))) throw invalid();
   return { message, duplicate: false, lock };

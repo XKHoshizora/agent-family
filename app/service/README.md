@@ -492,7 +492,7 @@ picked from the @ list mean anyone but the one picked.
   Agent outside the conversation, a handle nobody has — stores nothing. Nothing in code is read, nor anything in an
   address. In an Agent's own
   conversation the Agent is also named as it always was there: by its full handle or name part as a whole mention, and
-  by `@` and its name anywhere (case ignored). At most the first 20 distinct handles are looked up; the picked entries
+  by `@` and its name anywhere (case ignored) but in code or an address (the same test as the handles). At most the first 20 distinct handles are looked up; the picked entries
   come first when the 20 places run out.
 - **Asked, not named** (`messages.asks_agent`, never sent to anyone): decided by the same reading at the same moment,
   whether a typed `@…` asked an Agent it could not name — the full handle of an Agent that is not one of the
@@ -506,13 +506,37 @@ picked from the @ list mean anyone but the one picked.
   - an indented code block: lines indented 4 columns or more (a tab to the next multiple of 4), the first at the start
     of the text or after a blank line, unless the text before that blank line is a list item (its marker line or a line
     indented under it) — there indented lines are the item's own text, as Markdown has it; blank lines inside the block
-    are part of it. (A block indented deeper than its item's text — code inside a list item — is read as the item's
-    text here; the web shows it as code.)
+    are part of it.
   - outside those, a backtick span: a run of backticks up to the next run of exactly as many within one paragraph (a
     blank line ends it); a backtick after an odd number of backslashes is text, and so is a run nothing closes.
+
+  Where this differs from the CommonMark the web renders an Agent's reply with, and who it touches:
+  - A block indented deeper than its list item's text — code nested in a list item — is read as the item's text here;
+    the web shows it as code. So a handle shown as nested code **can still call** the Agent whose handle it holds: a
+    member who posts such a block in a group, or an Agent whose reply holds one (a model explaining `@owner.name`
+    inside a list item), calls that Agent, and the sender — or the calling Agent's owner — pays as for any call.
+    Fenced code in a list item (the common shape of model output) is handled.
+  - The same direction (read as text here, shown as code on the web), with the same effect: an indented block directly
+    after a heading or a fence's closing line (no blank line between), and one after `>` quote markers.
+  - The opposite direction (code here, text on the web): a lazy continuation line followed by a blank line and an
+    indented line. A handle there is neither stored nor called, and is shown as plain text. Rare.
 - **An address** is no one addressed: an `@` right after `/` (`example.org/@anna`), or inside a URL (a scheme and `://`,
   or `www.`, up to white space or `<` `>`) or a Markdown link's target (`](` up to `)` or white space), is not read, and a
-  picked range there is 400 `bad_mentions`.
+  picked range there is 400 `bad_mentions` (the web's composer turns such a tag into plain text before it is sent, and
+  says so under the box). A scheme counts only where a run of its characters (`A–Z a–z 0–9 + . -`) begins, as GFM's
+  autolinks have it (`1http://x` is no URL; it was one before fix round 2). The pattern (`ADDRESS_PATTERN`,
+  `src/agents/mentions.ts`) is the web's (`app/web/src/data/mentions.js`) character for character — a test compares
+  them — and is found once per text; the whole reading at send (code, addresses, `@…`) is linear in the text, tested at
+  the longest a message may be (`MESSAGE_TEXT_MAX`, 8 000 characters, `src/messages/send.ts`) against a quarter of it.
+- **Consequences of these rules**, as they stand:
+  - `@anna/@bob` and `A/@B` read nobody for the second name (the `/` rule).
+  - A URL glued to Chinese punctuation or text swallows a following `@name` up to the next white space
+    (`https://x.com/a，@贾维斯 帮我看` calls nobody, silently). It agrees with how GFM links it, so the reader sees a link,
+    but the sender who typed the `@` by hand gets no reply and no hint. The picker cannot be used there (it needs white
+    space before `@`).
+  - A mention in link TEXT is stored and may call an Agent, but is drawn as a plain link, not a tag.
+  - For people's messages the web draws no Markdown, so the widened code rules (list fences, indented blocks) switch off
+    a typed call for text the UI does not show as code.
 - **An Agent's reply** is text from a model: it is read the same way, once, when it is posted (`postAsAgent`), and its
   entries (and `asks_agent`) are stored the same way. (The group's system text tells it to write `@` and an Agent's
   full handle to call it.)

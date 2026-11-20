@@ -139,13 +139,16 @@ export function codeRanges(text: string): Range[] {
  * The addresses of `text`, in which an `@name` is part of the address and names nobody (fix round 1, I-3: a name inside
  * an address is not someone being addressed): a URL — a scheme and `://`, or `www.`, then everything up to white space
  * or `<` `>` — and a Markdown link's target, `](` up to its `)` or white space. (An `@` right after `/` is an address
- * too, wherever it is: `mentionTokens`, `checkPicked`.)
+ * too, wherever it is: `mentionTokens`, `checkPicked`.) A scheme is tried only where a run of its characters begins
+ * (the lookbehind), so a long run of letters is passed once: linear in the text (fix round 2, I-4; it was tried at every
+ * character of a run, to the run's end each time). The web's copy (app/web/src/data/mentions.js) is this text exactly
+ * (a test compares them).
  */
-const ADDRESS = /(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
+export const ADDRESS_PATTERN = /(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/|www\.)[^\s<>]*|\]\([^)\s]*/g;
 
-/** The addresses of `text` (`ADDRESS`), in order. */
+/** The addresses of `text` (`ADDRESS_PATTERN`), in order. */
 export function addressRanges(text: string): Range[] {
-  return [...text.matchAll(ADDRESS)].map((m) => [m.index!, m.index! + m[0].length] as const);
+  return [...text.matchAll(ADDRESS_PATTERN)].map((m) => [m.index!, m.index! + m[0].length] as const);
 }
 
 /** The backtick spans of `text` in `[from, to)` (`codeRanges`): an opening run's next run of the same length closes it. */
@@ -214,6 +217,26 @@ function outside(ranges: readonly Range[]): (start: number, length: number) => b
 }
 
 /**
+ * A test of whether a typed `@…` at `[start, start + length)` of `text` may be read: outside every one of `skip` (code,
+ * addresses, what was picked or read already: `outside`) and not right after a `/` (an address too). The one test of
+ * both readings at send: the handles (`mentionTokens`) and, in an Agent's own conversation, its name (`mentionsAtSend`).
+ */
+function readableIn(text: string, skip: readonly Range[]): (start: number, length: number) => boolean {
+  const free = outside(skip);
+  return (start, length) => text[start - 1] !== "/" && free(start, length);
+}
+
+/**
+ * The parts of `text` a typed `@…` is never read in — code (`codeRanges`), addresses (`addressRanges`, or the
+ * `addresses` its caller has already found) and the picked ranges (`picked`) — and the `@…` read outside them
+ * (`mentionTokens`): the whole reading at send but its lookups, linear in the text.
+ */
+export function typedReading(text: string, picked: readonly Range[] = [], addresses: readonly Range[] = addressRanges(text)): { tokens: Token[]; skip: Range[] } {
+  const skip = [...codeRanges(text), ...addresses, ...picked];
+  return { tokens: mentionTokens(text, skip), skip };
+}
+
+/**
  * The `@…` of `text` the reading looks up, outside `skip` (code, addresses and the picked ranges) and not right after a
  * `/` (an address: `example.org/@anna`, fix round 1): `@owner.name` — an owner's
  * handle of 3 to 24 word characters, a dot, a name part of 2 to 24 — or a bare `@name` of 2 to 24 (a person's handle or
@@ -224,11 +247,11 @@ function outside(ranges: readonly Range[]): (start: number, length: number) => b
  */
 export function mentionTokens(text: string, skip: readonly Range[] = []): Token[] {
   const found: Token[] = [];
-  const free = outside(skip);
+  const readable = readableIn(text, skip);
   for (const match of text.matchAll(MENTION)) {
     const [whole, first, name] = match as unknown as [string, string, string | undefined];
     const fits = name === undefined ? first.length >= 2 && first.length <= 24 : first.length >= 3 && first.length <= 24 && name.length >= 2 && name.length <= 24;
-    if (!fits || text[match.index! - 1] === "/" || !free(match.index!, whole.length)) continue;
+    if (!fits || !readable(match.index!, whole.length)) continue;
     found.push({ handle: (name === undefined ? first : `${first}.${name}`).toLowerCase(), start: match.index!, length: whole.length });
   }
   return found;
@@ -339,11 +362,17 @@ const oneMention = (range: string): boolean => {
  * any mention). The text in a range is otherwise free: it is the name as the sender saw it. Anything else: 400
  * `bad_mentions`, and nothing is stored. One query, none when nothing was picked.
  */
-export async function checkPicked(q: Queryable, conversationId: string, text: string, picked: readonly Mention[]): Promise<void> {
+export async function checkPicked(
+  q: Queryable,
+  conversationId: string,
+  text: string,
+  picked: readonly Mention[],
+  addresses: readonly Range[] = addressRanges(text),
+): Promise<void> {
   if (picked.length === 0) return;
   if (picked.length > MENTION_LIMIT) throw bad();
   let end = 0;
-  const free = outside(addressRanges(text));
+  const free = outside(addresses);
   for (const { start, length } of picked) {
     if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < end || length < 1 || start + length > text.length) throw bad();
     if (text[start] !== "@" || splitsPair(text, start + length) || !oneMention(text.slice(start, start + length))) throw bad();
@@ -379,14 +408,13 @@ export async function mentionsAtSend(
   conversation: { id: string; type: ConversationType },
   text: string,
   picked: readonly Mention[] = [],
+  addresses?: readonly Range[],
 ): Promise<MentionsRead> {
   const kept = picked.map(({ id, start, length }) => ({ id, start, length }));
   // No `@` typed anywhere: only what was picked (and no query at all).
   if (!text.includes("@")) return { mentions: kept.length === 0 ? null : kept, asksAgent: false };
-  const code = codeRanges(text);
   const taken: Range[] = picked.map((m) => [m.start, m.start + m.length] as const);
-  const skip = [...code, ...addressRanges(text), ...taken];
-  const tokens = mentionTokens(text, skip);
+  const { tokens, skip } = typedReading(text, taken, addresses);
   const typed: Mention[] = [];
   let asksAgent = false;
   const own = conversation.type === "agent" ? await ownAgent(q, conversation.id) : null;
@@ -402,9 +430,10 @@ export async function mentionsAtSend(
   }
   if (own !== null && own.name !== "") {
     const byName = new RegExp(`@${own.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "giu");
-    const free = outside([...code, ...taken, ...typed.map((m) => [m.start, m.start + m.length] as const)]);
+    // (Read as the handles are: outside code, addresses and what was picked or read already, not after a `/`.)
+    const readable = readableIn(text, [...skip, ...typed.map((m) => [m.start, m.start + m.length] as const)]);
     for (const match of text.matchAll(byName)) {
-      if (free(match.index!, match[0].length)) typed.push({ id: own.id, start: match.index!, length: match[0].length });
+      if (readable(match.index!, match[0].length)) typed.push({ id: own.id, start: match.index!, length: match[0].length });
     }
   }
   const room = Math.max(0, MENTION_LIMIT - kept.length);

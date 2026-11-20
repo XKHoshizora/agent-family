@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mentionedHandles, mentionsAtSend, mentionTokens } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend, mentionTokens, typedReading } from "../src/agents/mentions.ts";
+import { MESSAGE_TEXT_MAX } from "../src/messages/send.ts";
 
 import { namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
@@ -90,6 +91,56 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
       expect(fastest(large)).toBeLessThan(8 * fastest(small) + 5);
     }
   });
+});
+
+/** The time of one call of `work` over a burst: `work` repeated until at least 30 ms have passed (a fast call is measured too). */
+function burst(work: () => void): number {
+  let calls = 0;
+  const started = performance.now();
+  let spent = 0;
+  do {
+    work();
+    calls += 1;
+    spent = performance.now() - started;
+  } while (spent < 30);
+  return spent / calls;
+}
+
+/**
+ * How many times longer one call of `large` takes than one of `small` — a ratio, not a number of milliseconds, decides a
+ * linearity test: after a warm-up (both compiled), the median of five ratios, the two of each measured one right after
+ * the other, each as the shortest of three bursts (a busy machine only ever adds time: a thread put aside for a while).
+ */
+function timeRatio(large: () => void, small: () => void): number {
+  burst(large);
+  burst(small);
+  const perCall = (work: () => void) => Math.min(burst(work), burst(work), burst(work));
+  const ratios: number[] = [];
+  for (let s = 0; s < 5; s++) ratios.push(perCall(large) / perCall(small));
+  return ratios.sort((a, b) => a - b)[2]!;
+}
+
+describe("the reading at send is linear in the text, at the longest a message may be (fix round 2, I-4)", () => {
+  it("code, addresses and tokens of 8 000 characters (MESSAGE_TEXT_MAX) take about four times what 2 000 take, whatever the text holds", () => {
+    expect(MESSAGE_TEXT_MAX).toBe(8000);
+    const cases: Array<[string, (n: number) => string]> = [
+      ["@ and a run of letters", (n) => `@${"a".repeat(n - 1)}`],
+      ["a run of letters, dots and dashes", (n) => `@x ${"a.b-c+".repeat(n / 6)}`.slice(0, n)],
+      ["www. again and again", (n) => `@x ${"www.".repeat(n / 4)}`.slice(0, n)],
+      ["schemes without //", (n) => `@x ${"http:".repeat(n / 5)}`.slice(0, n)],
+      ["link targets", (n) => `@x ${"](".repeat(n / 2)}`.slice(0, n)],
+      ["backticks", (n) => `@x ${"`a``".repeat(n / 4)}`.slice(0, n)],
+      ["mentions after slashes", (n) => "/@anna ".repeat(n / 7)],
+    ];
+    for (const [name, make] of cases) {
+      const [small, large] = [make(2000), make(MESSAGE_TEXT_MAX)];
+      expect(Array.from(large).length, name).toBeGreaterThanOrEqual(MESSAGE_TEXT_MAX - 7);
+      // Linear: four times the text, about four times the time (a quadratic reading takes sixteen).
+      const ratio = timeRatio(() => typedReading(large), () => typedReading(small));
+      expect(ratio, `${name}: 4× the text took ${ratio.toFixed(1)}× the time`).toBeLessThan(8);
+    }
+    // (Seven shapes, each about a second of measuring: more than the usual limit of a test.)
+  }, 60_000);
 });
 
 /** Puts principal `id` into conversation `conv` from its current seq on. */

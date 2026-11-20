@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { codeRanges, mentionsAtSend } from "../src/agents/mentions.ts";
+import { readFileSync } from "node:fs";
+import { ADDRESS_PATTERN, codeRanges, mentionsAtSend } from "../src/agents/mentions.ts";
 import { judgeable, namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { postAsAgent } from "../src/agents/conversation.ts";
@@ -333,6 +334,13 @@ describe("typed mentions are read once, at send", () => {
     await settleAll();
     const picked = await say(owner, conv, "@小助手 你好", [{ id: agent.id, start: 0, length: 4 }]);
     expect(await covered(agent.id, conv)).toEqual([seq, picked]);
+    await settleAll();
+    // Its name in an address is no call there either (fix round 2, M-2): after a /, or inside a URL.
+    const runs = await allRuns();
+    for (const text of ["看 https://x.example/@贾维斯", "见 x.example/@贾维斯 吧", "链接 https://x.example/u?n=@贾维斯 打开"]) {
+      expect([text, await stored(conv, await say(owner, conv, text))]).toEqual([text, null]);
+    }
+    expect(await allRuns()).toBe(runs);
   });
 });
 
@@ -496,6 +504,23 @@ describe("fix round 1: a name inside an address is no mention (I-3)", () => {
     // Outside the address, the same name is read.
     const seq = await say(w.bobby, w.g, "https://x.example/ @anna");
     expect(await stored(w.g, seq)).toEqual([{ id: w.anna.id, start: 19, length: 5 }]);
+  });
+});
+
+describe("fix round 2: addresses (M-5)", () => {
+  it("an e-mail address names nobody and asks no Agent; a mention in a link's TEXT is read (only its target is an address)", async () => {
+    const w = await world();
+    await agentOf(w.xiaolin, "jarvis", w.g);
+    const mail = await say(w.bobby, w.g, "写信到 anna@example.com 或 xiaolin.jarvis@example.com");
+    expect([await stored(w.g, mail), await asks(w.g, mail)]).toEqual([null, false]);
+    const text = await say(w.bobby, w.g, "[@anna](https://x.example/p) 看这个");
+    expect(await stored(w.g, text)).toEqual([{ id: w.anna.id, start: 1, length: 5 }]);
+  });
+
+  it("the server's address pattern is the web's, character for character (app/web/src/data/mentions.js)", () => {
+    const web = readFileSync(new URL("../../web/src/data/mentions.js", import.meta.url), "utf8");
+    const source = /const ADDRESS = \/(.+)\/g;/.exec(web)?.[1];
+    expect(source).toBe(ADDRESS_PATTERN.source);
   });
 });
 
