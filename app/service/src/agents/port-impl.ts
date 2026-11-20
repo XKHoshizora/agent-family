@@ -138,8 +138,8 @@ interface RunMoney {
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
 /**
- * In a group, none of the messages that called for the reply is one its Agent can see (context.ts `callsSeen`): nothing is
- * left to answer — nothing failed, nothing to retry.
+ * In a group, none of the messages that called for the reply is one its Agent can see and show (context.ts `callsSeen`):
+ * nothing is left to answer — nothing failed, nothing to retry.
  */
 const NOTHING_LEFT: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
@@ -484,9 +484,10 @@ export class DbAgentPort implements AgentPort {
       // what it covered before taking on what was noted above, those calls included — is recorded among its askers
       // (runs.ts `hearFrom`, fix round 2), so the line counts them, and so does whatever it hands down.
       if (group) await hearFrom(t, run.id, coveredBefore, null);
-      const calls = group ? await callsSeen(t, agent.id, run.id) : [];
+      const line = group ? await askerLine(t, run.id) : 0;
+      const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
       if (group && calls.length === 0) return { end: NOTHING_LEFT };
-      const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: await askerLine(t, run.id), calls } : null;
+      const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
       // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it

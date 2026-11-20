@@ -385,6 +385,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .memory-detail { width: min(420px, 100%); padding: 8px 12px; border-radius: 12px; background: rgba(255, 255, 255, 0.85); border: 1px solid var(--line); font-size: 13.5px; text-align: left; }
 .memory-lines { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; overflow-wrap: anywhere; }
 .memory-lines .tag { margin-left: 6px; }
+/* Under a merge's line: the notes it joined, set in and quieter */
+.memory-lines .memory-merged { margin-top: -2px; padding-left: 1.2em; font-size: 12.5px; color: var(--ink-3); }
 .memory-foot, .memory-hint { margin: 6px 0 0; font-size: 13px; }
 .memory-card { width: min(420px, 100%); }
 /* A whisper (悄悄话): a small private note after the message it follows, only its owner sees it; answered, a quiet line */
@@ -402,6 +404,10 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 /* The memory palace: a room's open entries as bordered rows, the vault block set apart under them. A row wraps (text, then its actions) on a phone. */
 .memory-stale { margin: 4px 0; font-size: 13px; }
 .memory-switches { margin: 0; padding: 0; border: 0; min-width: 0; }
+/* Under 记忆, when it is turned back on: whether to look back at what was said while it was off */
+.memory-catch-up { margin: 4px 0 12px; padding: 10px 12px; max-width: var(--field-w); border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.7); }
+.memory-catch-up p { margin: 0 0 8px; font-size: 14px; }
+.memory-catch-up .card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .memory-room { margin: 4px 0 22px; max-width: var(--field-w); }
 .memory-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .memory-head h3 { margin: 18px 0 4px; }

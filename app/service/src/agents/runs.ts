@@ -394,23 +394,36 @@ export type Askers = readonly string[] | null;
 const askersParam = (askers: Askers): string[] | null => (askers === null ? null : [...askers]);
 
 /**
- * SQL, a `uuid[]`: everyone a reply hears from in a stretch of its group (Task 10b, fix round 2) — every person, never an
- * Agent, who sent a text or file message (what a reply is shown) in conversation `conversation` with a seq after `from`
- * and, unless `to` is null, up to `to`. Only parameter positions and the written row's own columns are spliced in.
+ * SQL, a `uuid[]` or null: everyone a reply hears from in a stretch of its group (Task 10b, fix rounds 2 and 3) — for each
+ * text or file message (what a reply is shown) in conversation `conversation` with a seq after `from` and, unless `to`
+ * is null, up to `to`: a person's sender, and for an Agent's message the askers of the run that posted it (`postingRun`:
+ * whoever asked it, whose question it may be relaying; another member's Agent answering an older member counts that
+ * member). Null — not known — when one of those Agent's messages has no posting run whose askers are known. Only parameter
+ * positions and the written row's own columns are spliced in (its own aliases `h…` shadow none of theirs).
  */
 const heardIn = (conversation: string, from: string, to: string | null): string =>
-  `array(select m.sender_id from messages m join principals p on p.id = m.sender_id and p.kind = 'human'
-          where m.conversation_id = ${conversation} and m.seq > ${from}${to === null ? "" : ` and m.seq <= ${to}`}
-            and m.kind in ('text', 'file'))`;
+  `(select case when bool_or(hp.kind = 'agent' and hr.asker_ids is null) then null
+               else coalesce(array_agg(distinct hx.id) filter (where hx.id is not null), '{}'::uuid[]) end
+      from messages hm
+      join principals hp on hp.id = hm.sender_id
+      left join agent_runs hr on hp.kind = 'agent' and ${postingRun("hm", "hr")}
+      left join lateral unnest(case when hp.kind = 'human' then array[hm.sender_id] else hr.asker_ids end) as hx (id) on true
+     where hm.conversation_id = ${conversation} and hm.seq > ${from}${to === null ? "" : ` and hm.seq <= ${to}`}
+       and hm.kind in ('text', 'file'))`;
 
 /**
  * SQL: a run's `asker_ids` with `param` (a parameter position holding `Askers`; null: no call's) and those `heard`
- * (`heardIn`) taken on — every one of them, each once — or null (not known) when the run's or the call's are not known.
+ * (`heardIn`) taken on — every one of them, each once — or null (not known) when the run's, the call's or those heard
+ * are not known. (`||` would drop a null array silently, so each is tested; `heard` is evaluated once.)
  */
 const withAskers = (param: string | null, heard: string | null = null): string => {
-  const taken = ["asker_ids", ...(param === null ? [] : [`${param}::uuid[]`]), ...(heard === null ? [] : [heard])];
-  return `case when asker_ids is null${param === null ? "" : ` or ${param}::uuid[] is null`} then null
-        else array(select distinct a from unnest(${taken.join(" || ")}) as x (a) order by a) end`;
+  const unknown = `asker_ids is null${param === null ? "" : ` or ${param}::uuid[] is null`}`;
+  const union = (more: string): string =>
+    `array(select distinct a from unnest(asker_ids${param === null ? "" : ` || ${param}::uuid[]`}${more}) as x (a) order by a)`;
+  return heard === null
+    ? `case when ${unknown} then null else ${union("")} end`
+    : `case when ${unknown} then null
+            else (select case when h.ids is null then null else ${union(" || h.ids")} end from (select ${heard} as ids) h) end`;
 };
 
 /**
@@ -434,7 +447,10 @@ export async function hearFrom(t: Tx, runId: string, from: number, to: number | 
 /** That run `runId` answers the calls at `seqs` too (`call_seqs`, migration 046), besides those it has. */
 async function answersCalls(t: Tx, runId: string, seqs: readonly number[]): Promise<void> {
   if (seqs.length === 0) return;
-  await t.query("update agent_runs set call_seqs = coalesce(call_seqs, array[covers_seq]) || $2::bigint[] where id = $1", [runId, seqs]);
+  await t.query("update agent_runs set call_seqs = array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $2::bigint[]) as x (s) order by s) where id = $1", [
+    runId,
+    seqs,
+  ]);
 }
 
 /**
@@ -528,7 +544,7 @@ async function rateLimitedInGroup(
     `update agent_runs as r
         set covers_seq = greatest(r.covers_seq, $2), finished_at = now(), ${takesOnCall("true", "$3", "$4", "$5")},
             asker_ids = ${withAskers("$6", heardIn("r.conversation_id", "r.covers_seq", "$2::bigint"))},
-            call_seqs = coalesce(r.call_seqs, array[r.covers_seq]) || $2::bigint
+            call_seqs = array(select distinct s from unnest(coalesce(r.call_seqs, array[r.covers_seq]) || $2::bigint) as x (s) order by s)
       where r.id = $1 returning ${RUN_COLUMNS}`,
     [row.id, coversSeq, triggeredBy, caller.lane, caller.id, askersParam(askers)],
   );
@@ -654,7 +670,7 @@ async function reachAgents(
               pending_seq = case when status = 'running' then greatest(pending_seq, $3) else pending_seq end,
               ${takesOnCall("status = 'queued'", "$4", "$5", "$6")},
               asker_ids = ${withAskers("$7", heardIn("$2::uuid", "agent_runs.covers_seq", "$3::bigint"))},
-              call_seqs = coalesce(call_seqs, array[covers_seq]) || $3::bigint
+              call_seqs = array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $3::bigint) as x (s) order by s)
         where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
       [agent.id, conversationId, seq, triggeredBy, by.lane, by.id, askersParam(askers)],
     );
@@ -986,7 +1002,9 @@ async function chainBudgetSpent(
  * call on someone else's Agent counts toward the caller limit of the person behind it, as their own call would; what a
  * reply nobody called for relays is others', with no caller (no caller limit; the budget and the others' lane hold).
  * Each run it reaches answers `askers`, those of the run that posted the message (Task 10b: the person whose message
- * started the chain; null, not known, when no run posted it or that run's are not known) — every caller says whose.
+ * started the chain; null, not known, when no run posted it or that run's are not known) — every caller says whose; a
+ * function (`postAsAgent`'s, which first records what the posting run heard, runs.ts `hearFrom`) is called only once the
+ * message reaches a run, never for one that calls nobody.
  */
 export async function triggerFromAgent(
   t: Tx,
@@ -995,7 +1013,7 @@ export async function triggerFromAgent(
   poster: AgentRow,
   postedBy: Caller | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
-  askers: Askers,
+  askers: Askers | (() => Promise<Askers>),
 ): Promise<Triggered> {
   const handles = mentionedHandles(textOf(message));
   if (handles.length === 0) return noneTriggered();
@@ -1045,7 +1063,7 @@ export async function triggerFromAgent(
 
   const dayStart = siteToday(config);
   const told = noneTold();
-  const calls: Call[] = [];
+  const reached: Array<Omit<Call, "askers">> = [];
   for (const target of targets) {
     const spent = await chainBudgetSpent(t, conversationId, target.id, BigInt(target.budget), human);
     if (spent?.notice) told.notices.push(spent.notice);
@@ -1055,8 +1073,11 @@ export async function triggerFromAgent(
       refused.push(target.id);
       continue;
     }
-    calls.push({ agent, by, askers });
+    reached.push({ agent, by });
   }
+  // Whose questions the calls carry, read only now that the message reaches a run (fix round 3, M-10).
+  const carried = reached.length === 0 ? null : typeof askers === "function" ? await askers() : askers;
+  const calls: Call[] = reached.map((c) => ({ ...c, askers: carried }));
   return recorded({ ...(await reachAgents(t, conversationId, calls, message.seq, "agent", config)), ...told });
 }
 
@@ -1163,11 +1184,12 @@ export async function followUp(
     ? owners
     : callerOf(agent.ownerId, calls.find((r) => r.caller_id !== null)?.caller_id ?? null);
   // And everyone who wrote in what it now covers (fix round 2: whoever it hears from, `heardIn`).
-  const heard = await t.query<{ ids: string[] }>(`select ${heardIn("$1::uuid", "$2::bigint", "$3::bigint")} as ids`, [conversationId, covers, pending]);
+  const heard = (await t.query<{ ids: string[] | null }>(`select ${heardIn("$1::uuid", "$2::bigint", "$3::bigint")} as ids`, [conversationId, covers, pending]))
+    .rows[0]!.ids;
   const askers: Askers =
-    calls.length === 0 || calls.some((r) => r.kind === "agent" && r.askers === null)
+    calls.length === 0 || calls.some((r) => r.kind === "agent" && r.askers === null) || heard === null
       ? null
-      : [...new Set([...calls.flatMap((r) => (r.kind === "human" ? [r.sender_id] : r.askers!)), ...heard.rows[0]!.ids])];
+      : [...new Set([...calls.flatMap((r) => (r.kind === "human" ? [r.sender_id] : r.askers!)), ...heard])];
   const told = noneTold();
   if (!asked) {
     if (await haltedSince(t, conversationId, pending)) return followUpOf(null);

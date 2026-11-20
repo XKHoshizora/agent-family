@@ -349,6 +349,20 @@ describe("the owner's room: /api/memory/notes", () => {
     expect((await rowOf(other))!.text).toBe("字".repeat(1990));
   });
 
+  it("a room over its limit (the operator lowered it) still takes an edit that makes a note shorter, or keeps its length; one that makes it longer is room_full", async () => {
+    const { owner } = await world();
+    // 2500 of 2000: what a room holds once its limit was lowered below it.
+    const id = await insertOwnerNote(owner.id, "字".repeat(100), false, "owner");
+    await insertOwnerNote(owner.id, "字".repeat(2400), false, "owner");
+    const shorter = await api(app, owner, "PATCH", `/api/memory/notes/${id}`, { text: "字".repeat(60) });
+    expect(shorter.status).toBe(200);
+    expect((await rowOf(id))!.text).toBe("字".repeat(60));
+    expect((await api(app, owner, "PATCH", `/api/memory/notes/${id}`, { text: "文".repeat(60) })).status).toBe(200);
+    const longer = await api(app, owner, "PATCH", `/api/memory/notes/${id}`, { text: "字".repeat(61) });
+    expect(longer).toEqual({ status: 409, json: { error: "room_full", left: 0 } });
+    expect((await rowOf(id))!.text).toBe("文".repeat(60));
+  });
+
   it("a text edit alone may move a note into the vault, never out, and never touches an owner's choice", async () => {
     const { owner } = await world();
     // Outside by auto: an edit that sorts as private goes in; one that sorts as fine stays out.

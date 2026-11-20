@@ -337,7 +337,9 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
     }
     if (touched.has(note.id) || moved) return;
     if (op.op === "lock") {
-      if (note.vault && note.vaultBy === "owner") return;
+      // The owner's choice is final: a note they locked, and — when nobody asks them (`applied`: a lock applies at once) — one they took
+      // out of the vault, which the model never puts back (the dream's rule). A pending card still carries it, for their yes.
+      if (note.vaultBy === "owner" && (note.vault || opts.status === "applied")) return;
       touched.add(note.id);
       candidates.push({ index, op: "lock", note, text: note.text, growth: 0 });
     } else if (op.op === "remove") {
@@ -387,7 +389,8 @@ function plan(state: State, who: Who, ops: Op[], refs: ReadonlyMap<string, ReadN
     if (op === "remove") {
       stored.push({ ...s, originConversationId: note.originConversationId, origin: note.origin, createdAt: state.exact.get(note.id)!.createdAt });
     } else if (op === "lock") {
-      stored.push({ ...s, after: note.text, vaultAfter: true, vaultByAfter: "owner", unsureAfter: note.unsure });
+      // Applied at once nobody chose it (the model's, `auto`); confirmed on a card it is the owner's.
+      stored.push({ ...s, after: note.text, vaultAfter: true, vaultByAfter: opts.status === "applied" ? "auto" : "owner", unsureAfter: note.unsure });
     } else {
       const vault = intoVaultOnly(note, opts.vaults.get(vaultKey(note.kind, text)));
       const originAfter = keptOrigin(note.originConversationId, { from: "conversation", id: opts.originConversationId });
@@ -549,6 +552,11 @@ export interface DreamApplyOpts {
   rooms: Rooms;
   /** Whose change it is (`memory_changes.phase`): a dream's (the default), or a review's — a merge a review found faithful (pipeline.ts) is applied here as a dream's is, but it is the review's doing. */
   phase?: "rest" | "dream";
+  /**
+   * A review's merge: the conversation the review read, one more origin of what the merged text may carry (`keptOrigin`), so that the
+   * result keeps an origin only when every source and that conversation agree. A dream reads none.
+   */
+  heardIn?: string;
 }
 
 /**
@@ -602,7 +610,7 @@ function planDream(state: State, who: Who, ops: DreamOp[], refs: Map<string, { k
           vaultByAfter: vault.by,
           unsureAfter: vault.unsure,
           originBefore: into.originConversationId,
-          originAfter: keptOrigin(into.originConversationId, { from: "notes", origins: sources.map((n) => n.originConversationId) }),
+          originAfter: keptOrigin(into.originConversationId, { from: "notes", origins: [...sources.map((n) => n.originConversationId), ...(opts.heardIn === undefined ? [] : [opts.heardIn])] }),
           strengthAfter: sources.reduce((sum, n) => sum + n.strength, 0),
           seenAtAfter: sources.map((n) => state.exact.get(n.id)!.seenAt).sort().at(-1)!,
           removed: (from as Note[]).map(whole),
@@ -689,6 +697,12 @@ export async function applyDream(t: Tx, who: Who, ops: DreamOp[], refs: Map<stri
   const changeId = await writeChange(t, who, opts.conversationId, opts.status, stored, planned.full, opts.phase ?? "dream");
   return { changeId, applied: stored.map(plain), full: planned.full, unlocks: [], noRoom: planned.noRoom };
 }
+
+/**
+ * Records, in the caller's transaction (which holds the account lock), that a room could not take what a review would have written: an
+ * applied change with no ops and `full`, whose notice says the room is full (a review's merge its room could not hold, pipeline.ts).
+ */
+export const recordRoomFull = (t: Tx, who: Ids, conversationId: string): Promise<string> => writeChange(t, who, conversationId, "applied", [], true);
 
 /** An entry to write into an Agent's hearsay: who said it (a flagged message's own sender), where and when. */
 export interface NewHearsay {

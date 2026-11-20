@@ -1,0 +1,66 @@
+{"id":"zh-faithful-01","lang":"zh","cat":"faithful","sources":["喜欢喝茶","喝茶不加糖"],"result":"喜欢喝茶，不加糖","expect":{"faithful":true}}
+{"id":"zh-faithful-02","lang":"zh","cat":"faithful","sources":["路由器在客厅","路由器是华硕的"],"result":"路由器是华硕的，放在客厅","expect":{"faithful":true}}
+{"id":"zh-faithful-03","lang":"zh","cat":"faithful","sources":["女儿叫小雨","女儿今年 6 岁","女儿在上一年级"],"result":"女儿小雨今年 6 岁，在上一年级","expect":{"faithful":true}}
+{"id":"zh-faithful-04","lang":"zh","cat":"faithful","reworded":true,"sources":["2026 年 3 月 12 日搬到杭州","新家在西湖区，离公司 5 公里"],"result":"从 2026 年 3 月 12 日起住在杭州西湖区，新家到公司五公里","expect":{"faithful":true}}
+{"id":"zh-faithful-05","lang":"zh","cat":"faithful","sources":["对花生过敏","花生过敏会起疹子"],"result":"对花生过敏，吃了会起疹子","expect":{"faithful":true}}
+{"id":"zh-faithful-06","lang":"zh","cat":"faithful","sources":["每周二晚上打羽毛球","打球的地方在体育中心","一般和同事一起打"],"result":"每周二晚上和同事在体育中心打羽毛球","expect":{"faithful":true}}
+{"id":"zh-faithful-07","lang":"zh","cat":"faithful","sources":["不吃香菜","也不吃葱"],"result":"不吃香菜和葱","expect":{"faithful":true}}
+{"id":"zh-dropped-01","lang":"zh","cat":"dropped","sources":["喜欢喝茶","喜欢喝绿茶，不加糖"],"result":"爱喝绿茶","expect":{"faithful":false}}
+{"id":"zh-dropped-02","lang":"zh","cat":"dropped","sources":["女儿叫小雨","女儿今年 6 岁","女儿对芒果过敏"],"result":"女儿小雨今年 6 岁","expect":{"faithful":false}}
+{"id":"zh-changed-01","lang":"zh","cat":"changed","what":"number","sources":["每天跑步","每次跑 5 公里"],"result":"每天跑步 3 公里","expect":{"faithful":false}}
+{"id":"zh-changed-02","lang":"zh","cat":"changed","what":"date","sources":["下个月 15 号去北京出差","出差三天"],"result":"下个月 16 号去北京出差三天","expect":{"faithful":false}}
+{"id":"zh-changed-03","lang":"zh","cat":"changed","what":"negation","sources":["不喝咖啡","晚上也不喝浓茶"],"result":"喝咖啡，晚上不喝浓茶","expect":{"faithful":false}}
+{"id":"zh-added-01","lang":"zh","cat":"added","sources":["周末去爬山","和小林一起去"],"result":"周末和小林去爬山，七点出发","expect":{"faithful":false}}
+{"id":"zh-added-02","lang":"zh","cat":"added","sources":["在一家设计公司上班","做 UI 设计"],"result":"在一家设计公司做 UI 设计，已经做了五年","expect":{"faithful":false}}
+{"id":"zh-fused-01","lang":"zh","cat":"fused","sources":["妈妈下周三做手术","爸爸下周五过生日"],"result":"爸爸下周三做手术，周五过生日","expect":{"faithful":false}}
+{"id":"zh-fused-02","lang":"zh","cat":"fused","sources":["3 月去日本旅行了","10 月去泰国旅行了"],"result":"3 月去日本和泰国旅行了","expect":{"faithful":false}}
+{"id":"zh-correction-01","lang":"zh","cat":"correction","sources":["生日是 5 月 3 日","之前记错了，生日其实是 5 月 13 日"],"result":"生日是 5 月 3 日","expect":{"faithful":false}}
+{"id":"zh-unrelated-01","lang":"zh","cat":"unrelated","sources":["喜欢喝茶","住在上海"],"result":"喜欢喝茶","expect":{"faithful":false}}
+{"id":"ja-faithful-01","lang":"ja","cat":"faithful","sources":["コーヒーはブラックで飲む","コーヒーは一日二杯まで"],"result":"コーヒーはブラックで、一日二杯まで","expect":{"faithful":true}}
+{"id":"ja-faithful-02","lang":"ja","cat":"faithful","sources":["猫を飼っている","猫の名前はミケ"],"result":"ミケという猫を飼っている","expect":{"faithful":true}}
+{"id":"ja-faithful-03","lang":"ja","cat":"faithful","sources":["毎朝七時に起きる","起きたらまずストレッチをする","朝ごはんはパン"],"result":"毎朝七時に起きてまずストレッチをし、朝ごはんはパンを食べる","expect":{"faithful":true}}
+{"id":"ja-faithful-04","lang":"ja","cat":"faithful","reworded":true,"sources":["2026年4月1日から新しい会社で働く","新しい会社は渋谷にある"],"result":"渋谷にある新しい職場での勤務開始は2026年4月1日","expect":{"faithful":true}}
+{"id":"ja-faithful-05","lang":"ja","cat":"faithful","sources":["卵アレルギーがある","卵が入ったお菓子も食べられない"],"result":"卵アレルギーで、卵入りのお菓子も食べられない","expect":{"faithful":true}}
+{"id":"ja-faithful-06","lang":"ja","cat":"faithful","sources":["日曜はジムに行く","ジムでは泳ぐ"],"result":"日曜はジムに行って泳ぐ","expect":{"faithful":true}}
+{"id":"ja-dropped-01","lang":"ja","cat":"dropped","sources":["ラーメンが好き","ラーメンは味噌でネギ多め"],"result":"味噌ラーメンが好き","expect":{"faithful":false}}
+{"id":"ja-dropped-02","lang":"ja","cat":"dropped","sources":["息子は健太","健太は中学二年生","健太はサッカー部"],"result":"息子の健太は中学二年生","expect":{"faithful":false}}
+{"id":"ja-changed-01","lang":"ja","cat":"changed","what":"number","sources":["家賃は月8万円","駅から徒歩10分"],"result":"家賃は月9万円で、駅から徒歩10分","expect":{"faithful":false}}
+{"id":"ja-changed-02","lang":"ja","cat":"changed","what":"name","sources":["上司は田中さん","田中さんは厳しいけど親切"],"result":"上司の中田さんは厳しいけど親切","expect":{"faithful":false}}
+{"id":"ja-changed-03","lang":"ja","cat":"changed","what":"negation","sources":["お酒は飲まない","飲み会には参加する"],"result":"お酒を飲み、飲み会にも参加する","expect":{"faithful":false}}
+{"id":"ja-added-01","lang":"ja","cat":"added","sources":["来月京都に行く","京都では友だちに会う"],"result":"来月京都に行って友だちに会い、清水寺も見る","expect":{"faithful":false}}
+{"id":"ja-added-02","lang":"ja","cat":"added","sources":["ピアノを習っている","レッスンは毎週土曜"],"result":"ピアノを三年習っていて、レッスンは毎週土曜","expect":{"faithful":false}}
+{"id":"ja-fused-01","lang":"ja","cat":"fused","sources":["姉は大阪に住んでいる","妹は札幌に住んでいる"],"result":"姉は大阪と札幌に住んでいる","expect":{"faithful":false}}
+{"id":"ja-correction-01","lang":"ja","cat":"correction","sources":["会議は毎週月曜","会議は月曜から火曜に変わった"],"result":"会議は毎週月曜","expect":{"faithful":false}}
+{"id":"ja-unrelated-01","lang":"ja","cat":"unrelated","sources":["辛いものが苦手","車はトヨタ"],"result":"辛いものが苦手","expect":{"faithful":false}}
+{"id":"en-faithful-01","lang":"en","cat":"faithful","sources":["Drinks tea","Takes tea without sugar"],"result":"Drinks tea without sugar","expect":{"faithful":true}}
+{"id":"en-faithful-02","lang":"en","cat":"faithful","sources":["Has a dog","The dog is called Biscuit"],"result":"Has a dog called Biscuit","expect":{"faithful":true}}
+{"id":"en-faithful-03","lang":"en","cat":"faithful","sources":["Works as a nurse","Works night shifts","Works at St. Mary's Hospital"],"result":"Works night shifts as a nurse at St. Mary's Hospital","expect":{"faithful":true}}
+{"id":"en-faithful-04","lang":"en","cat":"faithful","reworded":true,"sources":["Moving to Berlin on 2026-09-01","Will rent a flat in Kreuzberg for 1,200 euros a month"],"result":"From 1 September 2026: living in Berlin, in a Kreuzberg flat rented at €1,200 per month","expect":{"faithful":true}}
+{"id":"en-faithful-05","lang":"en","cat":"faithful","sources":["Allergic to penicillin","Penicillin gives them a rash"],"result":"Allergic to penicillin: it gives them a rash","expect":{"faithful":true}}
+{"id":"en-faithful-06","lang":"en","cat":"faithful","sources":["Plays guitar","Has played guitar for ten years","Plays in a band on Fridays"],"result":"Has played guitar for ten years and plays in a band on Fridays","expect":{"faithful":true}}
+{"id":"en-dropped-01","lang":"en","cat":"dropped","sources":["Likes running","Runs 10 km every Sunday"],"result":"Likes running on Sundays","expect":{"faithful":false}}
+{"id":"en-dropped-02","lang":"en","cat":"dropped","sources":["Vegetarian","Also avoids eggs"],"result":"Vegetarian","expect":{"faithful":false}}
+{"id":"en-changed-01","lang":"en","cat":"changed","what":"date","sources":["Dentist appointment on March 4","The dentist is Dr. Lee"],"result":"Dentist appointment with Dr. Lee on March 14","expect":{"faithful":false}}
+{"id":"en-changed-02","lang":"en","cat":"changed","what":"name","sources":["Partner is called Sam","Sam works as a teacher"],"result":"Partner Sean works as a teacher","expect":{"faithful":false}}
+{"id":"en-changed-03","lang":"en","cat":"changed","what":"negation","sources":["Does not eat pork","Eats chicken and fish"],"result":"Eats pork, chicken and fish","expect":{"faithful":false}}
+{"id":"en-added-01","lang":"en","cat":"added","sources":["Learning Spanish","Takes lessons on Tuesdays"],"result":"Learning Spanish for a trip to Madrid, with lessons on Tuesdays","expect":{"faithful":false}}
+{"id":"en-added-02","lang":"en","cat":"added","sources":["Has a cat","The cat is grey"],"result":"Has a grey cat, adopted last year","expect":{"faithful":false}}
+{"id":"en-fused-01","lang":"en","cat":"fused","sources":["Visited Rome in May","Visited Lisbon in October"],"result":"Visited Rome and Lisbon in May","expect":{"faithful":false}}
+{"id":"en-correction-01","lang":"en","cat":"correction","sources":["Flight to Tokyo is on June 2","Correction: the Tokyo flight moved to June 5"],"result":"Flight to Tokyo is on June 2","expect":{"faithful":false}}
+{"id":"en-unrelated-01","lang":"en","cat":"unrelated","sources":["Likes jazz","Lives in Leeds"],"result":"Likes jazz","expect":{"faithful":false}}
+{"id":"mix-faithful-01","lang":"mix","cat":"faithful","sources":["喜欢 jazz","最喜欢的乐手是 Bill Evans"],"result":"喜欢 jazz，最喜欢的乐手是 Bill Evans","expect":{"faithful":true}}
+{"id":"mix-faithful-02","lang":"mix","cat":"faithful","sources":["用 iPhone 15","手机壳是蓝色的"],"result":"用 iPhone 15，配蓝色手机壳","expect":{"faithful":true}}
+{"id":"mix-faithful-03","lang":"mix","cat":"faithful","sources":["Works at a bank","在北京分行","做风控"],"result":"Works at a bank：在北京分行做风控","expect":{"faithful":true}}
+{"id":"mix-faithful-04","lang":"mix","cat":"faithful","reworded":true,"sources":["2026 年 12 月 20 日 fly to London","航班 BA168，早上 9 点起飞"],"result":"BA168 to London, departing 9 AM on 20 Dec 2026","expect":{"faithful":true}}
+{"id":"mix-faithful-05","lang":"mix","cat":"faithful","sources":["对 shellfish 过敏","虾和蟹都不能吃"],"result":"Allergic to shellfish：虾和蟹都不能吃","expect":{"faithful":true}}
+{"id":"mix-faithful-06","lang":"mix","cat":"faithful","sources":["猫の名前は Luna","Luna is three years old"],"result":"猫の Luna は三歳","expect":{"faithful":true}}
+{"id":"mix-dropped-01","lang":"mix","cat":"dropped","sources":["喜欢 latte","latte 要燕麦奶，少冰"],"result":"喜欢 oat milk latte","expect":{"faithful":false}}
+{"id":"mix-dropped-02","lang":"mix","cat":"dropped","sources":["Gym on Monday","Gym on Thursday","周六游泳"],"result":"Gym on Monday and Thursday","expect":{"faithful":false}}
+{"id":"mix-changed-01","lang":"mix","cat":"changed","what":"date","sources":["月薪 2 万","salary paid on the 10th"],"result":"月薪 2 万，salary paid on the 15th","expect":{"faithful":false}}
+{"id":"mix-changed-02","lang":"mix","cat":"changed","what":"number","sources":["身高 175cm","体重 70kg"],"result":"身高 175cm，体重 75kg","expect":{"faithful":false}}
+{"id":"mix-added-01","lang":"mix","cat":"added","sources":["在学 Python","用 PyCharm 写代码"],"result":"在学 Python，用 PyCharm 写代码，目标是转行做数据分析","expect":{"faithful":false}}
+{"id":"mix-added-02","lang":"mix","cat":"added","sources":["下周去 Shanghai 开会","住在 Hilton"],"result":"下周去 Shanghai 开会，住 Hilton 两晚","expect":{"faithful":false}}
+{"id":"mix-fused-01","lang":"mix","cat":"fused","sources":["朋友 Anna 在 Paris","朋友 Ben 在 Berlin"],"result":"朋友 Anna 在 Paris 和 Berlin","expect":{"faithful":false}}
+{"id":"mix-fused-02","lang":"mix","cat":"fused","sources":["Mom's birthday is May 2","爸爸生日是 8 月 9 日"],"result":"爸妈的生日都是 May 2","expect":{"faithful":false}}
+{"id":"mix-correction-01","lang":"mix","cat":"correction","sources":["Lives on the 5th floor","更正：其实住 6 楼"],"result":"Lives on the 5th floor","expect":{"faithful":false}}
+{"id":"mix-unrelated-01","lang":"mix","cat":"unrelated","sources":["Prefers short answers","家里有两只猫"],"result":"Prefers short answers","expect":{"faithful":false}}

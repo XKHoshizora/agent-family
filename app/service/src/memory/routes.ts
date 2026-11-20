@@ -19,7 +19,7 @@ import { sortNote } from "./sort.ts";
 import { changeKind, count, countDecision } from "./stats.ts";
 import { getMemoryLanguage, getNewNotes, hearsayUsed, listHearsay, roomOf, type Note } from "./store.ts";
 import { weight, weightOf } from "./weight.ts";
-import { deleteNote, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
+import { deleteNote, fits, insertNote, listRoom, lockHearsay, lockRoom, readNote, roomLimit, takeHearsay, updateNote, type Room } from "./write.ts";
 
 /**
  * The owner reads and edits the palace: the notes about them (shared by their Agents), each Agent's own notes, and the
@@ -137,6 +137,8 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
 
   /** Room left for text of `room` once `without` is not counted (a note being replaced). */
   const leftIn = (room: Room, notes: ReadonlyArray<Note>, without?: Note): number => Math.max(0, limitOf(room) - weightOf(notes) + (without ? weight(without.text) : 0));
+  /** Whether `note` may take `text`: an edit that does not make the room heavier always may, also in a room over its limit (one lowered below what it holds). */
+  const editFits = (room: Room, notes: ReadonlyArray<Note>, note: Note, text: string): boolean => fits(weightOf(notes), weight(text) - weight(note.text), limitOf(room));
 
   /** Why a new note of `text` does not fit the room as it stands (it already holds `roomNotes` notes, or the note is too heavy); null when it fits. */
   const noRoomFor = (room: Room, notes: ReadonlyArray<Note>, text: string): AppError | null => {
@@ -177,7 +179,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
     const before = notesBefore.find((n) => n.id === noteId);
     if (!before) throw notFound();
     // Over the room already (no judgement is spent on it); asked again under the lock.
-    if (text !== undefined && weight(text) > leftIn(room, notesBefore, before)) throw roomFull(leftIn(room, notesBefore, before));
+    if (text !== undefined && !editFits(room, notesBefore, before, text)) throw roomFull(leftIn(room, notesBefore, before));
     // A text change alone re-sorts, and only a note outside the vault that the owner never chose for: towards the vault.
     const resort = body.vault === undefined && text !== undefined && text !== before.text && !before.vault && before.vaultBy === "auto";
     const sorted = resort ? await sortNote(sortDeps(log, ownerId), text, room.kind, await getNewNotes(db, ownerId)) : null;
@@ -186,7 +188,7 @@ export function registerMemoryRoutes(app: FastifyInstance, { readLimit }: { read
       const notes = await listRoom(t, room);
       const note = notes.find((n) => n.id === noteId);
       if (!note) throw notFound();
-      if (text !== undefined && weight(text) > leftIn(room, notes, note)) throw roomFull(leftIn(room, notes, note));
+      if (text !== undefined && !editFits(room, notes, note, text)) throw roomFull(leftIn(room, notes, note));
       const patch =
         body.vault !== undefined
           ? { vault: body.vault, vaultBy: "owner" as const, unsure: false }
