@@ -1111,8 +1111,9 @@ group is told), then — unless the mention folds into a reply under way, which 
   included; nor does anything of the group reach that one.
 - *How much of the group.* At most its latest 80 messages, and at most `AGENT_GROUP_CONTEXT_TOKENS` (12 000) tokens of
   them, oldest dropped first, within that cap, as in its own conversation (What the model is shown): the cap replaces
-  the model's context as the budget when the context would hold more. It is the service's estimate — text in weight
-  (Metering, Token estimates), labels and quotes included, 1 500 an image, 300 per KB of PDF — so a provider may bill an
+  the model's context as the budget when the context would hold more. It is the service's estimate — text in weight,
+  times the model's learned ratio when it is above 1 (Metering, Token estimates), labels and quotes included, 1 500 an
+  image, 300 per KB of PDF — so a provider may bill an
   image or a PDF at more. The system text, the roster included, comes on top of it. Its own conversation has no such cap.
 - *What it stores.* An ordinary `text` message from the Agent, which every member reads: its text (message-text rules,
   everything from its first `<af-` on dropped, cut at 8 000 characters, then without the run's mark, below), `stopped` and `truncated` as in its own
@@ -2405,9 +2406,10 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       nobody. What the first step took on (mentions noted on the run after its claim) is handed back as noted, so the
       run's end follows it up as any (Coalescing): the owner's own mention is answered — the owner's calls are never
       refused by these — and someone else's meets the others' budget again and is not queued once it is spent (no second
-      notice that day); nothing loops. Otherwise the call is admitted on its input
-      estimate, corrected by its model's learned ratio (Metering, Token estimates; `no_quota` ends it `failed` before any
-      call), the estimate and the ratio's key are recorded on the run for settlement to learn from, and the Agent's read
+      notice that day); nothing loops. Otherwise the call is admitted holding the most its
+      input can cost (Metering, Admission: its text's utf-8 bytes, at most what the context leaves beside the output
+      limit; `no_quota` ends it `failed` before any call), its input estimate and the ratio's key are recorded on the run
+      for settlement to learn from (Metering, Token estimates), and the Agent's read
       marker moves to what the run covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)
    — except for a reply in a group, of which no delta goes to anyone, its owner included (plan ruling 2; decided at
@@ -2563,10 +2565,11 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
   listing keeps answering with that level (the run is not failed) until the Agent is edited, when the level is checked
   again.
 
-A reply's input estimate counts all of the above, attachments at their estimate. What admission holds for — and what
-settlement falls back on when no usage is reported — is that estimate with its text corrected by the model's learned
-ratio (Metering, Token estimates); a reply that showed text only also records the estimate itself, for settlement to
-learn the ratio from.
+A reply's input estimate counts all of the above, attachments at their estimate. What settlement falls back on when no
+usage is reported is that estimate with its text corrected by the model's learned ratio (Metering, Token estimates); a
+reply that showed text only also records the estimate itself, for settlement to learn the ratio from. What admission
+holds for is no estimate but the most the input can cost: the system text and every text part at their utf-8 bytes, at
+most what the context leaves beside the output limit, attachments at their estimate (Metering, Admission).
 
 **Outcomes.** How a run ends — the message it leaves, its `status` and `error` code (`Run`, Replies), what it is charged
 (Metering):
@@ -2639,8 +2642,8 @@ nobody working on it: the stale-run sweep (below) releases it.
 **Memory calls** (`src/memory/call.ts`; `tests/memory-call.test.ts`). The one way an Agent's memory calls a model in the
 background is `memoryCall`: a run of purpose `memory` (no Agent, no conversation, the owner's own lane), admitted against
 the owner's memory allowance, which the site pays (Metering, "The memory allowance"; this supersedes the plan's "review and
-consolidation calls are the owner's points": memory never spends the owner's free allowance or balance), held for the model's input
-estimate and the call's own output limit, settled on what the upstream reported (one usage record of purpose `memory`;
+consolidation calls are the owner's points": memory never spends the owner's free allowance or balance), held for the most its input
+can cost (Metering, Admission) and the call's own output limit, settled on what the upstream reported (one usage record of purpose `memory`;
 `GET /api/usage` lists it apart from replies and drafts). The model is the one the owner chose (`PATCH /api/me`
 `memoryModel`: a free-tier site model, or a model of their own provider; memory the site pays for runs only on its free models, so a
 paid site model stored before that rule is read as no choice), else the site's: `MEMORY.model` when it names a
@@ -3001,7 +3004,7 @@ at `info`, so the two `debug` lines show only when the level is lowered.
 ## Metering (`src/metering/`)
 
 Spec 6.3 and 6.4. A model call is a reply of an Agent, a persona draft (`POST /api/agents/draft-persona`) or a memory
-call (below): all are runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices in `prices.ts`, estimates in `tokens.ts`). A call on a
+call (below): all are runs, admitted, held and settled alike (`admit.ts`, `settle.ts`; prices in `prices.ts`, estimates and the hold's bound in `tokens.ts`). A call on a
 provider model costs nothing and needs no points (it is still recorded). A call on a site model is admitted before it
 starts and settled when it ends, each in one transaction under the owner's `accounts` row lock (after the run's row), and
 never with a transaction open across the call.
@@ -3012,8 +3015,9 @@ Prices are micro-points per token (`inputMicroPerToken`, `outputMicroPerToken` o
 of points (Usage and points).
 
 **Token estimates** (`src/metering/tokens.ts`; migration `042_token_ratios.sql`; `tests/tokens.test.ts`). Every estimate
-of what a text costs in tokens — what a reply's context holds, what a call is held for, what it is settled on when its
-upstream reports no usage, memory's sizes — is one measure, *weight*: `ceil(utf-8 bytes / 3)` (How memory is measured). A
+of what a text costs in tokens — what a reply's context holds, what a call is settled on when its upstream reports no
+usage, memory's sizes — is one measure, *weight*: `ceil(utf-8 bytes / 3)` (How memory is measured; what a call is held
+for is a bound, not an estimate: Admission). A
 Chinese, Japanese or Korean character weighs 1 and a Latin letter a third, so 3 000 English letters are 1 000 tokens, as
 1 000 Chinese characters are (until this, a token was a character, three times too many for Latin text). Images (1 500)
 and PDFs (300 per KB) keep their constants. What one model really counts for a weight is its own, so a call's input
@@ -3024,13 +3028,17 @@ it; `provider:<provider row id>:<model name>` for a model of an owner's provider
 usage is whatever the owner's endpoint reports, and never the owner's id, a key or an address; deleting the provider
 deletes its ratios in the same transaction); settlement, when the upstream reported the input tokens, moves that ratio
 (`token_ratios (key, ratio, samples, updated_at)`) by a tenth of the sample `reported / estimated`, from 1 for a first
-sample, each sample held to [0.8, 2] and so the ratio too (one owner's crafted text can lower a shared hold by at most a
-fifth). Nothing is learned from an estimate under 200, a reported count that is not a whole number above 0, a draft or a
+sample, each sample held to [0.8, 2] and so the ratio too. So one owner's crafted text can bring a shared site ratio no
+lower than 0.8 — a fifth off what calls settled on an estimate are charged, measured from ratio 1 (from a model's honest
+1.25 it is 36 %) — and no higher than 2, where every owner's context on that model is planned at half its weight (a
+small context's Agents with long system texts then fail `context_too_small`) until honest samples pull it back, a tenth
+of the way each. Nothing is learned from an estimate under 200, a reported count that is not a whole number above 0, a draft or a
 memory call, or a settlement on an estimate. A ratio is used once it has 5 samples (1 until then), held to [0.8, 2], and
-read once per call: a call is held for its text's estimate times the ratio, rounded up, plus its images and PDFs at
-their constants (drafts and memory calls too); and its context is planned at the ratio when it is above 1 (a ratio below
-1 never lets more be sent), keeping a tenth of the room free (`CONTEXT_HEADROOM`; What the model is shown, the budget).
-Learning never fails or delays a settlement: it is done in a savepoint, waits at most 100 ms for the ratio's row
+read once per call: a call settled with no usage reported is charged its text's estimate times the ratio, rounded up,
+plus its images and PDFs at their constants (drafts and memory calls too), and at most what it held; and its context is
+planned at the ratio when it is above 1 (a ratio below 1 never lets more be sent), keeping a tenth of the room free
+(`CONTEXT_HEADROOM`; What the model is shown, the budget). What a call is held for has no ratio in it (Admission).
+Learning never fails or delays a settlement: it is done in a savepoint, waits at most 100 ms each time it waits for the ratio's row
 (another settlement of the same model may hold it), and when anything fails the sample is skipped with a warning that
 carries the database's error code only. Reading a ratio never fails either: a failed read is 1. **A rule for runs that
 do more than one plain call:** learning assumes the reported input is the input the run's estimate counted, so a run that
@@ -3038,9 +3046,13 @@ sends tool definitions or makes more than one model call writes `input_estimate 
 exactly what was sent.
 
 **Admission** decides, once, the one source the call is charged to, and holds against that source the most the call can
-cost until it is settled: its input estimate (Token estimates: text in weight times its model's learned ratio; 1 500 per
-image; 300 per KB of PDF) plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
-model), at the model's prices. A free-tier model is charged to today's
+cost until it is settled — a bound, not an estimate: its input's text at its utf-8 bytes, since no tokenizer counts more
+than one token a byte, but never more than the model's context leaves beside the call's output limit, since no request
+carries more input (`holdTokens`; whatever the model's ratio: Token estimates), plus 1 500 per image and 300 per KB of
+PDF, plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
+model), at the model's prices. So text an upstream counts at up to a token a byte never costs more than was held. A hold larger than
+the call's cost takes nothing from the owner: the call is charged what it cost, and a larger hold only lets fewer calls
+start at once at the edge of what is left (one starts while what is left after the holds is above zero). A free-tier model is charged to today's
 free allowance while what is left of it, less what your running calls hold against it, is above zero; otherwise to the
 balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
 (402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
@@ -3048,8 +3060,8 @@ so). A memory call (purpose `memory`) on a site model is the exception: see "The
 Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
-reported none, the estimate — its input as admission held it (ratio included; images and PDFs at their estimate), its
-output in weight — and the record says
+reported none, the estimate — its input in weight times its model's learned ratio (Token estimates; images and PDFs at
+their estimate), its output in weight — and the record says
 `estimated`, at the model's price — unless the operator has removed that site model from `SITE_MODELS` while the call
 ran: then it cannot be priced, its true cost is recorded as 0 and `estimated`, nothing is charged, and the log says so
 (warn, with the run and the model). A call that failed (the provider's error, a stream it cut off midway, an answer
@@ -3117,7 +3129,8 @@ container `node dist/cli.js memory:stats --days 7` (`npm run memory:stats`, `mem
 **Forgiveness.** What is not charged of the true cost is forgiven, charged to no one — neither the balance nor any day's
 allowance — and recorded as such (`forgiven_micro`):
 
-- whatever is above the call's hold (an estimate that turned out low);
+- whatever is above the call's hold (not its text, counted at up to a token a byte, which the hold bounds; an image or a
+  PDF the upstream counted above its constant, or an upstream that reported more input than a request can carry);
 - whatever of an allowance charge exceeds what is left of that day's allowance (not moved to the balance, nor to the
   next day);
 - all of it when the reply could not be stored for the service's own reasons (run error `busy`: the record keeps the

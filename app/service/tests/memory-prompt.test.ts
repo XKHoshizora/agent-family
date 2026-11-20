@@ -579,6 +579,19 @@ describe("the passage takes at most a quarter of the model's context", () => {
     expect((await api(app, owner, "PATCH", `/api/agents/${small.id}`, { model: FAST })).status).toBe(200);
     expect(await fitsOf(small.id)).toBe(true);
   });
+
+  it("GET /api/agents/:id/memory measures the palace at the model's planning ratio: one that fits at 1 does not at a learned 2, and does at 0.8", async () => {
+    const owner = await signUp(app, "mpratio");
+    const agent = await mustCreateAgent(app, owner, { handle: "ratio_bot", model: { source: "site", id: "mid" }, persona: "你说话简短。" });
+    const fitsOf = async () => (await api(app, owner, "GET", `/api/agents/${agent.id}/memory`)).json.fits;
+    // About 1 900 weight of notes: within the passage's quarter of `mid` (2 625 of its 10 500) at 1, not at 2.
+    for (let i = 0; i < 9; i++) await insertOwner(owner.id, `主${String(i).padStart(2, "0")}${"主".repeat(197)}`, false);
+    expect(await fitsOf()).toBe(true);
+    await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:mid', 2, 5, now())");
+    expect(await fitsOf()).toBe(false);
+    await db.query("update token_ratios set ratio = 0.8 where key = 'site:mid'");
+    expect(await fitsOf()).toBe(true);
+  });
 });
 
 // --- what the budget counts of the passage -------------------------------------------------------------------------------

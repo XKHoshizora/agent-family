@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DRAFT_INSTRUCTION, draftData } from "../src/agents/persona.ts";
 import { ContextPlan, contextBudget, type ContextEntry } from "../src/agents/runtime/context.ts";
 import { ReplyStream } from "../src/agents/runtime/stream.ts";
 import type { Tx } from "../src/db.ts";
@@ -9,6 +10,7 @@ import {
   CONTEXT_HEADROOM,
   cutToWeight,
   estimateTokens,
+  holdTokens,
   learnRatio,
   planRatio,
   ratioKey,
@@ -18,7 +20,7 @@ import {
   weightOf,
 } from "../src/metering/tokens.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
-import { api, signUp, type Actor } from "./helpers/actors.ts";
+import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { grant } from "./helpers/metering.ts";
@@ -85,6 +87,11 @@ const lastCall = (): ModelCall => {
   return calls[calls.length - 1]!;
 };
 const textsOf = (call: ModelCall) => call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
+/** The utf-8 bytes of `texts` together. */
+const bytesOf = (...texts: string[]) => texts.reduce((n, t) => n + Buffer.byteLength(t, "utf8"), 0);
+/** The review's dense text: 95 404 characters of ASCII punctuation (weight 31 802), which a tokenizer may count a token a byte. */
+const PUNCTUATION = "!#$%&()*+,-./:;<=>?@[]^_{|}~";
+const DENSE = PUNCTUATION.repeat(Math.ceil(95_404 / PUNCTUATION.length)).slice(0, 95_404);
 
 /** The memory vector, verbatim (tests/memory-weight.test.ts, app/web/tests/memory-weight.test.js). */
 const VECTOR: Array<[string, number]> = [
@@ -140,6 +147,21 @@ describe("one ruler", () => {
     expect(estimateTokens("", 3)).toBe(0);
     // Images and PDFs keep their constants.
     expect(IMAGE_TOKENS).toBe(1500);
+  });
+
+  it("a call's text is held at its utf-8 bytes (no tokenizer counts more than a token a byte), never at more than the context leaves beside the output limit, and with no ratio in it", () => {
+    // `fast`: a 100 000-token context and 4 096 for the output, so no request carries more than 95 904 tokens of input.
+    const hold = (...texts: string[]) => holdTokens(texts, 100_000, 4096);
+    // A Chinese text of N characters: 3N.
+    expect(hold("字".repeat(1000))).toBe(3000);
+    expect(hold("hello", " ", "世界")).toBe(5 + 1 + 6);
+    // The dense text weighs 31 802; it is held at 95 404, three times that, more than any ratio (at most 2) makes of it.
+    expect([weight(DENSE), hold(DENSE)]).toEqual([31_802, 95_404]);
+    // Larger than the context leaves: the cap.
+    expect(hold("字".repeat(40_000))).toBe(95_904);
+    expect(hold(DENSE, "字".repeat(1000))).toBe(95_904);
+    expect(hold()).toBe(0);
+    expect(holdTokens(["abc"], 1000, 2048)).toBe(0);
   });
 
   it("an English conversation cut at 3 messages by code points now keeps 9 within the same model's context, a tenth of its room kept free", () => {
@@ -287,6 +309,56 @@ describe("the learned ratio", () => {
     await expectRatio("site:fast", 1, 1);
   });
 
+  it("gives the caller's lock_timeout back after a sample learned and after one skipped, and a settlement whose sample timed out still commits", async () => {
+    /** `learnRatio` in a transaction whose own lock_timeout is 7 s: that wait, as the transaction reads it afterwards. */
+    const waitAfter = (log?: SettleLog) =>
+      db.tx(async (t) => {
+        await t.query("set local lock_timeout = '7s'");
+        await learnRatio(t, "site:fast", 1000, 1000, log);
+        return (await t.query<{ wait: string }>("select current_setting('lock_timeout') as wait")).rows[0]!.wait;
+      });
+    expect(await waitAfter()).toBe("7s");
+    await expectRatio("site:fast", 1, 1);
+
+    // A reply's run as admission leaves it (an estimate of 1 000 and its key), for a settlement to learn from.
+    const owner = await signUp(app, "waiter");
+    const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: "fast" }, persona: "你说话简短。", memory: false });
+    const runId = (
+      await db.query<{ id: string }>(
+        `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, started_at, source, model, charge_to, hold_micro, input_estimate, ratio_key)
+         values ('reply', $1, $2, $3, 'running', now(), 'site', 'fast', 'free', 100000, 1000, 'site:fast') returning id`,
+        [agent.conversationId, agent.id, owner.id],
+      )
+    ).rows[0]!.id;
+    const holder = await db.pool.connect();
+    try {
+      await holder.query("begin");
+      await holder.query("select 1 from token_ratios where key = 'site:fast' for update");
+      const skipped = keptLog();
+      expect(await waitAfter(skipped)).toBe("7s");
+      expect(skipped.warned.map((w) => w.details)).toEqual([{ code: "55P03" }]);
+
+      // Settlement: its sample waits, times out and is skipped; the rest of its transaction goes on and commits.
+      const settling = keptLog();
+      const after = await db.tx(async (t) => {
+        await t.query("set local lock_timeout = '7s'");
+        await settle(t, app.deps.config, runId, { inputTokens: 1300, outputTokens: 10 }, { inputChars: 0, outputChars: 0 }, "done", new Date(), { log: settling });
+        await t.query("update agent_runs set status = 'done', finished_at = now() where id = $1", [runId]);
+        return (await t.query<{ wait: string }>("select current_setting('lock_timeout') as wait")).rows[0]!.wait;
+      });
+      expect(after).toBe("7s");
+      expect(settling.warned.map((w) => w.details)).toEqual([{ code: "55P03" }]);
+    } finally {
+      await holder.query("rollback");
+      holder.release();
+    }
+    // `fast`: 1 micro-point an input token, 2 an output token.
+    const record = await db.query("select input_tokens::int as input, cost_micro::int as cost, free_micro::int as free, estimated from usage_records where run_id = $1", [runId]);
+    expect(record.rows).toEqual([{ input: 1300, cost: 1320, free: 1320, estimated: false }]);
+    expect((await db.query("select status, hold_micro::text as hold from agent_runs where id = $1", [runId])).rows).toEqual([{ status: "done", hold: "0" }]);
+    await expectRatio("site:fast", 1, 1);
+  });
+
   it("a read that fails is 1 and throws nothing", async () => {
     const failing = { query: async () => Promise.reject(new Error("the database is gone")) } as unknown as Tx;
     expect(await readRatio(failing, "site:fast")).toBe(1);
@@ -294,12 +366,23 @@ describe("the learned ratio", () => {
   });
 });
 
-describe("replies learn their model's ratio and are held by it", () => {
+describe("replies learn their model's ratio; what they are held at does not depend on it", () => {
   const PERSONA = "你说话简短。";
   let txn = 0;
   const say = async (owner: Actor, conv: string, text: string) => {
     const res = await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { text, clientTxn: `t${++txn}` });
     expect(res.status).toBe(201);
+  };
+  /** Uploads `data` to `conv` as `filename`: the attachment's id. */
+  const upload = async (owner: Actor, conv: string, filename: string, data: Buffer) => {
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conv}/attachments`,
+      headers: { cookie: owner.cookie, "content-type": MULTIPART },
+      payload: multipart([{ name: "file", filename, type: "application/octet-stream", data }]),
+    });
+    expect(res.statusCode).toBe(201);
+    return res.json().id as string;
   };
   async function owned(name: string, model = "fast") {
     const owner = await signUp(app, name);
@@ -346,46 +429,85 @@ describe("replies learn their model's ratio and are held by it", () => {
     expect((await ratioRow("site:fast"))!.samples).toBe(1);
   });
 
-  it("the hold uses the model's ratio: at 1.5 a reply holds 1.5 times its input estimate, and with no usage reported settles on that", async () => {
-    await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:fast', 1.5, 5, now())");
-    const { owner, conv } = await owned("holder");
-    const text = "hello there, how are you today?".repeat(20);
+  it("a hold does not change with the ratio: at no ratio, 0.8 and 2 a reply is held at its text's bytes; with no usage reported it settles on its estimate times the ratio", async () => {
+    for (const [name, ratio] of [["holdnone", null], ["holdlow0", 0.8], ["holdhigh", 2]] as const) {
+      await db.query("delete from token_ratios");
+      if (ratio !== null) await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:fast', $1, 5, now())", [ratio]);
+      const { owner, conv } = await owned(name);
+      const text = "hello there, how are you today?".repeat(20);
+      await say(owner, conv, text);
+      const hold = gateway.hang();
+      const running = app.agentWorker.runOnce();
+      const call = await hold.reached;
+      expect(textsOf(call)).toEqual([text]);
+      const estimate = estimateTokens(call.system) + estimateTokens(text);
+      const run = await runOf(conv);
+      // `fast`: 1 micro-point an input token, 2 an output token. The input is held at its bytes, whatever the ratio.
+      expect([name, run.input_estimate, run.hold]).toEqual([name, estimate, String(bytesOf(call.system, text) + call.maxOutputTokens * 2)]);
+      hold.release("好的。");
+      await running;
+      // No usage reported: the estimate times the model's ratio (charged at most what was held).
+      expect([name, await recordOf(run.id)]).toEqual([name, { input: Math.ceil(estimate * (ratio ?? 1)), estimated: true }]);
+    }
+  });
+
+  it("a Chinese text of N characters is held at 3N tokens: its bytes", async () => {
+    const { owner, conv } = await owned("cjkholder");
+    const text = "字".repeat(3000);
     await say(owner, conv, text);
     const hold = gateway.hang();
     const running = app.agentWorker.runOnce();
     const call = await hold.reached;
     expect(textsOf(call)).toEqual([text]);
-    const estimate = estimateTokens(call.system) + estimateTokens(text);
-    const held = Math.ceil(estimate * 1.5);
     const run = await runOf(conv);
-    // `fast`: 1 micro-point an input token, 2 an output token.
-    expect([run.input_estimate, run.hold]).toEqual([estimate, String(held + call.maxOutputTokens * 2)]);
+    expect(run.hold).toBe(String(bytesOf(call.system) + 3 * 3000 + call.maxOutputTokens * 2));
     hold.release("好的。");
     await running;
-    expect(await recordOf(run.id)).toEqual({ input: held, estimated: true });
+  });
+
+  it("a hold is an upper bound again: a file of 95 404 ASCII punctuation characters, which the upstream counts a token a byte, is charged in full and nothing is forgiven", async () => {
+    const { owner, conv } = await owned("densefile");
+    const attachmentId = await upload(owner, conv, "dense.txt", Buffer.from(DENSE));
+    expect((await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId, clientTxn: `t${++txn}` })).status).toBe(201);
+    const hold = gateway.hang();
+    const running = app.agentWorker.runOnce();
+    const call = await hold.reached;
+    const [shown] = textsOf(call);
+    expect(shown).toBe(`[文件：dense.txt]\n${DENSE}`);
+    // `fast`: 100 000 tokens of context, 4 096 of output, so no request carries more than 95 904 tokens of input; the
+    // system text and the file are more bytes than that: the input is held at the cap.
+    expect(call.maxOutputTokens).toBe(4096);
+    expect(bytesOf(call.system, shown!)).toBeGreaterThan(95_904);
+    const run = await runOf(conv);
+    expect(run.hold).toBe(String(95_904 + 4096 * 2));
+    // The upstream counts the file a token a byte and the system text at its weight: 95 904 in all, as in the review.
+    hold.release("好的。", { usage: { inputTokens: 95_904, outputTokens: 5 } });
+    await running;
+    const { rows } = await db.query(
+      "select cost_micro::int as cost, free_micro::int as free, forgiven_micro::int as forgiven from usage_records where run_id = $1",
+      [run.id],
+    );
+    expect(rows).toEqual([{ cost: 95_914, free: 95_914, forgiven: 0 }]);
   });
 
   it("an image keeps its constant in the hold, and a reply that shows one teaches nothing (its tokens are not text's)", async () => {
     await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:thinker', 2, 5, now())");
     const { owner, conv } = await owned("looker", "thinker");
     await grant(db, owner.id, 10_000_000n);
-    const upload = await app.inject({
-      method: "POST",
-      url: `/api/conversations/${conv}/attachments`,
-      headers: { cookie: owner.cookie, "content-type": MULTIPART },
-      payload: multipart([{ name: "file", filename: "pixel.png", type: "application/octet-stream", data: PNG }]),
-    });
-    expect(upload.statusCode).toBe(201);
-    const sent = await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId: upload.json().id, text: "这是什么？", clientTxn: `t${++txn}` });
+    const attachmentId = await upload(owner, conv, "pixel.png", PNG);
+    const sent = await api(app, owner, "POST", `/api/conversations/${conv}/messages`, { attachmentId, text: "这是什么？", clientTxn: `t${++txn}` });
     expect(sent.status).toBe(201);
     const hold = gateway.hang();
     const running = app.agentWorker.runOnce();
     const call = await hold.reached;
     expect(call.messages[0]!.parts.map((p) => p.type)).toEqual(["text", "image"]);
-    const text = estimateTokens(call.system) + estimateTokens("这是什么？");
     const run = await runOf(conv);
-    // `thinker`: 3 micro-points an input token, 6 an output token.
-    expect([run.input_estimate, run.ratio_key, run.hold]).toEqual([null, "site:thinker", String((text * 2 + IMAGE_TOKENS) * 3 + call.maxOutputTokens * 6)]);
+    // `thinker`: 3 micro-points an input token, 6 an output token; the text at its bytes (not times the ratio), the image at its constant.
+    expect([run.input_estimate, run.ratio_key, run.hold]).toEqual([
+      null,
+      "site:thinker",
+      String((bytesOf(call.system, "这是什么？") + IMAGE_TOKENS) * 3 + call.maxOutputTokens * 6),
+    ]);
     hold.release("一个像素。", { usage: { inputTokens: 5000, outputTokens: 5 } });
     await running;
     await expectRatio("site:thinker", 2, 5);
@@ -465,19 +587,75 @@ describe("replies learn their model's ratio and are held by it", () => {
     await expectRatio(b.key, 0.9 + 0.1 * b.sample, 1);
   });
 
-  it("an owner call (a persona draft) is counted in weight and held by the ratio too", async () => {
+  it("an owner call (a persona draft) is held at its text's bytes too, and with no usage reported settles on its weight times the ratio", async () => {
     await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:fast', 2, 5, now())");
     const owner = await signUp(app, "drafter");
     const written = "<af-persona>You are a calm reading companion who speaks briefly.</af-persona>";
-    gateway.reply(written);
-    const res = await api(app, owner, "POST", "/api/agents/draft-persona", { name: "Reader", intro: "Reads with me.", field: "books", model: { source: "site", id: "fast" } });
-    expect(res.status).toBe(200);
-    const call = lastCall();
+    const hold = gateway.hang();
+    const drafting = api(app, owner, "POST", "/api/agents/draft-persona", { name: "Reader", intro: "Reads with me.", field: "books", model: { source: "site", id: "fast" } });
+    const call = await hold.reached;
     const user = textsOf(call).join("");
+    const held = await db.query<{ hold: string }>("select hold_micro::text as hold from agent_runs where owner_id = $1 and purpose = 'draft'", [owner.id]);
+    // `fast`: 1 micro-point an input token, 2 an output token.
+    expect(held.rows).toEqual([{ hold: String(bytesOf(call.system, user) + call.maxOutputTokens * 2) }]);
+    hold.release(written);
+    expect((await drafting).status).toBe(200);
     const { rows } = await db.query<{ input: number; output: number; estimated: boolean }>(
       "select input_tokens::int as input, output_tokens::int as output, estimated from usage_records where owner_id = $1",
       [owner.id],
     );
     expect(rows).toEqual([{ input: Math.ceil((estimateTokens(call.system) + estimateTokens(user)) * 2), output: estimateTokens(written), estimated: true }]);
+  });
+
+  it("an owner call's fit is planned at the ratio: a draft whose data fits a provider model's context at 1 is context_too_small at a learned 2, and fits at 0.8", async () => {
+    const owner = await signUp(app, "snugdraft");
+    const fields = { name: "Reader", intro: "Reads with me.", field: "books" };
+    const system = { rest: DRAFT_INSTRUCTION, passage: "" };
+    const data = draftData(fields);
+    const output = app.deps.config.providerDefaultMaxOutputTokens;
+    // The least context whose budget at 1 holds the data: floor((context − output − system) × 0.9) ≥ data.
+    const context = output + estimateTokens(DRAFT_INSTRUCTION) + Math.ceil(estimateTokens(data) / (1 - CONTEXT_HEADROOM)) + 1;
+    expect(contextBudget(context, output, system, 1)).toBeGreaterThanOrEqual(estimateTokens(data));
+    expect(contextBudget(context, output, system, 2)).toBeLessThan(estimateTokens(data, 2));
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "snug", contextTokens: context }] }))).json;
+    const draft = () => api(app, owner, "POST", "/api/agents/draft-persona", { ...fields, model: { source: "provider", providerId: provider.id, model: "snug" } });
+
+    gateway.reply("<af-persona>You read with me.</af-persona>");
+    expect((await draft()).status).toBe(200);
+    expect(textsOf(lastCall())).toEqual([data]);
+    await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ($1, 2, 5, now())", [`provider:${provider.id}:snug`]);
+    const calls = gateway.calls.length;
+    expect(await draft()).toEqual({ status: 400, json: { error: "context_too_small" } });
+    expect(gateway.calls.length).toBe(calls);
+    // A ratio below 1 is planned at 1.
+    await db.query("update token_ratios set ratio = 0.8 where key = $1", [`provider:${provider.id}:snug`]);
+    gateway.reply("<af-persona>You read with me.</af-persona>");
+    expect((await draft()).status).toBe(200);
+  });
+
+  it("a group reply is planned at its model's ratio too: a learned 1.5 shows fewer of the group's messages, a learned ratio under 1 exactly as many as none", async () => {
+    const shownWith = async (name: string, ratio: number | null) => {
+      await db.query("delete from token_ratios");
+      if (ratio !== null) await db.query("insert into token_ratios (key, ratio, samples, updated_at) values ('site:small', $1, 5, now())", [ratio]);
+      // Same-length names: the system texts, roster and all, weigh the same.
+      const [owner, mia, ned] = [await signUp(app, `${name}own`), await signUp(app, `${name}mia`), await signUp(app, `${name}ned`)];
+      const g = await group(app, owner, "读书会", [mia, ned]);
+      const agent = await mustCreateAgent(app, owner, { handle: `${name}_bot`, name: "Planner", model: { source: "site", id: "small" }, persona: PERSONA, memory: false });
+      expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+      for (let i = 0; i < 24; i++) await say(mia, g, englishText(i));
+      await say(mia, g, `@${name}_bot go on`);
+      const calls = gateway.calls.length;
+      gateway.reply("OK.");
+      expect(await app.agentWorker.runOnce()).toBe(true);
+      expect(gateway.calls.length).toBe(calls + 1);
+      return textsOf(lastCall()).length;
+    };
+    const none = await shownWith("gpa", null);
+    const high = await shownWith("gpb", 1.5);
+    const low = await shownWith("gpc", 0.6);
+    expect(none).toBeLessThan(25);
+    expect(high).toBeGreaterThan(0);
+    expect(high).toBeLessThan(none);
+    expect(low).toBe(none);
   });
 });

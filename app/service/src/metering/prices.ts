@@ -2,8 +2,9 @@ import type { Resolved } from "../models/resolve.ts";
 
 /**
  * Cost maths of site models. Money is `bigint` micro-points; a price is micro-points per token. The most a call can cost
- * is held against the owner's quota while it runs (admit.ts): its input estimate (tokens.ts, corrected by its model's
- * learned ratio) and its whole output limit.
+ * is held against the owner's quota while it runs (admit.ts): its input's bound (tokens.ts `holdTokens`: its text at its
+ * utf-8 bytes, at most what the context leaves beside the output limit; images and PDFs at their constants) and its
+ * whole output limit.
  */
 
 /** Tokens counted for one image shown to a model. */
@@ -39,10 +40,13 @@ export function costMicro(price: Price, input: number, output: number): bigint {
 }
 
 /**
- * The most one call can cost: the input estimate and the call's whole output limit — `resolved.call.maxOutputTokens`,
- * the number the gateway sends, thinking allowance included (src/models/resolve.ts `outputLimit`) — at its prices (0
- * for a provider model). What admission holds against the owner's quota while the call runs. The estimate must be a
- * count (`assertCount`), whatever the model.
+ * The most one call can cost: `inputTokensEstimate`, the input's bound — its text at its utf-8 bytes (no tokenizer counts
+ * more than one token a byte), at most what the model's context leaves beside the output limit, images and PDFs at their
+ * constants (tokens.ts `holdTokens`) — and the call's whole output limit — `resolved.call.maxOutputTokens`, the number
+ * the gateway sends, thinking allowance included (src/models/resolve.ts `outputLimit`) — at its prices (0 for a provider
+ * model). What admission holds against the owner's quota while the call runs: an upper bound, not an estimate, so no
+ * text costs more than it held (an image or a PDF counted above its constant can). The input must be a count
+ * (`assertCount`), whatever the model.
  */
 export function maxCostMicro(resolved: Pick<Resolved, "price" | "call">, inputTokensEstimate: number): bigint {
   assertCount("the input token estimate", inputTokensEstimate);

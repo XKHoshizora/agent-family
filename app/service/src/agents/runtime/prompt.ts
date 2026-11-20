@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto";
-import { estimateTokens } from "../../metering/prices.ts";
+import { estimateTokens } from "../../metering/tokens.ts";
 
 /**
  * The system text of a reply (spec 6.5 "发给模型的内容"). In the Agent's own conversation (`systemPrompt`): the site's

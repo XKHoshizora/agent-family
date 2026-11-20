@@ -28,8 +28,8 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * Settles the call of run `runId` with `outcome`, by what its admission recorded on the run (`source`, `model`,
  * `charge_to`, `hold_micro`), whatever the Agent's model is by now:
  * - Tokens: `usage` as reported; when none was reported (or it is not two whole non-negative numbers), `fallback` (the
- *   caller's estimate: text in weight, its input as admission held it — corrected by the model's learned ratio, images
- *   and PDFs at their constants; tokens.ts) and the record says `estimated`. `fallback` is ours, so its counts must be
+ *   caller's estimate: text in weight, the input's times the model's learned ratio, images and PDFs at their
+ *   constants; tokens.ts) and the record says `estimated`. `fallback` is ours, so its counts must be
  *   whole numbers of 0 or more: anything else throws before anything is read or written.
  * - Cost (`cost_micro`, the true cost): the tokens at the site model's configured price; 0 for a provider model, for a
  *   `failed` call that produced no output, for no tokens at all (a run recovered at start-up settles so), and for a
@@ -46,7 +46,7 @@ const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
  * - Learns: a reply (purpose `reply`) whose input estimate admission recorded (`input_estimate`, `ratio_key`) and whose
  *   usage was reported teaches its model's ratio once (`learnRatio`, which never throws and never holds this up). Nothing
  *   else does: no draft, no memory call, no settlement on an estimate.
- * - `forgiveAll`:the call's result was lost on the service's side (its reply could not be stored): nothing is charged
+ * - `forgiveAll`: the call's result was lost on the service's side (its reply could not be stored): nothing is charged
  *   and the whole cost, still recorded in `cost_micro`, is `forgiven_micro`.
  * Locks the run row, then (a site call) the account. Throws, changing nothing, for a run that does not exist or was
  * settled already (`usage_records_run_id_key` holds that in the database too).

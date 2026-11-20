@@ -698,8 +698,14 @@ const labelled = (call: ModelCall): string[] => {
 };
 /** Tokens of a member's label with a three-letter name (`〔mark mia｜群成员〕`): what a message of theirs costs beyond its text. */
 const MEMBER_LABEL_TOKENS = 16;
-/** What `fast` holds for a call: its input estimate at 1 micro-point a token and its 4 096 output tokens at 2. */
-const fastHold = (call: ModelCall): bigint => BigInt(estimateTokens(call.system) + historyTokens(call)) + 4096n * 2n;
+/** The utf-8 bytes of a call's text: its system text and its turns' text parts. */
+const textBytes = (call: ModelCall): number =>
+  Buffer.byteLength(call.system, "utf8") + call.messages.flatMap((m) => m.parts).reduce((n, p) => n + (p.type === "text" ? Buffer.byteLength(p.text, "utf8") : 0), 0);
+/**
+ * What `fast` holds for a call of text only: its input at its utf-8 bytes (a token a byte at most; never more than the
+ * 95 904 its context leaves beside the output limit) at 1 micro-point a token, and its 4 096 output tokens at 2.
+ */
+const fastHold = (call: ModelCall): bigint => BigInt(Math.min(textBytes(call), 100_000 - 4096)) + 4096n * 2n;
 /** `n` messages of 200 characters, numbered. */
 const long = (n: number): string[] => Array.from({ length: n }, (_, i) => `${String(i + 1).padStart(2, "0")}号${"字".repeat(197)}`);
 const FILE_TEXT = "文".repeat(3000);
@@ -747,7 +753,8 @@ describe("how much of the group it is shown", () => {
     expect(historyTokens(call)).toBeLessThanOrEqual(12_000);
     expect(historyTokens(call) + 200 + MEMBER_LABEL_TOKENS).toBeGreaterThan(12_000);
     expect(hold).toBe(fastHold(call));
-    expect(hold).toBeLessThan(BigInt(estimateTokens(call.system) + 12_000) + 4096n * 2n + 1n);
+    // At most three bytes a weight: the cap bounds the hold too.
+    expect(hold).toBeLessThanOrEqual(BigInt(3 * (estimateTokens(call.system) + 12_000)) + 4096n * 2n);
   });
 
   it("at most its latest 80 messages, however few tokens they take; a file among them is shown whole within the cap", async () => {

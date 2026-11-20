@@ -10,7 +10,7 @@ import type { Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { admitRun } from "./admit.ts";
 import { settle, type Usage } from "./settle.ts";
-import { correctedEstimate, estimateTokens, planRatio, ratioKey, readRatio } from "./tokens.ts";
+import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio } from "./tokens.ts";
 
 /**
  * A metered owner call: a model call that is not a chat reply, metered to an owner in the owner's own lane (a persona draft, charged to
@@ -20,13 +20,13 @@ import { correctedEstimate, estimateTokens, planRatio, ratioKey, readRatio } fro
  *    (`spec.choose`; none to call: 502 `provider_unavailable`; a saved key that cannot be opened: 502
  *    `provider_rejected`), the owner's calls running at once must be fewer than `agentMaxConcurrentRuns` (429
  *    `rate_limited`), the context must hold the input (400 `context_too_small`; planned as a reply's context is: at the
- *    model's ratio when above 1, a tenth of the room free), then admission (402 `no_quota`) on the input's estimate in
- *    weight, corrected by the model's learned ratio (tokens.ts; one read for both). Any refusal rolls all of it back:
- *    nothing recorded, nothing called.
+ *    model's ratio when above 1, a tenth of the room free), then admission (402 `no_quota`) holding the most the input
+ *    can cost: its utf-8 bytes, at most what the context leaves beside the output limit (tokens.ts `holdTokens`; no ratio
+ *    in it). Any refusal rolls all of it back: nothing recorded, nothing called.
  * 2. The call, outside any transaction, reasoning `none`, ended after `spec.deadlineMs`.
  * 3. One transaction: settled (`settle`: a failed call is charged only what the upstream reported; with no usage
- *    reported, on the input as admission held it and the output in weight) and the run ended. An owner call teaches no
- *    ratio: only replies do.
+ *    reported, on the input's estimate in weight corrected by the model's learned ratio — the same read as the fit's —
+ *    and the output in weight) and the run ended. An owner call teaches no ratio: only replies do.
  *
  * What the callers differ in is parameters of `ownerCall`; what to do with the outcome is theirs. Nothing here throws
  * for what goes wrong in the three steps: each is a kind of `OwnerCallOutcome`.
@@ -97,7 +97,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
   const { db, config, models, log, inFlight } = deps;
   const { ownerId, system, user, label } = spec;
 
-  /** `input`: the input estimate as admission held it (and settlement falls back on). */
+  /** `input`: the input estimate settlement falls back on (in weight, corrected by the model's ratio; not the hold). */
   let started: { runId: string; call: Resolved["call"]; input: number };
   try {
     started = await db.tx(async (t) => {
@@ -127,7 +127,8 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
         spec.maxOutputTokens === undefined
           ? resolved
           : { ...resolved, call: { ...resolved.call, maxOutputTokens: Math.min(spec.maxOutputTokens, resolved.call.maxOutputTokens) } };
-      // The model's learned ratio, read once: the fit is planned at it when it is above 1, the hold corrected by it.
+      // The model's learned ratio, read once: the fit is planned at it when it is above 1, the estimate settlement falls
+      // back on corrected by it. The hold has no ratio in it: the input's utf-8 bytes, at most what the context leaves.
       const ratio = await readRatio(t, ratioKey(sized));
       const planned = planRatio(ratio);
       // A system text of its own (a draft's, a memory call's): no notes passage in it.
@@ -135,7 +136,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
         throw new AppError(400, "context_too_small");
       }
       const input = correctedEstimate(estimateTokens(system) + estimateTokens(user), 0, ratio);
-      await admitRun(t, config, runId, ownerId, sized, input, new Date());
+      await admitRun(t, config, runId, ownerId, sized, holdTokens([system, user], sized.contextTokens, sized.call.maxOutputTokens), new Date());
       return { runId, call: sized.call, input };
     });
   } catch (error) {

@@ -1,4 +1,4 @@
-import { estimateTokens } from "../../metering/prices.ts";
+import { estimateTokens } from "../../metering/tokens.ts";
 import { stripUnsafeText } from "../../schemas.ts";
 import type { Delta } from "./port.ts";
 

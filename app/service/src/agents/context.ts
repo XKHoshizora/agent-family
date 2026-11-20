@@ -119,8 +119,9 @@ export interface BuiltContext {
   messages: ModelCall["messages"];
   /**
    * Tokens of the system text and the turns — text in weight, images and PDFs at their constants — at ratio 1: what the
-   * budget was planned in. Admission holds for it corrected by the model's learned ratio (`correctedEstimate`), and a reply
-   * of text only teaches the ratio from it (metering/tokens.ts).
+   * budget was planned in. Settlement falls back on it corrected by the model's learned ratio (`correctedEstimate`) when
+   * no usage is reported, and a reply of text only teaches the ratio from it (metering/tokens.ts). Admission holds the
+   * texts' bound instead (`holdTokens`).
    */
   inputTokensEstimate: number;
   /** Of `inputTokensEstimate`, what images and PDFs are counted as: their constants, never corrected by a ratio. */

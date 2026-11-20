@@ -333,13 +333,15 @@ describe("attachments", () => {
         ],
       },
     ]);
-    // The hold is the input estimate (1 micro-point per input token, outputs free): system, text and the image.
-    const estimate = estimateTokens(call.system) + estimateTokens("这是什么？") + IMAGE_TOKENS;
+    // The hold is the most the input can cost (1 micro-point per input token, outputs free): the system text and the
+    // text at their utf-8 bytes, a token a byte at most, and the image at its constant.
+    const bytes = Buffer.byteLength(call.system, "utf8") + Buffer.byteLength("这是什么？", "utf8");
     const held = await db.query<{ hold: string }>("select hold_micro::text as hold from agent_runs where status = 'running'");
-    expect(held.rows).toEqual([{ hold: String(estimate) }]);
+    expect(held.rows).toEqual([{ hold: String(bytes + IMAGE_TOKENS) }]);
     hold.release("一个像素。");
     await running;
-    // No usage reported: settled on the same estimate, images included.
+    // No usage reported: settled on the estimate (text in weight), images included.
+    const estimate = estimateTokens(call.system) + estimateTokens("这是什么？") + IMAGE_TOKENS;
     expect(await usageInput((await latestRun(owner, conv)).id)).toEqual({ input: estimate, estimated: true });
 
     const blind = await owned("blind", "blind");

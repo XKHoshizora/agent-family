@@ -7,7 +7,7 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun } from "../metering/admit.ts";
 import { settle } from "../metering/settle.ts";
-import { correctedEstimate, planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
+import { correctedEstimate, holdTokens, planRatio, ratioKey, readRatio } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
@@ -311,10 +311,12 @@ export class DbAgentPort implements AgentPort {
    *    owner's calls are never refused by these), someone else's meets the others' budget again and is not queued once
    *    it is spent.
    *    Otherwise
-   *    the call is admitted on its input estimate, its text corrected by its model's learned ratio (the one step 1 read;
-   *    metering/tokens.ts; 402 `no_quota` ends the run failed), the estimate itself (a call of text only) and the ratio's key are recorded on
+   *    the call is admitted holding the most its input can cost: its text at its utf-8 bytes, at most what the model's
+   *    context leaves beside the output limit, images and PDFs at their constants (metering/tokens.ts `holdTokens`; no
+   *    ratio in it; 402 `no_quota` ends the run failed); the estimate itself (a call of text only) and the ratio's key are recorded on
    *    the run for settlement to learn from, and the Agent's read marker moves to what the run covers (announced after
-   *    commit). The reasoning level is the Agent's when the model allows it, else `none`.
+   *    commit). What settlement falls back on when no usage is reported is the estimate with its text corrected by the
+   *    model's learned ratio (the one step 1 read). The reasoning level is the Agent's when the model allows it, else `none`.
    */
   async begin(run: RunTicket, closing?: AbortSignal): Promise<Prepared | RunEnd> {
     const { db, config, blobs, log } = this.deps;
@@ -346,7 +348,7 @@ export class DbAgentPort implements AgentPort {
       }
       if (!resolved) return { end: UNAVAILABLE };
       // The model's learned ratio, read once for the run: the context is planned at it when it is above 1 (`planRatio`),
-      // and admission (step 3) corrects the input estimate by it.
+      // and step 3 corrects by it the input estimate settlement falls back on (never the hold).
       const key = ratioKey(resolved);
       const ratio = await readRatio(t, key);
       const planned = planRatio(ratio);
@@ -431,11 +433,15 @@ export class DbAgentPort implements AgentPort {
         return { end: ENDED_QUIETLY, told };
       }
       const { resolved, loaded, covers, key, ratio } = first;
+      // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
+      // leaves beside the output limit (`holdTokens`), images and PDFs at their constants — whatever the model's ratio.
+      const texts = [loaded.system.text, ...context.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])))];
+      const held = holdTokens(texts, resolved.contextTokens, resolved.call.maxOutputTokens) + context.fixedTokens;
       // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned;
-      // read in step 1), images and PDFs at their constants. What admission holds for, and what settlement falls back on.
+      // read in step 1), images and PDFs at their constants. What settlement falls back on when no usage is reported.
       const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, ratio);
       try {
-        await admitRun(t, config, run.id, run.ownerId, resolved, input, now);
+        await admitRun(t, config, run.id, run.ownerId, resolved, held, now);
       } catch (err) {
         if (!(err instanceof AppError) || err.code !== "no_quota") throw err;
         const resetsAt = err.details.resetsAt;
