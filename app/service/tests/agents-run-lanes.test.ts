@@ -78,7 +78,8 @@ const agentSays = (agentId: string, conv: string, text: string, on: FastifyInsta
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, on.deps.config)) };
+    // Posted by no run: whose question it carries is not known (null, the safe side; Task 10b).
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, on.deps.config, null)) };
   });
 
 /** The Agent's runs in `conv`, oldest first: each one's lane and who called for it. */

@@ -1085,7 +1085,8 @@ describe.each([false, true])("the rows it locks, and a proactive reply someone a
       db.tx(async (t) => {
         const poster = await lockAgent(t, posterId, w.g);
         const message = await insertMessage(t, w.g, posterId, "text", { text }, null);
-        await triggerFromAgent(t, w.g, message, poster, postedBy, app.deps.config);
+        // Posted by no run here: whose question it carries is not known (null, the safe side; Task 10b).
+        await triggerFromAgent(t, w.g, message, poster, postedBy, app.deps.config, null);
         return message.seq;
       });
     judge.answer(byName({ anna: 0.9 }));
@@ -1145,7 +1146,7 @@ describe("what reaches anyone", () => {
       }
     return into;
   };
-  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools"];
+  const HIDDEN_KEYS = ["proactive", "proactiveLevel", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "newNotes", "memoryModel", "memoryModelUsable", "memoryLanguage", "lane", "callerId", "caller", "quiet", "surcharge", "judgedAt", "probability", "probabilities", "threshold", "whisper", "whispers", "afterSeq", "queries", "tools", "askerIds", "asker_ids", "askers"];
 
   it("no frame and no view of another member names proactive replies, lanes, callers, thresholds or probabilities; the log only ids and reasons", async () => {
     const w = await world();

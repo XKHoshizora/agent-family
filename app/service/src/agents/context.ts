@@ -207,15 +207,18 @@ export async function readPrefix(
 
 /**
  * The asker's line of reply run `runId` in a group (Task 10b, the product rule of 2026-11-20): the seq at and before which
- * nothing of the group is shown to its model — the latest joining among the people whose questions it answers
- * (`agent_runs.asker_ids`, runs.ts `Askers`), each at the start of their latest stay there (the current one; for one
- * who has left since, the stay they asked in). Where an asker cannot be told — the run's askers are not known (a run
- * recorded before they were, a chain whose first person cannot be told), or one was never in the group — the latest
- * joining among the group's people now counts as well (the safe side). 0 when nothing bounds it (no such run; no person
- * in the group now). The Agent's own joining needs no line here: the visibility rule with the Agent as reader
- * (`VISIBLE_JOIN`) bounds everything it is shown already, so a reply is shown nothing before the later of the two.
- * Everything that shows a reply's model what was said in its group — this context (`loadContext`), and any tool that
- * reads the group's history or a summary of it for the reply — keeps to the same line.
+ * nothing of the group is shown to its model — the latest current-stay start (`joined_seq`, the visibility rule's) among
+ * the people whose questions it answers (`agent_runs.asker_ids`, runs.ts `Askers`) and every person whose words it will be
+ * shown after them: a person (never an Agent) who sent a message — text or file, what the reply is shown — after what the
+ * run covers (`covers_seq`, which `begin` has set to everything it takes on before it reads this), in the group now
+ * (fix round 1, I-1: a question that slipped in while the reply waited is not answered from before its sender's joining;
+ * one of an older member does not move the line). Where an asker cannot be told — the run's askers are not known (a run
+ * recorded before they were, a chain whose first person cannot be told), or one is not in the group now (left since, or
+ * never in it) — the latest joining among the group's people now counts as well (the safe side). 0 when nothing bounds
+ * it (no such run; no person in the group now). The Agent's own joining needs no line here: the visibility rule with the
+ * Agent as reader (`VISIBLE_JOIN`) bounds everything it is shown already, so a reply is shown nothing before the later
+ * of the two. Everything that shows a reply's model what was said in its group — this context (`loadContext`), and any
+ * tool that reads the group's history or a summary of it for the reply — keeps to the same line.
  */
 export async function askerLine(q: Queryable, runId: string): Promise<number> {
   const { rows } = await q.query<{ line: string }>(
@@ -224,13 +227,17 @@ export async function askerLine(q: Queryable, runId: string): Promise<number> {
               case when bool_or(j.joined is null) is not false
                    then (select coalesce(max(ms.joined_seq), 0) from memberships ms join principals p on p.id = ms.principal_id
                           where ms.conversation_id = r.conversation_id and ms.left_seq is null and p.kind = 'human')
-                   else 0 end)::text as line
+                   else 0 end,
+              (select coalesce(max(ms.joined_seq), 0) from messages m
+                 join principals p on p.id = m.sender_id and p.kind = 'human'
+                 join memberships ms on ms.conversation_id = m.conversation_id and ms.principal_id = m.sender_id and ms.left_seq is null
+                where m.conversation_id = r.conversation_id and m.seq > r.covers_seq and m.kind in ('text', 'file')))::text as line
        from agent_runs r
-       left join lateral (select (select max(ms.joined_seq) from memberships ms
-                                   where ms.conversation_id = r.conversation_id and ms.principal_id = a.id) as joined
+       left join lateral (select (select ms.joined_seq from memberships ms
+                                   where ms.conversation_id = r.conversation_id and ms.principal_id = a.id and ms.left_seq is null) as joined
                             from unnest(r.asker_ids) as a (id)) j on true
       where r.id = $1
-      group by r.id, r.conversation_id`,
+      group by r.id, r.conversation_id, r.covers_seq`,
     [runId],
   );
   return Number(rows[0]?.line ?? 0);

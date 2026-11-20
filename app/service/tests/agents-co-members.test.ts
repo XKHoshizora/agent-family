@@ -95,6 +95,10 @@ const HIDDEN_KEYS = [
   "queries",
   // Whether a provider's model may be offered tools (its owner's provider list only).
   "tools",
+  // Whose questions a reply answers (`agent_runs.asker_ids`, Task 10b): never on the wire, not even to its owner.
+  "askerIds",
+  "asker_ids",
+  "askers",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 

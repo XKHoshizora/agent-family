@@ -72,7 +72,8 @@ const say = async (who: Actor, conv: string, text: string): Promise<number> => {
 async function unasked(agent: Agent, conv: string, seq: number): Promise<Announced> {
   const run = await db.tx(async (t) => {
     await lockConversation(t, conv);
-    return queueRun(t, agent, conv, seq, "human", { id: null, lane: "proactive" });
+    // Queued by hand, not by a judgement: whose message it answers is not known here (null, the safe side; Task 10b).
+    return queueRun(t, agent, conv, seq, "human", { id: null, lane: "proactive" }, null);
   });
   app.agentPort.announce(run);
   return run;

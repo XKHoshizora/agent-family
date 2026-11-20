@@ -135,6 +135,12 @@ interface RunMoney {
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
+/**
+ * In a group, everything the reply was to answer is at or before its asker's line (context.ts `askerLine`): its asker
+ * asked, left and came back, or someone who joined after the question spoke before the reply began. Nothing it was for
+ * may be shown: nothing failed, nothing to retry.
+ */
+const CUT_AWAY: RunEnd = { status: "cancelled" };
 /** The model's context cannot hold the owner's newest message (`holdsNewest`): no call is made. */
 const TOO_SMALL: RunEnd = { status: "failed", error: "context_too_small" };
 /** The provider's saved key cannot be opened (`KeyUnreadableError`): as a refused key, its owner must save it again. */
@@ -356,9 +362,11 @@ export class DbAgentPort implements AgentPort {
    *    (`groupSystemPrompt`, with the group's title, other Agents and roster, `loadGroupScene`; the roster's speakers
    *    are those of what `loadContext` read, `withRoster`) — and the conversation (`loadContext`, SQL only; in a group at
    *    most `agentGroupContextTokens` tokens of its latest `GROUP_CONTEXT_MESSAGES` messages, nothing at or before the
-   *    run's asker's line (context.ts `askerLine`: the latest joining of those whose questions it answers), each of someone else's
+   *    run's asker's line (context.ts `askerLine`: the latest joining of those whose questions it answers and of every
+   *    person who wrote after what it covers), each of someone else's
    *    labelled with the run's mark, which `loadContext` draws with `deps.drawMark` and the roster carries too; the
-   *    port keeps it for `post` once the call is handed over, `RunFlags.mark`). With no owner's message in it (in a group: nobody else's) the run ends without a call:
+   *    port keeps it for `post` once the call is handed over, `RunFlags.mark`). In a group, a run whose every question is
+   *    at or before that line ends there, before the conversation is read: `cancelled` with no error (`CUT_AWAY`). With no owner's message in it (in a group: nobody else's) the run ends without a call:
    *    `cancelled` with no error when everything it was to answer is before a new topic (its owner started over), else
    *    `failed` `busy`; and so does one whose model's context cannot hold the newest such message, or 200 tokens of it,
    *    beside the system text, roster and all (`failed`, `context_too_small`). Everything here is planned at the model's
@@ -469,8 +477,10 @@ export class DbAgentPort implements AgentPort {
             ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown, and
-      // nothing at or before its asker's line (`askerLine`, Task 10b), read once, here, for the whole run.
+      // nothing at or before its asker's line (`askerLine`, Task 10b), read once, here, for the whole run — after
+      // `covers_seq` took on what was noted above, so that whoever wrote after that counts too.
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: await askerLine(t, run.id) } : null;
+      if (cap !== null && covers <= cap.after) return { end: CUT_AWAY };
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
       // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it

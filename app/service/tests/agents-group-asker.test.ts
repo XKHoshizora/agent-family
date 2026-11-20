@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { decideProactive } from "../src/agents/proactive/decide.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
-import { markOf, mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
+import { markOf, mustCreateAgent, PNG, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
 import { useApp } from "./helpers/harness.ts";
 import { byName, scriptedJudge } from "./helpers/judge.ts";
+import { grant } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { MULTIPART, multipart } from "./helpers/multipart.ts";
 
@@ -14,9 +15,11 @@ import { MULTIPART, multipart } from "./helpers/multipart.ts";
  * history a reply's model is shown starts at the later of where the Agent's own membership began and where the asker's
  * current membership began — the asker being the person whose message caused the reply: the sender of a mention, the
  * sender of the message a reply nobody asked for answers, and in an Agents' chain the person whose message started it
- * (unknown: the latest join among the group's people now). Nothing before that line reaches the model: no message, no
- * quote of one, no file of one. Driven through the real routes, the worker run by hand; every assertion is on what the
- * scripted model was actually sent.
+ * (unknown, or no longer in the group: the latest join among the group's people now) — and, as asking too, every person
+ * whose message came after what the reply answers before it began (fix round 1, I-1). Nothing before that line reaches
+ * the model: no message, no quote of one, no file of one; a reply whose every question is at or before it ends quietly.
+ * Driven through the real routes, the worker run by hand; every assertion is on what the scripted model was actually
+ * sent.
  */
 
 const JUDGE = {
@@ -57,26 +60,30 @@ const say = async (who: Actor, conv: string, text: string, extra: Record<string,
   if (sent.status !== 201) throw new Error(`say: ${sent.status} ${JSON.stringify(sent.json)}`);
   return sent.json.message.seq as number;
 };
-/** Uploads `data` as `filename` and sends it to `conv` with no caption. */
-async function sendFile(who: Actor, conv: string, filename: string, data: string): Promise<void> {
+/** Uploads `data` as `filename` (of `type`) and sends it to `conv` with no caption; returns its seq. */
+async function sendFile(who: Actor, conv: string, filename: string, data: string | Buffer, type = "application/octet-stream"): Promise<number> {
   const uploaded = await app.inject({
     method: "POST",
     url: `/api/conversations/${conv}/attachments`,
     headers: { cookie: who.cookie, "content-type": MULTIPART },
-    payload: multipart([{ name: "file", filename, type: "application/octet-stream", data }]),
+    payload: multipart([{ name: "file", filename, type, data }]),
   });
   expect(uploaded.statusCode).toBe(201);
   const sent = await api(app, who, "POST", `/api/conversations/${conv}/messages`, { attachmentId: uploaded.json().id, clientTxn: `ak${++txn}` });
   expect(sent.status).toBe(201);
+  return sent.json.message.seq as number;
 }
+/** An image (a 1×1 PNG, shown inline) named `filename`. */
+const sendImage = (who: Actor, conv: string, filename: string): Promise<number> => sendFile(who, conv, filename, PNG, "image/png");
 const addMember = async (by: Actor, conv: string, principalId: string): Promise<void> => {
   const res = await api(app, by, "POST", `/api/conversations/${conv}/members`, { principalId });
   if (res.status !== 201) throw new Error(`addMember: ${res.status} ${JSON.stringify(res.json)}`);
 };
-const leave = async (who: Actor, conv: string): Promise<void> => {
-  const res = await api(app, who, "DELETE", `/api/conversations/${conv}/members/${who.id}`);
-  if (res.status !== 200) throw new Error(`leave: ${res.status} ${JSON.stringify(res.json)}`);
+const removeMember = async (by: Actor, conv: string, principalId: string): Promise<void> => {
+  const res = await api(app, by, "DELETE", `/api/conversations/${conv}/members/${principalId}`);
+  if (res.status !== 200) throw new Error(`removeMember: ${res.status} ${JSON.stringify(res.json)}`);
 };
+const leave = (who: Actor, conv: string): Promise<void> => removeMember(who, conv, who.id);
 /** Where `principalId`'s current stay in `conv` began. */
 const joinedSeq = async (conv: string, principalId: string): Promise<number> =>
   Number(
@@ -173,6 +180,17 @@ async function newcomerJoins(w: World): Promise<number> {
   await addMember(w.v, w.g, w.s.id);
   return joinedSeq(w.g, w.s.id);
 }
+
+/** `v` befriends `name` and adds them after everything so far: another newcomer, and where their stay began. */
+async function anotherJoins(w: World, name: string): Promise<{ who: Actor; line: number }> {
+  const who = await signUp(app, name);
+  await befriend(app, w.v, who);
+  await addMember(w.v, w.g, who.id);
+  return { who, line: await joinedSeq(w.g, who.id) };
+}
+
+/** Every part of a call that is not text (an image, a PDF). */
+const filesSent = (call: ModelCall) => call.messages.flatMap((m) => m.parts.filter((p) => p.type !== "text"));
 
 // --- the attack ------------------------------------------------------------------------------------------------------
 
@@ -368,6 +386,285 @@ describe("a newcomer asks someone's Agent what was said before they joined", () 
     expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "done", error: null, lane: "others" }]);
     const posted = (await api(app, w.s, "GET", `/api/conversations/${w.g}/messages`)).json.messages.at(-1);
     expect(posted).toMatchObject({ senderId: w.agent.id, text: "（一条消息的窗口）" });
+  });
+});
+
+// --- whoever the reply will hear from (fix round 1) -------------------------------------------------------------------
+
+describe("everyone whose words the reply will see counts: what a person sends while the reply waits", () => {
+  it("the newcomer's question without a mention, sent while an older member's reply waits to run, is not answered from before their joining", async () => {
+    const w = await world();
+    await privateThings(w);
+    const line = await newcomerJoins(w);
+    const older = await say(w.m, w.g, "@helper_bot 周末停水的事你记得吗？");
+    // Every member is told the Agent is replying: the newcomer can watch for the moment.
+    expect((await runsOf(w.agent.id, w.g)).map((r) => r.status)).toEqual(["queued"]);
+    const slipped = await say(w.s, w.g, "我刚进群，大家最近有什么要注意的吗？");
+
+    await answer("（回答老成员）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect((await seqsShown(call, w.g)).shown).toEqual([older, slipped]);
+    expect(await peopleAfter(w.g, line)).toEqual([older, slipped]);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "done", error: null, lane: "others" }]);
+  });
+
+  it("the same for a reply nobody asked for that the newcomer's message rides on", async () => {
+    const w = await world();
+    await privateThings(w);
+    const line = await newcomerJoins(w);
+    const remark = await say(w.m, w.g, "周末好像要停水");
+    judge.answer(byName({ 小助手: 0.95 }));
+    const decided = await decideProactive({ db, judge, config: app.deps.config, log: app.log }, w.g, remark);
+    expect(decided.runs).toHaveLength(1);
+    for (const run of decided.runs) app.agentPort.announce(run);
+    const slipped = await say(w.s, w.g, "我刚进群，大家最近有什么要注意的吗？");
+
+    await answer("（主动说一句）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect((await seqsShown(call, w.g)).shown).toEqual([remark, slipped]);
+    expect(await peopleAfter(w.g, line)).toEqual([remark, slipped]);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "done", error: null, lane: "proactive" }]);
+  });
+
+  it("control: an older member, or an Agent that joined later, writing while the reply waits does not move the line", async () => {
+    const w = await world();
+    const other = await mustCreateAgent(app, w.m2, { handle: "other_bot", name: "阿杰", intro: "擅长查资料", model: FAST, persona: "你是阿杰。" });
+    const agentJoined = await joinedSeq(w.g, w.agent.id);
+    await privateThings(w);
+    // An Agent that joined after the private things, and a newcomer who says nothing.
+    await addMember(w.m2, w.g, other.id);
+    await newcomerJoins(w);
+    await say(w.m2, w.g, "@other_bot 你好");
+    await say(w.m, w.g, "@helper_bot 周末停水的事你记得吗？");
+    // 阿杰's reply (queued first) is posted while the older member's reply waits; so is an older member's message.
+    await answer("AGENT-GAP-10b 我在");
+    await say(w.m2, w.g, "我也想知道");
+
+    await answer("（回答老成员）");
+    const call = lastCall();
+    const sent = shownText(call);
+    for (const secret of [SECRET.m, SECRET.m2, "AGENT-GAP-10b"]) expect([secret, sent.includes(secret)]).toEqual([secret, true]);
+    expect((await seqsShown(call, w.g)).shown).toEqual(await peopleAfter(w.g, agentJoined));
+  });
+});
+
+describe("a line that leaves nothing to answer, and an asker who is not in the group now", () => {
+  it("everything the reply was to answer at or before its line (the asker asked, left and came back; nobody wrote since): it ends quietly — no call, nothing failed, nothing to retry", async () => {
+    const w = await world();
+    await privateThings(w);
+    await newcomerJoins(w);
+    await say(w.s, w.g, QUESTION);
+    await leave(w.s, w.g);
+    await newcomerJoins(w);
+
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(callsHere()).toEqual([]);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "cancelled", error: null, lane: "others" }]);
+    expect((await api(app, w.v, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.agent.id })).status).toBe(400);
+  });
+
+  it("a newcomer who joined after the question and spoke before the reply began: the question is cut away, and the reply ends quietly", async () => {
+    const w = await world();
+    await privateThings(w);
+    await say(w.m, w.g, "@helper_bot 周末停水的事你记得吗？");
+    await newcomerJoins(w);
+    await say(w.s, w.g, "我刚进群，大家最近有什么要注意的吗？");
+
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(callsHere()).toEqual([]);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "cancelled", error: null, lane: "others" }]);
+  });
+
+  it("an asker who is no longer in the group when the reply begins counts as not known: the latest joining among the group's people now", async () => {
+    const w = await world();
+    await privateThings(w);
+    await newcomerJoins(w);
+    await say(w.m, w.g, "BETWEEN-10b 欢迎新邻居");
+    const later = await anotherJoins(w, "tina");
+    const asked = await say(w.s, w.g, QUESTION);
+    await leave(w.s, w.g);
+
+    await answer("（回答已经走了的人）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect(JSON.stringify(call)).not.toContain("BETWEEN-10b");
+    expect((await seqsShown(call, w.g)).shown).toEqual([asked]);
+    expect(await peopleAfter(w.g, later.line)).toEqual([asked]);
+  });
+
+  it("asks, is removed, others talk, is added back before the reply runs: nothing of the time away (nor before)", async () => {
+    const w = await world();
+    await privateThings(w);
+    await newcomerJoins(w);
+    await say(w.s, w.g, QUESTION);
+    await removeMember(w.v, w.g, w.s.id);
+    await say(w.m, w.g, "SECRET-GAP-10b 他不在，说点别的");
+    const back = await newcomerJoins(w);
+    const again = await say(w.s, w.g, "@helper_bot 我回来了，刚才的问题还在吗？");
+    expect((await runsOf(w.agent.id, w.g)).map((r) => r.status)).toEqual(["queued"]);
+
+    await answer("（回答回来的人）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect(JSON.stringify(call)).not.toContain("SECRET-GAP-10b");
+    expect((await seqsShown(call, w.g)).shown).toEqual([again]);
+    expect(await peopleAfter(w.g, back)).toEqual([again]);
+  });
+});
+
+describe("more of what reaches back, and more of who asked", () => {
+  it("the Agent's own replies from before the line are not shown, nor one posted after it whose run answered what came before it", async () => {
+    const w = await world();
+    await privateThings(w);
+    await say(w.m, w.g, "@helper_bot 记一下我下个月不在");
+    await answer("REPLY-BEFORE-10b 记下了");
+    await say(w.m2, w.g, "@helper_bot 也记一下我的");
+    const line = await newcomerJoins(w);
+    // Posted after the newcomer joined, answering a question from before.
+    await answer("REPLY-COVERED-10b 也记下了");
+    const asked = await say(w.s, w.g, QUESTION);
+
+    await answer("（回答新来的）");
+    const call = lastCall();
+    expectNoSecret(call);
+    for (const absent of ["REPLY-BEFORE-10b", "REPLY-COVERED-10b"]) expect([absent, JSON.stringify(call).includes(absent)]).toEqual([absent, false]);
+    expect(call.messages.filter((m) => m.role === "assistant")).toEqual([]);
+    expect((await seqsShown(call, w.g)).shown).toEqual(await peopleAfter(w.g, line));
+    expect((await seqsShown(call, w.g)).shown).toEqual([asked]);
+  });
+
+  it("a chain of two hops the newcomer started (小助手 → 阿杰 → 小助手): every reply in it is cut at the newcomer's joining", async () => {
+    const w = await world();
+    const other = await mustCreateAgent(app, w.m, { handle: "other_bot", name: "阿杰", intro: "擅长查资料", model: FAST, persona: "你是阿杰。" });
+    await addMember(w.m, w.g, other.id);
+    await privateThings(w);
+    const line = await newcomerJoins(w);
+    const welcome = await say(w.m, w.g, "欢迎新邻居");
+    // Someone joins later still: a chain that lost its asker would be cut at their joining instead.
+    await anotherJoins(w, "tina");
+    const asked = await say(w.s, w.g, "@helper_bot 你帮我问问阿杰，大家最近有什么要注意的？");
+
+    await answer("@other_bot 最近群里有什么要注意的吗？");
+    await answer("@helper_bot 没什么特别的。");
+    await answer("好的，谢谢阿杰。");
+    const calls = callsHere();
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expectNoSecret(call);
+      expect((await seqsShown(call, w.g)).shown).toEqual([welcome, asked]);
+    }
+    expect(await peopleAfter(w.g, line)).toEqual([welcome, asked]);
+    expect((await runsOf(w.agent.id, w.g)).map((r) => r.status)).toEqual(["done", "done"]);
+    expect((await runsOf(other.id, w.g)).map((r) => r.status)).toEqual(["done"]);
+  });
+
+  it("two newcomers' mentions folded into one reply: the later joining is the line", async () => {
+    const w = await world();
+    await privateThings(w);
+    await newcomerJoins(w);
+    await say(w.m, w.g, "BETWEEN-10b 欢迎新邻居");
+    const later = await anotherJoins(w, "tina");
+    const first = await say(w.s, w.g, QUESTION);
+    const second = await say(later.who, w.g, "@helper_bot 我也刚进群，有什么要注意的？");
+    expect((await runsOf(w.agent.id, w.g)).map((r) => r.status)).toEqual(["queued"]);
+
+    await answer("（回答两位新来的）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect(JSON.stringify(call)).not.toContain("BETWEEN-10b");
+    expect((await seqsShown(call, w.g)).shown).toEqual([first, second]);
+    expect(await peopleAfter(w.g, later.line)).toEqual([first, second]);
+  });
+
+  it("a quote, after the line, of a file or an image sent before it: nothing of it is shown — not its name, not its label; an older member's question shows both", async () => {
+    const w = await world();
+    const file = await sendFile(w.m2, w.g, FILE_NAME, SECRET.file);
+    const image = await sendImage(w.m2, w.g, "SECRET-PHOTO-10b.png");
+    await newcomerJoins(w);
+    await say(w.m, w.g, "看这个文件", { replyToSeq: file });
+    await say(w.m, w.g, "看这张图", { replyToSeq: image });
+    await say(w.s, w.g, QUESTION);
+
+    await answer("（回答新来的）");
+    const toNewcomer = lastCall();
+    const m = markOf(toNewcomer);
+    expectNoSecret(toNewcomer);
+    for (const absent of ["SECRET-PHOTO-10b", "[文件：", "[图片："]) expect([absent, JSON.stringify(toNewcomer).includes(absent)]).toEqual([absent, false]);
+    expect(toNewcomer.messages).toEqual([
+      {
+        role: "user",
+        parts: [
+          { type: "text", text: `〔${m} mona｜群成员〕看这个文件` },
+          { type: "text", text: `〔${m} mona｜群成员〕看这张图` },
+          { type: "text", text: `〔${m} sam｜群成员〕${QUESTION}` },
+        ],
+      },
+    ]);
+
+    await say(w.m, w.g, "@helper_bot 上面引用的是什么？");
+    await answer("（回答老成员）");
+    const toMember = shownText(lastCall());
+    expect(toMember).toContain(`> [文件：${FILE_NAME}]\n看这个文件`);
+    expect(toMember).toContain("> [图片：SECRET-PHOTO-10b.png]\n看这张图");
+  });
+
+  it("an image sent before the line, with a model that sees images: not sent for the newcomer's question; sent for an older member's", async () => {
+    const w = await world();
+    expect((await api(app, w.v, "PATCH", `/api/agents/${w.agent.id}`, { model: { source: "site", id: "thinker" } })).status).toBe(200);
+    await grant(db, w.v.id, 5_000_000n); // a paid-tier model needs a balance
+    await sendImage(w.m2, w.g, "SECRET-PHOTO-10b.png");
+    await newcomerJoins(w);
+    await say(w.s, w.g, QUESTION);
+
+    await answer("（回答新来的）");
+    expect(filesSent(lastCall())).toEqual([]);
+    expect(JSON.stringify(lastCall())).not.toContain("SECRET-PHOTO-10b");
+
+    await say(w.m, w.g, "@helper_bot 上面那张图是什么？");
+    await answer("（回答老成员）");
+    expect(filesSent(lastCall()).map((p) => p.type)).toEqual(["image"]);
+  });
+
+  it("a reply nobody asked for, taken over by the newcomer's mention while it waits: cut at the newcomer's joining", async () => {
+    const w = await world();
+    await privateThings(w);
+    const line = await newcomerJoins(w);
+    const remark = await say(w.m, w.g, "周末好像要停水");
+    judge.answer(byName({ 小助手: 0.95 }));
+    const decided = await decideProactive({ db, judge, config: app.deps.config, log: app.log }, w.g, remark);
+    expect(decided.runs).toHaveLength(1);
+    for (const run of decided.runs) app.agentPort.announce(run);
+    const asked = await say(w.s, w.g, QUESTION);
+
+    await answer("（回答新来的）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect((await seqsShown(call, w.g)).shown).toEqual([remark, asked]);
+    expect(await peopleAfter(w.g, line)).toEqual([remark, asked]);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "done", error: null, lane: "others" }]);
+  });
+
+  it("the owner retrying a failed reply the newcomer asked for: the retry answers the same asker, cut at the newcomer's joining", async () => {
+    const w = await world();
+    await privateThings(w);
+    const line = await newcomerJoins(w);
+    const welcome = await say(w.m, w.g, "欢迎新邻居");
+    // Someone joins later still: a retry that lost its asker would be cut at their joining instead.
+    await anotherJoins(w, "tina");
+    const asked = await say(w.s, w.g, QUESTION);
+    gateway.fail("provider_unavailable");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await runsOf(w.agent.id, w.g)).toEqual([{ status: "failed", error: "provider_unavailable", lane: "others" }]);
+
+    const retried = await api(app, w.v, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.agent.id });
+    expect(retried.status).toBe(201);
+    await answer("（重试的回答）");
+    const call = lastCall();
+    expectNoSecret(call);
+    expect((await seqsShown(call, w.g)).shown).toEqual([welcome, asked]);
+    expect(await peopleAfter(w.g, line)).toEqual([welcome, asked]);
   });
 });
 

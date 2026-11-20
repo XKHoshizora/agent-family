@@ -79,7 +79,8 @@ const agentSays = (agentId: string, conv: string, text: string, config: RunLimit
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
     const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, config)) };
+    // Posted by no run: whose question it carries is not known (null, the safe side; Task 10b).
+    return { message, ...(await triggerFromAgent(t, conv, message, poster, null, config, null)) };
   });
 
 interface RunView {
@@ -563,7 +564,8 @@ describe("an Agent's message in a group", () => {
         const poster = await lockAgent(t, agentId, conv);
         await meet();
         const message = await insertMessage(t, conv, agentId, "text", { text }, null);
-        return triggerFromAgent(t, conv, message, poster, null, app.deps.config);
+        // Posted by no run: whose question it carries is not known (null).
+        return triggerFromAgent(t, conv, message, poster, null, app.deps.config, null);
       });
     const [inG, inG2] = await bounded(Promise.all([holdingThenCalling(a.id, w.g, "@beta 一起"), holdingThenCalling(b.id, g2, "@alpha 一起")]));
     expect([inG.runs.map((r) => r.ownerId), inG2.runs.map((r) => r.ownerId)]).toEqual([[w.member.id], [w.owner.id]]);
@@ -772,7 +774,8 @@ describe("POST /api/conversations/:id/agents/halt", () => {
         await t.query("set local lock_timeout = '2s'");
         const poster = await lockAgent(t, a.id, w.g);
         const message = await insertMessage(t, w.g, a.id, "text", { text: "@beta 你看看" }, null);
-        return { message, ...(await triggerFromAgent(t, w.g, message, poster, null, app.deps.config)) };
+        // Posted by no run: whose question it carries is not known (null).
+        return { message, ...(await triggerFromAgent(t, w.g, message, poster, null, app.deps.config, null)) };
       });
       expect(refused.runs).toEqual([]);
       const recorded = await db.query("select agent_id from refused_agent_calls where conversation_id = $1 and seq = $2", [w.g, refused.message.seq]);

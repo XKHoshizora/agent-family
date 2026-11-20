@@ -403,9 +403,10 @@ const withAskers = (param: string): string =>
 
 /**
  * Queues a reply of the Agent in `conversationId` answering up to `coversSeq` (a seq of that conversation), called for
- * by a person's message unless `triggeredBy` says an Agent's, by `caller` and in its lane, answering `askers` (none
- * given: not known). Under that conversation's row lock, which every writer of the Agent's runs there holds: the Agent
- * has no active run there (`agent_runs_one_active_per_agent_conversation` would refuse a second).
+ * by a person's message unless `triggeredBy` says an Agent's, by `caller` and in its lane, answering `askers` (every
+ * caller says whose; null only where they cannot be told). Under that conversation's row lock, which every writer of
+ * the Agent's runs there holds: the Agent has no active run there (`agent_runs_one_active_per_agent_conversation` would
+ * refuse a second).
  */
 export async function queueRun(
   t: Tx,
@@ -414,7 +415,7 @@ export async function queueRun(
   coversSeq: number,
   triggeredBy: TriggeredBy,
   caller: Caller,
-  askers: Askers = null,
+  askers: Askers,
 ): Promise<Announced> {
   const { rows } = await t.query<RunRow>(
     `insert into agent_runs as r (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by, caller_id, lane, asker_ids)
@@ -942,7 +943,7 @@ async function chainBudgetSpent(
  * call on someone else's Agent counts toward the caller limit of the person behind it, as their own call would; what a
  * reply nobody called for relays is others', with no caller (no caller limit; the budget and the others' lane hold).
  * Each run it reaches answers `askers`, those of the run that posted the message (Task 10b: the person whose message
- * started the chain; null, not known, when no run posted it or that run's are not known).
+ * started the chain; null, not known, when no run posted it or that run's are not known) — every caller says whose.
  */
 export async function triggerFromAgent(
   t: Tx,
@@ -951,7 +952,7 @@ export async function triggerFromAgent(
   poster: AgentRow,
   postedBy: Caller | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
-  askers: Askers = null,
+  askers: Askers,
 ): Promise<Triggered> {
   const own = poster.handle.toLowerCase();
   const handles = mentionedHandles(textOf(message)).filter((h) => h !== own);
