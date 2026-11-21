@@ -2626,8 +2626,10 @@ does not block) keeps its mark (`held_back_by`, `held_back_on`) until it is admi
 waits for is still running, and until it is admitted — queued, or claimed again and not admitted yet — the owner's younger
 replies that would be paid from the same source are passed over too (first come, first served per payer and source, so a
 reply with a large hold is not passed for ever by smaller ones; which source a queued reply would be paid from is
-admission's own rule on what its owner has now); a reply on the owner's own provider key, or one the other source would
-pay, never waits behind it. Claimed again, its owner is told it is running (the other members of a group, who were told it
+admission's own rule on what its owner has now; a free-tier reply held back with nothing left of either source after the
+holds waits on both, `held_back_on` `any`, and holds back the younger replies either would pay); a reply on the owner's own
+provider key, or one the other source would pay, never waits behind it, nor does the owner's own reply (lane `own`)
+behind a reply someone else called for, which the others' lanes may keep queued. Claimed again, its owner is told it is running (the other members of a group, who were told it
 is replying, are told nothing more), and its wait is not logged again; each claim starts the run's in-process flags
 afresh, and nothing of an attempt that was held back (its end, its flags) touches the next. The worker is woken after a
 trigger commits, after every run it has worked on ends (so a held-back reply is claimed as the reply it waited for
@@ -2637,7 +2639,8 @@ releases a run and after a persona draft ends, and also looks every 2 s (another
 1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
    in any of them ends the run `failed`, `busy`):
    1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
-      `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
+      `cancelled`, a stop asked for meanwhile `stopped` (kept in the run's row, `stop_asked`, so also one asked while an
+      earlier attempt ran, whatever this process saw of it), a run in a group its Agent is no longer a current member of
       `cancelled`, `agent_removed`, a model that no longer resolves `failed`
       (`provider_unavailable`; `provider_rejected`, not retryable, when its provider's saved key cannot be opened). The
       run takes on what was noted meanwhile — but a reply nobody had asked for (lane `proactive`) with a mention noted on
@@ -3429,19 +3432,46 @@ hold only makes a reply wait: when it starts, the holds against its source, its 
 that source — then it starts whatever its hold. A reply that would pass that is *held back*: it is not refused; its run
 goes back to `queued` — its owner is told it is queued, the other members of its group are told nothing (they keep seeing
 it replying: nothing about money reaches anyone else) — with the calls it waits for and the source it waits on
-(`agent_runs.held_back_by`, `held_back_on`, migrations 054 and 055), and the worker claims it again as soon as one of
+(`agent_runs.held_back_by`, `held_back_on`, migration 054), and the worker claims it again as soon as one of
 them has ended; until it is admitted, your younger replies paid from the same source wait behind it, first come first
 served (Agents and runs, The worker; a reply on your own provider key, or one the other source pays, does not wait). That
 is decided under your account's lock, which every settlement takes before its run leaves `running`, so a reply is never
 left waiting for a call that has already ended. It stays an ordinary queued reply meanwhile: your stop (also one you
-asked while it was still running and that landed as it was held back), a pause, a delete, the Agent's leaving end it as
-any; what it had taken on (your mention noted while it ran) is handed back as noted, so it is answered whatever becomes of
+asked while it was still running: it is kept in the run's row, `agent_runs.stop_asked`, and its next attempt ends
+`stopped`), a pause, a delete, the Agent's leaving end it as any; what it had taken on (your mention noted while it ran) is handed back as noted, so it is answered whatever becomes of
 its next attempt; its next `begin` reads everything again (what it was asked, its asker's line, the model). A persona
 draft never waits (you are waiting for it on the page): it starts while something is left of its source, whatever your
-replies hold, and its hold counts against them like any. *On the free allowance* (fix round 1's ruling: the site pays
-what passes it) a reply offered tools holds, from its admission, room for its last call beside its first — the most one
-call of its model can cost, its whole context and its whole output — and that is the hold the rule above counts: so near
-the end of the day's allowance such replies run one at a time. *Worked example:* a balance of 3 points,
+replies hold, and its hold counts against them like any. *On the free allowance* (the site pays what passes it) a reply
+offered tools holds, from its admission, room for a last call beside its first — **the free allowance's room** — and that
+is the hold the rule above counts, renewed a round at a time (Extension): the room is what a last call made after one
+more round can cost,
+
+    room = cost(min(input + G, C − M + 400 + fixed), M)
+    G    = k × (3 × TOOLS.resultMaxWeight + 200) + 6 × M + 300
+
+where `input` is the bound of the reply's next call's input (at admission its first call's; Admission, Extension), `C`
+the model's context, `M` its output limit (the room holds the whole of it), `fixed` its images and PDFs at their
+constants, 400 what providers add around tool definitions, and `G` the most one more tool round can add to a call, in the
+unit holds count in (a token a byte): `k` results — the calls one reply may run in all, the offered tools' per-reply caps
+summed (`TOOLS.searchPerReply` + `TOOLS.filePerReply` = 10 by default; a tool offered with no cap of its own makes the
+room the whole call) —, each at most 3 × `resultMaxWeight` bytes (a result's weight is ⌈bytes / 3⌉, and results are cut by
+weight) and 200 of framing; the round's own assistant turn and the notes answering calls not run, taken as at most 6
+bytes an output token; and 300. Never more than one whole call of the model, and never less than the last call can cost:
+that call's input is at most the input of the call before it and what that call's round added. *Worked example* (the
+acceptance's free model, Luna: 70 micro-points an input token, 350 an output token, `M` 4 096, `C` 200 000; a fresh
+conversation whose first call's input bound is 6 000; `k` 10): `G` = 10 × 9 200 + 24 576 + 300 = 116 876; the room is
+122 876 × 70 + 4 096 × 350 = 10.03 points; the first call's most 6 000 × 70 + 4 096 × 350 = 1.85; the reply holds 11.89
+(the whole context's room would make it 17.03). At half of a 100-point day, 50 left, four such replies start at once (4 ×
+11.89 = 47.6 ≤ 50; `AGENT_MAX_CONCURRENT_RUNS` is 4), against two with the whole context's room; an ordinary one-search
+reply keeps its rounds: its search reported 2 500 in and 300 out (0.28) and brought back 3 000 bytes, so its next call's
+input bound is about 9 500, its most 2.10, the room renewed 10.28, and the hold goes to 0.28 + 2.10 + 10.28 = 12.66 — two
+such replies open hold 25.3 of the 50. Below 23.8 left a second waits for the first; below 11.89 a reply starts only
+alone. *The forgiven overrun* per owner and site day is still at most one reply plus one call per open persona draft: a
+reply that starts beside others fits beside their holds, and every round of it renews its room only while it fits (else
+its next call is the last, made within the room it kept), so only the reply that starts alone can pass what is left — by
+at most its hold less what was left (11.89 − L on Luna above; its real cost, typically under 1 point; at worst, a first
+call on a whole context, 2 × 15.17), the one assumption being the 6 bytes an output token (a turn beyond it is forgiven,
+as an image counted above its constant is). *Worked example (the balance):* a balance of 3 points,
 two Agents of yours called at once on a model whose calls hold 5 each. The first starts (3 is above zero, and it is the
 only call holding against the balance). The second would make the holds 10 against 3: it waits, queued. The first costs
 4: the balance is −1, and the second, claimed again, is refused (`no_quota`) — nothing is left. Had the first cost 1, the
@@ -3465,10 +3495,12 @@ with this run's own hold added back; never another source than admission chose. 
 reached by so far counted with what is settled (the Agent's others' daily budget for someone else's call, its proactive
 budget for a reply nobody asked for, and in a group, for a reply in an Agents' chain, its chain budget) allows the last
 call at most; else, while so far and the next call's most stay within `TOOLS.maxPoints` and within *left* — on the free
-allowance with the room kept for the last call besides (Admission) — the hold becomes that and another round may call
-tools; else the hold becomes so far and the next call's most — past *left* if it must be, even below zero (on the free
-allowance the room kept covers it, so the hold does not grow) — and the next call is the last. *So far* is never more
-than the reply has held for its calls (less, on the free allowance, the room kept): every call was held at its most
+allowance with the room for a last call after it besides, renewed from the next call's input bound (Admission, the free
+allowance's room) — the hold becomes that and another round may call tools; else the hold becomes so far and the next
+call's most — past *left* if it must be, even below zero (on the free allowance the room kept covers it, so the hold does
+not grow) — and the next call is the last: short of the renewed room on the free allowance a reply is never cut or
+queued, its next call is the last. *So far* is never more than the reply has held for its calls (less, on the free
+allowance, the room kept): every call was held at its most
 before it was made, so an upstream that reports more is wrong, and what it reports above that is never held for —
 settlement forgives it (Forgiveness). A reply that has started is never refused for money: short of
 it, it stops calling tools and answers with what it found. The ordinary call that follows a later round the upstream
@@ -3588,21 +3620,27 @@ rule of its own per source:
 
 `tests/metering-concurrency.test.ts` (twenty replies at once, also with every call costing far more than it held),
 `tests/money-blocking.test.ts` (six tool replies on 3 points of balance, and on the day's 3 free points one at a time with
-at most one reply forgiven; two replies that would each run to `TOOLS.maxPoints` on 6; a round reported at 100 points),
+at most one reply forgiven; two replies that would each run to `TOOLS.maxPoints` on 6; a round reported at 100 points; the
+free allowance's room at admission and after each round; four Luna one-search replies at once at half of a 100-point day),
 `tests/money-drafts.test.ts` (eight drafts at once at the end of the allowance).
 
 **Reminders** (`src/metering/reminders.ts`; `tests/money-reminders.test.ts`). When a reply or a persona draft is
-settled, its owner may be told, by a whisper of kind `allowance` with no button, written in the settlement's own
-transaction (so a crash cannot lose it), in that Agent's own conversation — after a draft, or a reply whose Agent was
-deleted meanwhile, in the conversation of the Agent they used last (its newest message) — (Whispers: only they ever see
-it, also when the reply was in a group): when the day's free allowance is `ALLOWANCE.warnAt` (default 0.8) used,
+settled, its owner may be told, by a whisper of kind `allowance` with no button, in that Agent's own conversation — after a
+draft, or a reply whose Agent was deleted meanwhile, in the conversation of the Agent they used last (its newest message)
+— (Whispers: only they ever see it, also when the reply was in a group). The reminder is recorded in the settlement's own
+transaction, under the account lock (so a crash cannot lose it), and its whisper is made once that has committed, in a
+transaction of its own that takes the conversation's row and then the Agent's as every whisper does (none of them is
+taken after the account's, which would deadlock with a message or a run holding them); a reminder recorded but never
+made (the service stopped between the two) is made by the periodic sweep (`MEMORY.changesSweepMs`, hourly; also
+`attachments:sweep`), once, and one of an earlier site day is dropped. It is said: when the day's free allowance is `ALLOWANCE.warnAt` (default 0.8) used,
 `这个周期的额度已经用了 80%。` (the share as configured); when it is used up and the balance is at or below zero — no reply
 on a free-tier model starts before the site's midnight —, `额度用完了，11月22日 00:00 恢复。` (the date and time it comes back,
 in `SITE_TIMEZONE`, written as the web writes a date — never "明天": the whisper stays for days; nothing about topping up:
 points are only granted by the operator); and when the call took the balance from above zero to zero or below,
 `余额用完了。` — again each time a grant has brought it above zero and a call takes it down again. The first two are said at
 most once each per owner and site day, whatever paid it (`allowance_reminders (owner_id, day, threshold)`, migration 054,
-written under the account lock settlement holds; an owner's earlier days are deleted as a new one is written); once the
+recorded under the account lock settlement holds, `delivered_at` once made; an owner's earlier days are deleted as a new
+one is recorded); once the
 allowance is used up, its 80 % is not said after; on the settlement that says it is used up, nothing is said of the
 balance beside it. They follow the state, not the one call: what someone else's spending used is told at the next
 settlement. An owner with no Agent left is told nothing (the next settlement tries again). Counted in the log (Metrics in
