@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
-import { isAgent, isMyAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
+import { isAgent, isMyAgent, lineText, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
 import { formatSize, namesAgent, replyPoints } from "../data/viewmodel.js";
 import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
@@ -23,7 +23,7 @@ function Quote({ quote }) {
   return (
     <blockquote>
       <strong>{quote.from ? senderName(state, quote.from) : ""}</strong>
-      {quote.kind === "file" ? quote.attachmentName : quote.text}
+      {quote.kind === "file" ? quote.attachmentName : lineText(state, quote.from, quote.text)}
     </blockquote>
   );
 }

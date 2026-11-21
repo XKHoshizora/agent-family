@@ -7,7 +7,7 @@
 import "./markdown-ready.js";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { A1, AG1, ANN, BO, ME_ID, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, at, group, runOf, syncOf, wire } from "./fixtures.js";
 import { click, elapse, flush, installBrowser, openApp, push } from "./harness.jsx";
 import { forgetRevealed } from "../src/pages/AgentChatBits.jsx";
@@ -328,5 +328,50 @@ describe("what a reply looked up", () => {
     expect(line.getAttribute("aria-expanded")).toBe("false");
     expect(lookupLine(2).querySelector(".lookup-rows")).toBeNull();
     await flush();
+  });
+});
+
+describe("a reply's citations are its links, and nothing wherever its text is previewed (round 2, N-6)", () => {
+  const CITED = "在春熙路〔m1〕，周一休息〔f2〕。";
+  const SHOWN = "在春熙路，周一休息。";
+
+  it("a found message that is an Agent's reply: its row shows no citation", async () => {
+    const getMessage = vi.fn(async () => ({ message: wire(G1, 1, OAG, CITED), principals: {} }));
+    await openChats({
+      open: "周末小组",
+      groupMessages: [wire(G1, 1, OAG, CITED), wire(G1, 2, AG1, "见上。", { lookups: { search: 1 }, found: [{ conversationId: G1, seq: 1 }] })],
+      api: { getMessage },
+    });
+    await click(within(lookupLine(2)).getByRole("button", { name: "查了 1 次聊天记录" }));
+    expect([...lookupLine(2).querySelectorAll(".lookup-rows .row-preview")].map((p) => p.textContent)).toEqual([SHOWN]);
+  });
+
+  it("the quote of an Agent's reply shows no citation; a person's text is as written", async () => {
+    await openChats({
+      open: "周末小组",
+      groupMessages: [
+        wire(G1, 1, OAG, CITED),
+        wire(G1, 2, ME_ID, "好的", { replyTo: { seq: 1, visible: true, senderId: OAG, text: CITED, kind: "text" } }),
+        wire(G1, 3, ANN, "我写的〔m1〕"),
+        wire(G1, 4, BO, "嗯", { replyTo: { seq: 3, visible: true, senderId: ANN, text: "我写的〔m1〕", kind: "text" } }),
+      ],
+    });
+    expect(storedLi(2).querySelector("blockquote").textContent).toBe(`安的助手${SHOWN}`);
+    expect(storedLi(4).querySelector("blockquote").textContent).toBe("小安我写的〔m1〕");
+  });
+
+  it("the reply chip over the composer shows no citation of the Agent's reply it answers", async () => {
+    await openChats({ messages: [...BASE, wire(A1, 3, AG1, CITED)] });
+    await click(within(storedLi(3)).getByRole("button", { name: /回复/ }));
+    expect(document.querySelector(".reply-chip span").textContent).toBe(`回复 小助手：${SHOWN}`);
+  });
+
+  it("a hit of the list's search that is an Agent's reply shows no citation", async () => {
+    const searchAll = vi.fn(async () => ({ messages: [wire(G1, 1, OAG, CITED, { createdAt: at(1) })], nextBefore: null, principals: {} }));
+    await openChats({ groupMessages: [wire(G1, 1, OAG, CITED)], api: { searchAll } });
+    fireEvent.change(screen.getByLabelText("搜索联系人、群聊"), { target: { value: "春熙路" } });
+    await elapse(300);
+    const row = document.querySelector(".list-col .row-preview mark").closest("button");
+    expect(row.querySelector(".row-preview").textContent).toBe(`安的助手：${SHOWN}`);
   });
 });
