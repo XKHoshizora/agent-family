@@ -113,6 +113,13 @@ const HIDDEN_KEYS = [
   "call_seqs",
   // Which lines of a memory notice are the notes a merge joined (its owner's notice only).
   "sourceLines",
+  // Whether a reply could start on the free allowance now (the owner's `GET /api/usage` only; Task H).
+  "canStartFreeReply",
+  // A run held back at admission, and an owner's stop kept in its row (Task H): never on the wire, not even to its owner.
+  "heldBackBy",
+  "held_back_by",
+  "stopAsked",
+  "stop_asked",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 
