@@ -25,10 +25,15 @@ export interface Usage {
 
 const min = (a: bigint, b: bigint): bigint => (a < b ? a : b);
 
-/** What a settlement charged: to which source (null: a run never admitted, or a provider model), and how much of it the balance. */
+/**
+ * What a settlement charged: to which source (null: a run never admitted, or a provider model), and how much of it the
+ * balance; and, for one charged to the free allowance or the balance, what the day's free allowance has used and the
+ * balance is once it is charged (read under the account lock it took). The reminders (reminders.ts) go by it.
+ */
 export interface Settled {
   chargeTo: ChargeTo | null;
   balanceMicro: bigint;
+  after: { freeUsedMicro: bigint; balanceMicro: bigint } | null;
 }
 
 /**
@@ -106,11 +111,15 @@ export async function settle(
   let freeMicro = 0n;
   let balanceMicro = 0n;
   let memoryMicro = 0n;
+  let after: Settled["after"] = null;
   if (run.charge_to !== null) {
     const charged = forgiveAll ? 0n : min(cost, BigInt(run.hold_micro));
-    await lockAccount(t, run.owner_id);
+    const account = await lockAccount(t, run.owner_id);
+    if (run.charge_to === "free" || run.charge_to === "balance") {
+      after = { freeUsedMicro: await freeUsedToday(t, run.owner_id, now, config.siteTimezone), balanceMicro: account.balanceMicro };
+    }
     if (run.charge_to === "free") {
-      const used = await freeUsedToday(t, run.owner_id, now, config.siteTimezone);
+      const used = after!.freeUsedMicro;
       freeMicro = min(charged, config.freeDailyMicro > used ? config.freeDailyMicro - used : 0n);
       if (freeMicro > 0n) {
         await t.query(
@@ -152,5 +161,6 @@ export async function settle(
   if (reported && run.purpose === "reply" && run.input_estimate !== null && run.ratio_key !== null) {
     await learnRatio(t, run.ratio_key, run.input_estimate, usage.inputTokens, log);
   }
-  return { chargeTo: run.charge_to, balanceMicro };
+  if (after) after = { freeUsedMicro: after.freeUsedMicro + freeMicro, balanceMicro: after.balanceMicro - balanceMicro };
+  return { chargeTo: run.charge_to, balanceMicro, after };
 }

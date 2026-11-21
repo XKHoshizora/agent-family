@@ -134,8 +134,12 @@ interface Round {
 /** A reply that can make no further call: what it wrote stands, as cut. */
 const CUT_SHORT: Finished = { usage: null, truncated: true, toolCalls: [], assistant: [], toolsRefused: false };
 
-/** A reply's spend could not be held for another call, and it wrote nothing. */
-const NO_QUOTA: RunEnd = { status: "failed", error: "no_quota" };
+/**
+ * `extend` said "stop": the run is no longer running here (ended elsewhere meanwhile), and it wrote nothing; `finish`
+ * finds it so and leaves it as that recorded it. Money never stops a reply that has started: short of it, the next call is
+ * its last ("final").
+ */
+const ENDED_ELSEWHERE: RunEnd = { status: "cancelled" };
 
 /**
  * What a reply's rounds used, for its one settlement (and for `extend`, which counts it the same way): each round's
@@ -413,7 +417,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     try {
       await work(run, shutdown.signal);
     } finally {
-      shutdowns.delete(run.id);
+      // Only this attempt's: a run held back and claimed again by this worker meanwhile has its own.
+      if (shutdowns.get(run.id) === shutdown) shutdowns.delete(run.id);
     }
   }
 
@@ -466,8 +471,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * the last round is not run, and no call follows. An upstream that refused the tools (the first round): they are marked
    * unusable, and that round's text is the answer. A later round the upstream refuses (400 or 422: something in the
    * rounds it will not take) is followed, once, by the ordinary call — no tools, no rounds, its cost held first — whose
-   * answer is the reply's. `extend` saying "stop" ends the reply with what it wrote, as cut (nothing written:
-   * `no_quota`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
+   * answer is the reply's. `extend` saying "stop" — the run no longer running here; money never says it — ends the reply
+   * with what it wrote, as cut (nothing written: `ENDED_ELSEWHERE`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
    * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
    * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
    * paragraph break. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
@@ -558,7 +563,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         if (steps.length > 0 && !plain && (round.status === 400 || round.status === 422)) {
           const next = await extend(holdTokens([prepared.call.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
           if (next === "stop" || next === "busy") {
-            ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
+            ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? ENDED_ELSEWHERE : BUSY };
             break;
           }
           plain = true;
@@ -670,7 +675,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
           TOOL_PREAMBLE_TOKENS,
       );
       if (next === "stop" || next === "busy") {
-        ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
+        ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? ENDED_ELSEWHERE : BUSY };
         break;
       }
       final = next === "final" || guard.exhausted() || guard.mustEnd() || unusable || stepsTokens >= room;

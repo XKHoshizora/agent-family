@@ -178,12 +178,17 @@ export interface Usage {
 }
 
 export interface AgentPort {
-  /** The oldest queued reply whose owner has fewer than `agentMaxConcurrentRuns` running, now `running`; null when none. */
+  /**
+   * The oldest queued reply whose owner has fewer than `agentMaxConcurrentRuns` running, now `running`; null when none. A
+   * reply held back at admission is passed over while every call it waits for runs, and, until it is admitted, so are its
+   * owner's younger replies that would be paid from the same source (first come, first served per payer and source).
+   */
   claimNext(): Promise<RunTicket | null>;
   /**
    * Resolves the model, builds what the model is shown (never no turn at all), admits the call and marks the Agent's
    * read position — or says why the run ends at once (a reply held back at admission, its run queued again to wait for
-   * room, ends here too: `finish` then finds it queued and leaves it so); rejects with `RunNotRunning` when the run was
+   * room, ends this attempt here too: `finish` given that end does nothing, a later attempt being the run's own); rejects
+   * with `RunNotRunning` when the run was
    * ended elsewhere meanwhile. Reading the attachments stops between files once the run should
    * stop (it then ends as `shouldStop` says) and is bounded by the run's time limit (`failed`, `busy`). `closing`
    * aborts when the service is closing: before the call is admitted, `begin` then rejects with its reason and records

@@ -17,6 +17,7 @@ import { agentName, userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { pushWhispers } from "../whispers/routes.ts";
 import { expireOfAgent } from "../whispers/store.ts";
+import { toWireWhisper } from "../whispers/wire.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
 import { agentField, agentIntro, agentPersona, confirmProposal, discardProposal, draftPersona, proposedPersona } from "./persona.ts";
@@ -304,7 +305,19 @@ export function registerAgentRoutes(
       const { name, intro: givenIntro, field: givenField, model: chosen } = req.body;
       const closing = new AbortController();
       const drafting = draftPersona(
-        { db, config, models: app.deps.models, log: req.log, inFlight: draftRuns, release: (runId) => app.agentPort.releaseRun(runId) },
+        {
+          db,
+          config,
+          models: app.deps.models,
+          log: req.log,
+          inFlight: draftRuns,
+          release: (runId) => app.agentPort.releaseRun(runId),
+          // A reminder about money its settlement wrote: pushed to its owner and counted, now that it is committed.
+          reminded: ({ whisper, metric }) => {
+            req.log.info({ metric }, "a reminder about money was written for its owner");
+            app.realtime.pushWhisper(whisper.ownerId, toWireWhisper(whisper));
+          },
+        },
         me.id,
         { name, intro: givenIntro ?? "", field: givenField ?? "", model: chosen },
         closing.signal,

@@ -222,16 +222,17 @@ export const DEFAULT_TOOLS: Readonly<ToolsConfig> = Object.freeze(toolsSchema.pa
 /** What the open holds of one payer may add up to (`HOLDS`; README "Metering", Admission). */
 export interface HoldsConfig {
   /**
-   * The holds of one owner's running calls against one source (today's free allowance, or the balance) may add up to at
-   * most this share of what is left of it; a reply that would pass it waits, queued, unless it would be the only one
-   * holding against that source (src/metering/admit.ts). Above 0, at most 1: a share above 1 would let replies running
-   * together hold more than there is, and the debt bound would no longer hold.
+   * An admission rule: a reply starts beside the owner's other running calls on its source (today's free allowance, or
+   * the balance) only when all their holds, its own included, add up to at most this share of what is left of it; else it
+   * waits, queued, unless it would be the only one holding against that source (src/metering/admit.ts). A reply's later
+   * rounds are held against all that is left, whatever the share. From 0.01 (below, the share would round to nothing) to
+   * 1: a share above 1 would let replies starting together hold more than there is, and the debt bound would not hold.
    */
   maxOpenShare: number;
 }
 
 const holdsSchema = z.strictObject({
-  maxOpenShare: z.number().gt(0).max(1).default(1),
+  maxOpenShare: z.number().min(0.01).max(1).default(1),
 });
 
 /** When the owner is reminded that the day's free allowance runs low (`ALLOWANCE`; src/metering/reminders.ts). */

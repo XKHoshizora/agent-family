@@ -20,22 +20,33 @@ import { maxCostMicro } from "./prices.ts";
  * the calls it waited for has ended (agents/port-impl.ts `begin`, `claimNext`). A persona draft (its owner waits at the
  * page) never waits: it starts while something is left, its hold counted like any. A reply that offers tools makes
  * several calls on one admission; before each after its first, extension (`raiseHold`) holds what the reply has cost so
- * far and the most of that call; where that does not fit what is left beside the other holds, the call is the reply's
- * last — never refused, also past what is left. So the most the owner's calls can take a source below zero is what one
- * call that started alone costs, and one call more (a last call, or a draft) for each other call open beside it
- * (tests/metering-concurrency.test.ts, tests/money-blocking.test.ts); on the free allowance that is what is forgiven.
+ * far — at most what it held for its calls: an upstream that reports more is wrong and the rest is forgiven — and the
+ * most of that call; where that does not fit what is left beside the other holds, the call is the reply's last — never
+ * refused, also past what is left. The two sources differ there (fix round 1's ruling):
+ * - the balance: so the most the owner's calls can take it below zero is what one reply that started alone costs, and
+ *   one call more (a last call, or a draft) for each other call open beside it; that debt is the owner's, repaid by the
+ *   next grant;
+ * - the free allowance, whose overrun the site forgives: a reply offered tools holds there, from its admission, room for
+ *   its last call too (the most one call of its model can cost: its whole context and output) beside its first, and every
+ *   round before the last keeps that room; so its last call never passes its hold, only a reply that started alone (one
+ *   at a time near the end of the day's allowance) can pass what is left, and what is forgiven a day is at most one
+ *   reply, and a draft for each draft open beside it.
+ * (tests/metering-concurrency.test.ts, tests/money-blocking.test.ts.)
  *
  * Lock order: the run row (admitRun, settle), then the `accounts` row. Neither function locks a conversation or an
  * `agents` row: callers that need those take them first.
  */
 
 /**
- * A reply whose hold, beside what the owner's other running calls hold against its source, would pass what
+ * A reply whose hold, beside what the owner's other running calls hold against its source (`on`), would pass what
  * `HOLDS.maxOpenShare` lets them hold of what is left: it waits for one of `behind` (those calls' run ids) to end. Thrown
  * by `admit`, under the account lock, before anything is written.
  */
 export class HeldBack extends Error {
-  constructor(readonly behind: readonly string[]) {
+  constructor(
+    readonly behind: readonly string[],
+    readonly on: "free" | "balance",
+  ) {
     super("admission: the holds of the owner's other running calls leave no room for this one now");
     this.name = "HeldBack";
   }
@@ -47,6 +58,11 @@ export type ChargeTo = "free" | "balance" | "memory";
 export interface Admission {
   chargeTo: ChargeTo | null;
   holdMicro: bigint;
+  /**
+   * Of `holdMicro`, the room a reply offered tools keeps on the free allowance for its last call (`admit`'s `lastCallMicro`);
+   * absent when none is kept.
+   */
+  reserveMicro?: bigint;
 }
 
 /** What the owner's running memory calls hold against the memory allowance. */
@@ -98,7 +114,7 @@ export function chargeSource(tier: "free" | "paid", left: PerSource): ChargeTo |
   return left.balanceMicro > 0n ? "balance" : null;
 }
 
-/** `share` (`HOLDS.maxOpenShare`, above 0 and at most 1) of `micro`, rounded down, in whole micro-points. */
+/** `share` (`HOLDS.maxOpenShare`, 0.01 to 1) of `micro`, rounded down, in whole micro-points. */
 const shareOf = (micro: bigint, share: number): bigint => (micro * BigInt(Math.round(share * 1_000_000))) / 1_000_000n;
 
 /**
@@ -110,7 +126,9 @@ const shareOf = (micro: bigint, share: number): bigint => (micro * BigInt(Math.r
  *   `free_and_balance` (free-tier model; `resetsAt`: the next site midnight) or `balance` (paid-tier model);
  * - a reply (`purpose` `reply`) starts when no other running call holds against that source, or when every hold
  *   against it, its own included, adds up to at most `HOLDS.maxOpenShare` of what is left of it; else — and when the
- *   holds leave neither source anything though one has something left — it throws `HeldBack` with those calls' runs;
+ *   holds leave neither source anything though one has something left — it throws `HeldBack` with those calls' runs and
+ *   the source it waits for. On the free allowance a reply also holds `lastCallMicro` (a reply offered tools: room for its
+ *   last call; `reserveMicro`), counted in that rule as its hold is;
  * - a persona draft (`draft`) starts while something is left, holds or not: on the source picked after the holds, or
  *   else the one picked on what is left;
  * - a memory call (`memory`) on a site model takes the memory allowance and nothing else, and is 402 `no_quota` with
@@ -125,6 +143,7 @@ export async function admit(
   inputTokensEstimate: number,
   now: Date,
   purpose: "reply" | "draft" | "memory" = "reply",
+  lastCallMicro = 0n,
 ): Promise<Admission> {
   if (resolved.source === "provider") return { chargeTo: null, holdMicro: 0n };
   if (purpose === "memory") {
@@ -138,14 +157,12 @@ export async function admit(
   // A site model without a tier is treated as paid: it never touches the free allowance.
   const tier = resolved.tier === "free" ? "free" : "paid";
   const account = await lockAccount(t, ownerId);
-  const raw: PerSource = {
-    freeMicro: config.freeDailyMicro - (await freeUsedToday(t, ownerId, now, config.siteTimezone)),
-    balanceMicro: account.balanceMicro,
-  };
+  const freeUsedMicro = await freeUsedToday(t, ownerId, now, config.siteTimezone);
+  const raw: PerSource = { freeMicro: config.freeDailyMicro - freeUsedMicro, balanceMicro: account.balanceMicro };
   const holds = await readHolds(t, ownerId);
-  const holdMicro = maxCostMicro(resolved, inputTokensEstimate);
+  const firstMicro = maxCostMicro(resolved, inputTokensEstimate);
   // The existing rule, on what is left after the holds; and on what is left, holds aside (whether anything is).
-  const chargeTo = chargeSource(tier, { freeMicro: raw.freeMicro - holds.freeMicro, balanceMicro: raw.balanceMicro - holds.balanceMicro });
+  const chargeTo = chargeSource(tier, headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro, balanceMicro: account.balanceMicro, holds }));
   const anything = chargeSource(tier, raw);
   if (anything === null) {
     throw new AppError(
@@ -154,7 +171,10 @@ export async function admit(
       tier === "free" ? { reason: "free_and_balance", resetsAt: nextSiteMidnight(now, config.siteTimezone).toISOString() } : { reason: "balance" },
     );
   }
-  if (purpose === "draft") return { chargeTo: chargeTo ?? anything, holdMicro };
+  if (purpose === "draft") return { chargeTo: chargeTo ?? anything, holdMicro: firstMicro };
+  // On the free allowance, a reply offered tools holds room for its last call too.
+  const reserveMicro = chargeTo === "free" ? lastCallMicro : 0n;
+  const holdMicro = firstMicro + reserveMicro;
   // A reply: the calls that hold against the source it would take — or, the holds leaving it none, against every source
   // it may use (it waits for whichever of them ends first).
   const sources: ChargeTo[] = chargeTo !== null ? [chargeTo] : tier === "free" ? ["free", "balance"] : ["balance"];
@@ -163,15 +183,20 @@ export async function admit(
     [ownerId, sources],
   );
   if (chargeTo !== null) {
+    const admitted: Admission = { chargeTo, holdMicro, ...(reserveMicro > 0n ? { reserveMicro } : {}) };
     // The only call holding against it: it starts, whatever its hold (one reply may always be open).
-    if (rows.length === 0) return { chargeTo, holdMicro };
+    if (rows.length === 0) return admitted;
     const held = chargeTo === "free" ? holds.freeMicro : holds.balanceMicro;
     const left = chargeTo === "free" ? raw.freeMicro : raw.balanceMicro;
-    if (held + holdMicro <= shareOf(left, config.holds.maxOpenShare)) return { chargeTo, holdMicro };
+    if (held + holdMicro <= shareOf(left, config.holds.maxOpenShare)) return admitted;
   }
   // Never empty here: holds leave a source with something left nothing only when calls running hold against it.
   if (rows.length === 0) throw new Error("admission: held back behind no running call");
-  throw new HeldBack(rows.map((r) => r.id));
+  // A reply's source is the allowance or the balance, never the memory allowance (that is a memory call's alone).
+  throw new HeldBack(
+    rows.map((r) => r.id),
+    (chargeTo ?? anything) === "free" ? "free" : "balance",
+  );
 }
 
 /**
@@ -179,7 +204,9 @@ export async function admit(
  * hold taken after its usage record would never be released): locks the run row, admits, and records on it the call's
  * `source` and `model` (`resolved.name`) with its `charge_to` and `hold_micro` — what settlement goes by — and the
  * reasoning level the call is sent at (`resolved.reasoning`: what its reply's `via` shows its owner), all in the
- * caller's transaction. A refusal (402 `no_quota`) or a reply held back (`HeldBack`) throws and writes nothing.
+ * caller's transaction; a reply held back before has its mark cleared (`held_back_by`, `held_back_on`: the owner's
+ * younger replies stop waiting behind it, agents/port-impl.ts `claimNext`). A refusal (402 `no_quota`) or a reply held
+ * back (`HeldBack`) throws and writes nothing. `lastCallMicro`: `admit`'s.
  */
 export async function admitRun(
   t: Tx,
@@ -189,6 +216,7 @@ export async function admitRun(
   resolved: Pick<Resolved, "source" | "name" | "tier" | "price" | "call" | "reasoning">,
   inputTokensEstimate: number,
   now: Date,
+  lastCallMicro = 0n,
 ): Promise<Admission> {
   const { rows } = await t.query<{ owner_id: string; status: string; source: string | null; purpose: "reply" | "draft" | "memory" }>(
     "select owner_id, status, source, purpose from agent_runs where id = $1 for update",
@@ -200,53 +228,57 @@ export async function admitRun(
   if ((await t.query("select 1 from usage_records where run_id = $1", [runId])).rowCount !== 0) {
     throw new Error(`admitRun: ${runId} is already settled`);
   }
-  const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now, run.purpose);
-  await t.query("update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5, reasoning = $6 where id = $1", [
+  const admission = await admit(t, config, ownerId, resolved, inputTokensEstimate, now, run.purpose, lastCallMicro);
+  await t.query(
+    `update agent_runs set source = $2, model = $3, charge_to = $4, hold_micro = $5, reasoning = $6, held_back_by = null, held_back_on = null
+      where id = $1`,
+    [
     runId,
     resolved.source,
     resolved.name,
     admission.chargeTo,
     admission.holdMicro.toString(),
     resolved.reasoning,
-  ]);
+    ],
+  );
   return admission;
 }
 
 /**
  * Extension: a reply that offers tools makes a call per round (agents/runtime/worker.ts), and before each call after its
- * first the hold of its run — admitted on a site model, still running, its row locked by the caller — is raised to
- * `wanted`: what the reply has cost so far and the true most of that call. It is never lowered. `left` is what is left of
- * the run's own source (its `charge_to`: today's free allowance, the balance, or the memory allowance) by admission's
- * headroom (`headroom`, `memoryLeft`: what is left less what running calls hold), this run's own hold added back; never
+ * first the hold of its run — admitted on a site model, still running, its row locked by the caller — is raised; never
+ * lowered. `left` is what is left of the run's own source (its `charge_to`: today's free allowance or the balance) by
+ * admission's headroom (`headroom`: what is left less what running calls hold), this run's own hold added back; never
  * another source than admission chose.
- * - "ok": `toolsAllowed` (the caller's cap and lane budgets) and `wanted` within `left` — the hold overdraws nothing;
- * - "final": else — the next call is the reply's last, and its hold may pass `left`, also below zero: a reply that has
- *   started is never refused for money (Task H, rule 1); it only stops calling tools. So what the holds pass a source by
- *   is, per reply, at most that one last call.
- * Under the owner's account lock (lock order: the run's row, then the account), so two runs of one owner raise their
- * holds one after the other, each seeing the other's.
+ * - "ok": `toolsAllowed` (the caller's cap and lane budgets) and `wanted.ok` within `left` — the hold becomes `wanted.ok`
+ *   (what the reply has spent and the most of the next call, and on the free allowance the room kept for the last call):
+ *   it overdraws nothing;
+ * - "final": else — the next call is the reply's last, its hold `wanted.final` (spent and the most of that call), also
+ *   past `left` and below zero: a reply that has started is never refused for money (Task H, rule 1); it only stops
+ *   calling tools. On the balance that passes `left` by at most that one last call; on the free allowance the room kept
+ *   holds it.
+ * A memory call makes one call and is never extended (it would be refused here). Under the owner's account lock (lock
+ * order: the run's row, then the account), so two runs of one owner raise their holds one after the other, each seeing
+ * the other's.
  */
 export async function raiseHold(
   t: Tx,
-  config: Pick<Config, "freeDailyMicro" | "siteTimezone" | "memory">,
+  config: Pick<Config, "freeDailyMicro" | "siteTimezone">,
   run: { id: string; ownerId: string; chargeTo: ChargeTo; holdMicro: bigint },
-  wanted: bigint,
+  wanted: { ok: bigint; final: bigint },
   toolsAllowed: boolean,
   now: Date,
 ): Promise<"ok" | "final"> {
+  if (run.chargeTo === "memory") throw new Error("raiseHold: a memory call makes one call; it is never extended");
   const account = await lockAccount(t, run.ownerId);
-  let left: bigint;
-  if (run.chargeTo === "memory") {
-    left = (await memoryLeft(t, config, run.ownerId, now)) + run.holdMicro;
-  } else {
-    const per = headroom({
-      freeDailyMicro: config.freeDailyMicro,
-      freeUsedMicro: await freeUsedToday(t, run.ownerId, now, config.siteTimezone),
-      balanceMicro: account.balanceMicro,
-      holds: await readHolds(t, run.ownerId),
-    });
-    left = (run.chargeTo === "free" ? per.freeMicro : per.balanceMicro) + run.holdMicro;
-  }
-  await t.query("update agent_runs set hold_micro = greatest(hold_micro, $2::bigint) where id = $1", [run.id, wanted.toString()]);
-  return toolsAllowed && wanted <= left ? "ok" : "final";
+  const per = headroom({
+    freeDailyMicro: config.freeDailyMicro,
+    freeUsedMicro: await freeUsedToday(t, run.ownerId, now, config.siteTimezone),
+    balanceMicro: account.balanceMicro,
+    holds: await readHolds(t, run.ownerId),
+  });
+  const left = (run.chargeTo === "free" ? per.freeMicro : per.balanceMicro) + run.holdMicro;
+  const ok = toolsAllowed && wanted.ok <= left;
+  await t.query("update agent_runs set hold_micro = greatest(hold_micro, $2::bigint) where id = $1", [run.id, (ok ? wanted.ok : wanted.final).toString()]);
+  return ok ? "ok" : "final";
 }

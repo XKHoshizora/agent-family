@@ -438,14 +438,15 @@ describe("the holds and allowance configuration", () => {
     expect(loadConfig({ ...base, ALLOWANCE: "{}" }).allowance).toEqual({ warnAt: 0.8 });
   });
 
-  test("an override: a share above 0 and at most 1; a warning point above 0 and below 1", () => {
+  test("an override: a share from 0.01 to 1; a warning point above 0 and below 1", () => {
     expect(loadConfig({ ...base, HOLDS: '{"maxOpenShare":0.5}' }).holds).toEqual({ maxOpenShare: 0.5 });
+    expect(loadConfig({ ...base, HOLDS: '{"maxOpenShare":0.01}' }).holds).toEqual({ maxOpenShare: 0.01 });
     expect(loadConfig({ ...base, HOLDS: '{"maxOpenShare":1}' }).holds).toEqual({ maxOpenShare: 1 });
     expect(loadConfig({ ...base, ALLOWANCE: '{"warnAt":0.9}' }).allowance).toEqual({ warnAt: 0.9 });
   });
 
-  test("a share of 0 or less or above 1 (the holds of replies running together could then pass what is left), a warning point out of range, an unknown key and bad JSON refuse", () => {
-    for (const bad of ['{"maxOpenShare":0}', '{"maxOpenShare":-0.5}', '{"maxOpenShare":1.01}', '{"maxOpenShare":"1"}', '{"nope":1}', "[]", "nope"]) {
+  test("a share below 0.01 (it would round to nothing) or above 1 (the holds of replies running together could then pass what is left), a warning point out of range, an unknown key and bad JSON refuse", () => {
+    for (const bad of ['{"maxOpenShare":0}', '{"maxOpenShare":0.001}', '{"maxOpenShare":-0.5}', '{"maxOpenShare":1.01}', '{"maxOpenShare":"1"}', '{"nope":1}', "[]", "nope"]) {
       expect(() => loadConfig({ ...base, HOLDS: bad }), bad).toThrow(/HOLDS/);
     }
     for (const bad of ['{"warnAt":0}', '{"warnAt":1}', '{"warnAt":1.5}', '{"warnAt":"0.8"}', '{"nope":1}', "[]", "nope"]) {

@@ -76,7 +76,7 @@ type Task =
    * Run `runId` of the conversation: `run` to the owner its row names (none: the owner is not told), its state to a
    * group's others. `activity` (`pushActivity`): what its tool is doing, with both — dropped if `wanted` says no by then.
    */
-  | { kind: "run"; conversationId: string; runId: string; run: WireRun | null; activity?: Activity | null; wanted?: () => boolean };
+  | { kind: "run"; conversationId: string; runId: string; run: WireRun | null; activity?: Activity | null; wanted?: () => boolean; ownerOnly?: true };
 
 interface Queue {
   tasks: Task[];
@@ -194,6 +194,15 @@ export class Hub {
    */
   pushRun(conversationId: string, run: WireRun): void {
     this.enqueue(conversationId, { kind: "run", conversationId, runId: run.id, run });
+  }
+
+  /**
+   * `pushRun` to the run's owner alone: a reply held back at its admission, queued again or claimed again (agents/port-impl.ts)
+   * — the other members of a group, told it is replying, are told nothing more, so its going back and forth says nothing
+   * about its owner's money.
+   */
+  pushRunToOwner(conversationId: string, run: WireRun): void {
+    this.enqueue(conversationId, { kind: "run", conversationId, runId: run.id, run, ownerOnly: true });
   }
 
   /**
@@ -443,6 +452,7 @@ export class Hub {
     }
     const { agentId, state } = audience;
     if (run) this.push(ownerId, { type: "run", conversationId, agentId, run, ...tool });
+    if (task.ownerOnly) return;
     if (task.activity !== undefined && state !== "replying") return;
     for (const id of this.connectedAmong(audience.memberIds)) {
       if (id !== ownerId) this.push(id, { type: "run", conversationId, agentId, state, ...tool });

@@ -3,6 +3,7 @@ import { draftDeadlineMs, type Config } from "../config.ts";
 import type { Db, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { ownerCall } from "../metering/owner-call.ts";
+import type { Reminded } from "../metering/reminders.ts";
 import { ModelError, type ModelGateway } from "../models/gateway.ts";
 import { resolveModel } from "../models/resolve.ts";
 import { characters, hasVisibleText, stripUnsafeText, userText } from "../schemas.ts";
@@ -284,6 +285,8 @@ export interface DraftDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn">;
   /** The drafts this process is working on, by run id (the stale-run sweep leaves them alone). */
   inFlight: Set<string>;
+  /** A reminder about money the draft's settlement wrote (metering/owner-call.ts `reminded`). */
+  reminded?: (reminder: Reminded) => void;
   /**
    * Ends a draft's run that will not be finished here (the service is closing) as recovery ends one: `failed`,
    * `provider_unavailable`, its hold released at no charge (`DbAgentPort.releaseRun`). Rejects when it cannot be written.

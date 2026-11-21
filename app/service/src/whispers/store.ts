@@ -225,6 +225,44 @@ export async function createWhisper(
 }
 
 /**
+ * `createWhisper` for a caller whose transaction already holds rows that come after a conversation's in the lock order —
+ * a settlement, under the owner's `accounts` row (metering/reminders.ts) — so it takes no conversation or Agent row: the
+ * conversation's last seq is read as it is now (a message committed meanwhile may sit just before or just after it), and
+ * the memberships and the Agent's being alive are checked in the insert itself, as `createWhisper` checks them. A caller
+ * that also holds the Agent's row (a reply's `finish`) keeps a delete out; otherwise a delete in flight may leave the
+ * whisper open after the Agent's whispers were expired, to expire on its own with the rest (`WHISPER_OPEN_DAYS`). The
+ * same refusals and the same null as `createWhisper`'s.
+ */
+export async function createWhisperUnlocked(
+  t: Tx,
+  w: { conversationId: string; ownerId: string; agentId: string; kind: WhisperKind; body: WhisperBody },
+  log?: Pick<FastifyBaseLogger, "warn">,
+): Promise<Whisper | null> {
+  if (!(WHISPER_KINDS as readonly string[]).includes(w.kind)) throw new Error("createWhisperUnlocked: not a whisper kind");
+  const checked = checkBody(w.body);
+  if (!checked) throw new Error("createWhisperUnlocked: the whisper body is not one");
+  if ("refused" in checked) {
+    log?.warn({ kind: w.kind, reason: checked.refused }, "a whisper was not made: its body cannot be kept");
+    return null;
+  }
+  const { rows } = await t.query<WhisperRow>(
+    `insert into whispers (conversation_id, owner_id, agent_id, after_seq, kind, body)
+     select c.id, $2::uuid, $3::uuid, c.seq, $4::text, $5::jsonb
+       from conversations c
+      where c.id = $1
+        and exists (select 1 from memberships me where me.conversation_id = $1 and me.principal_id = $2 and me.left_seq is null)
+        and exists (
+          select 1 from memberships am
+            join agents a on a.principal_id = am.principal_id
+            join principals p on p.id = am.principal_id
+           where am.conversation_id = $1 and am.principal_id = $3 and am.left_seq is null and a.deleted_at is null and p.owner_id = $2)
+     returning ${COLUMNS}`,
+    [w.conversationId, w.ownerId, w.agentId, w.kind, JSON.stringify(checked.body)],
+  );
+  return rows[0] ? toWhisper(rows[0]) : null;
+}
+
+/**
  * The owner's answer to their whisper `id`: `accepted` (its `tell` button) or `declined` (its `dismiss`). Changes its status
  * and nothing else (what an answer does for a kind is the caller's, whispers/routes.ts `ANSWER_HOOKS`). "gone" when there is
  * no whisper `id` of `ownerId`'s — anyone else's and none are found by the same single read —, and as well when its Agent

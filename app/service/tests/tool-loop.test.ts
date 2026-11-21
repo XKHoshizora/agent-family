@@ -452,7 +452,7 @@ describe("a reply that offers tools", () => {
     expect(finishedAs(again)).toEqual([{ status: "failed", error: "provider_unavailable" }]);
   });
 
-  it("a later round refused (400) with nothing left to hold the ordinary call for: it is not made, and the reply ends as when nothing more can be held", async () => {
+  it("a later round refused (400) when the port says stop (the run ended elsewhere): the ordinary call is not made, and the reply ends with what it wrote", async () => {
     const said = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
       .fail("provider_unavailable", { status: 400 });
@@ -470,7 +470,7 @@ describe("a reply that offers tools", () => {
     await runOn(silent, mute);
     expect(mute.calls).toHaveLength(2);
     expect(silent.posted).toEqual([]);
-    expect(finishedAs(silent)).toEqual([{ status: "failed", error: "no_quota" }]);
+    expect(finishedAs(silent)).toEqual([{ status: "cancelled" }]);
   });
 
   it("the owner's stop between rounds, or between two tool calls: what was written is posted as stopped, nothing more is called or run", async () => {
@@ -634,7 +634,7 @@ describe("a reply that offers tools", () => {
     expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
   });
 
-  it("the port's word on money: final makes the next call the last; stop ends the reply with what it wrote, or with no_quota when it wrote nothing", async () => {
+  it("the port's word: final makes the next call the last; stop (the run ended elsewhere — money never stops a reply) ends the reply with what it wrote, or with nothing when it wrote nothing", async () => {
     const finalGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }]).reply("就这样。");
     const final = fakePort({ extend: () => "final" });
     await runOn(final, finalGateway);
@@ -652,7 +652,7 @@ describe("a reply that offers tools", () => {
     const stopSilent = fakePort({ extend: () => "stop" });
     await runOn(stopSilent, nothing);
     expect(stopSilent.posted).toEqual([]);
-    expect(stopSilent.finished).toEqual([{ end: { status: "failed", error: "no_quota" }, usage: U(100, 10), fallback: expect.any(Object) }]);
+    expect(stopSilent.finished).toEqual([{ end: { status: "cancelled" }, usage: U(100, 10), fallback: expect.any(Object) }]);
   });
 
   it("the port failing to answer about money ends the reply with what it wrote, as cut; with nothing written it fails busy, our own trouble", async () => {

@@ -168,7 +168,10 @@ describe("the money of a reply that offers tools", () => {
       .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 60) })
       .reply("去吃川菜。", { usage: U(2000, 70) });
     const { worker } = toolWorker(gateway);
-    const { owner, conv } = await owned("sumup");
+    // On the balance: on the day's 3 free points a reply offered tools holds room for a whole-context last call (about 11
+    // points on this model) and gets one round only (money-blocking.test.ts).
+    const { owner, conv } = await owned("sumup", PAID);
+    await grant(db, owner.id, 20n * POINT);
     await say(owner, conv, "附近有什么好吃的？");
     expect(await worker.runOnce()).toBe(true);
 
@@ -178,8 +181,8 @@ describe("the money of a reply that offers tools", () => {
     expect(run).toMatchObject({ status: "done", hold: "0", input_estimate: null });
     const total = plus(U(1000, 50), U(1500, 60), U(2000, 70));
     const cost = costOf(total).toString();
-    expect(await recordsOf(run.id)).toEqual([{ input: total.inputTokens, output: total.outputTokens, estimated: false, source: "site", outcome: "done", cost, free: cost, balance: "0", forgiven: "0" }]);
-    expect(await freeUsed(owner.id)).toBe(cost);
+    expect(await recordsOf(run.id)).toEqual([{ input: total.inputTokens, output: total.outputTokens, estimated: false, source: "site", outcome: "done", cost, free: "0", balance: cost, forgiven: "0" }]);
+    expect(await balanceOf(owner.id)).toBe(20n * POINT - BigInt(cost));
     expect((await db.query("select count(*)::int as n from token_ratios")).rows[0].n).toBe(0);
   });
 
@@ -189,7 +192,8 @@ describe("the money of a reply that offers tools", () => {
       .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 60) });
     const third = gateway.hang();
     const { worker } = toolWorker(gateway);
-    const { owner, conv } = await owned("holder");
+    const { owner, conv } = await owned("holder", PAID);
+    await grant(db, owner.id, 20n * POINT);
     await say(owner, conv, "附近有什么好吃的？");
     const running = worker.runOnce();
     const call = await third.reached;
@@ -425,15 +429,18 @@ describe("the money of a reply that offers tools", () => {
     expect(await Promise.all(tickets.map((t) => holdOf(t.id)))).toEqual([wanted, wanted]);
   });
 
-  it("what is left between an ordinary call's most and the last call's own most: the last call, held at its own most; with nothing left after what was spent, the last call all the same — and the free allowance is never overdrawn (what passes it is forgiven), nor the balance touched", async () => {
+  it("the free allowance, what is left between an ordinary call's most and the last call's own most: the last call, made within the room the reply kept for it from its admission (its hold is not raised); with nothing left after what was spent, the last call all the same — and the free allowance is never overdrawn (what passes it is forgiven), nor the balance touched", async () => {
     const hits = "川".repeat(3000);
     const two = [
       { name: "search", input: { query: "a" } },
       { name: "search", input: { query: "b" } },
     ];
-    // Someone else's spending leaves `left` of the day's 3 free points while the first round's tools run.
+    // Someone else's spending leaves `left` of the day's 3 free points while the first round's tools run; the reply's
+    // hold then (its admission's) is kept in `held`.
+    const held: bigint[] = [];
     const leaving = (ownerId: string, left: bigint) => async (): Promise<ToolOutcome> => {
       await setFreeUsed(ownerId, 3n * POINT - left);
+      held.push(await holdOf((await runOf(ownerId)).id));
       return { output: hits, activity: "search" };
     };
 
@@ -452,7 +459,12 @@ describe("the money of a reply that offers tools", () => {
     const most = callMax(nextInput(call));
     expect(spent + ordinary).toBeLessThanOrEqual(leave);
     expect(spent + most).toBeGreaterThan(leave);
-    expect(await holdOf(run.id)).toBe(spent + most);
+    // Its admission held its first call and room for a whole-context last call (fix round 1): the last call fits in it.
+    const firstCall = callMax(holdTokens([windowGateway.calls[0]!.system, ...textsOf(windowGateway.calls[0]!), JSON.stringify(TOOLS)], CONTEXT, MAX_OUT) + TOOL_PREAMBLE_TOKENS);
+    const lastCallRoom = callMax(CONTEXT - MAX_OUT + TOOL_PREAMBLE_TOKENS);
+    expect([...new Set(held)]).toEqual([firstCall + lastCallRoom]);
+    expect(spent + most).toBeLessThanOrEqual(held[0]!);
+    expect(await holdOf(run.id)).toBe(held[0]);
     last.release("就这两家。", { usage: U(3000, 100) });
     await running;
     const cost = costOf(plus(U(1000, 50), U(3000, 100)));
@@ -538,8 +550,8 @@ describe("the money of a reply that offers tools", () => {
 
   it("stopped during its third round, which reported nothing: the first two rounds' reported tokens, their hidden reasoning in them, are charged; the third's estimate is added; the raised hold is released", async () => {
     const gateway = scriptedGateway()
-      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 2500), reasoning: "想".repeat(50) })
-      .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 2500), reasoning: "再想".repeat(30) });
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 900), reasoning: "想".repeat(50) })
+      .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 950), reasoning: "再想".repeat(30) });
     const third = gateway.hangAfter("我查到了一些，");
     const { port, worker } = toolWorker(gateway);
     const { owner, conv } = await owned("stopthird", PAID);
@@ -549,13 +561,13 @@ describe("the money of a reply that offers tools", () => {
     const call = await third.reached;
     expect(isFinal(call)).toBe(false);
     const run = await runOf(owner.id);
-    expect(await holdOf(run.id)).toBe(costOf(plus(U(1000, 2500), U(1500, 2500))) + callMax(nextInput(call)));
+    expect(await holdOf(run.id)).toBe(costOf(plus(U(1000, 900), U(1500, 950))) + callMax(nextInput(call)));
     port.requestStop(run.id);
     await running;
 
     // Round 3's estimate: the conversation, the tools and both steps it carried; what it wrote before the stop.
     const thirdInput = estimateTokens(call.system) + textsOf(call).reduce((n, t) => n + estimateTokens(t), 0) + estimateTokens(JSON.stringify(TOOLS) + JSON.stringify(call.steps));
-    const tokens = { input: 1000 + 1500 + thirdInput, output: 2500 + 2500 + estimateTokens("我查到了一些，") };
+    const tokens = { input: 1000 + 1500 + thirdInput, output: 900 + 950 + estimateTokens("我查到了一些，") };
     const cost = costOf(U(tokens.input, tokens.output)).toString();
     expect(await recordsOf(run.id)).toEqual([{ ...tokens, estimated: true, source: "site", outcome: "stopped", cost, free: "0", balance: cost, forgiven: "0" }]);
     expect(await runOf(owner.id)).toMatchObject({ status: "stopped", hold: "0" });
@@ -618,7 +630,8 @@ describe("the money of a reply that offers tools", () => {
     expect(staleAfterMs({ agentRunTimeoutMs: 600_000, tools: { runTimeoutMs: 300_000 } })).toBe(2 * 600_000 + 60_000);
 
     const { port } = toolWorker(scriptedGateway());
-    const { owner, conv } = await owned("crashed");
+    const { owner, conv } = await owned("crashed", PAID);
+    await grant(db, owner.id, 20n * POINT);
     await say(owner, conv, "你好");
     const ticket = (await port.claimNext())!;
     const prepared = await port.begin(ticket);

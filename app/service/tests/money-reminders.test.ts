@@ -5,6 +5,7 @@ import type { ModelGateway } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { nextSiteMidnight } from "../src/accounts/store.ts";
 import { grant, METER_ENV } from "./helpers/metering.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
@@ -19,7 +20,9 @@ import { closeAllSockets, connect } from "./helpers/ws.ts";
  */
 
 const lines: string[] = [];
-const { app, db } = useApp({ env: METER_ENV, agentWorker: false, logStream: { write: (line) => void lines.push(line) } });
+/** The app's own model gateway: what persona drafts call. */
+const drafts = scriptedGateway();
+const { app, db } = useApp({ env: METER_ENV, models: drafts, agentWorker: false, logStream: { write: (line) => void lines.push(line) } });
 
 afterEach(async () => {
   await closeAllSockets();
@@ -29,7 +32,19 @@ const FREE = { source: "site", id: "meter_free" } as const;
 const PAID = { source: "site", id: "meter_paid" } as const;
 const POINT = 1_000_000n;
 const WARN = "这个周期的额度已经用了 80%。";
-const EMPTY = "额度用完了，明天 00:00 恢复。";
+/**
+ * When the allowance comes back, written as the web writes a date ("M月D日 HH:MM", app/web/src/data/errorTexts.js
+ * `resetTimeText`), in the site's time zone: a whisper stays open for days, so never "明天".
+ */
+const resetText = (): string => {
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
+      .formatToParts(nextSiteMidnight(new Date(), "Asia/Shanghai"))
+      .map((x) => [x.type, x.value]),
+  );
+  return `${Number(parts.month)}月${Number(parts.day)}日 ${parts.hour}:${parts.minute}`;
+};
+const EMPTY = `额度用完了，${resetText()} 恢复。`;
 const BALANCE = "余额用完了。";
 /** `n` output tokens: n × 1 000 micro-points on a meter model. */
 const out = (n: number) => ({ inputTokens: 0, outputTokens: n });
@@ -207,6 +222,48 @@ describe("reminders of the day's free allowance and of the balance", () => {
     await Promise.all(runs);
     expect([...(await whispersIn(owner, ann.conversationId)), ...(await whispersIn(owner, bob.conversationId))]).toEqual([WARN]);
     expect((await db.query("select threshold from allowance_reminders where owner_id = $1", [owner.id])).rows).toEqual([{ threshold: "warn" }]);
+    expect(gateway.pending()).toBe(0);
+  });
+
+  it("a persona draft that takes the allowance past 80 % tells its owner too: in the conversation of the Agent they used last, in the same transaction as the draft's settlement", async () => {
+    const owner = await signUp(app, "draftwarn");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const bob = await mustCreateAgent(app, owner, { model: FREE, name: "Bob", persona: "简短地回答。" });
+    await say(owner, ann.conversationId, "早");
+    await say(owner, bob.conversationId, "晚");
+    await setFreeUsed(owner.id, (23n * POINT) / 10n);
+    drafts.reply("你是一个助手。", { usage: out(200) });
+    lines.length = 0;
+    expect((await api(app, owner, "POST", "/api/agents/draft-persona", { name: "Cai", model: FREE })).status).toBe(200);
+    expect(await whispersIn(owner, bob.conversationId)).toEqual([WARN]);
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([]);
+    expect(metrics().map((m) => m.metric)).toEqual(["allowance_warn_80"]);
+    expect(drafts.pending()).toBe(0);
+  });
+
+  it("a reply whose Agent was deleted while it ran still tells its owner, in the conversation of the Agent they used last of those left", async () => {
+    const gateway = scriptedGateway().reply("早。", { usage: out(0) });
+    const call = gateway.hang();
+    const worker = workerWith(gateway);
+    const owner = await signUp(app, "deletedwarn");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const bob = await mustCreateAgent(app, owner, { model: FREE, name: "Bob", persona: "简短地回答。" });
+    const cai = await mustCreateAgent(app, owner, { model: FREE, name: "Cai", persona: "简短地回答。" });
+    // Cai was used before Bob was; Ann's conversation, used last of all, goes with Ann.
+    await say(owner, cai.conversationId, "早");
+    expect(await worker.runOnce()).toBe(true);
+    await say(owner, bob.conversationId, "也早");
+    await db.query("update agent_runs set status = 'cancelled', finished_at = now() where conversation_id = $1 and status = 'queued'", [bob.conversationId]);
+    await setFreeUsed(owner.id, (12n * POINT) / 5n - 1n);
+    await say(owner, ann.conversationId, "你好");
+    const running = worker.runOnce();
+    await call.reached;
+    expect((await api(app, owner, "DELETE", `/api/agents/${ann.id}`)).status).toBe(200);
+    call.release("好。", { usage: out(100) });
+    await running;
+    expect(BigInt(await freeUsed(owner.id))).toBeGreaterThanOrEqual((12n * POINT) / 5n);
+    expect(await whispersIn(owner, bob.conversationId)).toEqual([WARN]);
+    expect(await whispersIn(owner, cai.conversationId)).toEqual([]);
     expect(gateway.pending()).toBe(0);
   });
 });

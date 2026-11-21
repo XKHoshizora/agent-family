@@ -1,17 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentPort, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
-import type { ToolOutcome } from "../src/agents/runtime/port.ts";
+import { isRunEnd, NOTHING, type RunEnd, type ToolOutcome } from "../src/agents/runtime/port.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { Config } from "../src/config.ts";
 import { AppError } from "../src/errors.ts";
-import { admitRun, HeldBack } from "../src/metering/admit.ts";
+import { admitRun, HeldBack, raiseHold } from "../src/metering/admit.ts";
+import { stopRun } from "../src/agents/runs.ts";
 import type { ModelCall, ModelEvent, ModelGateway, ToolCall, ToolSpec } from "../src/models/gateway.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
-import { ESTIMATE, grant, MAX_COST, METER_ENV, meteredAgent, runningRun } from "./helpers/metering.ts";
+import { ESTIMATE, grant, MAX_COST, METER_ENV, meteredAgent, paidReply, runningRun } from "./helpers/metering.ts";
 import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
-import { closeAllSockets } from "./helpers/ws.ts";
+import { providerBody } from "./helpers/providers.ts";
+import { closeAllSockets, connect } from "./helpers/ws.ts";
 
 /**
  * Money that does not block (Task H; README "Metering", Admission, Extension, The debt bound): a reply starts while
@@ -47,15 +49,23 @@ const ENV = {
   AGENT_MAX_CONCURRENT_OTHERS_RUNS: "8",
 };
 
-const { app, db } = useApp({ env: ENV, agentWorker: false });
+const lines: string[] = [];
+const { app, db } = useApp({ env: ENV, agentWorker: false, logStream: { write: (line) => void lines.push(line) } });
+/** The metric lines named `name` logged since the test began (`lines` is emptied before each). */
+const metric = (name: string) => lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => e.metric === name);
 
 afterEach(async () => {
   await closeAllSockets();
+  lines.length = 0;
 });
 
 const POINT = 1_000_000n;
 const FIVE = { source: "site", id: "hold5" } as const;
 const PAID = { source: "site", id: "meter_paid" } as const;
+const FREE = { source: "site", id: "meter_free" } as const;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** The most one call can cost on a meter model: its whole context (less its output) and its whole output, and what providers add around tool definitions. */
+const FULL_CALL = (100_000n - 1000n + 400n) * 100n + 1000n * 1000n;
 const U = (inputTokens: number, outputTokens: number) => ({ inputTokens, outputTokens });
 
 const SEARCH: ToolSpec = {
@@ -113,19 +123,53 @@ const say = async (who: Actor, conv: string, text: string) => {
   expect(sent.status).toBe(201);
 };
 
-async function agentOf(owner: Actor, model: typeof FIVE | typeof PAID, name: string) {
+async function agentOf(owner: Actor, model: typeof FIVE | typeof PAID | typeof FREE | { source: "provider"; providerId: string; model: string }, name: string) {
   const agent = await mustCreateAgent(app, owner, { model, name, persona: `简短地回答。${name}` });
   return { id: agent.id as string, conv: agent.conversationId as string };
 }
 
-type RunRow = { id: string; status: string; error: string | null; hold: string; held_back_by: string[] | null; charge_to: string | null };
+type RunRow = { id: string; status: string; error: string | null; hold: string; held_back_by: string[] | null; held_back_on: string | null; charge_to: string | null; source: string | null };
 const runIn = async (conv: string): Promise<RunRow> =>
   (
     await db.query<RunRow>(
-      "select id, status, error, hold_micro::text as hold, held_back_by, charge_to from agent_runs where conversation_id = $1 and purpose = 'reply' order by created_at desc limit 1",
+      "select id, status, error, hold_micro::text as hold, held_back_by, held_back_on, charge_to, source from agent_runs where conversation_id = $1 and purpose = 'reply' order by created_at desc limit 1",
       [conv],
     )
   ).rows[0]!;
+/** Routes each call to the gateway of the Agent whose name its system text carries (each Agent's persona names it). */
+function router(routes: Map<string, ModelGateway>): ModelGateway {
+  return {
+    stream(call) {
+      for (const [name, gateway] of routes) if (call.system.includes(`简短地回答。${name}`)) return gateway.stream(call);
+      throw new Error("router: no gateway for this call");
+    },
+    async listModels() {
+      return [];
+    },
+  };
+}
+/**
+ * The most of the owner's replies admitted at once: over their admitted runs (a model recorded), from the claim they were
+ * admitted at to their end.
+ */
+async function mostAtOnce(ownerId: string): Promise<number> {
+  const { rows } = await db.query<{ s: Date; f: Date }>(
+    "select started_at as s, finished_at as f from agent_runs where owner_id = $1 and purpose = 'reply' and source is not null",
+    [ownerId],
+  );
+  const events = rows.flatMap((r) => [
+    { at: r.s.getTime(), d: 1 },
+    { at: r.f.getTime(), d: -1 },
+  ]);
+  events.sort((a, b) => a.at - b.at || a.d - b.d);
+  let open = 0;
+  let most = 0;
+  for (const e of events) {
+    open += e.d;
+    most = Math.max(most, open);
+  }
+  return most;
+}
 const holdOf = async (runId: string) => BigInt((await db.query<{ hold: string }>("select hold_micro::text as hold from agent_runs where id = $1", [runId])).rows[0]!.hold);
 const balanceOf = async (ownerId: string) =>
   BigInt((await db.query<{ b: string }>("select balance_micro::text as b from accounts where principal_id = $1", [ownerId])).rows[0]!.b);
@@ -225,12 +269,13 @@ describe("the holds of one owner's replies are capped together by queueing, not 
     await expectSettledBooks(rich.id);
   });
 
-  it("a held-back reply is woken by the end of the reply it waited for, not by the worker's poll", async () => {
+  it("a held-back reply is woken by the end of the reply it waited for, not by the worker's poll (twice: a poll every 2 s could pass once by chance)", async () => {
+    for (const round of [1, 2]) {
     const gateway = scriptedGateway();
     const first = gateway.hang();
     gateway.reply("二。", { usage: U(0, 1000) });
     const { worker } = workerWith(gateway, { background: true });
-    const owner = await signUp(app, "woken");
+    const owner = await signUp(app, `woken${round}`);
     const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
     await grant(db, owner.id, 6n * POINT);
     await say(owner, a.conv, "你好");
@@ -247,9 +292,10 @@ describe("the holds of one owner's replies are capped together by queueing, not 
         [(await runIn(a.conv)).id, (await runIn(b.conv)).id],
       );
       // The worker polls every 2 s; the end of the first wakes it at once.
-      expect(rows[0]!.gap).toBeLessThan(400);
+      expect(rows[0]!.gap).toBeLessThan(200);
     } finally {
       await worker.stop();
+    }
     }
   });
 
@@ -410,19 +456,33 @@ describe("the holds of one owner's replies are capped together by queueing, not 
     await grant(db, owner.id, 6n * POINT);
     const g = await group(app, owner, "team", [mia, ned]);
     for (const agent of [a, b]) expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    const [miaSocket, ownerSocket] = [await connect(app, mia), await connect(app, owner)];
     await say(owner, a.conversationId, "你好");
     const running = worker.runOnce();
     await first.reached;
     await say(mia, g, "@held_bob 你好");
+    await miaSocket.waitFor((e) => e.type === "run" && e.agentId === b.id && e.state === "replying");
     const before = (await api(app, mia, "GET", `/api/conversations/${g}/runs`)).json;
+    const seen = miaSocket.events.length;
     expect(await worker.runOnce()).toBe(true);
     expect(await runIn(g)).toMatchObject({ status: "queued", held_back_by: [(await runIn(a.conversationId)).id] });
+    // Its owner is told it is queued again; mia is told nothing: not even the same state once more.
+    await ownerSocket.waitFor((e) => e.type === "run" && e.agentId === b.id && e.run.status === "queued", { from: ownerSocket.events.findIndex((e) => e.type === "run" && e.agentId === b.id && e.run.status === "running") });
     // What mia reads of the group's replies is what she read while it was queued the first time.
     expect((await api(app, mia, "GET", `/api/conversations/${g}/runs`)).json).toEqual(before);
     expect(JSON.stringify(before)).not.toMatch(/held_back|hold|balance|quota/);
     expect(before.runs).toMatchObject([{ agentId: b.id, state: "replying" }]);
     first.release("一。", { usage: U(0, 1000) });
+    gateway.reply("二。", { usage: U(0, 1000) });
     await running;
+    // Claimed again and answered: mia saw its first claim (as any reply's) and its end — nothing of its going back and
+    // forth.
+    expect(await worker.runOnce()).toBe(true);
+    await miaSocket.waitFor((e) => e.type === "run" && e.agentId === b.id && e.state === null);
+    expect(miaSocket.events.slice(seen).filter((e) => e.type === "run").map((e) => e.state)).toEqual(["replying", null]);
+    // The wait is logged once per reply, however often it is claimed; each time it is held back is counted.
+    expect(metric("run_wait_ms")).toHaveLength(2);
+    expect(metric("run_held_back")).toHaveLength(1);
   });
 });
 
@@ -459,32 +519,52 @@ describe("the debt bound: one reply that started alone, and one call more for ea
   const CALL = U(1000, 300);
   const CALL_COST = 1000n * 100n + 300n * 1000n;
 
-  async function contend(name: string, n: number, balance: bigint, config: Config) {
+  async function contend(name: string, n: number, balance: bigint, config: Config, model: typeof PAID | typeof FREE = PAID) {
     const gateway = searcher(CALL);
     const { worker } = workerWith(gateway, { box: toolbox(), config });
     const owner = await signUp(app, name);
     const agents = [];
-    for (let i = 0; i < n; i++) agents.push(await agentOf(owner, PAID, `A${i}`));
+    for (let i = 0; i < n; i++) agents.push(await agentOf(owner, model, `A${i}`));
     await grant(db, owner.id, balance);
     for (const a of agents) await say(owner, a.conv, "查一查附近的店");
     // All at once, each on its own connection, then whatever was held back as the others end.
     await Promise.all(agents.map(() => worker.runOnce()));
     while (await worker.runOnce());
-    const records = (
-      await db.query<{ cost: string }>("select cost_micro::text as cost from usage_records where owner_id = $1 and purpose = 'reply'", [owner.id])
-    ).rows.map((r) => BigInt(r.cost));
+    const rows = (
+      await db.query<{ cost: string; forgiven: string }>(
+        "select cost_micro::text as cost, forgiven_micro::text as forgiven from usage_records where owner_id = $1 and purpose = 'reply'",
+        [owner.id],
+      )
+    ).rows;
+    const records = rows.map((r) => BigInt(r.cost));
+    const forgiven = rows.reduce((sum, r) => sum + BigInt(r.forgiven), 0n);
     const statuses = (await db.query<{ status: string; error: string | null }>("select status, error from agent_runs where owner_id = $1 and purpose = 'reply'", [owner.id])).rows;
     await expectSettledBooks(owner.id);
-    return { owner, records, statuses, end: await balanceOf(owner.id), calls: gateway.calls.length };
+    return { owner, records, forgiven, statuses, end: await balanceOf(owner.id), calls: gateway.calls.length, atOnce: await mostAtOnce(owner.id) };
   }
 
-  it("six tool replies of one owner called at once on 3 points: every reply ends — answered, or refused once nothing is left —, no lock waits for ever, and the balance ends no lower than one reply's cost and one last call for each of the other five", { timeout: 120_000 }, async () => {
-    const { records, statuses, end } = await contend("sixcalls", 6, 3n * POINT, app.deps.config);
+  it("six tool replies of one owner called at once on 3 points of balance: every reply ends — answered, or refused once nothing is left —, no lock waits for ever, and the balance ends no lower than one reply's cost and one last call for each other reply that was open beside it (were extension blind to money, two at once would end near −4.2, below that)", { timeout: 120_000 }, async () => {
+    const { records, statuses, end, atOnce, forgiven } = await contend("sixcalls", 6, 3n * POINT, app.deps.config);
     expect(statuses).toHaveLength(6);
     for (const s of statuses) expect([["done", null], ["failed", "no_quota"]]).toContainEqual([s.status, s.error]);
     expect(statuses.filter((s) => s.status === "done").length).toBeGreaterThanOrEqual(1);
     const largest = records.reduce((a, b) => (a > b ? a : b), 0n);
-    expect(end).toBeGreaterThanOrEqual(-(largest + 5n * CALL_COST));
+    expect(atOnce).toBeGreaterThanOrEqual(1);
+    expect(end).toBeGreaterThanOrEqual(-(largest + BigInt(atOnce - 1) * CALL_COST));
+    // On the balance nothing is forgiven: the debt is the owner's, repaid by the next grant.
+    expect(forgiven).toBe(0n);
+  });
+
+  it("the free allowance: a reply offered tools holds room for its last call beside its first, so six at once on the day's 3 points run one at a time, and the overrun the site forgives is at most one reply", { timeout: 120_000 }, async () => {
+    const { owner, records, statuses, forgiven, atOnce } = await contend("freesix", 6, 0n, app.deps.config, FREE);
+    expect(statuses).toHaveLength(6);
+    for (const s of statuses) expect([["done", null], ["failed", "no_quota"]]).toContainEqual([s.status, s.error]);
+    expect(atOnce).toBe(1);
+    const largest = records.reduce((a, b) => (a > b ? a : b), 0n);
+    expect(forgiven).toBeLessThanOrEqual(largest);
+    expect(await balanceOf(owner.id)).toBe(0n);
+    const used = (await db.query<{ used: string }>("select coalesce(sum(used_micro), 0)::text as used from free_usage where owner_id = $1", [owner.id])).rows[0]!.used;
+    expect(BigInt(used)).toBe(3n * POINT);
   });
 
   it("the case that broke the first draft of these rules: 6 points, two tool replies that would each run to TOOLS.maxPoints (20) — they end within one reply and one last call, not near −34", { timeout: 120_000 }, async () => {
@@ -498,5 +578,240 @@ describe("the debt bound: one reply that started alone, and one call more for ea
     expect(end).toBeGreaterThan(-4n * POINT);
     // Neither ran anywhere near its cap.
     for (const r of records) expect(r).toBeLessThan(10n * POINT);
+  });
+});
+
+describe("fix round 1: spend clamped to what was held, a requeued attempt that cannot touch the next, first come first served per source", () => {
+  it("an upstream that over-reports a round cannot take the balance past what was held: the last call is held at the first call's hold and its own most, the reply is charged at most that, the rest is forgiven", async () => {
+    const gateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }], { usage: U(1_000_000, 0), text: "我先查一下。" });
+    const last = gateway.hang();
+    const { worker } = workerWith(gateway, { box: toolbox() });
+    const owner = await signUp(app, "overreport");
+    const a = await agentOf(owner, PAID, "Over");
+    await grant(db, owner.id, 3n * POINT);
+    await say(owner, a.conv, "查一查");
+    const running = worker.runOnce();
+    await last.reached;
+    const run = await runIn(a.conv);
+    const held = BigInt(run.hold);
+    // Not the 100 points the round reported: what the first call held, and the last call's own most.
+    expect(held).toBeLessThan(2n * FULL_CALL);
+    last.release("就这样。", { usage: U(1000, 100) });
+    await running;
+    const [record] = await recordOf(run.id);
+    expect(BigInt(record!.balance)).toBe(held);
+    expect(BigInt(record!.forgiven)).toBe(BigInt(record!.cost) - held);
+    expect(await balanceOf(owner.id)).toBe(3n * POINT - held);
+    expect(gateway.pending()).toBe(0);
+  });
+
+  it("a requeued attempt's own late end cannot touch the reply's next attempt — claimed meanwhile by another worker, or by the same one", async () => {
+    for (const again of ["another", "same"] as const) {
+      const owner = await signUp(app, `stale${again}`);
+      const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
+      await grant(db, owner.id, 6n * POINT);
+      await say(owner, a.conv, "你好");
+      await say(owner, b.conv, "你好");
+      const one = workerWith(scriptedGateway()).port;
+      const two = again === "same" ? one : workerWith(scriptedGateway()).port;
+      const ann = (await one.claimNext())!;
+      expect(isRunEnd(await one.begin(ann))).toBe(false);
+      const first = (await one.claimNext())!;
+      const heldBack = (await one.begin(first)) as RunEnd;
+      expect(await runIn(b.conv)).toMatchObject({ status: "queued" });
+      // Ann's reply ends: Bob's may be claimed again — and is, before its first attempt's end has been recorded.
+      await one.finish(ann, { status: "failed", error: "busy" }, null, NOTHING);
+      const second = (await two.claimNext())!;
+      expect(second.id).toBe(first.id);
+      expect(isRunEnd(await two.begin(second))).toBe(false);
+      await one.finish(first, heldBack, null, NOTHING);
+      // The second attempt stands: running, admitted, unsettled, its flags its own.
+      expect(await runIn(b.conv)).toMatchObject({ status: "running", error: null, charge_to: "balance" });
+      expect(await recordOf(second.id)).toEqual([]);
+      expect(await two.extend(second, null, { inputChars: 0, outputChars: 0 }, 100)).not.toBe("stop");
+      await two.finish(second, { status: "failed", error: "busy" }, null, NOTHING);
+      expect(await runIn(b.conv)).toMatchObject({ status: "failed", error: "busy", hold: "0" });
+      await expectSettledBooks(owner.id);
+    }
+  });
+
+  it("a stop asked while the reply was running, landing after it was held back: the reply is stopped all the same, not left to run later", async () => {
+    const owner = await signUp(app, "stopwindow");
+    const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
+    await grant(db, owner.id, 6n * POINT);
+    await say(owner, a.conv, "你好");
+    await say(owner, b.conv, "你好");
+    const { port } = workerWith(scriptedGateway());
+    const ann = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(ann))).toBe(false);
+    const bob = (await port.claimNext())!;
+    // The stop route's transaction sees it running…
+    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
+    // …its admission holds it back before the route has told the port…
+    await port.finish(bob, (await port.begin(bob)) as RunEnd, null, NOTHING);
+    expect(await runIn(b.conv)).toMatchObject({ status: "queued" });
+    // …and what the route does next stops it.
+    await port.stopAsked(bob.id);
+    expect(await runIn(b.conv)).toMatchObject({ status: "stopped", hold: "0" });
+    await port.finish(ann, { status: "failed", error: "busy" }, null, NOTHING);
+    expect(await port.claimNext()).toBeNull();
+  });
+
+  it("a held-back reply keeps the owner's own mention it took on: refused at its next attempt by the others' daily budget, the owner's call is still answered", async () => {
+    const owner = await signUp(app, "keepmention");
+    const [mia, ned] = [await signUp(app, "keepmia"), await signUp(app, "keepned")];
+    const x = await mustCreateAgent(app, owner, { model: FIVE, handle: "keep_x", name: "Xia", persona: "简短地回答。Xia", othersBudget: "6" });
+    const y = await agentOf(owner, FIVE, "Yan");
+    await grant(db, owner.id, 6n * POINT);
+    const g = await group(app, owner, "team", [mia, ned]);
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: x.id })).status).toBe(201);
+    const { port } = workerWith(scriptedGateway());
+    await say(owner, y.conv, "你好");
+    const yan = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(yan))).toBe(false);
+    await say(mia, g, "@keep_x 你好");
+    const r = (await port.claimNext())!;
+    expect(r.conversationId).toBe(g);
+    // The owner's own mention, noted on the reply someone else called for while it was claimed.
+    await say(owner, g, "@keep_x 也帮我看看");
+    const ownersSeq = Number((await db.query("select seq from conversations where id = $1", [g])).rows[0].seq);
+    await port.finish(r, (await port.begin(r)) as RunEnd, null, NOTHING);
+    expect(await runIn(g)).toMatchObject({ status: "queued" });
+    // Replies settled while it waited spend the Agent's others' daily budget.
+    await paidReply(db, { agentId: x.id, ownerId: owner.id, conversationId: g, lane: "others", micro: 6n * POINT });
+    await port.finish(yan, { status: "failed", error: "busy" }, null, NOTHING);
+    const again = (await port.claimNext())!;
+    expect(again.id).toBe(r.id);
+    await port.finish(again, (await port.begin(again)) as RunEnd, null, NOTHING);
+    expect((await db.query("select status, error from agent_runs where id = $1", [r.id])).rows[0]).toEqual({ status: "cancelled", error: null });
+    // Its owner's mention is queued as theirs.
+    const followed = (await db.query("select status, lane, covers_seq::int as covers from agent_runs where agent_id = $1 and conversation_id = $2 and id <> $3 and status = 'queued'", [x.id, g, r.id])).rows;
+    expect(followed).toEqual([{ status: "queued", lane: "own", covers: ownersSeq }]);
+  });
+
+  it("first come, first served while the worker runs on its own: a large reply held back behind a small one is the next admitted, ahead of the stream of small ones that came after it", { timeout: 60_000 }, async () => {
+    const routes = new Map<string, ModelGateway>();
+    const bigGateway = scriptedGateway();
+    const bigCall = bigGateway.hang();
+    const firstGateway = scriptedGateway();
+    const firstCall = firstGateway.hang();
+    routes.set("Lars", bigGateway);
+    routes.set("S0", firstGateway);
+    const { worker } = workerWith(router(routes), { background: true });
+    const owner = await signUp(app, "fifostream");
+    const s0 = await agentOf(owner, PAID, "S0");
+    const lars = await agentOf(owner, FIVE, "Lars");
+    const smalls: Array<{ id: string; conv: string }> = [];
+    for (let i = 1; i <= 5; i++) {
+      const agent = await agentOf(owner, PAID, `S${i}`);
+      routes.set(`S${i}`, scriptedGateway().reply("好。", { usage: U(0, 100) }));
+      smalls.push(agent);
+    }
+    await grant(db, owner.id, 6n * POINT);
+    worker.start();
+    try {
+      await say(owner, s0.conv, "你好");
+      worker.wake();
+      await firstCall.reached;
+      await say(owner, lars.conv, "你好");
+      worker.wake();
+      await vi.waitFor(async () => expect((await runIn(lars.conv)).held_back_by).not.toBeNull(), { timeout: 10_000 });
+      expect(await runIn(lars.conv)).toMatchObject({ status: "queued" });
+      for (const small of smalls) {
+        await say(owner, small.conv, "你好");
+        worker.wake();
+      }
+      await sleep(300);
+      for (const small of smalls) expect(await runIn(small.conv)).toMatchObject({ status: "queued", source: null });
+      firstCall.release("一。", { usage: U(0, 100) });
+      await bigCall.reached;
+      // Lars is calling its model: it was admitted, and no small reply that came after it was admitted before it.
+      for (const small of smalls) expect((await runIn(small.conv)).source).toBeNull();
+      bigCall.release("大。", { usage: U(0, 100) });
+      await vi.waitFor(async () => {
+        for (const small of smalls) expect(await runIn(small.conv)).toMatchObject({ status: "done" });
+      }, { timeout: 30_000 });
+      expect(await runIn(lars.conv)).toMatchObject({ status: "done" });
+    } finally {
+      await worker.stop();
+    }
+  });
+
+  it("the mark stays until admission: a held-back reply claimed again keeps the owner's younger replies on its source unclaimed until it is admitted — else a quicker small one would win the account's lock and hold the large one back again, for ever", async () => {
+    const owner = await signUp(app, "markstays");
+    const s0 = await agentOf(owner, PAID, "S0");
+    const lars = await agentOf(owner, FIVE, "Lars");
+    const s1 = await agentOf(owner, PAID, "S1");
+    await grant(db, owner.id, 6n * POINT);
+    const { port } = workerWith(scriptedGateway());
+    await say(owner, s0.conv, "你好");
+    const small = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(small))).toBe(false);
+    await say(owner, lars.conv, "你好");
+    const large = (await port.claimNext())!;
+    await port.finish(large, (await port.begin(large)) as RunEnd, null, NOTHING);
+    expect(await runIn(lars.conv)).toMatchObject({ status: "queued", held_back_by: [small.id] });
+    await say(owner, s1.conv, "你好");
+    await port.finish(small, { status: "failed", error: "busy" }, null, NOTHING);
+    const again = (await port.claimNext())!;
+    expect(again.id).toBe(large.id);
+    // Claimed but not admitted yet: the small reply after it is not claimed.
+    expect(await port.claimNext()).toBeNull();
+    expect(isRunEnd(await port.begin(again))).toBe(false);
+    expect(await runIn(lars.conv)).toMatchObject({ status: "running", held_back_by: null, held_back_on: null, charge_to: "balance" });
+    // Admitted: now the small one is claimed, and waits behind it.
+    const next = (await port.claimNext())!;
+    expect(next.conversationId).toBe(s1.conv);
+    await port.finish(next, (await port.begin(next)) as RunEnd, null, NOTHING);
+    expect(await runIn(s1.conv)).toMatchObject({ status: "queued", held_back_by: [large.id], held_back_on: "balance" });
+  });
+
+  it("only replies that compete for the same money wait behind a held-back one: a reply on the owner's own provider key, or one the free allowance pays while the held-back one waits on the balance, goes ahead", async () => {
+    const owner = await signUp(app, "samesource");
+    const provider = (await api(app, owner, "POST", "/api/providers", providerBody({ models: [{ name: "mine" }] }))).json;
+    const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
+    const free = await agentOf(owner, FREE, "Fay");
+    const own = await agentOf(owner, { source: "provider", providerId: provider.id as string, model: "mine" }, "Ole");
+    await grant(db, owner.id, 6n * POINT);
+    const gateway = scriptedGateway();
+    const annCall = gateway.hang();
+    gateway.reply("免费的。", { usage: U(0, 100) }).reply("自己的。", { usage: U(0, 100) });
+    const { worker } = workerWith(gateway);
+    for (const agent of [a, b, free, own]) await say(owner, agent.conv, "你好");
+    const running = worker.runOnce();
+    await annCall.reached;
+    expect(await worker.runOnce()).toBe(true);
+    expect(await runIn(b.conv)).toMatchObject({ status: "queued" });
+    expect(await worker.runOnce()).toBe(true);
+    expect(await runIn(free.conv)).toMatchObject({ status: "done", charge_to: "free" });
+    expect(await worker.runOnce()).toBe(true);
+    expect(await runIn(own.conv)).toMatchObject({ status: "done", charge_to: null });
+    expect(await runIn(b.conv)).toMatchObject({ status: "queued", held_back_on: "balance" });
+    annCall.release("一。", { usage: U(0, 100) });
+    await running;
+    gateway.reply("二。", { usage: U(0, 100) });
+    expect(await worker.runOnce()).toBe(true);
+    expect(await runIn(b.conv)).toMatchObject({ status: "done", held_back_by: null, held_back_on: null });
+    expect(gateway.pending()).toBe(0);
+  });
+
+  it("HOLDS.maxOpenShare is an admission rule: at 0.5 a second reply whose hold would fit in the whole balance beside the first waits", async () => {
+    const owner = await signUp(app, "halfshare");
+    const [first, second] = [await meteredAgent(app, db, owner, PAID), await meteredAgent(app, db, owner, PAID)];
+    await grant(db, owner.id, 5n * POINT);
+    const half: Config = { ...app.deps.config, holds: { maxOpenShare: 0.5 } };
+    const r1 = await runningRun(db, owner.id, first);
+    expect(await db.tx((t) => admitRun(t, half, r1, owner.id, first.resolved, ESTIMATE, new Date()))).toEqual({ chargeTo: "balance", holdMicro: MAX_COST });
+    const r2 = await runningRun(db, owner.id, second);
+    // 2 + 2 of 5: within the whole balance, past half of it.
+    await expect(db.tx((t) => admitRun(t, half, r2, owner.id, second.resolved, ESTIMATE, new Date()))).rejects.toBeInstanceOf(HeldBack);
+    expect(await db.tx((t) => admitRun(t, app.deps.config, r2, owner.id, second.resolved, ESTIMATE, new Date()))).toEqual({ chargeTo: "balance", holdMicro: MAX_COST });
+  });
+
+  it("extension is a reply's alone: a memory call (one call, the site's memory allowance) is never extended", async () => {
+    const owner = await signUp(app, "memoryextend");
+    await expect(
+      db.tx((t) => raiseHold(t, app.deps.config, { id: "00000000-0000-0000-0000-000000000000", ownerId: owner.id, chargeTo: "memory", holdMicro: 1n }, { ok: 2n, final: 2n }, true, new Date())),
+    ).rejects.toThrow(/memory/);
   });
 });
