@@ -733,9 +733,11 @@ interface Call {
  * relayed through one of the owner's Agents does not make it the owner's — unless nobody had called for it (lane
  * `proactive`): then it is this call's, in its lane (`takesOnCall`); a running one notes it (`pending_seq`), and
  * stays as it is: its follow-up answers what was noted, in a lane of its own (`followUp`). A told reply (`whisper_id`:
- * 告诉他们 queued it, Task 8), queued or running, takes on no call: it only notes it, as a running reply does, and takes
- * on nothing else of it — its follow-up answers the call as an ordinary reply, with tools, in the caller's lane. Any
- * other takes on the call's askers (`withAskers`) and the call (`call_seqs`), and everyone who wrote since what it covers, up to the call
+ * 告诉他们 queued it, Task 8), queued or running, takes on no call: it only notes it, as a running reply does — the seq
+ * in `pending_seq`, the call in `call_seqs`, which for it hold nothing else (`tellFromWhisper`) — and takes on nothing
+ * else of it: its follow-up answers the call as an ordinary reply, with tools, in the caller's lane. Every call records
+ * the call (`call_seqs`: what a follow-up answers of what was noted is exactly those); any but a told reply also takes
+ * on the call's askers (`withAskers`), and everyone who wrote since what it covers, up to the call
  * (`heardIn`: a queued one now covers that stretch; a running one takes it on in `begin`, or hands it down): a running
  * one may take on what was noted before its `begin` reads what it is shown, and what it relays carries its askers on
  * (`triggerFromAgent`). A mention folded so is never
@@ -765,9 +767,7 @@ async function reachAgents(
               pending_seq = case when status = 'running' or whisper_id is not null then greatest(pending_seq, $3) else pending_seq end,
               ${takesOnCall("status = 'queued' and whisper_id is null", "$4", "$5", "$6")},
               asker_ids = case when whisper_id is null then ${withAskers("$7", heardIn("$2::uuid", "agent_runs.covers_seq", "$3::bigint"))} else asker_ids end,
-              call_seqs = case when whisper_id is null
-                               then array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $3::bigint) as x (s) order by s)
-                               else call_seqs end
+              call_seqs = array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $3::bigint) as x (s) order by s)
         where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
       [agent.id, conversationId, seq, triggeredBy, by.lane, by.id, askersParam(askers)],
     );
@@ -1255,7 +1255,6 @@ export async function followUp(
   pending: number,
   callSeqs: readonly (number | string)[] | null,
   config: RunLimits,
-  toldReply = false,
 ): Promise<FollowUp> {
   const owners = callerOf(agent.ownerId, agent.ownerId);
   if (conversationId === agent.conversationId) return followUpOf(await queueRun(t, agent, conversationId, pending, "human", owners, [agent.ownerId]));
@@ -1278,21 +1277,10 @@ export async function followUp(
     [conversationId, covers, pending, agent.ownerId, agent.id],
   );
   // The calls the run noted (`callSeqs`, its `call_seqs`: each recorded as it was accepted when it was sent), never read
-  // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1).
-  // (A told reply (`告诉他们`) answers nobody's call — its `call_seqs` hold only the group's latest message when it was queued,
-  // what it covers, which is no call — and a call folded into it is only noted: what was noted on it, between what it covers
-  // and `pending`, is read from the messages' stored mentions — those that name this Agent — as the sender stored them.)
-  const noted = new Set(
-    toldReply
-      ? (
-          await t.query<{ seq: string }>(
-            `select m.seq::text as seq from messages m
-              where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.mentions @> jsonb_build_array(jsonb_build_object('id', $4::text))`,
-            [conversationId, covers, pending, agent.id],
-          )
-        ).rows.map((r) => Number(r.seq))
-      : (callSeqs ?? []).map(Number),
-  );
+  // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1) — nor
+  // from the messages' stored mentions, which also name the Agent where its call was refused as it was sent. A told reply
+  // (`告诉他们`) is followed up so too: its `call_seqs` hold the calls noted on it and nothing else (`reachAgents`).
+  const noted = new Set((callSeqs ?? []).map(Number));
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
   const calls = rows.filter(
     (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && noted.has(Number(r.seq)),
@@ -1466,7 +1454,8 @@ const isGroup = async (q: Queryable, conversationId: string): Promise<boolean> =
  * `告诉他们` on a `found_elsewhere` whisper (Task 8; whispers/routes.ts `ANSWER_HOOKS`), in the answer's transaction — the
  * group's row, the Agent's (for update) and the whisper's held, the whisper answered: ONE reply of the Agent in the group,
  * queued as its owner's own (`triggered_by` human, lane `own`, the owner its caller and the one it answers), covering the
- * group's latest message, that is shown the whisper's hits (`agent_runs.whisper_id`, read in port-impl.ts `begin`) and
+ * group's latest message but answering no call (`call_seqs` empty: they will hold the calls noted on it, `reachAgents`),
+ * that is shown the whisper's hits (`agent_runs.whisper_id`, read in port-impl.ts `begin`) and
  * offered no tools — none when the whisper holds no hits (nothing to tell: null). Held to what a retry by its owner is
  * held to (`retryInGroup`): 409 `agent_paused`, 400
  * `invalid_request` when it has no model, 409 `busy_run` while it has a reply queued or running there, 429 `rate_limited`
@@ -1494,7 +1483,8 @@ export async function tellFromWhisper(
   const latest = await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [whisper.conversationId]);
   const owner = callerOf(whisper.ownerId, whisper.ownerId);
   const queued = await queueRun(t, agent, whisper.conversationId, Number(latest.rows[0]!.seq), "human", owner, [whisper.ownerId]);
-  await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, whisper.id]);
+  // It answers no call: what it covers is no call of it, and its `call_seqs` will hold the calls noted on it, nothing else.
+  await t.query("update agent_runs set whisper_id = $2, call_seqs = '{}' where id = $1", [queued.run.id, whisper.id]);
   return queued;
 }
 

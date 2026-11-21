@@ -216,16 +216,19 @@ interface RunState {
   pending_seq: string | null;
   interrupted: Interruption | null;
   lane: Lane;
-  /** The calls it answers, as each was accepted when it was sent (`call_seqs`): what its follow-up answers of them. */
+  /**
+   * The calls it answers and those noted on it, as each was accepted when it was sent (`call_seqs`): what its follow-up
+   * answers of what was noted. A told reply's hold the calls noted on it only.
+   */
   call_seqs: string[] | null;
   /** It was held back at an earlier attempt and is not admitted yet (`held_back_by`). */
   marked: boolean;
   /** Its owner asked it to stop while it ran (runs.ts `stopRun`). */
   stop_asked: boolean;
   /**
-   * A reply `告诉他们` queued (`whisper_id`): it answers nobody's call — its `call_seqs` hold only what it covers, the group's
-   * latest message when it was queued, which may be anyone's and is no call — so `begin` holds none of it to the block
-   * rule; its follow-up finds what was noted on it from the messages' stored mentions (runs.ts `followUp`).
+   * A reply `告诉他们` queued (`whisper_id`): it answers nobody's call — what it covers is merely the group's latest message
+   * when it was queued, anyone's — so `begin` holds none of it to the block rule; the calls noted on it are its follow-up's,
+   * held to that rule there (runs.ts `followUp`).
    */
   told: boolean;
 }
@@ -1174,7 +1177,7 @@ export class DbAgentPort implements AgentPort {
         followed:
           next === null
             ? followUpOf(null)
-            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config, state.rows[0].told),
+            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
         interrupted: state.rows[0].interrupted !== null,
         reply: reply ? Number(reply.seq) : null,
         reminder,
@@ -1326,7 +1329,7 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
   const { run: followed, ...told } =
-    next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config, state.told);
+    next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config);
   return {
     runs: followed ? [ended, followed] : [ended],
     told,
