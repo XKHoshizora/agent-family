@@ -10,6 +10,7 @@ import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { expectLinear, LOADED_TIMEOUT_MS } from "./helpers/linear.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 
 /** The handles a text names, as the reading at send looks them up (its tokens, then their distinct handles). */
@@ -65,17 +66,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     expect(handlesIn(text)).toEqual(expected);
   });
 
-  it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like take about four times what 2 000 take", () => {
-    // The best of a few runs of each size: a pause of the collector or a busy machine does not decide it.
-    const fastest = (text: string): number => {
-      let best = Number.POSITIVE_INFINITY;
-      for (let i = 0; i < 5; i++) {
-        const started = performance.now();
-        for (let j = 0; j < 10; j++) handlesIn(text);
-        best = Math.min(best, performance.now() - started);
-      }
-      return best;
-    };
+  it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like take about four times what 2 000 take", { timeout: LOADED_TIMEOUT_MS }, () => {
     const cases: Array<[(n: number) => string, string[]]> = [
       [(n) => "@a.".repeat(n * 0.34), []],
       [(n) => `@${"a.".repeat(n / 2)}`, []],
@@ -84,41 +75,18 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
       [(n) => ".@xyz.".repeat(n / 6), ["xyz"]],
     ];
     for (const [make, expected] of cases) {
-      const [small, large] = [make(2000), make(8000)];
-      expect(large.length).toBeGreaterThanOrEqual(7900);
-      expect(handlesIn(large)).toEqual(expected);
-      // Linear: four times the text, about four times the time (a quadratic parse would take sixteen); a few ms of grace.
-      expect(fastest(large)).toBeLessThan(8 * fastest(small) + 5);
+      expect(make(8000).length).toBeGreaterThanOrEqual(7900);
+      // `expectLinear` (helpers/linear.ts) compares the two sizes with each other: four times the text, less than eight times the time.
+      expectLinear({
+        n: 2000,
+        make,
+        run: (text) => {
+          if (JSON.stringify(handlesIn(text)) !== JSON.stringify(expected)) throw new Error(`handlesIn gave ${JSON.stringify(handlesIn(text))} for a text of ${text.length} characters`);
+        },
+      });
     }
   });
 });
-
-/** The time of one call of `work` over a burst: `work` repeated until at least 30 ms have passed (a fast call is measured too). */
-function burst(work: () => void): number {
-  let calls = 0;
-  const started = performance.now();
-  let spent = 0;
-  do {
-    work();
-    calls += 1;
-    spent = performance.now() - started;
-  } while (spent < 30);
-  return spent / calls;
-}
-
-/**
- * How many times longer one call of `large` takes than one of `small` — a ratio, not a number of milliseconds, decides a
- * linearity test: after a warm-up (both compiled), the median of five ratios, the two of each measured one right after
- * the other, each as the shortest of three bursts (a busy machine only ever adds time: a thread put aside for a while).
- */
-function timeRatio(large: () => void, small: () => void): number {
-  burst(large);
-  burst(small);
-  const perCall = (work: () => void) => Math.min(burst(work), burst(work), burst(work));
-  const ratios: number[] = [];
-  for (let s = 0; s < 5; s++) ratios.push(perCall(large) / perCall(small));
-  return ratios.sort((a, b) => a - b)[2]!;
-}
 
 describe("the reading at send is linear in the text, at the longest a message may be (fix round 2, I-4; tidy round, m-1)", () => {
   it("code, addresses and tokens of 16 000 code units (MESSAGE_TEXT_MAX code points, each up to two units) take about four times what 4 000 take, whatever the text holds", () => {
@@ -140,11 +108,15 @@ describe("the reading at send is linear in the text, at the longest a message ma
       ["blank lines between short paragraphs", (n) => `@x\n${"a `b\n\n".repeat(n / 6)}`.slice(0, n)],
     ];
     for (const [name, make] of cases) {
-      const [small, large] = [make(longest / 4), make(longest)];
-      expect(large.length, name).toBeGreaterThanOrEqual(longest - 14);
-      // Linear: four times the text, about four times the time (a quadratic reading takes sixteen).
-      const ratio = timeRatio(() => typedReading(large), () => typedReading(small));
-      expect(ratio, `${name}: 4× the text took ${ratio.toFixed(1)}× the time`).toBeLessThan(8);
+      expect(make(longest).length, name).toBeGreaterThanOrEqual(longest - 14);
+      // Linear: four times the text, less than eight times the time (a quadratic reading takes sixteen).
+      expectLinear({
+        n: longest / 4,
+        make,
+        run: (text) => {
+          if (typedReading(text).tokens === undefined) throw new Error(`${name}: no reading`);
+        },
+      });
     }
     // (Eleven shapes, each about a second of measuring: more than the usual limit of a test.)
   }, 120_000);
