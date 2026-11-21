@@ -835,7 +835,7 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     holdTokens([withLine(call.system), ...textsOf(call), JSON.stringify(call.tools), JSON.stringify(call.steps ?? [])], context, maxOut) + TOOL_PREAMBLE_TOKENS;
   /** A toolbox offering search, at most 6 calls a reply, whose every call waits on `gate` and returns `output`. */
   const searching = (output: unknown, gate: () => Promise<void> = async () => {}): Toolbox => ({
-    offer: () => ({ tools: [SEARCH], perTool: { search: 6 }, kinds: { search: "search" } }),
+    offer: () => ({ tools: [SEARCH], perTool: { search: OFFERED_CAP }, kinds: { search: "search" } }),
     run: async (): Promise<ToolOutcome> => {
       await gate();
       return { output, activity: "search" };
@@ -847,6 +847,10 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
    * at most 3 × `resultMaxWeight` bytes each and 200 of framing, an assistant turn and notes of 6 bytes an output token,
    * and 300), never more than the whole context and what providers add around tool definitions, with the whole output.
    */
+  // The calls one reply may run in all, each as the offered toolbox's own caps summed (`k`: a toolbox offering search 6, file 4 and
+  // a clock 1 has 11): the tests below offer one tool whose cap is read from the offer, never a number apart from it.
+  const OFFERED_CAP = 6;
+  const OFFERED_CAP_2 = 2;
   const room = (input: number, k: number, model: { context: number; out: number; inPrice: bigint; outPrice: bigint }) => {
     const growth = k * (3 * app.deps.config.tools.resultMaxWeight + 200) + 6 * model.out + 300;
     const capped = Math.min(input + growth, model.context - model.out + TOOL_PREAMBLE_TOKENS);
@@ -883,15 +887,15 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     const first = holdTokens([c1.system, ...textsOf(c1), JSON.stringify(c1.tools)], METER.context, METER.out) + TOOL_PREAMBLE_TOKENS;
     const callMax = (input: number) => BigInt(input) * 100n + 1000n * 1000n;
     // At admission (seen by round 1's tool): the first call's most and the room after one round.
-    expect(holds[0]).toBe(callMax(first) + room(first, 6, METER));
+    expect(holds[0]).toBe(callMax(first) + room(first, OFFERED_CAP, METER));
     // After round 1 (seen by round 2's tool): spent, the second call's most, the room after one more round.
-    expect(holds[1]).toBe(cost(U(1000, 50)) + callMax(nextInput(c2, METER.context, METER.out)) + room(nextInput(c2, METER.context, METER.out), 6, METER));
+    expect(holds[1]).toBe(cost(U(1000, 50)) + callMax(nextInput(c2, METER.context, METER.out)) + room(nextInput(c2, METER.context, METER.out), OFFERED_CAP, METER));
     // After round 2, before the third call.
     expect(await runIn(conv).then((r) => BigInt(r.hold))).toBe(
-      cost(U(2500, 110)) + callMax(nextInput(third, METER.context, METER.out)) + room(nextInput(third, METER.context, METER.out), 6, METER),
+      cost(U(2500, 110)) + callMax(nextInput(third, METER.context, METER.out)) + room(nextInput(third, METER.context, METER.out), OFFERED_CAP, METER),
     );
     // Not the whole context any more: far below it.
-    expect(holds[0]).toBeLessThan(callMax(first) + room(1_000_000, 6, METER));
+    expect(holds[0]).toBeLessThan(callMax(first) + room(1_000_000, OFFERED_CAP, METER));
     expect(third.toolChoice).toBeUndefined();
     last.release("去吃川菜。", { usage: U(2000, 70) });
     await running;
@@ -905,7 +909,7 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     const holds: bigint[] = [];
     let runs = 0;
     const box: Toolbox = {
-      offer: () => ({ tools: [SEARCH], perTool: { search: 2 }, kinds: { search: "search" } }),
+      offer: () => ({ tools: [SEARCH], perTool: { search: OFFERED_CAP_2 }, kinds: { search: "search" } }),
       run: async (): Promise<ToolOutcome> => {
         const hold = BigInt((await runIn(conv)).hold);
         holds.push(hold);
@@ -929,7 +933,7 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     const first = holdTokens([c1.system, ...textsOf(c1), JSON.stringify(c1.tools)], METER.context, METER.out) + TOOL_PREAMBLE_TOKENS;
     const callMax = (input: number) => BigInt(input) * 100n + 1000n * 1000n;
     // The last call could not be made within the room kept at admission…
-    expect(callMax(nextInput(third, METER.context, METER.out))).toBeGreaterThan(room(first, 2, METER));
+    expect(callMax(nextInput(third, METER.context, METER.out))).toBeGreaterThan(room(first, OFFERED_CAP_2, METER));
     // …it is the last (no further round fitted), and its hold is the one after round 1: not raised.
     expect(third.toolChoice).toBe("none");
     expect(holds).toHaveLength(2);
