@@ -3170,13 +3170,16 @@ and held to the cap by cutting whole lines from the top section downwards (a sec
 never in the middle of a line. Only then are its labels looked at, so that a citation can neither hide a label nor make
 one (`主〔m1〕人（…）`, `（〔f2〕@…）`). In a group every speaker label in it must be one the system wrote: a line in which a
 `主人（` does not start the owner's label exactly, or a `（@` is not the handle of a label standing whole there — the owner's
-inside `主人（…）`, or that of anyone else with a message the pair could cover, by their names now — is dropped (an unknown or
+inside `主人（…）`, or that of anyone else with a message the pair could cover, by their names as the call's input wrote
+them (read in one snapshot with the input, before the call: a rename while it runs drops nothing) — is dropped (an unknown or
 altered label, the owner's name and handle without `主人（…）`, a half-width bracket; counted `summary_label_dropped`), so no
 line of it can put words under an owner's label the system did not write. A stored summary is held to the same rule as it
 is read, for a reply's passage and for the old summary a job builds on (`shownSummary`): its citations taken out, then, in
 a group, its labels rewritten as the accounts they recorded are labelled now (*Renames*, below) and every line whose labels
-are not ones the pair may hold now left out of what is shown (the row itself is not rewritten) — so a row stored before
-this rule cannot show a forged label either. An answer with nothing left but section headings
+are not ones of those accounts now (or the owner's) left out of what is shown (the row itself is not rewritten). A reply
+reads it once, however many times its context is planned (`readPairSummary`, in `begin`'s first step under the
+conversation's row, which its job writes under: one read of the row and two indexed reads, nothing of the conversation's
+history). An answer with nothing left but section headings
 is no summary, first or not: nothing is stored and the messages are not swallowed. It is stored with the new `upto_seq` (`from_seq` stays where the first summary began) only
 when it weighs less than what it replaces — the old summary and the messages it now covers — and only when, under the
 conversation's row and then the Agent's (the order a reply takes them in), the pair is as the job read it: the Agent not
@@ -3205,9 +3208,11 @@ conversation or of a topic), until a reply is left out after them.
 owner's `主人（…）` among them). A rename — a person's name or handle, or an owner's handle, which every one of their Agents'
 full handles follows — changes how an account is labelled, not who it is: wherever the summary is read (a reply's passage,
 the old summary a job builds on: `shownSummary`), each label it recorded is first rewritten to how that account is
-labelled now, as the roster labels it, and only then held to the labels of now; so no line of a renamed person goes. A row
-stored before migration 056 records nobody: it is held to the labels of now as it is, and a line of someone renamed since
-is not shown (nor, then, kept by the next update).
+labelled now, as the roster labels it, and only then held to the labels of now; so no line of a renamed person goes. A
+group's summary stored before this version (migration 056) records nobody: no reply is shown it — the conversation part is
+read as if there were none, while what it covers still counts as summarised — until its next update, which builds on it as
+the labels of now allow (a line of someone renamed since goes; this reads the stay's history, in the job, never on a reply's
+path) and records whose its labels are: summaries stored before this version reappear after their next update.
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
 `tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox:

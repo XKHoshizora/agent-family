@@ -195,18 +195,27 @@ async function labelsNow(q: Queryable, r: PlacedReader, ids: readonly string[]):
  * The pair's stored summary `s` as a reply is shown it and a job builds on it (final review I-3, m-11): its text without any
  * citation (tools/refs.ts `withoutCitations`); in a group, then, each label it recorded (`speakers`) rewritten to how that
  * account is labelled now (prompt.ts `relabelled`: a rename changes the label, not the person), and the text held again to
- * the labels it may hold now (prompt.ts `keepLabelled`) — those of the accounts it recorded, or, for a row that recorded
- * none (written before migration 056), of everyone placed after `base` up to what it covers (`speakerLabels`) — so a line
- * with any other is not shown: a row stored before its answer was stripped of citations first cannot show a forged label
- * either. Read only: the row is never written back.
+ * the labels of now of the accounts it recorded and its owner (prompt.ts `keepLabelled`) — a line with any other is not shown.
+ * Two indexed reads, nothing of the conversation's history. Null for a group's row that recorded nobody (written before
+ * migration 056): no reply is shown it (round 2, N-4) until a job has rewritten it (`legacySummary`). Read only: the row is
+ * never written back.
  */
-export async function shownSummary(q: Queryable, r: PlacedReader, base: number, s: Summary): Promise<string> {
+export async function shownSummary(q: Queryable, r: PlacedReader, s: Summary): Promise<string | null> {
   const text = withoutCitations(s.text);
   if (!r.group) return text;
-  if (s.speakers === null) return keepLabelled(text, await speakerLabels(q, r, base, s.uptoSeq)).text;
+  if (s.speakers === null) return null;
   const now = await labelsNow(q, r, Object.values(s.speakers));
   const byId = new Map([...now.ids].map(([label, id]) => [id, label]));
   return keepLabelled(relabelled(text, s.speakers, byId), now).text;
+}
+
+/**
+ * A group's row that recorded nobody (written before migration 056) as the job builds on it — off any reply's path: without
+ * citations, held to the labels of now of everyone placed after `base` up to what it covers (`speakerLabels`, a read of the
+ * stay's history), so a line of someone renamed since goes. The job's next write records whose its labels are.
+ */
+export async function legacySummary(q: Queryable, r: PlacedReader, base: number, s: Summary): Promise<string> {
+  return keepLabelled(withoutCitations(s.text), await speakerLabels(q, r, base, s.uptoSeq)).text;
 }
 
 /** Stores the pair's summary as `s` (inserted, or replacing the one there), in the caller's transaction. */

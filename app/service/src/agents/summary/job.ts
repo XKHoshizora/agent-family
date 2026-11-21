@@ -8,7 +8,7 @@ import { personLabel, speakerRole } from "../runtime/prompt.ts";
 import { liveAgent, lockAgent } from "../store.ts";
 import { withoutCitations } from "../tools/refs.ts";
 import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, speakersIn, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
-import { countPlaced, readPlaced, readSummary, shownSummary, speakerLabels, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
+import { countPlaced, legacySummary, readPlaced, readSummary, shownSummary, speakerLabels, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
 /**
  * One rolling-summary job (README "The rolling summary"; queued after a reply by agents/port-impl.ts `finish`, run by the
@@ -89,7 +89,19 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   if (tried !== null && tried >= start && (await countPlaced(db, reader, tried, job.upTo)) < config.memory.summaryMinMessages) return;
 
   const { memory } = config;
-  const read = await readPlaced(db, reader, start, job.upTo, SUMMARY_MAX_MESSAGES + 1);
+  // What the call is shown and the labels its answer may hold, read in ONE snapshot (round 2, N-5): the messages, each
+  // speaker's label as the input writes it (`lineOf`), the old summary as it is built on, and the labels the answer is held
+  // to — so that a rename while the call runs changes none of them (whose each label is is recorded with the answer, and a
+  // reply shows it as that account is labelled then). The old summary as a reply is shown it (store.ts `shownSummary`), or,
+  // for a group's row from before migration 056, as the labels of now allow (`legacySummary`).
+  const { read, before, labels } = await db.tx(async (t) => {
+    await t.query("set transaction isolation level repeatable read, read only");
+    return {
+      read: await readPlaced(t, reader, start, job.upTo, SUMMARY_MAX_MESSAGES + 1),
+      before: old === null ? null : ((await shownSummary(t, reader, old)) ?? (await legacySummary(t, reader, base, old))),
+      labels: reader.group ? await speakerLabels(t, reader, base, job.upTo) : null,
+    };
+  });
   const lines = read.map((m) => lineOf(m, reader, memory.reviewMessageWeight));
   let n = Math.min(read.length, SUMMARY_MAX_MESSAGES);
   let total = 0;
@@ -114,8 +126,6 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   // least `reviewMessages` of them, which the configuration holds to at least `summaryMinMessages`: it is not asked again).
   if (!cut && taken.length < memory.summaryMinMessages) return;
   const next: Omit<Summary, "text" | "speakers"> = { fromSeq: old?.fromSeq ?? read[0]!.at, uptoSeq: upto };
-  // The old summary as a reply is shown it (store.ts `shownSummary`): what the call builds on.
-  const before = old === null ? null : await shownSummary(db, reader, base, old);
 
   count(db, "summary_run");
   const report: MemoryCallReport = { answered: false };
@@ -133,13 +143,12 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   if (ctx.closing.aborted) return;
   // Cleaned, and without any citation, before its labels are looked at (prompt.ts `cleanSummary`).
   const cleaned = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
-  // In a group every speaker label must be one the system wrote, by names and handles now: a line with any other goes
-  // (counted); whose each label kept is, is stored with it (`speakers`), so that a rename since changes its label, not
-  // whose it is (store.ts `shownSummary`).
+  // In a group every speaker label must be one the system wrote — as the input wrote it (`labels`, read with it): a line with
+  // any other goes (counted); whose each label kept is, is stored with it (`speakers`), so that a rename since changes its
+  // label, not whose it is (store.ts `shownSummary`).
   let labelled = cleaned;
   let speakers: Summary["speakers"] = null;
-  if (cleaned !== null && reader.group) {
-    const labels = await speakerLabels(db, reader, base, job.upTo);
+  if (cleaned !== null && labels !== null) {
     const kept = keepLabelled(cleaned, labels);
     count(db, "summary_label_dropped", kept.dropped);
     labelled = kept.text;

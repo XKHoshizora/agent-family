@@ -28,6 +28,7 @@ import {
   BlobStoreDown,
   buildContext,
   callsSeen,
+  readPairSummary,
   GROUP_CONTEXT_MESSAGES,
   hasOwnerTurn,
   loadContext,
@@ -666,6 +667,9 @@ export class DbAgentPort implements AgentPort {
       const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
       if (group && calls.length === 0 && told === null) return { end: NOTHING_LEFT };
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
+      // The pair's summary and what of it may be shown, read once for every plan below (round 2, N-4: two indexed reads at
+      // most, nothing of the conversation's history), here, under the row its job writes it under.
+      const summary = await readPairSummary(t, { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, group });
       const plan = {
         agentId: agent.id,
         ownerId: agent.ownerId,
@@ -673,6 +677,7 @@ export class DbAgentPort implements AgentPort {
         coversSeq: covers,
         group: cap,
         planRatio: planned,
+        summary,
         // A told reply is shown the group up to what it covers: a call noted on it since is its follow-up's.
         ...(told !== null ? { upTo: covers } : {}),
       };
